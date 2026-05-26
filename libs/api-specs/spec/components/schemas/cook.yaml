@@ -1,0 +1,253 @@
+# Cook session schemas.
+# Surface mirrors libs/api-interfaces/src/lib/cook.ts (canonical) with the
+# observation that the start-cook.ts handler's local Cook interface marks
+# meatType required; the spec follows api-interfaces (optional) since the
+# spec is the source-of-truth going forward.
+
+CookStatus:
+  type: string
+  description: |
+    Cook session lifecycle state. Named enum — generators (oapi-codegen, etc.)
+    must produce a typed constant set, not map[string]interface{}.
+  enum:
+    - planning
+    - active
+    - paused
+    - completed
+    - cancelled
+
+TargetTemperatures:
+  type: object
+  description: |
+    Per-probe setpoint group. All members optional — a cook may target the
+    grill only, or any subset of probes.
+  additionalProperties: false
+  properties:
+    grill:
+      type: number
+      format: double
+      minimum: -50
+      maximum: 1000
+      description: Grill chamber setpoint, degrees F.
+    probe1:
+      type: number
+      format: double
+      minimum: -50
+      maximum: 1000
+    probe2:
+      type: number
+      format: double
+      minimum: -50
+      maximum: 1000
+    probe3:
+      type: number
+      format: double
+      minimum: -50
+      maximum: 1000
+    probe4:
+      type: number
+      format: double
+      minimum: -50
+      maximum: 1000
+
+Cook:
+  type: object
+  description: |
+    Cook session. The canonical shape returned by GET /cooks (array items)
+    and POST /cooks (single object). Quirk: POST /cooks (apps/api/src/functions/
+    cooks/start-cook.ts) currently writes meatType as a required field on the
+    output even though the schema models it optional — both consumers should
+    tolerate either presence.
+  required:
+    - id
+    - userId
+    - deviceId
+    - name
+    - status
+    - startTime
+  additionalProperties: false
+  properties:
+    id:
+      type: string
+      description: Cook session id. Handler emits `cook-${Date.now()}`.
+    userId:
+      type: string
+    deviceId:
+      type: string
+    name:
+      type: string
+      minLength: 3
+      maxLength: 50
+    status:
+      $ref: '#/CookStatus'
+    startTime:
+      type: string
+      format: date-time
+    endTime:
+      type: string
+      format: date-time
+    meatType:
+      type: string
+      description: |
+        Type of meat (brisket, pork, chicken, ...). Required on POST /cooks
+        input but emitted optionally on outputs that pre-date a meatType
+        field (legacy fixture data).
+    weight:
+      type: number
+      format: double
+      minimum: 0
+      description: Pre-cook weight in pounds.
+    targetTemps:
+      $ref: '#/TargetTemperatures'
+    actualDuration:
+      type: number
+      format: double
+      description: Total cook duration in hours.
+    maxTemps:
+      $ref: '#/TargetTemperatures'
+    notes:
+      type: string
+    photos:
+      type: array
+      items:
+        type: string
+        format: uri
+    rating:
+      type: integer
+      minimum: 1
+      maximum: 5
+    isPublic:
+      type: boolean
+
+StartCookRequest:
+  type: object
+  description: |
+    Body for POST /cooks. Handler validates `name`, `deviceId`, `meatType`
+    presence and returns VALIDATION_ERROR on missing fields.
+  required:
+    - name
+    - deviceId
+    - meatType
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      minLength: 3
+      maxLength: 50
+    deviceId:
+      type: string
+    meatType:
+      type: string
+    weight:
+      type: number
+      format: double
+      minimum: 0
+    targetTemps:
+      $ref: '#/TargetTemperatures'
+    notes:
+      type: string
+
+UpdateCookRequest:
+  type: object
+  description: Body for PATCH /cooks/{id}. All fields optional partial-update.
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      minLength: 3
+      maxLength: 50
+    status:
+      $ref: '#/CookStatus'
+    targetTemps:
+      $ref: '#/TargetTemperatures'
+    notes:
+      type: string
+    rating:
+      type: integer
+      minimum: 1
+      maximum: 5
+    endTime:
+      type: string
+      format: date-time
+
+CookListResponse:
+  type: object
+  description: |
+    Response envelope for GET /cooks. Matches CookListResponse in
+    apps/api/src/functions/cooks/list-cooks.ts: bare cook array under
+    `cooks` plus offset/limit/hasMore pagination block (NOT wrapped in
+    ApiResponse).
+  required:
+    - cooks
+    - total
+    - offset
+    - limit
+    - hasMore
+  additionalProperties: false
+  properties:
+    cooks:
+      type: array
+      items:
+        $ref: '#/Cook'
+    total:
+      type: integer
+      minimum: 0
+    offset:
+      type: integer
+      minimum: 0
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 500
+    hasMore:
+      type: boolean
+
+CookSummary:
+  type: object
+  description: Aggregate stats for a completed cook. NOT YET IMPLEMENTED in handlers.
+  required:
+    - cookId
+    - totalDuration
+    - averageGrillTemp
+    - peakGrillTemp
+    - averageProbeTemps
+    - temperatureStability
+  additionalProperties: false
+  properties:
+    cookId:
+      type: string
+    totalDuration:
+      type: number
+      format: double
+      description: Minutes elapsed from startTime to endTime.
+    averageGrillTemp:
+      type: number
+      format: double
+    peakGrillTemp:
+      type: number
+      format: double
+    averageProbeTemps:
+      type: object
+      additionalProperties: false
+      properties:
+        probe1:
+          type: number
+          format: double
+        probe2:
+          type: number
+          format: double
+        probe3:
+          type: number
+          format: double
+        probe4:
+          type: number
+          format: double
+    temperatureStability:
+      type: number
+      format: double
+      minimum: 0
+      maximum: 100
+      description: Percent of samples within ±10°F of grill setpoint.
+    fuelEfficiency:
+      type: number
+      format: double

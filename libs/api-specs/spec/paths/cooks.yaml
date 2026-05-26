@@ -1,0 +1,300 @@
+# Cook path items.
+# Top-level keys are referenced from openapi.yaml's `paths` block.
+#
+# Implementation status:
+#   - cooks-collection : GET / POST implemented (apps/api/src/functions/cooks/{list-cooks,start-cook}.ts)
+#   - all others       : NOT YET IMPLEMENTED — descriptions are prefixed accordingly.
+
+cooks-collection:
+  get:
+    operationId: listCooks
+    summary: List cook sessions
+    description: |
+      Returns a paginated list of cook sessions. Mirrors the response shape
+      of apps/api/src/functions/cooks/list-cooks.ts (CookListResponse — bare
+      cook array under `cooks` with offset/limit/hasMore, NOT wrapped in
+      ApiResponse).
+    tags: [cooks]
+    parameters:
+      - name: userId
+        in: query
+        required: false
+        description: Filter by owner. When omitted, handler returns mock fixture data.
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          $ref: '../components/schemas/cook.yaml#/CookStatus'
+      - name: limit
+        in: query
+        required: false
+        description: Page size. Default 20 (per handler), max 500.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 20
+      - name: offset
+        in: query
+        required: false
+        description: Zero-based page offset. Default 0.
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+    responses:
+      '200':
+        description: Paginated list of cooks.
+        headers:
+          X-Request-ID:
+            description: Functions invocation id (correlation handle).
+            schema:
+              type: string
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/CookListResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+  post:
+    operationId: startCook
+    summary: Start a new cook session
+    description: |
+      Creates a cook in `active` status. Mirrors apps/api/src/functions/cooks/
+      start-cook.ts: validates name/deviceId/meatType, returns 201 with the
+      created Cook directly (NOT wrapped in ApiResponse). Returns 400
+      VALIDATION_ERROR if required fields are missing.
+    tags: [cooks]
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/cook.yaml#/StartCookRequest'
+    responses:
+      '201':
+        description: Cook created.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/Cook'
+      '400':
+        description: Validation failure (missing name/deviceId/meatType).
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+cook-item:
+  get:
+    operationId: getCook
+    summary: Get a single cook by id
+    description: |
+      NOT YET IMPLEMENTED - Will return the Cook with id=`{id}`. Returns 404
+      with NOT_FOUND if no cook exists.
+    tags: [cooks]
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Cook found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/Cook'
+      '404':
+        description: Cook not found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+  patch:
+    operationId: updateCook
+    summary: Patch a cook session
+    description: |
+      NOT YET IMPLEMENTED - Partial update of name/status/targetTemps/notes/
+      rating/endTime. Status transitions are validated server-side (e.g.,
+      cannot move `completed` → `active`).
+    tags: [cooks]
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/cook.yaml#/UpdateCookRequest'
+    responses:
+      '200':
+        description: Updated cook.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/Cook'
+      '400':
+        description: Invalid status transition or schema violation.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '404':
+        description: Cook not found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+cook-start:
+  post:
+    operationId: startExistingCook
+    summary: Transition a planned cook to active
+    description: |
+      NOT YET IMPLEMENTED - Moves cook id=`{id}` from `planning` to `active`.
+      Idempotent: a cook already in `active` returns 200 with the unchanged
+      Cook (no double-start side effects).
+    tags: [cooks]
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Cook now active.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/Cook'
+      '404':
+        description: Cook not found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '409':
+        description: Invalid status transition (e.g., `completed` → active).
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+cook-stop:
+  post:
+    operationId: stopCook
+    summary: Stop an active cook
+    description: |
+      NOT YET IMPLEMENTED - Moves cook id=`{id}` to `completed`, sets endTime
+      to now(), and emits a `cook_stopped` SignalR message. Idempotent: a
+      cook already in `completed` returns 200 unchanged.
+    tags: [cooks]
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Cook now completed.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/Cook'
+      '404':
+        description: Cook not found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+cook-history:
+  get:
+    operationId: getCookHistory
+    summary: Get aggregate summary for a completed cook
+    description: |
+      NOT YET IMPLEMENTED - Returns CookSummary statistics for cook
+      id=`{id}`. Only valid for cooks in `completed` status; returns 409
+      CONFLICT for in-progress cooks.
+    tags: [cooks]
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Cook summary.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/CookSummary'
+      '404':
+        description: Cook not found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '409':
+        description: Cook is not yet completed.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'

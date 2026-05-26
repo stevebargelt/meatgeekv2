@@ -1,0 +1,182 @@
+# Temperature reading schemas.
+# Mirrors libs/api-interfaces/src/lib/temperature.ts. The getCurrent handler
+# returns a BARE TemperatureReading (not wrapped in ApiResponse) — the spec
+# preserves that quirk in paths/temperatures.yaml.
+
+TemperatureReading:
+  type: object
+  description: |
+    A single sensor sample from one device. The current handler
+    (apps/api/src/functions/temperatures/get-current.ts) returns this shape
+    directly as the 200 body — no wrapping envelope.
+  required:
+    - deviceId
+    - timestamp
+  additionalProperties: false
+  properties:
+    deviceId:
+      type: string
+    timestamp:
+      type: string
+      format: date-time
+    cookId:
+      type: string
+      nullable: true
+      description: |
+        Cook session this reading belongs to. Strict tag-match semantics:
+        a reading is associated with a cook iff cookId equals the cook's id.
+        See GET /temperatures/history `cookId` query param docs.
+    grillTemp:
+      type: number
+      format: double
+      nullable: true
+      minimum: -50
+      maximum: 1000
+      description: |
+        Grill chamber reading in degrees F. Null when sensor is disconnected
+        or has not reported yet.
+    probe1Temp:
+      type: number
+      format: double
+      nullable: true
+      minimum: -50
+      maximum: 1000
+    probe2Temp:
+      type: number
+      format: double
+      nullable: true
+      minimum: -50
+      maximum: 1000
+    probe3Temp:
+      type: number
+      format: double
+      nullable: true
+      minimum: -50
+      maximum: 1000
+    probe4Temp:
+      type: number
+      format: double
+      nullable: true
+      minimum: -50
+      maximum: 1000
+
+TemperatureHistoryResponse:
+  type: object
+  description: |
+    Response for GET /temperatures/history. NOT YET IMPLEMENTED — see
+    paths/temperatures.yaml for the strict cookId tag-match contract.
+  required:
+    - readings
+    - total
+    - offset
+    - limit
+    - hasMore
+  additionalProperties: false
+  properties:
+    readings:
+      type: array
+      items:
+        $ref: '#/TemperatureReading'
+    total:
+      type: integer
+      minimum: 0
+    offset:
+      type: integer
+      minimum: 0
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 5000
+    hasMore:
+      type: boolean
+
+TemperatureAlertType:
+  type: string
+  description: Trigger condition for a temperature alert. Named enum.
+  enum:
+    - high
+    - low
+    - target_reached
+
+ProbeName:
+  type: string
+  description: Identifier for a probe location. Named enum.
+  enum:
+    - grill
+    - probe1
+    - probe2
+    - probe3
+    - probe4
+
+TemperatureAlert:
+  type: object
+  description: Configured alert that fires when a probe crosses a threshold.
+  required:
+    - id
+    - type
+    - probe
+    - threshold
+    - isActive
+    - message
+  additionalProperties: false
+  properties:
+    id:
+      type: string
+    type:
+      $ref: '#/TemperatureAlertType'
+    probe:
+      $ref: '#/ProbeName'
+    threshold:
+      type: number
+      format: double
+      minimum: -50
+      maximum: 1000
+    isActive:
+      type: boolean
+    message:
+      type: string
+
+LiveTemperatureUpdate:
+  type: object
+  description: |
+    Real-time temperature payload pushed over SignalR (see
+    signalr-payloads.yaml for the envelope). Keys differ from
+    TemperatureReading — `temperatures.grill/probeN` rather than
+    `grillTemp/probeNTemp` to align with api-interfaces.
+  required:
+    - deviceId
+    - timestamp
+    - temperatures
+  additionalProperties: false
+  properties:
+    deviceId:
+      type: string
+    timestamp:
+      type: string
+      format: date-time
+    cookId:
+      type: string
+      nullable: true
+    temperatures:
+      type: object
+      additionalProperties: false
+      properties:
+        grill:
+          type: number
+          format: double
+        probe1:
+          type: number
+          format: double
+        probe2:
+          type: number
+          format: double
+        probe3:
+          type: number
+          format: double
+        probe4:
+          type: number
+          format: double
+    alerts:
+      type: array
+      items:
+        $ref: '#/TemperatureAlert'

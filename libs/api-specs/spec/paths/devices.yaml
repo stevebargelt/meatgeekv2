@@ -1,0 +1,143 @@
+# Device path items.
+#
+# Implementation status:
+#   - devices-collection : GET implemented (apps/api/src/functions/devices/get-devices.ts)
+#   - device-item        : NOT YET IMPLEMENTED.
+#
+# Quirk preserved: GET /devices wraps the array in {devices: [...]} per the
+# existing handler. Future endpoints (GET /devices/{id}, PATCH /devices/{id})
+# return bare Device objects rather than introducing a second wrapper layer.
+
+devices-collection:
+  get:
+    operationId: getDevices
+    summary: List devices owned by a user
+    description: |
+      Returns the user's registered devices. Mirrors apps/api/src/functions/
+      devices/get-devices.ts: response body is wrapped under a `devices`
+      key (NOT a bare array, NOT ApiResponse).
+
+      `userId` may be supplied either as the `userId` query param or the
+      `x-user-id` request header. Returns 400 VALIDATION_ERROR if neither
+      is present.
+    tags: [devices]
+    parameters:
+      - name: userId
+        in: query
+        required: false
+        description: |
+          Owner id. Falls back to the `x-user-id` request header when omitted.
+          One of the two MUST be present.
+        schema:
+          type: string
+      - name: x-user-id
+        in: header
+        required: false
+        description: Alternative source for the owner id; see `userId` query param.
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Devices for the requested user.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/device.yaml#/DeviceListResponse'
+      '400':
+        description: Missing userId (neither query param nor header).
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+device-item:
+  get:
+    operationId: getDevice
+    summary: Get a single device by id
+    description: |
+      NOT YET IMPLEMENTED - Returns the Device with id=`{id}` as a bare
+      object (NOT wrapped in {device: ...}; the {devices: [...]} wrapper
+      is unique to the collection endpoint).
+    tags: [devices]
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Device found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/device.yaml#/Device'
+      '404':
+        description: Device not found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+  patch:
+    operationId: updateDevice
+    summary: Patch a device's name, location, or configuration
+    description: |
+      NOT YET IMPLEMENTED - Partial update of name/location/configuration.
+      Configuration sub-fields (probe correction offsets, polling interval,
+      alert thresholds) are merged on top of the existing configuration —
+      send only the fields you want to change.
+    tags: [devices]
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/device.yaml#/UpdateDeviceRequest'
+    responses:
+      '200':
+        description: Updated device.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/device.yaml#/Device'
+      '400':
+        description: Schema violation in request body.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '404':
+        description: Device not found.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'

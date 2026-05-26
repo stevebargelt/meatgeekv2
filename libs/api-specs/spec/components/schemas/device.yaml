@@ -1,0 +1,222 @@
+# Device schemas.
+# Quirk preserved: GET /devices wraps the array in {devices: [...]} (see
+# apps/api/src/functions/devices/get-devices.ts) rather than returning a
+# bare array. That wrapper lives in paths/devices.yaml; this file defines
+# only the inner entities.
+
+Device:
+  type: object
+  description: |
+    A registered BBQ controller (e.g., MeatGeek V1 'meatgeek3'). Matches
+    the Device interface in libs/api-interfaces/src/lib/device.ts.
+  required:
+    - id
+    - userId
+    - name
+    - model
+    - isActive
+  additionalProperties: false
+  properties:
+    id:
+      type: string
+      description: Device hardware id (e.g., 'meatgeek3').
+    userId:
+      type: string
+    name:
+      type: string
+      minLength: 3
+      maxLength: 30
+    model:
+      type: string
+      description: Hardware model string (e.g., 'MeatGeek V1').
+    location:
+      type: string
+      description: Free-text location label (e.g., 'Austin, TX').
+    lastSeen:
+      type: string
+      format: date-time
+      description: ISO-8601 timestamp of the most recent heartbeat.
+    isActive:
+      type: boolean
+    configuration:
+      $ref: '#/DeviceConfiguration'
+    connectionStatus:
+      $ref: './common.yaml#/ConnectionStatus'
+    firmware:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - updateAvailable
+      properties:
+        version:
+          type: string
+        updateAvailable:
+          type: boolean
+
+DeviceConfiguration:
+  type: object
+  description: |
+    Per-device tunable settings, including probe-correction offsets that
+    are added to raw thermistor readings before the API returns them.
+  additionalProperties: false
+  properties:
+    grillProbeCorrection:
+      type: number
+      format: double
+      description: Offset °F applied to grill probe.
+    probe1Correction:
+      type: number
+      format: double
+    probe2Correction:
+      type: number
+      format: double
+    probe3Correction:
+      type: number
+      format: double
+    probe4Correction:
+      type: number
+      format: double
+    temperatureUnit:
+      $ref: './common.yaml#/TemperatureUnit'
+    pollingInterval:
+      type: integer
+      minimum: 1
+      maximum: 3600
+      description: Telemetry sample period in seconds.
+    alertSettings:
+      type: object
+      additionalProperties: false
+      required:
+        - highTempThreshold
+        - lowTempThreshold
+        - enableSounds
+        - enablePushNotifications
+      properties:
+        highTempThreshold:
+          type: number
+          format: double
+        lowTempThreshold:
+          type: number
+          format: double
+        enableSounds:
+          type: boolean
+        enablePushNotifications:
+          type: boolean
+
+DeviceListResponse:
+  type: object
+  description: |
+    Response envelope for GET /devices. Preserves the existing handler's
+    quirk of wrapping the array under a `devices` key rather than returning
+    a bare array (see apps/api/src/functions/devices/get-devices.ts).
+  required:
+    - devices
+  additionalProperties: false
+  properties:
+    devices:
+      type: array
+      items:
+        $ref: '#/Device'
+
+UpdateDeviceRequest:
+  type: object
+  description: Body for PATCH /devices/{id}. All fields optional partial-update.
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      minLength: 3
+      maxLength: 30
+    location:
+      type: string
+    configuration:
+      $ref: '#/DeviceConfiguration'
+
+DeviceStatus:
+  type: object
+  description: |
+    Hardware controller status snapshot (auger/blower/ignition + sensor
+    readings). NOT YET IMPLEMENTED as an HTTP endpoint — included for
+    SignalR payload reuse.
+  required:
+    - deviceId
+    - timestamp
+    - augerOn
+    - blowerOn
+    - igniterOn
+    - fireHealthy
+    - mode
+    - setPoint
+    - currentTemps
+    - systemHealth
+  additionalProperties: false
+  properties:
+    deviceId:
+      type: string
+    timestamp:
+      type: string
+      format: date-time
+    augerOn:
+      type: boolean
+    blowerOn:
+      type: boolean
+    igniterOn:
+      type: boolean
+    fireHealthy:
+      type: boolean
+    mode:
+      type: string
+    setPoint:
+      type: number
+      format: double
+    currentTemps:
+      type: object
+      additionalProperties: false
+      required:
+        - grill
+      properties:
+        grill:
+          type: number
+          format: double
+        probe1:
+          type: number
+          format: double
+        probe2:
+          type: number
+          format: double
+        probe3:
+          type: number
+          format: double
+        probe4:
+          type: number
+          format: double
+    systemHealth:
+      type: object
+      additionalProperties: false
+      required:
+        - cpuUsage
+        - memoryUsage
+        - diskUsage
+        - networkStatus
+      properties:
+        cpuUsage:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        memoryUsage:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        diskUsage:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        networkStatus:
+          type: string
+          enum:
+            - connected
+            - disconnected

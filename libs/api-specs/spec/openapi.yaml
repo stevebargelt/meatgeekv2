@@ -1,0 +1,158 @@
+openapi: 3.0.3
+
+info:
+  title: MeatGeek V2 API
+  version: 0.1.0
+  description: |
+    OpenAPI source-of-truth for the MeatGeek V2 platform. Covers the Phase-1
+    HTTP surface (cooks, temperatures, devices) plus the SignalR message
+    payloads used for real-time push.
+
+    ## SignalR transport note
+
+    The schemas under `components/schemas/signalr-payloads.yaml`
+    (TemperatureUpdateMessage, CookStartedMessage, etc.) describe SignalR
+    message payloads, NOT HTTP endpoints; transport is the SignalR
+    `temperatureHub` channel. Clients connect to that hub and receive
+    messages whose envelope matches `SignalRMessage` (a discriminated union
+    keyed on the `type` field). Every envelope MUST carry `correlation.id`
+    so producers and consumers can stitch a single user action through
+    device → IoT Hub → Functions → SignalR → client traces.
+
+    ## Source-of-truth note
+
+    Routes for the four currently-implemented HTTP endpoints
+    (GET /cooks, POST /cooks, GET /temperatures/current/{deviceId},
+    GET /devices) match `apps/api/src/main.ts` route templates
+    character-for-character — these are the contract. Endpoints whose
+    description starts with `NOT YET IMPLEMENTED -` represent the planned
+    Phase-1/Phase-2 surface; handlers will follow.
+
+  contact:
+    name: MeatGeek V2 team
+    url: https://github.com/your-org/meatgeekv2
+  license:
+    name: UNLICENSED
+
+servers:
+  - url: http://localhost:7071/api
+    description: Local Azure Functions Core Tools (default).
+  - url: http://localhost:4010
+    description: Local mock server (libs/api-specs mock-server).
+
+tags:
+  - name: cooks
+    description: Cook session CRUD and lifecycle.
+  - name: temperatures
+    description: Live and historical temperature readings.
+  - name: devices
+    description: BBQ device registration, configuration, and status.
+
+paths:
+  /cooks:
+    $ref: './paths/cooks.yaml#/cooks-collection'
+  /cooks/{id}:
+    $ref: './paths/cooks.yaml#/cook-item'
+  /cooks/{id}/start:
+    $ref: './paths/cooks.yaml#/cook-start'
+  /cooks/{id}/stop:
+    $ref: './paths/cooks.yaml#/cook-stop'
+  /cooks/{id}/history:
+    $ref: './paths/cooks.yaml#/cook-history'
+  /temperatures/current/{deviceId}:
+    $ref: './paths/temperatures.yaml#/temperatures-current'
+  /temperatures/history:
+    $ref: './paths/temperatures.yaml#/temperatures-history'
+  /devices:
+    $ref: './paths/devices.yaml#/devices-collection'
+  /devices/{id}:
+    $ref: './paths/devices.yaml#/device-item'
+
+components:
+  schemas:
+    # Common
+    ErrorCode:
+      $ref: './components/schemas/common.yaml#/ErrorCode'
+    ErrorResponse:
+      $ref: './components/schemas/common.yaml#/ErrorResponse'
+    Pagination:
+      $ref: './components/schemas/common.yaml#/Pagination'
+    TemperatureUnit:
+      $ref: './components/schemas/common.yaml#/TemperatureUnit'
+    ConnectionStatus:
+      $ref: './components/schemas/common.yaml#/ConnectionStatus'
+    ISODateTime:
+      $ref: './components/schemas/common.yaml#/ISODateTime'
+
+    # Cook
+    CookStatus:
+      $ref: './components/schemas/cook.yaml#/CookStatus'
+    TargetTemperatures:
+      $ref: './components/schemas/cook.yaml#/TargetTemperatures'
+    Cook:
+      $ref: './components/schemas/cook.yaml#/Cook'
+    StartCookRequest:
+      $ref: './components/schemas/cook.yaml#/StartCookRequest'
+    UpdateCookRequest:
+      $ref: './components/schemas/cook.yaml#/UpdateCookRequest'
+    CookListResponse:
+      $ref: './components/schemas/cook.yaml#/CookListResponse'
+    CookSummary:
+      $ref: './components/schemas/cook.yaml#/CookSummary'
+
+    # Temperature
+    TemperatureReading:
+      $ref: './components/schemas/temperature.yaml#/TemperatureReading'
+    TemperatureHistoryResponse:
+      $ref: './components/schemas/temperature.yaml#/TemperatureHistoryResponse'
+    TemperatureAlertType:
+      $ref: './components/schemas/temperature.yaml#/TemperatureAlertType'
+    ProbeName:
+      $ref: './components/schemas/temperature.yaml#/ProbeName'
+    TemperatureAlert:
+      $ref: './components/schemas/temperature.yaml#/TemperatureAlert'
+    LiveTemperatureUpdate:
+      $ref: './components/schemas/temperature.yaml#/LiveTemperatureUpdate'
+
+    # Device
+    Device:
+      $ref: './components/schemas/device.yaml#/Device'
+    DeviceConfiguration:
+      $ref: './components/schemas/device.yaml#/DeviceConfiguration'
+    DeviceListResponse:
+      $ref: './components/schemas/device.yaml#/DeviceListResponse'
+    UpdateDeviceRequest:
+      $ref: './components/schemas/device.yaml#/UpdateDeviceRequest'
+    DeviceStatus:
+      $ref: './components/schemas/device.yaml#/DeviceStatus'
+
+    # SignalR payloads — message envelopes for the temperatureHub channel,
+    # not HTTP endpoints. See info.description for the transport note.
+    SignalRMessageType:
+      $ref: './components/schemas/signalr-payloads.yaml#/SignalRMessageType'
+    CorrelationContext:
+      $ref: './components/schemas/signalr-payloads.yaml#/CorrelationContext'
+    SignalREnvelopeBase:
+      $ref: './components/schemas/signalr-payloads.yaml#/SignalREnvelopeBase'
+    TemperatureUpdateMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/TemperatureUpdateMessage'
+    CookStartedMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/CookStartedMessage'
+    CookStoppedMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/CookStoppedMessage'
+    CookPausedMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/CookPausedMessage'
+    CookResumedMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/CookResumedMessage'
+    DeviceOnlineMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/DeviceOnlineMessage'
+    DeviceOfflineMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/DeviceOfflineMessage'
+    AlertTriggeredMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/AlertTriggeredMessage'
+    SystemNotificationLevel:
+      $ref: './components/schemas/signalr-payloads.yaml#/SystemNotificationLevel'
+    SystemNotificationMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/SystemNotificationMessage'
+    SignalRMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/SignalRMessage'

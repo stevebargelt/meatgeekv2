@@ -1,0 +1,137 @@
+# Temperature path items.
+#
+# Implementation status:
+#   - temperatures-current : GET implemented (apps/api/src/functions/temperatures/get-current.ts)
+#   - temperatures-history : NOT YET IMPLEMENTED.
+#
+# History endpoint documents STRICT cookId tag-match semantics: a `?cookId=X`
+# filter returns only readings whose `cookId` field equals X — it does NOT
+# expand to "all readings inside the cook's time window". This decision is
+# load-bearing for CosmosDB partitioning (ticket #1) and must not silently
+# change.
+
+temperatures-current:
+  get:
+    operationId: getCurrentTemperatures
+    summary: Get the latest temperature reading for a device
+    description: |
+      Returns the most recent TemperatureReading for the device. Mirrors
+      apps/api/src/functions/temperatures/get-current.ts: response body is
+      a BARE TemperatureReading (NOT wrapped in ApiResponse) — clients
+      consume the object directly. Returns 400 VALIDATION_ERROR if the
+      path parameter is missing (handled at framework level — included
+      for completeness).
+    tags: [temperatures]
+    parameters:
+      - name: deviceId
+        in: path
+        required: true
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Latest sample for the device.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/temperature.yaml#/TemperatureReading'
+      '400':
+        description: Missing deviceId parameter.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+temperatures-history:
+  get:
+    operationId: getTemperatureHistory
+    summary: Query historical temperature readings
+    description: |
+      NOT YET IMPLEMENTED - Returns paginated TemperatureReading rows from
+      CosmosDB. Filtered by deviceId (required) plus optional cookId and a
+      [startTime, endTime] window.
+
+      Backed by the direct-to-CosmosDB write path (ticket #1) so partitioning
+      MUST align with the dominant query shape (deviceId + time range).
+    tags: [temperatures]
+    parameters:
+      - name: deviceId
+        in: query
+        required: true
+        description: Device whose readings to return.
+        schema:
+          type: string
+      - name: cookId
+        in: query
+        required: false
+        description: |
+          STRICT TAG-MATCH semantics: when present, only readings whose
+          `cookId` field equals this value are returned. This is NOT a
+          time-window shorthand — readings that fall inside the cook's
+          start/end interval but lack the cookId tag (e.g., reading
+          recorded before the cook session was created) are EXCLUDED.
+
+          The strict semantic is load-bearing for ticket #1 (CosmosDB
+          partitioning); do not silently relax it without coordination
+          with the API team.
+        schema:
+          type: string
+      - name: startTime
+        in: query
+        required: false
+        description: ISO-8601 lower bound (inclusive).
+        schema:
+          type: string
+          format: date-time
+      - name: endTime
+        in: query
+        required: false
+        description: ISO-8601 upper bound (exclusive).
+        schema:
+          type: string
+          format: date-time
+      - name: limit
+        in: query
+        required: false
+        description: Page size. Default 100, max 5000.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 5000
+          default: 100
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+    responses:
+      '200':
+        description: Page of historical readings.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/temperature.yaml#/TemperatureHistoryResponse'
+      '400':
+        description: Validation failure (missing deviceId, bad time range).
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        description: Server error.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'

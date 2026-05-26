@@ -1,0 +1,92 @@
+# Shared schemas: error envelopes, pagination, identifiers.
+# Handlers in apps/api/src/functions/** return a flat error envelope
+# {error, message, requestId} — NOT the nested api-interfaces ErrorResponse shape.
+# The spec models the actual wire shape.
+
+ErrorCode:
+  type: string
+  description: |
+    Stable, machine-readable error code. Clients should branch on this.
+    Sourced from libs/utils/src/lib/constants.ts ERROR_CODES.
+  enum:
+    - VALIDATION_ERROR
+    - INVALID_TEMPERATURE
+    - NOT_FOUND
+    - UNAUTHORIZED
+    - FORBIDDEN
+    - CONFLICT
+    - INTERNAL_SERVER_ERROR
+    - SERVICE_UNAVAILABLE
+
+ErrorResponse:
+  type: object
+  description: |
+    Error envelope returned by Phase-1 Functions handlers.
+    Matches apps/api/src/functions/**/*.ts handler returns exactly.
+  required:
+    - error
+    - message
+    - requestId
+  additionalProperties: false
+  properties:
+    error:
+      $ref: '#/ErrorCode'
+    message:
+      type: string
+      description: Human-readable diagnostic message. Not stable across releases.
+    requestId:
+      type: string
+      description: |
+        Echoes Functions' InvocationContext.invocationId. Used as the correlation
+        id for log/trace lookup and for X-Request-ID response header parity.
+
+Pagination:
+  type: object
+  description: |
+    Offset/limit pagination block reused across list endpoints.
+    Matches the CookListResponse and TemperatureHistoryResponse field set.
+  required:
+    - total
+    - offset
+    - limit
+    - hasMore
+  additionalProperties: false
+  properties:
+    total:
+      type: integer
+      minimum: 0
+      description: Total number of items matching the query (across all pages).
+    offset:
+      type: integer
+      minimum: 0
+      description: Zero-based index of the first item in this page.
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 500
+      description: Maximum number of items returned in this page.
+    hasMore:
+      type: boolean
+      description: True iff the next page would contain at least one item.
+
+TemperatureUnit:
+  type: string
+  description: User-facing temperature unit (handlers emit Fahrenheit only today).
+  enum:
+    - fahrenheit
+    - celsius
+
+ConnectionStatus:
+  type: string
+  description: |
+    Reachability of a device from the cloud side. Named enum (not anonymous
+    union) so Go codegen produces a typed constant set.
+  enum:
+    - online
+    - offline
+    - unknown
+
+ISODateTime:
+  type: string
+  format: date-time
+  description: ISO-8601 timestamp, UTC. Matches `new Date().toISOString()` output.

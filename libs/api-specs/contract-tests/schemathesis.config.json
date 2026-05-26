@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schemathesis.readthedocs.io/en/stable/schemas/config.json",
+  "comment": "Configuration for run-schemathesis.sh. Schemathesis reads CLI flags primarily; this file documents the desired check set + hypothesis tuning so the run is reproducible. The script passes -c all on the command line which overrides per-check toggles below — flip the script's -c flag if you want to honor this file's selection.",
+  "base_url": "http://host.docker.internal:4010",
+  "checks": {
+    "status_code_conformance": true,
+    "content_type_conformance": true,
+    "response_schema_conformance": true,
+    "response_headers_conformance": true,
+    "not_a_server_error": true
+  },
+  "hypothesis": {
+    "max_examples": 100,
+    "deadline": 5000,
+    "derandomize": false
+  },
+  "workers": 1,
+  "ignore_network_errors": false,
+  "notes": [
+    "max_examples=100 is a tradeoff between fuzz coverage and CI runtime. Bump to 500+ for nightly runs.",
+    "deadline=5000ms allows for slow mock-server cold starts. Reduce once the mock is warm.",
+    "derandomize=false keeps the test stochastic; set to true if you need reproducible failures during triage.",
+    "workers=1 keeps output linear; raise for faster runs once the mock server tolerates concurrent fuzz."
+  ]
+}
