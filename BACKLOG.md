@@ -2,12 +2,11 @@
 
 ## Notes for next session
 
-### Wave 1 of Phase 1 landed (2026-05-26)
+### Wave 2 of Phase 1 landed (2026-05-26)
 
-Tickets #1, #2, #3, #4 complete. Wave 2 (#5 data-pusher) is the next thing to launch — depends on #1's IoT Hub routing being live (it is). Wave 3 (#6 otel-integration) depends on #1, #4, #5.
+Tickets #1-#5 + #8 complete. Wave 3 is just #6 (otel-integration) — depends on #1, #4, #5, all done.
 
-**Workspace blocker (filed as #8, do this FIRST):**
-Every `nx` command fails to load the project graph because `.eslintrc.json` (root + `libs/api-specs/`) uses the legacy `extends: ['@typescript-eslint/recommended']` shortcut that typescript-eslint v7.18+ dropped. Engineers in Wave 1 worked around by direct `jest` / `make` invocation, but this blocks any real `nx`-driven workflow. ~5 minute fix; prioritize before Wave 2 if you want a clean engineer experience.
+Pipeline anomaly during #5: the first build attempt hit Anthropic's 5-hour rate limit mid-run. `forge retry` created fresh sub-builds that completed cleanly. Some "zombie" pending tasks remain in the #5 run's task list as audit artifacts — the work itself is complete and committed (`5d7e111`).
 
 **Security finding (manual stakeholder action required):**
 NewRelic license key `***REMOVED***` was in `apps/device-controller/main.go:43` — redacted in commit `96f1fa1`, fully removed in commit `1f03708` (ticket #4). Still in git history. **Rotate the key on the NewRelic side** to invalidate the leaked credential.
@@ -20,30 +19,6 @@ NewRelic license key `***REMOVED***` was in `apps/device-controller/main.go:43` 
 
 ## Active
 
-### #5 — data-pusher-implementation
-
-#### Context
-`apps/data-pusher` has the structure (`cmd/main.go`, `internal/{collector, iothub, telemetry}`) but `iothub/client.go` is a stub — `PublishTelemetry` is a TODO that no-ops. Cook session state, temperature enrichment, local buffering, and SignalR client are not yet implemented. With #4's close-out decision, data-pusher is also the boundary where `@meatgeekv2/api-interfaces` types enter the Go side (V1→V2 translation lives here, not in device-controller).
-
-#### Acceptance Criteria
-- [ ] Real Azure IoT Hub publishing in `internal/iothub/client.go` (MQTT or AMQP via Azure Go SDK)
-- [ ] Cook session management: in-memory active `cookId`, recovery on restart
-- [ ] Temperature enrichment: every outbound telemetry message carries `cookId`, `device.id`, `correlation.id`
-- [ ] V1 device-controller JSON → V2 `DeviceStatus` / `TemperatureReading` / `DeviceTelemetryBatch` translation against `@meatgeekv2/api-interfaces` (via Go codegen from #2 OpenAPI specs, or hand-written struct mapping — decision in tech-lead)
-- [ ] Local buffering for offline scenarios (disk-backed queue, replay on reconnect)
-- [ ] SignalR client for receiving cook start/stop notifications from backend
-- [ ] systemd service configuration for Raspberry Pi deployment
-- [ ] `nx build-arm data-pusher` (or `make build-arm` if eslint workspace bug is still present) produces working ARM64 binary
-- [ ] End-to-end smoke test: data-pusher → IoT Hub → CosmosDB (storage path) and → Functions (real-time path) both visible in Azure Portal
-- [ ] Mock IoT Hub client preserved for dev
-
-#### Dependencies
-- Depends on: #1 (✅ complete — IoT Hub routing + CosmosDB endpoint live)
-- Unblocks: #6 (OTel instruments the working data path)
-
-#### Notes
-The `correlation.id` IoT Hub message-property contract is defined in #6 — implement against that contract.
-
 ### #6 — otel-integration
 
 #### Context
@@ -51,14 +26,14 @@ Cross-cutting observability work landing the OTel discipline + Sentry architectu
 
 #### Acceptance Criteria — OTel instrumentation
 - [ ] Go device-controller: OTel Go SDK + Azure Monitor exporter (NewRelic was removed in #4 ✅)
-- [ ] Go data-pusher: OTel Go SDK + Azure Monitor exporter
+- [ ] Go data-pusher: OTel Go SDK + Azure Monitor exporter (skeleton at `internal/telemetry/tracing.go` exists from #5; wire the Azure Monitor exporter and instrument the publish path)
 - [ ] TS Azure Functions API: `@azure/monitor-opentelemetry` distribution
 - [ ] Connection strings + endpoints via env vars only (no hardcoded values)
 - [ ] AlwaysSample on Go side (volume too small to undersample); 50% sampling on Functions (configured in #1 ✅)
 
 #### Acceptance Criteria — Trace propagation
 - [ ] W3C Trace Context propagation across device-controller → data-pusher → IoT Hub → Functions → CosmosDB → SignalR
-- [ ] `correlation.id` rides as IoT Hub message property on send (data-pusher) and is restored to span dimension on receive (Function)
+- [ ] `correlation.id` rides as IoT Hub message property on send (data-pusher already sets a UUID placeholder per #5 — tighten this to W3C trace context) and is restored to span dimension on receive (Function)
 - [ ] Standard custom dimensions enforced everywhere: `device.id`, `cook.id`, `correlation.id`, `processing.path`, `component`, `environment`
 
 #### Acceptance Criteria — Sentry architecture (Phase 1, $0 on Developer free tier)
@@ -88,13 +63,13 @@ Cross-cutting observability work landing the OTel discipline + Sentry architectu
 - [ ] First-cut Workbook content populates the stub created in #1 ✅
 
 #### Dependencies
-- Depends on: #1 (✅), #4 (✅), #5 (in flight)
+- Depends on: #1 (✅), #4 (✅), #5 (✅)
 - Unblocks: Phase 3 #7 depends on Sentry architecture established here
 
 ### #7 — [Phase 3] mobile-sentry-integration
 
 #### Context
-Phase 3 implementation work — DO NOT start before Phase 1 #6 lands and the mobile app exists. Filed now to lock scope. Architecture is established in Phase 1 ticket #6. This ticket wires the Sentry RN SDK into the mobile app once it exists.
+Phase 3 implementation work — DO NOT start before Phase 1 #6 lands and the mobile app exists. Filed now to lock scope. Architecture is established in Phase 1 ticket #6.
 
 #### Acceptance Criteria
 - [ ] Sentry RN SDK installed and initialized in `apps/mobile`
@@ -108,22 +83,6 @@ Phase 3 implementation work — DO NOT start before Phase 1 #6 lands and the mob
 
 #### Dependencies
 - Depends on: #6 + mobile app existing
-
-### #8 — workspace-eslint-config-fix
-
-#### Context
-Surfaced by Wave 1 engineers (#4, #3, #2 all hit it; worked around with direct `jest` / `make`). Every `nx` command fails to load the project graph with `Failed to load config "@typescript-eslint/recommended" to extend from`. Root cause: `.eslintrc.json` files use the legacy bare-name shortcut that typescript-eslint v7.18+ dropped.
-
-#### Acceptance Criteria
-- [ ] `extends: ['@typescript-eslint/recommended']` → `extends: ['plugin:@typescript-eslint/recommended']` in:
-  - `/Users/stevebargelt/code/meatgeekv2/.eslintrc.json`
-  - `/Users/stevebargelt/code/meatgeekv2/libs/api-specs/.eslintrc.json`
-  - Any other `.eslintrc.json` files in the tree with the same legacy extends
-- [ ] `nx graph` and at least one `nx test <project>` succeed (proves project graph loads + a target runs)
-- [ ] Search every `.eslintrc.json` for similar legacy bare-name `extends` entries; convert systematically
-
-#### Notes
-~5 minute fix. Should be done before further Wave 2/3 pipeline work so engineers don't all have to work around it.
 
 ### #9 — data-models-impl-fixes
 
@@ -139,9 +98,6 @@ Bugs in `libs/data-models` that the #3 test suite pins as characterization tests
 - [ ] Weight bounds disagreement: cook-manager hard-fails outside 0<w≤100, DataValidator allows >0 with warning over 50. Unify.
 - [ ] `validateCookNameUniqueness` compares `cook.name !== excludeCookId` — almost certainly meant `cook.id !== excludeCookId`. Fix and verify existing characterization test for the old behavior is updated.
 - [ ] Update the corresponding `// BUG:` characterization tests in #3's spec files to assert the fixed behavior
-
-#### Notes
-Wait for #3 to land (it has — commit `7115aea`); start from the `// BUG:` comments in the spec files for the inventory.
 
 ### #10 — infra-security-hardening
 
@@ -164,10 +120,10 @@ Pre-existing security issues red-wide flagged during #1's review. Out of scope f
 - [ ] `apps/data-pusher/go.mod` module path → `github.com/stevebargelt/meatgeekv2/apps/data-pusher`
 - [ ] All internal import paths updated
 - [ ] `go build ./...`, `go vet ./...`, `go test ./...` all pass
-- [ ] `nx build data-pusher` and `nx build-arm data-pusher` both pass (assumes #8 has landed)
+- [ ] `nx build data-pusher` and `nx build-arm data-pusher` both pass
 
 #### Notes
-Coordinate with #5 — if #5 is in flight, defer this until #5 lands to avoid merge churn.
+Now that #5 has landed, this is safe to run anytime.
 
 ### #12 — azurerm-v5-deprecation-cleanup
 
@@ -196,9 +152,26 @@ Not blocking until you actually upgrade to azurerm v5. Could be deferred until j
 #### Notes
 Schemathesis stays — Pact layers on top, doesn't replace.
 
+### #14 — [Phase 2] api-signalr-cook-events
+
+#### Context
+Surfaced during #5's architect gate. The data-pusher (ticket #5) shipped a Go SignalR consumer that connects to receive `cook_started` and `cook_stopped` events from the API. But the Azure Functions API doesn't actually emit those events yet — there's no `negotiate` endpoint and no event publisher. The data-pusher's SignalR client is currently a consumer-without-a-producer; it gracefully reconnects but receives nothing.
+
+#### Acceptance Criteria
+- [ ] Azure Functions API exposes a SignalR `negotiate` HTTP endpoint that returns the connection info for the SignalR Service
+- [ ] When a cook start API call lands, the Function publishes a `cook_started` event with `{cookId, deviceId, startedAt, ...}` payload to the SignalR hub on a per-device group
+- [ ] When a cook stop API call lands, the Function publishes a `cook_stopped` event with `{cookId, deviceId, stoppedAt, ...}`
+- [ ] Authentication on the negotiate endpoint matches the broader API auth scheme
+- [ ] Smoke test: trigger a cook start via the API, see the data-pusher's SignalR client receive the event and update its `activeCookID`, then see subsequent telemetry messages carry the new `cookId`
+
+#### Notes
+Phase 2 work per docs/planning/implementation-phases.md (the API/SignalR section). Filed now so the cross-ticket dependency between #5's SignalR consumer and #6's end-to-end smoke test is explicit. #6's smoke test should pass even without #14 because the SignalR consumer is graceful-on-no-events.
+
 ## Done (recent)
 
 - 2026-05-26 closed #1 — infra-azure-services-config (commit `8b0cc8c`)
 - 2026-05-26 closed #2 — lib-api-specs (commit `0610095`)
 - 2026-05-26 closed #3 — lib-data-models-tests (commit `7115aea`)
 - 2026-05-26 closed #4 — device-controller-integration (commit `1f03708`)
+- 2026-05-26 closed #5 — data-pusher-implementation (commit `5d7e111`)
+- 2026-05-26 closed #8 — workspace-eslint-config-fix (commit `8b688a2`)
