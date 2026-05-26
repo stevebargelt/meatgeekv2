@@ -4,7 +4,7 @@
 resource "azurerm_signalr_service" "main" {
   name                = "${var.resource_prefix}-signalr"
   resource_group_name = var.resource_group_name
-  location           = var.location
+  location            = var.location
 
   sku {
     name     = var.signalr_sku_name
@@ -12,10 +12,10 @@ resource "azurerm_signalr_service" "main" {
   }
 
   # Service mode configuration
-  service_mode                 = "Default"
-  connectivity_logs_enabled    = true
-  messaging_logs_enabled       = true
-  http_request_logs_enabled    = true
+  service_mode              = "Default"
+  connectivity_logs_enabled = true
+  messaging_logs_enabled    = true
+  http_request_logs_enabled = true
 
   # CORS configuration for web clients
   cors {

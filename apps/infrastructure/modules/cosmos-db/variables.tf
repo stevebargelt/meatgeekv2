@@ -64,7 +64,7 @@ variable "indexing_mode" {
 variable "backup_policy" {
   description = "Backup policy configuration"
   type = object({
-    type                = string # "Periodic" or "Continuous"
+    type                = string                # "Periodic" or "Continuous"
     interval_in_minutes = optional(number, 240) # 4 hours default
     retention_in_hours  = optional(number, 168) # 7 days default
   })

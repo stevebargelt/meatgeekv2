@@ -11,7 +11,7 @@ resource "azurerm_cosmosdb_sql_database" "meatgeek" {
   name                = "${var.resource_prefix}-db"
   resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.existing.name
-  
+
   # No throughput at database level - containers will have individual throughput for minimal usage
 }
 
@@ -22,7 +22,7 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
   resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.existing.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
-  
+
   partition_key_paths   = ["/id"]
   partition_key_version = 1
   # No throughput - will share from temperatures container
@@ -65,11 +65,11 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
   resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.existing.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
-  
+
   partition_key_paths   = ["/deviceId"]
   partition_key_version = 1
-  throughput           = 400  # All throughput allocated to most active container
-  
+  throughput            = 400 # All throughput allocated to most active container
+
   # TTL for automatic data cleanup (90 days = 7776000 seconds)
   default_ttl = var.temperature_data_ttl
 
@@ -88,7 +88,7 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
     # Composite indexes for common temperature queries
     composite_index {
       index {
-        path  = "/deviceId" 
+        path  = "/deviceId"
         order = "ascending"
       }
       index {
@@ -100,7 +100,7 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
     composite_index {
       index {
         path  = "/cookId"
-        order = "ascending"  
+        order = "ascending"
       }
       index {
         path  = "/timestamp"
@@ -117,7 +117,7 @@ resource "azurerm_cosmosdb_sql_container" "cooks" {
   resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.existing.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
-  
+
   partition_key_paths   = ["/userId"]
   partition_key_version = 1
 
@@ -169,7 +169,7 @@ resource "azurerm_cosmosdb_sql_container" "users" {
   resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.existing.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
-  
+
   partition_key_paths   = ["/id"]
   partition_key_version = 1
 
@@ -199,7 +199,7 @@ resource "azurerm_cosmosdb_sql_container" "recipes" {
   resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.existing.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
-  
+
   partition_key_paths   = ["/userId"]
   partition_key_version = 1
 
@@ -233,7 +233,7 @@ resource "azurerm_cosmosdb_sql_container" "recipes" {
         order = "ascending"
       }
       index {
-        path  = "/rating"  
+        path  = "/rating"
         order = "descending"
       }
     }

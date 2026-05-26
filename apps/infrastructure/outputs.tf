@@ -135,9 +135,9 @@ output "environment_config" {
 output "device_configuration" {
   description = "Configuration needed for device registration"
   value = {
-    iot_hub_hostname              = module.iot_hub.hostname
-    device_connection_strings     = module.iot_hub.device_connection_strings
-    api_endpoint                  = module.azure_functions.function_app_url
+    iot_hub_hostname          = module.iot_hub.hostname
+    device_connection_strings = module.iot_hub.device_connection_strings
+    api_endpoint              = module.azure_functions.function_app_url
   }
   sensitive = true
 }

@@ -46,3 +46,16 @@ output "eventhub_connection_string" {
   value       = azurerm_eventhub_authorization_rule.iothub.primary_connection_string
   sensitive   = true
 }
+
+output "identity_principal_id" {
+  description = "Principal ID of the IoT Hub system-assigned managed identity (consumed by root to grant Cosmos DB Built-in Data Contributor)"
+  value       = azurerm_iothub.main.identity[0].principal_id
+}
+
+output "routes" {
+  description = "Names of the custom routes created on the IoT Hub, keyed by destination"
+  value = {
+    cosmos   = azurerm_iothub_route.cosmos.name
+    eventhub = azurerm_iothub_route.eventhub.name
+  }
+}

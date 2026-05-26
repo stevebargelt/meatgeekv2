@@ -41,7 +41,7 @@ output "primary_key" {
 }
 
 output "secondary_key" {
-  description = "Secondary key for the CosmosDB account"  
+  description = "Secondary key for the CosmosDB account"
   value       = data.azurerm_cosmosdb_account.existing.secondary_key
   sensitive   = true
 }
@@ -62,7 +62,7 @@ output "partition_keys" {
   description = "Partition key paths for each container"
   value = {
     devices      = "/id"
-    temperatures = "/deviceId" 
+    temperatures = "/deviceId"
     cooks        = "/userId"
     users        = "/id"
     recipes      = "/userId"
@@ -77,7 +77,7 @@ output "application_config" {
     database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
     account_name        = data.azurerm_cosmosdb_account.existing.name
     resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
-    
+
     containers = {
       devices      = azurerm_cosmosdb_sql_container.devices.name
       temperatures = azurerm_cosmosdb_sql_container.temperatures.name
@@ -85,11 +85,11 @@ output "application_config" {
       users        = azurerm_cosmosdb_sql_container.users.name
       recipes      = azurerm_cosmosdb_sql_container.recipes.name
     }
-    
+
     partition_keys = {
       devices      = "/id"
       temperatures = "/deviceId"
-      cooks        = "/userId" 
+      cooks        = "/userId"
       users        = "/id"
       recipes      = "/userId"
     }
@@ -117,7 +117,7 @@ output "environment_info" {
   value = {
     environment     = var.environment
     database_prefix = var.resource_prefix
-    ttl_days       = var.temperature_data_ttl / 86400
-    auto_scale_max = var.database_max_throughput
+    ttl_days        = var.temperature_data_ttl / 86400
+    auto_scale_max  = var.database_max_throughput
   }
 }

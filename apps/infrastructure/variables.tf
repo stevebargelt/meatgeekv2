@@ -5,7 +5,7 @@ variable "environment" {
   description = "Environment name (dev, staging, prod)"
   type        = string
   validation {
-    condition = contains(["dev", "staging", "prod"], var.environment)
+    condition     = contains(["dev", "staging", "prod"], var.environment)
     error_message = "Environment must be one of: dev, staging, prod."
   }
 }
@@ -36,7 +36,7 @@ variable "iot_hub_sku_name" {
   type        = string
   default     = "S1"
   validation {
-    condition = contains(["F1", "S1", "S2", "S3"], var.iot_hub_sku_name)
+    condition     = contains(["F1", "S1", "S2", "S3"], var.iot_hub_sku_name)
     error_message = "IoT Hub SKU must be one of: F1, S1, S2, S3."
   }
 }
@@ -94,7 +94,7 @@ variable "functions_app_service_plan_sku" {
   type        = string
   default     = "Y1" # Consumption plan
   validation {
-    condition = contains(["Y1", "EP1", "EP2", "EP3"], var.functions_app_service_plan_sku)
+    condition     = contains(["Y1", "EP1", "EP2", "EP3"], var.functions_app_service_plan_sku)
     error_message = "Functions App Service Plan SKU must be one of: Y1 (Consumption), EP1, EP2, EP3 (Premium)."
   }
 }
@@ -105,7 +105,7 @@ variable "signalr_sku_name" {
   type        = string
   default     = "Free_F1"
   validation {
-    condition = contains(["Free_F1", "Standard_S1"], var.signalr_sku_name)
+    condition     = contains(["Free_F1", "Standard_S1"], var.signalr_sku_name)
     error_message = "SignalR SKU must be one of: Free_F1, Standard_S1."
   }
 }
@@ -157,9 +157,26 @@ variable "auto_shutdown_enabled" {
 }
 
 variable "budget_limit" {
-  description = "Monthly budget limit in USD for cost alerts"
+  description = "Monthly budget limit in USD for cost alerts (resource group scope)"
   type        = number
   default     = 100
+}
+
+variable "secondary_budget_limit" {
+  description = "Secondary subscription-level budget limit in USD (warning before Azure credit exhausted)"
+  type        = number
+  default     = 150
+}
+
+# Observability / Azure Monitor cost control
+variable "ingestion_cap_gb" {
+  description = "Daily ingestion cap (GB/day) on the Log Analytics workspace. Hard guardrail against runaway Azure Monitor cost."
+  type        = number
+  default     = 2
+  validation {
+    condition     = var.ingestion_cap_gb >= 1 && var.ingestion_cap_gb <= 10
+    error_message = "ingestion_cap_gb must be between 1 and 10 (inclusive)."
+  }
 }
 
 # Admin Configuration

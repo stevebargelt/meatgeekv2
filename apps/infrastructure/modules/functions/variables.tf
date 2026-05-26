@@ -21,9 +21,10 @@ variable "functions_app_service_plan_sku" {
   default     = "Y1"
 }
 
-variable "application_insights_key" {
-  description = "Application Insights instrumentation key"
+variable "application_insights_connection_string" {
+  description = "Application Insights connection string"
   type        = string
+  sensitive   = true
 }
 
 variable "cosmos_connection_string" {
