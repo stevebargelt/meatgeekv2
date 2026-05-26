@@ -1,3 +1,5 @@
+//go:build !testserver
+
 package main
 
 import (
@@ -10,13 +12,11 @@ import (
 	"strconv"
 	"time"
 
-    "github.com/newrelic/go-agent/v3/newrelic"
-
 	//using standard json with custom NaN handling
 	"encoding/json"
 
 	dc_i2c "github.com/davecheney/i2c"
-	queue "github.com/stevebargelt/MeatGeek-DeviceController/goqueue"
+	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
 
 	// Updated to gobot.io/x/gobot/v2 for Go 1.25 compatibility
 	"gobot.io/x/gobot/v2"
@@ -38,11 +38,6 @@ var SmokerStatus = Status {
 
 func main() {
 
-    app, err := newrelic.NewApplication(
-    newrelic.ConfigAppName("meatgeek-devicecontroller"),
-    newrelic.ConfigLicense(""),
-    newrelic.ConfigAppLogForwardingEnabled(true),
-)
     manager := gobot.NewManager()
     deviceApi := api.NewAPI(manager)
     deviceApi.Port = "3000"
@@ -158,18 +153,14 @@ func main() {
             work,
     )
     robot.AddCommand("get_temps", func(params map[string]interface{}) interface{} {
-        txn := app.StartTransaction("get_temps")
-        defer txn.End()
         res, err := json.Marshal(SmokerStatus.Temps)
         if err != nil {
             fmt.Println("ERROR: ", err.Error())
         }
         return string(res)
     })
-    
+
     robot.AddCommand("get_status", func(params map[string]interface{}) interface{} {
-        txn := app.StartTransaction("get_status")
-        defer txn.End()
         res, err := json.Marshal(SmokerStatus)
         if err != nil {
             fmt.Println("ERROR: ", err.Error())

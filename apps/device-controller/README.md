@@ -127,7 +127,7 @@ This device controller is designed to work with the new V2 system through:
 
 1. **Data Pusher Service**: The separate `data-pusher` service polls this controller's API and sends data to Azure IoT Hub
 2. **Existing API Compatibility**: Maintains the original API endpoints for backward compatibility
-3. **Enhanced Observability**: Integration with Azure Monitor replacing NewRelic
+3. **Observability**: NewRelic instrumentation was removed in ticket #4. OTel Go SDK + Azure Monitor exporter will be re-added in ticket #6 at the same `main.go` init site.
 
 ## Temperature Data Structure
 

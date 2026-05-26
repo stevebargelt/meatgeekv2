@@ -3,7 +3,7 @@ package goqueue_test
 import (
 	"runtime"
 
-	queue "github.com/stevebargelt/MeatGeek-DeviceController/goqueue"
+	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
 )
 
 var _ = Describe("Queue", func() {
