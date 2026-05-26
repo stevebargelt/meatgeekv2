@@ -60,27 +60,17 @@ dev:
 	@echo "   - Mock IoT Hub connection"
 	go run cmd/main.go --device-url=http://localhost:3000 --debug=true --mock-iot=true
 
-# Install as systemd service (on Raspberry Pi)
+# Install as systemd service (on Raspberry Pi).
+# Operator MUST populate /etc/meatgeek-pusher/env (chmod 600) with the
+# per-device IoT Hub connection string before the service can start cleanly.
+# See apps/data-pusher/README.md for the env file contents.
 install: build-arm
 	@echo "Installing $(BINARY_NAME) as systemd service..."
-	sudo cp dist/$(BINARY_NAME)-arm /usr/local/bin/$(BINARY_NAME)
-	@echo "Creating systemd service file..."
-	@echo "[Unit]" | sudo tee /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "Description=MeatGeek Data Pusher Service" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "After=network.target meatgeek-controller.service" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "Requires=meatgeek-controller.service" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "[Service]" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "Type=simple" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "User=pi" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "WorkingDirectory=/home/pi" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "ExecStart=/usr/local/bin/$(BINARY_NAME)" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "Restart=always" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "RestartSec=10" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "Environment=DEVICE_URL=http://localhost:3000" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "[Install]" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
-	@echo "WantedBy=multi-user.target" | sudo tee -a /etc/systemd/system/$(SERVICE_NAME).service > /dev/null
+	sudo install -m 0755 dist/$(BINARY_NAME)-arm /usr/local/bin/$(BINARY_NAME)
+	sudo install -d -m 0755 /var/lib/meatgeek-pusher
+	sudo install -d -m 0750 /etc/meatgeek-pusher
+	sudo cp deploy/$(SERVICE_NAME).service /etc/systemd/system/$(SERVICE_NAME).service
+	@echo "⚠️  Ensure /etc/meatgeek-pusher/env exists and is chmod 600 before starting (see README)."
 	sudo systemctl daemon-reload
 	sudo systemctl enable $(SERVICE_NAME)
 	sudo systemctl start $(SERVICE_NAME)

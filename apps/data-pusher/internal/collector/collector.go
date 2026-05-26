@@ -1,3 +1,14 @@
+// Package collector polls the device-controller's local HTTP API on a fixed
+// interval and emits each successful poll's V1Status onto an outbound
+// Samples channel.
+//
+// Architectural note (ticket #5): per the all-through-queue model, the
+// collector is a PURE PRODUCER — it never touches IoT Hub directly, never
+// owns cook-session state, and never mints message ids. Consumers (the
+// main package's queue runner) read from Samples() and own those concerns.
+// This decoupling lets the disk-backed queue be the single writer to
+// IoT Hub and eliminates the race window the previous design had between
+// "set active cook id" and "in-flight poll".
 package collector
 
 import (
@@ -9,75 +20,73 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
+
+	"meatgeek-pusher/internal/wire"
 )
 
-// TemperatureData represents the temperature data structure
-type TemperatureData struct {
-	DeviceID    string     `json:"deviceId"`
-	Timestamp   time.Time  `json:"timestamp"`
-	CookID      *string    `json:"cookId,omitempty"`
-	GrillTemp   *float64   `json:"grillTemp"`
-	Probe1Temp  *float64   `json:"probe1Temp"`
-	Probe2Temp  *float64   `json:"probe2Temp"`
-	Probe3Temp  *float64   `json:"probe3Temp"`
-	Probe4Temp  *float64   `json:"probe4Temp"`
+// Sample is what the collector emits on each successful poll. The producer
+// (collector) is decoupled from the IoT-Hub-bound publisher (queue runner);
+// the consumer owns wire mapping, cookId enrichment, and message-id minting.
+type Sample struct {
+	// Status is the raw V1 shape received from the device-controller. The
+	// queue runner is responsible for mapping V1 -> V2 TemperatureReading
+	// at enqueue time (so the active cookId is captured at the moment of
+	// collection rather than at publish time).
+	Status wire.V1Status
+
+	// Timestamp is the wall-clock time the sample was observed by the
+	// pusher (UTC). The queue runner threads this into wire.MintMessageId
+	// so the message id stays stable across publish retries.
+	Timestamp time.Time
 }
 
-// DeviceStatus represents the device status from the API
-type DeviceStatus struct {
-	Temps struct {
-		GrillTemp  *float64 `json:"grillTemp"`
-		Probe1Temp *float64 `json:"probe1Temp"`
-		Probe2Temp *float64 `json:"probe2Temp"`
-		Probe3Temp *float64 `json:"probe3Temp"`
-		Probe4Temp *float64 `json:"probe4Temp"`
-	} `json:"temps"`
-	Status struct {
-		SmokerID    string `json:"smokerid"`
-		CurrentTime string `json:"currentTime"`
-	} `json:"status"`
+// gobotCommandResponse is the {"result": "<json-string>"} envelope that
+// gobot.io's HTTP API wraps every command handler in. The device-controller's
+// get_status handler calls `json.Marshal(SmokerStatus)` and `return string(res)`,
+// which gobot then JSON-encodes inside the "result" field, producing a
+// JSON-encoded STRING (not a struct). The unwrap path is therefore: decode
+// outer envelope -> read .Result -> json.Unmarshal that string into V1Status.
+type gobotCommandResponse struct {
+	Result string `json:"result"`
 }
 
-// Collector handles polling the device controller for temperature data
+// Collector polls the device-controller on a fixed interval.
 type Collector struct {
-	deviceURL     string
-	pollInterval  time.Duration
-	httpClient    *http.Client
-	tracer        trace.Tracer
-	activeCookID  *string // Maintained in memory for cook session management
+	deviceURL    string
+	pollInterval time.Duration
+	httpClient   *http.Client
+	tracer       trace.Tracer
+	samples      chan Sample
 }
 
-// DataHandler is called for each temperature reading
-type DataHandler func(data TemperatureData) error
-
-// New creates a new temperature collector
+// New constructs a Collector. The samples buffer is small (16) so a slow
+// downstream queue runner backpressures the poll loop rather than buffering
+// arbitrarily many readings in memory.
 func New(deviceURL string, pollInterval time.Duration, tracer trace.Tracer) (*Collector, error) {
 	if deviceURL == "" {
 		return nil, fmt.Errorf("device URL is required")
 	}
-
 	return &Collector{
 		deviceURL:    deviceURL,
 		pollInterval: pollInterval,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		tracer: tracer,
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		tracer:       tracer,
+		samples:      make(chan Sample, 16),
 	}, nil
 }
 
-// SetActiveCook sets the current active cook ID
-func (c *Collector) SetActiveCook(cookID *string) {
-	c.activeCookID = cookID
-	if cookID != nil {
-		logrus.WithField("cookId", *cookID).Info("Set active cook ID")
-	} else {
-		logrus.Info("Cleared active cook ID")
-	}
+// Samples returns the channel the collector writes to. It is closed when
+// Start returns.
+func (c *Collector) Samples() <-chan Sample {
+	return c.samples
 }
 
-// Start begins polling the device controller
-func (c *Collector) Start(ctx context.Context, handler DataHandler) error {
+// Start polls until ctx is cancelled. Returns ctx.Err() on shutdown. The
+// samples channel is closed on return so downstream consumers can use
+// `range` to drive their own shutdown.
+func (c *Collector) Start(ctx context.Context) error {
+	defer close(c.samples)
+
 	logrus.WithFields(logrus.Fields{
 		"deviceURL":    c.deviceURL,
 		"pollInterval": c.pollInterval,
@@ -86,8 +95,7 @@ func (c *Collector) Start(ctx context.Context, handler DataHandler) error {
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
-	// Initial poll
-	if err := c.poll(ctx, handler); err != nil {
+	if err := c.pollOnce(ctx); err != nil {
 		logrus.WithError(err).Warn("Initial poll failed")
 	}
 
@@ -97,57 +105,46 @@ func (c *Collector) Start(ctx context.Context, handler DataHandler) error {
 			logrus.Info("Temperature collection stopped")
 			return ctx.Err()
 		case <-ticker.C:
-			if err := c.poll(ctx, handler); err != nil {
+			if err := c.pollOnce(ctx); err != nil {
 				logrus.WithError(err).Error("Poll failed")
-				// Continue polling even if individual polls fail
 			}
 		}
 	}
 }
 
-func (c *Collector) poll(ctx context.Context, handler DataHandler) error {
+func (c *Collector) pollOnce(ctx context.Context) error {
 	ctx, span := c.tracer.Start(ctx, "collector.poll")
 	defer span.End()
 
-	// Get temperature data from device controller
 	status, err := c.fetchDeviceStatus(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch device status: %w", err)
 	}
 
-	// Convert to our data structure
-	data := TemperatureData{
-		DeviceID:   status.Status.SmokerID,
-		Timestamp:  time.Now().UTC(),
-		CookID:     c.activeCookID, // Add cook ID if we have an active cook
-		GrillTemp:  status.Temps.GrillTemp,
-		Probe1Temp: status.Temps.Probe1Temp,
-		Probe2Temp: status.Temps.Probe2Temp,
-		Probe3Temp: status.Temps.Probe3Temp,
-		Probe4Temp: status.Temps.Probe4Temp,
+	sample := Sample{
+		Status:    *status,
+		Timestamp: time.Now().UTC(),
 	}
 
-	// Call the handler to process the data
-	if err := handler(data); err != nil {
-		return fmt.Errorf("handler failed: %w", err)
+	select {
+	case c.samples <- sample:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	return nil
 }
 
-func (c *Collector) fetchDeviceStatus(ctx context.Context) (*DeviceStatus, error) {
+func (c *Collector) fetchDeviceStatus(ctx context.Context) (*wire.V1Status, error) {
 	ctx, span := c.tracer.Start(ctx, "collector.fetchDeviceStatus")
 	defer span.End()
 
-	// Create request to device controller
 	url := fmt.Sprintf("%s/api/robots/MeatGeekBot/commands/get_status", c.deviceURL)
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Make the request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
@@ -158,11 +155,30 @@ func (c *Collector) fetchDeviceStatus(ctx context.Context) (*DeviceStatus, error
 		return nil, fmt.Errorf("device returned status %d", resp.StatusCode)
 	}
 
-	// Parse response
-	var status DeviceStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
+	return decodeGobotStatus(resp.Body)
+}
 
+// decodeGobotStatus performs the two-step unwrap of the device-controller's
+// gobot.io HTTP response. Exposed (lowercase but called by the test reader)
+// via DecodeGobotStatus so collector_test.go can verify the unwrap against a
+// canned response without spinning up an httptest.Server.
+func decodeGobotStatus(r interface{ Read(p []byte) (int, error) }) (*wire.V1Status, error) {
+	var env gobotCommandResponse
+	if err := json.NewDecoder(r).Decode(&env); err != nil {
+		return nil, fmt.Errorf("decode gobot envelope: %w", err)
+	}
+	if env.Result == "" {
+		return nil, fmt.Errorf("gobot envelope missing 'result' field")
+	}
+	var status wire.V1Status
+	if err := json.Unmarshal([]byte(env.Result), &status); err != nil {
+		return nil, fmt.Errorf("decode V1Status from result string: %w", err)
+	}
 	return &status, nil
+}
+
+// DecodeGobotStatus is the exported entrypoint to decodeGobotStatus used
+// by the package tests; production callers go through fetchDeviceStatus.
+func DecodeGobotStatus(r interface{ Read(p []byte) (int, error) }) (*wire.V1Status, error) {
+	return decodeGobotStatus(r)
 }

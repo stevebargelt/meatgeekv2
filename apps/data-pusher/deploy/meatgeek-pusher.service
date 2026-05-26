@@ -1,0 +1,32 @@
+[Unit]
+Description=MeatGeek Data Pusher Service
+Documentation=https://github.com/sbargelt/meatgeekv2/tree/main/apps/data-pusher
+After=network-online.target meatgeek-controller.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/var/lib/meatgeek-pusher
+ExecStart=/usr/local/bin/meatgeek-pusher
+Restart=on-failure
+RestartSec=10
+
+# Secrets (per-device IoT Hub connection string) live in a permission-restricted
+# file rather than a shell-visible Environment= line. See README for the
+# expected file contents and recommended `chmod 600`.
+EnvironmentFile=/etc/meatgeek-pusher/env
+
+# journald captures stdout/stderr; structured JSON logs ship through unchanged.
+StandardOutput=journal
+StandardError=journal
+
+# Minor hardening; safe defaults for a single-user Pi service.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
