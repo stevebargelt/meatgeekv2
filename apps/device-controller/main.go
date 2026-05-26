@@ -40,7 +40,7 @@ func main() {
 
     app, err := newrelic.NewApplication(
     newrelic.ConfigAppName("meatgeek-devicecontroller"),
-    newrelic.ConfigLicense("***REMOVED***"),
+    newrelic.ConfigLicense(""),
     newrelic.ConfigAppLogForwardingEnabled(true),
 )
     manager := gobot.NewManager()
