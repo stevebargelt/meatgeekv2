@@ -1,0 +1,25 @@
+{
+  "recommendations": [
+    "nrwl.angular-console",
+    "ms-azuretools.vscode-azurefunctions", 
+    "golang.go",
+    "hashicorp.terraform",
+    "ms-vscode.vscode-typescript-next",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "ms-vscode.vscode-json",
+    "ms-vscode-remote.remote-containers",
+    "ms-vscode.vscode-eslint",
+    "orta.vscode-jest",
+    "ms-vscode.test-adapter-converter",
+    "ms-dotnettools.vscode-dotnet-runtime",
+    "yzhang.markdown-all-in-one",
+    "streetsidesoftware.code-spell-checker",
+    "ms-vscode.makefile-tools",
+    "mhutchie.git-graph"
+  ],
+  "unwantedRecommendations": [
+    "ms-vscode.vscode-typescript",
+    "hookyqr.beautify"
+  ]
+}

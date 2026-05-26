@@ -1,0 +1,350 @@
+<mxfile host="app.diagrams.net" modified="2025-01-26T12:00:00.000Z" agent="5.0" version="24.7.17">
+  <diagram name="MeatGeek V2 Data Flow" id="data-flow">
+    <mxGraphModel dx="1422" dy="827" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Title -->
+        <mxCell id="title" value="MeatGeek V2 Temperature Data Flow Pipeline" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="650" y="20" width="400" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- Hardware Sensors Layer -->
+        <mxCell id="sensors-layer" value="Hardware Sensors (Raspberry Pi)" style="swimlane;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#c62828;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="80" width="1480" height="120" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="grill-sensor" value="Grill RTD&#xa;Sensor&#xa;(Channel 0)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ef5350;strokeColor=#c62828;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="40" y="40" width="100" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="probe1-sensor" value="Probe 1 RTD&#xa;Sensor&#xa;(Channel 1)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ef5350;strokeColor=#c62828;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="180" y="40" width="100" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="probe2-sensor" value="Probe 2 RTD&#xa;Sensor&#xa;(Channel 2)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ef5350;strokeColor=#c62828;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="320" y="40" width="100" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="probe3-sensor" value="Probe 3 RTD&#xa;Sensor&#xa;(Channel 3)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ef5350;strokeColor=#c62828;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="460" y="40" width="100" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="probe4-sensor" value="Probe 4 RTD&#xa;Sensor&#xa;(Channel 4)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ef5350;strokeColor=#c62828;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="600" y="40" width="100" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="mcp3008-adc" value="MCP3008&#xa;ADC&#xa;(SPI Interface)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcc02;strokeColor=#d84315;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="760" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="sensor-data-format" value="Raw Sensor Data:&#xa;• Analog voltage (0-3.3V)&#xa;• 10-bit ADC resolution&#xa;• 10ms sampling rate&#xa;• Per-channel reading" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;align=left;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="920" y="30" width="200" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="sensor-conditions" value="Environmental Factors:&#xa;• Temperature range: -40°F to 500°F&#xa;• RTD accuracy: ±0.1°C&#xa;• Electrical noise filtering&#xa;• Sensor disconnection detection" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;align=left;" vertex="1" parent="sensors-layer">
+          <mxGeometry x="1160" y="30" width="280" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Data Processing Layer -->
+        <mxCell id="processing-layer" value="Data Processing Layer (Device Controller - Go)" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e8f5e8;strokeColor=#2e7d32;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="220" width="1480" height="140" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="adc-reading" value="ADC Reading&#xa;Loop&#xa;(10ms interval)&#xa;gobot.Every()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#388e3c;" vertex="1" parent="processing-layer">
+          <mxGeometry x="40" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="resistance-calc" value="Resistance&#xa;Calculation&#xa;R = (3.3V-Vrtd)&#xa;* 1kΩ / Vrtd" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#388e3c;" vertex="1" parent="processing-layer">
+          <mxGeometry x="200" y="40" width="140" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="temp-conversion" value="Temperature&#xa;Conversion&#xa;RTD Formula&#xa;(°C to °F)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#388e3c;" vertex="1" parent="processing-layer">
+          <mxGeometry x="380" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="temp-correction" value="Temperature&#xa;Correction&#xa;Per-probe&#xa;calibration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#388e3c;" vertex="1" parent="processing-layer">
+          <mxGeometry x="540" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="averaging-queue" value="100-Sample&#xa;Averaging Queue&#xa;Per probe&#xa;rolling average" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#4caf50;" vertex="1" parent="processing-layer">
+          <mxGeometry x="700" y="40" width="130" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="status-aggregation" value="Status&#xa;Aggregation&#xa;5 second&#xa;interval" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#4caf50;" vertex="1" parent="processing-layer">
+          <mxGeometry x="870" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="processing-formulas" value="Processing Formulas:&#xa;• Resistance: R = (3.3-V)*1000/V&#xa;• Temp: T = (-A+√(A²-4B(1-R/R0)))/(2B)&#xa;• A = 3.90830e-3, B = -5.775e-7&#xa;• R0 = 1000Ω (reference)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f57f17;align=left;" vertex="1" parent="processing-layer">
+          <mxGeometry x="1030" y="30" width="280" height="90" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="corrections" value="Probe Corrections:&#xa;• Grill: -6.0°F&#xa;• Probe 1: -8.0°F&#xa;• Probe 2: +2.0°F&#xa;• Probe 3: -1.0°F&#xa;• Probe 4: -5.0°F" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;align=left;" vertex="1" parent="processing-layer">
+          <mxGeometry x="1340" y="30" width="120" height="90" as="geometry" />
+        </mxCell>
+        
+        <!-- Local Outputs Layer -->
+        <mxCell id="local-outputs-layer" value="Local Outputs and API" style="swimlane;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="380" width="1480" height="100" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="lcd-display" value="LCD Display&#xa;(20x4 I2C)&#xa;Real-time&#xa;Temperature" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcc02;strokeColor=#e65100;" vertex="1" parent="local-outputs-layer">
+          <mxGeometry x="40" y="30" width="120" height="50" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="local-api-server" value="Local API Server&#xa;Port 3000&#xa;HTTP Endpoints" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcc02;strokeColor=#e65100;" vertex="1" parent="local-outputs-layer">
+          <mxGeometry x="200" y="30" width="140" height="50" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="api-endpoints" value="API Endpoints:&#xa;• /api/robots/MeatGeekBot/commands/get_temps&#xa;• /api/robots/MeatGeekBot/commands/get_status" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#ff8f00;align=left;" vertex="1" parent="local-outputs-layer">
+          <mxGeometry x="380" y="20" width="340" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="json-format" value="JSON Response Format:&#xa;{&#xa;  grillTemp: 225.0,&#xa;  probe1Temp: 160.0,&#xa;  probe2Temp: 145.0,&#xa;  probe3Temp: null,&#xa;  probe4Temp: 200.0&#xa;}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0277bd;align=left;" vertex="1" parent="local-outputs-layer">
+          <mxGeometry x="760" y="15" width="200" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="display-format" value="LCD Display Layout:&#xa;Line 1: P1 160°F    P2 145°F&#xa;Line 2: P3 ---°F    P4 200°F&#xa;Line 3: Grill 225°F&#xa;Line 4: Mon Jan 26 15:04" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;align=left;" vertex="1" parent="local-outputs-layer">
+          <mxGeometry x="1000" y="15" width="200" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="update-intervals" value="Update Intervals:&#xa;• ADC Reading: 10ms&#xa;• Temperature Calc: 10ms&#xa;• Queue Average: 5s&#xa;• LCD Update: 5s&#xa;• API Response: Real-time" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f57f17;align=left;" vertex="1" parent="local-outputs-layer">
+          <mxGeometry x="1240" y="15" width="200" height="70" as="geometry" />
+        </mxCell>
+        
+        <!-- Cloud Transfer Layer -->
+        <mxCell id="cloud-transfer-layer" value="Cloud Transfer Layer (Data Pusher Service - Go)" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="500" width="1480" height="120" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="data-pusher-service" value="Data Pusher&#xa;Service&#xa;(Go Application)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#42a5f5;strokeColor=#1565c0;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="http-polling" value="HTTP Polling&#xa;Local API&#xa;30 second&#xa;interval" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#42a5f5;strokeColor=#1565c0;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="200" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="json-formatting" value="JSON Payload&#xa;Formatting&#xa;Device metadata&#xa;+ temperatures" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#42a5f5;strokeColor=#1565c0;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="360" y="40" width="130" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="local-buffer" value="Local Buffer&#xa;Offline resilience&#xa;Store and forward&#xa;mechanism" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#64b5f6;strokeColor=#1976d2;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="530" y="40" width="130" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="cook-context" value="Cook Session&#xa;Context&#xa;Active cook ID&#xa;association" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#64b5f6;strokeColor=#1976d2;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="700" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="mqtt-https" value="MQTT/HTTPS&#xa;Transmission&#xa;Azure IoT Hub&#xa;protocol" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#42a5f5;strokeColor=#1565c0;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="860" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="cloud-payload" value="Cloud Payload:&#xa;{&#xa;  deviceId: meatgeek3,&#xa;  timestamp: 2025-01-26T15:04:00Z,&#xa;  cookId: uuid-here,&#xa;  temperatures: { ... }&#xa;}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0277bd;align=left;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="1020" y="25" width="200" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="retry-logic" value="Error Handling:&#xa;• Connection retry logic&#xa;• Exponential backoff&#xa;• Local data persistence&#xa;• Network failure recovery" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f57f17;align=left;" vertex="1" parent="cloud-transfer-layer">
+          <mxGeometry x="1260" y="25" width="180" height="70" as="geometry" />
+        </mxCell>
+        
+        <!-- Azure Cloud Pipeline -->
+        <mxCell id="azure-pipeline-layer" value="Azure Cloud Pipeline" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="640" width="1480" height="140" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="iot-hub" value="Azure IoT Hub&#xa;Device Gateway&#xa;Message routing&#xa;and scaling" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ba68c8;strokeColor=#7b1fa2;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="40" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="event-hub" value="Event Hub&#xa;Message Stream&#xa;Temperature&#xa;events" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ba68c8;strokeColor=#7b1fa2;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="200" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="azure-function" value="Azure Function&#xa;Event Processor&#xa;Temperature&#xa;handler" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ba68c8;strokeColor=#7b1fa2;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="360" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="openapi-validation" value="OpenAPI&#xa;Validation&#xa;Request/Response&#xa;schema check" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#81c784;strokeColor=#388e3c;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="520" y="40" width="130" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="data-enrichment" value="Data&#xa;Enrichment&#xa;Cook context&#xa;association" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ba68c8;strokeColor=#7b1fa2;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="690" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="cosmosdb-storage" value="CosmosDB&#xa;Storage&#xa;NoSQL&#xa;persistence" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ff9800;strokeColor=#e65100;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="850" y="30" width="80" height="90" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="signalr-hub" value="SignalR Hub&#xa;Real-time Push&#xa;WebSocket&#xa;connections" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ba68c8;strokeColor=#7b1fa2;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="970" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="app-insights" value="Application&#xa;Insights&#xa;Telemetry and&#xa;monitoring" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffb74d;strokeColor=#f57c00;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="1130" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="azure-monitor" value="Azure Monitor&#xa;Observability&#xa;Distributed&#xa;tracing" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffb74d;strokeColor=#f57c00;" vertex="1" parent="azure-pipeline-layer">
+          <mxGeometry x="1290" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Client Applications -->
+        <mxCell id="client-layer" value="Client Applications and Data Consumption" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e8f5e8;strokeColor=#2e7d32;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="800" width="1480" height="120" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="mobile-app" value="React Native&#xa;Mobile App&#xa;Primary client&#xa;Push notifications" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#388e3c;" vertex="1" parent="client-layer">
+          <mxGeometry x="40" y="40" width="140" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="web-app" value="React Web App&#xa;Dashboard&#xa;Advanced analytics&#xa;Multi-device view" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#388e3c;" vertex="1" parent="client-layer">
+          <mxGeometry x="220" y="40" width="140" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="temp-charts" value="Real-time&#xa;Temperature Charts&#xa;Live data&#xa;visualization" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#4caf50;" vertex="1" parent="client-layer">
+          <mxGeometry x="400" y="40" width="140" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="cook-management" value="Cook Session&#xa;Management&#xa;Start/Stop/Edit&#xa;sessions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#4caf50;" vertex="1" parent="client-layer">
+          <mxGeometry x="580" y="40" width="140" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="historical-data" value="Historical&#xa;Analytics&#xa;Past cook&#xa;performance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#4caf50;" vertex="1" parent="client-layer">
+          <mxGeometry x="760" y="40" width="140" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="temp-alerts" value="Temperature&#xa;Alerts&#xa;Threshold&#xa;notifications" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3cd;strokeColor=#856404;" vertex="1" parent="client-layer">
+          <mxGeometry x="940" y="40" width="130" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="device-status" value="Device Status&#xa;Monitoring&#xa;Connection and&#xa;health status" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3cd;strokeColor=#856404;" vertex="1" parent="client-layer">
+          <mxGeometry x="1110" y="40" width="130" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="notification-types" value="Notification Types:&#xa;• Target temp reached&#xa;• Cook time elapsed&#xa;• Device disconnected&#xa;• Temperature spike/drop" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffecb3;strokeColor=#ff8f00;align=left;" vertex="1" parent="client-layer">
+          <mxGeometry x="1280" y="30" width="160" height="70" as="geometry" />
+        </mxCell>
+        
+        <!-- Data Flow Arrows -->
+        <!-- Sensor to ADC -->
+        <mxCell id="sensors-to-adc" value="Analog Voltage&#xa;0-3.3V" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#d32f2f;strokeWidth=3;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="grill-sensor" target="mcp3008-adc">
+          <mxGeometry x="0.2" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- ADC to Processing -->
+        <mxCell id="adc-to-processing" value="Digital Values&#xa;0-1023" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#e65100;strokeWidth=3;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="mcp3008-adc" target="adc-reading">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Processing Pipeline -->
+        <mxCell id="reading-to-resistance" value="Raw ADC" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" parent="1" source="adc-reading" target="resistance-calc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="resistance-to-temp" value="Resistance (Ω)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" parent="1" source="resistance-calc" target="temp-conversion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="temp-to-correction" value="Temp (°C)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" parent="1" source="temp-conversion" target="temp-correction">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="correction-to-queue" value="Corrected (°F)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4caf50;strokeWidth=2;" edge="1" parent="1" source="temp-correction" target="averaging-queue">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="queue-to-aggregation" value="Averaged Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4caf50;strokeWidth=2;" edge="1" parent="1" source="averaging-queue" target="status-aggregation">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Processing to Local Outputs -->
+        <mxCell id="processing-to-lcd" value="Display Update" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#e65100;strokeWidth=2;" edge="1" parent="1" source="status-aggregation" target="lcd-display">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="processing-to-api" value="JSON Response" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#e65100;strokeWidth=2;" edge="1" parent="1" source="status-aggregation" target="local-api-server">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Local API to Cloud Transfer -->
+        <mxCell id="api-to-pusher" value="HTTP GET" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565c0;strokeWidth=2;" edge="1" parent="1" source="local-api-server" target="http-polling">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Cloud Transfer Pipeline -->
+        <mxCell id="polling-to-format" value="JSON Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565c0;strokeWidth=2;" edge="1" parent="1" source="http-polling" target="json-formatting">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="format-to-buffer" value="Formatted Payload" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1976d2;strokeWidth=2;" edge="1" parent="1" source="json-formatting" target="local-buffer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="buffer-to-context" value="Buffered Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1976d2;strokeWidth=2;" edge="1" parent="1" source="local-buffer" target="cook-context">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="context-to-mqtt" value="Enriched Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565c0;strokeWidth=2;" edge="1" parent="1" source="cook-context" target="mqtt-https">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Cloud Transfer to Azure -->
+        <mxCell id="mqtt-to-iot" value="MQTT/HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7b1fa2;strokeWidth=3;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="mqtt-https" target="iot-hub">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Azure Pipeline -->
+        <mxCell id="iot-to-event" value="Route Messages" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7b1fa2;strokeWidth=2;" edge="1" parent="1" source="iot-hub" target="event-hub">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="event-to-function" value="Event Trigger" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7b1fa2;strokeWidth=2;" edge="1" parent="1" source="event-hub" target="azure-function">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="function-to-validation" value="Request Validation" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#388e3c;strokeWidth=2;" edge="1" parent="1" source="azure-function" target="openapi-validation">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="validation-to-enrichment" value="Validated Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7b1fa2;strokeWidth=2;" edge="1" parent="1" source="openapi-validation" target="data-enrichment">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="enrichment-to-cosmos" value="Store Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#e65100;strokeWidth=2;" edge="1" parent="1" source="data-enrichment" target="cosmosdb-storage">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="enrichment-to-signalr" value="Real-time Push" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7b1fa2;strokeWidth=2;" edge="1" parent="1" source="data-enrichment" target="signalr-hub">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="function-to-insights" value="Telemetry" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#f57c00;strokeWidth=2;" edge="1" parent="1" source="azure-function" target="app-insights">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Azure to Clients -->
+        <mxCell id="signalr-to-mobile" value="WebSocket" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=3;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="signalr-hub" target="mobile-app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="signalr-to-web" value="WebSocket" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" parent="1" source="signalr-hub" target="web-app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="function-to-mobile" value="REST API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" parent="1" source="azure-function" target="mobile-app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="cosmos-to-charts" value="Historical Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4caf50;strokeWidth=2;" edge="1" parent="1" source="cosmosdb-storage" target="temp-charts">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

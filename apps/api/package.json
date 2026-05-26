@@ -1,0 +1,17 @@
+{
+  "name": "@meatgeekv2/api",
+  "version": "0.0.1",
+  "description": "MeatGeek V2 Azure Functions API",
+  "main": "dist/apps/api/main.js",
+  "scripts": {
+    "build": "nx build api",
+    "start": "func start",
+    "test": "nx test api"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@meatgeekv2/web",
+  "version": "0.0.1",
+  "description": "MeatGeek V2 React Web Application",
+  "main": "src/main.tsx",
+  "scripts": {
+    "build": "nx build web",
+    "start": "nx serve web",
+    "test": "nx test web",
+    "lint": "nx lint web",
+    "preview": "nx preview web"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

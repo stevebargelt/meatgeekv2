@@ -1,0 +1,76 @@
+{
+  "name": "data-pusher",
+  "sourceRoot": "apps/data-pusher",
+  "projectType": "application",
+  "targets": {
+    "build": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make build",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "build-arm": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make build-arm",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "test": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make test",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "lint": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make lint",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "serve": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make dev",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "format": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make format",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "clean": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make clean",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "install": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make install",
+        "cwd": "apps/data-pusher"
+      }
+    },
+    "deploy": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "commands": [
+          "make build-arm",
+          "scp dist/meatgeek-pusher-arm pi@{args.host}:~/meatgeek-pusher",
+          "ssh pi@{args.host} 'sudo systemctl restart meatgeek-pusher'"
+        ],
+        "parallel": false,
+        "cwd": "apps/data-pusher"
+      }
+    }
+  },
+  "tags": ["type:app", "platform:go", "scope:device"]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@meatgeekv2/mobile",
+  "version": "0.0.1",
+  "description": "MeatGeek V2 React Native Mobile App",
+  "main": "src/main.tsx",
+  "scripts": {
+    "android": "nx run-android mobile",
+    "ios": "nx run-ios mobile",
+    "start": "nx serve mobile",
+    "test": "nx test mobile",
+    "lint": "nx lint mobile"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-native": "0.75.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

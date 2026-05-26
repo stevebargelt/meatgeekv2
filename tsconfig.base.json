@@ -1,0 +1,35 @@
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    "rootDir": ".",
+    "sourceMap": true,
+    "declaration": false,
+    "moduleResolution": "node",
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "importHelpers": true,
+    "target": "es2015",
+    "module": "esnext",
+    "lib": ["es2020", "dom"],
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+    "baseUrl": ".",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@meatgeekv2/api-interfaces": ["libs/api-interfaces/src/index.ts"],
+      "@meatgeekv2/azure-client": ["libs/azure-client/src/index.ts"],
+      "@meatgeekv2/charts": ["libs/charts/src/index.ts"],
+      "@meatgeekv2/data-models": ["libs/data-models/src/index.ts"],
+      "@meatgeekv2/realtime": ["libs/realtime/src/index.ts"],
+      "@meatgeekv2/tracing": ["libs/tracing/src/index.ts"],
+      "@meatgeekv2/ui-components": ["libs/ui-components/src/index.ts"],
+      "@meatgeekv2/utils": ["libs/utils/src/index.ts"],
+      "@meatgeekv2/api-specs": ["libs/api-specs/src/index.ts"]
+    }
+  },
+  "exclude": ["node_modules", "tmp"]
+}

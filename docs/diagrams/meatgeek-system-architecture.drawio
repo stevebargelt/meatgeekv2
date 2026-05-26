@@ -1,0 +1,196 @@
+<mxfile host="app.diagrams.net" modified="2025-01-26T12:00:00.000Z" agent="5.0" version="24.7.17">
+  <diagram name="MeatGeek V2 System Architecture" id="system-overview">
+    <mxGraphModel dx="1422" dy="827" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Title -->
+        <mxCell id="title" value="MeatGeek V2 System Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="20" width="300" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- Raspberry Pi Device Group -->
+        <mxCell id="rpi-group" value="Raspberry Pi Device" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#01579b;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="80" width="300" height="280" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="rtd-sensors" value="RTD Temperature&#xa;Sensors (5x)&#xa;• Grill Sensor&#xa;• 4x Probe Sensors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#d32f2f;" vertex="1" parent="rpi-group">
+          <mxGeometry x="20" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="device-controller" value="Device Controller&#xa;(Go Application)&#xa;• ADC Reading&#xa;• Temperature Calc&#xa;• Queue Averaging" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;" vertex="1" parent="rpi-group">
+          <mxGeometry x="160" y="40" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="lcd-display" value="LCD Display&#xa;(20x4 I2C)&#xa;Real-time Temps" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;" vertex="1" parent="rpi-group">
+          <mxGeometry x="20" y="140" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="data-pusher" value="Data Pusher&#xa;Service (Go)&#xa;Cloud Bridge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;" vertex="1" parent="rpi-group">
+          <mxGeometry x="160" y="140" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="local-api" value="Local API Server&#xa;Port 3000&#xa;/api/robots/MeatGeekBot/&#xa;commands/get_temps" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e8;strokeColor=#2e7d32;" vertex="1" parent="rpi-group">
+          <mxGeometry x="20" y="220" width="260" height="40" as="geometry" />
+        </mxCell>
+        
+        <!-- Azure Cloud Services Group -->
+        <mxCell id="azure-group" value="Azure Cloud Services" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#0d47a1;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="420" y="80" width="540" height="480" as="geometry" />
+        </mxCell>
+        
+        <!-- IoT and Ingestion -->
+        <mxCell id="iot-hub" value="Azure IoT Hub&#xa;(Device Gateway)&#xa;MQTT/HTTPS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffeb3b;strokeColor=#f57f17;" vertex="1" parent="azure-group">
+          <mxGeometry x="40" y="40" width="120" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="event-hub" value="Event Hub&#xa;(Message Stream)&#xa;Temperature Events" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffeb3b;strokeColor=#f57f17;" vertex="1" parent="azure-group">
+          <mxGeometry x="180" y="40" width="120" height="70" as="geometry" />
+        </mxCell>
+        
+        <!-- Compute Services -->
+        <mxCell id="azure-functions" value="Azure Functions API&#xa;(Serverless Compute)&#xa;• Cook Management&#xa;• Temperature Processing&#xa;• Device Management&#xa;• OpenAPI Validation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4caf50;strokeColor=#1b5e20;" vertex="1" parent="azure-group">
+          <mxGeometry x="320" y="40" width="180" height="110" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="signalr" value="SignalR Service&#xa;(Real-time Hub)&#xa;• TemperatureHub&#xa;• CookHub&#xa;• DeviceHub" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4caf50;strokeColor=#1b5e20;" vertex="1" parent="azure-group">
+          <mxGeometry x="40" y="130" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Storage -->
+        <mxCell id="cosmosdb" value="CosmosDB&#xa;(NoSQL Database)&#xa;• devices&#xa;• temperatures&#xa;• cooks&#xa;• users&#xa;• recipes" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ff9800;strokeColor=#e65100;" vertex="1" parent="azure-group">
+          <mxGeometry x="180" y="130" width="120" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- OpenAPI and NX -->
+        <mxCell id="openapi-specs" value="OpenAPI 3.0&#xa;Specifications&#xa;Contract-First API&#xa;• Validation&#xa;• Type Generation&#xa;• Documentation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0277bd;" vertex="1" parent="azure-group">
+          <mxGeometry x="320" y="170" width="180" height="90" as="geometry" />
+        </mxCell>
+        
+        <!-- Monitoring -->
+        <mxCell id="app-insights" value="Application Insights&#xa;(APM &amp; Telemetry)&#xa;OpenTelemetry Integration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffc107;strokeColor=#f57c00;" vertex="1" parent="azure-group">
+          <mxGeometry x="40" y="280" width="120" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="azure-monitor" value="Azure Monitor&#xa;(Observability)&#xa;• Distributed Tracing&#xa;• W3C Trace Context&#xa;• Correlation IDs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffc107;strokeColor=#f57c00;" vertex="1" parent="azure-group">
+          <mxGeometry x="180" y="280" width="120" height="90" as="geometry" />
+        </mxCell>
+        
+        <!-- Security -->
+        <mxCell id="azure-ad" value="Azure AD B2C&#xa;(Identity &amp; Auth)&#xa;JWT Tokens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f44336;strokeColor=#c62828;" vertex="1" parent="azure-group">
+          <mxGeometry x="320" y="280" width="90" height="70" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="key-vault" value="Key Vault&#xa;(Secrets)&#xa;Connection&#xa;Strings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f44336;strokeColor=#c62828;" vertex="1" parent="azure-group">
+          <mxGeometry x="430" y="280" width="70" height="70" as="geometry" />
+        </mxCell>
+        
+        <!-- NX Monorepo -->
+        <mxCell id="nx-monorepo" value="NX Monorepo&#xa;(meatgeekv2)&#xa;• Unified Build System&#xa;• Code Generation&#xa;• Shared Libraries" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0277bd;" vertex="1" parent="azure-group">
+          <mxGeometry x="40" y="380" width="460" height="60" as="geometry" />
+        </mxCell>
+        
+        <!-- Client Applications Group -->
+        <mxCell id="clients-group" value="Client Applications" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f1f8e9;strokeColor=#33691e;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="80" width="300" height="280" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="mobile-app" value="React Native&#xa;Mobile App&#xa;(Primary Client)&#xa;• Real-time Temps&#xa;• Cook Management&#xa;• Push Notifications" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#2e7d32;" vertex="1" parent="clients-group">
+          <mxGeometry x="40" y="40" width="220" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="web-app" value="React Web App&#xa;(Secondary Client)&#xa;• Dashboard View&#xa;• Advanced Analytics&#xa;• Multi-device Mgmt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#2e7d32;" vertex="1" parent="clients-group">
+          <mxGeometry x="40" y="140" width="220" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="shared-libs" value="Shared Libraries:&#xa;• @meatgeekv2/api-interfaces&#xa;• @meatgeekv2/ui-components&#xa;• @meatgeekv2/realtime&#xa;• @meatgeekv2/charts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#388e3c;align=left;" vertex="1" parent="clients-group">
+          <mxGeometry x="40" y="230" width="220" height="40" as="geometry" />
+        </mxCell>
+        
+        <!-- Data Flow Connections -->
+        <mxCell id="rtd-to-controller" value="Analog Signal" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#d32f2f;strokeWidth=2;" edge="1" parent="1" source="rtd-sensors" target="device-controller">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="controller-to-lcd" value="Display" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7b1fa2;strokeWidth=2;" edge="1" parent="1" source="device-controller" target="lcd-display">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="controller-to-pusher" value="Local API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#e65100;strokeWidth=2;" edge="1" parent="1" source="device-controller" target="data-pusher">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="pusher-to-iot" value="MQTT/HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#f57f17;strokeWidth=3;" edge="1" parent="1" source="data-pusher" target="iot-hub">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="iot-to-event" value="Route" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#f57f17;strokeWidth=2;" edge="1" parent="1" source="iot-hub" target="event-hub">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="event-to-functions" value="Trigger" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1b5e20;strokeWidth=3;" edge="1" parent="1" source="event-hub" target="azure-functions">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="functions-to-cosmos" value="Store Data" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#e65100;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="cosmosdb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="functions-to-signalr" value="Real-time Push" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1b5e20;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="signalr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="signalr-to-mobile" value="WebSocket" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=3;" edge="1" parent="1" source="signalr" target="mobile-app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="signalr-to-web" value="WebSocket" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" parent="1" source="signalr" target="web-app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="functions-to-mobile" value="REST API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1b5e20;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="mobile-app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="functions-to-web" value="REST API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1b5e20;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="web-app">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- OpenAPI Integration -->
+        <mxCell id="openapi-to-functions" value="Validates" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0277bd;strokeWidth=2;" edge="1" parent="1" source="openapi-specs" target="azure-functions">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Monitoring Connections -->
+        <mxCell id="controller-to-insights" value="Telemetry" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#f57c00;strokeWidth=2;" edge="1" parent="1" source="device-controller" target="app-insights">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="functions-to-insights" value="Telemetry" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#f57c00;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="app-insights">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Security Connections -->
+        <mxCell id="functions-to-auth" value="Authenticate" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c62828;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="azure-ad">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="functions-to-keyvault" value="Secrets" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c62828;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="key-vault">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Key Features Callout -->
+        <mxCell id="features-callout" value="Key System Features:&#xa;&#xa;• Contract-First API Development (OpenAPI 3.0)&#xa;• Real-time Temperature Updates (SignalR)&#xa;• End-to-End Observability (OpenTelemetry)&#xa;• NX Monorepo with Shared Libraries&#xa;• Cross-platform Mobile &amp; Web Apps&#xa;• Serverless Azure Functions&#xa;• NoSQL Data Storage (CosmosDB)&#xa;• Hardware Integration (RTD Sensors)&#xa;• Local Resilience &amp; Cloud Sync&#xa;• JWT Authentication &amp; Security" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;align=left;fontSize=12;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="60" y="400" width="300" height="200" as="geometry" />
+        </mxCell>
+        
+        <!-- Technology Stack Legend -->
+        <mxCell id="tech-legend" value="Technology Stack:&#xa;&#xa;Hardware: Raspberry Pi, RTD Sensors, LCD&#xa;Device: Go Applications, Local API&#xa;Cloud: Azure (IoT Hub, Functions, CosmosDB)&#xa;Real-time: SignalR Service, WebSockets&#xa;API: OpenAPI 3.0, REST, JSON&#xa;Frontend: React Native, React Web&#xa;Development: NX Monorepo, TypeScript&#xa;Monitoring: Application Insights, OpenTelemetry&#xa;Security: Azure AD B2C, Key Vault, JWT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3f51b5;align=left;fontSize=11;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="400" width="300" height="200" as="geometry" />
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

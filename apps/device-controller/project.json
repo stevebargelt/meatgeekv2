@@ -1,0 +1,76 @@
+{
+  "name": "device-controller",
+  "sourceRoot": "apps/device-controller",
+  "projectType": "application",
+  "targets": {
+    "build": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make build",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "build-arm": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make build-arm",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "build-windows": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make build-windows",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "test": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make test",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "lint": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make lint",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "serve": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make dev",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "format": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make format",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "clean": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "command": "make clean",
+        "cwd": "apps/device-controller"
+      }
+    },
+    "deploy": {
+      "executor": "@nx/workspace:run-commands",
+      "options": {
+        "commands": [
+          "make build-arm",
+          "scp dist/MeatGeek-DeviceController-arm pi@{args.host}:~/MeatGeek-DeviceController",
+          "ssh pi@{args.host} 'sudo systemctl restart meatgeek-controller'"
+        ],
+        "parallel": false,
+        "cwd": "apps/device-controller"
+      }
+    }
+  },
+  "tags": ["type:app", "platform:go", "scope:device"]
+}

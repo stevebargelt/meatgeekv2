@@ -1,0 +1,279 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '20'
+  GO_VERSION: '1.21'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      affected-apps: ${{ steps.affected.outputs.apps }}
+      affected-libs: ${{ steps.affected.outputs.libs }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Get affected projects
+        id: affected
+        run: |
+          echo "apps=$(npx nx print-affected --type=app --select=projects)" >> $GITHUB_OUTPUT
+          echo "libs=$(npx nx print-affected --type=lib --select=projects)" >> $GITHUB_OUTPUT
+
+  lint-and-test:
+    runs-on: ubuntu-latest
+    needs: setup
+    strategy:
+      matrix:
+        project: ['api', 'web', 'mobile', 'api-interfaces']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint ${{ matrix.project }}
+        run: npx nx lint ${{ matrix.project }}
+
+      - name: Test ${{ matrix.project }}
+        run: npx nx test ${{ matrix.project }} --coverage
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          directory: ./coverage/${{ matrix.project }}
+          flags: ${{ matrix.project }}
+
+  build-typescript:
+    runs-on: ubuntu-latest
+    needs: setup
+    strategy:
+      matrix:
+        app: ['api', 'web', 'mobile']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build ${{ matrix.app }}
+        run: npx nx build ${{ matrix.app }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app }}-build
+          path: dist/apps/${{ matrix.app }}
+          retention-days: 7
+
+  build-go:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: ['device-controller', 'data-pusher']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install Make
+        run: sudo apt-get update && sudo apt-get install -y make
+
+      - name: Build ${{ matrix.app }}
+        run: |
+          cd apps/${{ matrix.app }}
+          make build
+          make test
+
+      - name: Build ARM64
+        run: |
+          cd apps/${{ matrix.app }}
+          make build-arm
+
+      - name: Upload Go artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app }}-build
+          path: apps/${{ matrix.app }}/dist/
+          retention-days: 7
+
+  validate-infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.9'
+
+      - name: Terraform Format Check
+        run: |
+          cd apps/infrastructure
+          terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: |
+          cd apps/infrastructure
+          terraform init -backend=false
+
+      - name: Terraform Validate
+        run: |
+          cd apps/infrastructure
+          terraform validate
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate
+
+      - name: Run Snyk security scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+        continue-on-error: true
+
+  deploy-dev:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, build-typescript, build-go, validate-infrastructure]
+    environment: development
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.9'
+
+      - name: Deploy Infrastructure
+        run: |
+          cd apps/infrastructure
+          terraform init
+          terraform plan -var-file=environments/dev.tfvars -out=tfplan
+          terraform apply -auto-approve tfplan
+
+      - name: Download API build
+        uses: actions/download-artifact@v4
+        with:
+          name: api-build
+          path: dist/apps/api
+
+      - name: Deploy Azure Functions
+        run: |
+          npx nx deploy api --env=dev
+
+      - name: Deploy Web App
+        uses: azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: 'upload'
+          app_location: 'dist/apps/web'
+          api_location: ''
+          skip_app_build: true
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, build-typescript, build-go, validate-infrastructure]
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.9'
+
+      - name: Deploy Infrastructure
+        run: |
+          cd apps/infrastructure
+          terraform init
+          terraform plan -var-file=environments/prod.tfvars -out=tfplan
+          terraform apply -auto-approve tfplan
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-build'
+
+      - name: Deploy to Production
+        run: |
+          npx nx deploy api --env=prod
+          # Additional production deployment steps

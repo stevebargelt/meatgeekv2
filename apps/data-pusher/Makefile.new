@@ -1,0 +1,15 @@
+BINARY_NAME=meatgeek-pusher
+
+.PHONY: build info help
+
+build:
+	@echo "Building $(BINARY_NAME)..."
+	go build -o dist/$(BINARY_NAME) cmd/main.go
+	@echo "Build complete"
+
+info:
+	@echo "Binary: $(BINARY_NAME)"
+	@echo "Go: $(shell go version)"
+
+help:
+	@echo "Available targets: build, info, help"
