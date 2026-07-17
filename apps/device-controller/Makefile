@@ -30,8 +30,7 @@ build-windows:
 # Run tests
 test:
 	@echo "Running Go tests..."
-	go test -v ./...
-	go test -v ./goqueue
+	go test -tags testserver -v ./...
 	@echo "✅ Tests complete"
 
 # Lint code

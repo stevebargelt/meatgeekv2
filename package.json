@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "build": "nx build",
-    "test": "nx test",
+    "test": "nx run-many -t test --all",
     "lint": "nx lint",
     "serve": "nx serve",
     "start": "nx serve",

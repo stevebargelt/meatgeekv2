@@ -224,8 +224,7 @@ meatgeekv2/
 │       ├── deploy-api.yml
 │       ├── deploy-web.yml
 │       └── build-mobile.yml
-├── nx.json                      # NX workspace configuration
-├── workspace.json               # NX project configurations
+├── nx.json                      # NX workspace configuration (each project self-configured via its own project.json)
 ├── package.json                 # Root package.json with shared dependencies
 ├── tsconfig.base.json           # Base TypeScript configuration
 ├── .eslintrc.json              # Shared ESLint configuration
