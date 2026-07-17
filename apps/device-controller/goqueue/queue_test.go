@@ -2,6 +2,7 @@ package goqueue_test
 
 import (
 	"runtime"
+	"sync"
 
 	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
 )
@@ -88,25 +89,54 @@ var _ = Describe("Queue", func() {
 	Describe("Thread Safety", func() {
 		Context("Push is thread safe with two or more goroutines", func() {
 			q := queue.New()
+			// Launch six concurrent pushes and wait for every one to complete
+			// before asserting length; a WaitGroup gives deterministic
+			// synchronization without sleeps.
+			var wg sync.WaitGroup
+			wg.Add(6)
 			for i := 0; i < 6; i++ {
-				go func(q *queue.Queue) { q.Push(1) }(q)
+				go func(q *queue.Queue) {
+					defer wg.Done()
+					q.Push(1)
+				}(q)
 			}
-			It("Should be a queue of six element", func() {
+			wg.Wait()
+			It("Should be a queue of six elements", func() {
 				Expect(q.Len()).To(Equal(int64(6)))
 			})
 		})
 
 		Context("Calling push and pop in goroutines is safe", func() {
 			q := queue.New()
-			for i := 1; i < 601; i++ {
-				go func(q *queue.Queue) { q.Push(1) }(q)
-			}
-
+			// Prefill 300 items so that every one of the 300 concurrent Pop
+			// workers is guaranteed an element to remove, regardless of how
+			// the Push and Pop goroutines interleave (worst case: all pops
+			// run before any push, and the prefill still covers them).
 			for i := 0; i < 300; i++ {
-				go func(q *queue.Queue) { q.Pop() }(q)
+				q.Push(1)
 			}
 
-			It("Should be a Queue of three thousand elements", func() {
+			// Concurrently run 300 pushes and 300 pops — genuinely
+			// contended access — and wait for all 600 to finish before
+			// asserting. Final length is deterministic: 300 prefill +
+			// 300 pushed - 300 popped = 300.
+			var wg sync.WaitGroup
+			wg.Add(600)
+			for i := 0; i < 300; i++ {
+				go func(q *queue.Queue) {
+					defer wg.Done()
+					q.Push(1)
+				}(q)
+			}
+			for i := 0; i < 300; i++ {
+				go func(q *queue.Queue) {
+					defer wg.Done()
+					q.Pop()
+				}(q)
+			}
+			wg.Wait()
+
+			It("Should be a Queue of three hundred elements", func() {
 				Expect(q.Len()).To(Equal(int64(300)))
 			})
 		})
