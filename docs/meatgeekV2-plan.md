@@ -2722,33 +2722,47 @@ signalr_sku = "Standard_S1"
     "plan": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "terraform plan -var-file=environments/{args.env}.tfvars",
+        "command": "terraform plan -var-file=environments/{args.env}.tfvars -out=tfplan",
         "cwd": "apps/infrastructure"
       }
     },
     "apply": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "terraform apply -var-file=environments/{args.env}.tfvars -auto-approve",
+        "command": "terraform apply tfplan",
         "cwd": "apps/infrastructure"
       }
     },
     "destroy": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "terraform destroy -var-file=environments/{args.env}.tfvars -auto-approve",
+        "command": "terraform destroy -var-file=environments/{args.env}.tfvars",
         "cwd": "apps/infrastructure"
       }
     },
     "validate": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "terraform validate && terraform fmt -check",
+        "command": "terraform validate",
+        "cwd": "apps/infrastructure"
+      }
+    },
+    "format": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "terraform fmt -recursive",
+        "cwd": "apps/infrastructure"
+      }
+    },
+    "output": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "terraform output",
         "cwd": "apps/infrastructure"
       }
     }
   },
-  "tags": ["type:infrastructure", "scope:shared"]
+  "tags": ["type:app", "scope:infrastructure", "platform:terraform"]
 }
 ```
 
