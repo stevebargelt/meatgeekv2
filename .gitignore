@@ -178,3 +178,7 @@ temp/
 
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
+
+# forge — per-developer claude-code config (machine-local, not committed)
+.claude/settings.local.json
+.claude/commands/

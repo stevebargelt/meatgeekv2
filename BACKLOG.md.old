@@ -2,20 +2,6 @@
 
 ## Notes for next session
 
-### Wave 2 of Phase 1 landed (2026-05-26)
-
-Tickets #1-#5 + #8 complete. Wave 3 is just #6 (otel-integration) — depends on #1, #4, #5, all done.
-
-Pipeline anomaly during #5: the first build attempt hit Anthropic's 5-hour rate limit mid-run. `forge retry` created fresh sub-builds that completed cleanly. Some "zombie" pending tasks remain in the #5 run's task list as audit artifacts — the work itself is complete and committed (`5d7e111`).
-
-**Security finding (manual stakeholder action required):**
-NewRelic license key `***REMOVED***` was in `apps/device-controller/main.go:43` — redacted in commit `96f1fa1`, fully removed in commit `1f03708` (ticket #4). Still in git history. **Rotate the key on the NewRelic side** to invalidate the leaked credential.
-
-**Architecture artifacts (read for deep context on the o11y stack decisions):**
-- Synthesis: `~/.forge/runs/run-o11y-architecture-synthesis-668aa7/`
-- Backend APM research: `~/.forge/runs/run-o11y-research-backend-apm-c5c89b/`
-- Frontend RUM research: `~/.forge/runs/run-o11y-research-frontend-rum-2b7b18/`
-- Analytics/flags research: `~/.forge/runs/run-o11y-research-product-analytics-flags-51845e/`
 
 ## Active
 
