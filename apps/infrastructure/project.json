@@ -4,49 +4,49 @@
   "projectType": "application",
   "targets": {
     "init": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform init",
         "cwd": "apps/infrastructure"
       }
     },
     "plan": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform plan -var-file=environments/{args.env}.tfvars -out=tfplan",
         "cwd": "apps/infrastructure"
       }
     },
     "apply": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform apply tfplan",
         "cwd": "apps/infrastructure"
       }
     },
     "destroy": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform destroy -var-file=environments/{args.env}.tfvars",
         "cwd": "apps/infrastructure"
       }
     },
     "validate": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform validate",
         "cwd": "apps/infrastructure"
       }
     },
     "format": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform fmt -recursive",
         "cwd": "apps/infrastructure"
       }
     },
     "output": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform output",
         "cwd": "apps/infrastructure"

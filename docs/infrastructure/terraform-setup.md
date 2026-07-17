@@ -222,35 +222,35 @@ NX commands for Terraform operations:
   "projectType": "application",
   "targets": {
     "init": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform init",
         "cwd": "apps/infrastructure"
       }
     },
     "plan": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform plan -var-file=environments/{args.env}.tfvars",
         "cwd": "apps/infrastructure"
       }
     },
     "apply": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform apply -var-file=environments/{args.env}.tfvars -auto-approve",
         "cwd": "apps/infrastructure"
       }
     },
     "destroy": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform destroy -var-file=environments/{args.env}.tfvars -auto-approve",
         "cwd": "apps/infrastructure"
       }
     },
     "validate": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "terraform validate && terraform fmt -check",
         "cwd": "apps/infrastructure"

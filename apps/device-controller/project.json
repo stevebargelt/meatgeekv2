@@ -4,63 +4,63 @@
   "projectType": "application",
   "targets": {
     "build": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make build",
         "cwd": "apps/device-controller"
       }
     },
     "build-arm": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make build-arm",
         "cwd": "apps/device-controller"
       }
     },
     "build-windows": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make build-windows",
         "cwd": "apps/device-controller"
       }
     },
     "test": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make test",
         "cwd": "apps/device-controller"
       }
     },
     "lint": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make lint",
         "cwd": "apps/device-controller"
       }
     },
     "serve": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make dev",
         "cwd": "apps/device-controller"
       }
     },
     "format": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make format",
         "cwd": "apps/device-controller"
       }
     },
     "clean": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make clean",
         "cwd": "apps/device-controller"
       }
     },
     "deploy": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "commands": [
           "make build-arm",

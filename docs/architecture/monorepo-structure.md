@@ -261,42 +261,42 @@ NX orchestrates by calling Make targets, not managing Go directly:
   "projectType": "application",
   "targets": {
     "build": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make build",
         "cwd": "apps/device-controller"
       }
     },
     "build-arm": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make build-arm",
         "cwd": "apps/device-controller"
       }
     },
     "test": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make test",
         "cwd": "apps/device-controller"
       }
     },
     "lint": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make lint",
         "cwd": "apps/device-controller"
       }
     },
     "serve": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make dev",
         "cwd": "apps/device-controller"
       }
     },
     "format": {
-      "executor": "@nx/workspace:run-commands",
+      "executor": "nx:run-commands",
       "options": {
         "command": "make format",
         "cwd": "apps/device-controller"
