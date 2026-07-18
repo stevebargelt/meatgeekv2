@@ -295,6 +295,12 @@ nx generate @nx/react:component Button --project=ui-components
 nx generate @nx/js:lib temperature-utils --project=data-models
 ```
 
+> **After generating a new project**, add two things the generators don't scaffold for this workspace:
+> 1. A local `.eslintrc.json` — the root config sets `ignorePatterns: ["**/*"]`, so a project without its own override is silently skipped by `nx lint`.
+> 2. For a buildable library, a `package.json` whose `name` matches its `@meatgeekv2/*` alias in `tsconfig.base.json`, or dependents fail to build with `TS6059`.
+>
+> See [Local Setup → New project checklist](local-setup.md#new-project-checklist) and the [Buildable Library Pattern](../architecture/monorepo-structure.md#buildable-library-pattern).
+
 ### API Development
 ```bash
 # Generate new Azure Function

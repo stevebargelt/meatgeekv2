@@ -439,6 +439,26 @@ libs/api-specs/
 └── project.json               # Build and validation commands
 ```
 
+### Buildable Library Pattern
+
+Libraries that are compiled into a dependent app's build — the API dependency chain `api-interfaces`, `utils`, `data-models`, and `azure-client` — each carry a minimal `package.json` whose `name` matches the library's `@meatgeekv2/*` alias in `tsconfig.base.json`:
+
+```json
+// libs/api-interfaces/package.json
+{
+  "name": "@meatgeekv2/api-interfaces",
+  "version": "0.0.1",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts"
+}
+```
+
+This `package.json` is **required** for the build to succeed. When NX builds an app or a dependent library with `@nx/js:tsc`, it rewrites each `@meatgeekv2/*` alias to point at the library's compiled `dist` output via its `updatePaths()` step, keyed on the `name` in that library's `package.json`. Without the `package.json`, the remap is inert, the alias stays pointed at source, and `nx build` fails with `TS6059` (`file is not under 'rootDir'`) for the depended-on library.
+
+The alias entries in `tsconfig.base.json` intentionally still point at source (`libs/*/src/index.ts`) and must **not** be changed to point at `dist`. Source resolution is what Jest's `moduleNameMapper` and IDE go-to-definition rely on; the `dist` remap happens only at build time via the per-library `package.json`. In other words: `tsconfig.base.json` = source (for tests and editors), library `package.json` name = build-time `dist` remap.
+
+When you add a new buildable library, give it a `package.json` whose `name` is its `tsconfig.base.json` alias, or apps and libraries that depend on it will fail to build.
+
 ## NX Workspace Benefits
 
 ### 1. Code Reuse and Consistency

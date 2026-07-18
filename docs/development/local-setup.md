@@ -122,6 +122,14 @@ nx generate @nx/react:component MyComponent --project=ui-components
 nx build api-interfaces
 ```
 
+#### New project checklist
+
+The library and app generators don't scaffold everything this workspace needs. When you add a new project, wire up two things by hand:
+
+1. **Local ESLint override.** The root `.eslintrc.json` sets `ignorePatterns: ["**/*"]`, so every project must supply its own `.eslintrc.json` (extending the root config) to be lintable — otherwise `nx lint <project>` silently ignores all files. The existing projects (`api`, `web`, `mobile`, and the `libs/*`) each have one; copy an existing library's `.eslintrc.json` as the starting point.
+
+2. **Buildable-library `package.json`.** If the new library is compiled into a dependent app or library, give it a `package.json` whose `name` matches its `@meatgeekv2/*` alias in `tsconfig.base.json` (see [Buildable Library Pattern](../architecture/monorepo-structure.md#buildable-library-pattern)). Leave the `tsconfig.base.json` alias pointed at `libs/<name>/src` — it must resolve to source for Jest and IDE navigation.
+
 ### Device Development (Go + Makefiles)
 
 The Go applications use Makefiles for build management, with NX providing orchestration:
@@ -279,6 +287,20 @@ make build                       # If Makefile deployed to Pi
 export NODE_OPTIONS="--max-old-space-size=8192"
 nx build api
 ```
+
+### `TS6059: file is not under 'rootDir'` when building a library or app
+
+This means a depended-on library is missing its buildable `package.json`, so NX can't remap its `@meatgeekv2/*` alias to `dist` at build time and the alias stays pointed at source. Add a `package.json` to that library whose `name` equals its `tsconfig.base.json` alias (do **not** change the alias). See the [Buildable Library Pattern](../architecture/monorepo-structure.md#buildable-library-pattern).
+
+### `npm ci` fails with a lockfile sync error
+
+`package-lock.json` must be generated with **npm 10** — the version the CI runners use. npm 11 drops nested optional-peer entries that npm 10 requires, which breaks `npm ci`. If you changed dependencies with npm 11, regenerate the lockfile:
+
+```bash
+npx npm@10 install --package-lock-only
+```
+
+See the [CI/CD Pipeline](ci-cd.md#npm-and-the-lockfile) doc for details.
 
 ### Go Cross-compilation Issues
 ```bash
