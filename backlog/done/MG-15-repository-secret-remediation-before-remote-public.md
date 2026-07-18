@@ -1,9 +1,11 @@
 ---
 id: MG-15
 type: story
-status: active
+status: done
 title: repository secret remediation before remote publication
 created: 2026-07-17
+closed: 2026-07-18
+closed_commit: 82d8548
 ---
 
 #### Context
