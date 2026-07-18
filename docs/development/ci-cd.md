@@ -58,17 +58,11 @@ Branch protection is configured on the GitHub repository (Settings → Branches)
 
 ## npm and the Lockfile
 
-`package.json` pins `engines.npm` to `>=10.0.0`, and the CI runners install with **npm 10**. `package-lock.json` must be generated with npm 10 as well.
+`package.json` pins the toolchain via `"packageManager": "npm@10.9.8"`, and CI activates it with a `corepack enable` step before `npm ci` in every dependency-installing job (`setup`, `lint-and-test`, `build-typescript`, `security-scan`). Corepack reads the `packageManager` field and provisions npm 10.9.8 automatically, so both the runners and local contributors resolve dependencies with the same pinned npm. (`engines.npm` remains `>=10.0.0` as a floor.)
 
-npm 11 (the default in some local/container environments) omits the nested optional-peer entries (for example `babel-plugin-macros`, `cosmiconfig`, `yaml`) that npm 10 expects. A lockfile written by npm 11 therefore fails `npm ci` on the runners with a sync error. The npm-10 lockfile is a compatible superset, so it works under both.
+Why npm 10 rather than 11: npm 11 (the default in some local/container environments) omits the nested optional-peer entries (for example `babel-plugin-macros`, `cosmiconfig`, `yaml`) that npm 10 expects. A lockfile written by npm 11 therefore fails `npm ci` on the runners with a sync error. The npm-10 lockfile is a compatible superset, so it works under both.
 
-If you change dependencies, regenerate the lockfile with npm 10:
-
-```bash
-npx npm@10 install --package-lock-only
-```
-
-> A dedicated npm/toolchain pin to enforce this automatically is tracked in **MG-20**; until it lands, regenerate with npm 10 by hand as shown above.
+With the pin in place, no manual workaround is needed. Run `corepack enable` once in your clone (see [Local Setup](local-setup.md)) and any `npm install` that touches dependencies will regenerate `package-lock.json` under npm 10.9.8 automatically.
 
 ## Related
 

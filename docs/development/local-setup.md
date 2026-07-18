@@ -31,6 +31,9 @@
 git clone https://github.com/stevebargelt/meatgeekv2
 cd meatgeekv2
 
+# Activate the pinned npm (npm 10.9.8, from package.json "packageManager")
+corepack enable
+
 # Install all dependencies
 npm install
 
@@ -294,11 +297,13 @@ This means a depended-on library is missing its buildable `package.json`, so NX 
 
 ### `npm ci` fails with a lockfile sync error
 
-`package-lock.json` must be generated with **npm 10** — the version the CI runners use. npm 11 drops nested optional-peer entries that npm 10 requires, which breaks `npm ci`. If you changed dependencies with npm 11, regenerate the lockfile:
+`package-lock.json` must be generated with **npm 10** — the version CI uses. npm 11 drops nested optional-peer entries that npm 10 requires, which breaks `npm ci`. The toolchain is pinned via `"packageManager": "npm@10.9.8"` in `package.json`, so you get the right npm automatically once corepack is enabled:
 
 ```bash
-npx npm@10 install --package-lock-only
+corepack enable
 ```
+
+With corepack enabled, any `npm install` that touches dependencies regenerates the lockfile under npm 10.9.8 — no manual `npx npm@10` step required. If you hit this error, confirm `corepack enable` has been run in your clone and re-run the install.
 
 See the [CI/CD Pipeline](ci-cd.md#npm-and-the-lockfile) doc for details.
 
