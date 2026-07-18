@@ -30,6 +30,13 @@ nx serve api          # Azure Functions (http://localhost:7071)
 nx serve mobile       # React Native mobile app
 ```
 
+### Local Configuration & Secrets
+
+Real secrets and Azure connection strings must **never** be committed. Keep them out of the repo:
+
+- Put local secrets in the **untracked** `apps/api/local.settings.json` (already gitignored) and/or supply them as environment variables: `COSMOSDB_CONNECTION_STRING`, `IOTHUB_CONNECTION_STRING`, `SIGNALR_CONNECTION_STRING`, `APPINSIGHTS_CONNECTION_STRING`, and related keys.
+- The fallback values committed in `apps/api/src/environments/environment.development.ts` are **not** real credentials — they are the publicly documented Azure Cosmos DB Emulator default key and explicit `fake-key` placeholders, used only when the environment variables above are unset.
+
 ## 🏗️ System Architecture
 
 MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time and provides comprehensive cook management through mobile and web applications.
@@ -142,21 +149,20 @@ Comprehensive documentation is available in the `/docs` directory:
 - **[API Documentation](docs/api/)** - API specifications and integration
 - **[Infrastructure Guide](docs/infrastructure/)** - Terraform and Azure setup
 
-## 🚦 Development Status - Phase 0 Complete ✅
+## 🚦 Development Status - Phase 1 In Progress 🔄
 
-**Phase 0: Monorepo Setup** has been completed successfully:
+**Phase 0: Monorepo Setup** is complete, and **Phase 1: Foundation** is underway.
 
-### ✅ Completed
+### ✅ Phase 0 - Completed
 - [x] NX workspace initialized with TypeScript preset
 - [x] All application project structures created
 - [x] Go projects integrated with Makefile + NX orchestration
 - [x] Shared libraries foundation established
 - [x] API interfaces library with comprehensive TypeScript types
 - [x] VS Code workspace configured with recommended settings
-- [x] Development environment ready for Phase 1
 
-### 🔄 Next Phase
-**Phase 1: Foundation (Weeks 2-5)** - Infrastructure & Core Services
+### 🔄 Phase 1 - In Progress
+**Phase 1: Foundation** - Infrastructure & Core Services
 - Azure infrastructure deployment with Terraform
 - Enhanced device controller with Azure Monitor integration
 - Data pusher service with IoT Hub connectivity
@@ -210,4 +216,4 @@ MIT License - See the original MeatGeek project for licensing details.
 
 ---
 
-> **Phase 0 Complete!** 🎉 The MeatGeek V2 monorepo foundation is now established and ready for Phase 1 development. All applications, libraries, and development tooling are configured and tested.
+> **Phase 0 Complete!** 🎉 The MeatGeek V2 monorepo foundation is established, and Phase 1 (Infrastructure & Core Services) is now in progress. All applications, libraries, and development tooling are configured and tested.
