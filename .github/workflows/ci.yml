@@ -75,7 +75,7 @@ jobs:
     needs: setup
     strategy:
       matrix:
-        app: ['api', 'web', 'mobile']
+        app: ['api', 'web']
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

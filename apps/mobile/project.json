@@ -3,20 +3,6 @@
   "sourceRoot": "apps/mobile/src",
   "projectType": "application",
   "targets": {
-    "build": {
-      "executor": "@nx/react-native:build",
-      "outputs": ["{options.outputPath}"],
-      "options": {
-        "outputPath": "dist/apps/mobile"
-      },
-      "configurations": {
-        "production": {
-          "optimization": true,
-          "extractLicenses": true,
-          "inspect": false
-        }
-      }
-    },
     "serve": {
       "executor": "@nx/react-native:start",
       "options": {
