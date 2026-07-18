@@ -70,7 +70,7 @@ export async function getDevicesHandler(
     };
 
   } catch (error) {
-    context.log.error('Error in getDevices:', error);
+    context.error('Error in getDevices:', error);
     
     return {
       status: 500,

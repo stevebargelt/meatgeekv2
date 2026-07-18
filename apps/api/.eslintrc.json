@@ -5,7 +5,8 @@
     "dist/**/*",
     "coverage/**/*",
     "node_modules/**/*",
-    "src/test-integration.ts"
+    "src/test-integration.ts",
+    "webpack.config.js"
   ],
   "plugins": ["@nx"],
   "overrides": [

@@ -18,7 +18,7 @@ export async function getCurrentTemperaturesHandler(
   context.log('Processing getCurrentTemperatures request');
 
   try {
-    const deviceId = request.params.deviceId;
+    const deviceId = request.params['deviceId'];
     
     if (!deviceId) {
       return {
@@ -40,7 +40,7 @@ export async function getCurrentTemperaturesHandler(
       grillTemp: 225.5,
       probe1Temp: 165.2,
       probe2Temp: 145.8,
-      probe3Temp: null,
+      probe3Temp: undefined,
       probe4Temp: 200.1
     };
 
@@ -56,7 +56,7 @@ export async function getCurrentTemperaturesHandler(
     };
 
   } catch (error) {
-    context.log.error('Error in getCurrentTemperatures:', error);
+    context.error('Error in getCurrentTemperatures:', error);
     
     return {
       status: 500,

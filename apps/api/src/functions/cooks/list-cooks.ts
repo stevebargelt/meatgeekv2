@@ -88,7 +88,7 @@ export async function getCooksHandler(
     };
 
   } catch (error) {
-    context.log.error('Error in getCooks:', error);
+    context.error('Error in getCooks:', error);
     
     return {
       status: 500,

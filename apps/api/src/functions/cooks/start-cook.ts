@@ -81,7 +81,7 @@ export async function startCookHandler(
     };
 
   } catch (error) {
-    context.log.error('Error in startCook:', error);
+    context.error('Error in startCook:', error);
     
     return {
       status: 500,

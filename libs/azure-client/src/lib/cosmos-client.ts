@@ -26,7 +26,7 @@ export interface CosmosClientConfig {
 
 export class CosmosClient {
   private config: CosmosClientConfig;
-  private containerNames: Required<CosmosClientConfig['containerNames']>;
+  private containerNames: Required<NonNullable<CosmosClientConfig['containerNames']>>;
   
   constructor(config: CosmosClientConfig) {
     this.config = config;
