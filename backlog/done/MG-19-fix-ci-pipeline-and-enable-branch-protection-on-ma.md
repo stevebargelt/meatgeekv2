@@ -1,9 +1,11 @@
 ---
 id: MG-19
 type: story
-status: active
+status: done
 title: fix CI pipeline and enable branch protection on main
 created: 2026-07-18
+closed: 2026-07-18
+closed_commit: c59cbe9
 ---
 
 ### Context

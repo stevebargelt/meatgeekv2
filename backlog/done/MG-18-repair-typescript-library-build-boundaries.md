@@ -1,9 +1,11 @@
 ---
 id: MG-18
 type: story
-status: active
+status: done
 title: repair TypeScript library build boundaries
 created: 2026-07-17
+closed: 2026-07-18
+closed_commit: 763d54f
 ---
 
 #### Context
