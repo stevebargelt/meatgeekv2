@@ -18,6 +18,9 @@ A comprehensive cloud-based BBQ temperature monitoring and cook management syste
 git clone https://github.com/stevebargelt/meatgeekv2
 cd meatgeekv2
 
+# Activate the pinned npm (npm 10.9.8, from package.json "packageManager")
+corepack enable
+
 # Install dependencies
 npm install
 

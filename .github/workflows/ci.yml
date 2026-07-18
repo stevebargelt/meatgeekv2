@@ -36,6 +36,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Derive affected base/head SHAs
+        uses: nrwl/nx-set-shas@v4
+        with:
+          main-branch-name: main
+
       - name: Get affected projects
         id: affected
         run: |
