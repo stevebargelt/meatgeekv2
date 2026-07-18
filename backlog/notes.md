@@ -10,7 +10,7 @@
 **External state to remember:**
 - GitHub repo is now PUBLIC at github.com/stevebargelt/meatgeekv2. Branch protection on `main`: 11 quality checks required (setup, lint-and-test x4, build-typescript api+web, build-go x2, validate-infrastructure, security-scan), deploy jobs EXCLUDED, `enforce_admins` off (solo direct pushes work).
 - New Relic credential confirmed rotated (operator) and scrubbed from all git history. Pre-publish backup mirror at `~/code/meatgeekv2-prepublish-backup-20260717.git` — safe to delete once you trust the published history.
-- CI runner is Node 20 / npm 10; local + agent tooling default to npm 11. Lockfile MUST be generated under npm 10 (`npx npm@10 install --package-lock-only`) until MG-20 lands.
+- CI runner is Node 20 / npm 10; local + agent tooling default to npm 11. MG-20 pinned the toolchain via `"packageManager": "npm@10.9.8"` + `corepack enable` in CI, so corepack now supplies npm 10 automatically for both CI and local contributors — the manual `npx npm@10 install --package-lock-only` workaround is retired. Run `corepack enable` once in a fresh clone.
 
 **Decisions worth not relitigating:**
 - MG-18 red-review was OVERRIDDEN (operator-confirmed): reviewer claimed TS6059 persisted; CI proved build green. Its local-only fix was discarded. CI is the deterministic truth here.
