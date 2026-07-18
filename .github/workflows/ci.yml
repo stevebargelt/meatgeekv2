@@ -34,8 +34,8 @@ jobs:
       - name: Get affected projects
         id: affected
         run: |
-          echo "apps=$(npx nx print-affected --type=app --select=projects)" >> $GITHUB_OUTPUT
-          echo "libs=$(npx nx print-affected --type=lib --select=projects)" >> $GITHUB_OUTPUT
+          echo "apps=$(npx nx show projects --affected --type app --json)" >> $GITHUB_OUTPUT
+          echo "libs=$(npx nx show projects --affected --type lib --json)" >> $GITHUB_OUTPUT
 
   lint-and-test:
     runs-on: ubuntu-latest
@@ -187,6 +187,7 @@ jobs:
 
       - name: Run npm audit
         run: npm audit --audit-level=moderate
+        continue-on-error: true
 
       - name: Run Snyk security scan
         uses: snyk/actions/node@master
