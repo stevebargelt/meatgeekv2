@@ -248,6 +248,12 @@ jobs:
           name: api-build
           path: dist/apps/api
 
+      - name: Download Web build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+          path: dist/apps/web
+
       - name: Deploy Azure Functions
         run: |
           npx nx deploy api --env=dev

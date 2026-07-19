@@ -22,8 +22,10 @@
  *     - has `workflow_dispatch` for manual re-runs.
  *     - concurrency.cancel-in-progress === false.
  *     - a deploy job gated on `needs.guard.outputs.has_creds == 'true'`.
- *   ci.yml — the deploy-prod job (and its orphaned api-build upload that fed it)
- *     are gone, while deploy-dev stays.
+ *   ci.yml — the deploy-prod job is gone, while deploy-dev stays. The
+ *     build-typescript artifact upload is RETAINED (not removed): deploy-dev
+ *     downloads the api/web builds to deploy them, so the upload is a required
+ *     develop-deploy dependency, not orphaned prod-only tooling.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -133,16 +135,33 @@ describe('MG-21: prod deploy split', () => {
       expect(jobs).toHaveProperty('deploy-dev');
     });
 
-    it('has no orphaned api-build upload-artifact step (that fed the removed prod deploy)', () => {
-      const uploadsApiBuild = Object.values(jobs).some(job =>
+    it('retains the build-artifact upload that feeds deploy-dev', () => {
+      // MG-21 corrected AC: the build artifacts are RETAINED for deploy-dev — only
+      // deploy-prod was split out. The upload lives on the build-typescript matrix
+      // job, so its `name` is the templated `${{ matrix.app }}-build`, never a literal
+      // `api-build`; scan for the upload step itself, not a resolved artifact name.
+      const uploadsBuild = Object.values(jobs).some(job =>
         (job.steps ?? []).some(
           s =>
             typeof s.uses === 'string' &&
             s.uses.startsWith('actions/upload-artifact') &&
-            String((s.with ?? {})['name'] ?? '').includes('api-build')
+            /(\{\{\s*matrix\.app\s*\}\}|api|web)-build/.test(String((s.with ?? {})['name'] ?? ''))
         )
       );
-      expect(uploadsApiBuild).toBe(false);
+      expect(uploadsBuild).toBe(true);
+    });
+
+    it('deploy-dev downloads both build artifacts it deploys (api + web)', () => {
+      // deploy-dev deploys the API (`nx deploy api`) and dist/apps/web (static web
+      // apps); each build comes from a separate matrix runner, so both must be
+      // downloaded explicitly for the develop deploy to have its inputs.
+      const downloaded = new Set(
+        (jobs['deploy-dev']?.steps ?? [])
+          .filter(s => typeof s.uses === 'string' && s.uses.startsWith('actions/download-artifact'))
+          .map(s => String((s.with ?? {})['name'] ?? ''))
+      );
+      expect(downloaded).toContain('api-build');
+      expect(downloaded).toContain('web-build');
     });
   });
 });
