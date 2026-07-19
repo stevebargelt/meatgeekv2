@@ -1,0 +1,55 @@
+name: Deploy Prod Infrastructure
+
+# Manual/recovery only. Auto-apply-on-merge (push + paths: apps/infrastructure/**)
+# is deferred to MG-24 until terraform has a remote state backend — path-triggered
+# apply against empty local state would try to recreate all prod infra.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: infra-deploy-prod-production
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      has_creds: ${{ steps.check.outputs.has_creds }}
+    steps:
+      - name: Check for Azure credentials
+        id: check
+        env:
+          CREDS: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+        run: |
+          if [ -n "$CREDS" ]; then
+            echo "has_creds=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_creds=false" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-infra:
+    needs: guard
+    if: needs.guard.outputs.has_creds == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.9'
+
+      - name: Deploy Infrastructure
+        run: |
+          cd apps/infrastructure
+          terraform init
+          terraform plan -var-file=environments/prod.tfvars -out=tfplan
+          terraform apply -auto-approve tfplan

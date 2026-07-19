@@ -3701,6 +3701,8 @@ jobs:
 
 **Deployment Workflow:**
 
+> **Historical design note — superseded.** The single `deploy.yml` example below (one workflow, every push to `main`, conditionally building/deploying the web app) reflects the original plan and is **not** what shipped. The shipped model splits prod deploy into two standalone workflows: `infra-deploy-prod.yml` (Terraform infrastructure, `workflow_dispatch` only — auto-apply-on-merge is deferred to MG-24 pending a Terraform remote state backend) and `app-deploy-prod.yml` (Functions **API only** via `nx deploy api --env=prod`, triggered by push to `main` scoped to `apps/api/**` and `libs/**` plus `workflow_dispatch`, with a self-contained build and an `AZURE_CREDENTIALS_PROD` credential-skip guard). There is **no** prod web / Static Web Apps deploy — the web app is deployed to dev only. Dev deployment (`deploy-dev`) still lives in `ci.yml`. See [CI/CD Pipeline](development/ci-cd.md) for the current, authoritative description. The YAML below is retained only as a record of the original intent.
+
 ```yaml
 # .github/workflows/deploy.yml
 name: Deploy

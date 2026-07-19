@@ -1,9 +1,11 @@
 ---
 id: MG-22
 type: story
-status: active
+status: done
 title: fix Nx affected base on PR CI (git diff main fails in PR checkout)
 created: 2026-07-18
+closed: 2026-07-18
+closed_commit: 56b003804e8e11b056ad5e0346f16905656d7d81
 ---
 
 ## Problem

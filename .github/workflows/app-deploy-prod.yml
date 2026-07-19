@@ -1,0 +1,69 @@
+name: Deploy Prod App
+
+# Prod is API-only — no web/Static-Web-Apps deploy (that's dev-only).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/api/**'
+      - 'libs/**'
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  # Let corepack download the packageManager-pinned npm without an interactive prompt.
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+
+concurrency:
+  group: app-deploy-prod-production
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      has_creds: ${{ steps.check.outputs.has_creds }}
+    steps:
+      - name: Check for Azure credentials
+        id: check
+        env:
+          CREDS: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+        run: |
+          if [ -n "$CREDS" ]; then
+            echo "has_creds=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_creds=false" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-api:
+    needs: guard
+    if: needs.guard.outputs.has_creds == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build api
+        run: npx nx build api
+
+      - name: Setup Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+
+      - name: Deploy to Production
+        run: npx nx deploy api --env=prod

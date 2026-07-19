@@ -1,6 +1,6 @@
 # CI/CD Pipeline
 
-MeatGeek V2 runs its continuous integration and deployment through a single GitHub Actions workflow, `.github/workflows/ci.yml`. This document describes the jobs that run, why the TypeScript build matrix is scoped the way it is, the branch-protection rules on `main`, and the npm/lockfile constraint the runners depend on.
+MeatGeek V2 runs continuous integration through `.github/workflows/ci.yml`, and deploys through separate workflows. Dev deployment still lives in `ci.yml` (the `deploy-dev` job on `develop`); production deployment is split into two standalone workflows — `.github/workflows/infra-deploy-prod.yml` and `.github/workflows/app-deploy-prod.yml`. This document describes the CI jobs that run, why the TypeScript build matrix is scoped the way it is, how prod deploys work, the branch-protection rules on `main`, and the npm/lockfile constraint the runners depend on.
 
 ## Triggers
 
@@ -30,16 +30,30 @@ These jobs run on every push and pull request and gate merges into `main` (see [
 
 Adding a new buildable TypeScript app? Add it to the `build-typescript` matrix. A new React Native target does **not** belong there — keep it in `lint-and-test` only.
 
-## Deployment Jobs
+## Deployment
 
-Deployment jobs run only after the quality jobs and only on the matching branch. They are **not** part of branch protection.
+Deployment is **not** part of branch protection — it runs after a merge lands on the target branch, so it can never be a merge gate.
 
-| Job | Runs when | Depends on |
-|-----|-----------|------------|
-| `deploy-dev` | push to `develop` | `lint-and-test`, `build-typescript`, `build-go`, `validate-infrastructure` |
-| `deploy-prod` | push to `main` | `lint-and-test`, `build-typescript`, `build-go`, `validate-infrastructure` |
+### Dev
 
-Both deploy Terraform infrastructure and then the API/web artifacts. Deploy credentials come from repository secrets and are never committed.
+The `deploy-dev` job lives in `ci.yml`. It runs on push to `develop`, after `lint-and-test`, `build-typescript`, `build-go`, and `validate-infrastructure`, and deploys Terraform infrastructure, the Functions API, and the web app (Azure Static Web Apps) using the `AZURE_CREDENTIALS` secret and the `development` environment.
+
+### Prod
+
+Production deployment is **not** in `ci.yml`. It lives in two standalone workflows so infrastructure and the app can be deployed independently:
+
+| Workflow | Triggers | What it deploys |
+|----------|----------|-----------------|
+| `infra-deploy-prod.yml` | `workflow_dispatch` only (manual / recovery) | Terraform infrastructure (`terraform apply` against `apps/infrastructure`) |
+| `app-deploy-prod.yml` | push to `main` scoped to `apps/api/**` and `libs/**`, plus `workflow_dispatch` | Functions API only, via `nx deploy api --env=prod` |
+
+Prod is **API-only** — there is no prod web / Static Web Apps deploy; the web app is deployed to dev only.
+
+`app-deploy-prod.yml` builds its own artifact (`corepack enable` → `npm ci` → `nx build api`); there is no artifact sharing between workflows.
+
+**Infra is manual-only for now.** Auto-apply-on-merge (a push trigger on `apps/infrastructure/**`) is intentionally deferred to MG-24 until Terraform has an `azurerm` remote state backend. With today's local-state posture, a path-triggered apply would plan against empty state and try to recreate all prod infrastructure, so infra prod deploys are run by hand via `workflow_dispatch`.
+
+**Credentials and environment.** Both prod workflows require the `AZURE_CREDENTIALS_PROD` repository secret and target the reviewer-less `production` environment, with `concurrency` set to not cancel in-progress runs. Each workflow's `guard` job checks for `AZURE_CREDENTIALS_PROD`: if the secret is absent, the deploy job **skips cleanly (green)** rather than failing — so a push to `main` is never red just because prod credentials are not set. Deploy credentials come from repository secrets and are never committed.
 
 ## Branch Protection
 
@@ -52,7 +66,7 @@ Both deploy Terraform infrastructure and then the API/web artifacts. Deploy cred
 - `validate-infrastructure`
 - `security-scan`
 
-The `deploy-dev` and `deploy-prod` jobs are **excluded** from the required checks — deployment runs after a merge lands on the target branch, so it cannot be a merge gate.
+Deployment is **excluded** from the required checks — the `deploy-dev` job and the standalone prod deploy workflows (`infra-deploy-prod.yml`, `app-deploy-prod.yml`) run after a merge lands on the target branch, so they cannot be a merge gate.
 
 Branch protection is configured on the GitHub repository (Settings → Branches), not in a tracked file. When you add or rename a required job in `ci.yml`, update the required-status-check list to match, or the new job will run without gating merges.
 

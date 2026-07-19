@@ -1,9 +1,11 @@
 ---
 id: MG-20
 type: story
-status: active
+status: done
 title: pin npm to prevent npm11/npm10 lockfile skew
 created: 2026-07-18
+closed: 2026-07-18
+closed_commit: 56b003804e8e11b056ad5e0346f16905656d7d81
 ---
 
 ## Problem

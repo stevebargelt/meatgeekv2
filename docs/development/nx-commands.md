@@ -272,10 +272,11 @@ nx destroy infrastructure --env=dev
 nx deploy api --env=dev
 nx deploy api --env=prod
 
-# Deploy web app to Azure Static Web Apps
+# Deploy web app to Azure Static Web Apps (dev only)
 nx deploy web --env=dev
-nx deploy web --env=prod
 ```
+
+> **Prod is API-only.** The `app-deploy-prod.yml` workflow deploys only `nx deploy api --env=prod`; there is no production web/Static Web Apps deploy. A `nx deploy web --env=prod` step is not yet implemented — do not run it as a current operator command.
 
 ## Library Development
 
@@ -437,9 +438,8 @@ nx run-many --target=build --configuration=production --all
 # 2. Deploy infrastructure changes first
 nx apply infrastructure --env=prod
 
-# 3. Deploy applications
+# 3. Deploy applications (prod is API-only — no prod web deploy yet)
 nx deploy api --env=prod
-nx deploy web --env=prod
 
 # 4. Deploy device updates  
 nx build-arm device-controller   # Cross-compile for ARM
