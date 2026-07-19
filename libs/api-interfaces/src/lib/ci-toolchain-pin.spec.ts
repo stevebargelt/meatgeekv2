@@ -106,7 +106,9 @@ describe('MG-20: npm toolchain pin', () => {
     });
 
     it('leaves the deploy jobs free of npm ci (nothing to pin there)', () => {
-      for (const jobName of ['deploy-dev', 'deploy-prod']) {
+      // deploy-prod was split out of ci.yml into app-deploy-prod.yml (MG-21);
+      // deploy-dev is the only deploy job that remains here.
+      for (const jobName of ['deploy-dev']) {
         const job = jobs[jobName];
         expect(job).toBeDefined();
         expect(firstRunStepIndex(job.steps ?? [], 'npm ci')).toBe(-1);
