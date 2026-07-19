@@ -36,8 +36,10 @@ const WORKFLOWS = path.join(REPO_ROOT, '.github', 'workflows');
 
 interface WfStep {
   name?: string;
+  id?: string;
   uses?: string;
   run?: string;
+  env?: Record<string, unknown>;
   with?: Record<string, unknown>;
 }
 interface WfJob {
@@ -67,6 +69,62 @@ function triggers(wf: Workflow): Record<string, unknown> {
   return (on ?? {}) as Record<string, unknown>;
 }
 
+/**
+ * The real teeth of MG-21: a prod deploy must be blocked when the repo has no
+ * AZURE_CREDENTIALS_PROD secret. Asserting only that a deploy job references
+ * `needs.guard.outputs.has_creds` (as the gating tests below do) is not enough —
+ * a guard job hardcoded to emit `has_creds=true` would satisfy that yet still let
+ * credential-less pushes reach `azure/login` and fail the deploy. So we verify the
+ * guard actually READS the secret and DERIVES has_creds from its (non-)emptiness.
+ */
+function assertGuardDerivesCredsFromSecret(wf: Workflow): void {
+  const jobs = wf.jobs ?? {};
+  const guard = jobs['guard'];
+  expect(guard).toBeDefined();
+
+  // (1) has_creds is wired to a check step's output, not a literal in the map.
+  const output = String((guard?.outputs ?? {})['has_creds'] ?? '');
+  const idMatch = output.match(/steps\.([A-Za-z0-9_-]+)\.outputs\.has_creds/);
+  expect(idMatch).toBeTruthy();
+  const checkId = idMatch?.[1];
+
+  // (2) that check step exists.
+  const check = (guard?.steps ?? []).find(s => s.id === checkId);
+  expect(check).toBeDefined();
+
+  // (3) the step exposes AZURE_CREDENTIALS_PROD — via an env binding or a run ref.
+  const secretEnvEntry = Object.entries(check?.env ?? {}).find(([, v]) =>
+    /secrets\.AZURE_CREDENTIALS_PROD/.test(String(v))
+  );
+  const run = String(check?.run ?? '');
+  const secretInRun = /AZURE_CREDENTIALS_PROD/.test(run);
+  expect(Boolean(secretEnvEntry) || secretInRun).toBe(true);
+
+  // (4) has_creds is DERIVED from the secret, not hardcoded. The run must set
+  //     has_creds on BOTH branches and test the credential value for
+  //     (non-)emptiness — a guard hardcoded to `has_creds=true` fails all three.
+  const credVar = secretEnvEntry?.[0];
+  expect(run).toMatch(/has_creds\s*=\s*true/);
+  expect(run).toMatch(/has_creds\s*=\s*false/);
+  const emptinessTest = credVar
+    ? new RegExp(`-[nz]\\s+"?\\$\\{?${credVar}\\b`)
+    : /-[nz]\s+"?\$\{?\{?\s*secrets\.AZURE_CREDENTIALS_PROD/;
+  expect(run).toMatch(emptinessTest);
+}
+
+/** A deploy job must gate on `needs.guard.outputs.has_creds == 'true'`. */
+function assertDeployGatedOnGuard(wf: Workflow): void {
+  const jobs = wf.jobs ?? {};
+  const gated = Object.values(jobs).filter(
+    j => typeof j.if === 'string' && /needs\.guard\.outputs\.has_creds\s*==\s*'true'/.test(j.if)
+  );
+  expect(gated.length).toBeGreaterThanOrEqual(1);
+  for (const j of gated) {
+    const needs = Array.isArray(j.needs) ? j.needs : [j.needs];
+    expect(needs).toContain('guard');
+  }
+}
+
 describe('MG-21: prod deploy split', () => {
   describe('infra-deploy-prod.yml (manual/recovery only)', () => {
     const wf = readWorkflow('infra-deploy-prod.yml');
@@ -81,6 +139,14 @@ describe('MG-21: prod deploy split', () => {
 
     it('never cancels an in-flight infra apply', () => {
       expect(wf.concurrency?.['cancel-in-progress']).toBe(false);
+    });
+
+    it('guard derives has_creds by reading AZURE_CREDENTIALS_PROD (not hardcoded)', () => {
+      assertGuardDerivesCredsFromSecret(wf);
+    });
+
+    it('gates the deploy job on the guard credential check', () => {
+      assertDeployGatedOnGuard(wf);
     });
   });
 
@@ -120,6 +186,10 @@ describe('MG-21: prod deploy split', () => {
       }
       // ...and the guard job must expose has_creds.
       expect(jobs['guard']?.outputs).toHaveProperty('has_creds');
+    });
+
+    it('guard derives has_creds by reading AZURE_CREDENTIALS_PROD (not hardcoded)', () => {
+      assertGuardDerivesCredsFromSecret(wf);
     });
   });
 
