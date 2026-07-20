@@ -42,6 +42,24 @@ run "function_app_name_is_globally_unique" {
   }
 }
 
+# MG-24 data-service local-auth posture — host storage is fully managed-identity:
+# shared-key access is DISABLED (so the account's inherent key attribute cannot
+# authenticate and AzureWebJobsStorage cannot fall back to a key), and the host
+# resolves storage via its managed identity. This is what makes it SAFE to leave
+# shared_access_key_enabled=false without breaking the Functions runtime — the
+# precondition the gate's storage-residual acceptance relies on.
+run "host_storage_is_managed_identity_only" {
+  command = plan
+  assert {
+    condition     = azurerm_storage_account.functions.shared_access_key_enabled == false
+    error_message = "Function host storage must have shared_access_key_enabled=false (no account key can authenticate or leak into state)"
+  }
+  assert {
+    condition     = azurerm_linux_function_app.main.storage_uses_managed_identity == true
+    error_message = "AzureWebJobsStorage must use the managed identity, not a storage account key"
+  }
+}
+
 # item 2 — the FULL App Insights connection string (InstrumentationKey included)
 # is wired verbatim as APPLICATIONINSIGHTS_CONNECTION_STRING (NOT an
 # endpoint-only literal), alongside Authorization=AAD. The ikey is a

@@ -199,6 +199,50 @@ ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type
 # another reason the post-apply STATE run is required.)
 ai_ikeys="$(printf '%s\n' "${RESOURCES}" | jq -r '[.[] | select(.type=="azurerm_application_insights") | .values.instrumentation_key] | map(select(. != null and . != "")) | unique | .[]' 2>/dev/null || true)"
 
+# --- 2b. Collect the INHERENT-KEY data-service resources ---------------------
+# Cosmos DB, Storage, SignalR, and IoT Hub each store their OWN computed
+# key / connection-string attributes in state (primary_key, connection_strings,
+# primary_access_key, shared_access_policy[].primary_key …) — a TF-managed
+# resource ALWAYS persists its computed attributes, and there is no argument that
+# suppresses them. Unlike a sink, these are inherent. They are a
+# NON-authenticating residual ONLY when local/key auth is DISABLED on the
+# resource (so the in-state key cannot authenticate). If local auth is left
+# ENABLED, that in-state key IS a live credential -> VIOLATION. The
+# disable-flag differs per service:
+#     azurerm_cosmosdb_account -> local_authentication_disabled == true
+#     azurerm_storage_account  -> shared_access_key_enabled     == false
+#     azurerm_signalr_service  -> local_auth_enabled            == false
+# IoT Hub is the acknowledged EXCEPTION (devices/data-pusher/device-controller
+# authenticate with SAS keys, so key auth must stay on): its key attributes are
+# accepted WITH A NOTE, mitigated by restricted state access (MG-24 ADR).
+# We emit one row per DISTINCT resource address: <type>\t<address>\t<disabled>.
+# group_by/any UNIONs the planned_values and resource_changes sources so a flag
+# known in either proves the residual safe. A null/unknown flag yields
+# disabled=false -> fail-closed VIOLATION (we refuse to accept a residual we
+# cannot PROVE is inert). A jq collection error here is an inspection that could
+# not run -> die (fail-closed), never an empty set that walks nothing.
+data_service_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
+  [ .[]
+    | select(.type=="azurerm_cosmosdb_account"
+          or .type=="azurerm_storage_account"
+          or .type=="azurerm_signalr_service"
+          or .type=="azurerm_iothub")
+    | { type: .type,
+        address: .address,
+        disabled: (
+          if   .type=="azurerm_cosmosdb_account" then (.values.local_authentication_disabled == true)
+          elif .type=="azurerm_storage_account"  then (.values.shared_access_key_enabled == false)
+          elif .type=="azurerm_signalr_service"  then (.values.local_auth_enabled == false)
+          else false end)
+      }
+  ]
+  | group_by(.address)
+  | map({ type: (.[0].type), address: (.[0].address), disabled: (map(.disabled) | any) })
+  | .[]
+  | [ .type, .address, (.disabled | tostring) ]
+  | @tsv
+' 2>/dev/null)" || die "cannot inspect: failed to collect the data-service resource universe from ${SRC}"
+
 # --- 3. Collect the sink VALUES (app_settings + outputs) as TSV --------------
 # Each line: <sink-kind>\t<address/path>\t<value>. We emit the VALUE side only.
 # sort -u dedups identical rows the planned_values/resource_changes union produces.
@@ -369,6 +413,28 @@ inspect_rows() {
   done
 }
 
+inspect_data_services() {
+  # Read TSV rows on stdin: type \t address \t disabled(true|false). Called with
+  # `< file` redirection (NOT a pipe) so it runs in THIS shell and the shared
+  # `violations` counter that report() bumps survives. Case comparison on the
+  # type is exact (jq emits canonical resource type names); the boolean is
+  # lowercased defensively before the equality test.
+  local rtype raddr rdisabled
+  while IFS="${TAB}" read -r rtype raddr rdisabled; do
+    [ -z "${rtype}" ] && continue
+    rdisabled="$(lc "${rdisabled}")"
+    if [ "${rtype}" = "azurerm_iothub" ]; then
+      echo "  · accepted IoT Hub key residual (DOCUMENTED EXCEPTION: devices/data-pusher/device-controller authenticate with SAS keys, so key auth is intentionally kept enabled; mitigated by restricted, container-scoped state access — MG-24 ADR): ${raddr}"
+      continue
+    fi
+    if [ "${rdisabled}" = "true" ]; then
+      echo "  · accepted inherent key residual (local/key auth disabled — the in-state key of ${rtype} is non-authenticating): ${raddr}"
+      continue
+    fi
+    report "resource" "${raddr}" "TF-managed ${rtype} persists its inherent key/connection-string attributes in state, but local/key auth is NOT disabled on it — that in-state key is a LIVE credential. Set local_authentication_disabled=true (Cosmos) / shared_access_key_enabled=false (Storage) / local_auth_enabled=false (SignalR) to make the residual non-authenticating (MG-24 gate)"
+  done
+}
+
 echo "tf-plan-secret-inspection: inspecting ${SRC} (App Insights resources: ${ai_count}, local_authentication_disabled(all)=${ai_local_auth_disabled})"
 
 # Feed both sink sets through the classifier. We stage the rows in a temp file and
@@ -380,6 +446,14 @@ trap 'rm -f "${rows_file}"' EXIT
 { printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${output_rows}"; } \
   | grep -v '^[[:space:]]*$' > "${rows_file}" || true
 inspect_rows < "${rows_file}"
+
+# Inspect the inherent-key data-service resources (Cosmos/Storage/SignalR/IoT).
+# Same temp-file + `< file` pattern so the loop runs in THIS shell and the
+# violation counter survives (no pipe / process substitution — dash-portable).
+ds_file="$(mktemp)"
+trap 'rm -f "${rows_file}" "${ds_file}"' EXIT
+printf '%s\n' "${data_service_rows}" | grep -v '^[[:space:]]*$' > "${ds_file}" || true
+inspect_data_services < "${ds_file}"
 
 echo
 if [ "${violations}" -ne 0 ]; then

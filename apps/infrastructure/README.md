@@ -37,9 +37,11 @@ meatgeek-v2-${environment}-*        # e.g. meatgeek-v2-dev-func
 
 The `v2` segment makes each resource unambiguously the V2 stack so it can never
 be confused with — or accidentally target — the legacy V1 system. The **Function
-App name** (`meatgeek-v2-${environment}-func`) is exposed as the Terraform output
-`function_app_name` and is the **one** authoritative name the app deploy
-consumes — there is no independently-hardcoded Function App name anywhere.
+App name** (`meatgeek-v2-${environment}-func-<suffix>`, where `<suffix>` is the
+subscription-derived global-uniqueness suffix — see below) is exposed as the
+Terraform output `function_app_name` and is the **one** authoritative name the
+app deploy consumes — there is no independently-hardcoded Function App name
+anywhere.
 
 The V2-owned Cosmos account uses a deterministic, globally-unique,
 subscription-derived name (`mgv2-${environment}-<hash>`) decoupled from the
@@ -243,9 +245,12 @@ documented under \_Verifying the absence of secrets* below.
 Every output is **non-secret**. There are **no** connection-string / primary-key
 outputs — the former `cosmos_db_connection_string`, `iot_hub_connection_string`,
 `signalr_connection_string`, and `environment_config` aggregate outputs were
-**removed** (MG-24 S1), so no runtime credential is ever written to Terraform
-state. Consumers reach every service **identity-based** (managed identity +
-RBAC) via the non-secret endpoints below.
+**removed** (MG-24 S1), so no runtime credential is ever surfaced as an output or
+placed in app settings. (Note: each data service's key still exists as an
+inherent *computed attribute* in state — see "No runtime secret is USED …" under
+Security Notes for the full posture and how local-auth-disable renders those keys
+non-authenticating.) Consumers reach every service **identity-based** (managed
+identity + RBAC) via the non-secret endpoints below.
 
 ```bash
 terraform output -raw function_app_name          # the single deploy target name
@@ -291,13 +296,25 @@ Two layers, with clearly different strengths:
    resource across the root and all child modules plus every root output, and
    inspects the actual sensitive **VALUES** (distinguishing setting NAMES from
    VALUES — the app-setting key `APPLICATIONINSIGHTS_CONNECTION_STRING` is never
-   itself a finding; only the string bound to it is). It allows **only** the one
-   operator-accepted App Insights residual — the full AI connection string in a
-   Function App `app_setting`, and **only** when the plan's
-   `azurerm_application_insights` sets `local_authentication_disabled = true`
-   (the coupled invariant) — and **rejects** every other credential VALUE
-   (connection string / SAS / account|access|primary key / a bare instrumentation
-   key, in `app_settings` or outputs). It **EXITS NONZERO** on any violation, and
+   itself a finding; only the string bound to it is). It **rejects** every
+   credential VALUE (connection string / SAS / account|access|primary key / a
+   bare instrumentation key) reaching `app_settings` or outputs, and additionally
+   inspects the **inherent computed key attributes** of the data-service
+   resources themselves. It accepts a residual **only** when auth cannot use it:
+   - the full App Insights connection string in a Function App `app_setting`,
+     **only** when the plan's `azurerm_application_insights` sets
+     `local_authentication_disabled = true` (the coupled invariant);
+   - the inherent in-state key of an `azurerm_cosmosdb_account` /
+     `azurerm_signalr_service` / `azurerm_storage_account`, **only** when that
+     resource disables local/key auth in the plan
+     (`local_authentication_disabled = true` / `local_auth_enabled = false` /
+     `shared_access_key_enabled = false`) — otherwise the in-state key is a live
+     credential and it is a **VIOLATION**;
+   - `azurerm_iothub` key attributes as the **acknowledged exception** (accepted
+     with a printed note — device SAS auth is intentionally kept, mitigated by
+     restricted state access; MG-24 ADR).
+
+   It **EXITS NONZERO** on any violation, and
    also fail-closed on any operational failure (missing `jq`, unparseable JSON,
    no input). It replaces the old always-green one-liner (a `terraform show -json`
    result fed into `grep` and neutralized with a trailing `or-echo "ok"`), which
@@ -342,11 +359,30 @@ terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
 - **State store hardened** — TLS 1.2 floor, no public blob access, HTTPS-only,
   blob versioning + soft delete.
 
-- **No runtime secrets in state.** Cosmos / IoT-telemetry (Event Hubs) / SignalR
-  access is identity-based (managed identity + RBAC + non-secret endpoints); the
-  Function App's host storage uses its managed identity (shared-key access
-  disabled). No connection strings or primary keys are placed in app settings or
-  surfaced as Terraform outputs. **Application Insights telemetry ingestion is
+- **No runtime secret is USED or surfaced; in-state keys are made
+  non-authenticating (IoT Hub is the documented exception).** Cosmos /
+  IoT-telemetry (Event Hubs) / SignalR access is identity-based (managed identity
+  + RBAC + non-secret endpoints); the Function App's host storage uses its
+  managed identity. **No connection-string or primary-key VALUE is placed in app
+  settings or surfaced as a Terraform output.** The accurate posture about
+  *state itself*, however, is NOT "no keys in state": every TF-managed data
+  service exposes its key/connection-string as a **computed attribute** that
+  Terraform reads back into state by construction (no `azurerm` argument
+  suppresses it) — exactly like App Insights. The control is to make those keys
+  **inert for authentication** by disabling local/key auth where safe:
+  `local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
+  on SignalR, and `shared_access_key_enabled = false` on the Functions storage
+  account (host storage is fully managed-identity). With local auth off, the
+  in-state key is a **present-but-non-authenticating residual**.
+  **IoT Hub is the deliberate exception:** devices, the data-pusher, and the
+  device-controller authenticate with **SAS keys**, so key auth is intentionally
+  kept enabled and its in-state SAS keys are live — mitigated by restricted,
+  container-scoped state access and documented in the MG-24 ADR. The coupled
+  invariant (Cosmos/SignalR/Storage local auth must stay disabled) is
+  machine-enforced by the fail-closed `scripts/tf-plan-secret-inspection.sh`
+  gate, which flags any of those services as a violation if local auth is
+  re-enabled and accepts the IoT Hub keys with a note. **Application Insights
+  telemetry ingestion is
   AAD-authenticated:** the Function App authenticates via its managed identity —
   `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a
   `Monitoring Metrics Publisher` role assignment on the App Insights resource.

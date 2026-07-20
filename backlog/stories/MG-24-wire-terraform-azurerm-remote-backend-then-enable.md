@@ -42,6 +42,15 @@ Item 3 app-auth model = bearer-token VALIDATION-only (no interactive login, no c
 - Budget `start_date`: use a `time_static` resource persisted in remote state (or a required, validated environment-inception-date var) — NOT `timestamp()`, NOT a committed rolling default.
 - The suffixed state-account name is derived IDENTICALLY across bootstrap, backend init (`backend-*.hcl`), and the workflows — single derivation, no divergent hardcoding.
 
+### Data-service local-auth posture (operator decision 2026-07-20, red-wide round 11)
+
+Every TF-managed data service stores its own keys as INHERENT computed attributes in state (Cosmos primary_key, Storage primary_access_key, IoT Hub SAS keys, SignalR primary_access_key), the same as the App Insights ikey. Resolution: DISABLE local/key auth where SAFE so those in-state keys cannot authenticate; document the rest; correct the over-strong "no data-plane secrets in state" claim.
+- Cosmos: local_authentication_disabled = true (FA + IoT routing use MI + RBAC).
+- SignalR: AAD-only / local auth disabled (FA uses the SignalR RBAC role).
+- Storage: shared_access_key_enabled = false ONLY IF the Function host storage (AzureWebJobsStorage) is fully managed-identity; VERIFY first, else keep keys as a documented exception (do NOT break Functions).
+- IoT Hub: KEEP key/SAS auth (device / data-pusher / device-controller connectivity) as an explicit DOCUMENTED exception with restricted state access.
+- Extend the secret-inspection gate to VERIFY local-auth-disabled on Cosmos/Storage/SignalR (accept their key-attribute residual only when local auth is off, like the App Insights binding); IoT Hub is the acknowledged exception.
+- Extend the ADR (learnings/decisions/) to cover all four services + the IoT exception. Correct the claim in README/runbook/docs to: no data-plane secret is USED or reaches app_settings/outputs; access is identity-based; TF-managed resources inherent key attributes are in state but NON-AUTHENTICATING where local auth is disabled; IoT Hub retains key-based device auth (documented exception), state access restricted.
 ### Re-review requirement
 Re-review MUST exercise/verify the OPERATIONAL path (init/plan command validity, AAD ingestion per MS docs, RBAC sufficiency for the operation, fail-closed gate actually exits nonzero, runbook completeness), not just static shape.
 

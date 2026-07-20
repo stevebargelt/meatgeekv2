@@ -1,6 +1,19 @@
 # IoT Hub Module for MeatGeek V2
 
 # IoT Hub
+#
+# DOCUMENTED EXCEPTION (MG-24 ADR) — key/SAS auth is INTENTIONALLY kept enabled.
+# Unlike Cosmos/SignalR (local auth disabled) and Storage (shared-key disabled),
+# the IoT Hub keeps its shared-access policies: real BBQ devices, the data-pusher,
+# and the device-controller authenticate to the hub with SAS keys — the device
+# SDKs' supported path. Disabling local auth here (local_authentication_enabled =
+# false) would sever device connectivity, so it is deliberately left at its
+# default (enabled). The hub's inherent shared_access_policy key attributes are
+# therefore live credentials that DO land in Terraform state. The mitigation is
+# restricted, container-scoped RBAC state access (state blob is not broadly
+# readable) plus the documented acceptance in the MG-24 ADR. The secret-
+# inspection gate treats these IoT key attributes as the acknowledged exception
+# (accepted with a note), NOT as a violation.
 resource "azurerm_iothub" "main" {
   name                = "${var.resource_prefix}-iothub-${var.global_suffix}"
   resource_group_name = var.resource_group_name

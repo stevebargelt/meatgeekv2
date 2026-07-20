@@ -394,12 +394,17 @@ Step 4. It parses `terraform show -json`, walks every resource across the root
 and all child modules plus every root output, and **EXITS NONZERO** if any
 prohibited credential VALUE reached a Function App `app_setting` or an output
 (connection string / SAS / account|access|primary key / a bare instrumentation
-key). It allows **only** the one operator-accepted App Insights residual — the
-full AI connection string in an `app_setting`, and **only** when the plan's
-`azurerm_application_insights` sets `local_authentication_disabled = true` (the
-coupled invariant). It also fails closed on any operational failure (no `jq`,
-unparseable JSON, no input) — an inspection that cannot run must not report
-success.
+key). It also inspects the **inherent computed key attributes** of the data
+services and accepts a residual only when auth cannot use it: the full AI
+connection string in an `app_setting` **only** when
+`azurerm_application_insights` sets `local_authentication_disabled = true`; the
+inherent key of a Cosmos / SignalR / Storage resource **only** when that resource
+disables local/key auth (`local_authentication_disabled = true` /
+`local_auth_enabled = false` / `shared_access_key_enabled = false`) — otherwise
+it is a **VIOLATION** (a live in-state key); and `azurerm_iothub` keys as the
+**acknowledged exception** (accepted with a note — device SAS auth kept). It also
+fails closed on any operational failure (no `jq`, unparseable JSON, no input) —
+an inspection that cannot run must not report success.
 
 ```bash
 scripts/tf-plan-secret-inspection.sh tfplan \
@@ -682,10 +687,20 @@ Never add auto-apply to CI. Apply stays an operator action per this runbook.
 - **Function-App runtime credentials** — resolved by MG-24: the Functions
   module accesses Cosmos, host Storage, the IoT-telemetry Event Hub, and
   SignalR **identity-based** (system-assigned managed identity + RBAC over
-  non-secret endpoints), so no connection strings or primary keys land in
-  `app_settings` or Terraform outputs. The former "route plaintext secrets
-  through Key Vault references" question is therefore moot — there are no
-  such secrets to route. Application Insights is wired via the **full**
+  non-secret endpoints), so **no connection-string or primary-key VALUE is USED,
+  placed in `app_settings`, or surfaced as a Terraform output**. (Accurate state
+  posture: each data service's key still exists as an inherent *computed
+  attribute* in state — as for any TF-managed resource; the control is to make it
+  non-authenticating by disabling local/key auth where safe —
+  `local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
+  on SignalR, `shared_access_key_enabled = false` on host storage. **IoT Hub is
+  the documented exception:** device/data-pusher/device-controller SAS auth is
+  intentionally kept, mitigated by restricted state access. The
+  `tf-plan-secret-inspection.sh` gate flags Cosmos/SignalR/Storage as a VIOLATION
+  if local auth is re-enabled, and accepts the IoT Hub keys with a note.) The
+  former "route plaintext secrets through Key Vault references" question is
+  therefore moot — there are no such runtime secrets to route. Application
+  Insights is wired via the **full**
   TF-managed connection string (InstrumentationKey included — Microsoft requires
   it as the destination-resource identifier even under Entra), but the embedded
   ikey **cannot authenticate**: `local_authentication_disabled = true` on the

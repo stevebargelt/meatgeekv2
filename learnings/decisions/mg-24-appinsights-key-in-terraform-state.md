@@ -1,10 +1,16 @@
-# Application Insights connection string remains in Terraform state, made inert by local-auth disable (accepted risk)
+# Data-service keys remain in Terraform state as computed attributes, made inert by disabling local/key auth where safe (accepted risk); IoT Hub is the documented exception
 
-- **Status:** Accepted (revised — MG-24 corrective round)
+> Originally scoped to the Application Insights connection string; **generalized
+> in MG-24 round 11** to the full data-service posture (Cosmos DB, SignalR,
+> Storage) with IoT Hub as the one documented exception. The App Insights
+> reasoning below is the worked example the generalization follows.
+
+- **Status:** Accepted (revised — MG-24 corrective round; generalized round 11)
 - **Date:** 2026-07-20
 - **Ticket:** MG-24 (greenfield V2 infrastructure — secrets-out-of-state hardening)
-- **Scope:** `apps/infrastructure` (`azurerm_application_insights.main` and the
-  Function App telemetry wiring)
+- **Scope:** `apps/infrastructure` — App Insights telemetry wiring plus the
+  Cosmos / SignalR / Storage / IoT Hub data services and the pre-apply
+  secret-inspection gate
 
 ## Context
 
@@ -13,10 +19,29 @@ model: the app runs under a **system-assigned managed identity**, and access to
 Cosmos DB, the IoT-telemetry Event Hub, SignalR, and host storage is granted by
 **RBAC role assignments** over **non-secret endpoints**. The former
 `connection_string` / `primary_key` / SAS secret outputs on the Cosmos, Storage,
-IoT Hub, and SignalR modules were removed, so **no connection strings or primary
-keys land in `app_settings` or Terraform state** for those services.
+IoT Hub, and SignalR modules were removed, so **no connection string or primary
+key VALUE is ever USED — none is placed in `app_settings` or surfaced as a
+Terraform output** for those services.
 
-Application Insights is the one remaining exception. The
+### Correction (MG-24 red-wide round 11): the inherent-key residual is broader than App Insights
+
+An earlier version of this ADR asserted that "no connection strings or primary
+keys land in Terraform state" for Cosmos / Storage / IoT Hub / SignalR — that
+those services were "fully identity-based with no secrets in state." **That
+claim was inaccurate.** Removing the secret OUTPUTS and never USING a key does
+not remove the key from state. Just like App Insights, **every TF-managed data
+service exposes its key / connection-string as a COMPUTED attribute**, and
+Terraform reads those attributes back into state on each apply. So the Cosmos
+account's `primary_key` / `connection_strings`, the Storage account's access
+keys, the SignalR service's `primary_access_key`, and the IoT Hub's
+`shared_access_policy` keys are all present in state **by construction** — no
+`azurerm` argument suppresses them. The accurate posture is therefore the same
+as App Insights: not "no keys in state," but **keys that cannot authenticate**,
+achieved by disabling local/key auth on each service **where doing so is safe**.
+The section "**Extending the control to the data services**" below records that
+generalized decision and the one deliberate exception (IoT Hub).
+
+Application Insights was the first case examined. The
 `azurerm_application_insights.main` resource exposes `instrumentation_key` and
 `connection_string` as **computed attributes** — the Azure platform generates
 them when the resource is created. Terraform reads every managed resource's
@@ -116,9 +141,49 @@ enforced** by the pre-apply security gate:
   **only** when `main.tf` sets `local_authentication_disabled = true` on the AI
   resource.
 
-All **other** services — Cosmos DB, Storage, IoT Hub, SignalR — remain **fully
-identity-based with no secrets in state**. This decision is narrowly about the
-inherent App Insights computed attribute and changes nothing about that posture.
+## Extending the control to the data services (MG-24 round 11)
+
+The App Insights control — *accept the inherent in-state key, but disable
+local/key auth so it cannot authenticate* — is not unique to App Insights. It is
+the correct posture for **every** TF-managed data service whose keys are
+inherent computed attributes. The operator-approved decision is to apply it
+**where safe** and to document the one place it is not:
+
+| Service | In-state key attribute(s) | Control | Why safe / why exception |
+| --- | --- | --- | --- |
+| **Cosmos DB** (`azurerm_cosmosdb_account.main`) | `primary_key`, `secondary_key`, `connection_strings` | `local_authentication_disabled = true` | Data-plane access is AAD/RBAC: the Function App **and** the IoT Hub identity each hold *Cosmos DB Built-in Data Contributor* (SQL role assignments). Both keep working with key auth off; the in-state key can no longer authenticate. |
+| **SignalR** (`azurerm_signalr_service.main`) | `primary_access_key`, `primary_connection_string` | `local_auth_enabled = false` | The Function App connects identity-based via `AzureSignalRConnectionString__serviceUri` and holds *SignalR Service Owner*. AAD negotiation keeps working with AccessKey auth off. |
+| **Storage** (`azurerm_storage_account.functions`) | account access keys, connection string | `shared_access_key_enabled = false` (already set) | Host storage is **fully managed-identity**: `storage_uses_managed_identity = true`, no `storage_account_access_key` and no key-based `AzureWebJobsStorage` anywhere, and the identity holds *Storage Blob Data Owner* + *Storage Queue Data Contributor*. Shared-key auth is safely off without breaking the Functions runtime. |
+| **IoT Hub** (`azurerm_iothub.main`) | `shared_access_policy[].primary_key` / `secondary_key` (SAS) | **NOT disabled — documented exception** | Real BBQ **devices**, the **data-pusher**, and the **device-controller** authenticate to the hub with **SAS keys** (the device SDKs' supported path). Setting `local_authentication_enabled = false` would sever device connectivity. Key auth is deliberately kept enabled; the in-state SAS keys are **live credentials**. |
+
+The load-bearing facts that made the App Insights key inert (local auth off →
+key cannot authenticate; runtime access is identity-based; restricted state
+access) apply identically to Cosmos, SignalR, and Storage. For those three, the
+in-state key is a **present-but-non-authenticating residual**, exactly like the
+App Insights ikey.
+
+**IoT Hub is the accepted exception.** Its SAS keys remain live because device
+connectivity requires them. The mitigation is the same fourth control the App
+Insights acceptance already rests on — **restricted, container-scoped RBAC state
+access** (the state blob is not broadly readable) — plus this documented
+acceptance. The blast radius is bounded to the IoT Hub data plane (device
+message ingest / C2D), and rotating the SAS policy keys invalidates any leaked
+copy. If IoT ever moves fully to per-device X.509 / AAD auth, revisit and
+disable local auth here too.
+
+### Coupled invariant, generalized (enforced by the gate)
+
+The per-service acceptance holds **only while local/key auth stays disabled** on
+Cosmos, SignalR, and Storage. `apps/infrastructure/scripts/tf-plan-secret-inspection.sh`
+now enforces this over the real plan/state: for each `azurerm_cosmosdb_account` /
+`azurerm_storage_account` / `azurerm_signalr_service` it **accepts** the inherent
+key residual **only** when that resource's disable-flag is set
+(`local_authentication_disabled = true` / `shared_access_key_enabled = false` /
+`local_auth_enabled = false`), and **flags a VIOLATION (exit nonzero)** if local
+auth is left enabled — because then the in-state key is a live credential.
+`azurerm_iothub` key attributes are the **acknowledged exception**: accepted with
+a printed note. A real credential VALUE reaching `app_settings` or an output is
+a violation regardless of service, unchanged.
 
 ## Alternatives considered
 

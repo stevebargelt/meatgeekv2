@@ -363,9 +363,19 @@ SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
 > assignments** on that identity. App settings carry only **non-secret
 > endpoints** (`COSMOSDB__accountEndpoint`,
 > `IOTHUB_EVENTS__fullyQualifiedNamespace`,
-> `AzureSignalRConnectionString__serviceUri`) — **no connection strings or
-> primary keys** are injected as app settings or written to Terraform state, so
-> there is no plaintext secret to route through Key Vault. See
+> `AzureSignalRConnectionString__serviceUri`) — **no connection-string or
+> primary-key VALUE is injected as an app setting or surfaced as a Terraform
+> output**, so there is no plaintext secret to route through Key Vault. Each data
+> service's key does still exist as an inherent **computed attribute** in state
+> (true of any TF-managed resource); the control is to render those keys
+> non-authenticating by disabling local/key auth where safe
+> (`local_authentication_disabled` on Cosmos, `local_auth_enabled = false` on
+> SignalR, `shared_access_key_enabled = false` on host storage), with **IoT Hub
+> the documented exception** (device SAS auth kept; restricted state access as
+> the mitigation). The coupling is enforced by the fail-closed
+> `scripts/tf-plan-secret-inspection.sh` gate. See
+> [ADR: data-service keys in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md)
+> and
 > [Azure Functions API → Application Settings](../api/azure-functions.md#application-settings).
 
 ## Static Validation
