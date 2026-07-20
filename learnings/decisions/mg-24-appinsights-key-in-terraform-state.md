@@ -23,6 +23,31 @@ IoT Hub, and SignalR modules were removed, so **no connection string or primary
 key VALUE is ever USED — none is placed in `app_settings` or surfaced as a
 Terraform output** for those services.
 
+### Correction (MG-24 red-wide round 12): the Event Hubs namespace RootManage key is now disabled too — IoT Hub is the SOLE live-key exception
+
+Round 11 (below) disabled local/key auth on Cosmos, SignalR, and Storage and left
+IoT Hub as the documented exception — but it **missed the Event Hubs namespace**.
+`azurerm_eventhub_namespace.main` auto-creates a **RootManageSharedAccessKey** SAS
+policy whose primary/secondary keys and connection strings are computed attributes
+that land in state **by construction**, and round 11 left SAS auth **enabled** on
+it. That made the RootManage key a **live data-plane credential in state that was
+outside the documented IoT-Hub exception** — so the claim "IoT Hub is the ONLY
+live-key exception" was, at that point, false.
+
+The fix is to set **`local_authentication_enabled = false`** on
+`azurerm_eventhub_namespace.main`, exactly as Cosmos/SignalR/Storage disable their
+local auth. This is **safe** because both access paths to the namespace are
+already **identity-based**, not SAS: the IoT Hub **produces** via
+`azurerm_iothub_endpoint_eventhub.eventhub_realtime`
+(`authentication_type = identityBased`) backed by the *Azure Event Hubs Data
+Sender* role assignment, and the Function App **consumes** via *Azure Event Hubs
+Data Receiver* (`IOTHUB_EVENTS__fullyQualifiedNamespace`). Nothing reads the
+RootManage key. With local auth disabled the RootManage key becomes a
+**non-authenticating residual**, and **IoT Hub is once again the sole documented
+live-key exception** (device connectivity). The secret-inspection gate now
+enforces this for `azurerm_eventhub_namespace` (`local_authentication_enabled ==
+false`) the same way it does for the other data services.
+
 ### Correction (MG-24 red-wide round 11): the inherent-key residual is broader than App Insights
 
 An earlier version of this ADR asserted that "no connection strings or primary
@@ -33,7 +58,8 @@ not remove the key from state. Just like App Insights, **every TF-managed data
 service exposes its key / connection-string as a COMPUTED attribute**, and
 Terraform reads those attributes back into state on each apply. So the Cosmos
 account's `primary_key` / `connection_strings`, the Storage account's access
-keys, the SignalR service's `primary_access_key`, and the IoT Hub's
+keys, the SignalR service's `primary_access_key`, the Event Hubs namespace's
+auto-created `RootManageSharedAccessKey`, and the IoT Hub's
 `shared_access_policy` keys are all present in state **by construction** — no
 `azurerm` argument suppresses them. The accurate posture is therefore the same
 as App Insights: not "no keys in state," but **keys that cannot authenticate**,
@@ -154,13 +180,14 @@ inherent computed attributes. The operator-approved decision is to apply it
 | **Cosmos DB** (`azurerm_cosmosdb_account.main`) | `primary_key`, `secondary_key`, `connection_strings` | `local_authentication_disabled = true` | Data-plane access is AAD/RBAC: the Function App **and** the IoT Hub identity each hold *Cosmos DB Built-in Data Contributor* (SQL role assignments). Both keep working with key auth off; the in-state key can no longer authenticate. |
 | **SignalR** (`azurerm_signalr_service.main`) | `primary_access_key`, `primary_connection_string` | `local_auth_enabled = false` | The Function App connects identity-based via `AzureSignalRConnectionString__serviceUri` and holds *SignalR Service Owner*. AAD negotiation keeps working with AccessKey auth off. |
 | **Storage** (`azurerm_storage_account.functions`) | account access keys, connection string | `shared_access_key_enabled = false` (already set) | Host storage is **fully managed-identity**: `storage_uses_managed_identity = true`, no `storage_account_access_key` and no key-based `AzureWebJobsStorage` anywhere, and the identity holds *Storage Blob Data Owner* + *Storage Queue Data Contributor*. Shared-key auth is safely off without breaking the Functions runtime. |
-| **IoT Hub** (`azurerm_iothub.main`) | `shared_access_policy[].primary_key` / `secondary_key` (SAS) | **NOT disabled — documented exception** | Real BBQ **devices**, the **data-pusher**, and the **device-controller** authenticate to the hub with **SAS keys** (the device SDKs' supported path). Setting `local_authentication_enabled = false` would sever device connectivity. Key auth is deliberately kept enabled; the in-state SAS keys are **live credentials**. |
+| **Event Hubs namespace** (`azurerm_eventhub_namespace.main`) | auto-created `RootManageSharedAccessKey` primary/secondary keys + connection strings | `local_authentication_enabled = false` | Both access paths are identity-based: the IoT Hub **produces** via `azurerm_iothub_endpoint_eventhub.eventhub_realtime` (`authentication_type = identityBased` + *Azure Event Hubs Data Sender*), and the Function App **consumes** via *Azure Event Hubs Data Receiver* (`IOTHUB_EVENTS__fullyQualifiedNamespace`). Nothing reads the RootManage key, so SAS auth is safely off (round 12). |
+| **IoT Hub** (`azurerm_iothub.main`) | `shared_access_policy[].primary_key` / `secondary_key` (SAS) | **NOT disabled — the SOLE documented exception** | Real BBQ **devices**, the **data-pusher**, and the **device-controller** authenticate to the hub with **SAS keys** (the device SDKs' supported path). Setting `local_authentication_enabled = false` would sever device connectivity. Key auth is deliberately kept enabled; the in-state SAS keys are **live credentials**. This is now the **only** service whose in-state key remains live. |
 
 The load-bearing facts that made the App Insights key inert (local auth off →
 key cannot authenticate; runtime access is identity-based; restricted state
-access) apply identically to Cosmos, SignalR, and Storage. For those three, the
-in-state key is a **present-but-non-authenticating residual**, exactly like the
-App Insights ikey.
+access) apply identically to Cosmos, SignalR, Storage, and the Event Hubs
+namespace (round 12). For those four, the in-state key is a
+**present-but-non-authenticating residual**, exactly like the App Insights ikey.
 
 **IoT Hub is the accepted exception.** Its SAS keys remain live because device
 connectivity requires them. The mitigation is the same fourth control the App
@@ -174,15 +201,16 @@ disable local auth here too.
 ### Coupled invariant, generalized (enforced by the gate)
 
 The per-service acceptance holds **only while local/key auth stays disabled** on
-Cosmos, SignalR, and Storage. `apps/infrastructure/scripts/tf-plan-secret-inspection.sh`
+Cosmos, SignalR, Storage, and the Event Hubs namespace.
+`apps/infrastructure/scripts/tf-plan-secret-inspection.sh`
 now enforces this over the real plan/state: for each `azurerm_cosmosdb_account` /
-`azurerm_storage_account` / `azurerm_signalr_service` it **accepts** the inherent
-key residual **only** when that resource's disable-flag is set
-(`local_authentication_disabled = true` / `shared_access_key_enabled = false` /
-`local_auth_enabled = false`), and **flags a VIOLATION (exit nonzero)** if local
-auth is left enabled — because then the in-state key is a live credential.
-`azurerm_iothub` key attributes are the **acknowledged exception**: accepted with
-a printed note. A real credential VALUE reaching `app_settings` or an output is
+`azurerm_storage_account` / `azurerm_signalr_service` / `azurerm_eventhub_namespace`
+it **accepts** the inherent key residual **only** when that resource's disable-flag
+is set (`local_authentication_disabled = true` / `shared_access_key_enabled = false`
+/ `local_auth_enabled = false` / `local_authentication_enabled = false`), and
+**flags a VIOLATION (exit nonzero)** if local auth is left enabled — because then
+the in-state key is a live credential. `azurerm_iothub` key attributes are the
+**acknowledged exception**: accepted with a printed note. A real credential VALUE reaching `app_settings` or an output is
 a violation regardless of service, unchanged.
 
 ## Alternatives considered

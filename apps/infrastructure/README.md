@@ -305,11 +305,12 @@ Two layers, with clearly different strengths:
      **only** when the plan's `azurerm_application_insights` sets
      `local_authentication_disabled = true` (the coupled invariant);
    - the inherent in-state key of an `azurerm_cosmosdb_account` /
-     `azurerm_signalr_service` / `azurerm_storage_account`, **only** when that
+     `azurerm_signalr_service` / `azurerm_storage_account` /
+     `azurerm_eventhub_namespace`, **only** when that
      resource disables local/key auth in the plan
      (`local_authentication_disabled = true` / `local_auth_enabled = false` /
-     `shared_access_key_enabled = false`) — otherwise the in-state key is a live
-     credential and it is a **VIOLATION**;
+     `shared_access_key_enabled = false` / `local_authentication_enabled = false`)
+     — otherwise the in-state key is a live credential and it is a **VIOLATION**;
    - `azurerm_iothub` key attributes as the **acknowledged exception** (accepted
      with a printed note — device SAS auth is intentionally kept, mitigated by
      restricted state access; MG-24 ADR).
@@ -371,17 +372,22 @@ terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
   suppresses it) — exactly like App Insights. The control is to make those keys
   **inert for authentication** by disabling local/key auth where safe:
   `local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
-  on SignalR, and `shared_access_key_enabled = false` on the Functions storage
-  account (host storage is fully managed-identity). With local auth off, the
+  on SignalR, `shared_access_key_enabled = false` on the Functions storage
+  account (host storage is fully managed-identity), and
+  `local_authentication_enabled = false` on the Event Hubs namespace (its
+  auto-created `RootManageSharedAccessKey` is unused — the IoT Hub produces to it
+  identity-based and the Function App consumes via *Azure Event Hubs Data
+  Receiver*). With local auth off, the
   in-state key is a **present-but-non-authenticating residual**.
-  **IoT Hub is the deliberate exception:** devices, the data-pusher, and the
+  **IoT Hub is the SOLE deliberate exception:** devices, the data-pusher, and the
   device-controller authenticate with **SAS keys**, so key auth is intentionally
   kept enabled and its in-state SAS keys are live — mitigated by restricted,
   container-scoped state access and documented in the MG-24 ADR. The coupled
-  invariant (Cosmos/SignalR/Storage local auth must stay disabled) is
-  machine-enforced by the fail-closed `scripts/tf-plan-secret-inspection.sh`
-  gate, which flags any of those services as a violation if local auth is
-  re-enabled and accepts the IoT Hub keys with a note. **Application Insights
+  invariant (Cosmos/SignalR/Storage/Event Hubs namespace local auth must stay
+  disabled) is machine-enforced by the fail-closed
+  `scripts/tf-plan-secret-inspection.sh` gate, which flags any of those services
+  as a violation if local auth is re-enabled and accepts the IoT Hub keys with a
+  note. **Application Insights
   telemetry ingestion is
   AAD-authenticated:** the Function App authenticates via its managed identity —
   `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a

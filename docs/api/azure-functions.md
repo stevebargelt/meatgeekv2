@@ -337,13 +337,18 @@ data service exposes its own key / connection-string as an **inherent computed
 attribute**, and Terraform reads those attributes back into state on each apply
 **by construction** — no `azurerm` argument suppresses them. So the Cosmos
 account's keys, the Storage account's access keys, the SignalR service's access
-key, and the IoT Hub's SAS policy keys are all present in state. The security
+key, the Event Hubs namespace's auto-created `RootManageSharedAccessKey`, and the
+IoT Hub's SAS policy keys are all present in state. The security
 posture is not "no keys in state," it is **keys that cannot authenticate**:
 local/key auth is **disabled** on the services where doing so is safe —
 `local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
 on SignalR, `shared_access_key_enabled = false` on the Functions storage account
-(host storage is `storage_uses_managed_identity`). For those three the in-state
-key is a **present-but-non-authenticating residual**. **IoT Hub is the
+(host storage is `storage_uses_managed_identity`), and
+`local_authentication_enabled = false` on the Event Hubs namespace (both its
+producer — the identity-based IoT Hub routing endpoint — and its consumer — the
+Function App via *Azure Event Hubs Data Receiver* — are AAD, so the RootManage key
+is unused). For those four the in-state
+key is a **present-but-non-authenticating residual**. **IoT Hub is the SOLE
 documented exception:** its SAS keys stay **live** because real devices, the
 data-pusher, and the device-controller authenticate with them (the device SDKs'
 supported path), so disabling local auth would sever device connectivity; that
@@ -355,9 +360,10 @@ destination identifier**, not a credential —
 `local_authentication_disabled = true` on the App Insights resource forces
 AAD-only ingestion, so the ikey cannot authenticate anything (see the detailed
 note below). Each acceptance holds **only while local/key auth stays disabled**
-on Cosmos / SignalR / Storage / App Insights, a coupling **fail-closed enforced**
-by the pre-apply `tf-plan-secret-inspection.sh` gate (which also accepts the IoT
-Hub keys with a printed note as the acknowledged exception). See
+on Cosmos / SignalR / Storage / Event Hubs namespace / App Insights, a coupling
+**fail-closed enforced** by the pre-apply `tf-plan-secret-inspection.sh` gate
+(which also accepts the IoT Hub keys with a printed note as the acknowledged
+exception). See
 [ADR: Data-service keys in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 These are exactly the settings Terraform configures on the Function App:

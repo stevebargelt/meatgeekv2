@@ -370,9 +370,10 @@ SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
 > (true of any TF-managed resource); the control is to render those keys
 > non-authenticating by disabling local/key auth where safe
 > (`local_authentication_disabled` on Cosmos, `local_auth_enabled = false` on
-> SignalR, `shared_access_key_enabled = false` on host storage), with **IoT Hub
-> the documented exception** (device SAS auth kept; restricted state access as
-> the mitigation). The coupling is enforced by the fail-closed
+> SignalR, `shared_access_key_enabled = false` on host storage,
+> `local_authentication_enabled = false` on the Event Hubs namespace), with **IoT
+> Hub the SOLE documented exception** (device SAS auth kept; restricted state
+> access as the mitigation). The coupling is enforced by the fail-closed
 > `scripts/tf-plan-secret-inspection.sh` gate. See
 > [ADR: data-service keys in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md)
 > and

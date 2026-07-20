@@ -33,13 +33,28 @@ resource "azurerm_iothub" "main" {
   tags = var.tags
 }
 
-# Event Hub Namespace for real-time processing
+# Event Hub Namespace for real-time processing.
+#
+# SAS auth is DISABLED (local_authentication_enabled = false). The namespace
+# auto-creates a RootManageSharedAccessKey policy whose primary/secondary keys and
+# connection strings are computed attributes that ALWAYS land in Terraform state —
+# no argument suppresses them. Disabling local auth makes that RootManage key
+# NON-authenticating (AAD-only), so the in-state residual cannot be used as a
+# credential. This is SAFE because BOTH access paths are identity-based, not SAS:
+# the IoT Hub PRODUCES via azurerm_iothub_endpoint_eventhub.eventhub_realtime
+# (authentication_type = identityBased) backed by the iothub_eventhub_sender role
+# assignment, and the Function App CONSUMES via Azure Event Hubs Data Receiver
+# (IOTHUB_EVENTS__fullyQualifiedNamespace). Nothing reads the RootManage key.
+# Unlike the IoT Hub itself (whose device SAS keys must stay live — see below),
+# the Event Hubs namespace has no SAS consumer, so it is NOT an exception.
 resource "azurerm_eventhub_namespace" "main" {
   name                = "${var.resource_prefix}-eventhub-ns-${var.global_suffix}"
   location            = var.location
   resource_group_name = var.resource_group_name
   sku                 = "Standard"
   capacity            = 1
+
+  local_authentication_enabled = false
 
   tags = var.tags
 }

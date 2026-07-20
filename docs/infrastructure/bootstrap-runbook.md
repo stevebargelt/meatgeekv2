@@ -398,11 +398,13 @@ key). It also inspects the **inherent computed key attributes** of the data
 services and accepts a residual only when auth cannot use it: the full AI
 connection string in an `app_setting` **only** when
 `azurerm_application_insights` sets `local_authentication_disabled = true`; the
-inherent key of a Cosmos / SignalR / Storage resource **only** when that resource
-disables local/key auth (`local_authentication_disabled = true` /
-`local_auth_enabled = false` / `shared_access_key_enabled = false`) — otherwise
-it is a **VIOLATION** (a live in-state key); and `azurerm_iothub` keys as the
-**acknowledged exception** (accepted with a note — device SAS auth kept). It also
+inherent key of a Cosmos / SignalR / Storage / Event Hubs namespace resource
+**only** when that resource disables local/key auth
+(`local_authentication_disabled = true` / `local_auth_enabled = false` /
+`shared_access_key_enabled = false` / `local_authentication_enabled = false`) —
+otherwise it is a **VIOLATION** (a live in-state key); and `azurerm_iothub` keys
+as the **acknowledged exception** (accepted with a note — device SAS auth kept).
+It also
 fails closed on any operational failure (no `jq`, unparseable JSON, no input) —
 an inspection that cannot run must not report success.
 
@@ -693,11 +695,13 @@ Never add auto-apply to CI. Apply stays an operator action per this runbook.
   attribute* in state — as for any TF-managed resource; the control is to make it
   non-authenticating by disabling local/key auth where safe —
   `local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
-  on SignalR, `shared_access_key_enabled = false` on host storage. **IoT Hub is
-  the documented exception:** device/data-pusher/device-controller SAS auth is
+  on SignalR, `shared_access_key_enabled = false` on host storage,
+  `local_authentication_enabled = false` on the Event Hubs namespace. **IoT Hub is
+  the SOLE documented exception:** device/data-pusher/device-controller SAS auth is
   intentionally kept, mitigated by restricted state access. The
-  `tf-plan-secret-inspection.sh` gate flags Cosmos/SignalR/Storage as a VIOLATION
-  if local auth is re-enabled, and accepts the IoT Hub keys with a note.) The
+  `tf-plan-secret-inspection.sh` gate flags Cosmos/SignalR/Storage/Event Hubs
+  namespace as a VIOLATION if local auth is re-enabled, and accepts the IoT Hub
+  keys with a note.) The
   former "route plaintext secrets through Key Vault references" question is
   therefore moot — there are no such runtime secrets to route. Application
   Insights is wired via the **full**
