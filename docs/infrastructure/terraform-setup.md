@@ -159,9 +159,13 @@ locals {
 }
 ```
 
-The **Function App** is named `${local.resource_prefix}-func`
-(`meatgeek-v2-${environment}-func`) and exposed as the `function_app_name`
-output — the single name the app deploy consumes.
+The **Function App** is named `${var.resource_prefix}-func-${var.global_suffix}`
+(`meatgeek-v2-${environment}-func-<suffix>`, e.g. `meatgeek-v2-dev-func-abc123def456`)
+and exposed as the `function_app_name` output — the single name the app deploy
+consumes. The trailing `<suffix>` is the deterministic, subscription-derived
+`global_name_suffix` (a 12-char `sha1` of `${subscription_id}-global`) shared with
+the IoT Hub, Event Hubs namespace, and SignalR; it guarantees the globally-scoped
+Function App name cannot collide with a pre-existing resource on a greenfield apply.
 
 ### V2-owned Cosmos DB
 

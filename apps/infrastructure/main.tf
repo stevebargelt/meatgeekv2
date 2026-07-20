@@ -172,6 +172,13 @@ module "iot_hub" {
   cosmos_database_name    = module.cosmos_db.database_name
   cosmos_container_name   = "temperatures"
 
+  # Dependency handle: the Cosmos routing endpoint uses the IoT Hub identity, so
+  # it must be created only AFTER that identity holds the data-plane role. Only
+  # the endpoint (not azurerm_iothub.main) consumes this, so the graph stays
+  # acyclic even though the role assignment itself depends on this module's
+  # identity_principal_id output (MG-24).
+  cosmos_role_assignment_id = azurerm_cosmosdb_sql_role_assignment.iot_hub_writer.id
+
   tags = local.common_tags
 }
 

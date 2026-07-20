@@ -52,9 +52,23 @@ resource "azurerm_role_assignment" "iothub_eventhub_sender" {
   principal_id         = azurerm_iothub.main.identity[0].principal_id
 }
 
+# Dependency handle for the Cosmos data-plane role assignment. It carries the
+# role-assignment id passed from root into the graph as a concrete node the
+# identity-based Cosmos endpoint can depends_on. Using terraform_data (rather than
+# making azurerm_iothub.main depend on the role) is what keeps the graph acyclic:
+# the role assignment depends on this module's identity_principal_id output, so
+# only the endpoint below — never the IoT Hub resource — sits downstream of it.
+resource "terraform_data" "cosmos_role_ready" {
+  input = var.cosmos_role_assignment_id
+}
+
 # Custom routing endpoint: Cosmos DB temperatures container (identity-based auth).
-# Caller must grant the IoT Hub system-assigned identity (output: identity_principal_id)
-# the "Cosmos DB Built-in Data Contributor" role on the Cosmos account before apply.
+# The IoT Hub system-assigned identity (output: identity_principal_id) must hold
+# the "Cosmos DB Built-in Data Contributor" role on the Cosmos account BEFORE this
+# endpoint is created — the service validates the identity's data-plane access at
+# creation, so a greenfield apply that races the endpoint ahead of the role fails
+# until the role propagates. The depends_on below orders it strictly after the
+# role assignment via the terraform_data handle (MG-24).
 resource "azurerm_iothub_endpoint_cosmosdb_account" "cosmos_storage" {
   name                = "cosmos-storage"
   iothub_id           = azurerm_iothub.main.id
@@ -65,6 +79,8 @@ resource "azurerm_iothub_endpoint_cosmosdb_account" "cosmos_storage" {
   container_name = var.cosmos_container_name
 
   authentication_type = "identityBased"
+
+  depends_on = [terraform_data.cosmos_role_ready]
 }
 
 # Custom routing endpoint: Event Hub for real-time fan-out to Functions.
