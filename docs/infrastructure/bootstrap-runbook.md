@@ -292,10 +292,14 @@ Never add auto-apply to CI. Apply stays an operator action per this runbook.
 - **Prod alert-email + budget wiring** — the production activation (enabling the
   `production` environment secret and `PROD_DEPLOY_ENABLED`, plus prod-specific
   alert/budget values) is tracked under **MG-25**, not MG-24.
-- **Key Vault vs plaintext Function-App connection strings** — the Functions
-  module currently injects connection strings directly as app settings. Whether
-  to route them through Key Vault references is a **human security review**
-  decision, deliberately left open here.
+- **Function-App runtime credentials** — resolved by MG-24: the Functions
+  module accesses Cosmos, host Storage, the IoT-telemetry Event Hub, and
+  SignalR **identity-based** (system-assigned managed identity + RBAC over
+  non-secret endpoints), so no connection strings or primary keys land in
+  `app_settings` or Terraform outputs. The former "route plaintext secrets
+  through Key Vault references" question is therefore moot — there are no
+  such secrets to route. Application Insights is wired via its non-secret
+  telemetry connection string, the one endpoint of this kind.
 
 ---
 

@@ -26,10 +26,9 @@ variable "storage_account_name" {
   type        = string
 }
 
-variable "application_insights_connection_string" {
-  description = "Application Insights connection string (telemetry endpoint + ingestion key). NOT one of the identity-based data services; wired directly from the App Insights resource attribute, never surfaced as a Terraform output."
+variable "application_insights_ingestion_endpoint" {
+  description = "Non-secret Application Insights ingestion endpoint URL (the IngestionEndpoint parsed out of the AI connection string in the root module). Telemetry ingestion is identity-based (AAD): the Function App's managed identity is granted 'Monitoring Metrics Publisher' on the App Insights resource and the host authenticates with APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD, so NO instrumentation/ingestion key or secret connection-string value is placed in app_settings or Terraform state."
   type        = string
-  sensitive   = true
 }
 
 # --- Identity-based service endpoints (NON-SECRET) --------------------------

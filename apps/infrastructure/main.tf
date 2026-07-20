@@ -83,6 +83,17 @@ locals {
   # keeps it deterministic and comfortably under 24 chars (e.g. mgv2dev<hash> =
   # 19, mgv2prod<hash> = 20).
   functions_storage_account_name = "mgv2${var.environment}${substr(sha1("${data.azurerm_client_config.current.subscription_id}-funcstorage"), 0, 12)}"
+
+  # Non-secret Application Insights ingestion endpoint, parsed out of the AI
+  # connection string. The instrumentation/ingestion key portion is deliberately
+  # NOT propagated to the Function App: ingestion is identity-based (AAD) via the
+  # Monitoring Metrics Publisher role assignment below plus
+  # APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD, so only this
+  # non-secret endpoint reaches app_settings/state. nonsensitive() is intentional
+  # and safe here — the IngestionEndpoint URL is not a credential.
+  appinsights_ingestion_endpoint = nonsensitive(
+    try(regex("IngestionEndpoint=([^;]+)", azurerm_application_insights.main.connection_string)[0], "")
+  )
 }
 
 # Data sources for existing resources (if any)
@@ -192,8 +203,11 @@ module "azure_functions" {
   functions_app_service_plan_sku = var.functions_app_service_plan_sku
   storage_account_name           = local.functions_storage_account_name
 
-  # App Insights telemetry wiring (not one of the identity-based data services).
-  application_insights_connection_string = azurerm_application_insights.main.connection_string
+  # App Insights telemetry wiring — identity-based (AAD). Only the NON-SECRET
+  # ingestion endpoint is passed; the managed identity is granted Monitoring
+  # Metrics Publisher below and the host authenticates via Authorization=AAD, so
+  # no instrumentation/ingestion key or secret connection string enters state.
+  application_insights_ingestion_endpoint = local.appinsights_ingestion_endpoint
 
   # Identity-based service endpoints (NON-SECRET). Runtime authorization is via
   # the Function App's managed identity + the role assignments below.
@@ -239,6 +253,18 @@ resource "azurerm_role_assignment" "functions_eventhub_receiver" {
 resource "azurerm_role_assignment" "functions_signalr" {
   scope                = module.signalr.signalr_service_id
   role_definition_name = "SignalR Service Owner"
+  principal_id         = module.azure_functions.identity_principal_id
+}
+
+# Monitoring Metrics Publisher on the App Insights resource so the Function App
+# publishes telemetry with an AAD token (identity-based ingestion) instead of an
+# instrumentation/ingestion key. Combined with
+# APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD on the app, this
+# closes the last runtime-secret-in-state path — no ingestion key / secret
+# connection string is placed in app_settings or Terraform state (MG-24 S1).
+resource "azurerm_role_assignment" "functions_appinsights_publisher" {
+  scope                = azurerm_application_insights.main.id
+  role_definition_name = "Monitoring Metrics Publisher"
   principal_id         = module.azure_functions.identity_principal_id
 }
 

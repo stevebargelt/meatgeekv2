@@ -7,6 +7,12 @@
 #     primary keys are placed in app settings or Terraform state.
 #   * Host storage uses the managed identity (storage_uses_managed_identity),
 #     so no storage_account_access_key is written to state.
+#   * Application Insights ingestion is identity-based (AAD): the managed
+#     identity is granted 'Monitoring Metrics Publisher' on the App Insights
+#     resource (root module) and the host authenticates telemetry via
+#     APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD. Only the
+#     NON-SECRET ingestion endpoint is placed in app settings — no
+#     instrumentation/ingestion key or secret connection string enters state.
 #   * CORS is explicit per-environment (no wildcard); App Service Authentication
 #     default-DENIES every request until an identity provider is configured.
 
@@ -68,10 +74,19 @@ resource "azurerm_linux_function_app" "main" {
   # NON-SECRET endpoint (the `__`-suffixed settings the Functions host resolves
   # against the app's managed identity). No connection strings / primary keys.
   app_settings = {
-    "FUNCTIONS_WORKER_RUNTIME"                = "node"
-    "WEBSITE_NODE_DEFAULT_VERSION"            = "~20"
-    "APPLICATIONINSIGHTS_CONNECTION_STRING"   = var.application_insights_connection_string
-    "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE" = "50"
+    "FUNCTIONS_WORKER_RUNTIME"     = "node"
+    "WEBSITE_NODE_DEFAULT_VERSION" = "~20"
+
+    # Application Insights — identity-based (AAD) telemetry ingestion. The
+    # managed identity is granted 'Monitoring Metrics Publisher' on the App
+    # Insights resource (root module); Authorization=AAD makes the host
+    # authenticate with an AAD token, so NO instrumentation/ingestion key lands
+    # here. The connection string carries ONLY the non-secret ingestion endpoint
+    # (no InstrumentationKey / secret) — the resource is identified via the
+    # AAD-authorized publisher role, not an ingestion key.
+    "APPLICATIONINSIGHTS_AUTHENTICATION_STRING" = "Authorization=AAD"
+    "APPLICATIONINSIGHTS_CONNECTION_STRING"     = "IngestionEndpoint=${var.application_insights_ingestion_endpoint}"
+    "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE"   = "50"
 
     # Cosmos DB — identity-based. Endpoint is non-secret; data-plane access is
     # granted via the Cosmos SQL role assignment in the root module.

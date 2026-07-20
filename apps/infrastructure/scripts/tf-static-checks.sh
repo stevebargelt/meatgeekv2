@@ -18,11 +18,13 @@
 #      that could touch the legacy V1-bound on-disk tfstate. Git-ignored state
 #      is NOT exempt; the guard fails on any *.tfstate present on disk.
 #   6. Absence of the meatgeek-v2- V2 naming prefix.
-#   7. A secret OUTPUT (connection string / primary key / access key) in any
-#      module or root outputs.tf (MG-24 S1 — secrets must not leave via state).
+#   7. A secret OUTPUT (connection string / primary key / access key /
+#      instrumentation key) in any module or root outputs.tf (MG-24 S1 — secrets
+#      must not leave via state). NO carve-outs, App Insights included.
 #   8. Wildcard CORS (allowed_origins includes "*") anywhere (MG-24 S2).
 #   9. Function App is missing its managed identity or default-deny auth
-#      posture (MG-24 S1/S2).
+#      posture, OR its app_settings still carry a connection-string / ingestion
+#      key / primary key — App Insights included, NO carve-outs (MG-24 S1/S2).
 #  10. The Functions storage account name is not subscription-derived-unique.
 #  11. The IoT Hub Event Hubs routing endpoint uses a SAS connection string
 #      (or a lingering azurerm_eventhub_authorization_rule) instead of the IoT
@@ -113,14 +115,14 @@ fi
 # --- 7. No secret OUTPUTS (MG-24 S1) ----------------------------------------
 # Runtime credentials must never leave Terraform via an output (state exposure).
 # Scan every outputs.tf for an output block whose value derives a connection
-# string / primary|secondary key / access key / shared access policy key.
-# App Insights telemetry (instrumentation) is explicitly out of scope: it is
-# not a data-plane credential and is wired as a module INPUT, never an output.
-# Comment lines (NN:<space>#) are stripped so the explanatory notes documenting
-# what was REMOVED don't self-trip the scan.
+# string / primary|secondary key / access key / shared access policy key /
+# App Insights instrumentation (ingestion) key. There is NO App Insights
+# carve-out: its ingestion is identity-based (AAD) and no instrumentation key is
+# emitted anywhere. Comment lines (NN:<space>#) are stripped so the explanatory
+# notes documenting what was REMOVED don't self-trip the scan.
 secret_output_hits=""
 while IFS= read -r out_file; do
-  hits="$(grep -nE 'primary_key|secondary_key|primary_access_key|secondary_access_key|primary_connection_string|secondary_connection_string|shared_access_policy|AccountKey=|SharedAccessKey=' "${out_file}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  hits="$(grep -nE 'primary_key|secondary_key|primary_access_key|secondary_access_key|primary_connection_string|secondary_connection_string|shared_access_policy|instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=' "${out_file}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -n "${hits}" ]]; then
     secret_output_hits+="${out_file}:"$'\n'"${hits}"$'\n'
   fi
@@ -144,10 +146,22 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   if ! grep -qE 'storage_uses_managed_identity[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then
     func_posture+="Function App does not use managed-identity host storage (storage_uses_managed_identity)"$'\n'
   fi
-  # No plaintext connection-string app settings for the identity-based services.
-  cs_settings="$(grep -nE 'COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING|storage_account_access_key' "${FUNC_MAIN}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  # No secret VALUE in app_settings for ANY service — App Insights included, NO
+  # carve-outs (MG-24 S1). This targets secret VALUES, not setting NAMES: a
+  # sensitive Terraform attribute reference (.connection_string /
+  # .instrumentation_key / .primary_key / .primary_access_key /
+  # .primary_connection_string), a var whose name ends in *connection_string /
+  # *instrumentation_key, a literal ingestion/account/SAS key marker
+  # (InstrumentationKey= / AccountKey= / SharedAccessKey=), or a raw
+  # storage_account_access_key. The standard APPLICATIONINSIGHTS_CONNECTION_STRING
+  # SETTING is allowed ONLY because its value is the non-secret ingestion endpoint
+  # (IngestionEndpoint=...) under AAD ingestion — if it ever carried an
+  # instrumentation key or a .connection_string reference again, one of the
+  # patterns below catches it. The hypothetical *_CONNECTION_STRING setting names
+  # for the identity services stay flagged too.
+  cs_settings="$(grep -nE '\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING' "${FUNC_MAIN}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -n "${cs_settings}" ]]; then
-    func_posture+="connection-string / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
+    func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
   fi
   # Default-deny App Service Authentication.
   if ! grep -qE 'require_authentication[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then

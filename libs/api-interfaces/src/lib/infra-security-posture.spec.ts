@@ -105,6 +105,20 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       expect(live).not.toMatch(/SIGNALR_CONNECTION_STRING/);
     });
 
+    it('Application Insights ingestion is AAD identity-based — no ingestion key in app_settings', () => {
+      // Host authenticates telemetry with an AAD token, not an ingestion key.
+      expect(live).toMatch(/APPLICATIONINSIGHTS_AUTHENTICATION_STRING"\s*=\s*"Authorization=AAD"/);
+      // The connection-string setting carries ONLY the non-secret ingestion
+      // endpoint — never an instrumentation/ingestion key or a secret
+      // connection-string attribute reference.
+      expect(live).toMatch(/APPLICATIONINSIGHTS_CONNECTION_STRING"\s*=\s*"IngestionEndpoint=/);
+      expect(live).not.toMatch(/InstrumentationKey=/);
+      expect(live).not.toMatch(/instrumentation_key/i);
+      // No secret Terraform attribute / var is copied into app_settings.
+      expect(live).not.toMatch(/\.connection_string/);
+      expect(live).not.toMatch(/var\.application_insights_connection_string/);
+    });
+
     it('grants the identity narrowly-scoped storage data roles', () => {
       expect(live).toMatch(/azurerm_role_assignment"\s+"functions_storage_blob"/);
       expect(live).toMatch(/Storage Blob Data Owner/);
@@ -119,6 +133,18 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     expect(live).toMatch(/SignalR Service Owner/);
     // All target the Function App's own managed identity principal.
     expect(live).toMatch(/module\.azure_functions\.identity_principal_id/);
+  });
+
+  it('root grants the Function App identity Monitoring Metrics Publisher on App Insights (AAD ingestion)', () => {
+    const live = stripComments(read('main.tf'));
+    expect(live).toMatch(/azurerm_role_assignment"\s+"functions_appinsights_publisher"/);
+    expect(live).toMatch(/Monitoring Metrics Publisher/);
+    // Scoped to the App Insights resource, targeting the Function App identity.
+    expect(live).toMatch(/scope\s*=\s*azurerm_application_insights\.main\.id/);
+    // The App Insights connection string (with its ingestion key) is NOT passed
+    // into the Functions module — only the non-secret ingestion endpoint is.
+    expect(live).not.toMatch(/application_insights_connection_string\s*=/);
+    expect(live).toMatch(/application_insights_ingestion_endpoint\s*=/);
   });
 
   it('IoT Hub Event Hubs routing endpoint is identity-based (no SAS in state)', () => {
@@ -200,5 +226,30 @@ describe('MG-24 S2: Function App HTTP posture', () => {
     expect(live).not.toMatch(/require_authentication\s*=\s*false/);
     expect(live).not.toMatch(/anonymous/i);
     expect(live).not.toMatch(/\/health\b/);
+  });
+});
+
+describe('MG-24 S1: the static gate has NO App Insights carve-out', () => {
+  const gate = read('scripts/tf-static-checks.sh');
+
+  it('drops the former "App Insights ... out of scope" exemption', () => {
+    // The gate previously exempted App Insights instrumentation from the secret
+    // scans. That carve-out is removed — App Insights ingestion is identity-based
+    // (AAD) and no ingestion key exists to scan for anywhere.
+    expect(gate).not.toMatch(/out of scope/i);
+    expect(gate).not.toMatch(/App Insights[^\n]*explicitly/i);
+  });
+
+  it('the secret-output scan catches an App Insights instrumentation/ingestion key', () => {
+    expect(gate).toMatch(/instrumentation_key/);
+    expect(gate).toMatch(/InstrumentationKey=/);
+  });
+
+  it('the Function App app_settings scan catches any ingestion key / connection-string value', () => {
+    // Value-targeted: a secret Terraform attribute/var reference or a literal
+    // ingestion-key marker in app_settings must be flagged (App Insights too).
+    expect(gate).toMatch(/\\\.connection_string/);
+    expect(gate).toMatch(/\\\.instrumentation_key/);
+    expect(gate).toMatch(/InstrumentationKey=/);
   });
 });
