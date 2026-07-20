@@ -90,6 +90,28 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
 
-      - name: Deploy to Production
+      # Authoritative gate. main can advance during the multi-minute build, so the
+      # early guard alone leaves a TOCTOU window wide enough to ship a superseded
+      # commit. Re-query the main tip here, at the last possible moment, so the
+      # check-to-deploy window shrinks to the deploy command's own runtime.
+      - name: Re-verify main tip (final freshness gate before deploy)
+        id: freshness_final
         if: steps.freshness.outputs.fresh == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          CURRENT_TIP=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          echo "CI'd commit:   $CI_SHA"
+          echo "Current main:  $CURRENT_TIP"
+          if [ "$CI_SHA" = "$CURRENT_TIP" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Still the current main tip — deploying."
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "main advanced during the build — skipping deploy (not a failure)."
+          fi
+
+      - name: Deploy to Production
+        if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
         run: npx nx deploy api --env=prod

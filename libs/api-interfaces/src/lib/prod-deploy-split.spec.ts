@@ -211,6 +211,57 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(deployStep).toBeDefined();
     });
 
+    it('re-verifies freshness immediately before the deploy step (closes the build-window TOCTOU)', () => {
+      // The early guard alone is a TOCTOU hole: main can advance during the
+      // multi-minute build, yet the deploy of the now-superseded commit still
+      // proceeds because the single check already passed. The authoritative gate
+      // must be a SECOND freshness re-check that runs AFTER the build steps and
+      // immediately BEFORE the deploy, so the check-to-deploy window is
+      // milliseconds, not minutes.
+      const deployIdx = steps.findIndex(s => /nx deploy api/.test(String(s.run ?? '')));
+      expect(deployIdx).toBeGreaterThan(-1);
+      const deployStep = steps[deployIdx];
+
+      // There are (at least) two freshness-compare steps — one early, one late.
+      const freshnessSteps = steps.filter(
+        s =>
+          /fresh\s*=\s*true/.test(String(s.run ?? '')) &&
+          /fresh\s*=\s*false/.test(String(s.run ?? ''))
+      );
+      expect(freshnessSteps.length).toBeGreaterThanOrEqual(2);
+
+      // The final re-check is the freshness step nearest the deploy (and before it).
+      const finalGuard = freshnessSteps
+        .filter(s => steps.indexOf(s) < deployIdx)
+        .sort((a, b) => steps.indexOf(b) - steps.indexOf(a))[0];
+      expect(finalGuard).toBeDefined();
+      const finalGuardIdx = steps.indexOf(finalGuard);
+      const finalFreshId = finalGuard.id;
+      expect(finalFreshId).toBeTruthy();
+
+      // It must genuinely re-query the current main tip and compare to the CI'd SHA.
+      const finalText = `${Object.values(finalGuard.env ?? {})
+        .map(String)
+        .join('\n')}\n${String(finalGuard.run ?? '')}`;
+      expect(finalText).toMatch(/github\.event\.workflow_run\.head_sha/);
+      expect(finalText).toMatch(/\bmain\b/);
+
+      // It runs AFTER the build steps (npm ci / nx build), not at job start.
+      const buildIdx = steps.findIndex(s => /nx build api/.test(String(s.run ?? '')));
+      expect(buildIdx).toBeGreaterThan(-1);
+      expect(finalGuardIdx).toBeGreaterThan(buildIdx);
+
+      // No build/deploy work runs between the final re-check and the deploy — the
+      // re-check is the last step before the deploy, so the residual TOCTOU window
+      // is only the deploy command's own execution.
+      expect(finalGuardIdx).toBe(deployIdx - 1);
+
+      // The deploy step is gated on THIS final re-check (the authoritative gate),
+      // not merely on the initial job-start guard.
+      const finalGate = new RegExp(`steps\\.${finalFreshId}\\.outputs\\.fresh\\s*==\\s*'true'`);
+      expect(String(deployStep.if ?? '')).toMatch(finalGate);
+    });
+
     it('has NO credential-guard job (no guard job, no has_creds output)', () => {
       expect(jobs).not.toHaveProperty('guard');
       for (const job of Object.values(jobs)) {
