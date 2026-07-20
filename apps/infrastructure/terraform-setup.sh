@@ -11,9 +11,12 @@
 #   1. Run-once, per subscription:  ./bootstrap/bootstrap.sh
 #        Stands up the remote-state storage account/container and the OIDC
 #        deployment identity that the backend-*.hcl files point at.
-#   2. Per environment, per operator:
+#   2. Per environment, per operator (export ARM_SUBSCRIPTION_ID first — the
+#      state storage account name is derived from it, not carried in the .hcl):
 #        rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
-#        terraform init -reconfigure -backend-config=environments/backend-<env>.hcl
+#        terraform init -reconfigure \
+#          -backend-config=environments/backend-<env>.hcl \
+#          -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
 #        terraform plan  -var-file=environments/<env>.tfvars
 #        # apply is OPERATOR-run (never in CI) — see the runbook
 #
@@ -55,8 +58,12 @@ cat <<'GUIDE'
   1) Run-once bootstrap (per subscription, needs Owner/UA-Admin):
        ./bootstrap/bootstrap.sh
 
-  2) Initialize against the per-environment remote state:
-       terraform init -reconfigure -backend-config=environments/backend-<env>.hcl
+  2) Initialize against the per-environment remote state
+     (export ARM_SUBSCRIPTION_ID first — the state storage account name is
+      derived from it via scripts/state-account-name.sh, not in the .hcl):
+       terraform init -reconfigure \
+         -backend-config=environments/backend-<env>.hcl \
+         -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
        #   <env> = dev | prod   (distinct state keys, see environments/backend-*.hcl)
 
   3) Validate / format (backend not required):
