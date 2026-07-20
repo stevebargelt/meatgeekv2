@@ -136,6 +136,23 @@ What it creates (and nothing else):
      `AZURE_APP_DEPLOY_CLIENT_ID`; `app-deploy-prod.yml`'s func-publish
      `azure/login` uses it, not `AZURE_CLIENT_ID`.
 
+     > **The `Website Contributor` role is created by Terraform, in the same
+     > apply that creates the Function App** (MG-24 item 4). The Function App
+     > only exists **after** the greenfield apply, so the bootstrap (which runs
+     > **before** the apply) cannot grant a role on it — instead it **emits this
+     > SP's OBJECT ID** as `AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID`. The operator
+     > sets that value into `environments/dev.tfvars`
+     > (`app_deploy_principal_object_id`) **before Step 4/6**, and the single
+     > apply provisions the Function App **and** grants it `Website Contributor`
+     > scoped to that Function App alone (root `azurerm_role_assignment`
+     > `functions_app_deploy_publisher`, guarded by `count` on the var). Then
+     > `func publish` works immediately — there is **no** separate post-apply
+     > grant step and **no** bootstrap re-run. Leaving the var empty still
+     > validates/plans (the assignment is skipped); it is **required** for any
+     > environment you deploy code to. The bootstrap still grants this identity's
+     > read-only `Storage Blob Data Reader` on the state container directly (that
+     > container exists before the apply and is not Terraform-managed).
+
    > The **prod** app-deployment identity + its Function-App-scoped role
    > assignment are an **MG-25** deliverable and are out of scope for MG-24 —
    > flagged, not created here.
@@ -192,6 +209,29 @@ These are identifiers, not secrets. The prod-activation wiring (enabling the
 `production` environment secret + `PROD_DEPLOY_ENABLED`, and the **prod**
 app-deployment identity) is tracked under **MG-25** and is out of scope for
 MG-24.
+
+### Wire the app-deploy SP object id into `dev.tfvars` (publish role)
+
+The bootstrap also prints the app-deployment identity's **service principal
+OBJECT ID** (distinct from its `appId`/client id above):
+
+```
+AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID = <app-deploy SP object id>
+```
+
+Set it in `environments/dev.tfvars` **before Step 4 (plan) / Step 6 (apply)**:
+
+```hcl
+app_deploy_principal_object_id = "<AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID>"
+```
+
+This is what lets the **single** greenfield apply create the Function App **and**
+grant that identity `Website Contributor` scoped to the Function App alone, so
+`func publish` works immediately after Step 6 — no post-apply grant, no bootstrap
+re-run. Leaving it empty still validates and plans (the role assignment is
+skipped via `count`), but the resulting Function App has nothing that can publish
+to it, so it is **required** for a deployable dev environment. It is an
+identifier, not a secret.
 
 ### Dev app / API authentication registration (item 3)
 
@@ -313,6 +353,14 @@ terraform init -reconfigure \
 
 ### Step 4 — Plan the complete stack
 
+> **First set `app_deploy_principal_object_id` in `environments/dev.tfvars`**
+> (the bootstrap-emitted `AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID` — see "Wire the
+> app-deploy SP object id into `dev.tfvars`" above). With it set, this plan
+> includes the `Website Contributor` role assignment on the Function App, so the
+> single apply below leaves the app immediately publishable. Left empty the plan
+> still succeeds (the assignment is skipped) but the resulting app cannot be
+> published to.
+
 ```bash
 terraform plan -var-file=environments/dev.tfvars -out=tfplan \
   | tee /tmp/mg24-evidence/dev-plan-1.txt
@@ -321,7 +369,10 @@ terraform plan -var-file=environments/dev.tfvars -out=tfplan \
 The plan must propose the **complete** V2 dev stack — resource group,
 Log Analytics + Application Insights, IoT Hub, the **V2-owned** Cosmos account
 (not the V1 shared account), Azure Functions (including the Function App
-`meatgeek-v2-dev-func`), SignalR, and monitoring. Nothing should reference V1.
+`meatgeek-v2-dev-func`), SignalR, and monitoring. With
+`app_deploy_principal_object_id` set, it also includes the app-deploy identity's
+`Website Contributor` role assignment scoped to that Function App. Nothing should
+reference V1.
 
 ### Step 5 — Human plan review
 
@@ -392,6 +443,18 @@ terraform output -raw function_app_name   # → meatgeek-v2-dev-func-<suffix>
 
 The Function App name now carries the global-uniqueness suffix (item 9); it is
 still the single source of truth the app deploy consumes.
+
+Because `app_deploy_principal_object_id` was set (Step 4), this **same** apply
+also granted the app-deployment identity `Website Contributor` on that Function
+App — so `func publish` (run as `AZURE_APP_DEPLOY_CLIENT_ID`) works immediately,
+with no additional grant step and no bootstrap re-run. Confirm the assignment:
+
+```bash
+FUNC_ID="$(terraform state show module.azure_functions.azurerm_linux_function_app.main | awk '/^ *id /{print $3; exit}')"
+az role assignment list --scope "$FUNC_ID" \
+  --query "[?roleDefinitionName=='Website Contributor'].principalId" -o tsv
+#   → the app-deploy SP object id (== app_deploy_principal_object_id)
+```
 
 ### Step 6a — Authenticated smoke test (unblocks MG-21)
 
@@ -536,10 +599,13 @@ Never add auto-apply to CI. Apply stays an operator action per this runbook.
 - **Prod alert-email + budget wiring** — the production activation (enabling the
   `production` environment secret and `PROD_DEPLOY_ENABLED`, plus prod-specific
   alert/budget values) is tracked under **MG-25**, not MG-24.
-- **Prod app-deployment identity + role** — the prod counterpart of the dev
-  `AZURE_APP_DEPLOY_CLIENT_ID` identity (least-privilege `Website Contributor`
-  scoped to the prod Function App) and its role assignment are an **MG-25**
-  deliverable, out of scope for MG-24.
+- **Prod app-deployment identity** — the prod counterpart of the dev
+  `AZURE_APP_DEPLOY_CLIENT_ID` identity (a distinct SP) is an **MG-25**
+  deliverable, out of scope for MG-24. The role-assignment **mechanism** is
+  already environment-agnostic: once that identity exists, MG-25 sets
+  `app_deploy_principal_object_id` in `prod.tfvars` and the prod apply grants it
+  `Website Contributor` scoped to the prod Function App via the same guarded
+  `functions_app_deploy_publisher` assignment — no new Terraform is needed.
 - **Function-App runtime credentials** — resolved by MG-24: the Functions
   module accesses Cosmos, host Storage, the IoT-telemetry Event Hub, and
   SignalR **identity-based** (system-assigned managed identity + RBAC over

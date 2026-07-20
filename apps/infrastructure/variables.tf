@@ -174,6 +174,22 @@ variable "functions_auth_allowed_client_app_ids" {
   default     = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]
 }
 
+# App-deployment identity → Function App publish RBAC (MG-24 item 4).
+# The SERVICE PRINCIPAL OBJECT ID (not the appId/client id) of the SEPARATE
+# app-deployment identity that `func publish` runs as. It is created by the
+# bootstrap (Part 1) BEFORE this apply, and the bootstrap emits its object id as
+# AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID. Setting it here makes THIS apply create
+# the `Website Contributor` role assignment (scoped to the Function App alone)
+# in the SAME apply that creates the Function App — so `func publish` works
+# immediately after, with no missing post-apply grant step. Left empty (default)
+# the assignment is skipped and the plan still validates; REQUIRED for any
+# environment you intend to deploy code to.
+variable "app_deploy_principal_object_id" {
+  description = "Service principal OBJECT ID of the app-deployment identity (bootstrap-emitted AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID). When non-empty, this apply grants it Website Contributor scoped to the Function App alone so `func publish` works post-apply. Empty (default) skips the grant and still validates; required for a deployable environment."
+  type        = string
+  default     = ""
+}
+
 # Security Configuration
 variable "allowed_ip_ranges" {
   description = "IP ranges allowed to access resources (CIDR notation)"

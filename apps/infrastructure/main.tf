@@ -301,6 +301,25 @@ resource "azurerm_role_assignment" "functions_appinsights_publisher" {
   principal_id         = module.azure_functions.identity_principal_id
 }
 
+# App-deployment identity → Function App publish RBAC (MG-24 item 4).
+# `Website Contributor` scoped to the Function App ALONE so the SEPARATE
+# app-deployment SP can run `func publish`. A Reader (the plan identity) cannot
+# publish, which is why publishing is a distinct identity with this scoped role.
+# Created in the SAME apply as the Function App — closing the sequencing gap
+# where the FA only exists post-apply and nothing granted the publish role.
+# Guarded by count: when var.app_deploy_principal_object_id is empty (e.g. a bare
+# `terraform validate` / plan without the bootstrap-emitted object id) the
+# assignment is skipped and the plan still validates. Set the var (from the
+# bootstrap coordinate) for any environment you deploy code to. The object id is
+# the SP's OBJECT id — created by bootstrap phase 1, BEFORE this apply — so no
+# apply-time-computed principal is referenced and the graph stays acyclic.
+resource "azurerm_role_assignment" "functions_app_deploy_publisher" {
+  count                = var.app_deploy_principal_object_id != "" ? 1 : 0
+  scope                = module.azure_functions.function_app_id
+  role_definition_name = "Website Contributor"
+  principal_id         = var.app_deploy_principal_object_id
+}
+
 # SignalR Module
 module "signalr" {
   source = "./modules/signalr"

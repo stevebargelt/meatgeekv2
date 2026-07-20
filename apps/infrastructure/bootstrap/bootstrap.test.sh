@@ -274,18 +274,38 @@ if [ "${AAD_APP_NAME:-}" != "${AAD_DEPLOY_APP_NAME:-}" ] && [ -n "${AAD_DEPLOY_A
 else bad "plan and deploy identities must use distinct base display names"; fi
 
 # The PLAN identity keeps Reader (subscription-scope, read-only) — already
-# asserted above via CI_PLAN_ROLE default; here assert the DEPLOY identity is a
-# publish role scoped to the Function App ALONE, never subscription-wide write.
+# asserted above via CI_PLAN_ROLE default; here assert the DEPLOY identity's
+# publish role is Website Contributor scoped to the Function App ALONE. The role
+# assignment is now created by TERRAFORM (root main.tf) in the SAME apply that
+# creates the Function App — NOT by a bootstrap CLI grant (bootstrap runs
+# pre-apply, before the FA exists) — so these invariants are asserted against
+# the root Terraform, and the bootstrap must EMIT the SP object id coordinate.
+ROOT_MAIN="$DIR/../main.tf"
+ROOT_VARS="$DIR/../variables.tf"
 if grep -q 'DEPLOY_APP_ROLE:-Website Contributor' "$BOOT"; then
   ok "deploy identity role defaults to Website Contributor (publish-scoped)"
 else bad "deploy identity role must default to Website Contributor"; fi
-if grep -q -- '--scope "$fa_id"' "$BOOT"; then
-  ok "deploy publish role is scoped to the Function App id ONLY"
-else bad "deploy publish role must be scoped to the Function App (\$fa_id), not subscription"; fi
-# The deploy role must NOT be granted at a /subscriptions/ scope.
-if grep -A2 -- '--role "$DEPLOY_APP_ROLE"' "$BOOT" | grep -q '/subscriptions/'; then
-  bad "deploy publish role must not be granted at subscription scope"
+# The Terraform publish role assignment targets the Function App id with the
+# Website Contributor role.
+if grep -q 'functions_app_deploy_publisher' "$ROOT_MAIN" \
+   && grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q 'role_definition_name = "Website Contributor"' \
+   && grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q 'scope *= module.azure_functions.function_app_id'; then
+  ok "Terraform grants Website Contributor scoped to the Function App id ONLY"
+else bad "Terraform must grant Website Contributor scoped to module.azure_functions.function_app_id"; fi
+# The Terraform publish assignment is GUARDED by the object-id var so an empty
+# value still validates/plans (count → 0).
+if grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q 'count .*app_deploy_principal_object_id != ""'; then
+  ok "Terraform publish assignment guarded by app_deploy_principal_object_id (empty → skipped)"
+else bad "Terraform publish assignment must be guarded (count) on app_deploy_principal_object_id being non-empty"; fi
+# The publish role must NOT be granted at a /subscriptions/ scope anywhere.
+if grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q '/subscriptions/'; then
+  bad "publish role must not be scoped to a subscription"
 else ok "no subscription-scoped grant for the deploy publish role"; fi
+# The object-id variable exists and defaults to empty (so a bare plan validates).
+if grep -q 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" \
+   && grep -A5 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" | grep -q 'default *= ""'; then
+  ok "app_deploy_principal_object_id variable exists and defaults to empty"
+else bad "app_deploy_principal_object_id variable must exist with an empty default"; fi
 # Deploy identity's state access is READ-ONLY (Reader, not Contributor).
 if grep -q -- '--role "Storage Blob Data Reader"' "$BOOT"; then
   ok "deploy identity gets Storage Blob Data READER on state (read-only)"
@@ -294,6 +314,13 @@ else bad "deploy identity must get read-only state access (Storage Blob Data Rea
 if grep -q 'AZURE_APP_DEPLOY_CLIENT_ID' "$BOOT"; then
   ok "bootstrap emits AZURE_APP_DEPLOY_CLIENT_ID for the app-deploy job"
 else bad "bootstrap must emit AZURE_APP_DEPLOY_CLIENT_ID"; fi
+# Emits the SP OBJECT ID as a labeled coordinate so the operator sets
+# app_deploy_principal_object_id in dev.tfvars BEFORE the apply (closes the
+# publish-role sequencing gap without a missing post-apply step).
+if grep -q 'AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID' "$BOOT" \
+   && grep -q 'app_deploy_principal_object_id' "$BOOT"; then
+  ok "bootstrap emits AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID + names the tfvars key"
+else bad "bootstrap must emit the app-deploy SP object id coordinate (AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID)"; fi
 # Prod deployment identity is an EXPLICIT MG-25 gap, not silently created here.
 if grep -q 'MG-25' "$BOOT"; then
   ok "prod app-deployment identity is documented as an explicit MG-25 gap"

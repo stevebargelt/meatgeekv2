@@ -127,12 +127,6 @@ CI_PLAN_ROLE="${CI_PLAN_ROLE:-Reader}"
 # subscription. Emitted as AZURE_APP_DEPLOY_CLIENT_ID for the app-deploy job.
 AAD_DEPLOY_APP_NAME="${AAD_DEPLOY_APP_NAME:-meatgeek-v2-github-appdeploy}"
 DEPLOY_APP_ROLE="${DEPLOY_APP_ROLE:-Website Contributor}"
-# The dev Function App is named "${resource_prefix}-func-${global_suffix}" by the
-# Terraform functions module (resource_prefix = meatgeek-v2-dev). The suffix is
-# only known post-apply, so the deploy role is scoped by discovering the site by
-# this name prefix; if it does not exist yet the grant is deferred (see below).
-FUNCTIONAPP_NAME_PREFIX="${FUNCTIONAPP_NAME_PREFIX:-meatgeek-v2-dev-func-}"
-
 # --- dev ENTRA API AUTH registration (MG-24 item 3) ------------------------
 # The API app the Function App's Easy Auth validates tokens against. DISTINCT
 # from every OIDC/deployment app. Exposes ONE delegated scope, `access_as_user`.
@@ -470,7 +464,7 @@ bootstrap_deploy_identity() {
   # DEV ONLY. Prod app-deployment identity is MG-25 (see runbook / summary).
   local env="development" tfenv="dev"
   local app_name="${AAD_DEPLOY_APP_NAME}-${tfenv}"
-  local container app_id sp_id cred_name subject existing fa_id container_scope
+  local container app_id sp_id cred_name subject existing container_scope
   container="$(state_container_for "$env")"
 
   log "── dev APP-DEPLOYMENT identity ${app_name} (publish-only, separate SP)"
@@ -519,27 +513,17 @@ JSON
     ok "Federated credential created: ${cred_name}"
   fi
 
-  # Publish role: `Website Contributor` scoped to the dev Function App ALONE.
-  # The site name carries a post-apply suffix, so discover it by name prefix.
-  # If it does not exist yet (first run, pre-apply) the grant is DEFERRED — the
-  # bootstrap is idempotent, so re-running after the first apply completes it.
-  fa_id="$(az resource list \
-    --resource-type "Microsoft.Web/sites" \
-    --query "[?starts_with(name, '${FUNCTIONAPP_NAME_PREFIX}')].id | [0]" \
-    -o tsv 2>/dev/null || true)"
-  if [ -n "$fa_id" ] && [ "$fa_id" != "null" ]; then
-    log "Assigning '${DEPLOY_APP_ROLE}' scoped to the dev Function App ONLY"
-    az role assignment create \
-      --assignee-object-id "$sp_id" \
-      --assignee-principal-type ServicePrincipal \
-      --role "$DEPLOY_APP_ROLE" \
-      --scope "$fa_id" \
-      -o none
-    ok "'${DEPLOY_APP_ROLE}' granted on ${fa_id##*/} ONLY (no subscription-wide write)"
-  else
-    warn "Dev Function App (${FUNCTIONAPP_NAME_PREFIX}*) not found yet — publish role DEFERRED."
-    warn "Re-run bootstrap.sh AFTER the first Terraform apply to scope the deploy identity (idempotent)."
-  fi
+  # Publish role: `${DEPLOY_APP_ROLE}` (Website Contributor) scoped to the dev
+  # Function App ALONE. This role is now created by TERRAFORM in the SAME apply
+  # that creates the Function App (root azurerm_role_assignment
+  # "functions_app_deploy_publisher", guarded by var.app_deploy_principal_object_id)
+  # — NOT here. Bootstrap runs BEFORE the apply, so the FA does not exist yet;
+  # discovering it here and granting via CLI would only ever defer, and a
+  # post-apply re-run would collide with Terraform's own assignment. Instead we
+  # EMIT this identity's SP OBJECT ID below so the operator sets
+  # app_deploy_principal_object_id in dev.tfvars and the single apply grants it.
+  # The SP object id is $sp_id (resolved above via `az ad sp show --id <appId>
+  # --query id`). No Function-App lookup is needed here.
 
   # State read for publish (resolve outputs) — READER, not Contributor, on the
   # dev container ONLY. The deploy identity must never write state.
@@ -559,16 +543,26 @@ JSON
   cat <<SUMMARY
 
 ────────────────────────────────────────────────────────────────────
-dev APP-DEPLOYMENT identity — add as an *Environment* variable on the
-GitHub 'development' environment (NO client secret exists or is needed):
+dev APP-DEPLOYMENT identity — separate SP, publish-only.
 
-  AZURE_APP_DEPLOY_CLIENT_ID = ${app_id}
-  (AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID are shared with the plan identity)
+  1) Add as an *Environment* variable on the GitHub 'development' environment
+     (NO client secret exists or is needed):
+
+       AZURE_APP_DEPLOY_CLIENT_ID = ${app_id}
+       (AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID are shared with the plan identity)
+
+  2) Set this SP OBJECT ID in environments/dev.tfvars BEFORE the apply so
+     Terraform grants '${DEPLOY_APP_ROLE}' scoped to the Function App alone in
+     the SAME apply that creates it (then `func publish` works immediately):
+
+       AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID = ${sp_id}
+       # → app_deploy_principal_object_id = "${sp_id}"
 
   Federated subject: ${subject}
-  Role: ${DEPLOY_APP_ROLE} on the dev Function App ONLY + Storage Blob Data
-        Reader on ${container} ONLY. This identity publishes code; it cannot
-        plan/mutate other infra and cannot write state.
+  Role: ${DEPLOY_APP_ROLE} on the dev Function App ONLY (Terraform-managed via
+        app_deploy_principal_object_id) + Storage Blob Data Reader on
+        ${container} ONLY (granted above). This identity publishes code; it
+        cannot plan/mutate other infra and cannot write state.
   MG-25 GAP: the PROD app-deployment identity + its publish role are NOT
              created here — they are provisioned under MG-25 (prod activation).
 ────────────────────────────────────────────────────────────────────

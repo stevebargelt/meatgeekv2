@@ -70,6 +70,16 @@ functions_auth_allowed_audiences = [] # ["api://<dev-api-client-id>"]  (dev API 
 # token acquisition prompts for consent. A token from any OTHER client is rejected.
 functions_auth_allowed_client_app_ids = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"] # Azure CLI public client
 
+# App-deployment identity → Function App publish role (MG-24 item 4).
+# The SERVICE PRINCIPAL OBJECT ID of the SEPARATE app-deployment identity that
+# `func publish` runs as. The bootstrap (Part 1) creates that identity BEFORE
+# this apply and emits its object id as AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID.
+# Paste it here so THIS apply grants Website Contributor scoped to the Function
+# App alone — then `func publish` works immediately, with no missing post-apply
+# grant step. Leaving it empty still validates/plans but produces a Function App
+# nothing can publish to; REQUIRED before you deploy code to dev.
+app_deploy_principal_object_id = "" # <app-deploy SP object id: AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID>
+
 # Cost management
 enable_backup          = false # Disable backups in dev to save costs
 backup_retention_days  = 1
