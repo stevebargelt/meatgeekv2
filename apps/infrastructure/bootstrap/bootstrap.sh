@@ -59,7 +59,18 @@ GITHUB_REPO="${GITHUB_REPO:-stevebargelt/meatgeekv2}"
 # container below. These MUST be `environment:<name>` scopes (not
 # `ref:refs/heads/<branch>`), so trust is gated by the GitHub Environment
 # protection rules, not merely by which branch a workflow ran on.
-GITHUB_ENVIRONMENTS="${GITHUB_ENVIRONMENTS:-dev production}"
+#
+# CANONICAL SUBJECT SCHEME (MG-24 red-fix — must not drift):
+#   subject = repo:<owner>/<repo>:environment:<github-env>
+# The <github-env> tokens here MUST be the EXACT `environment:` values the
+# workflow jobs declare — `development` (ci.yml deploy-dev) and `production`
+# (infra-deploy-prod / app-deploy-prod). A GitHub deploy job with
+# `environment: development` presents the OIDC subject
+# `repo:<owner>/<repo>:environment:development`, so the dev federated credential
+# MUST be created for exactly that subject (previously `…:environment:dev`,
+# which silently never matched). The short tf env / state names (dev, prod) are
+# derived from these via tf_env_for below — do NOT federate the short forms.
+GITHUB_ENVIRONMENTS="${GITHUB_ENVIRONMENTS:-development production}"
 
 # Base display name for the per-environment AAD applications. Each environment
 # gets its OWN app: "${AAD_APP_NAME}-dev" and "${AAD_APP_NAME}-prod".
@@ -79,9 +90,13 @@ warn() { printf '\033[0;33m⚠️  %s\033[0m\n' "$*"; }
 die()  { printf '\033[0;31m❌ %s\033[0m\n' "$*" >&2; exit 1; }
 
 # Map a GitHub Environment name to its Terraform environment / state container.
-# GitHub uses `production`; Terraform + state keys use `prod`.
+# GitHub uses the full words `development`/`production` (which is what the
+# workflow `environment:` values — and therefore the OIDC subjects — use);
+# Terraform + state keys use the short `dev`/`prod`. Federation happens on the
+# GitHub-env name (the subject), NOT this short form.
 tf_env_for() {
   case "$1" in
+    development) echo "dev" ;;
     production) echo "prod" ;;
     *) echo "$1" ;;
   esac

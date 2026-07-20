@@ -250,11 +250,16 @@ See **[CI/CD Pipeline](../development/ci-cd.md)** for the full model.
 ### OIDC deployment identity
 
 The GitHub Actions identity uses **federated credentials scoped per GitHub
-Environment** (`repo:stevebargelt/meatgeekv2:environment:dev` and
-`:environment:production`), not per branch — so the dev CI identity can never
-authenticate to prod. It holds a **plan/read-only** role (`Reader` +
-`Storage Blob Data Contributor` on the state account only). Apply is never
-granted to CI. The identity is created by the bootstrap (see the runbook).
+Environment** — the canonical subject scheme
+`repo:<owner>/<repo>:environment:<github-env>` where `<github-env>` is the exact
+`environment:` the deploy job declares (`repo:stevebargelt/meatgeekv2:environment:development`
+for dev and `:environment:production` for prod), not per branch — so the dev CI
+identity can never authenticate to prod. dev and prod are SEPARATE identities
+(no shared SP). It holds a **plan/read-only** role (`Reader` +
+`Storage Blob Data Contributor` on that env's state container only). Apply is
+never granted to CI. The identities are created by the bootstrap (see the
+runbook), and the workflow↔bootstrap subject alignment is asserted in CI by
+`oidc-subject-consistency.spec.ts`.
 
 ## Getting Started
 
@@ -313,9 +318,16 @@ SUPABASE_ANON_KEY=<your-supabase-anon-key>
 SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
 ```
 
-> **Open security item (deferred):** Function-App connection strings are
-> currently injected as plaintext app settings. Whether to route them through
-> **Key Vault references** is left to a human security review.
+> **Identity-based service access (MG-24).** The Function App runs under a
+> **system-assigned managed identity**, and access to Cosmos DB, IoT/Event Hub
+> telemetry, SignalR, and its own host storage is granted by **RBAC role
+> assignments** on that identity. App settings carry only **non-secret
+> endpoints** (`COSMOSDB__accountEndpoint`,
+> `IOTHUB_EVENTS__fullyQualifiedNamespace`,
+> `AzureSignalRConnectionString__serviceUri`) — **no connection strings or
+> primary keys** are injected as app settings or written to Terraform state, so
+> there is no plaintext secret to route through Key Vault. See
+> [Azure Functions API → Application Settings](../api/azure-functions.md#application-settings).
 
 ## Static Validation
 

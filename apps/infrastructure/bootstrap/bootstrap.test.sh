@@ -65,6 +65,63 @@ if grep -Eq 'subject.*:ref:refs/heads' "$BOOT"; then
   bad "federated subject must NOT be a bare branch ref"
 else ok "no branch-ref-only federated subject"; fi
 
+# --- OIDC subject CONSISTENCY (MG-24 red-fix): bootstrap subjects == workflow ---
+# The dev-auth-fails bug was a silent DRIFT: bootstrap federated
+# `…:environment:dev` while the workflow job declared `environment: development`,
+# so the presented OIDC subject (`repo:<repo>:environment:development`) never
+# matched the credential. Assert the two sides agree, per environment, so it
+# cannot silently drift again.
+#
+# bootstrap.sh is sourced above, so GITHUB_ENVIRONMENTS / tf_env_for /
+# state_container_for are callable directly.
+
+# The canonical GitHub-Environment set the bootstrap federates must be the
+# full-word names the workflows use — `development` (ci.yml deploy-dev) and
+# `production` — NOT the retired bare `dev` that never matched.
+case " $GITHUB_ENVIRONMENTS " in
+  *" development "*) ok "bootstrap federates 'development' (matches ci.yml deploy-dev environment)";;
+  *) bad "GITHUB_ENVIRONMENTS must include 'development' (deploy-dev uses environment: development)";;
+esac
+case " $GITHUB_ENVIRONMENTS " in
+  *" production "*) ok "bootstrap federates 'production'";;
+  *) bad "GITHUB_ENVIRONMENTS must include 'production'";;
+esac
+case " $GITHUB_ENVIRONMENTS " in
+  *" dev "*) bad "GITHUB_ENVIRONMENTS must not federate bare 'dev' (workflow uses 'development'; subjects would never match)";;
+  *) ok "no stale bare-'dev' GitHub Environment federated";;
+esac
+
+# The full-word GitHub-env names still derive the short dev/prod tf + state
+# names, so state containers keep matching backend-{dev,prod}.hcl.
+[ "$(tf_env_for development)" = "dev" ]  && ok "tf_env_for development -> dev"  || bad "tf_env_for development must map to dev"
+[ "$(tf_env_for production)"  = "prod" ] && ok "tf_env_for production -> prod" || bad "tf_env_for production must map to prod"
+[ "$(state_container_for development)" = "tfstate-dev" ]  && ok "dev state container -> tfstate-dev (backend-dev.hcl)"  || bad "dev container must be tfstate-dev"
+[ "$(state_container_for production)"  = "tfstate-prod" ] && ok "prod state container -> tfstate-prod (backend-prod.hcl)" || bad "prod container must be tfstate-prod"
+
+# CROSS-CHECK the actual workflow YAML: every `environment:` a job declares
+# (which becomes the presented OIDC subject repo:<repo>:environment:<env>) MUST
+# be a GitHub Environment the bootstrap federates. This is the anti-drift gate.
+WF_DIR="$DIR/../../../.github/workflows"
+if [ -d "$WF_DIR" ]; then
+  wf_envs="$(grep -rhoE '^[[:space:]]*environment:[[:space:]]*[A-Za-z0-9_-]+' \
+      "$WF_DIR/ci.yml" "$WF_DIR/infra-deploy-prod.yml" "$WF_DIR/app-deploy-prod.yml" 2>/dev/null \
+    | sed -E 's/.*environment:[[:space:]]*//' | sort -u)"
+  [ -n "$wf_envs" ] || bad "no workflow environment: declarations found to cross-check"
+  for e in $wf_envs; do
+    case " $GITHUB_ENVIRONMENTS " in
+      *" $e "*) ok "workflow environment '$e' matches a bootstrap federated subject" ;;
+      *) bad "workflow environment '$e' has NO matching bootstrap federated credential (OIDC subject would not match)" ;;
+    esac
+  done
+  if grep -qE '^[[:space:]]*environment:[[:space:]]*development[[:space:]]*$' "$WF_DIR/ci.yml"; then
+    ok "ci.yml deploy-dev declares environment: development (subject repo:*:environment:development)"
+  else
+    bad "ci.yml must declare environment: development so the dev OIDC subject matches bootstrap"
+  fi
+else
+  bad "workflow dir not found for OIDC subject cross-check: $WF_DIR"
+fi
+
 # --- No client secret is created (OIDC = no long-lived secret) --------------
 if grep -Eq 'az ad (app|sp) credential (reset|create)' "$BOOT"; then
   bad "must not mint a client secret for the OIDC identity"

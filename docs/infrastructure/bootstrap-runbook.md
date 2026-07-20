@@ -82,13 +82,35 @@ What it creates (and nothing else):
    (`STATE_RG`, `STATE_STORAGE_ACCOUNT`, `STATE_CONTAINER`, `STATE_LOCATION`) —
    if you override them, update the `backend-*.hcl` files to match.
 
-2. **The GitHub Actions OIDC deployment identity** — an Azure AD application +
-   service principal with **federated credentials scoped per GitHub
-   Environment** (`repo:stevebargelt/meatgeekv2:environment:dev` and
-   `:environment:production`), **not** per branch. Because trust is bound to the
-   GitHub Environment (and its protection rules), the dev CI identity can never
-   mint a token accepted by the prod federated credential. **No client secret is
-   ever created** — OIDC issues short-lived tokens at run time.
+2. **The GitHub Actions OIDC deployment identity** — a SEPARATE Azure AD
+   application + service principal PER environment, each with a **federated
+   credential scoped per GitHub Environment**, **not** per branch. Because trust
+   is bound to the GitHub Environment (and its protection rules), the dev CI
+   identity can never mint a token accepted by the prod federated credential.
+   **No client secret is ever created** — OIDC issues short-lived tokens at run
+   time.
+
+   **Canonical subject scheme (must not drift):**
+
+   ```
+   subject = repo:<owner>/<repo>:environment:<github-env>
+   ```
+
+   `<github-env>` is the EXACT `environment:` value the deploy job declares, so
+   the credential the bootstrap creates equals the OIDC subject GitHub presents.
+   The two environments and their (short) Terraform/state names:
+
+   | GitHub Environment (workflow `environment:` + OIDC subject) | Federated subject                                       | tf env / state container |
+   | ----------------------------------------------------------- | ------------------------------------------------------- | ------------------------ |
+   | `development` (ci.yml `deploy-dev`)                          | `repo:stevebargelt/meatgeekv2:environment:development`  | `dev` / `tfstate-dev`    |
+   | `production` (infra-deploy-prod / app-deploy-prod)           | `repo:stevebargelt/meatgeekv2:environment:production`   | `prod` / `tfstate-prod`  |
+
+   The full-word GitHub-Environment names (`development`, `production`) are what
+   the workflows declare — a deploy job with `environment: development` presents
+   the subject `…:environment:development`, so the bootstrap federates that exact
+   subject (never a bare `…:environment:dev`, which would silently never match).
+   A jest guard (`oidc-subject-consistency.spec.ts`, in CI) and the bootstrap
+   tests (`bootstrap.test.sh`) assert this alignment so it cannot drift.
 
    The CI identity is granted least-privilege **`Reader`** (plan/read-only) at
    subscription scope plus **`Storage Blob Data Contributor` on the state
@@ -103,7 +125,8 @@ line of defense against a mistyped override pointing the bootstrap at V1.
 ### Wire the OIDC coordinates into GitHub
 
 The script prints the non-secret coordinates to register as **GitHub
-Environment** variables/secrets (per environment: `dev`, `production`):
+Environment** variables/secrets (one set per environment — the GitHub
+Environments named `development` and `production`):
 
 ```
 AZURE_CLIENT_ID        = <appId>

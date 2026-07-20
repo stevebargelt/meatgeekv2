@@ -9,10 +9,11 @@ on:
   workflow_dispatch:
 
 # OIDC: this workflow authenticates to Azure via a GitHub-Environment-scoped
-# federated credential (subject `environment:production`), NOT a long-lived
-# service-principal secret. The dev CI identity is scoped to `environment:dev`
-# and can never authenticate here. `id-token: write` lets azure/login mint the
-# short-lived OIDC token; `contents: read` is for checkout.
+# federated credential (subject `repo:<owner>/<repo>:environment:production`),
+# NOT a long-lived service-principal secret. The dev CI identity is scoped to
+# `environment:development` (a SEPARATE identity/subject) and can never
+# authenticate here. `id-token: write` lets azure/login mint the short-lived
+# OIDC token; `contents: read` is for checkout.
 permissions:
   id-token: write
   contents: read

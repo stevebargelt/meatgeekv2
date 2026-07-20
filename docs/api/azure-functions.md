@@ -106,7 +106,7 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
       "name": "messages",
       "direction": "in",
       "eventHubName": "temperature-realtime",
-      "connection": "EventHubConnectionString",
+      "connection": "IOTHUB_EVENTS",
       "cardinality": "many",
       "consumerGroup": "realtime-functions"
     }
@@ -323,29 +323,42 @@ export class EventDataAdapter {
 ```
 
 ### **Application Settings**:
+
+The Function App runs under a **system-assigned managed identity**, and every
+backing service (Cosmos DB, IoT/Event Hub telemetry, SignalR, host storage) is
+reached **identity-based**: the settings carry only **non-secret endpoints**, and
+data-plane access is granted by RBAC role assignments on the identity. **No
+connection strings or primary keys** are placed in app settings or Terraform
+state. These are exactly the settings Terraform configures on the Function App:
+
 ```bash
-# CosmosDB (for API functions only - real-time functions don't use it)
-COSMOSDB_CONNECTION_STRING=<cosmos-connection>
-COSMOSDB_DATABASE_NAME=meatgeek
+# Runtime
+FUNCTIONS_WORKER_RUNTIME=node
+WEBSITE_NODE_DEFAULT_VERSION=~20
 
-# Event Hub (for real-time functions)
-EventHubConnectionString=<event-hub-connection>
-
-# SignalR (for real-time broadcasting)
-AzureSignalRConnectionString=<signalr-connection>
-
-# Supabase Authentication
-SUPABASE_URL=<supabase-project-url>
-SUPABASE_ANON_KEY=<supabase-anon-key>
-SUPABASE_SERVICE_ROLE_KEY=<supabase-service-key>
-
-# Application Insights
+# Application Insights (telemetry connection string — the one non-secret-endpoint exception)
 APPLICATIONINSIGHTS_CONNECTION_STRING=<insights-connection>
+APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50
 
-# OpenTelemetry
-OTEL_SERVICE_NAME=meatgeek-api
-OTEL_SERVICE_VERSION=1.0.0
+# Cosmos DB — identity-based. NON-SECRET account endpoint only; the managed
+# identity holds a Cosmos SQL data-plane role assignment.
+COSMOSDB__accountEndpoint=<cosmos-account-endpoint>
+
+# IoT telemetry (Event Hubs-compatible) — identity-based. NON-SECRET
+# fully-qualified namespace only; the managed identity holds Azure Event Hubs
+# Data Receiver.
+IOTHUB_EVENTS__fullyQualifiedNamespace=<iot-eventhub-namespace-fqdn>
+
+# SignalR — identity-based. NON-SECRET service URI only; the managed identity
+# holds SignalR Service Owner.
+AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 ```
+
+> The `__accountEndpoint` / `__fullyQualifiedNamespace` / `__serviceUri` suffixes
+> are the Functions host's convention for identity-based bindings: the host
+> resolves each service using the app's managed identity against the non-secret
+> endpoint, so there is no secret to leak. Host storage is likewise identity-based
+> (`storage_uses_managed_identity`), so no storage account key is written either.
 
 ## Function Deployment
 
