@@ -308,14 +308,20 @@ inspect_rows() {
       continue
     fi
 
-    # Does this VALUE look like a credential at all?
-    if ! printf '%s\n' "${value}" | grep -qE "${CRED_MARKER_RE}"; then
+    # Does this VALUE look like a credential at all? Match CASE-INSENSITIVELY:
+    # Azure honors connection-string keywords regardless of case, so a lowercased
+    # or mixed-case `accountkey=` / `AcCountKey=` / `accountendpoint=…;accountkey=`
+    # is just as live a secret as the canonical form. A case-SENSITIVE match here
+    # was a gate bypass — the exact hole this closes.
+    if ! printf '%s\n' "${value}" | grep -qiE "${CRED_MARKER_RE}"; then
       continue   # non-secret value (endpoint / URI / plain string) — fine
     fi
 
     # It is a credential value. The ONLY accepted credential is the full App
     # Insights connection string in an app_setting, under local-auth-disabled.
-    if printf '%s\n' "${value}" | grep -qE "${AI_CONNSTR_RE}"; then
+    # Case-insensitive here too so a mixed-case AI conn string still routes to the
+    # managed-ikey binding below rather than the generic-credential reject.
+    if printf '%s\n' "${value}" | grep -qiE "${AI_CONNSTR_RE}"; then
       if [ "${kind}" = "app_setting" ] && [ "${ai_local_auth_disabled}" = "true" ]; then
         # The exception is bound to the MANAGED resource: the embedded
         # InstrumentationKey MUST be one of this plan/state's own App Insights

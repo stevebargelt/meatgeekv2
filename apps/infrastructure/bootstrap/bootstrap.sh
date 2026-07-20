@@ -78,10 +78,13 @@ source "${BOOTSTRAP_DIR}/../scripts/state-account-name.sh"
 # Configuration (defaults intentionally match environments/backend-*.hcl)
 # --------------------------------------------------------------------------
 STATE_RG="${STATE_RG:-meatgeek-v2-tfstate-rg}"
-# Empty by default: the state-account name is DERIVED from the subscription id
-# via state-account-name.sh (single source of truth, globally unique — MG-24
-# item 9). An explicit STATE_STORAGE_ACCOUNT override still wins if provided.
-STATE_STORAGE_ACCOUNT="${STATE_STORAGE_ACCOUNT:-}"
+# The state-account name is ALWAYS derived from the subscription id via the
+# single sourced helper state-account-name.sh (single source of truth, globally
+# unique — MG-24 item 9). It is intentionally NOT overridable: reading a
+# STATE_STORAGE_ACCOUNT env override would let bootstrap, the backend-*.hcl init,
+# and the workflows drift to different names. Filled in bootstrap_state_backend;
+# any inherited STATE_STORAGE_ACCOUNT from the environment is deliberately ignored.
+STATE_STORAGE_ACCOUNT=""
 STATE_LOCATION="${STATE_LOCATION:-eastus}"
 
 # GitHub repository that will assume the OIDC identities. The federated-credential
@@ -212,13 +215,12 @@ bootstrap_state_backend() {
   log "Subscription: ${sub_id}"
 
   # Derive the globally-unique state-account name from the subscription id
-  # (MG-24 item 9) unless the operator explicitly overrode it. Same single
-  # helper the CI workflows + runbook use, so the name can never drift.
-  if [ -z "${STATE_STORAGE_ACCOUNT:-}" ]; then
-    STATE_STORAGE_ACCOUNT="$(state_account_name "$sub_id")" \
-      || die "could not derive the state-account name from the subscription id"
-    log "State storage account (subscription-derived): ${STATE_STORAGE_ACCOUNT}"
-  fi
+  # (MG-24 item 9). ALWAYS derived — no override path — so bootstrap, the
+  # backend-*.hcl init, and the CI workflows all resolve the SAME name from the
+  # same helper and can never drift.
+  STATE_STORAGE_ACCOUNT="$(state_account_name "$sub_id")" \
+    || die "could not derive the state-account name from the subscription id"
+  log "State storage account (subscription-derived): ${STATE_STORAGE_ACCOUNT}"
 
   assert_v2_name "resource group"   "$STATE_RG"              || die "state RG failed V2 guard"
   assert_v2_name "storage account"  "$STATE_STORAGE_ACCOUNT" || die "state storage failed V2 guard"

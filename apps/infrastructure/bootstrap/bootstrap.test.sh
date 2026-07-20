@@ -238,6 +238,18 @@ if grep -q 'STATE_STORAGE_ACCOUNT:-meatgeekv2tfstate' "$BOOT"; then
   bad "state-account default must not be the hardcoded meatgeekv2tfstate literal"
 else ok "no hardcoded meatgeekv2tfstate default (derived instead)"; fi
 
+# SINGLE-SOURCE derivation (MG-24 item 9): the state-account name is ALWAYS
+# derived from the helper — NO STATE_STORAGE_ACCOUNT env override may win, or
+# bootstrap could drift from the backend-*.hcl init / workflows. Assert no
+# override path exists: no env-seeded default and no `if [ -z ... ]` guard that
+# would preserve an inherited value.
+if grep -Eq 'STATE_STORAGE_ACCOUNT="\$\{STATE_STORAGE_ACCOUNT:-' "$BOOT"; then
+  bad "STATE_STORAGE_ACCOUNT must not read an env override (single-source derivation)"
+else ok "no STATE_STORAGE_ACCOUNT env override (name is always derived)"; fi
+if grep -Eq 'if \[ -z "\$\{STATE_STORAGE_ACCOUNT' "$BOOT"; then
+  bad "state-account derivation must be unconditional (no override-preserving guard)"
+else ok "state-account name is derived unconditionally (no override guard)"; fi
+
 # ===========================================================================
 # MG-24 corrective (item 4): TWO distinct dev identities — plan/read vs deploy
 # ===========================================================================

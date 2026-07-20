@@ -338,11 +338,15 @@ WEBSITE_NODE_DEFAULT_VERSION=~20
 
 # Application Insights — identity-based (AAD) telemetry ingestion. The managed
 # identity holds "Monitoring Metrics Publisher" on the App Insights resource and
-# the host authenticates with an AAD token, so NO instrumentation/ingestion key
-# is set. The connection string carries only the NON-SECRET ingestion endpoint;
-# there is no secret connection string to configure.
+# the host authenticates with an AAD token (APPLICATIONINSIGHTS_AUTHENTICATION_STRING).
+# APPLICATIONINSIGHTS_CONNECTION_STRING is the FULL connection string —
+# InstrumentationKey included, because Microsoft requires the ikey as the
+# destination-resource identifier even under Entra-only ingestion — but that ikey
+# CANNOT authenticate: local_authentication_disabled=true on the App Insights
+# resource forces AAD-only ingestion, so the ikey is an inert, non-credential
+# identifier, not a secret to protect.
 APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD
-APPLICATIONINSIGHTS_CONNECTION_STRING=IngestionEndpoint=<insights-ingestion-endpoint>
+APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=<ikey>;IngestionEndpoint=<insights-ingestion-endpoint>;LiveEndpoint=<insights-live-endpoint>
 APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50
 
 # Cosmos DB — identity-based. NON-SECRET account endpoint only; the managed
@@ -368,13 +372,17 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > Application Insights follows the same identity-based model: telemetry is
 > published with an AAD token — `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`
 > plus a **Monitoring Metrics Publisher** role assignment on the App Insights
-> resource — so no instrumentation/ingestion key is placed in app settings.
-> `APPLICATIONINSIGHTS_CONNECTION_STRING` carries only the non-secret
-> `IngestionEndpoint`; Terraform parses it out of the platform-generated
-> connection string and deliberately drops the key portion. The App Insights
-> resource's computed `instrumentation_key`/`connection_string` still land in
-> Terraform state as an inherent computed attribute — an accepted, telemetry-write-only
-> residual documented in
+> resource. `APPLICATIONINSIGHTS_CONNECTION_STRING` is the **full**
+> Terraform-managed connection string, **`InstrumentationKey` included** —
+> Microsoft requires the ikey as the **destination-resource identifier** even
+> under Entra-only ingestion, so the endpoint-only value is not used. That ikey
+> **cannot authenticate ingestion**: the App Insights resource sets
+> **`local_authentication_disabled = true`**, so only an AAD token (Monitoring
+> Metrics Publisher) is accepted and an ikey-only client is rejected. The ikey
+> therefore lands in this app setting and in Terraform state as an **inert,
+> non-credential** telemetry-destination identifier — an accepted residual that
+> is safe **only while local auth stays disabled**, a coupling enforced by the
+> pre-apply secret-inspection gate. See
 > [ADR: App Insights instrumentation key remains in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 ## Function Deployment

@@ -138,12 +138,12 @@ export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
 
 # Clean init bound to the dev state key, with the derived state-account name
-# injected from the single sourced helper:
-nx init infrastructure --env=dev
-#   or directly:
-#   terraform init -reconfigure \
-#     -backend-config=environments/backend-dev.hcl \
-#     -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
+# injected from the single sourced helper (ARM_SUBSCRIPTION_ID must be exported).
+# `nx init` binds only the .hcl and does NOT inject storage_account_name, so it
+# cannot bind the remote backend on its own — init it directly:
+terraform init -reconfigure \
+  -backend-config=environments/backend-dev.hcl \
+  -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
 ```
 
 > **Never use `terraform init -migrate-state`** on first init — it would pull
@@ -197,6 +197,8 @@ anywhere in the stack.
 
 ```bash
 nx init     infrastructure --env=dev   # terraform init -reconfigure -backend-config=environments/backend-dev.hcl
+                                       #   NOTE: hcl-only — does NOT inject storage_account_name, so it cannot
+                                       #   bind the remote backend alone. Init directly (see the Bootstrap block above).
 nx validate infrastructure             # terraform validate
 nx format   infrastructure             # terraform fmt -recursive
 nx plan     infrastructure --env=dev   # terraform plan -var-file=environments/dev.tfvars -out=tfplan

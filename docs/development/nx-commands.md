@@ -247,8 +247,13 @@ nx run mobile:deploy --platform=android --device=emulator
 
 ### Terraform Operations
 ```bash
-# Initialize Terraform
-nx init infrastructure
+# Initialize Terraform against the remote backend. `nx init` binds only the
+# backend-*.hcl and does NOT pass the derived storage_account_name, so init the
+# remote backend directly (ARM_SUBSCRIPTION_ID must be exported):
+#   cd apps/infrastructure && terraform init -reconfigure \
+#     -backend-config=environments/backend-dev.hcl \
+#     -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
+nx init infrastructure   # hcl-only; insufficient for the remote backend on its own
 
 # Plan infrastructure changes
 nx plan infrastructure --env=dev

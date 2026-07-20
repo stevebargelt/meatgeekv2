@@ -190,7 +190,10 @@ module "cosmos_db" {
 ## Nx Integration
 
 `project.json` wraps the Terraform commands. The `init` target is **env-aware**
-and passes `-reconfigure` so switching environments re-binds the backend:
+and passes `-reconfigure` so switching environments re-binds the backend. Note it
+binds **only** the `-backend-config=environments/backend-{env}.hcl` file and does
+**not** inject the derived `storage_account_name` — so it is not sufficient to bind
+the remote backend by itself (see the caveat under Common Nx commands below):
 
 ```jsonc
 {
@@ -211,12 +214,21 @@ and passes `-reconfigure` so switching environments re-binds the backend:
 ### Common Nx commands
 
 ```bash
-nx init     infrastructure --env=dev
+nx init     infrastructure --env=dev     # binds the hcl only — see caveat below
 nx plan     infrastructure --env=dev
 nx apply    infrastructure --env=dev     # operator-run only, never CI
 nx validate infrastructure
 nx destroy  infrastructure --env=dev
 ```
+
+> **`nx init` does not bind the remote backend on its own.** The `init` wrapper
+> runs `terraform init -reconfigure -backend-config=environments/backend-{env}.hcl`
+> **without** the derived `storage_account_name`, which the `backend-*.hcl` files
+> deliberately omit — so on a clean checkout it cannot resolve the state account.
+> To bind the remote backend, run `terraform init` directly with **both**
+> `-backend-config` flags (as shown above and in the [bootstrap runbook](./bootstrap-runbook.md),
+> and as the CI/CD workflows do). Once the backend is bound, `nx plan` / `nx apply`
+> operate against it normally.
 
 ## Environment Management
 
@@ -255,7 +267,9 @@ CI **never** runs `terraform apply`. The authoritative model:
 - **`.github/workflows/infra-deploy-prod.yml`** — authenticates via **OIDC**
   (`id-token: write`, `azure/login` with the per-environment federated
   credential; no long-lived service-principal secret), binds prod remote state
-  (`-backend-config=environments/backend-prod.hcl`), runs under the `production`
+  (`terraform init -reconfigure -backend-config=environments/backend-prod.hcl`
+  plus `-backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"`),
+  runs under the `production`
   GitHub Environment gate, and **ends at `terraform plan`**. There is **no**
   `apply`.
 - **`.github/workflows/app-deploy-prod.yml`** — reads
@@ -311,7 +325,11 @@ runbook), and the workflow↔bootstrap subject alignment is asserted in CI by
    ```bash
    cd apps/infrastructure
    rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
-   nx init infrastructure --env=dev
+   # Bind the remote backend with the derived state-account name (the `nx init`
+   # wrapper does NOT inject storage_account_name, so init it directly):
+   terraform init -reconfigure \
+     -backend-config=environments/backend-dev.hcl \
+     -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
    nx plan infrastructure --env=dev
    # apply is operator-run per the runbook, after human plan review
    ```

@@ -294,7 +294,12 @@ terraform init -reconfigure \
   cached one.
 - The injected `storage_account_name` matches the account the bootstrap created
   from the **same** derivation, so init can never bind a divergent account name.
-- Equivalent Nx target: `nx init infrastructure --env=dev`.
+- **Do not substitute `nx init infrastructure --env=dev` here.** The Nx `init`
+  wrapper runs `terraform init -reconfigure -backend-config=environments/backend-dev.hcl`
+  **without** the derived `storage_account_name`, so it cannot bind the remote
+  backend on its own — run the `terraform init` above (both `-backend-config`
+  flags) directly. Once the backend is bound, `nx plan` / `nx apply` operate
+  against it normally.
 
 ### Step 4 — Plan the complete stack
 
@@ -499,8 +504,9 @@ gated activation.
   `terraform validate`, `terraform fmt -check`, and
   `scripts/tf-static-checks.sh`. The `deploy-dev` job is **plan-only**.
 - `.github/workflows/infra-deploy-prod.yml` authenticates via **OIDC**, binds
-  the prod remote state (`-backend-config=environments/backend-prod.hcl`), runs
-  under the `production` GitHub Environment gate, and **ends at
+  the prod remote state (`terraform init -reconfigure -backend-config=environments/backend-prod.hcl`
+  plus `-backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"`),
+  runs under the `production` GitHub Environment gate, and **ends at
   `terraform plan`** — there is **no** `apply` in CI.
 
 Never add auto-apply to CI. Apply stays an operator action per this runbook.
