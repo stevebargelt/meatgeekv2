@@ -1,32 +1,27 @@
-**Last session ended 2026-07-19.**
+**Session 2026-07-19.**
 
-**Where we left off:** Shipped MG-21 (prod deploy split) end-to-end via PR #2 — merged to main as `dc5df4d`. Clean tree. The CI-hardening arc (MG-20/22/21) is complete; deploy is now split and the red-on-every-push symptom is gone.
+**MG-21 — prod deploy split + CORRECTIVE hardening: in flight (PR #3, tip 2129a7d), NOT yet merged, stays OPEN after merge.**
+An external P1/P2 review reopened the first MG-21 shipment (it had shipped a CI-gating regression + overclaimed deploy capability). The corrective round (operator Option A + 8-point spec) hardens the prod workflows:
+- `app-deploy-prod.yml` — triggers via `workflow_run` on **CI/CD Pipeline** completion, deploys ONLY when that run's conclusion==success/event==push/head_branch==main AND repo variable **`PROD_DEPLOY_ENABLED`=='true'**. Checks out `workflow_run.head_sha`; **stale-SHA guard** re-verified immediately before deploy (TOCTOU closed — deploy gates on both an initial and a final freshness check). NO `workflow_dispatch` (retry via GitHub re-run). NO credential-guard job; `environment: production` only on the deploy job. `AZURE_CREDENTIALS_PROD` must be a **production-ENVIRONMENT secret**. Azure Functions Core Tools pinned (4.12.1). Builds + verifies a valid Functions package (`apps/api/host.json`+`package.json`, `tools/verify-func-package.js`).
+- `infra-deploy-prod.yml` — **plan-only** (no `terraform apply`), dispatch-only, pending MG-24.
+- Tests: `prod-deploy-split.spec.ts` (new-model assertions) + `verify-func-package.spec.ts`. Docs reconciled (ci-cd, nx-commands, terraform-setup, azure-functions, plan).
 
-**Picked up next:**
-1. **MG-23** — mirror the infra/app deploy split for dev (`develop`): `infra-deploy-dev.yml` + `app-deploy-dev.yml`, remove `deploy-dev` from `ci.yml`. ALSO remove the now-orphaned build-artifact upload from `ci.yml` at that point (it's retained today only because `deploy-dev` still downloads it — see MG-21). Precedent: the two prod workflows are the template; dev is a near-mechanical copy with `dev.tfvars`/`AZURE_CREDENTIALS`.
-2. **MG-24** — wire the terraform `azurerm` remote backend (`backend-config.hcl` exists, unwired), THEN enable infra auto-apply-on-merge (add the `push`+`apps/infrastructure/**` trigger to `infra-deploy-prod.yml`, and dev's). Blocker MG-21 deferred: today terraform runs on local state, so auto-apply would plan against empty state and try to recreate all prod infra.
-3. **Feature work** — MG-9 (data-models bug fixes; ready characterization-test AC — cleanest start), MG-14 (Phase 2 SignalR cook events), MG-6 (OTel).
+**Remaining to close MG-21 (req 8 — operator-gated):** the deterministic config+packaging is done; the closing EVIDENCE is a credentialed **dev Function App deploy** of the exact packaged `dist/apps/api` — operator-triggered. Operator actions when ready:
+1. Store `AZURE_CREDENTIALS_PROD` as a **production-environment** secret.
+2. Set repo variable `PROD_DEPLOY_ENABLED=true`.
+3. Run a dev Function App deploy (`nx deploy api` / `func publish`) to prove the package publishes, then report back → MG-21 closes.
 
-**Shipped this session (2026-07-18 → 07-19):**
-- **MG-20** — pinned npm 10.9.8 (`packageManager` + `corepack enable` in CI). Guard `ci-toolchain-pin.spec.ts`. Manual `npx npm@10` workaround retired.
-- **MG-22** — `nrwl/nx-set-shas@v4` so nx-affected works on PRs (was `git diff main HEAD`, fails in PR checkout). Both shipped in PR #1 (`56b0038`).
-- **MG-21** — split prod deploy out of `ci.yml`'s monolithic `deploy-prod`:
-  - `infra-deploy-prod.yml` — `workflow_dispatch` ONLY (auto-apply-on-merge deferred to MG-24).
-  - `app-deploy-prod.yml` — push to `main` on `apps/api/**`+`libs/**` + dispatch; **API-only** (`nx deploy api --env=prod`); self-contained build; credential-skip guard on `AZURE_CREDENTIALS_PROD`.
-  - Both: `environment: production` (reviewer-less), concurrency `cancel-in-progress: false`.
-  - `deploy-prod` removed from `ci.yml`; build-artifact upload RETAINED (deploy-dev still needs it).
-  - Guard `prod-deploy-split.spec.ts` (14 assertions, incl. that the guard reads the secret & derives `has_creds`). Docs reconciled: `ci-cd.md`, `nx-commands.md`, `meatgeekV2-plan.md`.
-  - **Post-merge PROVEN**: `app-deploy-prod` triggered (merge touched `libs/**`), guard job succeeded, `deploy-api` job SKIPPED (no creds) → workflow success not failure. `infra-deploy-prod` did NOT trigger (dispatch-only). ci.yml green.
+**Follow-ups (AC expanded per the review):**
+- **MG-23** — dev deploy split; dev infra plan-only until MG-24 (no unsafe empty-state auto-apply); mirror app-deploy safety; remove the now-orphaned artifact upload when `deploy-dev` leaves ci.yml.
+- **MG-24** — wire terraform azurerm remote backend, MIGRATE/IMPORT authoritative state (a fresh empty backend still recreates infra), prove a no-recreate first plan, THEN enable infra auto-apply-on-merge. Also align infra-deploy-prod's guard/env model (residual of review finding #6).
+- **Feature work** — MG-9 (data-models, cleanest start), MG-14 (Phase 2 SignalR), MG-6 (OTel).
 
-**External state to remember:**
-- GitHub repo PUBLIC. Branch protection on `main`: required checks setup, lint-and-test x4, build-typescript x2, build-go x2, validate-infrastructure, security-scan; deploy jobs/workflows EXCLUDED; enforce_admins off.
-- npm pinned (MG-20); PRs work in CI (MG-22); prod deploy split + gated (MG-21).
-- Prod deploy secrets: `AZURE_CREDENTIALS_PROD` (repo or `production` env) — currently ABSENT, so app-deploy-prod skips green. Prod is API-ONLY (no prod web deploy). Terraform still on LOCAL state (MG-24 to fix).
+**Shipped earlier this session:** MG-20 (npm pin 10.9.8 + corepack), MG-22 (nx-set-shas PR-CI fix) — PR #1 `56b0038`. The FIRST MG-21 split (later reopened) — PR #2 `dc5df4d`.
 
-**Decisions worth not relitigating:**
-- MG-21 rescoped mid-flight: the architect (via a red) caught that prod deploy is API-only (web is dev-only) and terraform has no remote backend. Operator chose: prod API-only, infra dispatch-only, defer auto-apply+backend to MG-24. Full pipeline abandoned, re-routed to quick chain.
-- The `ci.yml` build-artifact upload is NOT orphaned while `deploy-dev` lives there (deploy-dev downloads it). Removing it broke dev — review-loop caught it. Remove only when MG-23 splits deploy-dev.
-- MG-21 took ~7 review-loop rounds; every finding was legitimate (removed-job guard ref, upload/deploy-dev break, weak guard test, three stale deploy docs, stale handoff note). The loop earned its keep.
-- Binding INTERIM durable-dispatch rule still in effect: all Forge agent/multi-minute commands via `forge launch run` + ScheduleWakeup, never synchronous Bash — until FG-552/562/563.
+**External state:** GitHub PUBLIC; branch protection on `main` requires setup, lint-and-test x4, build-typescript x2, build-go x2, validate-infrastructure, security-scan (deploy EXCLUDED, enforce_admins off). Prod creds ABSENT (app-deploy-prod skips green). Prod is API-only. Terraform on LOCAL state (MG-24).
 
-**Shipped (older, for reference):** MG-15 (secret scrub + public publish), MG-16 (Nx alignment), MG-17 (goqueue race), MG-18 (TS build boundaries), MG-19 (CI repair + branch protection).
+**Ops note:** `forge review-loop` HANGS on this repo's host-side local verification (nx plugin-worker stall) — used `forge invoke red-wide` (container) + green PR CI as the review gate instead. If review-loop is needed later, watch for the hang.
+
+**Decisions not to relitigate:** MG-21 corrective = operator Option A (workflow_run CI-gating), env-secret + PROD_DEPLOY_ENABLED variable (not a credential-guard job), no dispatch on app deploy, infra plan-only until MG-24. Binding interim durable-dispatch rule still in effect (forge launch run + ScheduleWakeup) until FG-552/562/563.
+
+**Older shipped:** MG-15/16/17/18/19.
