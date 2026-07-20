@@ -363,6 +363,8 @@ nx build api --configuration=production
 nx deploy api --env=prod
 ```
 
+> In production this runs from CI, not by hand. The `app-deploy-prod.yml` workflow invokes `nx deploy api --env=prod` automatically **after the CI/CD Pipeline completes green on a push to `main`**, gated by the `PROD_DEPLOY_ENABLED` repository variable. See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod).
+
 ## Performance Optimizations
 
 ### **Real-time Functions**:

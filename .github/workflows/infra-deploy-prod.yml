@@ -47,9 +47,10 @@ jobs:
         with:
           terraform_version: '~1.9'
 
-      - name: Deploy Infrastructure
+      - name: Plan Infrastructure (plan-only)
+        # apply deferred to MG-24 (no remote state backend yet) — a `terraform
+        # apply` against empty local state would try to recreate all prod infra.
         run: |
           cd apps/infrastructure
           terraform init
           terraform plan -var-file=environments/prod.tfvars -out=tfplan
-          terraform apply -auto-approve tfplan

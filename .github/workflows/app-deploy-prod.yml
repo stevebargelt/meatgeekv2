@@ -1,69 +1,95 @@
 name: Deploy Prod App
 
 # Prod is API-only — no web/Static-Web-Apps deploy (that's dev-only).
+#
+# Trigger model (MG-21, Option A): this workflow runs ONLY after the "CI/CD
+# Pipeline" workflow completes. There is no push trigger and no workflow_dispatch
+# — prod deploys are gated on a green CI run of a push to main, plus the
+# vars.PROD_DEPLOY_ENABLED operator switch. A stale-SHA guard ensures we never
+# deploy a commit that main has already advanced past.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/api/**'
-      - 'libs/**'
-  workflow_dispatch:
+  workflow_run:
+    workflows: ['CI/CD Pipeline']
+    types: [completed]
 
 env:
   NODE_VERSION: '20'
   # Let corepack download the packageManager-pinned npm without an interactive prompt.
   COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+  FUNC_CORE_TOOLS_VERSION: '4.12.1'
 
 concurrency:
   group: app-deploy-prod-production
   cancel-in-progress: false
 
 jobs:
-  guard:
+  deploy-api:
+    # Deploy only when the triggering CI run: succeeded, was a push (not a PR),
+    # targeted main, AND the operator has flipped the PROD_DEPLOY_ENABLED switch.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      vars.PROD_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: production
-    outputs:
-      has_creds: ${{ steps.check.outputs.has_creds }}
     steps:
-      - name: Check for Azure credentials
-        id: check
+      - name: Stale-SHA guard (deploy only the current main tip)
+        id: freshness
         env:
-          CREDS: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+          GH_TOKEN: ${{ github.token }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          if [ -n "$CREDS" ]; then
-            echo "has_creds=true" >> $GITHUB_OUTPUT
+          CURRENT_TIP=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          echo "CI'd commit:   $CI_SHA"
+          echo "Current main:  $CURRENT_TIP"
+          if [ "$CI_SHA" = "$CURRENT_TIP" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Head SHA is the current main tip — proceeding."
           else
-            echo "has_creds=false" >> $GITHUB_OUTPUT
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "main has advanced past the CI'd commit — skipping deploy (not a failure)."
           fi
 
-  deploy-api:
-    needs: guard
-    if: needs.guard.outputs.has_creds == 'true'
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Checkout code
+      - name: Checkout the CI'd commit
+        if: steps.freshness.outputs.fresh == 'true'
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Setup Node.js
+        if: steps.freshness.outputs.fresh == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
       - name: Enable corepack (use packageManager-pinned npm)
+        if: steps.freshness.outputs.fresh == 'true'
         run: corepack enable
 
       - name: Install dependencies
+        if: steps.freshness.outputs.fresh == 'true'
         run: npm ci
 
       - name: Build api
+        if: steps.freshness.outputs.fresh == 'true'
         run: npx nx build api
 
-      - name: Setup Azure CLI
+      - name: Verify Functions package
+        if: steps.freshness.outputs.fresh == 'true'
+        run: node apps/api/tools/verify-func-package.js dist/apps/api
+
+      - name: Pin Azure Functions Core Tools
+        if: steps.freshness.outputs.fresh == 'true'
+        run: npm i -g azure-functions-core-tools@${{ env.FUNC_CORE_TOOLS_VERSION }}
+
+      - name: Azure login
+        if: steps.freshness.outputs.fresh == 'true'
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
 
       - name: Deploy to Production
+        if: steps.freshness.outputs.fresh == 'true'
         run: npx nx deploy api --env=prod

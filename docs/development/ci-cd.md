@@ -44,16 +44,33 @@ Production deployment is **not** in `ci.yml`. It lives in two standalone workflo
 
 | Workflow | Triggers | What it deploys |
 |----------|----------|-----------------|
-| `infra-deploy-prod.yml` | `workflow_dispatch` only (manual / recovery) | Terraform infrastructure (`terraform apply` against `apps/infrastructure`) |
-| `app-deploy-prod.yml` | push to `main` scoped to `apps/api/**` and `libs/**`, plus `workflow_dispatch` | Functions API only, via `nx deploy api --env=prod` |
+| `infra-deploy-prod.yml` | `workflow_dispatch` only (manual / recovery) | Terraform infrastructure — **plan-only** (`terraform init` + `terraform plan`, **no `apply`**) pending MG-24 |
+| `app-deploy-prod.yml` | `workflow_run` — after the **CI/CD Pipeline** workflow completes (no push trigger, no `workflow_dispatch`) | Functions API only, via `nx deploy api --env=prod` |
 
 Prod is **API-only** — there is no prod web / Static Web Apps deploy; the web app is deployed to dev only.
 
-`app-deploy-prod.yml` builds its own artifact (`corepack enable` → `npm ci` → `nx build api`); there is no artifact sharing between workflows.
+#### App deploy: CI-gated via `workflow_run`
 
-**Infra is manual-only for now.** Auto-apply-on-merge (a push trigger on `apps/infrastructure/**`) is intentionally deferred to MG-24 until Terraform has an `azurerm` remote state backend. With today's local-state posture, a path-triggered apply would plan against empty state and try to recreate all prod infrastructure, so infra prod deploys are run by hand via `workflow_dispatch`.
+`app-deploy-prod.yml` does **not** trigger on push. It runs on `workflow_run` when the **CI/CD Pipeline** workflow (`ci.yml`) *completes*, and only deploys when **all** of the following hold on the triggering CI run:
 
-**Credentials and environment.** Both prod workflows require the `AZURE_CREDENTIALS_PROD` repository secret and target the reviewer-less `production` environment, with `concurrency` set to not cancel in-progress runs. Each workflow's `guard` job checks for `AZURE_CREDENTIALS_PROD`: if the secret is absent, the deploy job **skips cleanly (green)** rather than failing — so a push to `main` is never red just because prod credentials are not set. Deploy credentials come from repository secrets and are never committed.
+- `conclusion == 'success'` — CI was green
+- `event == 'push'` — it was a push, not a pull request
+- `head_branch == 'main'` — the push targeted `main`
+- `vars.PROD_DEPLOY_ENABLED == 'true'` — the operator switch (a **repository variable**, not a secret) is flipped on
+
+This means prod app deploys only ever happen **after green CI on a push to `main`**, and never for a PR, a `develop` push, or a red build. `PROD_DEPLOY_ENABLED` is the master on/off switch: leave it unset (or anything other than `'true'`) to keep prod deploys dark; set it to `'true'` when you want green pushes to `main` to ship.
+
+**Stale-SHA guard.** The deploy job checks out the exact commit CI ran against (`github.event.workflow_run.head_sha`), but first compares that SHA to the current `main` tip. If `main` has already advanced past the CI'd commit, the job **skips cleanly (green, not a failure)** — it never deploys a commit that is no longer the head of `main`. When several pushes land in quick succession, only the run whose commit is still the tip deploys.
+
+**Retrying a failed deploy.** There is **no `workflow_dispatch`** on the app deploy. To retry, use GitHub's **re-run** on the relevant Actions run (the CI/CD Pipeline run, or the deploy run itself) — there is no manual trigger to invoke by hand.
+
+**Build and package check.** The job builds its own artifact (`corepack enable` → `npm ci` → `nx build api`); there is no artifact sharing between workflows. Before publishing it runs `node apps/api/tools/verify-func-package.js dist/apps/api`, which validates that the build is a well-formed Azure Functions (Node v4) package — `host.json` and `package.json` present and correct at the package root. Azure Functions Core Tools is pinned via `FUNC_CORE_TOOLS_VERSION` (currently `4.12.1`) so the publish toolchain does not drift.
+
+#### Infra deploy: plan-only, manual, pending MG-24
+
+`infra-deploy-prod.yml` is **`workflow_dispatch`-only** and **plan-only** — it runs `terraform init` and `terraform plan` (with `-var-file=environments/prod.tfvars`) but **does not `apply`**. Auto-apply-on-merge (a push trigger on `apps/infrastructure/**`) and the `apply` step itself are intentionally deferred to **MG-24** until Terraform has an `azurerm` remote state backend. With today's local-state posture, an `apply` against empty state would try to recreate all prod infrastructure, so infra prod runs are dispatched by hand and stop at the plan.
+
+**Credentials and environment.** `AZURE_CREDENTIALS_PROD` is a **`production`-environment secret** (not a repository secret) — it is only resolvable by jobs that declare `environment: production`. In `app-deploy-prod.yml` that environment is scoped to the deploy job alone; in `infra-deploy-prod.yml` both the `guard` and `deploy-infra` jobs use it. Both workflows set `concurrency` to not cancel in-progress runs. The infra workflow keeps a `guard` job that checks for `AZURE_CREDENTIALS_PROD` and skips cleanly (green) if it is absent. The app workflow has no such guard — it is gated by `PROD_DEPLOY_ENABLED` and consumes the environment secret directly. Deploy credentials come from GitHub secrets and are never committed.
 
 ## Branch Protection
 
@@ -66,7 +83,7 @@ Prod is **API-only** — there is no prod web / Static Web Apps deploy; the web 
 - `validate-infrastructure`
 - `security-scan`
 
-Deployment is **excluded** from the required checks — the `deploy-dev` job and the standalone prod deploy workflows (`infra-deploy-prod.yml`, `app-deploy-prod.yml`) run after a merge lands on the target branch, so they cannot be a merge gate.
+Deployment is **excluded** from the required checks — the `deploy-dev` job runs after a merge lands on the target branch, and the standalone prod deploy workflows run *after* CI (`app-deploy-prod.yml` is triggered by CI completing; `infra-deploy-prod.yml` is manual), so neither can be a merge gate.
 
 Branch protection is configured on the GitHub repository (Settings → Branches), not in a tracked file. When you add or rename a required job in `ci.yml`, update the required-status-check list to match, or the new job will run without gating merges.
 

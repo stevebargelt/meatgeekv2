@@ -12,7 +12,11 @@
         "outputPath": "dist/apps/api",
         "main": "apps/api/src/main.ts",
         "tsConfig": "apps/api/tsconfig.app.json",
-        "assets": ["apps/api/src/assets"],
+        "assets": [
+          "apps/api/src/assets",
+          { "glob": "host.json", "input": "apps/api", "output": "." },
+          { "glob": "package.json", "input": "apps/api", "output": "." }
+        ],
         "target": "node",
         "webpackConfig": "apps/api/webpack.config.js"
       },
@@ -77,13 +81,21 @@
     },
     "deploy": {
       "executor": "nx:run-commands",
+      "dependsOn": ["build"],
       "options": {
         "commands": [
-          "func azure functionapp publish meatgeek-api-{args.env} --typescript",
+          "func azure functionapp publish meatgeek-api-{args.env}",
           "echo 'API deployed to Azure Functions'"
         ],
         "parallel": false,
         "cwd": "dist/apps/api"
+      }
+    },
+    "verify-package": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["build"],
+      "options": {
+        "command": "node apps/api/tools/verify-func-package.js dist/apps/api"
       }
     }
   },

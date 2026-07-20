@@ -13,11 +13,5 @@
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
     "version": "[4.*, 5.0.0)"
   },
-  "functionTimeout": "00:05:00",
-  "httpWorker": {
-    "description": {
-      "defaultExecutablePath": "node",
-      "defaultWorkerPath": "dist/apps/api/main.js"
-    }
-  }
+  "functionTimeout": "00:05:00"
 }

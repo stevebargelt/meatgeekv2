@@ -276,7 +276,7 @@ nx deploy api --env=prod
 nx deploy web --env=dev
 ```
 
-> **Prod is API-only.** The `app-deploy-prod.yml` workflow deploys only `nx deploy api --env=prod`; there is no production web/Static Web Apps deploy. A `nx deploy web --env=prod` step is not yet implemented — do not run it as a current operator command.
+> **Prod is API-only, and prod app deploys are CI-gated — not run by hand.** The `nx deploy api --env=prod` command above is what the `app-deploy-prod.yml` workflow runs; in normal operation you don't invoke it yourself. That workflow is triggered by `workflow_run` **after the CI/CD Pipeline completes green on a push to `main`**, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'`. It has **no `workflow_dispatch`** — retry a failed deploy via GitHub's **re-run**, not a manual command. Prod **infra** deploy (`infra-deploy-prod.yml`) is `workflow_dispatch`-only and **plan-only** (no `terraform apply`) pending MG-24. There is no production web/Static Web Apps deploy — `nx deploy web --env=prod` is not implemented; do not run it. See [CI/CD Pipeline → Prod](ci-cd.md#prod) for the full gating model.
 
 ## Library Development
 
