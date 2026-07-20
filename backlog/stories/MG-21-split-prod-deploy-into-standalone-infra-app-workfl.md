@@ -35,6 +35,10 @@ REOPENED 2026-07-19 after an external P1/P2 review. The split + red-on-push fix 
 - `infra-deploy-prod` is plan-only (no local-state apply).
 - MG-21 remains OPEN pending the operator's successful DEV Function App deploy (dev creds) of the exact packaged artifact + a real-endpoint smoke test (req 8) — that dev proof is the closing evidence. Prod-secret + PROD_DEPLOY_ENABLED enable are NOT part of closing MG-21 (that is MG-25, production activation).
 
+## Publish path for the dev proof (operator-decided 2026-07-20)
+
+The manual MG-21 dev integration proof publishes with the OPERATOR's OWN authenticated dev session (`az login` as your dev identity → `nx build api` → `func publish` / `nx deploy api --env=dev` to the MG-24-created dev Function App). This proves the exact packaged artifact deploys and the AUTHENTICATED endpoint responds. The app-deploy OIDC service principal + its Website Contributor role (created by MG-24) is the AUTOMATED/CI deploy path — it is OIDC-only (no local login) and is exercised for real when MG-23's `app-deploy-dev` workflow lands; it is NOT used for this manual proof.
+
 ## Dependency (2026-07-20 — greenfield Azure facts)
 
 MeatGeek V2 has NO Azure dev infrastructure now (`meatgeek-dev-rg` was deleted; remaining MeatGeek resources are V1, out of scope). So MG-21's dev proof **DEPENDS ON MG-24** first creating the Terraform-owned V2 **dev** stack including the dev Function App. Sequence: MG-24 creates the dev Function App via IaC → then deploy commit `3dd4165`'s verified package to THAT Terraform-created Function App → smoke-test + capture the invocation log → MG-21 closes. **Do NOT manually create a proof Function App outside Terraform.** `PROD_DEPLOY_ENABLED` stays DISABLED throughout.

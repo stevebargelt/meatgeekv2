@@ -145,11 +145,16 @@ What it creates (and nothing else):
      > (`app_deploy_principal_object_id`) **before Step 4/6**, and the single
      > apply provisions the Function App **and** grants it `Website Contributor`
      > scoped to that Function App alone (root `azurerm_role_assignment`
-     > `functions_app_deploy_publisher`, guarded by `count` on the var). Then
-     > `func publish` works immediately — there is **no** separate post-apply
-     > grant step and **no** bootstrap re-run. Leaving the var empty still
+     > `functions_app_deploy_publisher`, guarded by `count` on the var). That
+     > makes the **automated/CI** publish path — `app-deploy-prod.yml` (and, when
+     > MG-23 lands, the dev `app-deploy` workflow) authenticating **as this OIDC
+     > SP** — work immediately, with **no** separate post-apply grant step and
+     > **no** bootstrap re-run. This SP is **OIDC-only** (no client secret, no
+     > local `az login`), so it is **not** used to publish from an operator's
+     > machine — the manual MG-21 dev proof publishes as the operator's own dev
+     > identity instead (Step 6a). Leaving the var empty still
      > validates/plans (the assignment is skipped); it is **required** for any
-     > environment you deploy code to. The bootstrap still grants this identity's
+     > environment you deploy code to via CI. The bootstrap still grants this identity's
      > read-only `Storage Blob Data Reader` on the state container directly (that
      > container exists before the apply and is not Terraform-managed).
 
@@ -200,7 +205,7 @@ Environments named `development` and `production`):
 
 ```
 AZURE_CLIENT_ID             = <plan/read appId>
-AZURE_APP_DEPLOY_CLIENT_ID  = <app-deployment appId>   # distinct SP; func-publish only
+AZURE_APP_DEPLOY_CLIENT_ID  = <app-deployment appId>   # distinct SP; CI/OIDC func-publish only
 AZURE_TENANT_ID             = <tenantId>
 AZURE_SUBSCRIPTION_ID       = <subscriptionId>
 ```
@@ -446,8 +451,12 @@ still the single source of truth the app deploy consumes.
 
 Because `app_deploy_principal_object_id` was set (Step 4), this **same** apply
 also granted the app-deployment identity `Website Contributor` on that Function
-App — so `func publish` (run as `AZURE_APP_DEPLOY_CLIENT_ID`) works immediately,
-with no additional grant step and no bootstrap re-run. Confirm the assignment:
+App. This is the **automated/CI publish path** — the OIDC
+`AZURE_APP_DEPLOY_CLIENT_ID` SP that `app-deploy-prod.yml` (and, when MG-23 lands,
+the dev `app-deploy` workflow) uses to `nx deploy api` / `func publish`. That SP
+is **OIDC-only** (no client secret, no local `az login`), so you do **not**
+publish as it from your machine — the manual MG-21 dev proof publishes as your own
+dev identity (Step 6a). Confirm the CI-path assignment exists:
 
 ```bash
 FUNC_ID="$(terraform state show module.azure_functions.azurerm_linux_function_app.main | awk '/^ *id /{print $3; exit}')"
@@ -456,12 +465,56 @@ az role assignment list --scope "$FUNC_ID" \
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 ```
 
-### Step 6a — Authenticated smoke test (unblocks MG-21)
+### Step 6a — Publish the app, then run the authenticated smoke test (unblocks MG-21)
 
-The Function App is **default-deny** with Easy Auth bound to the dev Entra API
-registration (Step "Dev app / API authentication registration"). Once
-`environments/dev.tfvars` carries the `functions_auth_*` values and the apply has
-activated the provider, acquire a delegated user token for the API's audience and
+The MG-21 dev integration proof has two parts, **both run manually by the operator
+using the operator's own authenticated dev session** — *not* the app-deploy OIDC
+service principal: first **publish** the packaged Functions artifact to the dev
+Function App, then run an **authenticated smoke test** against it.
+
+> **Why not the app-deploy SP?** The `AZURE_APP_DEPLOY_CLIENT_ID` identity is
+> **OIDC-only** — it has **no client secret and no local `az login` path**, so
+> there is no way to run `func publish` / `nx deploy api` **as it** from a local
+> machine. It is the **automated/CI** publish identity (exercised for real when
+> MG-23's dev `app-deploy` workflow lands); the `Website Contributor` grant
+> confirmed in Step 6 is what enables **that** path. Do **not** try to "publish as
+> the app-deploy SP" locally — the manual proof publishes as **you**.
+
+**Publish as your own dev identity.** You are already `az login`-ed as your dev
+identity from the bootstrap/apply. That identity needs publish rights on the dev
+Function App — either you already have them (e.g. Contributor/Owner on the dev
+resource group), **or** temporarily assign yourself `Website Contributor` scoped
+to the dev Function App:
+
+```bash
+FUNC="$(terraform output -raw function_app_name)"
+FUNC_ID="$(terraform state show module.azure_functions.azurerm_linux_function_app.main | awk '/^ *id /{print $3; exit}')"
+
+# Only if you don't already have publish rights on the dev FA:
+ME="$(az ad signed-in-user show --query id -o tsv)"
+az role assignment create --assignee-object-id "$ME" \
+  --assignee-principal-type User \
+  --role "Website Contributor" --scope "$FUNC_ID"
+```
+
+Then publish the packaged artifact to the dev Function App **as yourself**:
+
+```bash
+# Build + publish the API package — the Nx target CI runs, invoked locally under
+# your own dev session (NOT the app-deploy OIDC SP):
+npx nx deploy api --functionApp="$FUNC"
+#   … or the raw Core Tools publish against the built package:
+#   func azure functionapp publish "$FUNC"
+```
+
+This proves the packaged artifact deploys to the MG-24-created dev Function App.
+Capture the publish output as evidence.
+
+**Then run the authenticated smoke test.** The Function App is **default-deny**
+with Easy Auth bound to the dev Entra API registration (Step "Dev app / API
+authentication registration"). Once `environments/dev.tfvars` carries the
+`functions_auth_*` values and the apply has activated the provider, acquire a
+delegated user token for the API's audience — with the **same** dev session — and
 invoke the app. **Never log or paste the raw token** — capture only the HTTP
 status.
 
@@ -501,8 +554,10 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer ${WRONG}" \
 ```
 
 Capture the three status codes (no-token 401, valid-token 2xx, wrong-audience
-rejected) as the MG-21 authenticated-smoke evidence — **redact the token from
-every log**. Actual token acquisition and invocation require the live dev tenant,
+rejected) — plus the Function **invocation log** entry for the authenticated call
+(e.g. `az webapp log tail --name "$FUNC" --resource-group meatgeek-v2-dev-rg`, or
+the invocation from the portal/Application Insights) — as the MG-21
+authenticated-smoke evidence — **redact the token from every log**. Actual token acquisition and invocation require the live dev tenant,
 the populated `functions_auth_*` values, and a deployed app, so this step is
 **static-validated, operationally-unverified (operator live run)**.
 
@@ -565,6 +620,9 @@ Collect and attach to the MG-24 ticket:
   `scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID"` (RG
   `meatgeek-v2-tfstate-rg`).
 - The **plan/apply logs** captured above (`/tmp/mg24-evidence/*.txt`).
+- The **MG-21 dev proof** evidence from Step 6a: the operator-run publish output
+  and the authenticated-smoke result (no-token 401, valid-token 2xx,
+  wrong-audience rejected, plus the invocation log) — token redacted.
 - The **resource inventory**:
 
   ```bash
