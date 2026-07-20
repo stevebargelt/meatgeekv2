@@ -328,14 +328,39 @@ The Function App runs under a **system-assigned managed identity**, and every
 backing service (Cosmos DB, IoT/Event Hub telemetry, SignalR, host storage) is
 reached **identity-based**: those settings carry only **non-secret endpoints**,
 and data-plane access is granted by RBAC role assignments on the identity. **No
-service data-plane credential or key** — no Cosmos/Storage/IoT/SignalR
-connection string or primary key — is placed in app settings or Terraform state.
-The one connection string that *is* present, `APPLICATIONINSIGHTS_CONNECTION_STRING`,
-is the full App Insights value **including its `InstrumentationKey`**, but that
-ikey is a **non-authenticating destination identifier**, not a credential:
+service data-plane credential or key VALUE is USED** — no Cosmos/Storage/IoT/SignalR
+connection string or primary key is placed in `app_settings` or surfaced as a
+Terraform output.
+
+Those keys are **not, however, absent from Terraform state**. Every TF-managed
+data service exposes its own key / connection-string as an **inherent computed
+attribute**, and Terraform reads those attributes back into state on each apply
+**by construction** — no `azurerm` argument suppresses them. So the Cosmos
+account's keys, the Storage account's access keys, the SignalR service's access
+key, and the IoT Hub's SAS policy keys are all present in state. The security
+posture is not "no keys in state," it is **keys that cannot authenticate**:
+local/key auth is **disabled** on the services where doing so is safe —
+`local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
+on SignalR, `shared_access_key_enabled = false` on the Functions storage account
+(host storage is `storage_uses_managed_identity`). For those three the in-state
+key is a **present-but-non-authenticating residual**. **IoT Hub is the
+documented exception:** its SAS keys stay **live** because real devices, the
+data-pusher, and the device-controller authenticate with them (the device SDKs'
+supported path), so disabling local auth would sever device connectivity; that
+residual is mitigated by **restricted, container-scoped RBAC state access** and
+SAS-key rotation. `APPLICATIONINSIGHTS_CONNECTION_STRING` is the same class of
+residual: the full App Insights value **including its `InstrumentationKey`** is
+present in `app_settings` and state, but that ikey is a **non-authenticating
+destination identifier**, not a credential —
 `local_authentication_disabled = true` on the App Insights resource forces
 AAD-only ingestion, so the ikey cannot authenticate anything (see the detailed
-note below). These are exactly the settings Terraform configures on the Function App:
+note below). Each acceptance holds **only while local/key auth stays disabled**
+on Cosmos / SignalR / Storage / App Insights, a coupling **fail-closed enforced**
+by the pre-apply `tf-plan-secret-inspection.sh` gate (which also accepts the IoT
+Hub keys with a printed note as the acknowledged exception). See
+[ADR: Data-service keys in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
+
+These are exactly the settings Terraform configures on the Function App:
 
 ```bash
 # Runtime
@@ -372,8 +397,11 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > The `__accountEndpoint` / `__fullyQualifiedNamespace` / `__serviceUri` suffixes
 > are the Functions host's convention for identity-based bindings: the host
 > resolves each service using the app's managed identity against the non-secret
-> endpoint, so there is no secret to leak. Host storage is likewise identity-based
-> (`storage_uses_managed_identity`), so no storage account key is written either.
+> endpoint, so **no service key is written to app settings**. Host storage is
+> likewise identity-based (`storage_uses_managed_identity`), so no storage account
+> key reaches app settings either. (The services' inherent keys still exist as
+> computed attributes in Terraform state, made non-authenticating by disabling
+> local/key auth — IoT Hub excepted — as described above.)
 >
 > Application Insights follows the same identity-based model: telemetry is
 > published with an AAD token — `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`
