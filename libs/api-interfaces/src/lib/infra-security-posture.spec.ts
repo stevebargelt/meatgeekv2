@@ -1,8 +1,9 @@
 /**
  * Deterministic security-posture guard for the MeatGeek V2 Terraform stack
- * (MG-24 S1/S2). Host-runnable, NO credentials and NO live apply: it reads the
- * committed Terraform sources as text and asserts the secrets-out-of-state and
- * HTTP-posture invariants that must hold BEFORE the first greenfield apply.
+ * (MG-24 S1/S2, corrective round). Host-runnable, NO credentials and NO live
+ * apply: it reads the committed Terraform sources as text and asserts the
+ * secrets-out-of-state, global-uniqueness and HTTP-posture invariants that must
+ * hold BEFORE the first greenfield apply.
  *
  * Like prod-deploy-split.spec.ts next door, this is a *repo-tooling* invariant
  * that lives in api-interfaces so it runs on every CI push (the lint-and-test
@@ -17,26 +18,33 @@
  *     and its app_settings carry NON-SECRET endpoints (no *_CONNECTION_STRING /
  *     account access key) for Cosmos / IoT(EventHub) / SignalR.
  *   - The Function App identity is granted narrowly-scoped data-plane RBAC.
- *   - The Functions storage account name is subscription-derived (globally
- *     unique) so a greenfield apply cannot collide.
+ *   - Every globally-scoped name (Functions storage account, Function App, IoT
+ *     Hub, Event Hubs namespace, SignalR) is subscription-derived-unique so a
+ *     greenfield apply cannot collide.
  *
- * OPERATOR-ACCEPTED RESIDUAL (MG-24, operator decision): azurerm_application_insights
- * stays Terraform-managed, so the resource's OWN computed connection_string /
- * instrumentation_key are inherently in state (true of any TF-managed resource).
- * That is accepted as low-risk (telemetry write-only; the Function App
- * authenticates ingestion via AAD, so the key is unused for auth; state access
- * restricted). main.tf:94-95 extracts ONLY the non-secret IngestionEndpoint into
- * a local, and only that endpoint reaches app_settings. The allowance is narrow:
- * these specs STILL fail on a real secret VALUE (a connection string / key)
- * reaching an app_settings map OR an output, for ANY service App Insights
- * included — see the "operator-accepted residual" describe block below.
+ * OPERATOR-ACCEPTED RESIDUAL — CORRECTED COUPLED INVARIANT (MG-24 item 2):
+ *   azurerm_application_insights stays Terraform-managed, so the resource's OWN
+ *   computed connection_string / instrumentation_key are inherently in state
+ *   (true of any TF-managed resource). Microsoft requires the FULL connection
+ *   string (InstrumentationKey included, as the destination-resource identifier)
+ *   as APPLICATIONINSIGHTS_CONNECTION_STRING even under Entra-only ingestion, so
+ *   that full string DOES reach the Function App app_settings. This is accepted
+ *   as low-risk ONLY because the ikey CANNOT authenticate ingestion: the AI
+ *   resource sets `local_authentication_disabled = true`, forcing AAD-only
+ *   ingestion (the host publishes via Monitoring Metrics Publisher +
+ *   Authorization=AAD). The allowance is a COUPLED invariant — the full string is
+ *   safe ONLY while local auth stays disabled. These specs FAIL if the full AI
+ *   conn string is wired WITHOUT local_authentication_disabled=true, and still
+ *   FAIL on any OTHER service's secret VALUE (a connection string / key) reaching
+ *   an app_settings map OR an output. See the "operator-accepted residual"
+ *   describe blocks below and the MG-24 ADR.
  * S2 (Function App HTTP posture):
  *   - No wildcard CORS anywhere; allowed origins are environment-specific.
- *   - App Service Authentication is default-DENY (require_authentication=true,
- *     unauthenticated_action rejects rather than AllowAnonymous) on ALL paths —
- *     no anonymous carve-out for business (e.g. startCook) OR health. There is
- *     no HTTP health function and no excluded_paths bypass; health, if needed,
- *     is a platform mechanism, not an unauthenticated app path (MG-24 S2).
+ *   - App Service Authentication is FAIL-CLOSED / default-DENY: the module
+ *     refuses to plan (lifecycle precondition) unless an Entra identity provider
+ *     is configured, and once configured it is bearer-token VALIDATION only
+ *     (require_authentication=true, Return401, token store disabled, NO client
+ *     secret). No anonymous carve-out for business (e.g. startCook) OR health.
  */
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
@@ -81,7 +89,9 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     // and `access_key` are matched (not only the primary/secondary variants) so
     // an App Insights `.connection_string` — which embeds the InstrumentationKey —
     // or an `instrumentation_key` emitted as an OUTPUT is caught like any other
-    // service's secret. No App Insights exemption.
+    // service's secret. No App Insights exemption for OUTPUTS: the corrected
+    // coupled-invariant allowance is scoped to the Function App app_settings ONLY,
+    // never to a Terraform output.
     const secretPattern =
       /connection_string|primary_key|secondary_key|access_key|shared_access_policy|instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=/;
     const offenders: string[] = [];
@@ -124,18 +134,26 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       expect(live).not.toMatch(/SIGNALR_CONNECTION_STRING/);
     });
 
-    it('Application Insights ingestion is AAD identity-based — no ingestion key in app_settings', () => {
+    it('App Insights ingestion is AAD identity-based — full conn string from the module var, no hardcoded ikey', () => {
       // Host authenticates telemetry with an AAD token, not an ingestion key.
       expect(live).toMatch(/APPLICATIONINSIGHTS_AUTHENTICATION_STRING"\s*=\s*"Authorization=AAD"/);
-      // The connection-string setting carries ONLY the non-secret ingestion
-      // endpoint — never an instrumentation/ingestion key or a secret
-      // connection-string attribute reference.
-      expect(live).toMatch(/APPLICATIONINSIGHTS_CONNECTION_STRING"\s*=\s*"IngestionEndpoint=/);
+      // MG-24 item 2 CORRECTION: the FULL TF-managed connection string
+      // (InstrumentationKey included — Microsoft's required destination-resource
+      // identifier) is placed in app_settings via the module var. That is the
+      // corrected model; it is safe ONLY because local_authentication_disabled=true
+      // on the AI resource (asserted in the root main.tf test below and enforced
+      // by the tf-static-checks / tf-plan-secret-inspection gate).
+      expect(live).toMatch(
+        /APPLICATIONINSIGHTS_CONNECTION_STRING"\s*=\s*var\.application_insights_connection_string/
+      );
+      // The value flows from the module VAR — never a hardcoded literal
+      // InstrumentationKey= / ikey nor any OTHER service's secret attribute.
       expect(live).not.toMatch(/InstrumentationKey=/);
-      expect(live).not.toMatch(/instrumentation_key/i);
-      // No secret Terraform attribute / var is copied into app_settings.
+      expect(live).not.toMatch(/\.instrumentation_key/i);
+      // No secret Terraform attribute of ANOTHER service is copied into
+      // app_settings (only the accepted AI conn-string var is permitted).
       expect(live).not.toMatch(/\.connection_string/);
-      expect(live).not.toMatch(/var\.application_insights_connection_string/);
+      expect(live).not.toMatch(/COSMOSDB__accountKey|AccountKey=|SharedAccessKey=/);
     });
 
     it('grants the identity narrowly-scoped storage data roles', () => {
@@ -160,29 +178,33 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     expect(live).toMatch(/Monitoring Metrics Publisher/);
     // Scoped to the App Insights resource, targeting the Function App identity.
     expect(live).toMatch(/scope\s*=\s*azurerm_application_insights\.main\.id/);
-    // The App Insights connection string (with its ingestion key) is NOT passed
-    // into the Functions module — only the non-secret ingestion endpoint is.
-    expect(live).not.toMatch(/application_insights_connection_string\s*=/);
-    expect(live).toMatch(/application_insights_ingestion_endpoint\s*=/);
+    // MG-24 item 2 CORRECTION: the FULL AI connection string IS passed into the
+    // Functions module now (the endpoint-only local was removed) — safe because
+    // local auth is disabled (asserted below). The former endpoint-only
+    // interface must be gone.
+    expect(live).toMatch(/application_insights_connection_string\s*=/);
+    expect(live).not.toMatch(/application_insights_ingestion_endpoint\s*=/);
   });
 
-  it('root main.tf extracts ONLY the non-secret IngestionEndpoint from the AI connection string (main.tf:94-95)', () => {
-    // The accepted-residual extraction pattern: a regex pulls JUST the
-    // IngestionEndpoint substring out of the App Insights resource's own
-    // connection_string, wrapped in nonsensitive(), into a local. The
-    // instrumentation/ingestion key is never propagated — only the endpoint
-    // reaches the Functions module (and thence app_settings).
+  it('root passes the FULL AI connection string COUPLED to local_authentication_disabled=true (MG-24 item 2)', () => {
+    // The corrected accepted-residual model: the full TF-managed connection
+    // string (InstrumentationKey included) is materialized nonsensitive() into a
+    // local and handed to the Functions module — and that is safe ONLY because
+    // the AI resource forces AAD-only ingestion via local_authentication_disabled.
+    // The two facts are asserted together so the coupling cannot silently break.
     const live = stripComments(read('main.tf'));
-    expect(live).toMatch(/appinsights_ingestion_endpoint\s*=\s*nonsensitive\(/);
+    // (a) the full connection string local (no endpoint-substring regex extraction).
     expect(live).toMatch(
-      /regex\("IngestionEndpoint=\(\[\^;\]\+\)", azurerm_application_insights\.main\.connection_string\)/
+      /appinsights_connection_string\s*=\s*nonsensitive\(\s*azurerm_application_insights\.main\.connection_string\s*\)/
     );
-    // Only the endpoint local is handed to the Functions module — never the raw
-    // connection string or the instrumentation key.
+    // The endpoint-only extraction shape must NOT return (regex IngestionEndpoint=…).
+    expect(live).not.toMatch(/regex\("IngestionEndpoint=/);
+    // (b) local auth disabled on the AI resource — the safety basis.
+    expect(live).toMatch(/local_authentication_disabled\s*=\s*true/);
+    // (c) the local flows into the module (not the raw attribute, not the ikey).
     expect(live).toMatch(
-      /application_insights_ingestion_endpoint\s*=\s*local\.appinsights_ingestion_endpoint/
+      /application_insights_connection_string\s*=\s*local\.appinsights_connection_string/
     );
-    expect(live).not.toMatch(/application_insights_connection_string\s*=/);
     expect(live).not.toMatch(/application_insights_instrumentation_key\s*=/);
   });
 
@@ -204,6 +226,45 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     const line = live.split('\n').find(l => /functions_storage_account_name\s*=/.test(l)) ?? '';
     expect(line).toMatch(/sha1\(/);
     expect(line).toMatch(/subscription_id/);
+  });
+});
+
+describe('MG-24 item 9: every globally-scoped name is subscription-derived-unique', () => {
+  it('root computes a subscription-derived global_name_suffix and threads it to all global modules', () => {
+    const live = stripComments(read('main.tf'));
+    // Deterministic subscription-derived suffix (no wall-clock / random).
+    expect(live).toMatch(/global_name_suffix\s*=\s*substr\(\s*sha1\(/);
+    expect(live).toMatch(/global_name_suffix\s*=\s*substr\(\s*sha1\([^)]*subscription_id/);
+    // Threaded as `global_suffix` into iot_hub, azure_functions and signalr —
+    // one passthrough per globally-scoped module (>= 3).
+    const passthroughs = (live.match(/global_suffix\s*=\s*local\.global_name_suffix/g) ?? [])
+      .length;
+    expect(passthroughs).toBeGreaterThanOrEqual(3);
+  });
+
+  it('Function App name carries the global_suffix', () => {
+    const live = stripComments(read('modules/functions/main.tf'));
+    expect(live).toMatch(/name\s*=\s*"\$\{var\.resource_prefix\}-func-\$\{var\.global_suffix\}"/);
+  });
+
+  it('IoT Hub and Event Hubs namespace names carry the global_suffix', () => {
+    const live = stripComments(read('modules/iot-hub/main.tf'));
+    expect(live).toMatch(/name\s*=\s*"\$\{var\.resource_prefix\}-iothub-\$\{var\.global_suffix\}"/);
+    expect(live).toMatch(
+      /name\s*=\s*"\$\{var\.resource_prefix\}-eventhub-ns-\$\{var\.global_suffix\}"/
+    );
+    // The module declares the global_suffix input.
+    const vars = stripComments(read('modules/iot-hub/variables.tf'));
+    expect(vars).toMatch(/variable\s+"global_suffix"/);
+  });
+
+  it('SignalR service name carries the global_suffix', () => {
+    const live = stripComments(read('modules/signalr/main.tf'));
+    expect(live).toMatch(
+      /name\s*=\s*"\$\{var\.resource_prefix\}-signalr-\$\{var\.global_suffix\}"/
+    );
+    const vars = stripComments(read('modules/signalr/variables.tf'));
+    expect(vars).toMatch(/variable\s+"global_suffix"/);
   });
 });
 
@@ -246,40 +307,100 @@ describe('MG-24 S2: Function App HTTP posture', () => {
 
   it('App Service Authentication is default-DENY (require auth, reject anonymous)', () => {
     const live = stripComments(read('modules/functions/main.tf'));
-    expect(live).toMatch(/auth_settings_v2\s*\{/);
+    expect(live).toMatch(/auth_settings_v2/);
     expect(live).toMatch(/require_authentication\s*=\s*true/);
     // Unauthenticated requests are rejected (401/403), never allowed through.
     expect(live).toMatch(/unauthenticated_action\s*=\s*"Return(401|403)"/);
     expect(live).not.toMatch(/unauthenticated_action\s*=\s*"AllowAnonymous"/);
   });
 
+  it('Easy Auth is FAIL-CLOSED when unconfigured (plan precondition refuses an anonymous app)', () => {
+    // MG-24 item 3: an unconfigured Function App must not ship anonymous. The
+    // auth_settings_v2 block is present ONLY when the Entra API registration is
+    // configured (for_each gated on the client id), and a lifecycle precondition
+    // REFUSES the plan when it is empty — so default-deny is enforced at plan
+    // time rather than by an anonymous fallthrough.
+    const live = stripComments(read('modules/functions/main.tf'));
+    // Provider block is conditionally present on the configured client id.
+    expect(live).toMatch(
+      /for_each\s*=\s*var\.auth_active_directory_client_id\s*==\s*""\s*\?\s*\[\]\s*:\s*\[1\]/
+    );
+    // Fail-closed precondition: empty client id => plan refused.
+    expect(live).toMatch(/precondition\s*\{/);
+    expect(live).toMatch(/condition\s*=\s*var\.auth_active_directory_client_id\s*!=\s*""/);
+  });
+
+  it('Easy Auth is bearer-token VALIDATION only — token store disabled, NO client secret', () => {
+    // MG-24 item 3: this is API/bearer-token validation, not an interactive
+    // sign-in flow. No token-at-rest (token_store_enabled=false) and no client
+    // secret anywhere (no secret materialized into state).
+    const live = stripComments(read('modules/functions/main.tf'));
+    expect(live).toMatch(/token_store_enabled\s*=\s*false/);
+    expect(live).not.toMatch(/client_secret/);
+    expect(live).toMatch(/allowed_applications\s*=/);
+  });
+
+  it('allowed_applications validates the CALLING client, NOT the API registration (MG-24 item 1 corrective)', () => {
+    // allowed_applications checks the token's appid/azp — the CALLING client —
+    // so it must be bound to the smoke-test client allowlist var, never to the
+    // API registration's own client id. Binding [var.auth_active_directory_client_id]
+    // (the API, which is the callee) is the exact bug this corrects.
+    const funcLive = stripComments(read('modules/functions/main.tf'));
+    expect(funcLive).toMatch(/allowed_applications\s*=\s*var\.auth_allowed_client_app_ids/);
+    expect(funcLive).not.toMatch(
+      /allowed_applications\s*=\s*\[\s*var\.auth_active_directory_client_id\s*\]/
+    );
+    // client_id + allowed_audiences still carry the API registration / App ID URI.
+    expect(funcLive).toMatch(/client_id\s*=\s*var\.auth_active_directory_client_id/);
+    expect(funcLive).toMatch(/allowed_audiences\s*=\s*var\.auth_allowed_audiences/);
+    // The module declares the calling-client allowlist var, defaulted to the
+    // Azure CLI public client (the caller for the operator token flow).
+    const funcVars = stripComments(read('modules/functions/variables.tf'));
+    expect(funcVars).toMatch(/variable\s+"auth_allowed_client_app_ids"/);
+    expect(funcVars).toMatch(/04b07795-8ddb-461a-bbee-02f9e1bf7b46/);
+    // Root threads it through and dev.tfvars wires the calling client id(s).
+    const rootLive = stripComments(read('main.tf'));
+    expect(rootLive).toMatch(
+      /auth_allowed_client_app_ids\s*=\s*var\.functions_auth_allowed_client_app_ids/
+    );
+    const devTfvars = read('environments/dev.tfvars');
+    expect(devTfvars).toMatch(/functions_auth_allowed_client_app_ids\s*=/);
+    expect(devTfvars).toMatch(/04b07795-8ddb-461a-bbee-02f9e1bf7b46/);
+  });
+
   it('auth is required on ALL paths — no anonymous carve-out (business OR health)', () => {
     // Easy Auth enforces auth for every path; there is no HTTP health function
     // and no anonymous exception. Assert the Terraform carves out nothing: no
-    // per-path bypass (excluded_paths), and no anonymous "health"/"ready"/"live"
-    // route hole. Dropping the anonymous-health exception is the S2 default-deny
-    // resolution — health, if ever needed, is a platform mechanism, not an
-    // unauthenticated app path.
+    // per-path bypass (excluded_paths), no anonymous "health"/"ready"/"live"
+    // route hole, and no require_authentication=false. Dropping the
+    // anonymous-health exception is the S2 default-deny resolution — health, if
+    // ever needed, is a platform mechanism, not an unauthenticated app path.
+    //
+    // NOTE: the fail-closed error_message legitimately uses the word "anonymous"
+    // to describe what it PREVENTS, so a naive /anonymous/i scan would be a false
+    // positive here; we instead assert the concrete carve-out shapes are absent.
     const live = stripComments(read('modules/functions/main.tf'));
     expect(live).not.toMatch(/excluded_paths/);
     expect(live).not.toMatch(/require_authentication\s*=\s*false/);
-    expect(live).not.toMatch(/anonymous/i);
-    expect(live).not.toMatch(/\/health\b/);
+    expect(live).not.toMatch(/unauthenticated_action\s*=\s*"AllowAnonymous"/);
+    expect(live).not.toMatch(/"\/health"|path\s*=\s*"\/health/);
   });
 });
 
-describe('MG-24 S1: the static gate documents the operator-accepted App Insights residual precisely', () => {
+describe('MG-24 S1: the static gate documents the operator-accepted App Insights residual (corrected coupling)', () => {
   const gate = read('scripts/tf-static-checks.sh');
 
-  it('documents the operator-accepted residual (auditable, non-widening)', () => {
+  it('documents the coupled-invariant residual (auditable, non-widening)', () => {
     // The gate carries an explicit, auditable note: the App Insights resource
     // stays TF-managed, so its own computed connection_string / instrumentation_key
-    // are inherently in state (an accepted low-risk residual), and main.tf:94-95
-    // extracts ONLY the non-secret IngestionEndpoint. The note must state the
-    // allowance is narrow and does NOT exempt app_settings / outputs.
+    // are inherently in state (an accepted low-risk residual). The corrected model
+    // allows the FULL conn string in app_settings ONLY when
+    // local_authentication_disabled=true (the coupled invariant), and the runtime
+    // guarantee is the fail-closed plan/state inspection.
     expect(gate).toMatch(/OPERATOR-ACCEPTED RESIDUAL/);
-    expect(gate).toMatch(/IngestionEndpoint/);
-    expect(gate).toMatch(/inherently stores its own computed attributes in state/);
+    expect(gate).toMatch(/local_authentication_disabled/);
+    expect(gate).toMatch(/coupled-invariant/);
+    expect(gate).toMatch(/tf-plan-secret-inspection\.sh/);
     // It is explicitly NOT a blanket App Insights exemption.
     expect(gate).toMatch(/NOT a blanket App Insights exemption/);
   });
@@ -288,18 +409,24 @@ describe('MG-24 S1: the static gate documents the operator-accepted App Insights
     // Check-7 pattern includes a bare `connection_string` (so an App Insights
     // `.connection_string` output — which embeds the InstrumentationKey — is
     // caught, not only the primary/secondary variants) plus the ingestion-key
-    // markers.
+    // markers. OUTPUTS get NO App Insights exemption (the coupled allowance is
+    // app_settings-only).
     expect(gate).toMatch(/connection_string\|primary_key/);
     expect(gate).toMatch(/instrumentation_key/);
     expect(gate).toMatch(/InstrumentationKey=/);
   });
 
-  it('the Function App app_settings scan catches any ingestion key / connection-string value', () => {
+  it('the Function App app_settings scan enforces the coupled invariant (full AI conn string only when local auth disabled)', () => {
     // Value-targeted: a secret Terraform attribute/var reference or a literal
-    // ingestion-key marker in app_settings must be flagged (App Insights too).
+    // ingestion-key marker in app_settings is flagged, EXCEPT the accepted AI
+    // conn-string var — and even that is a VIOLATION when
+    // local_authentication_disabled is not set on the AI resource.
     expect(gate).toMatch(/\\\.connection_string/);
     expect(gate).toMatch(/\\\.instrumentation_key/);
     expect(gate).toMatch(/InstrumentationKey=/);
+    // The cross-field conditional: full conn string WITHOUT local auth disabled fails.
+    expect(gate).toMatch(/local_authentication_disabled/);
+    expect(gate).toMatch(/coupled-invariant violation/);
   });
 
   it('the secret-output scan is HONESTLY labeled best-effort AND catches obfuscated index refs', () => {
@@ -323,38 +450,45 @@ describe('MG-24 S1: the static gate documents the operator-accepted App Insights
 
   it('names the plan/state inspection as the AUTHORITATIVE guarantee (not the grep)', () => {
     // The honest claim: the lexical scan is best-effort; `terraform show -json`
-    // is what actually guarantees no sensitive VALUE materializes.
+    // + the fail-closed inspection script is what actually guarantees no
+    // sensitive VALUE materializes.
     expect(gate).toMatch(/AUTHORITATIVE/);
     expect(gate).toMatch(/terraform show -json/);
   });
 
-  it('check 12 requires the README to document the authoritative pre-apply inspection', () => {
+  it('check 12 requires the README to document the fail-closed pre-apply inspection', () => {
     // The gate enforces that the runbook keeps pointing at the authoritative
-    // gate: check 12 fails if the README stops documenting `terraform show
-    // -json` with the secret markers as a REQUIRED pre-apply step.
+    // gate: check 12 fails if the README stops documenting the fail-closed
+    // tf-plan-secret-inspection.sh as a REQUIRED pre-apply step.
     expect(gate).toMatch(/README=/);
-    expect(gate).toMatch(/terraform show -json/);
-    expect(gate).toMatch(/InstrumentationKey/);
+    expect(gate).toMatch(/tf-plan-secret-inspection\.sh/);
     expect(gate).toMatch(/required pre-apply gate \(README\)/i);
   });
 });
 
-describe('MG-24 S1: the README wires the authoritative plan/state inspection as a required pre-apply gate', () => {
+describe('MG-24 S1: the README wires the fail-closed plan/state inspection as a required pre-apply gate', () => {
   const readme = read('README.md');
 
   it('documents the best-effort static guard vs the authoritative inspection split', () => {
     expect(readme).toMatch(/best-effort/i);
     expect(readme).toMatch(/AUTHORITATIVE/);
-    // The authoritative command with all four secret markers is present.
-    expect(readme).toMatch(
-      /terraform show -json tfplan \| grep -iE 'connection_string\|primary_key\|SharedAccessKey\|InstrumentationKey'/
-    );
+    // The authoritative command pipes the real plan JSON into the fail-closed
+    // inspection script (which EXITS NONZERO on any prohibited value) — NOT the
+    // old always-green `grep ... || echo` one-liner.
+    expect(readme).toMatch(/terraform show -json/);
+    expect(readme).toMatch(/tf-plan-secret-inspection\.sh/);
   });
 
   it('marks the plan/state inspection REQUIRED before the first apply', () => {
     expect(readme).toMatch(
       /REQUIRED pre-apply|required before the first apply|required pre-apply/i
     );
+  });
+
+  it('documents the corrected App Insights (local-auth-disabled) coupling', () => {
+    // The README's security note must reflect the corrected model: the full conn
+    // string is present but the ikey cannot authenticate under local auth disabled.
+    expect(readme).toMatch(/local_authentication_disabled/);
   });
 });
 
@@ -383,12 +517,41 @@ describe('MG-24 S1: the static gate behaves — accepts the residual, catches re
     }
   }
 
-  it('PASSES on the committed infra — the endpoint-extraction residual does not trip it', () => {
+  it('PASSES on the committed infra — the coupled AI conn-string residual does not trip it', () => {
     const { code } = runGate(INFRA);
     expect(code).toBe(0);
   });
 
-  it('FAILS when a real AI connection string is planted into the Function App app_settings', () => {
+  it('FAILS when the FULL AI conn string is wired but local_authentication_disabled is removed', () => {
+    // The coupled invariant, exercised: the same full-conn-string app_setting
+    // that is ACCEPTED while local auth is disabled becomes a VIOLATION the
+    // moment the AAD-only lock is removed (the ikey could then authenticate).
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mg24-gate-coupling-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      copyInfra(dst);
+      const rootMain = path.join(dst, 'main.tf');
+      const src = fs.readFileSync(rootMain, 'utf8');
+      // Break the coupling: disable the AAD-only lock while the full conn string
+      // remains in the Function App app_settings. Anchor to the real assignment
+      // line (`^\s*local_authentication_disabled`) — a bare token replace would
+      // hit the prose COMMENT occurrence first and leave the code untouched.
+      const unlocked = src.replace(
+        /^(\s*)local_authentication_disabled\s*=\s*true/m,
+        '$1local_authentication_disabled = false'
+      );
+      expect(unlocked).not.toEqual(src); // the flag existed
+      expect(unlocked).toMatch(/^\s*local_authentication_disabled\s*=\s*false/m); // code line flipped
+      fs.writeFileSync(rootMain, unlocked);
+      const { code, out } = runGate(dst);
+      expect(code).not.toBe(0);
+      expect(out).toMatch(/coupled-invariant violation|WITHOUT local_authentication_disabled/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('FAILS when a real AI connection string ATTRIBUTE is planted into the Function App app_settings', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mg24-gate-appsettings-'));
     try {
       const dst = path.join(tmp, 'infrastructure');
@@ -396,8 +559,10 @@ describe('MG-24 S1: the static gate behaves — accepts the residual, catches re
       const funcMain = path.join(dst, 'modules', 'functions', 'main.tf');
       const src = fs.readFileSync(funcMain, 'utf8');
       const anchor = '"APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE"   = "50"';
-      // Plant a real leak: the AI resource's SECRET connection string (which
-      // embeds the instrumentation key) assigned straight into app_settings.
+      // Plant a real leak: the AI resource's SECRET connection string ATTRIBUTE
+      // (which embeds the instrumentation key) assigned straight into app_settings.
+      // This is NOT the accepted module var, so even with local auth disabled it
+      // is a `.connection_string` attribute leak and must be flagged.
       const leaked = src.replace(
         anchor,
         `${anchor}\n    "APPLICATIONINSIGHTS_CONNECTION_STRING_LEAK" = azurerm_application_insights.main.connection_string`

@@ -140,28 +140,42 @@ else bad "AAD application must be per-environment (…-\${tfenv}), not shared"; 
 if grep -q '/blobServices/default/containers/${container}' "$BOOT"; then
   ok "state blob role is scoped to the env's container only"
 else bad "state blob role must be scoped per-env container, not whole account"; fi
-# The old whole-account blob-role scope must be gone.
-if grep -Eq -- '--scope[[:space:]]+"\$state_sa_id"' "$BOOT"; then
-  bad "state blob role must NOT be scoped to the whole state account"
-else ok "no whole-state-account blob-role grant"; fi
+# Whole-state-account blob-role grants: the SP (dev/prod CI + deploy) identities
+# must NEVER get one (that would give dev access to prod state). The ONE permitted
+# whole-account grant is the OPERATOR's Storage Blob Data role (item 2) — creating
+# a state container is an account-level data-plane op that cannot be
+# container-scoped — and it must be a User-principal grant, not an SP grant. So
+# expect EXACTLY ONE `--scope "$state_sa_id"`, tied to the operator (signed-in-user).
+whole_acct_scopes="$(grep -Ec -- '--scope[[:space:]]+"\$state_sa_id"' "$BOOT" || true)"
+if [ "${whole_acct_scopes:-0}" -eq 1 ] && grep -q 'signed-in-user' "$BOOT"; then
+  ok "only the operator holds a whole-account blob grant (item 2); SP grants stay container-scoped"
+else bad "the only whole-account blob-role grant may be the operator's (item 2); SP state grants must be container-scoped"; fi
 
 # --- Per-env state CONTAINERS (isolation): tfstate-<env> ---------------------
 if grep -q 'state_container_for() { echo "tfstate-' "$BOOT"; then
   ok "per-environment state containers (tfstate-<env>)"
 else bad "state containers must be per-environment (tfstate-<env>)"; fi
 
-# --- #6: container create works with the operator's control-plane role ------
-# The initial container create must use KEY auth (control-plane-fetched key),
-# not a data-plane `--auth-mode login` that fails closed when the operator has
-# no Storage Blob DATA role yet.
-if grep -q 'az storage account keys list' "$BOOT" && grep -q -- '--auth-mode key --account-key' "$BOOT"; then
-  ok "container create uses control-plane key auth (does not fail closed)"
-else bad "container create must use control-plane key auth for the first run"; fi
-# Ignore comment lines so the note documenting WHY login-auth was dropped
-# doesn't self-trip this check.
+# --- #item 2: no storage account key on the command line --------------------
+# The container create/show must NOT pass the storage account key on argv (it
+# would leak a live credential into process listings). No account key is fetched
+# and no `--auth-mode key --account-key` call exists; container ops use AAD
+# (`--auth-mode login`) instead, backed by an operator Storage Blob DATA grant.
+# Ignore comment lines so the note explaining the fix doesn't self-trip.
+if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q -- '--account-key'; then
+  bad "no storage account key may appear on the command line (leaks via argv)"
+else ok "no storage account key on argv (no --account-key)"; fi
+if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q 'az storage account keys list'; then
+  bad "bootstrap must not fetch a storage account key for container ops"
+else ok "bootstrap does not fetch a storage account key"; fi
 if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q -- '--auth-mode login'; then
-  bad "container ops must not rely on data-plane --auth-mode login"
-else ok "no data-plane --auth-mode login in bootstrap"; fi
+  ok "container ops use AAD data-plane auth (--auth-mode login), no secret on argv"
+else bad "container ops must use --auth-mode login (no account key on argv)"; fi
+# The operator gets a Storage Blob DATA role so --auth-mode login works, mirroring
+# the per-env Storage Blob Data grants issued to the CI/deploy SPs.
+if grep -q 'signed-in-user' "$BOOT" && grep -q -- '--role "Storage Blob Data Contributor"' "$BOOT"; then
+  ok "operator granted Storage Blob Data Contributor for AAD container ops"
+else bad "operator must get a Storage Blob DATA role so --auth-mode login can create containers"; fi
 
 # --- terraform-setup.sh: no 'local backend' guidance, points to bootstrap ---
 if grep -Eqi 'local backend' "$SETUP"; then bad "terraform-setup.sh still advertises a local backend"
@@ -176,6 +190,119 @@ else bad "terraform-setup.sh must point at bootstrap.sh + the runbook"; fi
 if grep -Eq '(Run|run):[[:space:]]*terraform init[[:space:]]*$' "$SETUP"; then
   bad "terraform-setup.sh still recommends a bare 'terraform init'"
 else ok "no bare 'terraform init' recommendation in terraform-setup.sh"; fi
+
+# ===========================================================================
+# MG-24 corrective (item 9): subscription-derived state-account NAME helper
+# ===========================================================================
+HELPER="$DIR/../scripts/state-account-name.sh"
+if [ -f "$HELPER" ]; then
+  # EXERCISE the helper: a sample uuid must yield a <=24-char lowercase-alnum
+  # storage-account name that also passes the V1-safety guard.
+  san="$(bash "$HELPER" "12345678-1234-1234-1234-123456789abc" 2>/dev/null || true)"
+  if [ -n "$san" ] && [ "${#san}" -le 24 ] && printf '%s' "$san" | grep -Eq '^[a-z0-9]{3,24}$'; then
+    ok "state-account-name.sh emits a <=24-char lowercase-alnum name ($san)"
+  else
+    bad "state-account-name.sh must emit a <=24-char lowercase-alnum name (got '$san')"
+  fi
+  if assert_v2_name "state account" "$san" 2>/dev/null; then
+    ok "derived state-account name passes assert_v2_name (V1-safety guard)"
+  else
+    bad "derived state-account name must pass assert_v2_name"
+  fi
+  # Determinism: the SAME subscription id must always derive the SAME name
+  # (single source of truth — no drift between bootstrap, workflows, runbook).
+  san2="$(bash "$HELPER" "12345678-1234-1234-1234-123456789abc" 2>/dev/null || true)"
+  if [ "$san" = "$san2" ]; then ok "state-account name derivation is deterministic (no drift)"
+  else bad "state-account name derivation must be deterministic"; fi
+  # FAIL-CLOSED: an over-length prefix must be REJECTED (nonzero), never emitted
+  # as an invalid storage-account name Azure would refuse at create time.
+  if STATE_ACCOUNT_PREFIX="waytoolongprefixthatexceedslimit" \
+       bash "$HELPER" "12345678-1234-1234-1234-123456789abc" >/dev/null 2>&1; then
+    bad "state-account-name.sh must fail closed on an over-length derived name"
+  else
+    ok "state-account-name.sh fails closed (nonzero) on an over-length derived name"
+  fi
+else
+  bad "state-account-name.sh helper not found: $HELPER"
+fi
+
+# bootstrap.sh must DERIVE the state-account name via the single helper, not a
+# hardcoded literal (the old always-taken 'meatgeekv2tfstate').
+if grep -q 'scripts/state-account-name.sh' "$BOOT"; then
+  ok "bootstrap sources the single state-account-name helper"
+else bad "bootstrap must source scripts/state-account-name.sh"; fi
+if grep -q 'STATE_STORAGE_ACCOUNT="$(state_account_name' "$BOOT"; then
+  ok "state-account name is subscription-derived (state_account_name)"
+else bad "state-account name must be derived via state_account_name"; fi
+if grep -q 'STATE_STORAGE_ACCOUNT:-meatgeekv2tfstate' "$BOOT"; then
+  bad "state-account default must not be the hardcoded meatgeekv2tfstate literal"
+else ok "no hardcoded meatgeekv2tfstate default (derived instead)"; fi
+
+# ===========================================================================
+# MG-24 corrective (item 4): TWO distinct dev identities — plan/read vs deploy
+# ===========================================================================
+# The app-deployment identity must be a SEPARATE AAD app (distinct SP) from the
+# plan/read identity, so "read to plan" and "publish code" are never the same SP.
+if grep -q 'app_name="${AAD_DEPLOY_APP_NAME}-${tfenv}"' "$BOOT"; then
+  ok "dev app-deployment identity is a separate AAD app (distinct SP)"
+else bad "dev app-deployment identity must be a separate AAD app (…-\${tfenv})"; fi
+# The base display names of plan vs deploy identities must differ (globals are
+# in scope because bootstrap.sh is sourced above).
+if [ "${AAD_APP_NAME:-}" != "${AAD_DEPLOY_APP_NAME:-}" ] && [ -n "${AAD_DEPLOY_APP_NAME:-}" ]; then
+  ok "plan vs deploy identity base names differ (${AAD_APP_NAME} != ${AAD_DEPLOY_APP_NAME})"
+else bad "plan and deploy identities must use distinct base display names"; fi
+
+# The PLAN identity keeps Reader (subscription-scope, read-only) — already
+# asserted above via CI_PLAN_ROLE default; here assert the DEPLOY identity is a
+# publish role scoped to the Function App ALONE, never subscription-wide write.
+if grep -q 'DEPLOY_APP_ROLE:-Website Contributor' "$BOOT"; then
+  ok "deploy identity role defaults to Website Contributor (publish-scoped)"
+else bad "deploy identity role must default to Website Contributor"; fi
+if grep -q -- '--scope "$fa_id"' "$BOOT"; then
+  ok "deploy publish role is scoped to the Function App id ONLY"
+else bad "deploy publish role must be scoped to the Function App (\$fa_id), not subscription"; fi
+# The deploy role must NOT be granted at a /subscriptions/ scope.
+if grep -A2 -- '--role "$DEPLOY_APP_ROLE"' "$BOOT" | grep -q '/subscriptions/'; then
+  bad "deploy publish role must not be granted at subscription scope"
+else ok "no subscription-scoped grant for the deploy publish role"; fi
+# Deploy identity's state access is READ-ONLY (Reader, not Contributor).
+if grep -q -- '--role "Storage Blob Data Reader"' "$BOOT"; then
+  ok "deploy identity gets Storage Blob Data READER on state (read-only)"
+else bad "deploy identity must get read-only state access (Storage Blob Data Reader)"; fi
+# Emits the client id the app-deploy job consumes.
+if grep -q 'AZURE_APP_DEPLOY_CLIENT_ID' "$BOOT"; then
+  ok "bootstrap emits AZURE_APP_DEPLOY_CLIENT_ID for the app-deploy job"
+else bad "bootstrap must emit AZURE_APP_DEPLOY_CLIENT_ID"; fi
+# Prod deployment identity is an EXPLICIT MG-25 gap, not silently created here.
+if grep -q 'MG-25' "$BOOT"; then
+  ok "prod app-deployment identity is documented as an explicit MG-25 gap"
+else bad "prod app-deployment identity must be documented as an MG-25 gap"; fi
+
+# ===========================================================================
+# MG-24 corrective (item 3): dev ENTRA API auth registration (access_as_user)
+# ===========================================================================
+if grep -q 'DEV_API_SCOPE_NAME:-access_as_user' "$BOOT"; then
+  ok "dev API registration exposes the access_as_user delegated scope"
+else bad "dev API registration must expose access_as_user"; fi
+if grep -q 'oauth2PermissionScopes' "$BOOT" && grep -q '"value": "${DEV_API_SCOPE_NAME}"' "$BOOT"; then
+  ok "delegated scope is written into the Graph application manifest"
+else bad "dev API registration must write the delegated scope into the app manifest"; fi
+# SEPARATE from the OIDC/deployment apps.
+if [ "${DEV_API_APP_NAME:-}" != "${AAD_APP_NAME:-}" ] && [ "${DEV_API_APP_NAME:-}" != "${AAD_DEPLOY_APP_NAME:-}" ] && [ -n "${DEV_API_APP_NAME:-}" ]; then
+  ok "dev API registration is a separate app from the OIDC/deployment apps"
+else bad "dev API registration must be separate from the OIDC/deployment apps"; fi
+# NO client secret / password on ANY az ad app create (OIDC + Easy Auth only).
+if grep -E 'az ad app create' "$BOOT" | grep -q -- '--password'; then
+  bad "no az ad app create may mint a client secret (--password)"
+else ok "no --password on any az ad app create (no client secret minted)"; fi
+# Single-tenant API (not multi-tenant).
+if grep -q -- '--sign-in-audience AzureADMyOrg' "$BOOT"; then
+  ok "dev API registration is single-tenant (AzureADMyOrg)"
+else bad "dev API registration must be single-tenant (AzureADMyOrg)"; fi
+# The Graph write for the API scope must not smuggle in a passwordCredential.
+if grep -q 'passwordCredential' "$BOOT"; then
+  bad "dev API registration Graph manifest must not include a passwordCredential"
+else ok "no passwordCredential in the dev API registration manifest"; fi
 
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"

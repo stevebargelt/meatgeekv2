@@ -18,6 +18,10 @@ Production deployment must NOT be activated until production infrastructure and 
 2. **Add the production credential only when ready** — `AZURE_CREDENTIALS_PROD` as a GitHub `production`-ENVIRONMENT secret, least-privilege.
 3. **Set `PROD_DEPLOY_ENABLED=true` LAST** — only after 1 and 2. Until it flips, `app-deploy-prod`'s `deploy-api` job skips cleanly on every CI success.
 
+## Additional requirement (deploy identity)
+
+- **Dedicated deployment identity (from MG-24 operational review):** prod deploy REQUIRES a least-privilege DEPLOYMENT identity with scoped publish permission on the prod Function App (Reader — the Terraform PLAN identity's role — cannot `func publish`). This deploy identity + role must exist and be verified BEFORE `PROD_DEPLOY_ENABLED=true`. Keep the plan identity (Reader + state) and the deploy identity (scoped publish) DISTINCT.
+
 ## Acceptance criteria
 
 - Prod V2 stack created greenfield from empty prod state via a reviewed creation plan (MG-24 for prod); no V1 import; second plan no-op.

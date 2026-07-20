@@ -2,7 +2,7 @@
 
 # IoT Hub
 resource "azurerm_iothub" "main" {
-  name                = "${var.resource_prefix}-iothub"
+  name                = "${var.resource_prefix}-iothub-${var.global_suffix}"
   resource_group_name = var.resource_group_name
   location            = var.location
 
@@ -22,7 +22,7 @@ resource "azurerm_iothub" "main" {
 
 # Event Hub Namespace for real-time processing
 resource "azurerm_eventhub_namespace" "main" {
-  name                = "${var.resource_prefix}-eventhub-ns"
+  name                = "${var.resource_prefix}-eventhub-ns-${var.global_suffix}"
   location            = var.location
   resource_group_name = var.resource_group_name
   sku                 = "Standard"

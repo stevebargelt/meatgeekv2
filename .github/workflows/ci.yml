@@ -231,8 +231,16 @@ jobs:
   # with the prod infra workflow. The live greenfield dev plan/apply is the
   # operator's out-of-pipeline acceptance step (see the bootstrap runbook);
   # app/web deploys are owned by the dedicated deploy workflows.
+  #
+  # MG-24 corrective: the plan is now bound to the PERSISTENT dev remote-state
+  # backend (not `-backend=false`), so it is a meaningful drift/plan gate against
+  # real state POST-BOOTSTRAP. Until the operator has stood up that backend and
+  # flipped the DEV_TF_BACKEND_READY switch, the job is SKIPPED (skip-clean, not
+  # expected-red): a backend-bound init against a non-existent state container
+  # would fail with "Backend initialization required" — the exact failure the
+  # first pass shipped. The gate makes the transition operator-controlled.
   deploy-dev:
-    if: github.ref == 'refs/heads/develop'
+    if: github.ref == 'refs/heads/develop' && vars.DEV_TF_BACKEND_READY == 'true'
     runs-on: ubuntu-latest
     needs: [lint-and-test, build-typescript, build-go, validate-infrastructure]
     environment: development
@@ -269,8 +277,14 @@ jobs:
       - name: Plan Infrastructure (plan-only — no apply)
         run: |
           cd apps/infrastructure
-          # -backend=false: do not bind remote state from CI. This is a
-          # speculative plan gate only; the operator runs the real, state-bound
-          # plan/apply out of pipeline (see docs/infrastructure/bootstrap-runbook.md).
-          terraform init -backend=false
+          # Bind the PERSISTENT dev remote-state backend (MG-24 corrective). The
+          # state-account name is derived ONCE from the subscription id by the
+          # shared helper and injected as an extra -backend-config, so this init
+          # can never drift from the hcl's literal (there is none). ARM_SUBSCRIPTION_ID
+          # is already exported (job env) — the azurerm backend reads it, and
+          # `az account set` alone would NOT satisfy AzureRM v4.
+          STATE_ACCOUNT="$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
+          terraform init -reconfigure \
+            -backend-config=environments/backend-dev.hcl \
+            -backend-config="storage_account_name=$STATE_ACCOUNT"
           terraform plan -var-file=environments/dev.tfvars

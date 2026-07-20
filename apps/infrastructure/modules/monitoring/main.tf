@@ -8,6 +8,13 @@
 # alerts (no telemetry source emits the required custom metrics yet),
 # which is the anti-pattern the architect's synthesis called out.
 
+# Budget start-date anchor. `time_static` captures the apply time ONCE and then
+# persists it in state, so `time_static.budget_anchor.rfc3339` is stable across
+# subsequent plans/applies. Deriving the budget start_date from this (instead of
+# from the wall-clock time, which re-evaluates on every plan) keeps the first-of-month
+# start date fixed and guarantees a 2nd-plan no-op even across a month boundary.
+resource "time_static" "budget_anchor" {}
+
 # Action Group for alerts
 resource "azurerm_monitor_action_group" "main" {
   name                = "${var.resource_prefix}-alerts"
@@ -31,7 +38,7 @@ resource "azurerm_consumption_budget_resource_group" "main" {
   time_grain = "Monthly"
 
   time_period {
-    start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", timestamp())
+    start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", time_static.budget_anchor.rfc3339)
   }
 
   notification {
@@ -273,7 +280,7 @@ resource "azurerm_consumption_budget_subscription" "credit_budget" {
   time_grain = "Monthly"
 
   time_period {
-    start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", timestamp())
+    start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", time_static.budget_anchor.rfc3339)
   }
 
   notification {

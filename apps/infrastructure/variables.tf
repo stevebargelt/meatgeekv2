@@ -163,9 +163,15 @@ variable "functions_auth_tenant_id" {
 }
 
 variable "functions_auth_allowed_audiences" {
-  description = "Allowed token audiences for Function App authentication (only used when functions_auth_client_id is set)."
+  description = "Allowed token audiences for Function App authentication (only used when functions_auth_client_id is set). Carries the API App ID URI (e.g. api://<dev-api-client-id>)."
   type        = list(string)
   default     = []
+}
+
+variable "functions_auth_allowed_client_app_ids" {
+  description = "Client (CALLING) application ids allowed by the Function App's Easy Auth allowed_applications. This validates the calling client's appid/azp — NOT the API registration (functions_auth_client_id). Defaults to the Azure CLI public client (04b07795-8ddb-461a-bbee-02f9e1bf7b46), which is the caller for `az account get-access-token --scope <API App ID URI>/access_as_user`; override with a dedicated dev client. Each id must be pre-authorized on the dev API registration (bootstrap preAuthorizedApplications). Only used when functions_auth_client_id is set."
+  type        = list(string)
+  default     = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]
 }
 
 # Security Configuration

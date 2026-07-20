@@ -5,6 +5,11 @@ variable "resource_prefix" {
   type        = string
 }
 
+variable "global_suffix" {
+  description = "Subscription-derived suffix appended to globally-scoped resource names (SignalR hostname is a global DNS name) to guarantee cross-subscription uniqueness. Supplied from the root stack (local.global_name_suffix)."
+  type        = string
+}
+
 variable "resource_group_name" {
   description = "Name of the resource group"
   type        = string

@@ -47,6 +47,18 @@
  * permission + `azure/login` with a `client-id` — instead of a long-lived
  * AZURE_CREDENTIALS* service-principal secret, and bind the per-env azurerm
  * remote backend at init (`-backend-config=environments/backend-prod.hcl`).
+ *
+ * MG-24 corrective item 4 (two-identity separation): the single Azure identity is
+ * split into two least-privilege ones, selected per job by which client-id the
+ * login presents:
+ *   - PLAN/read identity (`vars.AZURE_CLIENT_ID`): Reader + its env state
+ *     container — used by the terraform-plan jobs (infra-deploy-prod plan,
+ *     app-deploy-prod's `terraform output` read, ci.yml deploy-dev plan).
+ *   - APP-DEPLOYMENT identity (`vars.AZURE_APP_DEPLOY_CLIENT_ID`): a scoped
+ *     publish role on the Function App only — used by app-deploy-prod's
+ *     func-publish login. A Reader cannot publish a Function App, so this guard
+ *     fails if the publish login silently reverts to the plan identity. (The
+ *     prod deploy identity + its role assignment land in MG-25.)
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -150,8 +162,28 @@ function assertGuardDerivesCredsFromOidcVars(wf: Workflow, raw: string): void {
   expect(raw).not.toMatch(/secrets\.AZURE_CREDENTIALS_PROD/);
 }
 
-/** Assert a workflow authenticates to Azure via OIDC (federated) not a secret. */
-function assertUsesOidcLogin(wf: Workflow, raw: string): void {
+/**
+ * Assert a workflow authenticates to Azure via OIDC (federated) not a secret,
+ * and that every azure/login step presents the EXPECTED client-id variable.
+ *
+ * MG-24 item 4 splits the single identity into two least-privilege ones:
+ *   - the PLAN/read identity  (`vars.AZURE_CLIENT_ID`): Reader + its env state
+ *     container — used by the terraform-plan jobs.
+ *   - the APP-DEPLOYMENT identity (`vars.AZURE_APP_DEPLOY_CLIENT_ID`): a scoped
+ *     publish role on the Function App only — used by the func-publish job. A
+ *     Reader cannot publish a Function App, so the publish login must NOT fall
+ *     back to the plan identity.
+ * `expectedClientVar` names which identity the workflow's login(s) must use.
+ * Because `AZURE_CLIENT_ID` is a suffix of `AZURE_APP_DEPLOY_CLIENT_ID`, the
+ * `vars.<name>\b` anchoring means the plan-identity pattern never spuriously
+ * matches the deploy identity (the char before `AZURE_CLIENT_ID` differs), and
+ * vice-versa — so requiring one and rejecting the other is unambiguous.
+ */
+function assertUsesOidcLogin(
+  wf: Workflow,
+  raw: string,
+  expectedClientVar: 'AZURE_CLIENT_ID' | 'AZURE_APP_DEPLOY_CLIENT_ID' = 'AZURE_CLIENT_ID'
+): void {
   // `id-token: write` is required for azure/login to mint the federated token.
   expect(String((wf.permissions ?? {})['id-token'] ?? '')).toBe('write');
 
@@ -163,9 +195,16 @@ function assertUsesOidcLogin(wf: Workflow, raw: string): void {
     }
   }
   expect(loginSteps.length).toBeGreaterThan(0);
+  // The identity this workflow's login(s) must NOT use — the OTHER of the two.
+  const forbiddenClientVar =
+    expectedClientVar === 'AZURE_CLIENT_ID' ? 'AZURE_APP_DEPLOY_CLIENT_ID' : 'AZURE_CLIENT_ID';
   for (const s of loginSteps) {
     const w = s.with ?? {};
-    expect(String(w['client-id'] ?? '')).toMatch(/vars\.AZURE_CLIENT_ID/);
+    const clientId = String(w['client-id'] ?? '');
+    expect(clientId).toMatch(new RegExp(`vars\\.${expectedClientVar}\\b`));
+    // A silent revert to the wrong identity (e.g. publish falling back to the
+    // Reader/plan identity, which cannot publish) must fail this guard.
+    expect(clientId).not.toMatch(new RegExp(`vars\\.${forbiddenClientVar}\\b`));
     expect(w).not.toHaveProperty('creds'); // no long-lived SP secret
   }
   // No retired prod SP secret anywhere in the file.
@@ -338,8 +377,12 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(wf.concurrency?.['cancel-in-progress']).toBe(false);
     });
 
-    it('authenticates via OIDC (id-token: write + azure/login client-id), not a stored SP secret', () => {
-      assertUsesOidcLogin(wf, raw);
+    it('func-publish authenticates via the OIDC APP-DEPLOYMENT identity (AZURE_APP_DEPLOY_CLIENT_ID), not the plan/Reader identity', () => {
+      // MG-24 item 4: a Function App publish is a data-plane action the plan/read
+      // identity (Reader) cannot perform. The publish login MUST use the separate
+      // least-privilege app-deployment identity, and must NOT silently revert to
+      // the plan identity (AZURE_CLIENT_ID) — that regression is what this guards.
+      assertUsesOidcLogin(wf, raw, 'AZURE_APP_DEPLOY_CLIENT_ID');
     });
 
     it('binds the per-env azurerm remote backend at init (prod state key)', () => {
@@ -381,8 +424,13 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(wf.concurrency?.['cancel-in-progress']).toBe(false);
     });
 
-    it('authenticates via OIDC (id-token: write + azure/login client-id), not a stored SP secret', () => {
-      assertUsesOidcLogin(wf, raw);
+    it('plan authenticates via the OIDC PLAN/read identity (AZURE_CLIENT_ID), not the app-deployment identity', () => {
+      // MG-24 item 4: this workflow is plan-only, so its login uses the plan/read
+      // identity (Reader + state container). It must NOT borrow the scoped
+      // app-deployment identity (AZURE_APP_DEPLOY_CLIENT_ID) — that identity is
+      // for publish only, and mislabelling plan identities as deploy identities
+      // is exactly the confusion item 4 corrects.
+      assertUsesOidcLogin(wf, raw, 'AZURE_CLIENT_ID');
     });
 
     it('binds the per-env azurerm remote backend at init (prod state key)', () => {

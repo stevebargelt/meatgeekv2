@@ -2,7 +2,7 @@
 
 # SignalR Service
 resource "azurerm_signalr_service" "main" {
-  name                = "${var.resource_prefix}-signalr"
+  name                = "${var.resource_prefix}-signalr-${var.global_suffix}"
   resource_group_name = var.resource_group_name
   location            = var.location
 

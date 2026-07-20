@@ -5,6 +5,11 @@ variable "resource_prefix" {
   type        = string
 }
 
+variable "global_suffix" {
+  description = "Subscription-derived suffix appended to globally-scoped resource names (IoT Hub, Event Hubs namespace) to guarantee cross-tenant DNS uniqueness (MG-24 item 9)."
+  type        = string
+}
+
 variable "resource_group_name" {
   description = "Name of the resource group"
   type        = string
