@@ -209,6 +209,16 @@ DEV_API_APP_ID_URI  = api://<api appId>   # the audience Easy Auth validates
 functions_auth_allowed_client_app_ids = [<calling client(s)>]   # allowed_applications
 ```
 
+`DEV_API_APP_ID_URI` is the value the Step 6a token-acquisition scope needs. It is
+**not** a Terraform output — the dev API registration is created by `bootstrap.sh`
+(Azure CLI), not by Terraform — so for an already-bootstrapped environment
+re-derive it directly from the registration rather than re-running the bootstrap:
+
+```bash
+az ad app show --id <DEV_API_CLIENT_ID> --query 'identifierUris[0]' -o tsv
+#   → api://<DEV_API_CLIENT_ID>
+```
+
 Populate `functions_auth_client_id` / `functions_auth_tenant_id` /
 `functions_auth_allowed_audiences` in `environments/dev.tfvars` with these
 values post-bootstrap so Easy Auth activates a **real** Entra identity provider
@@ -394,7 +404,15 @@ status.
 
 ```bash
 FUNC="$(terraform output -raw function_app_name)"
-APP_ID_URI="$(terraform output -raw dev_api_app_id_uri 2>/dev/null || echo 'api://<DEV_API_CLIENT_ID>')"
+
+# The dev API App ID URI is the audience Easy Auth validates. It is emitted by
+# the bootstrap as DEV_API_APP_ID_URI, but the dev API registration is NOT
+# Terraform-managed (it is created by bootstrap.sh via the Azure CLI), so there
+# is NO `terraform output` for it. Re-derive it straight from the registration —
+# no bootstrap re-run, no hand-typed placeholder:
+API_APP_ID="$(az ad app list --display-name meatgeek-v2-dev-api --query '[0].appId' -o tsv)"
+APP_ID_URI="$(az ad app show --id "$API_APP_ID" --query 'identifierUris[0]' -o tsv)"
+#   → api://<DEV_API_CLIENT_ID>  (equals the emitted DEV_API_APP_ID_URI)
 
 # 1. No token → MUST be 401 (default-deny proven):
 curl -s -o /dev/null -w '%{http_code}\n' "https://${FUNC}.azurewebsites.net/api/health"
@@ -402,7 +420,7 @@ curl -s -o /dev/null -w '%{http_code}\n' "https://${FUNC}.azurewebsites.net/api/
 
 # 2. Acquire a delegated user token for the API audience (interactive az user):
 TOKEN="$(az account get-access-token \
-  --scope "${APP_ID_URI}/access_as_user" \
+  --scope "$APP_ID_URI/access_as_user" \
   --query accessToken -o tsv)"
 
 # 3. Valid token, correct audience → MUST be 2xx:

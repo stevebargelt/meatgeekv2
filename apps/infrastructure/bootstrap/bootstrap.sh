@@ -660,8 +660,19 @@ JSON
   cat <<SUMMARY
 
 ────────────────────────────────────────────────────────────────────
-dev ENTRA API auth registration — wire these into
-environments/dev.tfvars (functions_auth_*) post-bootstrap:
+dev ENTRA API auth registration — emitted coordinates (identifiers, NOT
+secrets). COPY THESE — the App ID URI is what the operator authenticated
+smoke test needs; it is NOT a Terraform output (this app is bootstrap-created,
+not TF-managed), so there is no 'terraform output' for it:
+
+  DEV_API_CLIENT_ID   = ${app_id}
+  DEV_API_TENANT_ID   = ${tenant_id}
+  DEV_API_APP_ID_URI  = ${app_uri}          # the audience (aud) Easy Auth validates
+
+  Retrieve the App ID URI later (already-bootstrapped env, no re-run needed):
+    az ad app show --id ${app_id} --query 'identifierUris[0]' -o tsv
+
+Wire these into environments/dev.tfvars (functions_auth_*) post-bootstrap:
 
   functions_auth_client_id          = "${app_id}"
   functions_auth_tenant_id          = "${tenant_id}"
@@ -669,9 +680,9 @@ environments/dev.tfvars (functions_auth_*) post-bootstrap:
 
   functions_auth_allowed_client_app_ids = [${preauth_ids// /, }]  # calling client(s)
 
-  App ID URI:      ${app_uri}
   Delegated scope: ${app_uri}/${DEV_API_SCOPE_NAME}
-  Operator token:  az account get-access-token --scope "${app_uri}/${DEV_API_SCOPE_NAME}"
+  Operator token:  APP_ID_URI=\$(az ad app show --id ${app_id} --query 'identifierUris[0]' -o tsv)
+                   az account get-access-token --scope "\$APP_ID_URI/${DEV_API_SCOPE_NAME}"
   Pre-authorized calling client(s) (allowed_applications): ${preauth_ids}
   These are the CALLING client(s) Easy Auth accepts (validates appid/azp), NOT the
   API registration. A token minted by any OTHER client is rejected. The default is

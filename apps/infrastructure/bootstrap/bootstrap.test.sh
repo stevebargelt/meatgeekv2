@@ -324,6 +324,17 @@ else bad "dev API registration must be single-tenant (AzureADMyOrg)"; fi
 if grep -q 'passwordCredential' "$BOOT"; then
   bad "dev API registration Graph manifest must not include a passwordCredential"
 else ok "no passwordCredential in the dev API registration manifest"; fi
+# The App ID URI must be EMITTED as an explicit, labeled coordinate alongside the
+# client id / tenant — the operator copies it for the Step 6a authenticated smoke
+# test (the dev API reg is bootstrap-created, NOT TF-managed, so there is no
+# `terraform output` for it; a missing coordinate leaves a dangling placeholder).
+if grep -q 'DEV_API_APP_ID_URI' "$BOOT"; then
+  ok "bootstrap emits the dev API App ID URI as a labeled coordinate (DEV_API_APP_ID_URI)"
+else bad "bootstrap must emit the dev API App ID URI coordinate (DEV_API_APP_ID_URI)"; fi
+# ...and a retrieval command for an already-bootstrapped env (no re-run needed).
+if grep -Fq "identifierUris[0]" "$BOOT"; then
+  ok "bootstrap prints the App ID URI retrieval command (az ad app show … identifierUris[0])"
+else bad "bootstrap must print an App ID URI retrieval command (identifierUris[0])"; fi
 
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
