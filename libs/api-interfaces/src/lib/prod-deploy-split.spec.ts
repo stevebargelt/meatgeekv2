@@ -30,14 +30,23 @@
  *       on the deploy job, nowhere else.
  *     - Azure Functions Core Tools is pinned to an explicit version (never @latest).
  *   infra-deploy-prod.yml — manual/recovery, plan-only:
- *     - has `workflow_dispatch`, NO `push` trigger, and NO `terraform apply`
- *       anywhere (apply is deferred to MG-24 behind a remote state backend).
- *     - concurrency.cancel-in-progress === false (never cancel an in-flight apply).
- *     - a credential guard derives has_creds by reading AZURE_CREDENTIALS_PROD.
+ *     - has `workflow_dispatch`, NO `push` trigger, and NO live `terraform apply`
+ *       anywhere (plan-only; the greenfield apply is the operator's out-of-band
+ *       MG-24 acceptance step, behind the azurerm remote-state backend).
+ *     - concurrency.cancel-in-progress === false (never cancel an in-flight run).
+ *     - a credential guard derives has_creds from the OIDC identity vars
+ *       (AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID), NOT the
+ *       retired long-lived AZURE_CREDENTIALS_PROD service-principal secret.
  *   ci.yml — the deploy-prod job is gone, while deploy-dev stays. The
- *     build-typescript artifact upload is RETAINED (deploy-dev downloads the
- *     api/web builds), and its workflow name is `CI/CD Pipeline` so the
- *     app-deploy-prod `workflow_run` trigger actually resolves.
+ *     build-typescript artifact upload is RETAINED, and its workflow name is
+ *     `CI/CD Pipeline` so the app-deploy-prod `workflow_run` trigger actually
+ *     resolves. deploy-dev is plan-only (no live `terraform apply`).
+ *
+ * MG-24 (OIDC + remote backend): the prod workflows authenticate to Azure via
+ * a GitHub-Environment-scoped federated (OIDC) credential — `id-token: write`
+ * permission + `azure/login` with a `client-id` — instead of a long-lived
+ * AZURE_CREDENTIALS* service-principal secret, and bind the per-env azurerm
+ * remote backend at init (`-backend-config=environments/backend-prod.hcl`).
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -69,6 +78,7 @@ interface Workflow {
   on?: unknown;
   name?: string;
   env?: Record<string, unknown>;
+  permissions?: Record<string, unknown>;
   concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
   jobs?: Record<string, WfJob>;
   [k: string]: unknown;
@@ -89,14 +99,16 @@ function triggers(wf: Workflow): Record<string, unknown> {
 }
 
 /**
- * The infra guard still gates on a real credential read: a prod infra run must be
- * blocked when the repo has no AZURE_CREDENTIALS_PROD secret. Asserting only that a
- * deploy job references `needs.guard.outputs.has_creds` is not enough — a guard job
- * hardcoded to emit `has_creds=true` would satisfy that yet still let
- * credential-less runs reach `azure/login`. So we verify the guard actually READS
- * the secret and DERIVES has_creds from its (non-)emptiness.
+ * MG-24 OIDC posture: the infra guard gates on the presence of the OIDC identity
+ * VARIABLES (AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID), not the
+ * retired long-lived AZURE_CREDENTIALS_PROD service-principal secret. Asserting
+ * only that a deploy job references `needs.guard.outputs.has_creds` is not enough
+ * — a guard hardcoded to emit `has_creds=true` would satisfy that yet still let
+ * OIDC-unconfigured runs reach `azure/login`. So we verify the guard actually
+ * READS the OIDC vars and DERIVES has_creds from their (non-)emptiness. As a
+ * belt-and-braces check, the retired secret must not reappear anywhere.
  */
-function assertGuardDerivesCredsFromSecret(wf: Workflow): void {
+function assertGuardDerivesCredsFromOidcVars(wf: Workflow, raw: string): void {
   const jobs = wf.jobs ?? {};
   const guard = jobs['guard'];
   expect(guard).toBeDefined();
@@ -111,24 +123,52 @@ function assertGuardDerivesCredsFromSecret(wf: Workflow): void {
   const check = (guard?.steps ?? []).find(s => s.id === checkId);
   expect(check).toBeDefined();
 
-  // (3) the step exposes AZURE_CREDENTIALS_PROD — via an env binding or a run ref.
-  const secretEnvEntry = Object.entries(check?.env ?? {}).find(([, v]) =>
-    /secrets\.AZURE_CREDENTIALS_PROD/.test(String(v))
-  );
-  const run = String(check?.run ?? '');
-  const secretInRun = /AZURE_CREDENTIALS_PROD/.test(run);
-  expect(Boolean(secretEnvEntry) || secretInRun).toBe(true);
+  // (3) the step exposes the three OIDC vars — each via an env binding whose
+  //     value references `vars.AZURE_*`. Collect the env var NAMES bound to them.
+  const oidcSources = ['AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID'];
+  const boundVars: string[] = [];
+  for (const src of oidcSources) {
+    const entry = Object.entries(check?.env ?? {}).find(([, v]) =>
+      new RegExp(`vars\\.${src}\\b`).test(String(v))
+    );
+    expect(entry).toBeDefined(); // each OIDC var must be wired into the check step
+    if (entry) boundVars.push(entry[0]);
+  }
 
-  // (4) has_creds is DERIVED from the secret, not hardcoded. The run must set
-  //     has_creds on BOTH branches and test the credential value for
-  //     (non-)emptiness — a guard hardcoded to `has_creds=true` fails all three.
-  const credVar = secretEnvEntry?.[0];
+  // (4) has_creds is DERIVED from those vars, not hardcoded. The run must set
+  //     has_creds on BOTH branches and test each bound var for (non-)emptiness —
+  //     a guard hardcoded to `has_creds=true` fails these.
+  const run = String(check?.run ?? '');
   expect(run).toMatch(/has_creds\s*=\s*true/);
   expect(run).toMatch(/has_creds\s*=\s*false/);
-  const emptinessTest = credVar
-    ? new RegExp(`-[nz]\\s+"?\\$\\{?${credVar}\\b`)
-    : /-[nz]\s+"?\$\{?\{?\s*secrets\.AZURE_CREDENTIALS_PROD/;
-  expect(run).toMatch(emptinessTest);
+  for (const v of boundVars) {
+    expect(run).toMatch(new RegExp(`-n\\s+"?\\$\\{?${v}\\b`));
+  }
+
+  // (5) the retired long-lived SP secret must NOT appear anywhere in the file.
+  expect(raw).not.toMatch(/secrets\.AZURE_CREDENTIALS_PROD/);
+}
+
+/** Assert a workflow authenticates to Azure via OIDC (federated) not a secret. */
+function assertUsesOidcLogin(wf: Workflow, raw: string): void {
+  // `id-token: write` is required for azure/login to mint the federated token.
+  expect(String((wf.permissions ?? {})['id-token'] ?? '')).toBe('write');
+
+  // Every azure/login step uses a client-id (OIDC), never a `creds:` secret.
+  const loginSteps: WfStep[] = [];
+  for (const job of Object.values(wf.jobs ?? {})) {
+    for (const s of job.steps ?? []) {
+      if (typeof s.uses === 'string' && s.uses.startsWith('azure/login')) loginSteps.push(s);
+    }
+  }
+  expect(loginSteps.length).toBeGreaterThan(0);
+  for (const s of loginSteps) {
+    const w = s.with ?? {};
+    expect(String(w['client-id'] ?? '')).toMatch(/vars\.AZURE_CLIENT_ID/);
+    expect(w).not.toHaveProperty('creds'); // no long-lived SP secret
+  }
+  // No retired prod SP secret anywhere in the file.
+  expect(raw).not.toMatch(/secrets\.AZURE_CREDENTIALS_PROD/);
 }
 
 describe('MG-21: prod deploy split (corrective / Option A)', () => {
@@ -296,6 +336,16 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
     it('never cancels an in-flight app deploy', () => {
       expect(wf.concurrency?.['cancel-in-progress']).toBe(false);
     });
+
+    it('authenticates via OIDC (id-token: write + azure/login client-id), not a stored SP secret', () => {
+      assertUsesOidcLogin(wf, raw);
+    });
+
+    it('binds the per-env azurerm remote backend at init (prod state key)', () => {
+      // MG-24: the Function App name is resolved from the remote-backed prod
+      // state, so init pins the isolated prod backend config.
+      expect(raw).toMatch(/-backend-config=environments\/backend-prod\.hcl/);
+    });
   });
 
   describe('infra-deploy-prod.yml (manual/recovery, plan-only)', () => {
@@ -310,22 +360,37 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(Object.keys(on)).not.toContain('push');
     });
 
-    it('is plan-only: NO `terraform apply` step anywhere (deferred to MG-24)', () => {
+    it('is plan-only: NO live `terraform apply` step anywhere (greenfield apply is operator-run)', () => {
       const jobs = wf.jobs ?? {};
       const hasApplyStep = Object.values(jobs).some(job =>
         (job.steps ?? []).some(s => /terraform\s+apply\b/.test(String(s.run ?? '')))
       );
       expect(hasApplyStep).toBe(false);
-      // Raw-text backstop: no apply hiding in a comment-stripped-but-live command.
-      expect(raw).not.toMatch(/terraform\s+apply\b/);
+      // Raw-text backstop: no apply hiding in a live command. Comment lines are
+      // stripped first so a prose note like "no `terraform apply` here" (which
+      // legitimately contains the phrase) does not trip the guard.
+      const liveText = raw
+        .split('\n')
+        .filter(line => !/^\s*#/.test(line))
+        .join('\n');
+      expect(liveText).not.toMatch(/terraform\s+apply\b/);
     });
 
-    it('never cancels an in-flight infra apply', () => {
+    it('never cancels an in-flight infra run', () => {
       expect(wf.concurrency?.['cancel-in-progress']).toBe(false);
     });
 
-    it('guard derives has_creds by reading AZURE_CREDENTIALS_PROD (not hardcoded)', () => {
-      assertGuardDerivesCredsFromSecret(wf);
+    it('authenticates via OIDC (id-token: write + azure/login client-id), not a stored SP secret', () => {
+      assertUsesOidcLogin(wf, raw);
+    });
+
+    it('binds the per-env azurerm remote backend at init (prod state key)', () => {
+      // MG-24: plan runs against the remote backend for prod's ISOLATED state.
+      expect(raw).toMatch(/-backend-config=environments\/backend-prod\.hcl/);
+    });
+
+    it('guard derives has_creds from the OIDC identity vars (not a stored secret, not hardcoded)', () => {
+      assertGuardDerivesCredsFromOidcVars(wf, raw);
     });
 
     it('gates the deploy job on the guard credential check', () => {
@@ -358,7 +423,7 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(jobs).toHaveProperty('deploy-dev');
     });
 
-    it('retains the build-artifact upload that feeds deploy-dev', () => {
+    it('retains the build-artifact upload (build-typescript matrix job)', () => {
       // The upload lives on the build-typescript matrix job, so its `name` is the
       // templated `${{ matrix.app }}-build`, never a literal `api-build`; scan for
       // the upload step itself, not a resolved artifact name.
@@ -373,14 +438,16 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(uploadsBuild).toBe(true);
     });
 
-    it('deploy-dev downloads both build artifacts it deploys (api + web)', () => {
-      const downloaded = new Set(
-        (jobs['deploy-dev']?.steps ?? [])
-          .filter(s => typeof s.uses === 'string' && s.uses.startsWith('actions/download-artifact'))
-          .map(s => String((s.with ?? {})['name'] ?? ''))
-      );
-      expect(downloaded).toContain('api-build');
-      expect(downloaded).toContain('web-build');
+    it('deploy-dev is plan-only in CI: no live `terraform apply`, no `nx deploy`', () => {
+      // MG-24 keeps CI plan-only — the state-bound apply is the operator's
+      // out-of-band step. The dev CI job runs a speculative plan, never an apply
+      // or an app publish.
+      const devSteps = jobs['deploy-dev']?.steps ?? [];
+      const runText = devSteps.map(s => String(s.run ?? '')).join('\n');
+      expect(runText).not.toMatch(/terraform\s+apply\b/);
+      expect(runText).not.toMatch(/nx\s+deploy\b/);
+      // It does exercise a plan (the gate it exists for).
+      expect(runText).toMatch(/terraform\s+plan\b/);
     });
   });
 });

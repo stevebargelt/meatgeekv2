@@ -1,16 +1,67 @@
-# CosmosDB Module - Uses existing CosmosDB account with multiple databases
+# CosmosDB Module - Creates and OWNS the MeatGeek V2 CosmosDB account
+#
+# V2 is greenfield: this module CREATES its own Cosmos account inside the V2
+# resource group. It never reads, imports, or adopts the V1 shared account.
 
-# Data source to reference existing CosmosDB account
-data "azurerm_cosmosdb_account" "existing" {
-  name                = var.existing_cosmos_account_name
-  resource_group_name = var.existing_cosmos_resource_group_name
+locals {
+  # Azure Cosmos DB account naming rule: 3-44 chars, lowercase letters,
+  # numbers and hyphens only. Sanitize the caller-supplied name so the
+  # account name is always valid and deterministic (no timestamp/random).
+  cosmos_account_name = substr(
+    join("", regexall("[a-z0-9-]", lower(var.cosmos_account_name))),
+    0,
+    44
+  )
 }
 
-# Create environment-specific database within existing account
+# V2-owned CosmosDB account
+resource "azurerm_cosmosdb_account" "main" {
+  name                = local.cosmos_account_name
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  offer_type          = "Standard"
+  kind                = "GlobalDocumentDB"
+
+  free_tier_enabled                = var.enable_free_tier
+  multiple_write_locations_enabled = var.enable_multiple_write_locations
+
+  consistency_policy {
+    consistency_level       = var.consistency_level
+    max_interval_in_seconds = var.consistency_level == "BoundedStaleness" ? var.consistency_max_interval_in_seconds : null
+    max_staleness_prefix    = var.consistency_level == "BoundedStaleness" ? var.consistency_max_staleness_prefix : null
+  }
+
+  # Primary write region for the V2 account.
+  geo_location {
+    location          = var.location
+    failover_priority = 0
+    zone_redundant    = false
+  }
+
+  # Additional read/failover regions (production only; empty by default).
+  dynamic "geo_location" {
+    for_each = var.failover_locations
+    content {
+      location          = geo_location.value.location
+      failover_priority = geo_location.value.failover_priority
+      zone_redundant    = geo_location.value.zone_redundant
+    }
+  }
+
+  backup {
+    type                = var.backup_policy.type
+    interval_in_minutes = var.backup_policy.type == "Periodic" ? var.backup_policy.interval_in_minutes : null
+    retention_in_hours  = var.backup_policy.type == "Periodic" ? var.backup_policy.retention_in_hours : null
+  }
+
+  tags = var.tags
+}
+
+# Create environment-specific database within the V2-owned account
 resource "azurerm_cosmosdb_sql_database" "meatgeek" {
   name                = "${var.resource_prefix}-db"
-  resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.existing.name
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
 
   # No throughput at database level - containers will have individual throughput for minimal usage
 }
@@ -19,8 +70,8 @@ resource "azurerm_cosmosdb_sql_database" "meatgeek" {
 # Stores device information and configuration
 resource "azurerm_cosmosdb_sql_container" "devices" {
   name                = "devices"
-  resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.existing.name
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
 
   partition_key_paths   = ["/id"]
@@ -58,12 +109,12 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
   }
 }
 
-# Container: temperatures  
+# Container: temperatures
 # Stores temperature readings with TTL for data retention
 resource "azurerm_cosmosdb_sql_container" "temperatures" {
   name                = "temperatures"
-  resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.existing.name
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
 
   partition_key_paths   = ["/deviceId"]
@@ -114,8 +165,8 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
 # Stores cook session data partitioned by user
 resource "azurerm_cosmosdb_sql_container" "cooks" {
   name                = "cooks"
-  resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.existing.name
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
 
   partition_key_paths   = ["/userId"]
@@ -163,11 +214,11 @@ resource "azurerm_cosmosdb_sql_container" "cooks" {
 }
 
 # Container: users
-# Stores user profiles and preferences  
+# Stores user profiles and preferences
 resource "azurerm_cosmosdb_sql_container" "users" {
   name                = "users"
-  resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.existing.name
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
 
   partition_key_paths   = ["/id"]
@@ -196,8 +247,8 @@ resource "azurerm_cosmosdb_sql_container" "users" {
 # Stores recipe data partitioned by user
 resource "azurerm_cosmosdb_sql_container" "recipes" {
   name                = "recipes"
-  resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.existing.name
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
 
   partition_key_paths   = ["/userId"]

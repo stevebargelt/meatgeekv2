@@ -11,10 +11,7 @@ log_retention_days         = 30
 iot_hub_sku_name     = "S1"
 iot_hub_sku_capacity = 1
 
-# CosmosDB - Using existing account with environment-specific database
-existing_cosmos_account_name        = "meatgeek"        # Update this
-existing_cosmos_resource_group_name = "MeatGeek-Shared" # Update this
-
+# CosmosDB - V2-owned account (created by the cosmos-db module)
 cosmos_database_throughput     = 400  # Minimum allowed (will use full remaining capacity)
 cosmos_database_max_throughput = 1000 # Auto-scale maximum for dev
 temperature_data_ttl_days      = 7    # Shorter retention for dev (cost savings)
@@ -32,6 +29,11 @@ max_daily_messages = 10000
 
 # Security - More permissive for development
 allowed_ip_ranges = ["0.0.0.0/0"]
+
+# HTTP posture (S2) — explicit, env-specific CORS origins (no wildcard).
+# Dev allows the local web/mobile dev servers only.
+functions_cors_allowed_origins = ["http://localhost:4200", "http://localhost:3000"]
+signalr_cors_allowed_origins   = ["http://localhost:4200", "http://localhost:3000"]
 
 # Cost management
 enable_backup          = false # Disable backups in dev to save costs

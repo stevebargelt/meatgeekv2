@@ -2,557 +2,272 @@
 
 ## Overview
 
-The MeatGeek V2 infrastructure is completely managed using **Terraform** as Infrastructure as Code, organized within the NX monorepo for consistent development workflows.
+The MeatGeek V2 infrastructure is managed entirely with **Terraform** as
+Infrastructure as Code, organized within the Nx monorepo. This is a **greenfield
+V2 stack**: it creates and **owns** every resource it needs (including its own
+Cosmos DB account) and has **no** dependency on the legacy V1 system.
+
+> **Hard safety (MG-24).** Never import, adopt, modify, rename, or delete a V1
+> Azure resource from this project. V2 always uses the `azurerm` **remote**
+> backend with a per-environment state key — there is no supported local-state
+> path. Apply is an **operator** action; CI is plan-only.
+
+For the end-to-end operator procedure (bootstrap + the greenfield dev
+plan/apply acceptance with evidence capture) see the
+**[bootstrap runbook](./bootstrap-runbook.md)**.
 
 ## Directory Structure
 
 ```
 apps/infrastructure/
-├── environments/               # Environment-specific variables
-│   ├── dev.tfvars             # Development environment
-│   ├── staging.tfvars         # Staging environment
-│   └── prod.tfvars            # Production environment
-├── modules/                   # Reusable Terraform modules
-│   ├── iot-hub/               # Azure IoT Hub resources
-│   ├── cosmos-db/             # CosmosDB configuration
-│   ├── functions/             # Azure Functions resources
-│   ├── signalr/               # SignalR Service setup
-│   ├── monitoring/            # Application Insights & monitoring
-│   └── networking/            # Virtual networks and security
-├── main.tf                    # Root module configuration
-├── variables.tf               # Input variable definitions
-├── outputs.tf                 # Output value definitions
-├── backend.tf                 # Remote state management
-├── versions.tf                # Provider version constraints
-├── project.json               # NX project configuration
-└── README.md                  # Infrastructure documentation
+├── bootstrap/
+│   └── bootstrap.sh            # run-once: remote state + OIDC identity
+├── scripts/
+│   └── tf-static-checks.sh     # deterministic static gate (no Azure)
+├── environments/
+│   ├── dev.tfvars              # dev variable values
+│   ├── prod.tfvars             # prod variable values
+│   ├── backend-dev.hcl         # dev remote-state partial config
+│   └── backend-prod.hcl        # prod remote-state partial config
+├── modules/                    # reusable Terraform modules
+│   ├── iot-hub/
+│   ├── cosmos-db/              # CREATES and OWNS the V2 Cosmos account
+│   ├── functions/
+│   ├── signalr/
+│   └── monitoring/
+├── main.tf                     # root module (backend, provider, locals, modules)
+├── variables.tf                # input variable definitions
+├── outputs.tf                  # output value definitions
+├── project.json                # Nx project configuration
+└── README.md                   # infrastructure documentation
 ```
 
-## Core Configuration Files
+> There is **no** `staging.tfvars` — staging is out of scope for MG-24 and the
+> `environment` variable admits only `dev` and `prod`.
 
-### Backend Configuration (`backend.tf`)
+## Core Configuration
 
-Remote state management using Azure Storage for team collaboration:
+### Remote-state backend (partial config, per environment)
+
+`main.tf` declares an empty `azurerm` backend for partial configuration; the
+per-environment values are supplied at init time. This keeps **distinct** state
+keys so dev and prod state can never collide.
 
 ```hcl
+# main.tf
 terraform {
-  backend "azurerm" {
-    resource_group_name  = "meatgeek-terraform-state-rg"
-    storage_account_name = "meatgeekterraformstate"
-    container_name       = "tfstate"
-    key                  = "meatgeekv2.tfstate"
-  }
+  backend "azurerm" {}   # values come from environments/backend-<env>.hcl
 }
 ```
 
-### Provider Configuration (`versions.tf`)
+```hcl
+# environments/backend-dev.hcl
+resource_group_name  = "meatgeek-v2-tfstate-rg"
+storage_account_name = "meatgeekv2tfstate"
+container_name       = "tfstate"
+key                  = "meatgeek-v2/dev.tfstate"
+```
 
-Terraform and provider version constraints:
+```hcl
+# environments/backend-prod.hcl
+resource_group_name  = "meatgeek-v2-tfstate-rg"
+storage_account_name = "meatgeekv2tfstate"
+container_name       = "tfstate"
+key                  = "meatgeek-v2/prod.tfstate"
+```
+
+The state account (`meatgeekv2tfstate`) is created **once** by the bootstrap
+(`apps/infrastructure/bootstrap/bootstrap.sh`) — you do **not** create it by
+hand, and the legacy V1 shared state account is deliberately **not** used.
+
+Initialize with a **clean** init (never migrate local state):
+
+```bash
+rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
+terraform init -reconfigure -backend-config=environments/backend-dev.hcl
+```
+
+### Provider configuration
 
 ```hcl
 terraform {
-  required_version = ">= 1.9.0"
+  required_version = ">= 1.9"
 
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
-    azuread = {
-      source  = "hashicorp/azuread"
-      version = "~> 3.0"
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.0"
     }
   }
 }
 
 provider "azurerm" {
+  # No hardcoded subscription. Resolved from ARM_SUBSCRIPTION_ID / OIDC, the
+  # ambient az CLI context for local runs, or the optional subscription_id
+  # variable (default null).
+  subscription_id = var.subscription_id
+
   features {
+    resource_group {
+      prevent_deletion_if_contains_resources = false
+    }
     key_vault {
       purge_soft_delete_on_destroy    = true
       recover_soft_deleted_key_vaults = true
     }
-    resource_group {
-      prevent_deletion_if_contains_resources = false
-    }
   }
 }
 ```
 
-### Root Module (`main.tf`)
-
-Main infrastructure configuration using modular approach:
+### Naming & tags (single source of truth, no drift)
 
 ```hcl
 locals {
+  # V2 naming: meatgeek-v2-{environment}-{service}. One prefix, cascaded to
+  # every module, so V2 can never be confused with V1.
+  resource_prefix = "meatgeek-v2-${var.environment}"
+
+  # No wall-clock-derived tag (no CreatedDate = timestamp()) — a dynamic value
+  # would change on every plan and churn tags on unchanged resources.
   common_tags = {
-    Project     = "MeatGeek-V2"
+    Project     = "MeatGeek V2"
     Environment = var.environment
     ManagedBy   = "Terraform"
+    Repository  = "stevebargelt/meatgeekv2"
   }
 }
+```
 
-# Resource Group
-resource "azurerm_resource_group" "meatgeek" {
-  name     = "meatgeek-${var.environment}-rg"
-  location = var.location
-  tags     = local.common_tags
+The **Function App** is named `${local.resource_prefix}-func`
+(`meatgeek-v2-${environment}-func`) and exposed as the `function_app_name`
+output — the single name the app deploy consumes.
+
+### V2-owned Cosmos DB
+
+The Cosmos module **creates** the account — it does not read a shared V1 account
+via a data source, and there is **no** V1 shared-Cosmos adoption input anywhere:
+
+```hcl
+# main.tf — the owned account name is globally-unique, deterministic, and
+# decoupled from the human-readable prefix so it can never collide with V1.
+locals {
+  cosmos_account_name = "mgv2-${var.environment}-${substr(sha1("${data.azurerm_client_config.current.subscription_id}-cosmos"), 0, 12)}"
 }
 
-# IoT Hub Module
-module "iot_hub" {
-  source = "./modules/iot-hub"
-
-  resource_group_name = azurerm_resource_group.meatgeek.name
-  location           = azurerm_resource_group.meatgeek.location
-  environment        = var.environment
-  tags              = local.common_tags
-}
-
-# CosmosDB Module
 module "cosmos_db" {
   source = "./modules/cosmos-db"
 
-  resource_group_name = azurerm_resource_group.meatgeek.name
-  location           = azurerm_resource_group.meatgeek.location
-  environment        = var.environment
-  tags              = local.common_tags
+  resource_prefix     = local.resource_prefix
+  environment         = var.environment
+  cosmos_account_name = local.cosmos_account_name   # V2 owns this account
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  # ... throughput / ttl / tags
 }
+```
 
-# Azure Functions Module
-module "functions" {
-  source = "./modules/functions"
+## Nx Integration
 
-  resource_group_name = azurerm_resource_group.meatgeek.name
-  location           = azurerm_resource_group.meatgeek.location
-  environment        = var.environment
-  cosmos_connection  = module.cosmos_db.connection_string
-  iot_hub_connection = module.iot_hub.event_hub_connection_string
-  tags              = local.common_tags
+`project.json` wraps the Terraform commands. The `init` target is **env-aware**
+and passes `-reconfigure` so switching environments re-binds the backend:
+
+```jsonc
+{
+  "targets": {
+    "init": {
+      "command": "terraform init -reconfigure -backend-config=environments/backend-{args.env}.hcl",
+    },
+    "plan": { "command": "terraform plan -var-file=environments/{args.env}.tfvars -out=tfplan" },
+    "apply": { "command": "terraform apply tfplan" },
+    "destroy": { "command": "terraform destroy -var-file=environments/{args.env}.tfvars" },
+    "validate": { "command": "terraform validate" },
+    "format": { "command": "terraform fmt -recursive" },
+    "output": { "command": "terraform output" },
+  },
 }
+```
 
-# SignalR Module
-module "signalr" {
-  source = "./modules/signalr"
+### Common Nx commands
 
-  resource_group_name = azurerm_resource_group.meatgeek.name
-  location           = azurerm_resource_group.meatgeek.location
-  environment        = var.environment
-  tags              = local.common_tags
-}
-
-# Monitoring Module
-module "monitoring" {
-  source = "./modules/monitoring"
-
-  resource_group_name = azurerm_resource_group.meatgeek.name
-  location           = azurerm_resource_group.meatgeek.location
-  environment        = var.environment
-  function_app_id    = module.functions.function_app_id
-  cosmos_db_id       = module.cosmos_db.account_id
-  iot_hub_id         = module.iot_hub.hub_id
-  signalr_id         = module.signalr.service_id
-  tags              = local.common_tags
-}
+```bash
+nx init     infrastructure --env=dev
+nx plan     infrastructure --env=dev
+nx apply    infrastructure --env=dev     # operator-run only, never CI
+nx validate infrastructure
+nx destroy  infrastructure --env=dev
 ```
 
 ## Environment Management
 
-### Development Environment (`environments/dev.tfvars`)
+### Development (`environments/dev.tfvars`)
 
-Cost-optimized configuration for development:
+Cost-optimized:
 
 ```hcl
 environment = "dev"
 location    = "North Central US"
 
-# IoT Hub Configuration
-iot_hub_sku_name     = "F1"  # Free tier for dev
+iot_hub_sku_name     = "S1"   # S1 required for message routing (F1 cannot route)
 iot_hub_sku_capacity = 1
 
-# CosmosDB Configuration
-cosmos_consistency_level = "Session"
-cosmos_throughput       = 400  # Minimum for dev
+cosmos_database_throughput     = 400    # V2-owned account
+cosmos_database_max_throughput = 1000
+temperature_data_ttl_days      = 7
 
-# Function App Configuration
-function_app_service_plan_sku = "Y1"  # Consumption plan
-
-# SignalR Configuration
-signalr_sku = "Free_F1"
-
-# Device Configuration
-device_count = 1  # Single development device
+functions_app_service_plan_sku = "Y1"   # Consumption plan
+signalr_sku_name               = "Free_F1"
 ```
 
-### Production Environment (`environments/prod.tfvars`)
+### Production (`environments/prod.tfvars`)
 
-Production-ready configuration with higher performance:
-
-```hcl
-environment = "prod"
-location    = "North Central US"
-
-# IoT Hub Configuration
-iot_hub_sku_name     = "S1"  # Standard tier for production
-iot_hub_sku_capacity = 2
-
-# CosmosDB Configuration
-cosmos_consistency_level = "Strong"
-cosmos_throughput       = 1000
-
-# Function App Configuration
-function_app_service_plan_sku = "EP1"  # Premium plan for better performance
-
-# SignalR Configuration
-signalr_sku = "Standard_S1"
-
-# Device Configuration
-device_count = 5  # Support multiple production devices
-```
-
-## NX Integration
-
-### Project Configuration (`project.json`)
-
-NX commands for Terraform operations:
-
-```json
-{
-  "name": "infrastructure",
-  "sourceRoot": "apps/infrastructure",
-  "projectType": "application",
-  "targets": {
-    "init": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "terraform init",
-        "cwd": "apps/infrastructure"
-      }
-    },
-    "plan": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "terraform plan -var-file=environments/{args.env}.tfvars -out=tfplan",
-        "cwd": "apps/infrastructure"
-      }
-    },
-    "apply": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "terraform apply tfplan",
-        "cwd": "apps/infrastructure"
-      }
-    },
-    "destroy": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "terraform destroy -var-file=environments/{args.env}.tfvars",
-        "cwd": "apps/infrastructure"
-      }
-    },
-    "validate": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "terraform validate",
-        "cwd": "apps/infrastructure"
-      }
-    },
-    "format": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "terraform fmt -recursive",
-        "cwd": "apps/infrastructure"
-      }
-    },
-    "output": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "terraform output",
-        "cwd": "apps/infrastructure"
-      }
-    }
-  },
-  "tags": ["type:app", "scope:infrastructure", "platform:terraform"]
-}
-```
-
-### Common NX Commands
-
-```bash
-# Initialize Terraform
-nx init infrastructure
-
-# Plan changes for development
-nx plan infrastructure --env=dev
-
-# Apply development infrastructure
-nx apply infrastructure --env=dev
-
-# Plan production changes
-nx plan infrastructure --env=prod
-
-# Apply production infrastructure
-nx apply infrastructure --env=prod
-
-# Validate Terraform configuration
-nx validate infrastructure
-
-# Destroy development environment
-nx destroy infrastructure --env=dev
-```
-
-## Terraform Modules
-
-### IoT Hub Module (`modules/iot-hub/main.tf`)
-
-Complete IoT Hub setup with parallel message routing:
-
-```hcl
-resource "azurerm_iothub" "main" {
-  name                = "meatgeek-${var.environment}-iothub"
-  resource_group_name = var.resource_group_name
-  location            = var.location
-
-  sku {
-    name     = var.sku_name
-    capacity = var.sku_capacity
-  }
-
-  tags = var.tags
-}
-
-# Device registrations
-resource "azurerm_iothub_device" "meatgeek_devices" {
-  count               = var.device_count
-  name                = "meatgeek${count.index + 1}"
-  iothub_name         = azurerm_iothub.main.name
-  resource_group_name = var.resource_group_name
-
-  authentication_type = "sas"
-}
-
-# Event Hub for real-time processing
-resource "azurerm_eventhub_namespace" "realtime" {
-  name                = "meatgeek-${var.environment}-events"
-  resource_group_name = var.resource_group_name
-  location            = var.location
-  sku                 = "Standard"
-  capacity            = 1
-
-  tags = var.tags
-}
-
-resource "azurerm_eventhub" "realtime" {
-  name                = "temperature-realtime"
-  namespace_name      = azurerm_eventhub_namespace.realtime.name
-  resource_group_name = var.resource_group_name
-  partition_count     = 2
-  message_retention   = 1
-}
-
-# Consumer group for real-time Functions
-resource "azurerm_eventhub_consumer_group" "realtime_functions" {
-  name                = "realtime-functions"
-  namespace_name      = azurerm_eventhub_namespace.realtime.name
-  eventhub_name       = azurerm_eventhub.realtime.name
-  resource_group_name = var.resource_group_name
-}
-
-# IoT Hub endpoint for direct CosmosDB routing
-resource "azurerm_iothub_endpoint_cosmosdb_account" "storage" {
-  resource_group_name     = var.resource_group_name
-  iothub_name            = azurerm_iothub.main.name
-  name                   = "cosmosdb-temperatures"
-  connection_string      = var.cosmos_connection_string
-  endpoint_uri           = var.cosmos_endpoint_uri
-  database_name          = var.cosmos_database_name
-  container_name         = "temperatures"
-  partition_key_template = "$body.cookId"
-  partition_key_name     = "cookId"
-}
-
-# IoT Hub endpoint for Event Hub routing
-resource "azurerm_iothub_endpoint_eventhub" "realtime" {
-  resource_group_name = var.resource_group_name
-  iothub_name         = azurerm_iothub.main.name
-  name                = "eventhub-realtime"
-  connection_string   = azurerm_eventhub.realtime.default_primary_connection_string
-}
-
-# Route 1: Direct storage to CosmosDB
-resource "azurerm_iothub_route" "temperature_storage" {
-  resource_group_name = var.resource_group_name
-  iothub_name         = azurerm_iothub.main.name
-  name                = "TemperatureStorage"
-
-  source         = "DeviceMessages"
-  condition      = "messageType = 'temperature'"
-  endpoint_names = [azurerm_iothub_endpoint_cosmosdb_account.storage.name]
-  enabled        = true
-}
-
-# Route 2: Real-time processing via Event Hub
-resource "azurerm_iothub_route" "temperature_realtime" {
-  resource_group_name = var.resource_group_name
-  iothub_name         = azurerm_iothub.main.name
-  name                = "TemperatureRealtime"
-
-  source         = "DeviceMessages"
-  condition      = "messageType = 'temperature'"
-  endpoint_names = [azurerm_iothub_endpoint_eventhub.realtime.name]
-  enabled        = true
-}
-
-# Outputs for other modules
-output "connection_string" {
-  value     = azurerm_iothub.main.shared_access_policy[0].connection_string
-  sensitive = true
-}
-
-output "event_hub_connection_string" {
-  value     = azurerm_eventhub.realtime.default_primary_connection_string
-  sensitive = true
-}
-
-output "event_hub_name" {
-  value = azurerm_eventhub.realtime.name
-}
-
-output "hub_id" {
-  value = azurerm_iothub.main.id
-}
-```
-
-### CosmosDB Module (`modules/cosmos-db/main.tf`)
-
-CosmosDB configuration with proper collections:
-
-```hcl
-resource "azurerm_cosmosdb_account" "main" {
-  name                = "meatgeek-${var.environment}-cosmos"
-  resource_group_name = var.resource_group_name
-  location            = var.location
-  offer_type          = "Standard"
-
-  consistency_policy {
-    consistency_level = var.consistency_level
-  }
-
-  geo_location {
-    location          = var.location
-    failover_priority = 0
-  }
-
-  tags = var.tags
-}
-
-# Database for MeatGeek data
-resource "azurerm_cosmosdb_sql_database" "main" {
-  name                = "meatgeek"
-  resource_group_name = var.resource_group_name
-  account_name        = azurerm_cosmosdb_account.main.name
-  throughput          = var.throughput
-}
-
-# Collections with proper partitioning
-resource "azurerm_cosmosdb_sql_container" "temperatures" {
-  name                = "temperatures"
-  resource_group_name = var.resource_group_name
-  account_name        = azurerm_cosmosdb_account.main.name
-  database_name       = azurerm_cosmosdb_sql_database.main.name
-  partition_key_path  = "/cookId"
-  throughput          = 400
-}
-
-resource "azurerm_cosmosdb_sql_container" "cooks" {
-  name                = "cooks"
-  resource_group_name = var.resource_group_name
-  account_name        = azurerm_cosmosdb_account.main.name
-  database_name       = azurerm_cosmosdb_sql_database.main.name
-  partition_key_path  = "/deviceId"
-  throughput          = 400
-}
-
-resource "azurerm_cosmosdb_sql_container" "devices" {
-  name                = "devices"
-  resource_group_name = var.resource_group_name
-  account_name        = azurerm_cosmosdb_account.main.name
-  database_name       = azurerm_cosmosdb_sql_database.main.name
-  partition_key_path  = "/id"
-  throughput          = 400
-}
-```
+Higher-tier SKUs, extended retention, tighter security. Production is **activated
+separately under MG-25** (the `production` GitHub Environment secret +
+`PROD_DEPLOY_ENABLED`).
 
 ## CI/CD Integration
 
-### GitHub Actions Workflow (`.github/workflows/infrastructure.yml`)
+CI **never** runs `terraform apply`. The authoritative model:
 
-> **Aspirational — superseded by the shipped workflows.** The `infrastructure.yml` example below (push to `main` + `paths: apps/infrastructure/**` → `terraform apply`) reflects the original auto-apply-on-merge intent and is **not** what shipped. There is no `infrastructure.yml`. Prod infra actually deploys through `.github/workflows/infra-deploy-prod.yml`, which is **`workflow_dispatch`-only** and **plan-only** — `terraform init` + `terraform plan` (with `-var-file=environments/prod.tfvars`), **no `apply`**. Auto-apply-on-merge and the `apply` step are deferred to **MG-24** until Terraform has an `azurerm` remote state backend; an `apply` against today's empty local state would try to recreate all prod infrastructure. Prod app deploy lives in `app-deploy-prod.yml` (CI-gated, API-only). See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod) for the authoritative model. The YAML below is retained only as a record of the original intent.
+- **`.github/workflows/ci.yml`** — the `validate-infrastructure` job runs
+  `terraform validate`, `terraform fmt -check`, and `scripts/tf-static-checks.sh`.
+  The `deploy-dev` job is **plan-only**.
+- **`.github/workflows/infra-deploy-prod.yml`** — authenticates via **OIDC**
+  (`id-token: write`, `azure/login` with the per-environment federated
+  credential; no long-lived service-principal secret), binds prod remote state
+  (`-backend-config=environments/backend-prod.hcl`), runs under the `production`
+  GitHub Environment gate, and **ends at `terraform plan`**. There is **no**
+  `apply`.
+- **`.github/workflows/app-deploy-prod.yml`** — reads
+  `terraform output -raw function_app_name` and passes it to the `nx deploy api`
+  step so the publish target can never desync from the Terraform name.
 
-Automated infrastructure deployment pipeline:
+See **[CI/CD Pipeline](../development/ci-cd.md)** for the full model.
 
-```yaml
-name: Infrastructure Deployment
+### OIDC deployment identity
 
-on:
-  push:
-    branches: [main]
-    paths: ['apps/infrastructure/**']
-  pull_request:
-    paths: ['apps/infrastructure/**']
-
-jobs:
-  terraform:
-    runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install NX
-        run: npm install -g nx
-
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Terraform Init
-        run: nx init infrastructure
-
-      - name: Terraform Validate
-        run: nx validate infrastructure
-
-      - name: Terraform Plan
-        run: nx plan infrastructure --env=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
-
-      - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
-        run: nx apply infrastructure --env=prod
-```
+The GitHub Actions identity uses **federated credentials scoped per GitHub
+Environment** (`repo:stevebargelt/meatgeekv2:environment:dev` and
+`:environment:production`), not per branch — so the dev CI identity can never
+authenticate to prod. It holds a **plan/read-only** role (`Reader` +
+`Storage Blob Data Contributor` on the state account only). Apply is never
+granted to CI. The identity is created by the bootstrap (see the runbook).
 
 ## Getting Started
 
 ### Prerequisites
 
-1. **Azure CLI** installed and authenticated
-2. **Terraform** >= 1.9.0 installed
-3. **Node.js** and **NX** for monorepo commands
-4. **Azure Subscription** with appropriate permissions
+1. **Azure CLI** installed and authenticated (`az login`)
+2. **Terraform** ≥ 1.9
+3. **Node.js** + **Nx** for the monorepo commands
+4. Access to the V2 Azure subscription
 
-### Initial Setup
+### Initial setup
 
-1. **Clone the repository**:
+1. **Clone and install**
 
    ```bash
    git clone https://github.com/stevebargelt/meatgeekv2
@@ -560,62 +275,74 @@ jobs:
    npm install
    ```
 
-2. **Set up Terraform backend** (one-time setup):
+2. **Run the one-time bootstrap** (remote state + OIDC identity — idempotent):
 
    ```bash
-   # Create resource group for Terraform state
-   az group create --name meatgeek-terraform-state-rg --location "North Central US"
-
-   # Create storage account for state
-   az storage account create \
-     --name meatgeekterraformstate \
-     --resource-group meatgeek-terraform-state-rg \
-     --location "North Central US" \
-     --sku Standard_LRS
-
-   # Create storage container
-   az storage container create \
-     --name tfstate \
-     --account-name meatgeekterraformstate
+   cd apps/infrastructure/bootstrap
+   ./bootstrap.sh
    ```
 
-3. **Initialize and deploy development environment**:
+   Do **not** create the state storage account by hand — the bootstrap owns it.
+
+3. **Initialize and plan the dev environment** (clean init):
+
    ```bash
-   nx init infrastructure
+   cd apps/infrastructure
+   rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
+   nx init infrastructure --env=dev
    nx plan infrastructure --env=dev
-   nx apply infrastructure --env=dev
+   # apply is operator-run per the runbook, after human plan review
    ```
+
+The full greenfield acceptance (MG-24's 10-step dev proof with evidence capture)
+is in the **[bootstrap runbook](./bootstrap-runbook.md)**.
 
 ## Authentication Integration
 
-### External Authentication Provider
+MeatGeek V2 uses **Supabase Auth** as the external authentication provider:
 
-MeatGeek V2 uses **Supabase Auth** as the external authentication provider, which means:
-
-- No complex identity provider infrastructure needed in Terraform
-- Authentication is handled by Supabase's managed service
-- Azure Functions validate JWT tokens from Supabase
+- No identity-provider infrastructure needed in Terraform
+- Azure Functions validate JWTs from Supabase
 - Reduced infrastructure complexity and cost
 
-### Environment Variables Required
+Function App settings required:
 
 ```bash
-# Add to Azure Functions App Settings
 SUPABASE_URL=<your-supabase-project-url>
 SUPABASE_ANON_KEY=<your-supabase-anon-key>
 SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
 ```
 
-## Benefits of This Terraform Setup
+> **Open security item (deferred):** Function-App connection strings are
+> currently injected as plaintext app settings. Whether to route them through
+> **Key Vault references** is left to a human security review.
 
-- **Modular Architecture**: Reusable components across environments
-- **Environment Separation**: Clear development, staging, production configurations
-- **State Management**: Shared state with Azure Storage backend
-- **NX Integration**: Consistent tooling with other applications
-- **CI/CD Ready**: Automated deployment with GitHub Actions
-- **Scalable Structure**: Easy to add new Azure resources and modules
-- **External Auth**: No complex identity provider infrastructure to manage in Azure
+## Static Validation
+
+Run without any Azure credentials — produces no state:
+
+```bash
+cd apps/infrastructure
+terraform init -backend=false && terraform validate
+terraform fmt -check -recursive
+scripts/tf-static-checks.sh
+```
+
+`tf-static-checks.sh` fails on: a hardcoded subscription id, `timestamp()` tag
+drift, any leftover V1 shared-Cosmos adoption reference, missing per-env state
+keys, a stray local `*.tfstate`, or a missing `meatgeek-v2-` prefix.
+
+## Benefits of This Setup
+
+- **Greenfield & self-owned** — no V1 dependency; V2 owns its Cosmos account
+- **Per-environment isolated state** — dev/prod state can never collide
+- **No long-lived secrets** — OIDC federation, plan/read-only CI role
+- **Deterministic** — no `timestamp()` drift; a second plan is a NO-OP
+- **Single source of truth** — one naming prefix; the Function App name flows
+  from a Terraform output into the deploy
+- **Nx integration** — consistent tooling with the rest of the monorepo
 
 ---
 
-> **Next Steps**: Once infrastructure is deployed, configure applications using [Azure Services](azure-services.md) documentation, or proceed with [Deployment Guide](deployment.md).
+> **Next steps:** run the **[bootstrap runbook](./bootstrap-runbook.md)**, then
+> configure applications from the Terraform outputs.

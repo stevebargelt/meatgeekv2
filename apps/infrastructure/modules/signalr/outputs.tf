@@ -15,14 +15,13 @@ output "hostname" {
   value       = azurerm_signalr_service.main.hostname
 }
 
-output "connection_string" {
-  description = "Connection string for SignalR Service"
-  value       = azurerm_signalr_service.main.primary_connection_string
-  sensitive   = true
+# Non-secret service URI for identity-based access from the Function App
+# (AzureSignalRConnectionString__serviceUri). Runtime auth is via the caller's
+# managed identity + a SignalR Service Owner role assignment, not a key.
+output "service_uri" {
+  description = "SignalR Service URI (non-secret) for identity-based access"
+  value       = "https://${azurerm_signalr_service.main.hostname}"
 }
 
-output "access_key" {
-  description = "Primary access key for SignalR Service"
-  value       = azurerm_signalr_service.main.primary_access_key
-  sensitive   = true
-}
+# NOTE: the former `connection_string` and `access_key` secret outputs were
+# REMOVED (MG-24 S1). No SignalR key is surfaced via Terraform state/outputs.

@@ -84,7 +84,7 @@
       "dependsOn": ["build"],
       "options": {
         "commands": [
-          "func azure functionapp publish meatgeek-api-{args.env}",
+          "func azure functionapp publish {args.functionApp}",
           "echo 'API deployed to Azure Functions'"
         ],
         "parallel": false,

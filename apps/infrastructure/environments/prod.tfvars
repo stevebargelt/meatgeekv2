@@ -11,10 +11,7 @@ log_retention_days         = 90
 iot_hub_sku_name     = "S1" # Standard tier - 400,000 messages/day
 iot_hub_sku_capacity = 2    # 2 units for redundancy
 
-# CosmosDB - Using existing account with production database
-existing_cosmos_account_name        = "meatgeek"        # Update this
-existing_cosmos_resource_group_name = "MeatGeek-Shared" # Update this
-
+# CosmosDB - V2-owned account (created by the cosmos-db module)
 cosmos_database_throughput     = 400  # Cost-optimized base throughput
 cosmos_database_max_throughput = 4000 # Auto-scale for production spikes when needed
 temperature_data_ttl_days      = 90   # Full 90-day retention for production
@@ -36,6 +33,11 @@ allowed_ip_ranges = [
   "172.16.0.0/12", # Private networks
   "192.168.0.0/16" # Private networks
 ]
+
+# HTTP posture (S2) — explicit, env-specific CORS origins (no wildcard).
+# Prod allows only the production web front-end origins.
+functions_cors_allowed_origins = ["https://meatgeek.com", "https://www.meatgeek.com"]
+signalr_cors_allowed_origins   = ["https://meatgeek.com", "https://www.meatgeek.com"]
 
 # Backup and disaster recovery
 enable_backup         = true

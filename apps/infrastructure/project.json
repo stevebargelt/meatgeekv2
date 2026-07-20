@@ -6,7 +6,7 @@
     "init": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "terraform init",
+        "command": "terraform init -reconfigure -backend-config=environments/backend-{args.env}.hcl",
         "cwd": "apps/infrastructure"
       }
     },

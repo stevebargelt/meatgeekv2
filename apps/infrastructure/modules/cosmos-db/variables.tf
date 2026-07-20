@@ -1,18 +1,55 @@
-# CosmosDB Module Variables - For Existing Account Usage
+# CosmosDB Module Variables - For the V2-OWNED account
 
 variable "resource_prefix" {
-  description = "Prefix for resource names (e.g., meatgeek-dev)"
+  description = "Prefix for resource names (e.g., meatgeek-v2-dev)"
   type        = string
 }
 
-variable "existing_cosmos_account_name" {
-  description = "Name of the existing CosmosDB account to use"
+# --- V2-owned account inputs (contract A) ---
+
+variable "cosmos_account_name" {
+  description = "Globally-unique name for the V2-owned CosmosDB account. Sanitized to Azure's rule (3-44 chars, lowercase alphanumeric + hyphen) inside the module."
   type        = string
 }
 
-variable "existing_cosmos_resource_group_name" {
-  description = "Resource group name where the existing CosmosDB account is located"
+variable "resource_group_name" {
+  description = "Resource group in which to create the V2-owned CosmosDB account"
   type        = string
+}
+
+variable "location" {
+  description = "Azure region for the V2-owned CosmosDB account"
+  type        = string
+}
+
+# Consistency configuration
+variable "consistency_level" {
+  description = "CosmosDB consistency level"
+  type        = string
+  default     = "Session"
+  validation {
+    condition     = contains(["BoundedStaleness", "Eventual", "Session", "Strong", "ConsistentPrefix"], var.consistency_level)
+    error_message = "Consistency level must be one of: BoundedStaleness, Eventual, Session, Strong, ConsistentPrefix."
+  }
+}
+
+variable "consistency_max_interval_in_seconds" {
+  description = "Max lag interval (seconds) - only used when consistency_level is BoundedStaleness"
+  type        = number
+  default     = 300
+}
+
+variable "consistency_max_staleness_prefix" {
+  description = "Max staleness prefix (operations) - only used when consistency_level is BoundedStaleness"
+  type        = number
+  default     = 100000
+}
+
+# Free-tier knob (one free-tier account allowed per subscription; dev-only)
+variable "enable_free_tier" {
+  description = "Enable the CosmosDB free tier for the V2 account (one per subscription)"
+  type        = bool
+  default     = false
 }
 
 # Database configuration
@@ -83,7 +120,7 @@ variable "enable_multiple_write_locations" {
 }
 
 variable "failover_locations" {
-  description = "Failover locations for CosmosDB"
+  description = "Additional read/failover regions for CosmosDB (production only)"
   type = list(object({
     location          = string
     failover_priority = number
@@ -94,7 +131,7 @@ variable "failover_locations" {
 
 # Environment-specific settings
 variable "environment" {
-  description = "Environment name (dev, staging, prod)"
+  description = "Environment name (dev, prod)"
   type        = string
 }
 

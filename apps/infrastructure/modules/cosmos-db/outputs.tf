@@ -1,19 +1,19 @@
 # CosmosDB Module Outputs
 
-# Existing CosmosDB Account Information
+# V2-owned CosmosDB Account Information
 output "cosmos_account_id" {
-  description = "ID of the existing CosmosDB account"
-  value       = data.azurerm_cosmosdb_account.existing.id
+  description = "ID of the V2-owned CosmosDB account"
+  value       = azurerm_cosmosdb_account.main.id
 }
 
 output "cosmos_account_name" {
-  description = "Name of the existing CosmosDB account"
-  value       = data.azurerm_cosmosdb_account.existing.name
+  description = "Name of the V2-owned CosmosDB account"
+  value       = azurerm_cosmosdb_account.main.name
 }
 
 output "endpoint" {
   description = "CosmosDB account endpoint"
-  value       = data.azurerm_cosmosdb_account.existing.endpoint
+  value       = azurerm_cosmosdb_account.main.endpoint
 }
 
 # Database Information
@@ -28,23 +28,10 @@ output "database_name" {
 }
 
 # Connection Information
-output "connection_string" {
-  description = "CosmosDB connection string for the existing account"
-  value       = "AccountEndpoint=${data.azurerm_cosmosdb_account.existing.endpoint};AccountKey=${data.azurerm_cosmosdb_account.existing.primary_key};Database=${azurerm_cosmosdb_sql_database.meatgeek.name}"
-  sensitive   = true
-}
-
-output "primary_key" {
-  description = "Primary key for the CosmosDB account"
-  value       = data.azurerm_cosmosdb_account.existing.primary_key
-  sensitive   = true
-}
-
-output "secondary_key" {
-  description = "Secondary key for the CosmosDB account"
-  value       = data.azurerm_cosmosdb_account.existing.secondary_key
-  sensitive   = true
-}
+# NOTE: the former `connection_string`, `primary_key`, and `secondary_key`
+# secret outputs were REMOVED (MG-24 S1). Consumers (the Function App, the IoT
+# Hub route) access Cosmos identity-based via the non-secret `endpoint` above
+# plus a Cosmos SQL data-plane role assignment — no AccountKey enters state.
 
 # Container Information
 output "container_names" {
@@ -73,10 +60,10 @@ output "partition_keys" {
 output "application_config" {
   description = "Configuration object for applications"
   value = {
-    endpoint            = data.azurerm_cosmosdb_account.existing.endpoint
+    endpoint            = azurerm_cosmosdb_account.main.endpoint
     database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
-    account_name        = data.azurerm_cosmosdb_account.existing.name
-    resource_group_name = data.azurerm_cosmosdb_account.existing.resource_group_name
+    account_name        = azurerm_cosmosdb_account.main.name
+    resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
 
     containers = {
       devices      = azurerm_cosmosdb_sql_container.devices.name
