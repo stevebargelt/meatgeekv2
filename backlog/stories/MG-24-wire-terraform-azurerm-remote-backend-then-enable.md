@@ -43,7 +43,10 @@ After a minimal state/identity bootstrap, this repository creates the COMPLETE M
 
 ## Security requirements (FOUNDATIONAL — operator-directed 2026-07-20, must be in place BEFORE the first greenfield apply)
 
-### S1. No plaintext runtime secrets in Terraform state (secrets-in-state is a state-model defect, not a prod concern)
+### S1. No plaintext runtime secrets in Terraform state
+
+> **Accepted residual (operator decision 2026-07-20):** the `azurerm_application_insights` instrumentation key/connection_string is an inherent COMPUTED attribute of the TF-managed resource and is therefore in state (true of any TF-managed resource's attributes). App Insights stays TF-managed; accepted as low-risk — telemetry-write-only (no data/resource access), the Function App authenticates via managed identity/AAD (key unused for auth), and state access is restricted. Documented as an ADR under `learnings/decisions/`. This is the ONLY accepted exception: Cosmos/Storage/IoT Hub/SignalR are fully identity-based, and no connection-string/key VALUE may appear in app_settings or outputs (gate-enforced).
+ (secrets-in-state is a state-model defect, not a prod concern)
 - Function App uses a **managed identity**.
 - Replace Cosmos, Storage, IoT Hub, and SignalR **connection-string app settings** with **identity-based access + non-secret endpoints** wherever supported.
 - Grant **narrowly-scoped RBAC roles** to the Function App identity (least privilege per service).

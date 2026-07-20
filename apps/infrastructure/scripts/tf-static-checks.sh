@@ -18,17 +18,42 @@
 #      that could touch the legacy V1-bound on-disk tfstate. Git-ignored state
 #      is NOT exempt; the guard fails on any *.tfstate present on disk.
 #   6. Absence of the meatgeek-v2- V2 naming prefix.
-#   7. A secret OUTPUT (connection string / primary key / access key /
+#   7. A secret OUTPUT (connection string / primary|access key /
 #      instrumentation key) in any module or root outputs.tf (MG-24 S1 — secrets
-#      must not leave via state). NO carve-outs, App Insights included.
+#      must not leave via state). No exemption for a secret VALUE reaching an
+#      output — App Insights included.
 #   8. Wildcard CORS (allowed_origins includes "*") anywhere (MG-24 S2).
 #   9. Function App is missing its managed identity or default-deny auth
 #      posture, OR its app_settings still carry a connection-string / ingestion
-#      key / primary key — App Insights included, NO carve-outs (MG-24 S1/S2).
+#      key / primary|access key VALUE — App Insights included, no exemption for a
+#      secret VALUE in app_settings (MG-24 S1/S2).
 #  10. The Functions storage account name is not subscription-derived-unique.
 #  11. The IoT Hub Event Hubs routing endpoint uses a SAS connection string
 #      (or a lingering azurerm_eventhub_authorization_rule) instead of the IoT
 #      Hub managed identity (identity-based auth) (MG-24 S1).
+#
+# OPERATOR-ACCEPTED RESIDUAL (MG-24 — operator decision, steve@bargelt.com):
+#   The azurerm_application_insights.main resource STAYS Terraform-managed. Every
+#   TF-managed resource inherently stores its own computed attributes in state,
+#   so that resource's own connection_string / instrumentation_key ARE present in
+#   state — this is unavoidable while the resource is TF-managed. It is ACCEPTED
+#   as low-risk: App Insights telemetry is write-only, the Function App
+#   authenticates ingestion via AAD (Monitoring Metrics Publisher role +
+#   APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD) so the ingestion
+#   key is never used for authentication, and remote-state access is restricted.
+#   Correspondingly, main.tf:94-95 extracts ONLY the non-secret IngestionEndpoint
+#   substring — regex("IngestionEndpoint=([^;]+)", ...connection_string) wrapped
+#   in nonsensitive() — into a local, and only that endpoint reaches app_settings.
+#
+#   The allowance is NARROW and does NOT widen the secret scans. It covers ONLY
+#   (a) the resource's own inherent computed attribute in state and (b) the
+#   endpoint-extraction local above. It is NOT a blanket App Insights exemption:
+#   checks 7 and 9 STILL FAIL on a real secret VALUE — a connection string /
+#   primary|secondary|access key / SharedAccessKey / instrumentation key —
+#   assigned into an app_settings map OR emitted as an output, for ANY service
+#   INCLUDING App Insights. A raw azurerm_application_insights.main.connection_string
+#   copied into app_settings or an output is caught by the .connection_string
+#   pattern below; the residual never sanctions that.
 #
 # Usage: tf-static-checks.sh [INFRA_DIR]
 #   INFRA_DIR defaults to the directory that contains this script's parent
@@ -116,13 +141,16 @@ fi
 # Runtime credentials must never leave Terraform via an output (state exposure).
 # Scan every outputs.tf for an output block whose value derives a connection
 # string / primary|secondary key / access key / shared access policy key /
-# App Insights instrumentation (ingestion) key. There is NO App Insights
-# carve-out: its ingestion is identity-based (AAD) and no instrumentation key is
-# emitted anywhere. Comment lines (NN:<space>#) are stripped so the explanatory
-# notes documenting what was REMOVED don't self-trip the scan.
+# App Insights instrumentation (ingestion) key. App Insights is scanned exactly
+# like every other service: an instrumentation/ingestion key or a connection
+# string emitted as an OUTPUT fails here. (The AI resource's OWN computed key
+# living in state is the separately-documented operator-accepted residual at the
+# top of this file — that is not an output, so this scan never reaches it.)
+# Comment lines (NN:<space>#) are stripped so the explanatory notes documenting
+# what was REMOVED don't self-trip the scan.
 secret_output_hits=""
 while IFS= read -r out_file; do
-  hits="$(grep -nE 'primary_key|secondary_key|primary_access_key|secondary_access_key|primary_connection_string|secondary_connection_string|shared_access_policy|instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=' "${out_file}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  hits="$(grep -nE 'connection_string|primary_key|secondary_key|access_key|shared_access_policy|instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=' "${out_file}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -n "${hits}" ]]; then
     secret_output_hits+="${out_file}:"$'\n'"${hits}"$'\n'
   fi
@@ -146,9 +174,9 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   if ! grep -qE 'storage_uses_managed_identity[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then
     func_posture+="Function App does not use managed-identity host storage (storage_uses_managed_identity)"$'\n'
   fi
-  # No secret VALUE in app_settings for ANY service — App Insights included, NO
-  # carve-outs (MG-24 S1). This targets secret VALUES, not setting NAMES: a
-  # sensitive Terraform attribute reference (.connection_string /
+  # No secret VALUE in app_settings for ANY service — App Insights included, no
+  # exemption for a secret VALUE (MG-24 S1). This targets secret VALUES, not
+  # setting NAMES: a sensitive Terraform attribute reference (.connection_string /
   # .instrumentation_key / .primary_key / .primary_access_key /
   # .primary_connection_string), a var whose name ends in *connection_string /
   # *instrumentation_key, a literal ingestion/account/SAS key marker
@@ -157,8 +185,12 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # SETTING is allowed ONLY because its value is the non-secret ingestion endpoint
   # (IngestionEndpoint=...) under AAD ingestion — if it ever carried an
   # instrumentation key or a .connection_string reference again, one of the
-  # patterns below catches it. The hypothetical *_CONNECTION_STRING setting names
-  # for the identity services stay flagged too.
+  # patterns below catches it. The operator-accepted residual documented at the
+  # top of this file covers ONLY the endpoint-extraction local in main.tf, NEVER
+  # a raw key here: a raw azurerm_application_insights.main.connection_string (or
+  # .instrumentation_key) copied into app_settings is caught by .connection_string
+  # / .instrumentation_key below. The hypothetical *_CONNECTION_STRING setting
+  # names for the identity services stay flagged too.
   cs_settings="$(grep -nE '\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING' "${FUNC_MAIN}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -n "${cs_settings}" ]]; then
     func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'

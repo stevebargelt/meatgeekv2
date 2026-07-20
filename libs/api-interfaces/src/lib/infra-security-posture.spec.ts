@@ -10,14 +10,26 @@
  * runs in the separate validate-infrastructure job.
  *
  * S1 (no plaintext runtime secrets in state):
- *   - No secret OUTPUTS (connection strings / primary|access keys) in any
- *     module or root outputs.tf.
+ *   - No secret OUTPUTS (connection strings / primary|access keys /
+ *     instrumentation keys) in any module or root outputs.tf, for ANY service
+ *     INCLUDING App Insights.
  *   - The Function App uses a managed identity + identity-based host storage,
  *     and its app_settings carry NON-SECRET endpoints (no *_CONNECTION_STRING /
  *     account access key) for Cosmos / IoT(EventHub) / SignalR.
  *   - The Function App identity is granted narrowly-scoped data-plane RBAC.
  *   - The Functions storage account name is subscription-derived (globally
  *     unique) so a greenfield apply cannot collide.
+ *
+ * OPERATOR-ACCEPTED RESIDUAL (MG-24, operator decision): azurerm_application_insights
+ * stays Terraform-managed, so the resource's OWN computed connection_string /
+ * instrumentation_key are inherently in state (true of any TF-managed resource).
+ * That is accepted as low-risk (telemetry write-only; the Function App
+ * authenticates ingestion via AAD, so the key is unused for auth; state access
+ * restricted). main.tf:94-95 extracts ONLY the non-secret IngestionEndpoint into
+ * a local, and only that endpoint reaches app_settings. The allowance is narrow:
+ * these specs STILL fail on a real secret VALUE (a connection string / key)
+ * reaching an app_settings map OR an output, for ANY service App Insights
+ * included — see the "operator-accepted residual" describe block below.
  * S2 (Function App HTTP posture):
  *   - No wildcard CORS anywhere; allowed origins are environment-specific.
  *   - App Service Authentication is default-DENY (require_authentication=true,
@@ -26,7 +38,9 @@
  *     no HTTP health function and no excluded_paths bypass; health, if needed,
  *     is a platform mechanism, not an unauthenticated app path (MG-24 S2).
  */
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../');
@@ -62,9 +76,14 @@ function stripComments(tf: string): string {
 }
 
 describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
-  it('no secret OUTPUTS (connection strings / keys) in any outputs.tf', () => {
+  it('no secret OUTPUTS (connection strings / keys / instrumentation keys) in any outputs.tf', () => {
+    // Mirrors the tf-static-checks.sh check-7 pattern. A bare `connection_string`
+    // and `access_key` are matched (not only the primary/secondary variants) so
+    // an App Insights `.connection_string` — which embeds the InstrumentationKey —
+    // or an `instrumentation_key` emitted as an OUTPUT is caught like any other
+    // service's secret. No App Insights exemption.
     const secretPattern =
-      /primary_key|secondary_key|primary_access_key|secondary_access_key|primary_connection_string|secondary_connection_string|shared_access_policy|AccountKey=|SharedAccessKey=/;
+      /connection_string|primary_key|secondary_key|access_key|shared_access_policy|instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=/;
     const offenders: string[] = [];
     for (const file of outputsFiles()) {
       const live = stripComments(fs.readFileSync(file, 'utf8'));
@@ -145,6 +164,26 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     // into the Functions module — only the non-secret ingestion endpoint is.
     expect(live).not.toMatch(/application_insights_connection_string\s*=/);
     expect(live).toMatch(/application_insights_ingestion_endpoint\s*=/);
+  });
+
+  it('root main.tf extracts ONLY the non-secret IngestionEndpoint from the AI connection string (main.tf:94-95)', () => {
+    // The accepted-residual extraction pattern: a regex pulls JUST the
+    // IngestionEndpoint substring out of the App Insights resource's own
+    // connection_string, wrapped in nonsensitive(), into a local. The
+    // instrumentation/ingestion key is never propagated — only the endpoint
+    // reaches the Functions module (and thence app_settings).
+    const live = stripComments(read('main.tf'));
+    expect(live).toMatch(/appinsights_ingestion_endpoint\s*=\s*nonsensitive\(/);
+    expect(live).toMatch(
+      /regex\("IngestionEndpoint=\(\[\^;\]\+\)", azurerm_application_insights\.main\.connection_string\)/
+    );
+    // Only the endpoint local is handed to the Functions module — never the raw
+    // connection string or the instrumentation key.
+    expect(live).toMatch(
+      /application_insights_ingestion_endpoint\s*=\s*local\.appinsights_ingestion_endpoint/
+    );
+    expect(live).not.toMatch(/application_insights_connection_string\s*=/);
+    expect(live).not.toMatch(/application_insights_instrumentation_key\s*=/);
   });
 
   it('IoT Hub Event Hubs routing endpoint is identity-based (no SAS in state)', () => {
@@ -229,18 +268,28 @@ describe('MG-24 S2: Function App HTTP posture', () => {
   });
 });
 
-describe('MG-24 S1: the static gate has NO App Insights carve-out', () => {
+describe('MG-24 S1: the static gate documents the operator-accepted App Insights residual precisely', () => {
   const gate = read('scripts/tf-static-checks.sh');
 
-  it('drops the former "App Insights ... out of scope" exemption', () => {
-    // The gate previously exempted App Insights instrumentation from the secret
-    // scans. That carve-out is removed — App Insights ingestion is identity-based
-    // (AAD) and no ingestion key exists to scan for anywhere.
-    expect(gate).not.toMatch(/out of scope/i);
-    expect(gate).not.toMatch(/App Insights[^\n]*explicitly/i);
+  it('documents the operator-accepted residual (auditable, non-widening)', () => {
+    // The gate carries an explicit, auditable note: the App Insights resource
+    // stays TF-managed, so its own computed connection_string / instrumentation_key
+    // are inherently in state (an accepted low-risk residual), and main.tf:94-95
+    // extracts ONLY the non-secret IngestionEndpoint. The note must state the
+    // allowance is narrow and does NOT exempt app_settings / outputs.
+    expect(gate).toMatch(/OPERATOR-ACCEPTED RESIDUAL/);
+    expect(gate).toMatch(/IngestionEndpoint/);
+    expect(gate).toMatch(/inherently stores its own computed attributes in state/);
+    // It is explicitly NOT a blanket App Insights exemption.
+    expect(gate).toMatch(/NOT a blanket App Insights exemption/);
   });
 
-  it('the secret-output scan catches an App Insights instrumentation/ingestion key', () => {
+  it('the secret-output scan catches an App Insights connection string / instrumentation key', () => {
+    // Check-7 pattern includes a bare `connection_string` (so an App Insights
+    // `.connection_string` output — which embeds the InstrumentationKey — is
+    // caught, not only the primary/secondary variants) plus the ingestion-key
+    // markers.
+    expect(gate).toMatch(/connection_string\|primary_key/);
     expect(gate).toMatch(/instrumentation_key/);
     expect(gate).toMatch(/InstrumentationKey=/);
   });
@@ -251,5 +300,78 @@ describe('MG-24 S1: the static gate has NO App Insights carve-out', () => {
     expect(gate).toMatch(/\\\.connection_string/);
     expect(gate).toMatch(/\\\.instrumentation_key/);
     expect(gate).toMatch(/InstrumentationKey=/);
+  });
+});
+
+describe('MG-24 S1: the static gate behaves — accepts the residual, catches real leaks', () => {
+  const GATE = path.join(INFRA, 'scripts', 'tf-static-checks.sh');
+
+  // Copy the committed infra to a scratch dir (skipping heavy/vendored trees) so
+  // a planted leak can be injected without mutating the repo.
+  function copyInfra(dst: string): void {
+    fs.cpSync(INFRA, dst, {
+      recursive: true,
+      filter: (src: string) => {
+        const base = path.basename(src);
+        return base !== '.terraform' && base !== '.nx' && base !== 'node_modules';
+      },
+    });
+  }
+
+  function runGate(infraDir: string): { code: number; out: string } {
+    try {
+      const out = execFileSync('bash', [GATE, infraDir], { encoding: 'utf8' });
+      return { code: 0, out };
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+    }
+  }
+
+  it('PASSES on the committed infra — the endpoint-extraction residual does not trip it', () => {
+    const { code } = runGate(INFRA);
+    expect(code).toBe(0);
+  });
+
+  it('FAILS when a real AI connection string is planted into the Function App app_settings', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mg24-gate-appsettings-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      copyInfra(dst);
+      const funcMain = path.join(dst, 'modules', 'functions', 'main.tf');
+      const src = fs.readFileSync(funcMain, 'utf8');
+      const anchor = '"APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE"   = "50"';
+      // Plant a real leak: the AI resource's SECRET connection string (which
+      // embeds the instrumentation key) assigned straight into app_settings.
+      const leaked = src.replace(
+        anchor,
+        `${anchor}\n    "APPLICATIONINSIGHTS_CONNECTION_STRING_LEAK" = azurerm_application_insights.main.connection_string`
+      );
+      expect(leaked).not.toEqual(src); // the anchor existed
+      fs.writeFileSync(funcMain, leaked);
+      const { code, out } = runGate(dst);
+      expect(code).not.toBe(0);
+      expect(out).toMatch(/connection-string \/ ingestion-key \/ access-key setting still present/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('FAILS when a real AI connection string is emitted as a Terraform output', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mg24-gate-output-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      copyInfra(dst);
+      const outputs = path.join(dst, 'outputs.tf');
+      fs.appendFileSync(
+        outputs,
+        '\noutput "appinsights_connection_string" {\n  value     = azurerm_application_insights.main.connection_string\n  sensitive = true\n}\n'
+      );
+      const { code, out } = runGate(dst);
+      expect(code).not.toBe(0);
+      expect(out).toMatch(/no secret outputs/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

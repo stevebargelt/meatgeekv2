@@ -82,7 +82,7 @@
           <mxGeometry x="320" y="280" width="90" height="70" as="geometry" />
         </mxCell>
         
-        <mxCell id="key-vault" value="Key Vault&#xa;(Secrets)&#xa;Connection&#xa;Strings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f44336;strokeColor=#c62828;" vertex="1" parent="azure-group">
+        <mxCell id="managed-identity" value="Managed Identity&#xa;&amp; RBAC&#xa;(Entra ID)&#xa;Non-secret&#xa;Endpoints" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4caf50;strokeColor=#1b5e20;" vertex="1" parent="azure-group">
           <mxGeometry x="430" y="280" width="70" height="70" as="geometry" />
         </mxCell>
         
@@ -176,7 +176,7 @@
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         
-        <mxCell id="functions-to-keyvault" value="Secrets" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#c62828;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="key-vault">
+        <mxCell id="functions-to-identity" value="AAD Token&#xa;(RBAC)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1b5e20;strokeWidth=2;" edge="1" parent="1" source="azure-functions" target="managed-identity">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         
@@ -186,7 +186,7 @@
         </mxCell>
         
         <!-- Technology Stack Legend -->
-        <mxCell id="tech-legend" value="Technology Stack:&#xa;&#xa;Hardware: Raspberry Pi, RTD Sensors, LCD&#xa;Device: Go Applications, Local API&#xa;Cloud: Azure (IoT Hub, Functions, CosmosDB)&#xa;Real-time: SignalR Service, WebSockets&#xa;API: OpenAPI 3.0, REST, JSON&#xa;Frontend: React Native, React Web&#xa;Development: NX Monorepo, TypeScript&#xa;Monitoring: Application Insights, OpenTelemetry&#xa;Security: Azure AD B2C, Key Vault, JWT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3f51b5;align=left;fontSize=11;fontStyle=0;" vertex="1" parent="1">
+        <mxCell id="tech-legend" value="Technology Stack:&#xa;&#xa;Hardware: Raspberry Pi, RTD Sensors, LCD&#xa;Device: Go Applications, Local API&#xa;Cloud: Azure (IoT Hub, Functions, CosmosDB)&#xa;Real-time: SignalR Service, WebSockets&#xa;API: OpenAPI 3.0, REST, JSON&#xa;Frontend: React Native, React Web&#xa;Development: NX Monorepo, TypeScript&#xa;Monitoring: Application Insights, OpenTelemetry&#xa;Security: Azure AD B2C, Managed Identity (RBAC), JWT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3f51b5;align=left;fontSize=11;fontStyle=0;" vertex="1" parent="1">
           <mxGeometry x="1020" y="400" width="300" height="200" as="geometry" />
         </mxCell>
         
