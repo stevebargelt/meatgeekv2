@@ -2,7 +2,7 @@
   "name": "@meatgeekv2/api",
   "version": "0.0.1",
   "description": "MeatGeek V2 Azure Functions API",
-  "main": "dist/apps/api/main.js",
+  "main": "main.js",
   "scripts": {
     "build": "nx build api",
     "start": "func start",

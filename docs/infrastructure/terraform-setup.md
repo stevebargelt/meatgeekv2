@@ -486,6 +486,8 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
 
 ### GitHub Actions Workflow (`.github/workflows/infrastructure.yml`)
 
+> **Aspirational — superseded by the shipped workflows.** The `infrastructure.yml` example below (push to `main` + `paths: apps/infrastructure/**` → `terraform apply`) reflects the original auto-apply-on-merge intent and is **not** what shipped. There is no `infrastructure.yml`. Prod infra actually deploys through `.github/workflows/infra-deploy-prod.yml`, which is **`workflow_dispatch`-only** and **plan-only** — `terraform init` + `terraform plan` (with `-var-file=environments/prod.tfvars`), **no `apply`**. Auto-apply-on-merge and the `apply` step are deferred to **MG-24** until Terraform has an `azurerm` remote state backend; an `apply` against today's empty local state would try to recreate all prod infrastructure. Prod app deploy lives in `app-deploy-prod.yml` (CI-gated, API-only). See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod) for the authoritative model. The YAML below is retained only as a record of the original intent.
+
 Automated infrastructure deployment pipeline:
 
 ```yaml
