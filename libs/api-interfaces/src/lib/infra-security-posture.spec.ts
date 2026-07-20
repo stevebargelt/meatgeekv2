@@ -301,6 +301,61 @@ describe('MG-24 S1: the static gate documents the operator-accepted App Insights
     expect(gate).toMatch(/\\\.instrumentation_key/);
     expect(gate).toMatch(/InstrumentationKey=/);
   });
+
+  it('the secret-output scan is HONESTLY labeled best-effort AND catches obfuscated index refs', () => {
+    // The gate must NOT overclaim. It calls the output scan a best-effort guard
+    // and names the RED bypass vector — a resource reference indexed with a
+    // dynamically-assembled key (format/join/lookup/element/coalesce/try).
+    expect(gate).toMatch(/BEST-EFFORT/);
+    expect(gate).toMatch(/cannot evaluate Terraform expressions/i);
+    // The strengthened INDIRECT pattern is present (dynamic-index branch).
+    expect(gate).toMatch(/INDIRECT_SECRET_RE=/);
+    expect(gate).toMatch(/format\|join\|lookup\|element\|coalesce\|try/);
+    // Any *_access_key spelling is covered directly (not just primary/secondary).
+    expect(gate).toMatch(/\[A-Za-z0-9_\]\*_access_key/);
+  });
+
+  it('the app_settings scan ALSO catches obfuscated index refs', () => {
+    // The same INDIRECT index detection is applied to Function App app_settings.
+    expect(gate).toMatch(/APPSETTING_SECRET_RE=/);
+    expect(gate).toMatch(/format\|join\|lookup\|element\|coalesce\|try/);
+  });
+
+  it('names the plan/state inspection as the AUTHORITATIVE guarantee (not the grep)', () => {
+    // The honest claim: the lexical scan is best-effort; `terraform show -json`
+    // is what actually guarantees no sensitive VALUE materializes.
+    expect(gate).toMatch(/AUTHORITATIVE/);
+    expect(gate).toMatch(/terraform show -json/);
+  });
+
+  it('check 12 requires the README to document the authoritative pre-apply inspection', () => {
+    // The gate enforces that the runbook keeps pointing at the authoritative
+    // gate: check 12 fails if the README stops documenting `terraform show
+    // -json` with the secret markers as a REQUIRED pre-apply step.
+    expect(gate).toMatch(/README=/);
+    expect(gate).toMatch(/terraform show -json/);
+    expect(gate).toMatch(/InstrumentationKey/);
+    expect(gate).toMatch(/required pre-apply gate \(README\)/i);
+  });
+});
+
+describe('MG-24 S1: the README wires the authoritative plan/state inspection as a required pre-apply gate', () => {
+  const readme = read('README.md');
+
+  it('documents the best-effort static guard vs the authoritative inspection split', () => {
+    expect(readme).toMatch(/best-effort/i);
+    expect(readme).toMatch(/AUTHORITATIVE/);
+    // The authoritative command with all four secret markers is present.
+    expect(readme).toMatch(
+      /terraform show -json tfplan \| grep -iE 'connection_string\|primary_key\|SharedAccessKey\|InstrumentationKey'/
+    );
+  });
+
+  it('marks the plan/state inspection REQUIRED before the first apply', () => {
+    expect(readme).toMatch(
+      /REQUIRED pre-apply|required before the first apply|required pre-apply/i
+    );
+  });
 });
 
 describe('MG-24 S1: the static gate behaves — accepts the residual, catches real leaks', () => {
@@ -373,5 +428,57 @@ describe('MG-24 S1: the static gate behaves — accepts the residual, catches re
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('FAILS on the RED obfuscated-index output — the literal token never appears', () => {
+    // The exact bypass RED used against the old literal-token scan: the secret
+    // attribute is reached by INDEXING the resource with a format()-assembled
+    // key, so the string `connection_string` is absent from the source yet the
+    // value IS the App Insights connection string. The strengthened INDIRECT
+    // pattern must catch it.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mg24-gate-obfuscated-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      copyInfra(dst);
+      const outputs = path.join(dst, 'outputs.tf');
+      const planted =
+        '\noutput "ai_obfuscated" {\n  value     = azurerm_application_insights.main[format("%s_%s","connection","string")]\n  sensitive = true\n}\n';
+      // Guard the premise: the obfuscated form does NOT contain the literal token
+      // the old grep looked for, so a token-only scan would have passed.
+      expect(planted).not.toContain('connection_string');
+      fs.appendFileSync(outputs, planted);
+      const { code, out } = runGate(dst);
+      expect(code).not.toBe(0);
+      expect(out).toMatch(/no secret outputs/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('FAILS on a string-literal-index output that spells a secret fragment', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mg24-gate-strindex-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      copyInfra(dst);
+      const outputs = path.join(dst, 'outputs.tf');
+      fs.appendFileSync(
+        outputs,
+        '\noutput "ai_str_index" {\n  value     = azurerm_application_insights.main["primary_key"]\n  sensitive = true\n}\n'
+      );
+      const { code, out } = runGate(dst);
+      expect(code).not.toBe(0);
+      expect(out).toMatch(/no secret outputs/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('STILL PASSES the committed non-secret outputs that use numeric index / string endpoints', () => {
+    // Regression guard: the strengthened INDIRECT pattern must NOT flag legit
+    // `.identity[0].principal_id` numeric indexing or endpoint string
+    // interpolations. The committed tree already exercises both, so a clean run
+    // proves no false positive was introduced.
+    const { code } = runGate(INFRA);
+    expect(code).toBe(0);
   });
 });

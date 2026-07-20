@@ -18,10 +18,20 @@
 #      that could touch the legacy V1-bound on-disk tfstate. Git-ignored state
 #      is NOT exempt; the guard fails on any *.tfstate present on disk.
 #   6. Absence of the meatgeek-v2- V2 naming prefix.
-#   7. A secret OUTPUT (connection string / primary|access key /
+#   7. A secret OUTPUT (connection string / primary|secondary|access key /
 #      instrumentation key) in any module or root outputs.tf (MG-24 S1 — secrets
-#      must not leave via state). No exemption for a secret VALUE reaching an
-#      output — App Insights included.
+#      must not leave via state). This is a BEST-EFFORT static guard: it catches
+#      direct secret-attribute tokens AND the common INDIRECT/obfuscated forms
+#      (a resource/module/data reference indexed with a dynamically-built key —
+#      format()/join()/lookup()/element()/try()/coalesce() — or a string-literal
+#      index that spells a secret fragment). It CANNOT semantically prove the
+#      absence of every obfuscation a bash grep can't evaluate. The AUTHORITATIVE
+#      guarantee is the plan/state inspection gate (check 12 + the README
+#      pre-apply runbook): `terraform show -json <plan> | grep -iE
+#      'connection_string|primary_key|SharedAccessKey|InstrumentationKey'`, which
+#      surfaces the actual sensitive VALUES regardless of how they are
+#      referenced. No exemption for a secret VALUE reaching an output — App
+#      Insights included.
 #   8. Wildcard CORS (allowed_origins includes "*") anywhere (MG-24 S2).
 #   9. Function App is missing its managed identity or default-deny auth
 #      posture, OR its app_settings still carry a connection-string / ingestion
@@ -31,6 +41,11 @@
 #  11. The IoT Hub Event Hubs routing endpoint uses a SAS connection string
 #      (or a lingering azurerm_eventhub_authorization_rule) instead of the IoT
 #      Hub managed identity (identity-based auth) (MG-24 S1).
+#  12. The README does NOT document the AUTHORITATIVE plan/state secret
+#      inspection as a REQUIRED pre-apply gate. The static output scan (check 7)
+#      is best-effort; the `terraform show -json` inspection is what actually
+#      guarantees no sensitive VALUE materializes — so it must be a documented,
+#      required pre-apply step, not an optional footnote (MG-24 red-fix).
 #
 # OPERATOR-ACCEPTED RESIDUAL (MG-24 — operator decision, steve@bargelt.com):
 #   The azurerm_application_insights.main resource STAYS Terraform-managed. Every
@@ -137,25 +152,49 @@ else
   check "V2 naming prefix (meatgeek-v2-) present" "meatgeek-v2- prefix not found in any Terraform source"
 fi
 
-# --- 7. No secret OUTPUTS (MG-24 S1) ----------------------------------------
+# --- 7. No secret OUTPUTS — BEST-EFFORT static guard (MG-24 S1) --------------
 # Runtime credentials must never leave Terraform via an output (state exposure).
-# Scan every outputs.tf for an output block whose value derives a connection
-# string / primary|secondary key / access key / shared access policy key /
-# App Insights instrumentation (ingestion) key. App Insights is scanned exactly
-# like every other service: an instrumentation/ingestion key or a connection
-# string emitted as an OUTPUT fails here. (The AI resource's OWN computed key
-# living in state is the separately-documented operator-accepted residual at the
-# top of this file — that is not an output, so this scan never reaches it.)
-# Comment lines (NN:<space>#) are stripped so the explanatory notes documenting
-# what was REMOVED don't self-trip the scan.
+# Scan every outputs.tf for an output whose value derives a connection string /
+# primary|secondary key / access key / shared access policy key / App Insights
+# instrumentation (ingestion) key. App Insights is scanned exactly like every
+# other service. (The AI resource's OWN computed key living in state is the
+# separately-documented operator-accepted residual at the top of this file —
+# that is not an output, so this scan never reaches it.)
+#
+# HONESTY NOTE (MG-24 red-fix): this is a BEST-EFFORT lexical guard, NOT a
+# semantic proof. A bash grep cannot evaluate Terraform expressions, so a
+# sufficiently obfuscated reference can slip past ANY token list. RED bypassed
+# the previous literal-token scan with an assembled index:
+#     azurerm_application_insights.main[format("%s_%s","connection","string")]
+# — the token `connection_string` never appears, so the old grep missed it.
+# We now ALSO flag the common INDIRECT forms below (dynamic/string-literal
+# indexing into a resource/module/data reference). But the AUTHORITATIVE
+# guarantee is the plan/state inspection (check 12 + README pre-apply runbook):
+#     terraform show -json <plan> | grep -iE \
+#       'connection_string|primary_key|SharedAccessKey|InstrumentationKey'
+# which reports the actual sensitive VALUES regardless of how they are
+# referenced. Comment lines (NN:<space>#) are stripped so explanatory notes
+# don't self-trip the scan.
+#
+# DIRECT: literal secret-attribute tokens / SAS-key markers (primary|secondary|
+# any *_access_key included).
+DIRECT_SECRET_RE='connection_string|primary_key|secondary_key|primary_access_key|secondary_access_key|access_key|[A-Za-z0-9_]*_access_key|instrumentation_key|primary_connection_string|secondary_connection_string|shared_access_policy|InstrumentationKey=|AccountKey=|SharedAccessKey='
+# INDIRECT / obfuscated: a resource/module/data reference INDEXED with either a
+# dynamically-assembled key (format/join/lookup/element/coalesce/try) — the RED
+# bypass vector — or a string literal spelling a secret-ish fragment. Legit
+# numeric attribute indexing (e.g. `.identity[0]`) is NOT matched: the branches
+# require a function call or a quoted key immediately after the bracket.
+INDIRECT_SECRET_RE='(azurerm_|module\.|data\.)[A-Za-z0-9_.]+\[[[:space:]]*(format|join|lookup|element|coalesce|try)\(|(azurerm_|module\.|data\.)[A-Za-z0-9_.]+\[[[:space:]]*"[^"]*(connection|string|primary_key|secondary_key|access_key|instrumentation|password|secret|shared_access)[^"]*"[[:space:]]*\]'
 secret_output_hits=""
 while IFS= read -r out_file; do
-  hits="$(grep -nE 'connection_string|primary_key|secondary_key|access_key|shared_access_policy|instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=' "${out_file}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  direct="$(grep -nE "${DIRECT_SECRET_RE}" "${out_file}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  indirect="$(grep -nE "${INDIRECT_SECRET_RE}" "${out_file}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  hits="$(printf '%s\n%s' "${direct}" "${indirect}" | grep -v '^$' || true)"
   if [[ -n "${hits}" ]]; then
     secret_output_hits+="${out_file}:"$'\n'"${hits}"$'\n'
   fi
 done < <(find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' \) -prune -o -type f -name 'outputs.tf' -print 2>/dev/null)
-check "no secret outputs (connection strings / keys)" "${secret_output_hits%$'\n'}"
+check "no secret outputs — best-effort scan (direct + obfuscated index refs)" "${secret_output_hits%$'\n'}"
 
 # --- 8. No wildcard CORS (MG-24 S2) -----------------------------------------
 # allowed_origins must be explicit per-environment; a literal "*" is forbidden.
@@ -191,7 +230,12 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # .instrumentation_key) copied into app_settings is caught by .connection_string
   # / .instrumentation_key below. The hypothetical *_CONNECTION_STRING setting
   # names for the identity services stay flagged too.
-  cs_settings="$(grep -nE '\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING' "${FUNC_MAIN}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  # Same best-effort DIRECT + INDIRECT approach as check 7: literal secret
+  # attribute/var references AND obfuscated index refs (a resource/module/data/
+  # local reference indexed with a dynamically-assembled key or a secret-fragment
+  # string literal). Numeric attribute indexing (`.identity[0]`) is not matched.
+  APPSETTING_SECRET_RE='\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING|(azurerm_|module\.|data\.|local\.)[A-Za-z0-9_.]+\[[[:space:]]*(format|join|lookup|element|coalesce|try)\(|\[[[:space:]]*"[^"]*(connection|instrumentation|primary_key|secondary_key|access_key|shared_access|password)[^"]*"[[:space:]]*\]'
+  cs_settings="$(grep -nE "${APPSETTING_SECRET_RE}" "${FUNC_MAIN}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -n "${cs_settings}" ]]; then
     func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
   fi
@@ -239,6 +283,31 @@ else
   iot_routing="modules/iot-hub/main.tf not found"
 fi
 check "IoT Hub routing endpoint: identity-based, no SAS connection string" "${iot_routing%$'\n'}"
+
+# --- 12. Authoritative plan/state secret inspection is a REQUIRED pre-apply --
+# gate in the README (MG-24 red-fix). The static output scan (check 7) is
+# best-effort and cannot semantically prove no sensitive VALUE materializes;
+# `terraform show -json <plan> | grep -iE 'connection_string|primary_key|
+# SharedAccessKey|InstrumentationKey'` is what actually guarantees it. Assert the
+# README documents this inspection AND marks it REQUIRED before the first apply,
+# so the authoritative gate can't silently rot into an optional footnote.
+README="${INFRA_DIR}/README.md"
+runbook=""
+if [[ -f "${README}" ]]; then
+  readme_live="$(grep -vE '^[[:space:]]*#' "${README}" 2>/dev/null || true)"
+  if ! echo "${readme_live}" | grep -qE 'terraform show -json'; then
+    runbook+="README does not document the 'terraform show -json' plan/state secret inspection"$'\n'
+  fi
+  if ! echo "${readme_live}" | grep -qiE 'connection_string\|primary_key\|SharedAccessKey\|InstrumentationKey'; then
+    runbook+="README plan-inspection grep does not cover the authoritative secret markers (connection_string|primary_key|SharedAccessKey|InstrumentationKey)"$'\n'
+  fi
+  if ! echo "${readme_live}" | grep -qiE 'REQUIRED.*pre-apply|pre-apply.*REQUIRED|required before the first apply|required pre-apply'; then
+    runbook+="README does not mark the plan/state secret inspection as a REQUIRED pre-apply gate"$'\n'
+  fi
+else
+  runbook="README.md not found"
+fi
+check "authoritative plan/state secret inspection is a required pre-apply gate (README)" "${runbook%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then

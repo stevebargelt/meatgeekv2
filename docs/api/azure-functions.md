@@ -336,8 +336,13 @@ state. These are exactly the settings Terraform configures on the Function App:
 FUNCTIONS_WORKER_RUNTIME=node
 WEBSITE_NODE_DEFAULT_VERSION=~20
 
-# Application Insights (telemetry connection string — the one non-secret-endpoint exception)
-APPLICATIONINSIGHTS_CONNECTION_STRING=<insights-connection>
+# Application Insights — identity-based (AAD) telemetry ingestion. The managed
+# identity holds "Monitoring Metrics Publisher" on the App Insights resource and
+# the host authenticates with an AAD token, so NO instrumentation/ingestion key
+# is set. The connection string carries only the NON-SECRET ingestion endpoint;
+# there is no secret connection string to configure.
+APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD
+APPLICATIONINSIGHTS_CONNECTION_STRING=IngestionEndpoint=<insights-ingestion-endpoint>
 APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50
 
 # Cosmos DB — identity-based. NON-SECRET account endpoint only; the managed
@@ -359,6 +364,18 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > resolves each service using the app's managed identity against the non-secret
 > endpoint, so there is no secret to leak. Host storage is likewise identity-based
 > (`storage_uses_managed_identity`), so no storage account key is written either.
+>
+> Application Insights follows the same identity-based model: telemetry is
+> published with an AAD token — `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`
+> plus a **Monitoring Metrics Publisher** role assignment on the App Insights
+> resource — so no instrumentation/ingestion key is placed in app settings.
+> `APPLICATIONINSIGHTS_CONNECTION_STRING` carries only the non-secret
+> `IngestionEndpoint`; Terraform parses it out of the platform-generated
+> connection string and deliberately drops the key portion. The App Insights
+> resource's computed `instrumentation_key`/`connection_string` still land in
+> Terraform state as an inherent computed attribute — an accepted, telemetry-write-only
+> residual documented in
+> [ADR: App Insights instrumentation key remains in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 ## Function Deployment
 

@@ -175,8 +175,14 @@ scripts/tf-static-checks.sh            # asserts the V2 greenfield invariants
 
 `tf-static-checks.sh` fails CI on: a hardcoded subscription id, `timestamp()`
 tag drift, any leftover V1 shared-Cosmos adoption reference, missing per-env
-state keys, a stray local `*.tfstate`, or a missing `meatgeek-v2-` prefix. It
-runs in the `validate-infrastructure` job.
+state keys, a stray local `*.tfstate`, a missing `meatgeek-v2-` prefix, a
+secret OUTPUT (best-effort — direct or obfuscated-index reference), a secret
+value in the Function App app*settings, a SAS-based IoT Hub route, and (check 12) a README that stops documenting the authoritative `terraform show -json`
+plan/state secret inspection as a REQUIRED pre-apply gate. It runs in the
+`validate-infrastructure` job. Note: the secret-output/app_settings scans are a
+best-effort lexical guard; the authoritative secret-in-state guarantee is the
+`terraform show -json` plan inspection documented under \_Verifying the absence
+of secrets* below.
 
 ## Key Outputs
 
@@ -213,14 +219,35 @@ string is generated or stored in state.
 
 ### Verifying the absence of secrets in state/plan
 
+Two layers, with clearly different strengths:
+
+1. **`scripts/tf-static-checks.sh` — best-effort static guard.** It flags secret
+   OUTPUTS in any module/root `outputs.tf` (direct secret-attribute tokens AND
+   the common obfuscated forms — a resource reference indexed with a
+   dynamically-assembled key such as
+   `azurerm_application_insights.main[format("%s_%s","connection","string")]`),
+   confirms the IoT Hub routing endpoint is identity-based (no SAS), and checks
+   the Function App app*settings for secret values. Because it is a lexical
+   `grep`, it **cannot** semantically prove the absence of \_every* obfuscation —
+   it is a fast fail-early guard, not the guarantee.
+
+2. **`terraform show -json` plan/state inspection — the AUTHORITATIVE gate, and a
+   REQUIRED pre-apply step.** It surfaces the actual sensitive VALUES regardless
+   of how they are referenced in HCL, so it catches what the static scan can't.
+   **This inspection MUST be run and MUST come up clean before the first apply**
+   (it is enforced as required by tf-static-checks.sh check 12, which fails CI if
+   this runbook stops documenting it):
+
 ```bash
-# No secret OUTPUTS in any module or root outputs.tf, and the IoT Hub routing
-# endpoint is identity-based (no SAS). Both are enforced statically:
+# Layer 1 — best-effort static guard (fails CI early on the common patterns):
 scripts/tf-static-checks.sh
 
-# Inspect the plan for any connection string / key before the first apply:
+# Layer 2 — AUTHORITATIVE, REQUIRED pre-apply: inspect the real plan for any
+# sensitive VALUE (connection string / key / SAS / instrumentation key),
+# however it is referenced. This is the gate that actually guarantees no secret
+# materializes into state — do NOT apply until it is clean.
 terraform plan -var-file=environments/dev.tfvars -out=tfplan
-terraform show -json tfplan | grep -iE 'connection_string|primary_key|SharedAccessKey' || echo "no secrets in plan ✓"
+terraform show -json tfplan | grep -iE 'connection_string|primary_key|SharedAccessKey|InstrumentationKey' || echo "no secrets in plan ✓"
 ```
 
 ## Security Notes
