@@ -68,6 +68,7 @@ interface WfJob {
   needs?: string | string[];
   if?: string;
   environment?: string;
+  permissions?: Record<string, unknown>;
   concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
   outputs?: Record<string, unknown>;
   steps?: WfStep[];
@@ -448,6 +449,48 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(runText).not.toMatch(/nx\s+deploy\b/);
       // It does exercise a plan (the gate it exists for).
       expect(runText).toMatch(/terraform\s+plan\b/);
+    });
+
+    it('deploy-dev authenticates via per-env OIDC, not the legacy AZURE_CREDENTIALS secret (MG-24)', () => {
+      const raw = rawWorkflow('ci.yml');
+      const dev = jobs['deploy-dev'];
+      expect(dev).toBeDefined();
+
+      // (1) The retired long-lived SP secret must NOT appear anywhere in ci.yml —
+      //     no dev path may fall back to whole-subscription creds.
+      expect(raw).not.toMatch(/secrets\.AZURE_CREDENTIALS\b/);
+
+      // (2) The job carries id-token: write so azure/login can mint the OIDC token
+      //     (job-scoped so the other CI jobs keep the default token permissions).
+      expect(String((dev?.permissions ?? {})['id-token'] ?? '')).toBe('write');
+
+      // (3) Every azure/login step uses the OIDC identity (client-id + tenant-id +
+      //     subscription-id from per-env vars), never a `creds:` secret.
+      const loginSteps = (dev?.steps ?? []).filter(
+        s => typeof s.uses === 'string' && s.uses.startsWith('azure/login')
+      );
+      expect(loginSteps.length).toBeGreaterThan(0);
+      for (const s of loginSteps) {
+        const w = s.with ?? {};
+        expect(String(w['client-id'] ?? '')).toMatch(/vars\.AZURE_CLIENT_ID/);
+        expect(String(w['tenant-id'] ?? '')).toMatch(/vars\.AZURE_TENANT_ID/);
+        expect(String(w['subscription-id'] ?? '')).toMatch(/vars\.AZURE_SUBSCRIPTION_ID/);
+        expect(w).not.toHaveProperty('creds'); // no long-lived SP secret
+      }
+    });
+
+    it('dev and prod bind SEPARATE GitHub Environments (distinct federated subjects)', () => {
+      // The per-env OIDC identity is selected by the GitHub Environment the job
+      // binds. dev must be `development` and prod (in its own workflow) is
+      // `production`, so the two resolve to distinct federated subjects — no
+      // shared service principal, no whole-state access from dev.
+      expect(jobs['deploy-dev']?.environment).toBe('development');
+      const prodInfra = readWorkflow('infra-deploy-prod.yml');
+      const prodEnvs = Object.values(prodInfra.jobs ?? {})
+        .map(j => j.environment)
+        .filter(Boolean);
+      expect(prodEnvs).toContain('production');
+      expect(prodEnvs).not.toContain('development');
     });
   });
 });

@@ -21,8 +21,10 @@
  * S2 (Function App HTTP posture):
  *   - No wildcard CORS anywhere; allowed origins are environment-specific.
  *   - App Service Authentication is default-DENY (require_authentication=true,
- *     unauthenticated_action rejects rather than AllowAnonymous), so business
- *     endpoints (e.g. startCook) are never reachable anonymously.
+ *     unauthenticated_action rejects rather than AllowAnonymous) on ALL paths —
+ *     no anonymous carve-out for business (e.g. startCook) OR health. There is
+ *     no HTTP health function and no excluded_paths bypass; health, if needed,
+ *     is a platform mechanism, not an unauthenticated app path (MG-24 S2).
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -119,6 +121,19 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     expect(live).toMatch(/module\.azure_functions\.identity_principal_id/);
   });
 
+  it('IoT Hub Event Hubs routing endpoint is identity-based (no SAS in state)', () => {
+    // The custom Event Hubs routing endpoint must authenticate with the IoT
+    // Hub's managed identity, not a SAS connection string — otherwise a key /
+    // connection string is materialized into Terraform state. The former
+    // azurerm_eventhub_authorization_rule ("iothub-sender") must be gone.
+    const live = stripComments(read('modules/iot-hub/main.tf'));
+    expect(live).toMatch(/authentication_type\s*=\s*"identityBased"/);
+    expect(live).not.toMatch(/connection_string\s*=/);
+    expect(live).not.toMatch(/azurerm_eventhub_authorization_rule/);
+    // The IoT Hub identity is granted the send data-plane role instead.
+    expect(live).toMatch(/Azure Event Hubs Data Sender/);
+  });
+
   it('Functions storage account name is subscription-derived (globally unique)', () => {
     const live = stripComments(read('main.tf'));
     const line = live.split('\n').find(l => /functions_storage_account_name\s*=/.test(l)) ?? '';
@@ -171,5 +186,19 @@ describe('MG-24 S2: Function App HTTP posture', () => {
     // Unauthenticated requests are rejected (401/403), never allowed through.
     expect(live).toMatch(/unauthenticated_action\s*=\s*"Return(401|403)"/);
     expect(live).not.toMatch(/unauthenticated_action\s*=\s*"AllowAnonymous"/);
+  });
+
+  it('auth is required on ALL paths — no anonymous carve-out (business OR health)', () => {
+    // Easy Auth enforces auth for every path; there is no HTTP health function
+    // and no anonymous exception. Assert the Terraform carves out nothing: no
+    // per-path bypass (excluded_paths), and no anonymous "health"/"ready"/"live"
+    // route hole. Dropping the anonymous-health exception is the S2 default-deny
+    // resolution — health, if ever needed, is a platform mechanism, not an
+    // unauthenticated app path.
+    const live = stripComments(read('modules/functions/main.tf'));
+    expect(live).not.toMatch(/excluded_paths/);
+    expect(live).not.toMatch(/require_authentication\s*=\s*false/);
+    expect(live).not.toMatch(/anonymous/i);
+    expect(live).not.toMatch(/\/health\b/);
   });
 });

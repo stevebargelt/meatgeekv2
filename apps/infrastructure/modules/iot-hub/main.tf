@@ -40,15 +40,16 @@ resource "azurerm_eventhub" "temperature_data" {
   message_retention   = 1
 }
 
-# Event Hub authorization rule for IoT Hub
-resource "azurerm_eventhub_authorization_rule" "iothub" {
-  name                = "iothub-sender"
-  namespace_name      = azurerm_eventhub_namespace.main.name
-  eventhub_name       = azurerm_eventhub.temperature_data.name
-  resource_group_name = var.resource_group_name
-  listen              = false
-  send                = true
-  manage              = false
+# Identity-based send access for the IoT Hub routing endpoint.
+# The IoT Hub's system-assigned identity is granted "Azure Event Hubs Data
+# Sender" on the target Event Hub so the custom endpoint below authenticates via
+# AAD. This replaces the former azurerm_eventhub_authorization_rule ("iothub-sender"),
+# whose primary_connection_string / primary_key were SAS secrets materialized
+# into Terraform state (MG-24 S1). No SAS rule, no connection string, no key.
+resource "azurerm_role_assignment" "iothub_eventhub_sender" {
+  scope                = azurerm_eventhub.temperature_data.id
+  role_definition_name = "Azure Event Hubs Data Sender"
+  principal_id         = azurerm_iothub.main.identity[0].principal_id
 }
 
 # Custom routing endpoint: Cosmos DB temperatures container (identity-based auth).
@@ -67,13 +68,20 @@ resource "azurerm_iothub_endpoint_cosmosdb_account" "cosmos_storage" {
 }
 
 # Custom routing endpoint: Event Hub for real-time fan-out to Functions.
-# Re-uses the existing iothub-sender auth rule for key-based connection.
+# IDENTITY-BASED auth (MG-24 S1): the IoT Hub authenticates to the Event Hub
+# with its system-assigned managed identity (endpoint_uri + entity_path), so NO
+# SAS connection string / key is generated or stored in Terraform state. The
+# role assignment above must exist before the endpoint is created.
 resource "azurerm_iothub_endpoint_eventhub" "eventhub_realtime" {
   name                = "eventhub-realtime"
   iothub_id           = azurerm_iothub.main.id
   resource_group_name = var.resource_group_name
 
-  connection_string = azurerm_eventhub_authorization_rule.iothub.primary_connection_string
+  authentication_type = "identityBased"
+  endpoint_uri        = "sb://${azurerm_eventhub_namespace.main.name}.servicebus.windows.net"
+  entity_path         = azurerm_eventhub.temperature_data.name
+
+  depends_on = [azurerm_role_assignment.iothub_eventhub_sender]
 }
 
 # Parallel route #1: all DeviceMessages → Cosmos (storage of record).

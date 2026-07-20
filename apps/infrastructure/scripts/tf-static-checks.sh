@@ -24,6 +24,9 @@
 #   9. Function App is missing its managed identity or default-deny auth
 #      posture (MG-24 S1/S2).
 #  10. The Functions storage account name is not subscription-derived-unique.
+#  11. The IoT Hub Event Hubs routing endpoint uses a SAS connection string
+#      (or a lingering azurerm_eventhub_authorization_rule) instead of the IoT
+#      Hub managed identity (identity-based auth) (MG-24 S1).
 #
 # Usage: tf-static-checks.sh [INFRA_DIR]
 #   INFRA_DIR defaults to the directory that contains this script's parent
@@ -165,6 +168,31 @@ else
   check "Functions storage name is subscription-derived-unique" \
     "functions_storage_account_name must derive from sha1(subscription_id ...) in main.tf"
 fi
+
+# --- 11. IoT Hub Event Hubs routing endpoint is identity-based (MG-24 S1) ----
+# The custom Event Hubs routing endpoint must authenticate with the IoT Hub's
+# managed identity — NOT a SAS connection string (which would materialize a
+# key/connection string into Terraform state). Assert the endpoint declares
+# identityBased auth, carries no connection_string, and that no
+# azurerm_eventhub_authorization_rule (the former SAS source) lingers in the
+# module.
+IOT_MAIN="${INFRA_DIR}/modules/iot-hub/main.tf"
+iot_routing=""
+if [[ -f "${IOT_MAIN}" ]]; then
+  iot_live="$(grep -vE '^[[:space:]]*#' "${IOT_MAIN}")"
+  if ! echo "${iot_live}" | grep -qE 'authentication_type[[:space:]]*=[[:space:]]*"identityBased"'; then
+    iot_routing+="Event Hubs routing endpoint is not identity-based (authentication_type = \"identityBased\" absent)"$'\n'
+  fi
+  if echo "${iot_live}" | grep -qE 'connection_string[[:space:]]*='; then
+    iot_routing+="a connection_string is present in the IoT Hub module (SAS secret in state):"$'\n'"$(echo "${iot_live}" | grep -nE 'connection_string[[:space:]]*=')"$'\n'
+  fi
+  if echo "${iot_live}" | grep -qE 'azurerm_eventhub_authorization_rule'; then
+    iot_routing+="an azurerm_eventhub_authorization_rule (SAS key source) still exists in the IoT Hub module"$'\n'
+  fi
+else
+  iot_routing="modules/iot-hub/main.tf not found"
+fi
+check "IoT Hub routing endpoint: identity-based, no SAS connection string" "${iot_routing%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then

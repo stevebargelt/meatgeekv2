@@ -146,7 +146,7 @@ greenfield acceptance (MG-24's 10-step dev proof) is in the runbook.
 | `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices    |
 | `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs |
 | `modules/functions/`  | Function App + service plan + storage (length-safe names)  |
-| `modules/signalr/`    | SignalR Service + connection strings                       |
+| `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs) |
 | `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                      |
 
 The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it does
@@ -180,12 +180,47 @@ runs in the `validate-infrastructure` job.
 
 ## Key Outputs
 
+Every output is **non-secret**. There are **no** connection-string / primary-key
+outputs — the former `cosmos_db_connection_string`, `iot_hub_connection_string`,
+`signalr_connection_string`, and `environment_config` aggregate outputs were
+**removed** (MG-24 S1), so no runtime credential is ever written to Terraform
+state. Consumers reach every service **identity-based** (managed identity +
+RBAC) via the non-secret endpoints below.
+
 ```bash
 terraform output -raw function_app_name          # the single deploy target name
-terraform output -raw cosmos_db_connection_string
-terraform output -raw iot_hub_connection_string
-terraform output -raw signalr_connection_string
-terraform output environment_config              # all app config at once
+terraform output -raw cosmos_db_endpoint         # non-secret; access is identity-based
+terraform output -raw eventhub_namespace_fqdn    # non-secret IoT telemetry (Event Hubs) namespace
+terraform output -raw signalr_service_uri        # non-secret; access is identity-based
+terraform output development_urls                # non-secret endpoint URLs
+```
+
+### How the app gets access (no secrets)
+
+The Function App runs under a **system-assigned managed identity** and is granted
+narrowly-scoped data-plane RBAC by the root module:
+
+| Service       | Non-secret endpoint (app setting)          | Role granted to the Function App identity |
+| ------------- | ------------------------------------------ | ----------------------------------------- |
+| Cosmos DB     | `COSMOSDB__accountEndpoint`                | Cosmos DB Built-in Data Contributor       |
+| IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`   | Azure Event Hubs Data Receiver            |
+| SignalR       | `AzureSignalRConnectionString__serviceUri` | SignalR Service Owner                     |
+
+The IoT Hub's own system-assigned identity likewise writes to Cosmos (Built-in
+Data Contributor) and sends to the Event Hubs routing endpoint (Azure Event Hubs
+Data Sender) — the Event Hubs route is **identity-based**, so no SAS connection
+string is generated or stored in state.
+
+### Verifying the absence of secrets in state/plan
+
+```bash
+# No secret OUTPUTS in any module or root outputs.tf, and the IoT Hub routing
+# endpoint is identity-based (no SAS). Both are enforced statically:
+scripts/tf-static-checks.sh
+
+# Inspect the plan for any connection string / key before the first apply:
+terraform plan -var-file=environments/dev.tfvars -out=tfplan
+terraform show -json tfplan | grep -iE 'connection_string|primary_key|SharedAccessKey' || echo "no secrets in plan ✓"
 ```
 
 ## Security Notes
@@ -199,11 +234,13 @@ terraform output environment_config              # all app config at once
 - **State store hardened** — TLS 1.2 floor, no public blob access, HTTPS-only,
   blob versioning + soft delete.
 
-### Known open item (human security review)
-
-Function-App connection strings are currently injected as plaintext app
-settings. Whether to route them through **Key Vault references** is deferred to
-a human security review (see the runbook).
+- **No runtime secrets in state.** Cosmos / IoT-telemetry (Event Hubs) / SignalR
+  access is identity-based (managed identity + RBAC + non-secret endpoints); the
+  Function App's host storage uses its managed identity (shared-key access
+  disabled). No connection strings or primary keys are placed in app settings or
+  surfaced as Terraform outputs. The only sensitive app setting is the App
+  Insights connection string (telemetry ingestion, not a data-plane credential),
+  wired directly from the resource attribute and never exported as an output.
 
 ## Deploy Alignment (Function App name)
 

@@ -236,14 +236,30 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint-and-test, build-typescript, build-go, validate-infrastructure]
     environment: development
+    # OIDC: authenticate to Azure via the GitHub-Environment-scoped federated
+    # credential (subject `environment:development`), NOT the retired long-lived
+    # AZURE_CREDENTIALS service-principal secret. Because these are GitHub
+    # Environment variables bound to `development`, they resolve to a SEPARATE
+    # federated identity from prod's `environment:production` — no shared SP, no
+    # whole-state access. `id-token: write` lets azure/login mint the short-lived
+    # OIDC token; `contents: read` is for checkout.
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # From the authenticated OIDC context (a per-env GitHub Environment
+      # variable), never a hardcoded literal.
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Azure CLI
-        uses: azure/login@v1
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
