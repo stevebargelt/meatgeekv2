@@ -211,6 +211,7 @@ narrowly-scoped data-plane RBAC by the root module:
 | Cosmos DB     | `COSMOSDB__accountEndpoint`                | Cosmos DB Built-in Data Contributor       |
 | IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`   | Azure Event Hubs Data Receiver            |
 | SignalR       | `AzureSignalRConnectionString__serviceUri` | SignalR Service Owner                     |
+| App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` (endpoint-only: `IngestionEndpoint=<url>`, no key) + `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD` | Monitoring Metrics Publisher |
 
 The IoT Hub's own system-assigned identity likewise writes to Cosmos (Built-in
 Data Contributor) and sends to the Event Hubs routing endpoint (Azure Event Hubs
@@ -253,10 +254,14 @@ terraform show -json tfplan | grep -iE 'connection_string|primary_key|SharedAcce
 ## Security Notes
 
 - **OIDC, no long-lived secrets.** CI authenticates via GitHub Actions OIDC with
-  federated credentials scoped **per GitHub Environment** (`dev`, `production`) —
-  the dev CI identity can never authenticate to prod. The CI role is
-  **plan/read-only** (`Reader` + `Storage Blob Data Contributor` on the state
-  account only); apply is never granted to CI.
+  federated credentials scoped **per GitHub Environment** (`development`,
+  `production`) — the presented OIDC subject is
+  `repo:<owner>/<repo>:environment:development | production`, and the bootstrap
+  creates a federated credential whose subject matches each environment name
+  **exactly** (the workflow declares `environment: development`, so bare `dev`
+  would never match). The development CI identity can never authenticate to prod.
+  The CI role is **plan/read-only** (`Reader` + `Storage Blob Data Contributor`
+  on the state account only); apply is never granted to CI.
 - **No hardcoded subscription id** — resolved from the authenticated environment.
 - **State store hardened** — TLS 1.2 floor, no public blob access, HTTPS-only,
   blob versioning + soft delete.
@@ -265,9 +270,19 @@ terraform show -json tfplan | grep -iE 'connection_string|primary_key|SharedAcce
   access is identity-based (managed identity + RBAC + non-secret endpoints); the
   Function App's host storage uses its managed identity (shared-key access
   disabled). No connection strings or primary keys are placed in app settings or
-  surfaced as Terraform outputs. The only sensitive app setting is the App
-  Insights connection string (telemetry ingestion, not a data-plane credential),
-  wired directly from the resource attribute and never exported as an output.
+  surfaced as Terraform outputs. **Application Insights telemetry ingestion is
+  identity-based too:** the Function App authenticates via its managed identity —
+  `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a
+  `Monitoring Metrics Publisher` role assignment on the App Insights resource —
+  and only the **endpoint-only** `APPLICATIONINSIGHTS_CONNECTION_STRING =
+  "IngestionEndpoint=<url>"` (no `InstrumentationKey`, no secret) is placed in
+  app settings, with the key portion parsed out and dropped in the root module.
+  There is **no** secret App Insights connection string for operators to set. The
+  instrumentation key / connection string does remain a **computed attribute** of
+  `azurerm_application_insights.main` in Terraform state (Terraform reads every
+  managed resource's computed attributes back on each apply); that residual is an
+  **accepted, telemetry-write-only** risk — see
+  [ADR: App Insights key in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 ## Deploy Alignment (Function App name)
 
