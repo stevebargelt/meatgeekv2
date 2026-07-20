@@ -185,13 +185,20 @@ greenfield acceptance (MG-24's 10-step dev proof) is in the runbook.
 | --------------------- | ---------------------------------------------------------- |
 | `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices    |
 | `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs |
-| `modules/functions/`  | Function App + service plan + storage (length-safe names)  |
+| `modules/functions/`  | Linux Function App (`azurerm_linux_function_app`) on a Linux `azurerm_service_plan` + its own storage account (length-safe names) |
 | `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs) |
 | `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                      |
 
 The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it does
 **not** read a shared V1 account via a data source. There is no adoption of a pre-existing shared Cosmos account
 anywhere in the stack.
+
+The Functions module creates an **`azurerm_linux_function_app`** on a **Linux
+`azurerm_service_plan`** (`os_type = "Linux"`) — **not** a Flex Consumption app
+(`azurerm_function_app_flex_consumption`). The plan SKU comes from
+`functions_app_service_plan_sku`, which the root validation admits as only `Y1`,
+`EP1`, `EP2`, or `EP3`: dev uses **`Y1` (Consumption)** and prod uses **`EP1`
+(Elastic Premium)**. The Node runtime is pinned to **20**.
 
 ## Terraform / Nx Commands
 
