@@ -530,9 +530,12 @@ API_APP_ID="$(az ad app list --display-name meatgeek-v2-dev-api --query '[0].app
 APP_ID_URI="$(az ad app show --id "$API_APP_ID" --query 'identifierUris[0]' -o tsv)"
 #   → api://<DEV_API_CLIENT_ID>  (equals the emitted DEV_API_APP_ID_URI)
 
-# 1. No token → MUST be 401 (default-deny proven):
-curl -s -o /dev/null -w '%{http_code}\n' "https://${FUNC}.azurewebsites.net/api/health"
-#   → 401
+# 1. No token → MUST be rejected (default-deny proven). `/api/devices` is a real,
+#    idempotent GET route (function getDevices in apps/api/src/main.ts); there is
+#    NO health endpoint and no anonymous carve-out, so an unauthenticated call is
+#    rejected at the platform layer before the function runs:
+curl -s -o /dev/null -w '%{http_code}\n' "https://${FUNC}.azurewebsites.net/api/devices"
+#   → 401/403
 
 # 2. Acquire a delegated user token for the API audience (interactive az user):
 TOKEN="$(az account get-access-token \
@@ -542,14 +545,14 @@ TOKEN="$(az account get-access-token \
 # 3. Valid token, correct audience → MUST be 2xx:
 curl -s -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer ${TOKEN}" \
-  "https://${FUNC}.azurewebsites.net/api/health"
+  "https://${FUNC}.azurewebsites.net/api/devices"
 #   → 200
 
 # 4. Wrong audience → MUST be rejected (401/403). Acquire a token for a DIFFERENT
 #    scope (e.g. ARM) and confirm Easy Auth rejects it:
 WRONG="$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)"
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer ${WRONG}" \
-  "https://${FUNC}.azurewebsites.net/api/health"
+  "https://${FUNC}.azurewebsites.net/api/devices"
 #   → 401/403
 ```
 
