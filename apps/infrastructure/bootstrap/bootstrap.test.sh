@@ -214,13 +214,22 @@ if [ -f "$HELPER" ]; then
   san2="$(bash "$HELPER" "12345678-1234-1234-1234-123456789abc" 2>/dev/null || true)"
   if [ "$san" = "$san2" ]; then ok "state-account name derivation is deterministic (no drift)"
   else bad "state-account name derivation must be deterministic"; fi
-  # FAIL-CLOSED: an over-length prefix must be REJECTED (nonzero), never emitted
-  # as an invalid storage-account name Azure would refuse at create time.
-  if STATE_ACCOUNT_PREFIX="waytoolongprefixthatexceedslimit" \
-       bash "$HELPER" "12345678-1234-1234-1234-123456789abc" >/dev/null 2>&1; then
-    bad "state-account-name.sh must fail closed on an over-length derived name"
+  # SINGLE SOURCE OF TRUTH (MG-24 item 9): the prefix is a FIXED committed
+  # constant, NOT env-overridable. A STATE_ACCOUNT_PREFIX env var must be IGNORED
+  # so bootstrap and the CI workflows can never derive different state-account
+  # names for the same subscription.
+  san_env="$(STATE_ACCOUNT_PREFIX="somethingelse00" \
+       bash "$HELPER" "12345678-1234-1234-1234-123456789abc" 2>/dev/null || true)"
+  if [ "$san_env" = "$san" ]; then
+    ok "state-account-name.sh prefix is NOT env-overridable (STATE_ACCOUNT_PREFIX ignored)"
   else
-    ok "state-account-name.sh fails closed (nonzero) on an over-length derived name"
+    bad "state-account-name.sh prefix must be fixed, not env-overridable (env-set derived '$san_env' != '$san')"
+  fi
+  # The fixed prefix must be exactly the committed literal.
+  if printf '%s' "$san" | grep -q '^meatgeekv2tf'; then
+    ok "derived state-account name uses the fixed 'meatgeekv2tf' prefix"
+  else
+    bad "derived state-account name must start with the fixed 'meatgeekv2tf' prefix (got '$san')"
   fi
 else
   bad "state-account-name.sh helper not found: $HELPER"

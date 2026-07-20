@@ -326,10 +326,16 @@ export class EventDataAdapter {
 
 The Function App runs under a **system-assigned managed identity**, and every
 backing service (Cosmos DB, IoT/Event Hub telemetry, SignalR, host storage) is
-reached **identity-based**: the settings carry only **non-secret endpoints**, and
-data-plane access is granted by RBAC role assignments on the identity. **No
-connection strings or primary keys** are placed in app settings or Terraform
-state. These are exactly the settings Terraform configures on the Function App:
+reached **identity-based**: those settings carry only **non-secret endpoints**,
+and data-plane access is granted by RBAC role assignments on the identity. **No
+service data-plane credential or key** — no Cosmos/Storage/IoT/SignalR
+connection string or primary key — is placed in app settings or Terraform state.
+The one connection string that *is* present, `APPLICATIONINSIGHTS_CONNECTION_STRING`,
+is the full App Insights value **including its `InstrumentationKey`**, but that
+ikey is a **non-authenticating destination identifier**, not a credential:
+`local_authentication_disabled = true` on the App Insights resource forces
+AAD-only ingestion, so the ikey cannot authenticate anything (see the detailed
+note below). These are exactly the settings Terraform configures on the Function App:
 
 ```bash
 # Runtime

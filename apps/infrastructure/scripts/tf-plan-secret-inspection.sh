@@ -231,7 +231,24 @@ output_rows="$(printf '%s\n' "${JSON}" | jq -r '
 # WITHOUT a SharedAccessKey, an accountEndpoint URL) does NOT match, so the
 # identity-based `__serviceUri` / `__accountEndpoint` / `__fullyQualifiedNamespace`
 # settings pass. This is deliberately about the VALUE, not the setting NAME.
-CRED_MARKER_RE='(InstrumentationKey|AccountKey|SharedAccessKey|SharedAccessKeyName|AccessKey|AccountEndpoint=.*AccountKey|Password|PrimaryKey|SecondaryKey|primary_key|secondary_key|primaryKey|secondaryKey)='
+#
+# SCOPE — this marker set is a BEST-EFFORT REGRESSION GUARD for the COMMON
+# credential forms (Azure connection strings, storage keys, SAS tokens), not an
+# exhaustive adversarial barrier: a sufficiently novel or obfuscated encoding can
+# still evade a lexical match. The AUTHORITATIVE defenses are the identity-based
+# design (no secrets in state BY CONSTRUCTION — managed identity / RBAC, no keys
+# minted into app_settings or outputs) and HUMAN plan review before apply. This
+# gate exists to catch the accidental reintroduction of a known credential shape,
+# and so it errs toward catching more forms (case-insensitive, whitespace- and
+# SAS-tolerant) rather than fewer.
+#
+# Each key marker tolerates OPTIONAL WHITESPACE before '=' ("AccountKey = SECRET"
+# with spaces is just as live a secret as "AccountKey=SECRET"), matched
+# case-INSENSITIVELY below (grep -qiE). SAS tokens are covered by two forms: the
+# signature query parameter '[?&]sig=' (…&sig=<base64>) and the classic
+# 'SharedAccessSignature=' connection-string field — alongside the storage
+# 'SharedAccessKey' / 'SharedAccessKeyName' account-key fields.
+CRED_MARKER_RE='(InstrumentationKey|AccountKey|SharedAccessKeyName|SharedAccessKey|SharedAccessSignature|AccessKey|Password|PrimaryKey|SecondaryKey|primary_key|secondary_key|primaryKey|secondaryKey)[[:space:]]*=|[?&][[:space:]]*sig[[:space:]]*='
 # The App Insights connection string is uniquely identifiable: it carries BOTH an
 # InstrumentationKey and an IngestionEndpoint segment.
 AI_CONNSTR_RE='InstrumentationKey=.*IngestionEndpoint=|IngestionEndpoint=.*InstrumentationKey='

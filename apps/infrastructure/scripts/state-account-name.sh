@@ -31,7 +31,13 @@
 #   source state-account-name.sh && state_account_name <sub-id>
 
 # Prefix is 12 chars; the 12-char suffix fills the 24-char storage-account cap.
-STATE_ACCOUNT_PREFIX="${STATE_ACCOUNT_PREFIX:-meatgeekv2tf}"
+# FIXED committed constant — NOT env-overridable (MG-24 item 9). The derived name
+# is the SINGLE source of truth; if the prefix could be changed via a
+# STATE_ACCOUNT_PREFIX env var, bootstrap and the CI workflows could each derive a
+# DIFFERENT state-account name for the same subscription and silently drift apart.
+# A hardcoded literal (assigned unconditionally, ignoring any inherited env var)
+# guarantees the derivation is identical everywhere it runs.
+STATE_ACCOUNT_PREFIX="meatgeekv2tf"
 
 # Echo the derived, globally-unique state-account name for a subscription id.
 # Returns non-zero (with a message on stderr) if no subscription id is available.
