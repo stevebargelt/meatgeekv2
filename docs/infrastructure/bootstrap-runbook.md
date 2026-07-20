@@ -102,10 +102,14 @@ What it creates (and nothing else):
    identity's state access is RBAC-scoped to its own container. The account is
    hardened (TLS 1.2 floor, no public blob access, HTTPS-only, blob versioning +
    30-day soft delete). The RG / storage location are overridable via
-   `STATE_RG` / `STATE_STORAGE_ACCOUNT` / `STATE_LOCATION`; **`STATE_CONTAINER`
-   is not a supported override** — the per-environment container names
-   (`tfstate-dev` / `tfstate-prod`) are fixed to match the committed
-   `backend-*.hcl` files and the container-scoped RBAC grants.
+   `STATE_RG` / `STATE_LOCATION`. The state-account **name** is **not** an
+   operator override — it is **derived** from the subscription id by the single
+   sourced helper `scripts/state-account-name.sh` (the single source of truth),
+   so the bootstrap, the `backend-*.hcl` init, and every workflow all resolve the
+   **same** account and the single-derivation guarantee (item 9) cannot drift.
+   Likewise **`STATE_CONTAINER` is not a supported override** — the
+   per-environment container names (`tfstate-dev` / `tfstate-prod`) are fixed to
+   match the committed `backend-*.hcl` files and the container-scoped RBAC grants.
 
 2. **The GitHub Actions OIDC identities (two roles per environment)** — SEPARATE
    Azure AD applications + service principals, each with a **federated credential

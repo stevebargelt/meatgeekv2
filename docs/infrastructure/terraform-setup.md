@@ -61,31 +61,48 @@ terraform {
 ```
 
 ```hcl
-# environments/backend-dev.hcl
-resource_group_name  = "meatgeek-v2-tfstate-rg"
-storage_account_name = "meatgeekv2tfstate"
-container_name       = "tfstate"
-key                  = "meatgeek-v2/dev.tfstate"
+# environments/backend-dev.hcl — storage_account_name is DELIBERATELY absent
+resource_group_name = "meatgeek-v2-tfstate-rg"
+container_name      = "tfstate-dev"
+key                 = "meatgeek-v2/dev.tfstate"
+use_azuread_auth    = true
 ```
 
 ```hcl
-# environments/backend-prod.hcl
-resource_group_name  = "meatgeek-v2-tfstate-rg"
-storage_account_name = "meatgeekv2tfstate"
-container_name       = "tfstate"
-key                  = "meatgeek-v2/prod.tfstate"
+# environments/backend-prod.hcl — storage_account_name is DELIBERATELY absent
+resource_group_name = "meatgeek-v2-tfstate-rg"
+container_name      = "tfstate-prod"
+key                 = "meatgeek-v2/prod.tfstate"
+use_azuread_auth    = true
 ```
 
-The state account (`meatgeekv2tfstate`) is created **once** by the bootstrap
+dev and prod use **distinct, per-environment containers** (`tfstate-dev` /
+`tfstate-prod`) — not one shared `tfstate` container — so their state can never
+collide and each CI identity's data-plane state access is RBAC-scoped to its own
+container only.
+
+The state-account **name** is **deliberately not** in the `backend-*.hcl` files
+and is **not** a hardcoded literal: it is **derived** from the subscription id
+by the single sourced helper `scripts/state-account-name.sh` (`meatgeekv2tf` +
+first 12 hex of `sha1(subscription-id)` = 24 chars), so it is globally unique
+per subscription and identical everywhere it is used (bootstrap, CI, the
+runbook). Having exactly one derivation is what guarantees the bootstrap, the
+backend init, and every workflow can never bind divergent account names. The
+state account is created **once** by the bootstrap
 (`apps/infrastructure/bootstrap/bootstrap.sh`) — you do **not** create it by
 hand, and the legacy V1 shared state account is deliberately **not** used.
 
-Initialize with a **clean** init (never migrate local state):
+Initialize with a **clean** init, injecting the derived account name as an extra
+`-backend-config` (never migrate local state):
 
 ```bash
 rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
-terraform init -reconfigure -backend-config=environments/backend-dev.hcl
+terraform init -reconfigure \
+  -backend-config=environments/backend-dev.hcl \
+  -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
 ```
+
+(`ARM_SUBSCRIPTION_ID` must be exported first — see the runbook Prerequisites.)
 
 ### Provider configuration
 

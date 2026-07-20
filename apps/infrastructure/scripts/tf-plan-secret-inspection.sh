@@ -10,6 +10,18 @@
 # EXITS NONZERO on any violation. Run it BEFORE `terraform apply`; do not apply
 # until it prints a clean result.
 #
+# PORTABILITY (MG-24 corrective) — this is a SECURITY property, not a style note.
+# The gate is written to strict POSIX sh so it runs IDENTICALLY under macOS's
+# default bash 3.2, modern bash 5, and dash. It uses NO bash-4-only features
+# (no ${v,,}/${v^^} case modification, no associative arrays), NO here-strings
+# (<<<), and NO process substitution. Those constructs either raise a
+# `bad substitution` / syntax error on bash 3.2 or are silently unavailable on
+# dash — and a gate that ERRORS on the operator's shell while still reaching a
+# PASS is FAIL-OPEN. The earlier `${1,,}` in ikey_is_managed did exactly that:
+# on a shell without bash-4 case modification the managed-ikey comparison broke,
+# and a FOREIGN/lookalike connection string slipped through as accepted. Every
+# accept path below is now reachable ONLY after the comparison provably ran.
+#
 # WHAT IT DOES
 #   1. Loads a `terraform show -json` document (from a file arg, a plan binary it
 #      renders via `terraform show -json`, or stdin). Works on BOTH a PLAN doc and
@@ -38,17 +50,23 @@
 #      the single OPERATOR-ACCEPTED App Insights residual:
 #         the FULL App Insights connection string (InstrumentationKey=...;
 #         IngestionEndpoint=...) in a Function App app_setting — allowed ONLY when
-#         the plan's azurerm_application_insights resource sets
-#         local_authentication_disabled = true, which forces AAD-only ingestion so
-#         the embedded instrumentation key CANNOT authenticate (MG-24 item 2 / the
-#         ADR). The AI connection string as an OUTPUT is never accepted (an output
+#         BOTH (a) the plan's azurerm_application_insights resource sets
+#         local_authentication_disabled = true (forcing AAD-only ingestion so the
+#         embedded instrumentation key CANNOT authenticate) AND (b) the embedded
+#         InstrumentationKey is one of THIS plan/state's OWN managed App Insights
+#         ikeys (ai_ikeys). The exception is bound to the managed resource: a
+#         lookalike conn string that carries a FOREIGN ikey is a VIOLATION, not the
+#         residual (MG-24 item 2 / the ADR). The AI connection string as an OUTPUT is never accepted (an output
 #         is an export surface, not the telemetry sink), and the AI conn string in
 #         app_settings WITHOUT local auth disabled is a VIOLATION — that is the
 #         coupled invariant this gate enforces.
 #   5. Exits 1 on ANY violation (printing every offending path + why), or on ANY
-#      operational failure (no jq, unparseable JSON, no input) — fail-closed: an
-#      inspection that cannot run must NOT report success. Exits 0 only when the
-#      inspection ran to completion and found nothing prohibited.
+#      operational failure (no jq, unparseable JSON, no input, an inconclusive or
+#      errored managed-ikey comparison) — fail-closed: an inspection that cannot
+#      run, or a residual it cannot PROVE is the managed one, must NOT report
+#      success. Exits 0 only when the inspection ran to completion and every
+#      credential value was either provably the accepted managed residual or
+#      absent.
 #
 # USAGE
 #   tf-plan-secret-inspection.sh <plan.json>     # a `terraform show -json` doc
@@ -56,34 +74,46 @@
 #   terraform show -json tfplan | tf-plan-secret-inspection.sh   # via stdin
 #   tf-plan-secret-inspection.sh --json <file>   # force JSON interpretation
 #
-set -uo pipefail
+set -u
+# pipefail is a bash/ksh feature; dash lacks it and would print "Illegal option
+# -o pipefail" and skew the exit code. Enable it only when the running shell
+# supports it. Correctness never DEPENDS on pipefail here — every pipeline below
+# begins with echo/printf, which cannot fail — so this is defense in depth, not a
+# load-bearing option (and probing it in a subshell keeps dash silent + clean).
+if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
+
+TAB="$(printf '\t')"
 
 die() { echo "tf-plan-secret-inspection: FATAL: $*" >&2; exit 1; }   # fail-closed
 
 command -v jq >/dev/null 2>&1 || die "jq is required but not on PATH"
 
+# Portable lowercase (bash-4's ${v,,} is unavailable on bash 3.2 / dash).
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 # --- 1. Load the plan JSON --------------------------------------------------
 SRC=""            # human label for messages
 JSON=""
 force_json=0
-if [[ "${1:-}" == "--json" ]]; then
+if [ "${1:-}" = "--json" ]; then
   force_json=1
   shift
 fi
 
 read_input() {
-  local arg="${1:-}"
-  if [[ -z "${arg}" || "${arg}" == "-" ]]; then
+  local arg
+  arg="${1:-}"
+  if [ -z "${arg}" ] || [ "${arg}" = "-" ]; then
     SRC="stdin"
     cat
     return
   fi
-  [[ -f "${arg}" ]] || die "input not found: ${arg}"
+  [ -f "${arg}" ] || die "input not found: ${arg}"
   SRC="${arg}"
   # A `terraform show -json` document is JSON; a plan binary is not. If the file
   # already parses as JSON (or the caller forced --json), use it directly.
   # Otherwise treat it as a plan binary and render it with terraform.
-  if [[ "${force_json}" -eq 1 ]] || jq -e . "${arg}" >/dev/null 2>&1; then
+  if [ "${force_json}" -eq 1 ] || jq -e . "${arg}" >/dev/null 2>&1; then
     cat "${arg}"
     return
   fi
@@ -96,12 +126,35 @@ read_input() {
 # read_input runs in a command substitution (a subshell); its die() exits that
 # subshell with status 1, which the substitution propagates here. Catch that so
 # we surface ONE fatal and stay fail-closed rather than dying twice.
-if [[ -z "${1:-}" || "${1:-}" == "-" ]]; then SRC="stdin"; else SRC="${1}"; fi
+if [ -z "${1:-}" ] || [ "${1:-}" = "-" ]; then SRC="stdin"; else SRC="${1}"; fi
 if ! JSON="$(read_input "${1:-}")"; then
   exit 1
 fi
-[[ -n "${JSON}" ]] || die "no plan input (empty ${SRC:-input})"
-echo "${JSON}" | jq -e . >/dev/null 2>&1 || die "input is not valid JSON (${SRC})"
+[ -n "${JSON}" ] || die "no plan input (empty ${SRC:-input})"
+printf '%s\n' "${JSON}" | jq -e . >/dev/null 2>&1 || die "input is not valid JSON (${SRC})"
+
+# --- 1b. Fail-closed STRUCTURAL validation ----------------------------------
+# Valid JSON is NOT enough: '{}', '[]', '{"foo":"bar"}' all parse, collect zero
+# resources, walk nothing, and would trip a vacuous PASS — the fail-OPEN hole.
+# A PASS must be reachable ONLY after genuinely walking a recognizable
+# `terraform show -json` PLAN or STATE document. So before trusting anything,
+# require the shape of one: a top-level JSON OBJECT that carries a format_version
+# AND at least one recognized resource container
+# (.planned_values.root_module | .values.root_module | .resource_changes).
+# Absent that shape, or if the shape probe itself errors, we FAIL CLOSED.
+top_type="$(printf '%s\n' "${JSON}" | jq -r 'type' 2>/dev/null || true)"
+[ "${top_type}" = "object" ] || \
+  die "cannot inspect: unrecognized/empty terraform JSON (${SRC}) — top-level is '${top_type:-unknown}', expected a 'terraform show -json' object"
+has_shape="$(printf '%s\n' "${JSON}" | jq -r '
+  (has("format_version"))
+  and (
+    (.planned_values.root_module? != null)
+    or (.values.root_module? != null)
+    or (.resource_changes? != null)
+  )
+' 2>/dev/null || echo "error")"
+[ "${has_shape}" = "true" ] || \
+  die "cannot inspect: unrecognized/empty terraform JSON (${SRC}) — missing format_version and/or planned_values.root_module / values.root_module / resource_changes; refusing to report PASS on a document that is not a recognizable terraform plan or state"
 
 # --- 2. Normalize the resource + output universe ----------------------------
 # A `terraform show -json` document differs by mode, and a credential VALUE can
@@ -117,22 +170,25 @@ echo "${JSON}" | jq -e . >/dev/null 2>&1 || die "input is not valid JSON (${SRC}
 #   apply — they cannot be inspected pre-apply. That residual blind spot is exactly
 #   why the runbook ALSO requires running this gate against the POST-APPLY
 #   `terraform show -json` STATE, where those values are concrete.
-RESOURCES="$(echo "${JSON}" | jq -c '
+# A jq collection error here means we cannot enumerate the resource universe —
+# that is an inspection that could not run, so FAIL CLOSED (die), never fall back
+# to an empty `[]` (which would silently walk nothing and PASS).
+RESOURCES="$(printf '%s\n' "${JSON}" | jq -c '
   def modtree: recurse(.child_modules[]?) | .resources[]?;
   [
     (.planned_values.root_module // empty | modtree),
     (.values.root_module // empty | modtree),
     (.resource_changes[]? | {type: .type, address: .address, values: (.change.after // {})})
   ]
-' 2>/dev/null || echo '[]')"
+' 2>/dev/null)" || die "cannot inspect: failed to collect the resource universe from ${SRC}"
 
 # Is telemetry local auth disabled (AAD-only) on EVERY App Insights resource? If
 # any AI resource leaves local auth enabled, the ikey-in-app_settings residual is
 # NOT safe and must be rejected. `all` over an empty set is true, so also require
 # at least one AI resource before treating the residual as accepted. select(. !=
 # null) keeps a genuine `false` (which jq's `//` would wrongly drop).
-ai_count="$(echo "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights")] | length')"
-ai_local_auth_disabled="$(echo "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights") | .values.local_authentication_disabled | select(. != null)] | (length > 0) and all(. == true)')"
+ai_count="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights")] | length')"
+ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights") | .values.local_authentication_disabled | select(. != null)] | (length > 0) and all(. == true)')"
 
 # The AI resource's OWN computed connection_string / instrumentation_key living in
 # its resource block is the inherent-in-state residual (a TF-managed resource
@@ -141,12 +197,12 @@ ai_local_auth_disabled="$(echo "${RESOURCES}" | jq '[.[] | select(.type=="azurer
 # so a bare instrumentation key copied verbatim into a sink can still be caught.
 # (Pre-apply the ikey may be known-after-apply/unknown; then this list is empty —
 # another reason the post-apply STATE run is required.)
-ai_ikeys="$(echo "${RESOURCES}" | jq -r '[.[] | select(.type=="azurerm_application_insights") | .values.instrumentation_key] | map(select(. != null and . != "")) | unique | .[]' 2>/dev/null || true)"
+ai_ikeys="$(printf '%s\n' "${RESOURCES}" | jq -r '[.[] | select(.type=="azurerm_application_insights") | .values.instrumentation_key] | map(select(. != null and . != "")) | unique | .[]' 2>/dev/null || true)"
 
 # --- 3. Collect the sink VALUES (app_settings + outputs) as TSV --------------
 # Each line: <sink-kind>\t<address/path>\t<value>. We emit the VALUE side only.
 # sort -u dedups identical rows the planned_values/resource_changes union produces.
-app_setting_rows="$(echo "${RESOURCES}" | jq -r '
+app_setting_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
   .[]
   | select(.type | test("function_app|web_app|app_service"))
   | . as $r
@@ -158,7 +214,7 @@ app_setting_rows="$(echo "${RESOURCES}" | jq -r '
 
 # Outputs live under different keys by mode: .planned_values.outputs (plan),
 # .values.outputs (state), and .output_changes[].after (plan deltas). Union all.
-output_rows="$(echo "${JSON}" | jq -r '
+output_rows="$(printf '%s\n' "${JSON}" | jq -r '
   (
     ((.planned_values.outputs // {}) | to_entries[] | {k: .key, v: .value.value}),
     ((.values.outputs // {})         | to_entries[] | {k: .key, v: .value.value}),
@@ -188,38 +244,95 @@ report() {
   violations=$((violations + 1))
 }
 
+# Is <ikey> one of the plan/state's OWN azurerm_application_insights
+# instrumentation_key values (ai_ikeys)? The accepted-residual exception is bound
+# to the MANAGED resource: only the full conn string whose embedded ikey belongs
+# to a TF-managed App Insights is safe under local-auth-disabled. A lookalike
+# conn string carrying a FOREIGN ikey is NOT the residual — it is a leak. GUID
+# comparison is case-insensitive. An EMPTY needle (extraction failed) or empty
+# ai_ikeys returns 1 (not managed) — so the caller treats it as a VIOLATION.
+# The membership loop is a for-over-newlines (NO here-string), so it runs in THIS
+# shell on bash 3.2 / bash 5 / dash alike.
+ikey_is_managed() {
+  local needle ik oldifs
+  needle="$(lc "${1:-}")"
+  [ -z "${needle}" ] && return 1
+  [ -z "${ai_ikeys}" ] && return 1
+  oldifs="${IFS}"
+  IFS='
+'
+  set -f
+  for ik in ${ai_ikeys}; do
+    [ -z "${ik}" ] && continue
+    if [ "${needle}" = "$(lc "${ik}")" ]; then
+      IFS="${oldifs}"; set +f; return 0
+    fi
+  done
+  IFS="${oldifs}"; set +f
+  return 1
+}
+
+# Does a sink VALUE exactly equal one of the bare managed ikey GUIDs? (A bare
+# ikey copied verbatim into a sink — prohibited regardless of local-auth state.)
+value_is_bare_ikey() {
+  local v ik oldifs
+  v="$1"
+  [ -z "${ai_ikeys}" ] && return 1
+  oldifs="${IFS}"
+  IFS='
+'
+  set -f
+  for ik in ${ai_ikeys}; do
+    [ -z "${ik}" ] && continue
+    if [ "${v}" = "${ik}" ]; then
+      IFS="${oldifs}"; set +f; return 0
+    fi
+  done
+  IFS="${oldifs}"; set +f
+  return 1
+}
+
 inspect_rows() {
-  # Read TSV rows on stdin: kind \t path \t value
-  local kind path value
-  while IFS=$'\t' read -r kind path value; do
-    [[ -z "${kind}" ]] && continue
+  # Read TSV rows on stdin: kind \t path \t value. Called with `< file`
+  # redirection (NOT a pipe / process substitution), so it runs in THIS shell and
+  # the `violations` counter that report() bumps survives.
+  local kind path value embedded_ikey
+  while IFS="${TAB}" read -r kind path value; do
+    [ -z "${kind}" ] && continue
 
     # Bare instrumentation key (the AI resource's own ikey GUID) copied verbatim
     # into a sink. The ADR permits the ikey ONLY embedded in the full conn string
     # under local-auth-disabled; a bare ikey in a sink is prohibited regardless.
-    if [[ -n "${ai_ikeys}" ]]; then
-      while IFS= read -r ik; do
-        [[ -z "${ik}" ]] && continue
-        if [[ "${value}" == "${ik}" ]]; then
-          report "${kind}" "${path}" "bare App Insights instrumentation key copied into a ${kind} value (permitted only embedded in the full conn string under local-auth-disabled)"
-          continue 2
-        fi
-      done <<< "${ai_ikeys}"
+    if value_is_bare_ikey "${value}"; then
+      report "${kind}" "${path}" "bare App Insights instrumentation key copied into a ${kind} value (permitted only embedded in the full conn string under local-auth-disabled)"
+      continue
     fi
 
     # Does this VALUE look like a credential at all?
-    if ! echo "${value}" | grep -qE "${CRED_MARKER_RE}"; then
+    if ! printf '%s\n' "${value}" | grep -qE "${CRED_MARKER_RE}"; then
       continue   # non-secret value (endpoint / URI / plain string) — fine
     fi
 
     # It is a credential value. The ONLY accepted credential is the full App
     # Insights connection string in an app_setting, under local-auth-disabled.
-    if echo "${value}" | grep -qE "${AI_CONNSTR_RE}"; then
-      if [[ "${kind}" == "app_setting" && "${ai_local_auth_disabled}" == "true" ]]; then
-        echo "  · accepted App Insights residual (ikey non-authenticating; local_authentication_disabled=true): ${path}"
+    if printf '%s\n' "${value}" | grep -qE "${AI_CONNSTR_RE}"; then
+      if [ "${kind}" = "app_setting" ] && [ "${ai_local_auth_disabled}" = "true" ]; then
+        # The exception is bound to the MANAGED resource: the embedded
+        # InstrumentationKey MUST be one of this plan/state's own App Insights
+        # ikeys. FAIL CLOSED here — a foreign/attacker conn string that merely
+        # LOOKS like the AI shape (InstrumentationKey=…;IngestionEndpoint=…) but
+        # carries a different ikey, OR an extraction that yields no ikey at all,
+        # is a VIOLATION, not the accepted residual. Accept ONLY when the ikey is
+        # non-empty AND provably managed.
+        embedded_ikey="$(printf '%s' "${value}" | grep -oiE 'InstrumentationKey=[^;"]+' | head -n1 | cut -d= -f2)"
+        if [ -n "${embedded_ikey}" ] && ikey_is_managed "${embedded_ikey}"; then
+          echo "  · accepted App Insights residual (managed ikey non-authenticating; local_authentication_disabled=true): ${path}"
+          continue
+        fi
+        report "${kind}" "${path}" "App Insights connection string carries an InstrumentationKey (${embedded_ikey:-<none>}) that is NOT one of the plan/state's managed azurerm_application_insights instrumentation_key values — a foreign/lookalike connection string is not the accepted residual (ai_count=${ai_count})"
         continue
       fi
-      if [[ "${kind}" != "app_setting" ]]; then
+      if [ "${kind}" != "app_setting" ]; then
         report "${kind}" "${path}" "App Insights connection string exported as an ${kind} (export surface — never accepted, even under local-auth-disabled)"
         continue
       fi
@@ -235,13 +348,18 @@ inspect_rows() {
 
 echo "tf-plan-secret-inspection: inspecting ${SRC} (App Insights resources: ${ai_count}, local_authentication_disabled(all)=${ai_local_auth_disabled})"
 
-# Feed both sink sets through the classifier. Process substitution (not a pipe)
-# keeps inspect_rows in THIS shell so its violation counter survives. printf
-# keeps empty sets harmless.
-inspect_rows < <({ printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${output_rows}"; } | grep -v '^[[:space:]]*$')
+# Feed both sink sets through the classifier. We stage the rows in a temp file and
+# read inspect_rows with `< file` (not a pipe / process substitution — neither is
+# portable to dash) so the loop runs in THIS shell and its violation counter
+# survives. printf keeps empty sets harmless.
+rows_file="$(mktemp)"
+trap 'rm -f "${rows_file}"' EXIT
+{ printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${output_rows}"; } \
+  | grep -v '^[[:space:]]*$' > "${rows_file}" || true
+inspect_rows < "${rows_file}"
 
 echo
-if [[ "${violations}" -ne 0 ]]; then
+if [ "${violations}" -ne 0 ]; then
   echo "tf-plan-secret-inspection: FAILED — ${violations} prohibited credential VALUE(s) in plan/state. DO NOT APPLY." >&2
   exit 1
 fi

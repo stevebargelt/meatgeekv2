@@ -647,3 +647,202 @@ describe('MG-24 S1: the static gate behaves — accepts the residual, catches re
     expect(code).toBe(0);
   });
 });
+
+describe('MG-24 S1: the fail-closed plan/state inspection walks real VALUES (tf-plan-secret-inspection.sh)', () => {
+  const INSPECT = path.join(INFRA, 'scripts', 'tf-plan-secret-inspection.sh');
+  const IKEY = '11111111-1111-1111-1111-111111111111';
+  const FOREIGN_IKEY = '99999999-9999-9999-9999-999999999999';
+
+  function runInspect(arg: string): { code: number; out: string } {
+    return runInspectWith('bash', arg);
+  }
+
+  // Run the gate under an explicit shell so the SAME plan can be exercised under
+  // dash (`/bin/sh`) as well as bash — the MG-24 portability regression.
+  function runInspectWith(shell: string, arg: string): { code: number; out: string } {
+    try {
+      const out = execFileSync(shell, [INSPECT, arg], { encoding: 'utf8' });
+      return { code: 0, out };
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+    }
+  }
+
+  function writePlan(obj: unknown): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg24-inspect-'));
+    const file = path.join(dir, 'plan.json');
+    fs.writeFileSync(file, JSON.stringify(obj));
+    return file;
+  }
+
+  /** A structurally valid `terraform show -json` plan carrying an AI resource + a Function App. */
+  function planWith(connString: string, opts?: { localAuthDisabled?: boolean }): unknown {
+    return {
+      format_version: '1.2',
+      terraform_version: '1.9.0',
+      planned_values: {
+        root_module: {
+          resources: [
+            {
+              address: 'azurerm_application_insights.main',
+              type: 'azurerm_application_insights',
+              name: 'main',
+              values: {
+                local_authentication_disabled: opts?.localAuthDisabled ?? true,
+                instrumentation_key: IKEY,
+              },
+            },
+            {
+              address: 'module.functions.azurerm_linux_function_app.main',
+              type: 'azurerm_linux_function_app',
+              name: 'main',
+              values: {
+                app_settings: { APPLICATIONINSIGHTS_CONNECTION_STRING: connString },
+              },
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  // Finding 1 (HIGH): FAIL-CLOSED on empty / malformed / wrong-shape valid JSON.
+  it.each([
+    ['empty object {}', '{}'],
+    ['empty array []', '[]'],
+    ['wrong-shape object', '{"foo":"bar"}'],
+  ])('FAILS CLOSED (nonzero) on %s — no vacuous PASS', (_label, json) => {
+    const file = writePlan(JSON.parse(json));
+    const { code, out } = runInspect(file);
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/cannot inspect: unrecognized\/empty terraform JSON/);
+  });
+
+  it('FAILS CLOSED (nonzero) on a missing input file', () => {
+    const { code, out } = runInspect(path.join(os.tmpdir(), 'mg24-nope-does-not-exist.json'));
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/input not found/);
+  });
+
+  it('PASSES a real plan with the accepted-AI residual (managed ikey, local_authentication_disabled=true)', () => {
+    const connString = `InstrumentationKey=${IKEY};IngestionEndpoint=https://x.in.applicationinsights.azure.com/`;
+    const { code, out } = runInspect(writePlan(planWith(connString)));
+    expect(code).toBe(0);
+    expect(out).toMatch(/accepted App Insights residual/);
+  });
+
+  it('FAILS on a planted credential in resource_changes[].change.after', () => {
+    const plan = {
+      format_version: '1.2',
+      resource_changes: [
+        {
+          type: 'azurerm_linux_function_app',
+          address: 'azurerm_linux_function_app.main',
+          change: {
+            after: {
+              app_settings: { COSMOSDB: 'AccountEndpoint=https://x/;AccountKey=SECRETKEY==' },
+            },
+          },
+        },
+      ],
+    };
+    const { code, out } = runInspect(writePlan(plan));
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/prohibited credential VALUE/);
+  });
+
+  it('FAILS on a credential planted in an output', () => {
+    const plan = {
+      format_version: '1.2',
+      planned_values: { root_module: { resources: [] } },
+      output_changes: { leak: { after: 'AccountKey=abc123==;EndpointSuffix=core.windows.net' } },
+    };
+    const { code, out } = runInspect(writePlan(plan));
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/prohibited credential VALUE/);
+  });
+
+  // Finding 2 (MEDIUM): the AI exception is BOUND to the managed resource's ikey.
+  it('FAILS on a lookalike full AI connection string carrying a FOREIGN ikey (not a managed-resource ikey)', () => {
+    // Same accepted shape (InstrumentationKey=…;IngestionEndpoint=…) and local
+    // auth disabled — but the embedded ikey is NOT one of the plan's own
+    // azurerm_application_insights instrumentation_key values. That is a foreign
+    // connection string, not the accepted residual, and must be a VIOLATION.
+    const foreign = `InstrumentationKey=${FOREIGN_IKEY};IngestionEndpoint=https://evil.example.com/`;
+    const { code, out } = runInspect(writePlan(planWith(foreign)));
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/is NOT one of the plan\/state's managed azurerm_application_insights/);
+  });
+
+  // MG-24 corrective: PORTABLE-SHELL regression. The gate previously used
+  // bash-4-only `${1,,}` in ikey_is_managed; on macOS's default bash 3.2 (and
+  // silently under dash) that raised `bad substitution`, broke the managed-ikey
+  // comparison, and let a FOREIGN/lookalike connection string slip through as
+  // accepted — a FAIL-OPEN AI-binding check on any host without bash 4+. The
+  // gate is now strict POSIX sh; these guard that it neither uses the offending
+  // constructs NOR regresses when run under dash (`/bin/sh`).
+  describe('runs identically under dash (`sh`) — no bash-4-only / bash-only constructs', () => {
+    const src = fs.readFileSync(INSPECT, 'utf8');
+    // Scan CODE only: the header comment legitimately NAMES the forbidden
+    // constructs (`${v,,}`, `<<<`, …) while documenting why they were removed, so
+    // a raw scan would false-positive on the prose. Drop `#`-comment lines first.
+    const code = src
+      .split('\n')
+      .filter(line => !/^\s*#/.test(line))
+      .join('\n');
+
+    it('source is free of bash-4-only / non-portable constructs', () => {
+      // No ${v,,} / ${v^^} case modification (bash 4+ -> "bad substitution" on 3.2).
+      expect(code).not.toMatch(/\$\{[A-Za-z_][A-Za-z0-9_]*,,\}/);
+      expect(code).not.toMatch(/\$\{[A-Za-z_][A-Za-z0-9_]*\^\^\}/);
+      // No here-strings (<<<) and no process substitution (< <( ... )) — neither
+      // is available under dash.
+      expect(code).not.toMatch(/<<</);
+      expect(code).not.toMatch(/<\s*<\(/);
+      // No associative arrays.
+      expect(code).not.toMatch(/declare\s+-A/);
+      // Sanity: the case-insensitive lowercasing helper the fix relies on IS present.
+      expect(src).toMatch(/tr '\[:upper:\]' '\[:lower:\]'/);
+    });
+
+    it('parses cleanly under dash (`sh -n`) — no syntax errors', () => {
+      // `sh -n <script>` exits 0 on valid POSIX syntax without executing it.
+      let code = 0;
+      let out = '';
+      try {
+        out = execFileSync('sh', ['-n', INSPECT], { encoding: 'utf8' });
+      } catch (e) {
+        const err = e as { status?: number; stderr?: string };
+        code = err.status ?? 1;
+        out = err.stderr ?? '';
+      }
+      expect(code).toBe(0);
+      expect(out).not.toMatch(/bad substitution|syntax error/i);
+    });
+
+    it('under `sh` (dash): fails closed on empty {} and a foreign-ikey lookalike, accepts the managed residual', () => {
+      // Empty object -> fail-closed, no vacuous PASS.
+      const empty = runInspectWith('sh', writePlan({}));
+      expect(empty.code).not.toBe(0);
+      expect(empty.out).not.toMatch(/bad substitution/i);
+
+      // Managed residual -> PASS (0). This is the exact case the old bad-sub bug
+      // could not reach correctly on a non-bash-4 shell.
+      const okConn = `InstrumentationKey=${IKEY};IngestionEndpoint=https://x.in.applicationinsights.azure.com/`;
+      const accepted = runInspectWith('sh', writePlan(planWith(okConn)));
+      expect(accepted.code).toBe(0);
+      expect(accepted.out).toMatch(/accepted App Insights residual/);
+      expect(accepted.out).not.toMatch(/bad substitution/i);
+
+      // Foreign/lookalike ikey -> VIOLATION (nonzero), NOT fail-open.
+      const foreignConn = `InstrumentationKey=${FOREIGN_IKEY};IngestionEndpoint=https://evil.example.com/`;
+      const foreignRun = runInspectWith('sh', writePlan(planWith(foreignConn)));
+      expect(foreignRun.code).not.toBe(0);
+      expect(foreignRun.out).toMatch(
+        /is NOT one of the plan\/state's managed azurerm_application_insights/
+      );
+      expect(foreignRun.out).not.toMatch(/bad substitution/i);
+    });
+  });
+});
