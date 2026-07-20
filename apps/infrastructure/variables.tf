@@ -1,12 +1,19 @@
 # MeatGeek V2 Infrastructure Variables
 
+# Azure Subscription
+variable "subscription_id" {
+  description = "Azure subscription ID for the V2 stack. Leave null (the default) to resolve it from the authenticated environment (ARM_SUBSCRIPTION_ID / OIDC federated credential). Set explicitly only for local operator runs."
+  type        = string
+  default     = null
+}
+
 # Environment Configuration
 variable "environment" {
-  description = "Environment name (dev, staging, prod)"
+  description = "Environment name (dev, prod)"
   type        = string
   validation {
-    condition     = contains(["dev", "staging", "prod"], var.environment)
-    error_message = "Environment must be one of: dev, staging, prod."
+    condition     = contains(["dev", "prod"], var.environment)
+    error_message = "Environment must be one of: dev, prod."
   }
 }
 
@@ -47,17 +54,10 @@ variable "iot_hub_sku_capacity" {
   default     = 1
 }
 
-# CosmosDB Configuration - Using Existing Account
-variable "existing_cosmos_account_name" {
-  description = "Name of your existing CosmosDB account"
-  type        = string
-}
-
-variable "existing_cosmos_resource_group_name" {
-  description = "Resource group name where your existing CosmosDB account is located"
-  type        = string
-}
-
+# CosmosDB Configuration - V2 CREATES and OWNS its Cosmos account.
+# The account name is derived deterministically in main.tf (local.cosmos_account_name)
+# and the account is provisioned inside the V2 resource group by the cosmos-db module,
+# so there are no existing/shared-account inputs here anymore.
 variable "cosmos_database_throughput" {
   description = "Shared throughput for the environment-specific database (RU/s)"
   type        = number
@@ -127,6 +127,45 @@ variable "max_daily_messages" {
   description = "Maximum expected daily messages across all devices"
   type        = number
   default     = 100000
+}
+
+# HTTP posture (MG-24 S2) — explicit per-environment CORS + optional auth.
+variable "functions_cors_allowed_origins" {
+  description = "Explicit allowed CORS origins for the Function App (per environment). Empty => no cross-origin browser access. Wildcard '*' is rejected."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = !contains(var.functions_cors_allowed_origins, "*")
+    error_message = "Wildcard CORS ('*') is not allowed for the Function App; specify explicit origins per environment."
+  }
+}
+
+variable "signalr_cors_allowed_origins" {
+  description = "Explicit allowed CORS origins for SignalR (per environment). Empty => no cross-origin access. Wildcard '*' is rejected."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = !contains(var.signalr_cors_allowed_origins, "*")
+    error_message = "Wildcard CORS ('*') is not allowed for SignalR; specify explicit origins per environment."
+  }
+}
+
+variable "functions_auth_client_id" {
+  description = "Entra ID application client id for Function App App Service Authentication. Empty (default) keeps the Function App in default-DENY (require_authentication with no provider) until the auth design is finalized."
+  type        = string
+  default     = ""
+}
+
+variable "functions_auth_tenant_id" {
+  description = "Entra ID tenant id for Function App authentication (only used when functions_auth_client_id is set)."
+  type        = string
+  default     = ""
+}
+
+variable "functions_auth_allowed_audiences" {
+  description = "Allowed token audiences for Function App authentication (only used when functions_auth_client_id is set)."
+  type        = list(string)
+  default     = []
 }
 
 # Security Configuration

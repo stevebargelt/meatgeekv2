@@ -17,9 +17,10 @@ resource "azurerm_signalr_service" "main" {
   messaging_logs_enabled    = true
   http_request_logs_enabled = true
 
-  # CORS configuration for web clients
+  # CORS configuration for web clients — explicit per-environment origins
+  # (no wildcard). Empty list => no cross-origin access permitted (S2).
   cors {
-    allowed_origins = ["*"]
+    allowed_origins = var.cors_allowed_origins
   }
 
 

@@ -106,7 +106,7 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
       "name": "messages",
       "direction": "in",
       "eventHubName": "temperature-realtime",
-      "connection": "EventHubConnectionString",
+      "connection": "IOTHUB_EVENTS",
       "cardinality": "many",
       "consumerGroup": "realtime-functions"
     }
@@ -323,29 +323,59 @@ export class EventDataAdapter {
 ```
 
 ### **Application Settings**:
+
+The Function App runs under a **system-assigned managed identity**, and every
+backing service (Cosmos DB, IoT/Event Hub telemetry, SignalR, host storage) is
+reached **identity-based**: the settings carry only **non-secret endpoints**, and
+data-plane access is granted by RBAC role assignments on the identity. **No
+connection strings or primary keys** are placed in app settings or Terraform
+state. These are exactly the settings Terraform configures on the Function App:
+
 ```bash
-# CosmosDB (for API functions only - real-time functions don't use it)
-COSMOSDB_CONNECTION_STRING=<cosmos-connection>
-COSMOSDB_DATABASE_NAME=meatgeek
+# Runtime
+FUNCTIONS_WORKER_RUNTIME=node
+WEBSITE_NODE_DEFAULT_VERSION=~20
 
-# Event Hub (for real-time functions)
-EventHubConnectionString=<event-hub-connection>
+# Application Insights — identity-based (AAD) telemetry ingestion. The managed
+# identity holds "Monitoring Metrics Publisher" on the App Insights resource and
+# the host authenticates with an AAD token, so NO instrumentation/ingestion key
+# is set. The connection string carries only the NON-SECRET ingestion endpoint;
+# there is no secret connection string to configure.
+APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD
+APPLICATIONINSIGHTS_CONNECTION_STRING=IngestionEndpoint=<insights-ingestion-endpoint>
+APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50
 
-# SignalR (for real-time broadcasting)
-AzureSignalRConnectionString=<signalr-connection>
+# Cosmos DB — identity-based. NON-SECRET account endpoint only; the managed
+# identity holds a Cosmos SQL data-plane role assignment.
+COSMOSDB__accountEndpoint=<cosmos-account-endpoint>
 
-# Supabase Authentication
-SUPABASE_URL=<supabase-project-url>
-SUPABASE_ANON_KEY=<supabase-anon-key>
-SUPABASE_SERVICE_ROLE_KEY=<supabase-service-key>
+# IoT telemetry (Event Hubs-compatible) — identity-based. NON-SECRET
+# fully-qualified namespace only; the managed identity holds Azure Event Hubs
+# Data Receiver.
+IOTHUB_EVENTS__fullyQualifiedNamespace=<iot-eventhub-namespace-fqdn>
 
-# Application Insights
-APPLICATIONINSIGHTS_CONNECTION_STRING=<insights-connection>
-
-# OpenTelemetry
-OTEL_SERVICE_NAME=meatgeek-api
-OTEL_SERVICE_VERSION=1.0.0
+# SignalR — identity-based. NON-SECRET service URI only; the managed identity
+# holds SignalR Service Owner.
+AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 ```
+
+> The `__accountEndpoint` / `__fullyQualifiedNamespace` / `__serviceUri` suffixes
+> are the Functions host's convention for identity-based bindings: the host
+> resolves each service using the app's managed identity against the non-secret
+> endpoint, so there is no secret to leak. Host storage is likewise identity-based
+> (`storage_uses_managed_identity`), so no storage account key is written either.
+>
+> Application Insights follows the same identity-based model: telemetry is
+> published with an AAD token — `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`
+> plus a **Monitoring Metrics Publisher** role assignment on the App Insights
+> resource — so no instrumentation/ingestion key is placed in app settings.
+> `APPLICATIONINSIGHTS_CONNECTION_STRING` carries only the non-secret
+> `IngestionEndpoint`; Terraform parses it out of the platform-generated
+> connection string and deliberately drops the key portion. The App Insights
+> resource's computed `instrumentation_key`/`connection_string` still land in
+> Terraform state as an inherent computed attribute — an accepted, telemetry-write-only
+> residual documented in
+> [ADR: App Insights instrumentation key remains in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 ## Function Deployment
 

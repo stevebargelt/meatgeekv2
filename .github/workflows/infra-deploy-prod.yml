@@ -1,10 +1,22 @@
 name: Deploy Prod Infrastructure
 
 # Manual/recovery only. Auto-apply-on-merge (push + paths: apps/infrastructure/**)
-# is deferred to MG-24 until terraform has a remote state backend — path-triggered
-# apply against empty local state would try to recreate all prod infra.
+# stays deferred: this workflow is PLAN-ONLY. Even with a remote state backend,
+# an auto-apply against greenfield V2 state would try to create all prod infra
+# in CI — the live greenfield dev/prod plan+apply is the operator's out-of-band
+# acceptance step (MG-24), not a CI action.
 on:
   workflow_dispatch:
+
+# OIDC: this workflow authenticates to Azure via a GitHub-Environment-scoped
+# federated credential (subject `repo:<owner>/<repo>:environment:production`),
+# NOT a long-lived service-principal secret. The dev CI identity is scoped to
+# `environment:development` (a SEPARATE identity/subject) and can never
+# authenticate here. `id-token: write` lets azure/login mint the short-lived
+# OIDC token; `contents: read` is for checkout.
+permissions:
+  id-token: write
+  contents: read
 
 concurrency:
   group: infra-deploy-prod-production
@@ -17,15 +29,21 @@ jobs:
     outputs:
       has_creds: ${{ steps.check.outputs.has_creds }}
     steps:
-      - name: Check for Azure credentials
+      - name: Check for Azure OIDC configuration
         id: check
+        # OIDC needs the per-environment client/tenant/subscription IDs published
+        # as GitHub Environment variables (not the retired AZURE_CREDENTIALS_PROD
+        # SP secret). If any is unset the workflow no-ops instead of failing.
         env:
-          CREDS: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+          CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
-          if [ -n "$CREDS" ]; then
-            echo "has_creds=true" >> $GITHUB_OUTPUT
+          if [ -n "$CLIENT_ID" ] && [ -n "$TENANT_ID" ] && [ -n "$SUBSCRIPTION_ID" ]; then
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_creds=false" >> $GITHUB_OUTPUT
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
+            echo "Azure OIDC vars (AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID) not set — skipping (not a failure)."
           fi
 
   deploy-infra:
@@ -33,14 +51,20 @@ jobs:
     if: needs.guard.outputs.has_creds == 'true'
     runs-on: ubuntu-latest
     environment: production
+    env:
+      # ARM_SUBSCRIPTION_ID comes from the authenticated OIDC context — never a
+      # hardcoded literal. Terraform's azurerm provider reads it from the env.
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Azure CLI
-        uses: azure/login@v1
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -48,9 +72,11 @@ jobs:
           terraform_version: '~1.9'
 
       - name: Plan Infrastructure (plan-only)
-        # apply deferred to MG-24 (no remote state backend yet) — a `terraform
-        # apply` against empty local state would try to recreate all prod infra.
+        # PLAN-ONLY by design — no `terraform apply` in this workflow. The live
+        # greenfield prod apply is the operator's out-of-band acceptance step.
+        # Bind the per-env remote backend at init so prod uses its ISOLATED state
+        # key (meatgeek-v2/prod.tfstate); -reconfigure handles env switches.
         run: |
           cd apps/infrastructure
-          terraform init
+          terraform init -reconfigure -backend-config=environments/backend-prod.hcl
           terraform plan -var-file=environments/prod.tfvars -out=tfplan

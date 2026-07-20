@@ -36,7 +36,11 @@ Deployment is **not** part of branch protection — it runs after a merge lands 
 
 ### Dev
 
-The `deploy-dev` job lives in `ci.yml`. It runs on push to `develop`, after `lint-and-test`, `build-typescript`, `build-go`, and `validate-infrastructure`, and deploys Terraform infrastructure, the Functions API, and the web app (Azure Static Web Apps) using the `AZURE_CREDENTIALS` secret and the `development` environment.
+The `deploy-dev` job lives in `ci.yml`. It runs on push to `develop`, after `lint-and-test`, `build-typescript`, `build-go`, and `validate-infrastructure`, under the `development` GitHub Environment.
+
+It is **plan-only** — it runs `terraform init -backend=false` and `terraform plan -var-file=environments/dev.tfvars` and stops. It does **not** apply infrastructure and does **not** deploy the Functions API or the web app. Against the greenfield V2 stack, a CI apply against empty, ephemeral local state would try to *create* all dev infrastructure inside CI; per the MG-24 hard-safety rule the live greenfield dev plan/apply is the operator's out-of-pipeline acceptance step (see the [bootstrap runbook](../infrastructure/bootstrap-runbook.md)), and app/web deploys are owned by the dedicated deploy workflows.
+
+Authentication is **per-environment OIDC**, not the retired long-lived `AZURE_CREDENTIALS` service-principal secret. The job declares `permissions: id-token: write` and authenticates with `azure/login@v2` using the GitHub-Environment-scoped federated credential (subject `environment:development`) and the `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` **Environment variables**. Because those variables are bound to `development`, they resolve to a *separate* federated identity from prod's `environment:production` — the dev CI identity can never authenticate to prod, and no long-lived secret is stored.
 
 ### Prod
 
@@ -44,7 +48,7 @@ Production deployment is **not** in `ci.yml`. It lives in two standalone workflo
 
 | Workflow | Triggers | What it deploys |
 |----------|----------|-----------------|
-| `infra-deploy-prod.yml` | `workflow_dispatch` only (manual / recovery) | Terraform infrastructure — **plan-only** (`terraform init` + `terraform plan`, **no `apply`**) pending MG-24 |
+| `infra-deploy-prod.yml` | `workflow_dispatch` only (manual / recovery) | Terraform infrastructure — **plan-only** (`terraform init` binding the prod remote backend + `terraform plan`, **no `apply`**); apply is the operator's out-of-band step |
 | `app-deploy-prod.yml` | `workflow_run` — after the **CI/CD Pipeline** workflow completes (no push trigger, no `workflow_dispatch`) | Functions API only, via `nx deploy api --env=prod` |
 
 Prod is **API-only** — there is no prod web / Static Web Apps deploy; the web app is deployed to dev only.
@@ -66,11 +70,11 @@ This means prod app deploys only ever happen **after green CI on a push to `main
 
 **Build and package check.** The job builds its own artifact (`corepack enable` → `npm ci` → `nx build api`); there is no artifact sharing between workflows. Before publishing it runs `node apps/api/tools/verify-func-package.js dist/apps/api`, which validates that the build is a well-formed Azure Functions (Node v4) package — `host.json` and `package.json` present and correct at the package root. Azure Functions Core Tools is pinned via `FUNC_CORE_TOOLS_VERSION` (currently `4.12.1`) so the publish toolchain does not drift.
 
-#### Infra deploy: plan-only, manual, pending MG-24
+#### Infra deploy: plan-only, manual
 
-`infra-deploy-prod.yml` is **`workflow_dispatch`-only** and **plan-only** — it runs `terraform init` and `terraform plan` (with `-var-file=environments/prod.tfvars`) but **does not `apply`**. Auto-apply-on-merge (a push trigger on `apps/infrastructure/**`) and the `apply` step itself are intentionally deferred to **MG-24** until Terraform has an `azurerm` remote state backend. With today's local-state posture, an `apply` against empty state would try to recreate all prod infrastructure, so infra prod runs are dispatched by hand and stop at the plan.
+`infra-deploy-prod.yml` is **`workflow_dispatch`-only** and **plan-only** — it binds the per-environment `azurerm` remote backend (`terraform init -reconfigure -backend-config=environments/backend-prod.hcl`, prod's isolated state key `meatgeek-v2/prod.tfstate`) and runs `terraform plan -var-file=environments/prod.tfvars -out=tfplan`, but **does not `apply`**. Auto-apply-on-merge (a push trigger on `apps/infrastructure/**`) and the `apply` step itself stay deferred by design: even with the remote backend now shipped, an auto-apply against greenfield V2 state would try to create all prod infrastructure in CI. The live greenfield prod plan+apply is the operator's out-of-band acceptance step (MG-24), so infra prod runs are dispatched by hand and stop at the plan.
 
-**Credentials and environment.** `AZURE_CREDENTIALS_PROD` is a **`production`-environment secret** (not a repository secret) — it is only resolvable by jobs that declare `environment: production`. In `app-deploy-prod.yml` that environment is scoped to the deploy job alone; in `infra-deploy-prod.yml` both the `guard` and `deploy-infra` jobs use it. Both workflows set `concurrency` to not cancel in-progress runs. The infra workflow keeps a `guard` job that checks for `AZURE_CREDENTIALS_PROD` and skips cleanly (green) if it is absent. The app workflow has no such guard — it is gated by `PROD_DEPLOY_ENABLED` and consumes the environment secret directly. Deploy credentials come from GitHub secrets and are never committed.
+**Credentials and environment.** Both prod workflows authenticate via **per-environment OIDC** — `azure/login@v2` with the GitHub-Environment-scoped federated credential (subject `environment:production`), **not** the retired long-lived `AZURE_CREDENTIALS_PROD` service-principal secret. Each declares `permissions: id-token: write` so `azure/login` can mint a short-lived OIDC token, and reads the `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` **`production` Environment variables** (with `ARM_SUBSCRIPTION_ID` sourced from `AZURE_SUBSCRIPTION_ID` for Terraform). These variables only resolve for jobs that declare `environment: production` — in `app-deploy-prod.yml` that is the deploy job; in `infra-deploy-prod.yml` both the `guard` and `deploy-infra` jobs. Both workflows set `concurrency` to not cancel in-progress runs. The infra workflow's `guard` job checks that the three OIDC Environment variables are set and skips cleanly (green) if any is absent. The app workflow has no such guard — it is gated by `PROD_DEPLOY_ENABLED`. There are no long-lived deploy secrets to commit.
 
 ## Branch Protection
 

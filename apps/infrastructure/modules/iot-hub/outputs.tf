@@ -15,36 +15,29 @@ output "hostname" {
   value       = azurerm_iothub.main.hostname
 }
 
-output "connection_string" {
-  description = "Connection string for IoT Hub"
-  value       = "HostName=${azurerm_iothub.main.hostname};SharedAccessKeyName=iothubowner;SharedAccessKey=${azurerm_iothub.main.shared_access_policy[0].primary_key}"
-  sensitive   = true
-}
-
-output "device_connection_strings" {
-  description = "Connection strings for IoT devices (to be created manually)"
-  value = {
-    meatgeek1 = "HostName=${azurerm_iothub.main.hostname};DeviceId=meatgeek1;SharedAccessKey=DEVICE_KEY_TO_BE_CREATED"
-    meatgeek2 = "HostName=${azurerm_iothub.main.hostname};DeviceId=meatgeek2;SharedAccessKey=DEVICE_KEY_TO_BE_CREATED"
-    meatgeek3 = "HostName=${azurerm_iothub.main.hostname};DeviceId=meatgeek3;SharedAccessKey=DEVICE_KEY_TO_BE_CREATED"
-  }
-  sensitive = true
-}
+# NOTE: the former `connection_string`, `device_connection_strings`, and
+# `eventhub_connection_string` secret outputs were REMOVED (MG-24 S1). The
+# Function App consumes IoT telemetry identity-based via the Event Hubs
+# namespace FQDN below; no SharedAccessKey / connection string is surfaced.
 
 output "eventhub_namespace_name" {
   description = "Name of the Event Hub namespace"
   value       = azurerm_eventhub_namespace.main.name
 }
 
+output "eventhub_namespace_id" {
+  description = "Resource ID of the Event Hub namespace (consumed by the root module to grant the Function App identity Azure Event Hubs Data Receiver)."
+  value       = azurerm_eventhub_namespace.main.id
+}
+
+output "eventhub_namespace_fqdn" {
+  description = "Fully-qualified Event Hubs namespace hostname (non-secret) for identity-based access by the Function App."
+  value       = "${azurerm_eventhub_namespace.main.name}.servicebus.windows.net"
+}
+
 output "eventhub_name" {
   description = "Name of the Event Hub"
   value       = azurerm_eventhub.temperature_data.name
-}
-
-output "eventhub_connection_string" {
-  description = "Event Hub connection string"
-  value       = azurerm_eventhub_authorization_rule.iothub.primary_connection_string
-  sensitive   = true
 }
 
 output "identity_principal_id" {

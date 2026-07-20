@@ -1,76 +1,71 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# MeatGeek V2 — Terraform environment check + pointer
+# ===================================================
+# This is NOT the state bootstrap and NOT a local-state helper. V2 Terraform
+# ALWAYS uses the azurerm remote backend with a per-environment state key; there
+# is no supported local-state path (a Terraform apply against ephemeral local
+# state would try to create/recreate live infra — see MG-24 HARD SAFETY).
+#
+# Order of operations:
+#   1. Run-once, per subscription:  ./bootstrap/bootstrap.sh
+#        Stands up the remote-state storage account/container and the OIDC
+#        deployment identity that the backend-*.hcl files point at.
+#   2. Per environment, per operator:
+#        rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
+#        terraform init -reconfigure -backend-config=environments/backend-<env>.hcl
+#        terraform plan  -var-file=environments/<env>.tfvars
+#        # apply is OPERATOR-run (never in CI) — see the runbook
+#
+# Full procedure + evidence capture: docs/infrastructure/bootstrap-runbook.md
 
-# MeatGeek V2 Terraform Setup Script
-# This script helps initialize Terraform with proper backend configuration
+set -euo pipefail
 
-set -e  # Exit on any error
+echo "🚀 MeatGeek V2 Terraform environment check"
+echo "=========================================="
 
-echo "🚀 MeatGeek V2 Terraform Setup"
-echo "================================"
+# Prerequisites
+command -v terraform >/dev/null 2>&1 || { echo "❌ Terraform not found. Install Terraform first."; exit 1; }
+command -v az        >/dev/null 2>&1 || { echo "❌ Azure CLI not found. Install Azure CLI first."; exit 1; }
+echo "✅ terraform and az are installed"
 
-# Check prerequisites
-command -v terraform >/dev/null 2>&1 || { echo "❌ Terraform not found. Please install Terraform first."; exit 1; }
-command -v az >/dev/null 2>&1 || { echo "❌ Azure CLI not found. Please install Azure CLI first."; exit 1; }
-
-echo "✅ Prerequisites check passed"
-
-# Check Azure authentication
 if ! az account show >/dev/null 2>&1; then
-    echo "❌ Not authenticated with Azure. Please run: az login"
-    exit 1
+  echo "❌ Not authenticated with Azure. Run: az login"
+  exit 1
 fi
-
 echo "✅ Azure authentication verified"
 
-# Get current directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
 echo "📂 Working directory: $SCRIPT_DIR"
 
-# Option 1: Initialize with backend configuration file
-if [ -f "backend-config.hcl" ]; then
-    echo ""
-    echo "🔧 Option 1: Initialize with backend configuration (Recommended for team/production)"
-    echo "   This will store Terraform state in Azure Storage for collaboration"
-    echo ""
-    echo "   Please update backend-config.hcl with your actual storage account details:"
-    echo "   - resource_group_name: Your storage account's resource group"
-    echo "   - storage_account_name: Your storage account name"
-    echo ""
-    echo "   Then run: terraform init -backend-config=backend-config.hcl"
-    echo ""
+# Warn about stale local state — it must be deleted before a clean remote init
+# so the V1-bound local state is never migrated into the V2 remote backend.
+if [ -f terraform.tfstate ] || [ -d .terraform ]; then
+  echo ""
+  echo "⚠️  Stale local terraform state detected (terraform.tfstate / .terraform)."
+  echo "    Delete it BEFORE the first remote init (never use -migrate-state):"
+  echo "      rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform"
 fi
 
-# Option 2: Initialize with local backend
-echo "🔧 Option 2: Initialize with local backend (For individual development)"
-echo "   This stores state locally - good for initial testing"
-echo ""
-echo "   Run: terraform init"
-echo ""
+cat <<'GUIDE'
 
-# Option 3: Initialize without backend
-echo "🔧 Option 3: Validate configuration only"
-echo "   This initializes providers without backend for validation"
-echo ""
-echo "   Run: terraform init -backend=false"
-echo ""
+📋 Next steps (V2 remote-backend model — NO local state):
 
-echo "📋 After initialization, you can:"
-echo "   • Validate: terraform validate"
-echo "   • Format: terraform fmt -recursive"
-echo "   • Plan: terraform plan -var-file=environments/dev.tfvars"
-echo ""
+  1) Run-once bootstrap (per subscription, needs Owner/UA-Admin):
+       ./bootstrap/bootstrap.sh
 
-echo "🎯 For MeatGeek V2 development, we recommend:"
-echo "   1. Use local backend for initial testing"
-echo "   2. Set up Azure Storage backend when ready for team collaboration"
-echo ""
+  2) Initialize against the per-environment remote state:
+       terraform init -reconfigure -backend-config=environments/backend-<env>.hcl
+       #   <env> = dev | prod   (distinct state keys, see environments/backend-*.hcl)
 
-echo "⚙️  Environment files available:"
-echo "   • environments/dev.tfvars     - Development environment"
-echo "   • environments/staging.tfvars - Staging environment"
-echo "   • environments/prod.tfvars    - Production environment"
-echo ""
+  3) Validate / format (backend not required):
+       terraform init -backend=false && terraform validate
+       terraform fmt -check -recursive
 
-echo "Remember to update the CosmosDB account details in your chosen environment file!"
+  4) Plan (apply is OPERATOR-run, never in CI):
+       terraform plan -var-file=environments/<env>.tfvars
+
+Full runbook + greenfield acceptance + evidence capture:
+  docs/infrastructure/bootstrap-runbook.md
+GUIDE

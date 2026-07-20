@@ -12,6 +12,15 @@ on:
     workflows: ['CI/CD Pipeline']
     types: [completed]
 
+# OIDC: this workflow authenticates to Azure via a GitHub-Environment-scoped
+# federated credential (subject `environment:production`), NOT the retired
+# long-lived AZURE_CREDENTIALS_PROD service-principal secret. `id-token: write`
+# lets azure/login mint the short-lived OIDC token; `contents: read` is for
+# checkout.
+permissions:
+  id-token: write
+  contents: read
+
 env:
   NODE_VERSION: '20'
   # Let corepack download the packageManager-pinned npm without an interactive prompt.
@@ -33,6 +42,12 @@ jobs:
       vars.PROD_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: production
+    env:
+      # ARM_SUBSCRIPTION_ID comes from the authenticated OIDC context (published
+      # as a GitHub Environment variable), never a hardcoded literal. Terraform's
+      # azurerm backend/provider reads it from the env when resolving the
+      # function_app_name output below.
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Stale-SHA guard (deploy only the current main tip)
         id: freshness
@@ -84,11 +99,38 @@ jobs:
         if: steps.freshness.outputs.fresh == 'true'
         run: npm i -g azure-functions-core-tools@${{ env.FUNC_CORE_TOOLS_VERSION }}
 
-      - name: Azure login
+      - name: Azure login (OIDC)
         if: steps.freshness.outputs.fresh == 'true'
-        uses: azure/login@v1
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.9'
+
+      # Single source of truth for the Function App name: read it straight from
+      # the Terraform `function_app_name` output rather than reconstructing the
+      # name here. Bind the per-env remote backend (prod state key
+      # meatgeek-v2/prod.tfstate) at init so a Terraform naming change can never
+      # desync the publish target.
+      - name: Resolve Function App name (Terraform output)
+        id: tfout
+        if: steps.freshness.outputs.fresh == 'true'
+        run: |
+          cd apps/infrastructure
+          terraform init -reconfigure -backend-config=environments/backend-prod.hcl
+          NAME=$(terraform output -raw function_app_name)
+          if [ -z "$NAME" ]; then
+            echo "function_app_name Terraform output was empty — aborting deploy." >&2
+            exit 1
+          fi
+          echo "function_app_name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Resolved Function App name from Terraform: $NAME"
 
       # Authoritative gate. main can advance during the multi-minute build, so the
       # early guard alone leaves a TOCTOU window wide enough to ship a superseded
@@ -114,4 +156,7 @@ jobs:
 
       - name: Deploy to Production
         if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
-        run: npx nx deploy api --env=prod
+        # Publish to the exact Function App name Terraform owns — passed through to
+        # the Nx `deploy` target's `{args.functionApp}` interpolation. No hardcoded
+        # Function App name survives anywhere in the deploy path.
+        run: npx nx deploy api --functionApp='${{ steps.tfout.outputs.function_app_name }}'

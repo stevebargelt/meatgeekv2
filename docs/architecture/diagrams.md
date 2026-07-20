@@ -135,10 +135,10 @@ flowchart LR
     subgraph AzurePaaS["Azure - meatgeek-env-rg"]
         direction TB
 
-        subgraph FnHost["Linux Function App<br/>consumption plan<br/>node 20"]
+        subgraph FnHost["Linux Function App<br/>consumption plan<br/>node 20<br/>system-assigned managed identity"]
             apiBin[apps/api bundle<br/>HTTP triggers: cooks, devices, temperatures/current<br/>EventHub trigger: realtime broadcast]
             otelFn["@azure/monitor-opentelemetry<br/>useAzureMonitor + standalone sampler"]:::proposed
-            envFn[/APPLICATIONINSIGHTS_CONNECTION_STRING<br/>APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50<br/>COSMOSDB_CONNECTION_STRING<br/>SIGNALR_CONNECTION_STRING/]
+            envFn[/APPLICATIONINSIGHTS_CONNECTION_STRING<br/>APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50<br/>COSMOSDB__accountEndpoint<br/>IOTHUB_EVENTS__fullyQualifiedNamespace<br/>AzureSignalRConnectionString__serviceUri<br/>all identity-based, non-secret endpoints/]
         end
 
         iotMgd[IoT Hub<br/>system-assigned identity<br/>cosmos-storage-route<br/>eventhub-realtime-route]
@@ -164,9 +164,9 @@ flowchart LR
     dpBin -- "WebSocket" --> signalrMgd
     iotMgd --> ehMgd
     iotMgd --> cosmosMgd
-    ehMgd --> apiBin
-    apiBin --> cosmosMgd
-    apiBin --> signalrMgd
+    ehMgd -- "EventHub trigger<br/>identity-based (RBAC)" --> apiBin
+    apiBin -- "identity-based (RBAC)" --> cosmosMgd
+    apiBin -- "identity-based (RBAC)" --> signalrMgd
 
     signalrMgd --> mob
     signalrMgd --> webApp
@@ -388,12 +388,21 @@ flowchart TB
 
 ## Notes on what this document does NOT show
 
-- **Authentication / authorization**: ticket #10 (infra-security-hardening)
-  covers narrowing CORS, replacing storage-account keys with managed
-  identity, and Key Vault references. The current `app_settings` in
-  `apps/infrastructure/modules/functions/main.tf` still hold plaintext
-  connection strings; the diagrams above show logical flows, not the
-  secret-management posture.
+- **Authentication / authorization**: the Function App runs under a
+  **system-assigned managed identity**. Runtime access to Cosmos, host
+  Storage, the IoT-telemetry Event Hub, and SignalR is **identity-based
+  (RBAC + non-secret endpoints)** — the `app_settings` in
+  `apps/infrastructure/modules/functions/main.tf` carry only non-secret
+  endpoint URIs (`COSMOSDB__accountEndpoint`,
+  `IOTHUB_EVENTS__fullyQualifiedNamespace`,
+  `AzureSignalRConnectionString__serviceUri`) resolved against that
+  identity, **never** connection strings or primary keys, and no such
+  secret is emitted as a Terraform output. Host storage uses the same
+  identity (`storage_uses_managed_identity`; shared-key access disabled).
+  The single non-secret exception is Application Insights, wired via its
+  telemetry `APPLICATIONINSIGHTS_CONNECTION_STRING`. App Service
+  Authentication (Easy Auth) is configured **default-deny**. The diagrams
+  above show logical data flows, not the full RBAC posture.
 - **Cook session state recovery** detail: the data-pusher's
   `cooksession.Reconcile` against the REST API at startup is the
   *only* cook-id source today (SignalR consumer is connected but the

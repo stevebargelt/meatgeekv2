@@ -186,6 +186,9 @@ jobs:
           cd apps/infrastructure
           terraform validate
 
+      - name: Static checks (V2 invariants)
+        run: apps/infrastructure/scripts/tf-static-checks.sh
+
   security-scan:
     runs-on: ubuntu-latest
     steps:
@@ -216,54 +219,58 @@ jobs:
           args: --severity-threshold=high
         continue-on-error: true
 
+  # PLAN-ONLY gate on the develop branch.
+  #
+  # This job used to unconditionally deploy infrastructure and then push the
+  # app + web bundles. Against the V2 GREENFIELD stack that is a landmine: the
+  # deploy runs against empty, ephemeral local state and would try to CREATE
+  # all dev infrastructure inside CI, and the app/web deploy steps would target
+  # infrastructure that does not exist. Per the MG-24 hard safety rule
+  # (never apply against ephemeral local state; never create Azure resources
+  # from CI) the job is now plan-only and ends at `terraform plan`, consistent
+  # with the prod infra workflow. The live greenfield dev plan/apply is the
+  # operator's out-of-pipeline acceptance step (see the bootstrap runbook);
+  # app/web deploys are owned by the dedicated deploy workflows.
   deploy-dev:
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     needs: [lint-and-test, build-typescript, build-go, validate-infrastructure]
     environment: development
+    # OIDC: authenticate to Azure via the GitHub-Environment-scoped federated
+    # credential (subject `environment:development`), NOT the retired long-lived
+    # AZURE_CREDENTIALS service-principal secret. Because these are GitHub
+    # Environment variables bound to `development`, they resolve to a SEPARATE
+    # federated identity from prod's `environment:production` — no shared SP, no
+    # whole-state access. `id-token: write` lets azure/login mint the short-lived
+    # OIDC token; `contents: read` is for checkout.
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # From the authenticated OIDC context (a per-env GitHub Environment
+      # variable), never a hardcoded literal.
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Azure CLI
-        uses: azure/login@v1
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: '~1.9'
 
-      - name: Deploy Infrastructure
+      - name: Plan Infrastructure (plan-only — no apply)
         run: |
           cd apps/infrastructure
-          terraform init
-          terraform plan -var-file=environments/dev.tfvars -out=tfplan
-          terraform apply -auto-approve tfplan
-
-      - name: Download API build
-        uses: actions/download-artifact@v4
-        with:
-          name: api-build
-          path: dist/apps/api
-
-      - name: Download Web build
-        uses: actions/download-artifact@v4
-        with:
-          name: web-build
-          path: dist/apps/web
-
-      - name: Deploy Azure Functions
-        run: |
-          npx nx deploy api --env=dev
-
-      - name: Deploy Web App
-        uses: azure/static-web-apps-deploy@v1
-        with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          action: 'upload'
-          app_location: 'dist/apps/web'
-          api_location: ''
-          skip_app_build: true
+          # -backend=false: do not bind remote state from CI. This is a
+          # speculative plan gate only; the operator runs the real, state-bound
+          # plan/apply out of pipeline (see docs/infrastructure/bootstrap-runbook.md).
+          terraform init -backend=false
+          terraform plan -var-file=environments/dev.tfvars
