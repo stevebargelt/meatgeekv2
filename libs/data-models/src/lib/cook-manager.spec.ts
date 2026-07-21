@@ -76,6 +76,20 @@ describe('CookManager', () => {
       expect(cook.name).toBe('Sunday Brisket');
     });
 
+    it('throws (does not return a Cook) for a whitespace-only name', () => {
+      // MG-28: Cook.name is a required non-empty field; a whitespace-only name
+      // trims to '' and would emit an invalid Cook, so createCook fails fast.
+      expect(() =>
+        CookManager.createCook(buildStartRequest({ name: '   ' }), 'user-1')
+      ).toThrow('createCook: cook name must not be empty or whitespace-only');
+    });
+
+    it('throws for an empty-string name', () => {
+      expect(() =>
+        CookManager.createCook(buildStartRequest({ name: '' }), 'user-1')
+      ).toThrow('createCook: cook name must not be empty or whitespace-only');
+    });
+
     it('populates default targetTemps from MEAT_TYPES for BRISKET key', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'BRISKET', targetTemps: undefined }),

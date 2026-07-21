@@ -29,11 +29,19 @@ export class CookManager {
     const key = resolveMeatType(request.meatType);
     const meatTypeConfig = key ? MEAT_TYPES[key] : undefined;
 
+    // Cook.name is a required non-empty field. validateStartCookRequest already
+    // rejects empty/whitespace-only names in the normal flow; createCook enforces
+    // the same invariant defensively so it can never emit an invalid Cook (fail-fast).
+    const name = request.name.trim();
+    if (name.length === 0) {
+      throw new Error('createCook: cook name must not be empty or whitespace-only');
+    }
+
     return {
       id: cookId,
       userId,
       deviceId: request.deviceId,
-      name: request.name.trim(),
+      name,
       status: COOK_STATUS.PLANNING,
       startTime: new Date().toISOString(),
       meatType: request.meatType,
