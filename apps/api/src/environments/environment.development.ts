@@ -11,6 +11,6 @@ export const environment = {
     connectionString: process.env['SIGNALR_CONNECTION_STRING'] || 'Endpoint=https://meatgeek-dev-signalr.service.signalr.net;AccessKey=fake-key;Version=1.0;',
   },
   appInsights: {
-    connectionString: process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] || 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+    connectionString: process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] || '',
   },
 };

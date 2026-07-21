@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
 	"meatgeek-pusher/internal/wire"
@@ -138,11 +140,9 @@ func (c *Collector) fetchDeviceStatus(ctx context.Context) (*wire.V1Status, erro
 	ctx, span := c.tracer.Start(ctx, "collector.fetchDeviceStatus")
 	defer span.End()
 
-	url := fmt.Sprintf("%s/api/robots/MeatGeekBot/commands/get_status", c.deviceURL)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := c.newStatusRequest(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -156,6 +156,28 @@ func (c *Collector) fetchDeviceStatus(ctx context.Context) (*wire.V1Status, erro
 	}
 
 	return decodeGobotStatus(resp.Body)
+}
+
+// newStatusRequest builds the outbound get_status GET request and injects the
+// active span's W3C trace context into its headers using the globally installed
+// propagator (propagation.TraceContext, set by telemetry.Setup). This wires the
+// device-controller <- data-pusher hop: the collector is the client, so it
+// stamps `traceparent` on the request and the device-controller extracts it to
+// continue the same trace rather than starting a detached root.
+//
+// otelhttp is not a project dependency, so the injection is done manually here
+// rather than by wrapping the http.Client transport.
+func (c *Collector) newStatusRequest(ctx context.Context) (*http.Request, error) {
+	url := fmt.Sprintf("%s/api/robots/MeatGeekBot/commands/get_status", c.deviceURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+	return req, nil
 }
 
 // decodeGobotStatus performs the two-step unwrap of the device-controller's

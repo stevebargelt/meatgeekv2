@@ -16,6 +16,9 @@ import (
 	"meatgeek-pusher/internal/wire"
 
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -354,3 +357,50 @@ func (f *fakePublisher) PublishTelemetry(_ context.Context, payload []byte, prop
 }
 
 func float64Ptr(v float64) *float64 { return &v }
+
+// TestNewStatusRequest_InjectsW3CTraceparent verifies the client side of the
+// device-controller <- data-pusher hop: the outbound get_status request must
+// carry a valid W3C `traceparent` header whose trace-id matches the active
+// span, so the device-controller can continue the trace instead of rooting a
+// new one. No live network — the request is built in-test and inspected.
+func TestNewStatusRequest_InjectsW3CTraceparent(t *testing.T) {
+	// The global propagator is what production installs via telemetry.Setup;
+	// set it here so Inject emits `traceparent`.
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	tracer := tp.Tracer("collector-test")
+
+	c, err := New("http://device.local:3000", time.Second, tracer)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, span := tracer.Start(context.Background(), "test-parent")
+	defer span.End()
+
+	req, err := c.newStatusRequest(ctx)
+	if err != nil {
+		t.Fatalf("newStatusRequest: %v", err)
+	}
+
+	got := req.Header.Get("traceparent")
+	if got == "" {
+		t.Fatal("outbound request is missing a traceparent header")
+	}
+
+	// W3C format: version-traceid-parentid-flags => 00-<32hex>-<16hex>-<2hex>.
+	parts := strings.Split(got, "-")
+	if len(parts) != 4 {
+		t.Fatalf("malformed traceparent %q: want 4 dash-separated fields, got %d", got, len(parts))
+	}
+	if len(parts[1]) != 32 || len(parts[2]) != 16 {
+		t.Fatalf("malformed traceparent %q: bad trace/parent id lengths", got)
+	}
+
+	wantTrace := span.SpanContext().TraceID().String()
+	if parts[1] != wantTrace {
+		t.Fatalf("traceparent trace-id = %s, want active span trace-id %s", parts[1], wantTrace)
+	}
+}

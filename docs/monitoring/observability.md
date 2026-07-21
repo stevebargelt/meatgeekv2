@@ -29,7 +29,7 @@ MG-6 lands observability in three buckets. This section is the authoritative sta
 - **Bucket B — Sentry org / project architecture (PENDING operator decision).** The React Native lane's `traceparent` injection contract is designable now (see [Sentry (React Native lane)](#sentry-react-native-lane)), but the Sentry organization, project structure, and DSN specifics await an operator decision and are not yet wired.
 - **Bucket C — live Azure Monitor alerts + end-to-end trace smoke + live IoT-Hub receiver (BLOCKED).** Standing up live alerts, a real end-to-end trace smoke test, and a live IoT-Hub receiver is **blocked on the MG-24 greenfield bootstrap**. The KQL, dashboard, and alert definitions below are authored against the standard dimensions but are not yet deployed against a live resource.
 
-> **Connection-string env vars differ by runtime.** The Functions app reads the Azure-standard `APPLICATIONINSIGHTS_CONNECTION_STRING` (the Terraform-managed app setting). The two Go services read `APPINSIGHTS_CONNECTION_STRING`. Both are env-var only — never hardcoded — but the names are not interchangeable; set the one that matches the runtime.
+> **Connection-string env var is the same across runtimes.** Both the Functions app and the two Go services read the Azure-standard `APPLICATIONINSIGHTS_CONNECTION_STRING` (the Terraform-managed app setting). It is env-var only on every runtime — never hardcoded.
 
 ## Architecture
 
@@ -162,7 +162,7 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
         // Real export path: a swappable span exporter — an OTLP/HTTP exporter
         // aimed at the App Insights ingestion endpoint parsed from the
         // connection string. The connection string is sourced from
-        // APPINSIGHTS_CONNECTION_STRING on the Go services (env var only,
+        // APPLICATIONINSIGHTS_CONNECTION_STRING on the Go services (env var only,
         // never hardcoded). Swappable by design until the Azure Monitor Go
         // exporter is GA.
         exporter, err = otlptracehttp.New(ctx) // → App Insights ingestion endpoint
@@ -189,7 +189,7 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
 }
 ```
 
-> **Status (MG-6, Bucket A — implemented):** the Go services ship an OTel `TracerProvider` with `AlwaysSample`, a swappable span exporter (no-op offline; OTLP/HTTP to the App Insights ingestion endpoint when a connection string is present), and W3C Trace Context propagation across `device-controller → data-pusher → IoT Hub`. Connection strings and endpoints are supplied **via environment variables only** — `APPINSIGHTS_CONNECTION_STRING` on the Go services, `APPLICATIONINSIGHTS_CONNECTION_STRING` on the Functions app — with no hardcoded values. Per-span dimensions such as `device.id` are attached on the spans (see [Tracing Strategy](#tracing-strategy)); the environment-invariant dimensions (`component`, `environment`) are also copied onto the resource.
+> **Status (MG-6, Bucket A — implemented):** the Go services ship an OTel `TracerProvider` with `AlwaysSample`, a swappable span exporter (no-op offline; OTLP/HTTP to the App Insights ingestion endpoint when a connection string is present), and W3C Trace Context propagation across `device-controller → data-pusher → IoT Hub`. Connection strings and endpoints are supplied **via environment variables only** — `APPLICATIONINSIGHTS_CONNECTION_STRING` on both the Go services and the Functions app — with no hardcoded values. Per-span dimensions such as `device.id` are attached on the spans (see [Tracing Strategy](#tracing-strategy)); the environment-invariant dimensions (`component`, `environment`) are also copied onto the resource.
 
 ## Custom Dimensions Standard
 

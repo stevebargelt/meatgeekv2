@@ -18,7 +18,10 @@ import (
 
 	dc_i2c "github.com/davecheney/i2c"
 	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
+	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/httptrace"
 	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/telemetry"
+
+	"go.opentelemetry.io/otel"
 
 	// Updated to gobot.io/x/gobot/v2 for Go 1.25 compatibility
 	"gobot.io/x/gobot/v2"
@@ -56,6 +59,12 @@ func main() {
     manager := gobot.NewManager()
     deviceApi := api.NewAPI(manager)
     deviceApi.Port = "3000"
+
+    // Continue the W3C trace injected by the data-pusher collector on the
+    // inbound get_status hop (MG-6). This gobot middleware runs per-request with
+    // access to the raw *http.Request, extracts the `traceparent`, and opens a
+    // server span parented to the upstream trace.
+    deviceApi.AddHandler(httptrace.Middleware(otel.Tracer("device-controller")))
 
     deviceApi.AddHandler(func(w http.ResponseWriter, r *http.Request) {
     fmt.Fprintf(w, "Hello, %q \n", html.EscapeString(r.URL.Path))
