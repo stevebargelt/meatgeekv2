@@ -79,19 +79,19 @@ export class TemperatureCalculator {
       deviceId: rawReading.deviceId,
       timestamp: rawReading.timestamp,
       cookId: rawReading.cookId,
-      grillTemp: rawReading.grillAdc 
+      grillTemp: rawReading.grillAdc !== undefined && rawReading.grillAdc !== null
         ? this.convertAdcToTemperature(rawReading.grillAdc, corrections.grillProbeCorrection ?? 0) ?? undefined
         : undefined,
-      probe1Temp: rawReading.probe1Adc
+      probe1Temp: rawReading.probe1Adc !== undefined && rawReading.probe1Adc !== null
         ? this.convertAdcToTemperature(rawReading.probe1Adc, corrections.probe1Correction ?? 0) ?? undefined
         : undefined,
-      probe2Temp: rawReading.probe2Adc
+      probe2Temp: rawReading.probe2Adc !== undefined && rawReading.probe2Adc !== null
         ? this.convertAdcToTemperature(rawReading.probe2Adc, corrections.probe2Correction ?? 0) ?? undefined
         : undefined,
-      probe3Temp: rawReading.probe3Adc
+      probe3Temp: rawReading.probe3Adc !== undefined && rawReading.probe3Adc !== null
         ? this.convertAdcToTemperature(rawReading.probe3Adc, corrections.probe3Correction ?? 0) ?? undefined
         : undefined,
-      probe4Temp: rawReading.probe4Adc
+      probe4Temp: rawReading.probe4Adc !== undefined && rawReading.probe4Adc !== null
         ? this.convertAdcToTemperature(rawReading.probe4Adc, corrections.probe4Correction ?? 0) ?? undefined
         : undefined,
     };

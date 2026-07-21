@@ -33,7 +33,7 @@ export class CookManager {
       id: cookId,
       userId,
       deviceId: request.deviceId,
-      name: request.name?.trim() ?? request.name,
+      name: request.name.trim(),
       status: COOK_STATUS.PLANNING,
       startTime: new Date().toISOString(),
       meatType: request.meatType,
