@@ -211,20 +211,27 @@ describe('TemperatureCalculator', () => {
       expect(result.cookId).toBeUndefined();
     });
 
-    it('treats ADC=0 as absent and returns undefined for that probe (characterization)', () => {
-      // BUG: 0 ADC is a valid reading boundary but the implementation uses a
-      // truthy check (`rawReading.grillAdc ?`), so 0 falls through to undefined
-      // rather than going through convertAdcToTemperature (which would also
-      // return null for 0, but via the explicit boundary path).
-      const result = calc.processDeviceReading({
+    it('routes ADC=0 through convertAdcToTemperature boundary, matching other out-of-range ADC', () => {
+      // 0 is a present reading, not absent: an explicit presence check routes it
+      // through convertAdcToTemperature, whose `adcValue <= 0` boundary returns
+      // null → undefined. This must agree with any other out-of-range ADC.
+      const zero = calc.processDeviceReading({
         deviceId: 'd1',
         timestamp: '2026-01-01T00:00:00.000Z',
         grillAdc: 0,
         probe1Adc: 0,
       });
+      const outOfRange = calc.processDeviceReading({
+        deviceId: 'd1',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        grillAdc: 1023,
+        probe1Adc: 1023,
+      });
 
-      expect(result.grillTemp).toBeUndefined();
-      expect(result.probe1Temp).toBeUndefined();
+      expect(zero.grillTemp).toBeUndefined();
+      expect(zero.probe1Temp).toBeUndefined();
+      expect(zero.grillTemp).toBe(outOfRange.grillTemp);
+      expect(zero.probe1Temp).toBe(outOfRange.probe1Temp);
     });
 
     it('applies per-probe corrections from the corrections argument', () => {
