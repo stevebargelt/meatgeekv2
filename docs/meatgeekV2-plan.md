@@ -2628,8 +2628,13 @@ module "functions" {
   resource_group_name = azurerm_resource_group.meatgeek.name
   location           = azurerm_resource_group.meatgeek.location
   environment        = var.environment
-  cosmos_connection  = module.cosmos_db.connection_string
-  iot_hub_connection = module.iot_hub.event_hub_connection_string
+  # Identity-based data access (MG-24): the Function App runs under a managed
+  # identity and reaches Cosmos / IoT-telemetry Event Hub via RBAC over
+  # NON-SECRET endpoints. The former `connection_string` / key outputs on these
+  # modules were removed — no connection string or primary key is ever passed.
+  # See learnings/decisions/mg-24-appinsights-key-in-terraform-state.md.
+  cosmos_account_endpoint = module.cosmos_db.endpoint
+  eventhub_namespace_fqdn = module.iot_hub.eventhub_namespace_fqdn
   tags              = local.common_tags
 }
 
@@ -3134,6 +3139,16 @@ export async function processTemperatureData(
   "entryPoint": "default"
 }
 ```
+
+> **Superseded (MG-24 — identity-based Event Hub trigger).** The `"connection":
+> "EventHubConnectionString"` above names a connection-string setting from the
+> earlier plaintext-secret model, which was removed. The shipped Function App
+> reaches the IoT-telemetry Event Hub via its managed identity: Terraform
+> provisions the non-secret setting `IOTHUB_EVENTS__fullyQualifiedNamespace`, so
+> the trigger binding's `connection` is `IOTHUB_EVENTS` (host resolves the
+> `__fullyQualifiedNamespace` suffix against the app identity). No connection
+> string is provisioned. See
+> `learnings/decisions/mg-24-appinsights-key-in-terraform-state.md`.
 
 **Architecture Pattern Summary:**
 
