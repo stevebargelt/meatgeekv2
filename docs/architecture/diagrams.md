@@ -12,8 +12,9 @@ convention is:
 - **Dashed edges, orange-filled nodes (`proposed` class)** → introduced
   by ticket #6.
 - **Red-outlined nodes (`blocked` class)** → defined by #6 but inert
-  until a separate dependency lands (e.g. ticket #14 for SignalR
-  producer-side, ticket #7 for Sentry implementation).
+  until a separate dependency lands (e.g. the MG-24 greenfield SignalR
+  Service bootstrap that makes the shipped cook-event path live, ticket
+  #7 for Sentry implementation).
 
 Each diagram has a prose legend immediately above explaining what is
 new versus established.
@@ -88,8 +89,8 @@ flowchart TB
     Funcs -- "REST" --> Web
     Funcs -- "CosmosDB SDK" --> Cosmos
 
-    Funcs -. "negotiate + cook_started/stopped<br/>blocked on ticket 14" .-> SignalR
-    SignalR -. "cook lifecycle events<br/>(consumer-without-producer)" .-> DP
+    Funcs -. "negotiate + cook_started/stopped<br/>shipped MG-14, live path pending MG-24" .-> SignalR
+    SignalR -. "cook lifecycle events<br/>temperatureHub, group userId=deviceId" .-> DP
 
     OTEL_DC -. instruments .- DC
     OTEL_DP -. instruments .- DP
@@ -217,11 +218,16 @@ correlation identifiers are emphasized:
   context on receive. Independent of cook scope: every published
   message gets a fresh traceparent.
 
-The SignalR producer side (API emitting `cook_started`) is **blocked
-on ticket #14** — until then the data-pusher's SignalR consumer is
-a consumer-without-a-producer, `correlationHolder` stays empty, and
-the cook-id source is `cooksession.Reconcile` against the REST API on
-startup only.
+The SignalR producer side (API emitting `cook_started` / `cook_stopped`)
+**shipped in MG-14**: `startCook` and `stopCook` (registered in
+`apps/api/src/main.ts`) emit cook-lifecycle events to the `temperatureHub`
+SignalR hub, scoped to the per-device user group (`userId = deviceId`), and
+the data-pusher's SignalR consumer receives them and latches the propagated
+correlation id into `correlationHolder`. The **live** end-to-end path still
+awaits the MG-24 greenfield SignalR Service bootstrap (AC5, see
+`docs/api/signalr-cook-events-smoke.md`); until an operator runs it against
+live infrastructure, `cooksession.Reconcile` against the REST API on startup
+remains the practical cook-id source.
 
 ```mermaid
 sequenceDiagram
@@ -238,7 +244,7 @@ sequenceDiagram
     participant AI as App Insights
 
     rect rgba(220,38,38,0.08)
-        Note over User,SR: Cook start - blocked on ticket 14, producer side does not exist yet
+        Note over User,SR: Cook start - producer shipped (MG-14); live path pending MG-24 bootstrap
         User->>API: POST /cooks  (start cook)
         API->>Cos: insert cook doc {id=cook-abc123}
         API-->>SR: publish cook_started<br/>envelope.correlation.id = "corr-xyz"
@@ -291,10 +297,12 @@ not by any automatic correlation pipeline.
 
 - **Solid blue** edges: existing telemetry flow today.
 - **Dashed orange** edges/nodes: introduced by ticket #6.
-- **Red-outlined** alert nodes: defined in #6 but **inert** until
-  ticket #14 lands SignalR producer-side, since 3 of them depend on
-  the `processing.path` and `cook.id` dimensions only being populated
-  once the realtime path actually emits spans with a cook context.
+- **Red-outlined** alert nodes: defined in #6 but **inert** until the
+  live cook-event path runs, since 3 of them depend on the
+  `processing.path` and `cook.id` dimensions only being populated once
+  the realtime path actually emits spans with a cook context. The SignalR
+  producer shipped in MG-14; the live path now awaits the MG-24 SignalR
+  Service bootstrap (see `docs/api/signalr-cook-events-smoke.md`).
 - The vertical bar labelled **"no bridge"** between App Insights and
   Sentry is intentional: ticket #6 documents that the two tools are
   **never** wired together programmatically — the user opens both
@@ -342,7 +350,7 @@ flowchart TB
         a2["temperature-out-of-range<br/>value above 500F or below 32F"]:::live
     end
 
-    subgraph AlertsInert["Inert stub alerts, defined in ticket 6, actionable when ticket 14 lands"]
+    subgraph AlertsInert["Inert stub alerts, defined in ticket 6, actionable once the live cook-event path runs (MG-24)"]
         a3["realtime-error-rate above 10 pct per 5min<br/>needs processing.path=realtime spans"]:::blocked
         a4["storage-path-p95-latency above 5s per 5min<br/>needs processing.path=storage spans"]:::blocked
         a5["cook-session-idle above 2min<br/>needs cook.id present on spans"]:::blocked
@@ -403,11 +411,13 @@ flowchart TB
   telemetry `APPLICATIONINSIGHTS_CONNECTION_STRING`. App Service
   Authentication (Easy Auth) is configured **default-deny**. The diagrams
   above show logical data flows, not the full RBAC posture.
-- **Cook session state recovery** detail: the data-pusher's
-  `cooksession.Reconcile` against the REST API at startup is the
-  *only* cook-id source today (SignalR consumer is connected but the
-  producer side, ticket #14, is unbuilt). Diagram 3 calls this out
-  in the cook-start swimlane.
+- **Cook session state recovery** detail: the SignalR producer side
+  (API emitting `cook_started` / `cook_stopped`) **shipped in MG-14**, so
+  the data-pusher's SignalR consumer now has a real producer. Until the
+  MG-24 SignalR Service bootstrap makes the live path runnable (AC5, see
+  `docs/api/signalr-cook-events-smoke.md`), `cooksession.Reconcile` against
+  the REST API at startup remains the practical cook-id source. Diagram 3
+  calls this out in the cook-start swimlane.
 - **Mobile/Web build pipelines and Sentry sourcemap upload**: filed
   under ticket #7; out of scope for #6's diagrams beyond establishing
   the architectural boundary.
