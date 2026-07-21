@@ -293,8 +293,13 @@ resource "azurerm_role_assignment" "functions_signalr" {
 # publishes telemetry with an AAD token (identity-based ingestion) instead of an
 # instrumentation/ingestion key. Combined with
 # APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD on the app, this
-# closes the last runtime-secret-in-state path — no ingestion key / secret
-# connection string is placed in app_settings or Terraform state (MG-24 S1).
+# makes ingestion AAD-only. The FULL App Insights connection string
+# (InstrumentationKey included, as the destination-resource identifier Microsoft
+# requires) IS in app_settings and the ikey is inherently in Terraform state, but
+# it is NON-AUTHENTICATING: local_authentication_disabled=true on the AI resource
+# forces Entra-only ingestion, so the ikey cannot ingest. This residual is safe
+# ONLY while local auth stays disabled — enforced by the pre-apply secret-
+# inspection gate (MG-24 S1). See the MG-24 ADR.
 resource "azurerm_role_assignment" "functions_appinsights_publisher" {
   scope                = azurerm_application_insights.main.id
   role_definition_name = "Monitoring Metrics Publisher"

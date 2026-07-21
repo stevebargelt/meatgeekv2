@@ -49,7 +49,7 @@ Production deployment is **not** in `ci.yml`. It lives in two standalone workflo
 | Workflow | Triggers | What it deploys |
 |----------|----------|-----------------|
 | `infra-deploy-prod.yml` | `workflow_dispatch` only (manual / recovery) | Terraform infrastructure — **plan-only** (`terraform init` binding the prod remote backend + `terraform plan`, **no `apply`**); apply is the operator's out-of-band step |
-| `app-deploy-prod.yml` | `workflow_run` — after the **CI/CD Pipeline** workflow completes (no push trigger, no `workflow_dispatch`) | Functions API only, via `nx deploy api --env=prod` |
+| `app-deploy-prod.yml` | `workflow_run` — after the **CI/CD Pipeline** workflow completes (no push trigger, no `workflow_dispatch`) | Functions API only, via `nx deploy api --functionApp=<prod Function App name>` |
 
 Prod is **API-only** — there is no prod web / Static Web Apps deploy; the web app is deployed to dev only.
 

@@ -273,15 +273,17 @@ nx destroy infrastructure --env=dev
 
 ### Azure Deployment
 ```bash
-# Deploy API to Azure Functions
-nx deploy api --env=dev
-nx deploy api --env=prod
+# Deploy API to Azure Functions.
+# The deploy target runs `func azure functionapp publish {args.functionApp}`,
+# so it requires --functionApp=<Function App name> (there is no --env flag).
+# Get the name from Terraform, then publish:
+nx deploy api --functionApp=$(terraform output -raw function_app_name)
 
 # Deploy web app to Azure Static Web Apps (dev only)
 nx deploy web --env=dev
 ```
 
-> **Prod is API-only, and prod app deploys are CI-gated — not run by hand.** The `nx deploy api --env=prod` command above is what the `app-deploy-prod.yml` workflow runs; in normal operation you don't invoke it yourself. That workflow is triggered by `workflow_run` **after the CI/CD Pipeline completes green on a push to `main`**, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'`. It has **no `workflow_dispatch`** — retry a failed deploy via GitHub's **re-run**, not a manual command. Prod **infra** deploy (`infra-deploy-prod.yml`) is `workflow_dispatch`-only and **plan-only** (no `terraform apply`) pending MG-24. There is no production web/Static Web Apps deploy — `nx deploy web --env=prod` is not implemented; do not run it. See [CI/CD Pipeline → Prod](ci-cd.md#prod) for the full gating model.
+> **Prod is API-only, and prod app deploys are CI-gated — not run by hand.** The `app-deploy-prod.yml` workflow runs `nx deploy api --functionApp=<prod Function App name>` for you; in normal operation you don't invoke it yourself. That workflow is triggered by `workflow_run` **after the CI/CD Pipeline completes green on a push to `main`**, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'`. It has **no `workflow_dispatch`** — retry a failed deploy via GitHub's **re-run**, not a manual command. Prod **infra** deploy (`infra-deploy-prod.yml`) is `workflow_dispatch`-only and **plan-only** (no `terraform apply`) pending MG-24. There is no production web/Static Web Apps deploy — `nx deploy web --env=prod` is not implemented; do not run it. See [CI/CD Pipeline → Prod](ci-cd.md#prod) for the full gating model.
 
 ## Library Development
 
@@ -443,8 +445,10 @@ nx run-many --target=build --configuration=production --all
 # 2. Deploy infrastructure changes first
 nx apply infrastructure --env=prod
 
-# 3. Deploy applications (prod is API-only — no prod web deploy yet)
-nx deploy api --env=prod
+# 3. Deploy applications (prod is API-only — no prod web deploy yet).
+#    CI-gated: the app-deploy-prod.yml workflow runs this, not an operator.
+#    The deploy target takes --functionApp=<Function App name> (no --env):
+nx deploy api --functionApp=<prod Function App name>
 
 # 4. Deploy device updates  
 nx build-arm device-controller   # Cross-compile for ARM

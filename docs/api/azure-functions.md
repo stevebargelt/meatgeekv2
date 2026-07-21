@@ -429,19 +429,21 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 
 ### **Development Deployment**:
 ```bash
-# Build and deploy to development environment
+# Build and deploy to development environment.
+# The deploy target runs `func azure functionapp publish {args.functionApp}`,
+# so pass --functionApp=<Function App name> (there is no --env flag).
 nx build api --configuration=development
-nx deploy api --env=dev
+nx deploy api --functionApp=$(terraform output -raw function_app_name)
 ```
 
 ### **Production Deployment**:
 ```bash
 # Build optimized production bundle
 nx build api --configuration=production
-nx deploy api --env=prod
+nx deploy api --functionApp=<prod Function App name>
 ```
 
-> In production this runs from CI, not by hand. The `app-deploy-prod.yml` workflow invokes `nx deploy api --env=prod` automatically **after the CI/CD Pipeline completes green on a push to `main`**, gated by the `PROD_DEPLOY_ENABLED` repository variable. See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod).
+> In production this runs from CI, not by hand. The `app-deploy-prod.yml` workflow invokes `nx deploy api --functionApp=<prod Function App name>` automatically **after the CI/CD Pipeline completes green on a push to `main`**, gated by the `PROD_DEPLOY_ENABLED` repository variable. See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod).
 
 ## Performance Optimizations
 
