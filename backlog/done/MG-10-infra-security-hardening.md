@@ -1,8 +1,10 @@
 ---
 id: MG-10
 type: story
-status: active
+status: done
 title: infra-security-hardening
+closed: 2026-07-21
+closed_commit: 4df8427
 ---
 
 #### Context
