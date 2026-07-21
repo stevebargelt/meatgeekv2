@@ -500,6 +500,38 @@ describe('TemperatureCalculator', () => {
       const grill = calc.detectAnomalies(readings).find((a) => a.probe === 'grill');
       expect(grill?.timestamp).toBe(t1);
     });
+
+    it('honors custom thresholds passed by the caller', () => {
+      // Δ=+20 is a low-severity spike under the defaults (>15), but with tighter
+      // thresholds it becomes high (>10); with looser ones it is not an anomaly.
+      const readings = readingsForProbe('grillTemp', [100, 120]); // Δ=+20
+
+      const tight = calc
+        .detectAnomalies(readings, { high: 10, medium: 5, low: 2 })
+        .find((a) => a.probe === 'grill');
+      expect(tight?.anomaly).toBe('spike');
+      expect(tight?.severity).toBe('high');
+
+      const loose = calc
+        .detectAnomalies(readings, { high: 100, medium: 50, low: 30 })
+        .find((a) => a.probe === 'grill');
+      expect(loose).toBeUndefined();
+    });
+  });
+
+  describe('calculateRSquared (NaN guard)', () => {
+    it('returns 0 (not NaN) when normalizedTimes are identical (zero-variance x-axis)', () => {
+      const calc = new TemperatureCalculator();
+      // Identical time points make the upstream regression slope a 0/0 = NaN;
+      // calculateRSquared must still yield a defined value rather than NaN.
+      const r2 = (
+        calc as unknown as {
+          calculateRSquared(t: number[], x: number[], s: number): number;
+        }
+      ).calculateRSquared([100, 110, 120], [5, 5, 5], NaN);
+      expect(Number.isNaN(r2)).toBe(false);
+      expect(r2).toBe(0);
+    });
   });
 
   describe('estimateCompletionTime', () => {

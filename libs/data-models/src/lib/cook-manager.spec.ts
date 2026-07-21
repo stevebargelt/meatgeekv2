@@ -59,9 +59,21 @@ describe('CookManager', () => {
       jest.useRealTimers();
     });
 
-    it('returns a cookId matching cook-<timestamp>-<base36> shape', () => {
-      const cook = CookManager.createCook(buildStartRequest(), 'user-7');
-      expect(cook.id).toMatch(/^cook-\d+-[a-z0-9]+$/);
+    it('returns a cookId of the form cook-<uuidv4> that is unique across calls', () => {
+      const a = CookManager.createCook(buildStartRequest(), 'user-7');
+      const b = CookManager.createCook(buildStartRequest(), 'user-7');
+      expect(a.id).toMatch(
+        /^cook-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+      );
+      expect(a.id).not.toBe(b.id);
+    });
+
+    it('trims the cook name before storing (agrees with validateCook)', () => {
+      const cook = CookManager.createCook(
+        buildStartRequest({ name: '  Sunday Brisket  ' }),
+        'user-1'
+      );
+      expect(cook.name).toBe('Sunday Brisket');
     });
 
     it('populates default targetTemps from MEAT_TYPES for BRISKET key', () => {
@@ -97,13 +109,20 @@ describe('CookManager', () => {
       });
     });
 
-    // BUG: cook-manager and DataValidator disagree on meatType lookup —
-    // CookManager.createCook keys MEAT_TYPES by `meatType.toUpperCase()` (matches
-    // 'PORK_SHOULDER'), while DataValidator.validateStartCookRequest looks up by
-    // `.name` (matches 'Pork Shoulder'). Characterization test — follow-up needed.
-    it('leaves targetTemps grill/probe1 as undefined when meatType cannot be mapped to a MEAT_TYPES key', () => {
+    it('resolves the display name "Pork Shoulder" to the PORK_SHOULDER key and populates its default targetTemps', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'Pork Shoulder', targetTemps: undefined }),
+        'user-1'
+      );
+      expect(cook.targetTemps).toEqual({
+        grill: MEAT_TYPES.PORK_SHOULDER.defaultGrillTemp,
+        probe1: MEAT_TYPES.PORK_SHOULDER.defaultMeatTemp,
+      });
+    });
+
+    it('leaves targetTemps grill/probe1 as undefined when meatType cannot be resolved', () => {
+      const cook = CookManager.createCook(
+        buildStartRequest({ meatType: 'Unicorn Steaks', targetTemps: undefined }),
         'user-1'
       );
       expect(cook.targetTemps).toEqual({ grill: undefined, probe1: undefined });
@@ -346,7 +365,7 @@ describe('CookManager', () => {
         weight: 12,
         targetTemps: { grill: 225, probe1: 203 },
       });
-      expect(result).toEqual({ isValid: true, errors: [] });
+      expect(result).toEqual({ isValid: true, errors: [], warnings: [] });
     });
 
     it('flags a name shorter than 3 chars (after trim)', () => {
@@ -443,10 +462,7 @@ describe('CookManager', () => {
       expect(result.errors).toContain('Weight must be between 0 and 100 pounds');
     });
 
-    // BUG: cook-manager and DataValidator disagree on weight bounds —
-    // CookManager.validateCook allows 0 < weight ≤ 100 with no warning; DataValidator
-    // warns when weight > 50. Characterization test — follow-up needed.
-    it('accepts weight in (0, 100] with no errors (e.g. 75)', () => {
+    it('accepts weight in (0, 100] but warns above 50 (e.g. 75)', () => {
       const result = CookManager.validateCook({
         name: 'Sunday Brisket',
         deviceId: 'device-1',
@@ -456,6 +472,21 @@ describe('CookManager', () => {
       expect(result.isValid).toBe(true);
       expect(result.errors).not.toContain(
         'Weight must be between 0 and 100 pounds'
+      );
+      expect(result.warnings).toContain(
+        'Weight over 50 pounds - verify this is correct'
+      );
+    });
+
+    it('does not warn for weight in (0, 50]', () => {
+      const result = CookManager.validateCook({
+        name: 'Sunday Brisket',
+        deviceId: 'device-1',
+        meatType: 'BRISKET',
+        weight: 40,
+      });
+      expect(result.warnings).not.toContain(
+        'Weight over 50 pounds - verify this is correct'
       );
     });
 

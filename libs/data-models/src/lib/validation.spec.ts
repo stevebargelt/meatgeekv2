@@ -137,10 +137,7 @@ describe('DataValidator', () => {
       expect(result.warnings).toContain("'Unicorn Steaks' is not a recognized meat type");
     });
 
-    // BUG: validation.ts lookups by .name; cook-manager.ts lookups by KEY; the two
-    // surfaces disagree — see risk #1 in architect notes. Characterize: validation
-    // recognizes the display name 'Pork Shoulder' but NOT the key 'PORK_SHOULDER'.
-    it('recognizes the display name "Pork Shoulder" (matches MEAT_TYPES[*].name)', () => {
+    it('recognizes the display name "Pork Shoulder" (resolveMeatType matches MEAT_TYPES[*].name)', () => {
       const req = baseRequest();
       req.meatType = MEAT_TYPES.PORK_SHOULDER.name; // 'Pork Shoulder'
       const result = DataValidator.validateStartCookRequest(req);
@@ -149,13 +146,15 @@ describe('DataValidator', () => {
       );
     });
 
-    // BUG: validation.ts lookups by .name; cook-manager.ts lookups by KEY; the two
-    // surfaces disagree — see risk #1 in architect notes. The KEY form is rejected.
-    it('does NOT recognize the key "PORK_SHOULDER" (lookup is by display name, not key)', () => {
+    // resolveMeatType unifies cook-manager and DataValidator: BOTH the display name
+    // and the canonical KEY resolve, so neither surface warns on a valid meat type.
+    it('recognizes the key "PORK_SHOULDER" (resolveMeatType accepts keys too)', () => {
       const req = baseRequest();
       req.meatType = 'PORK_SHOULDER';
       const result = DataValidator.validateStartCookRequest(req);
-      expect(result.warnings).toContain("'PORK_SHOULDER' is not a recognized meat type");
+      expect(result.warnings ?? []).not.toContain(
+        "'PORK_SHOULDER' is not a recognized meat type"
+      );
     });
 
     it('flags weight <= 0 as an error', () => {
@@ -172,12 +171,20 @@ describe('DataValidator', () => {
       expect(result.errors).toContain('Weight must be greater than 0');
     });
 
-    it('warns when weight > 50 (within reasonable bounds)', () => {
+    it('warns when weight > 50 but <= 100 (within reasonable bounds)', () => {
       const req = baseRequest();
       req.weight = 51;
       const result = DataValidator.validateStartCookRequest(req);
       expect(result.warnings).toContain('Weight over 50 pounds - verify this is correct');
       expect(result.errors).not.toContain('Weight must be greater than 0');
+    });
+
+    it('flags weight over 100 as an error (unified weight contract)', () => {
+      const req = baseRequest();
+      req.weight = 101;
+      const result = DataValidator.validateStartCookRequest(req);
+      expect(result.errors).toContain('Weight cannot exceed 100 pounds');
+      expect(result.warnings).not.toContain('Weight over 50 pounds - verify this is correct');
     });
 
     it('does not warn or error for weight in (0, 50]', () => {
@@ -566,31 +573,34 @@ describe('DataValidator', () => {
       expect(result.errors).toContain('A cook with this name already exists');
     });
 
-    // BUG: validateCookNameUniqueness compares cook.name to excludeCookId; almost
-    // certainly intended to be cook.id — characterization test, follow-up needed;
-    // see risk #1 in architect notes.
-    //
-    // Effect of the bug: excludeCookId is matched against the cook's NAME, not an
-    // id field. So passing the *name* of an existing cook (rather than its id)
-    // excludes that cook from the duplicate check.
-    it('excludes a cook from the duplicate check when excludeCookId equals that cook.name (BUG)', () => {
+    // excludeCookId now excludes by cook.id (an opaque id), which is what callers
+    // pass — the self-cook is skipped so renaming/saving in place is not a "duplicate".
+    it('excludes a cook from the duplicate check when excludeCookId matches that cook.id', () => {
       const result = DataValidator.validateCookNameUniqueness(
         'My Cook',
-        [{ name: 'My Cook' }],
-        'My Cook' // passed as excludeCookId, but actually matched against cook.name
+        [{ id: 'cook-1', name: 'My Cook' }],
+        'cook-1'
       );
       expect(result.isValid).toBe(true);
       expect(result.errors).toEqual([]);
     });
 
-    // BUG (continued): When excludeCookId does NOT equal any existing cook.name —
-    // e.g. when callers correctly pass an opaque id — the filter doesn't exclude
-    // anything and the duplicate still surfaces. This is the buggy interaction
-    // callers actually hit in production-looking usage.
-    it('still flags a duplicate when excludeCookId is an opaque id that no cook.name matches (BUG)', () => {
+    // Exclusion is by id, not name: passing a cook's NAME as excludeCookId no
+    // longer wrongly excludes it, so a real duplicate still surfaces.
+    it('does not exclude by name — a cook whose name equals excludeCookId is still a duplicate', () => {
       const result = DataValidator.validateCookNameUniqueness(
         'My Cook',
-        [{ name: 'My Cook' }],
+        [{ id: 'cook-1', name: 'My Cook' }],
+        'My Cook'
+      );
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('A cook with this name already exists');
+    });
+
+    it('flags a duplicate when excludeCookId is an opaque id that no cook.id matches', () => {
+      const result = DataValidator.validateCookNameUniqueness(
+        'My Cook',
+        [{ id: 'cook-1', name: 'My Cook' }],
         'cook-id-abc123'
       );
       expect(result.isValid).toBe(false);

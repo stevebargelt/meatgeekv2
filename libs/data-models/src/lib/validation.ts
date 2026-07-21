@@ -2,7 +2,7 @@
  * Data validation utilities and business rules
  */
 
-import { VALIDATION, MEAT_TYPES } from '@meatgeekv2/utils';
+import { VALIDATION, resolveMeatType } from '@meatgeekv2/utils';
 import { 
   StartCookRequest, 
   UpdateCookRequest, 
@@ -51,14 +51,15 @@ export class DataValidator {
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    // Validate required fields
+    // Validate required fields (trim before length check — canonical: trim-before-validate)
     if (!request.name || request.name.trim().length === 0) {
       errors.push('Cook name is required');
     } else {
-      if (request.name.length < VALIDATION.COOK_NAME.MIN_LENGTH) {
+      const trimmedName = request.name.trim();
+      if (trimmedName.length < VALIDATION.COOK_NAME.MIN_LENGTH) {
         errors.push(`Cook name must be at least ${VALIDATION.COOK_NAME.MIN_LENGTH} characters`);
       }
-      if (request.name.length > VALIDATION.COOK_NAME.MAX_LENGTH) {
+      if (trimmedName.length > VALIDATION.COOK_NAME.MAX_LENGTH) {
         errors.push(`Cook name cannot exceed ${VALIDATION.COOK_NAME.MAX_LENGTH} characters`);
       }
     }
@@ -69,21 +70,17 @@ export class DataValidator {
 
     if (!request.meatType || request.meatType.trim().length === 0) {
       errors.push('Meat type is required');
-    } else {
-      const meatTypeExists = Object.values(MEAT_TYPES).some(
-        mt => mt.name.toLowerCase() === request.meatType.toLowerCase()
-      );
-      if (!meatTypeExists) {
-        warnings.push(`'${request.meatType}' is not a recognized meat type`);
-      }
+    } else if (!resolveMeatType(request.meatType)) {
+      warnings.push(`'${request.meatType}' is not a recognized meat type`);
     }
 
-    // Validate optional fields
+    // Validate optional fields — unified weight contract via VALIDATION.WEIGHT
     if (request.weight !== undefined) {
-      if (request.weight <= 0) {
+      if (request.weight <= VALIDATION.WEIGHT.MIN_EXCLUSIVE) {
         errors.push('Weight must be greater than 0');
-      }
-      if (request.weight > 50) {
+      } else if (request.weight > VALIDATION.WEIGHT.MAX) {
+        errors.push('Weight cannot exceed 100 pounds');
+      } else if (request.weight > VALIDATION.WEIGHT.WARN_ABOVE) {
         warnings.push('Weight over 50 pounds - verify this is correct');
       }
     }
@@ -110,10 +107,11 @@ export class DataValidator {
     const warnings: string[] = [];
 
     if (request.name !== undefined) {
-      if (request.name.length < VALIDATION.COOK_NAME.MIN_LENGTH) {
+      const trimmedName = request.name.trim();
+      if (trimmedName.length < VALIDATION.COOK_NAME.MIN_LENGTH) {
         errors.push(`Cook name must be at least ${VALIDATION.COOK_NAME.MIN_LENGTH} characters`);
       }
-      if (request.name.length > VALIDATION.COOK_NAME.MAX_LENGTH) {
+      if (trimmedName.length > VALIDATION.COOK_NAME.MAX_LENGTH) {
         errors.push(`Cook name cannot exceed ${VALIDATION.COOK_NAME.MAX_LENGTH} characters`);
       }
     }
@@ -290,14 +288,14 @@ export class DataValidator {
    * Validates cook name for uniqueness within user's cooks
    */
   static validateCookNameUniqueness(
-    cookName: string, 
-    existingCooks: Array<{ name: string }>, 
+    cookName: string,
+    existingCooks: Array<{ id?: string; name: string }>,
     excludeCookId?: string
   ): ValidationResult {
     const errors: string[] = [];
-    
+
     const isDuplicate = existingCooks
-      .filter(cook => excludeCookId === undefined || cook.name !== excludeCookId)
+      .filter(cook => excludeCookId === undefined || cook.id !== excludeCookId)
       .some(cook => cook.name.toLowerCase() === cookName.toLowerCase());
 
     if (isDuplicate) {

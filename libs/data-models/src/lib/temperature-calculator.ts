@@ -138,9 +138,22 @@ export class TemperatureCalculator {
   }
 
   /**
-   * Detects temperature anomalies
+   * Detects temperature anomalies.
+   *
+   * `thresholds` are the °F change (vs. the previous reading) at which a
+   * spike/drop is classified. Defaults preserve the original behavior: >high →
+   * high severity, >medium → medium, >low → low. They are configurable because
+   * the right sensitivity depends on the probe placement and cook (e.g. a fast
+   * searing cook tolerates larger swings than low-and-slow).
    */
-  detectAnomalies(readings: TemperatureReading[]): Array<{
+  detectAnomalies(
+    readings: TemperatureReading[],
+    thresholds: { high: number; medium: number; low: number } = {
+      high: 50,
+      medium: 25,
+      low: 15,
+    }
+  ): Array<{
     timestamp: string;
     anomaly: 'spike' | 'drop' | 'disconnect';
     probe: string;
@@ -185,13 +198,13 @@ export class TemperatureCalculator {
         let severity: 'low' | 'medium' | 'high' = 'low';
         let anomaly: 'spike' | 'drop' | null = null;
 
-        if (absChange > 50) {
+        if (absChange > thresholds.high) {
           severity = 'high';
           anomaly = change > 0 ? 'spike' : 'drop';
-        } else if (absChange > 25) {
+        } else if (absChange > thresholds.medium) {
           severity = 'medium';
           anomaly = change > 0 ? 'spike' : 'drop';
-        } else if (absChange > 15) {
+        } else if (absChange > thresholds.low) {
           severity = 'low';
           anomaly = change > 0 ? 'spike' : 'drop';
         }
@@ -308,6 +321,10 @@ export class TemperatureCalculator {
     }
     
     if (ssTot === 0) return 0;
-    return 1 - (ssRes / ssTot);
+    const rSquared = 1 - ssRes / ssTot;
+    // Guard NaN: when all time points are identical the upstream slope divide is
+    // 0/0 → NaN, which would propagate through here and poison the confidence
+    // calculation. Fall back to a defined 0 (no explanatory power).
+    return isFinite(rSquared) ? rSquared : 0;
   }
 }

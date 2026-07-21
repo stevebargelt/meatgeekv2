@@ -10,11 +10,14 @@ import {
   TemperatureReading,
   CookSummary
 } from '@meatgeekv2/api-interfaces';
-import { 
-  MEAT_TYPES, 
-  COOK_STATUS, 
+import { randomUUID } from 'node:crypto';
+import {
+  MEAT_TYPES,
+  COOK_STATUS,
+  VALIDATION,
+  resolveMeatType,
   calculateDuration,
-  formatDuration 
+  formatDuration
 } from '@meatgeekv2/utils';
 
 export class CookManager {
@@ -22,14 +25,15 @@ export class CookManager {
    * Creates a new cook session
    */
   static createCook(request: StartCookRequest, userId: string): Cook {
-    const cookId = `cook-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const meatTypeConfig = MEAT_TYPES[request.meatType.toUpperCase() as keyof typeof MEAT_TYPES];
-    
+    const cookId = `cook-${randomUUID()}`;
+    const key = resolveMeatType(request.meatType);
+    const meatTypeConfig = key ? MEAT_TYPES[key] : undefined;
+
     return {
       id: cookId,
       userId,
       deviceId: request.deviceId,
-      name: request.name,
+      name: request.name?.trim() ?? request.name,
       status: COOK_STATUS.PLANNING,
       startTime: new Date().toISOString(),
       meatType: request.meatType,
@@ -105,8 +109,9 @@ export class CookManager {
   /**
    * Validates cook data
    */
-  static validateCook(cook: Partial<Cook>): { isValid: boolean; errors: string[] } {
+  static validateCook(cook: Partial<Cook>): { isValid: boolean; errors: string[]; warnings: string[] } {
     const errors: string[] = [];
+    const warnings: string[] = [];
 
     if (!cook.name || cook.name.trim().length < 3) {
       errors.push('Cook name must be at least 3 characters');
@@ -120,8 +125,12 @@ export class CookManager {
       errors.push('Meat type is required');
     }
 
-    if (cook.weight !== undefined && (cook.weight <= 0 || cook.weight > 100)) {
-      errors.push('Weight must be between 0 and 100 pounds');
+    if (cook.weight !== undefined) {
+      if (cook.weight <= VALIDATION.WEIGHT.MIN_EXCLUSIVE || cook.weight > VALIDATION.WEIGHT.MAX) {
+        errors.push('Weight must be between 0 and 100 pounds');
+      } else if (cook.weight > VALIDATION.WEIGHT.WARN_ABOVE) {
+        warnings.push('Weight over 50 pounds - verify this is correct');
+      }
     }
 
     if (cook.targetTemps) {
@@ -141,6 +150,7 @@ export class CookManager {
     return {
       isValid: errors.length === 0,
       errors,
+      warnings,
     };
   }
 
