@@ -1,8 +1,10 @@
 ---
 id: MG-9
 type: story
-status: active
+status: done
 title: data-models-impl-fixes
+closed: 2026-07-21
+closed_commit: 0ebf184
 ---
 
 #### Context
