@@ -12,6 +12,16 @@
   Cosmos / SignalR / Storage / IoT Hub data services and the pre-apply
   secret-inspection gate
 
+> **Attribute-name note (MG-12):** The App Insights and Cosmos DB resources now
+> express local/key-auth disablement as **`local_authentication_enabled = false`**,
+> renamed from the deprecated `local_authentication_disabled = true` for azurerm
+> v5 forward-compat. This is an **inverted boolean with identical semantics** —
+> local/key auth is OFF; the security decision and accepted-residual reasoning are
+> unchanged. The secret-inspection gate and the cosmos-db module tests track the
+> new attribute name. SignalR (`local_auth_enabled = false`), Storage
+> (`shared_access_key_enabled = false`), and the Event Hubs namespace
+> (`local_authentication_enabled = false`) were **not** part of this rename.
+
 ## Context
 
 MG-24 drove every backing service the Function App uses to an **identity-based**
@@ -103,7 +113,7 @@ hide it.
 
 **Accept** the Application Insights **full connection string** (with its
 `InstrumentationKey`) being present in `app_settings` and Terraform state, on the
-condition that **`local_authentication_disabled = true`** is set on
+condition that **`local_authentication_enabled = false`** is set on
 `azurerm_application_insights.main`. Do not move the resource out of the primary
 stack to suppress the key.
 
@@ -111,7 +121,7 @@ The acceptance rests on the following facts, all verifiable in
 `apps/infrastructure`:
 
 1. **The instrumentation key cannot authenticate ingestion.** Setting
-   **`local_authentication_disabled = true`** on
+   **`local_authentication_enabled = false`** on
    `azurerm_application_insights.main` forces **Entra (AAD)-only ingestion**: the
    platform rejects any telemetry submitted with only the instrumentation key.
    The key that sits in `app_settings`/state is therefore a **destination
@@ -145,7 +155,7 @@ The acceptance rests on the following facts, all verifiable in
 ### Coupled invariant (enforced by the step-8 gate)
 
 The connection string is safe in `app_settings`/state **only while
-`local_authentication_disabled = true` remains set**. If that flag is ever
+`local_authentication_enabled = false` remains set**. If that flag is ever
 removed, the instrumentation key becomes a live ingestion credential again and
 this acceptance no longer holds.
 
@@ -156,7 +166,7 @@ enforced** by the pre-apply security gate:
   `terraform show -json`, distinguishes field **names** from **values**, and
   **allows the full App Insights connection string in the Function App
   `app_settings` ONLY when `azurerm_application_insights.main` has
-  `local_authentication_disabled = true`**. Any other connection string /
+  `local_authentication_enabled = false`**. Any other connection string /
   primary|access|SAS key / instrumentation key in `app_settings` or outputs — or
   the AI connection string **without** the local-auth-disabled flag — makes the
   script **exit nonzero**. It is the **required pre-apply gate** and is invoked
@@ -164,7 +174,7 @@ enforced** by the pre-apply security gate:
 - **`apps/infrastructure/scripts/tf-static-checks.sh`** (check 9) statically
   asserts the same cross-field condition on the Terraform source: the full
   `var.application_insights_connection_string` may reach the FA `app_settings`
-  **only** when `main.tf` sets `local_authentication_disabled = true` on the AI
+  **only** when `main.tf` sets `local_authentication_enabled = false` on the AI
   resource.
 
 ## Extending the control to the data services (MG-24 round 11)
@@ -177,7 +187,7 @@ inherent computed attributes. The operator-approved decision is to apply it
 
 | Service | In-state key attribute(s) | Control | Why safe / why exception |
 | --- | --- | --- | --- |
-| **Cosmos DB** (`azurerm_cosmosdb_account.main`) | `primary_key`, `secondary_key`, `connection_strings` | `local_authentication_disabled = true` | Data-plane access is AAD/RBAC: the Function App **and** the IoT Hub identity each hold *Cosmos DB Built-in Data Contributor* (SQL role assignments). Both keep working with key auth off; the in-state key can no longer authenticate. |
+| **Cosmos DB** (`azurerm_cosmosdb_account.main`) | `primary_key`, `secondary_key`, `connection_strings` | `local_authentication_enabled = false` | Data-plane access is AAD/RBAC: the Function App **and** the IoT Hub identity each hold *Cosmos DB Built-in Data Contributor* (SQL role assignments). Both keep working with key auth off; the in-state key can no longer authenticate. |
 | **SignalR** (`azurerm_signalr_service.main`) | `primary_access_key`, `primary_connection_string` | `local_auth_enabled = false` | The Function App connects identity-based via `AzureSignalRConnectionString__serviceUri` and holds *SignalR Service Owner*. AAD negotiation keeps working with AccessKey auth off. |
 | **Storage** (`azurerm_storage_account.functions`) | account access keys, connection string | `shared_access_key_enabled = false` (already set) | Host storage is **fully managed-identity**: `storage_uses_managed_identity = true`, no `storage_account_access_key` and no key-based `AzureWebJobsStorage` anywhere, and the identity holds *Storage Blob Data Owner* + *Storage Queue Data Contributor*. Shared-key auth is safely off without breaking the Functions runtime. |
 | **Event Hubs namespace** (`azurerm_eventhub_namespace.main`) | auto-created `RootManageSharedAccessKey` primary/secondary keys + connection strings | `local_authentication_enabled = false` | Both access paths are identity-based: the IoT Hub **produces** via `azurerm_iothub_endpoint_eventhub.eventhub_realtime` (`authentication_type = identityBased` + *Azure Event Hubs Data Sender*), and the Function App **consumes** via *Azure Event Hubs Data Receiver* (`IOTHUB_EVENTS__fullyQualifiedNamespace`). Nothing reads the RootManage key, so SAS auth is safely off (round 12). |
@@ -206,7 +216,7 @@ Cosmos, SignalR, Storage, and the Event Hubs namespace.
 now enforces this over the real plan/state: for each `azurerm_cosmosdb_account` /
 `azurerm_storage_account` / `azurerm_signalr_service` / `azurerm_eventhub_namespace`
 it **accepts** the inherent key residual **only** when that resource's disable-flag
-is set (`local_authentication_disabled = true` / `shared_access_key_enabled = false`
+is set (`local_authentication_enabled = false` / `shared_access_key_enabled = false`
 / `local_auth_enabled = false` / `local_authentication_enabled = false`), and
 **flags a VIOLATION (exit nonzero)** if local auth is left enabled — because then
 the in-state key is a live credential. `azurerm_iothub` key attributes are the
@@ -228,7 +238,7 @@ a violation regardless of service, unchanged.
   real structural complexity — a second state file, cross-stack wiring and apply
   ordering, and split ownership of the observability resources — to protect a
   **low-sensitivity, telemetry-write-only** value that has been rendered inert
-  for authentication by `local_authentication_disabled = true`. The complexity is
+  for authentication by `local_authentication_enabled = false`. The complexity is
   not justified.
 
 ## Consequences
@@ -236,13 +246,13 @@ a violation regardless of service, unchanged.
 - The Application Insights **full connection string** (with its
   `InstrumentationKey`) is present in `app_settings` and the primary stack's
   Terraform state; this is expected and accepted, **conditioned on**
-  `local_authentication_disabled = true` making the key inert for auth.
+  `local_authentication_enabled = false` making the key inert for auth.
 - The runtime authentication path stays identity-based (AAD + `Monitoring
   Metrics Publisher`); the key is a destination identifier, not a credential. Any
-  future change must preserve `local_authentication_disabled = true`, not replace
+  future change must preserve `local_authentication_enabled = false`, not replace
   AAD ingestion with key-based ingestion.
 - The coupled invariant is machine-enforced: removing
-  `local_authentication_disabled` will fail both the pre-apply
+  `local_authentication_enabled = false` will fail both the pre-apply
   `tf-plan-secret-inspection.sh` gate and the `tf-static-checks.sh` check 9 —
   the change cannot ship silently.
 - If App Insights sensitivity ever rises (e.g. it starts brokering access beyond
