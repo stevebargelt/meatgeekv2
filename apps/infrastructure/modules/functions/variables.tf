@@ -32,7 +32,7 @@ variable "global_suffix" {
 }
 
 variable "application_insights_connection_string" {
-  description = "FULL Terraform-managed Application Insights connection string (InstrumentationKey included), set as APPLICATIONINSIGHTS_CONNECTION_STRING. Microsoft requires the connection string — with the ikey as the destination-resource identifier — even under Entra-only ingestion. The ikey is a NON-credential here because the root module sets local_authentication_disabled=true on the App Insights resource, forcing AAD-only ingestion (the host authenticates via APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD + the Monitoring Metrics Publisher role). This residual is safe ONLY while local auth stays disabled — enforced by the pre-apply secret-inspection gate."
+  description = "FULL Terraform-managed Application Insights connection string (InstrumentationKey included), set as APPLICATIONINSIGHTS_CONNECTION_STRING. Microsoft requires the connection string — with the ikey as the destination-resource identifier — even under Entra-only ingestion. The ikey is a NON-credential here because the root module sets local_authentication_enabled=false on the App Insights resource, forcing AAD-only ingestion (the host authenticates via APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD + the Monitoring Metrics Publisher role). This residual is safe ONLY while local auth stays disabled — enforced by the pre-apply secret-inspection gate."
   type        = string
 }
 

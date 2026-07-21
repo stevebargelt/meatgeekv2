@@ -231,7 +231,7 @@ reference, missing per-env state keys, a stray local `*.tfstate`, a missing
 `meatgeek-v2-` prefix, a secret OUTPUT (best-effort — direct or obfuscated-index
 reference), a secret value in the Function App app*settings (with the one coupled
 App Insights exemption — the full conn string is allowed **only** when
-`local_authentication_disabled = true`), a SAS-based IoT Hub route, and
+`local_authentication_enabled = false`), a SAS-based IoT Hub route, and
 (check 12) a README that stops documenting the fail-closed
 `scripts/tf-plan-secret-inspection.sh` as a REQUIRED pre-apply gate. It runs in
 the `validate-infrastructure` job. Note: the secret-output/app_settings scans are
@@ -270,7 +270,7 @@ narrowly-scoped data-plane RBAC by the root module:
 | Cosmos DB     | `COSMOSDB__accountEndpoint`                                                                                                                                                                                                                                                                                                                                                                                         | Cosmos DB Built-in Data Contributor       |
 | IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`                                                                                                                                                                                                                                                                                                                                                                            | Azure Event Hubs Data Receiver            |
 | SignalR       | `AzureSignalRConnectionString__serviceUri`                                                                                                                                                                                                                                                                                                                                                                          | SignalR Service Owner                     |
-| App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` (the FULL TF-managed connection string, `InstrumentationKey=…;IngestionEndpoint=…` — Microsoft requires the ikey as the destination-resource identifier even under Entra) + `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`. The ikey **cannot authenticate**: `local_authentication_disabled = true` on the App Insights resource forces AAD-only ingestion. | Monitoring Metrics Publisher              |
+| App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` (the FULL TF-managed connection string, `InstrumentationKey=…;IngestionEndpoint=…` — Microsoft requires the ikey as the destination-resource identifier even under Entra) + `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`. The ikey **cannot authenticate**: `local_authentication_enabled = false` on the App Insights resource forces AAD-only ingestion. | Monitoring Metrics Publisher              |
 
 The IoT Hub's own system-assigned identity likewise writes to Cosmos (Built-in
 Data Contributor) and sends to the Event Hubs routing endpoint (Azure Event Hubs
@@ -303,12 +303,12 @@ Two layers, with clearly different strengths:
    resources themselves. It accepts a residual **only** when auth cannot use it:
    - the full App Insights connection string in a Function App `app_setting`,
      **only** when the plan's `azurerm_application_insights` sets
-     `local_authentication_disabled = true` (the coupled invariant);
+     `local_authentication_enabled = false` (the coupled invariant);
    - the inherent in-state key of an `azurerm_cosmosdb_account` /
      `azurerm_signalr_service` / `azurerm_storage_account` /
      `azurerm_eventhub_namespace`, **only** when that
      resource disables local/key auth in the plan
-     (`local_authentication_disabled = true` / `local_auth_enabled = false` /
+     (`local_authentication_enabled = false` / `local_auth_enabled = false` /
      `shared_access_key_enabled = false` / `local_authentication_enabled = false`)
      — otherwise the in-state key is a live credential and it is a **VIOLATION**;
    - `azurerm_iothub` key attributes as the **acknowledged exception** (accepted
@@ -371,7 +371,7 @@ terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
   Terraform reads back into state by construction (no `azurerm` argument
   suppresses it) — exactly like App Insights. The control is to make those keys
   **inert for authentication** by disabling local/key auth where safe:
-  `local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
+  `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
   on SignalR, `shared_access_key_enabled = false` on the Functions storage
   account (host storage is fully managed-identity), and
   `local_authentication_enabled = false` on the Event Hubs namespace (its
@@ -396,14 +396,14 @@ terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
   `InstrumentationKey`) is placed in app settings **because Microsoft requires
   the connection string as the destination-resource identifier even under
   Entra** — but the embedded ikey **cannot authenticate**: the App Insights
-  resource sets `local_authentication_disabled = true`, which forces AAD-only
+  resource sets `local_authentication_enabled = false`, which forces AAD-only
   ingestion and disables ikey/local auth. The connection string / instrumentation
   key is therefore present in app settings and (as a computed attribute of
   `azurerm_application_insights.main`) in Terraform state, but it is a
   **present-but-non-authenticating** residual: **safe ONLY while local auth is
   disabled**. That coupled invariant is machine-enforced — `tf-static-checks.sh`
   check 9 rejects the full conn string in `app_settings` unless
-  `local_authentication_disabled = true`, and the fail-closed
+  `local_authentication_enabled = false`, and the fail-closed
   `scripts/tf-plan-secret-inspection.sh` gate enforces the same over the real
   plan. See
   [ADR: App Insights key in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).

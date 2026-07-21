@@ -30,11 +30,11 @@
  *   as APPLICATIONINSIGHTS_CONNECTION_STRING even under Entra-only ingestion, so
  *   that full string DOES reach the Function App app_settings. This is accepted
  *   as low-risk ONLY because the ikey CANNOT authenticate ingestion: the AI
- *   resource sets `local_authentication_disabled = true`, forcing AAD-only
+ *   resource sets `local_authentication_enabled = false`, forcing AAD-only
  *   ingestion (the host publishes via Monitoring Metrics Publisher +
  *   Authorization=AAD). The allowance is a COUPLED invariant — the full string is
  *   safe ONLY while local auth stays disabled. These specs FAIL if the full AI
- *   conn string is wired WITHOUT local_authentication_disabled=true, and still
+ *   conn string is wired WITHOUT local_authentication_enabled=false, and still
  *   FAIL on any OTHER service's secret VALUE (a connection string / key) reaching
  *   an app_settings map OR an output. See the "operator-accepted residual"
  *   describe blocks below and the MG-24 ADR.
@@ -140,7 +140,7 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       // MG-24 item 2 CORRECTION: the FULL TF-managed connection string
       // (InstrumentationKey included — Microsoft's required destination-resource
       // identifier) is placed in app_settings via the module var. That is the
-      // corrected model; it is safe ONLY because local_authentication_disabled=true
+      // corrected model; it is safe ONLY because local_authentication_enabled=false
       // on the AI resource (asserted in the root main.tf test below and enforced
       // by the tf-static-checks / tf-plan-secret-inspection gate).
       expect(live).toMatch(
@@ -186,11 +186,11 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     expect(live).not.toMatch(/application_insights_ingestion_endpoint\s*=/);
   });
 
-  it('root passes the FULL AI connection string COUPLED to local_authentication_disabled=true (MG-24 item 2)', () => {
+  it('root passes the FULL AI connection string COUPLED to local_authentication_enabled=false (MG-24 item 2)', () => {
     // The corrected accepted-residual model: the full TF-managed connection
     // string (InstrumentationKey included) is materialized nonsensitive() into a
     // local and handed to the Functions module — and that is safe ONLY because
-    // the AI resource forces AAD-only ingestion via local_authentication_disabled.
+    // the AI resource forces AAD-only ingestion via local_authentication_enabled.
     // The two facts are asserted together so the coupling cannot silently break.
     const live = stripComments(read('main.tf'));
     // (a) the full connection string local (no endpoint-substring regex extraction).
@@ -200,7 +200,7 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     // The endpoint-only extraction shape must NOT return (regex IngestionEndpoint=…).
     expect(live).not.toMatch(/regex\("IngestionEndpoint=/);
     // (b) local auth disabled on the AI resource — the safety basis.
-    expect(live).toMatch(/local_authentication_disabled\s*=\s*true/);
+    expect(live).toMatch(/local_authentication_enabled\s*=\s*false/);
     // (c) the local flows into the module (not the raw attribute, not the ikey).
     expect(live).toMatch(
       /application_insights_connection_string\s*=\s*local\.appinsights_connection_string/
@@ -395,10 +395,10 @@ describe('MG-24 S1: the static gate documents the operator-accepted App Insights
     // stays TF-managed, so its own computed connection_string / instrumentation_key
     // are inherently in state (an accepted low-risk residual). The corrected model
     // allows the FULL conn string in app_settings ONLY when
-    // local_authentication_disabled=true (the coupled invariant), and the runtime
+    // local_authentication_enabled=false (the coupled invariant), and the runtime
     // guarantee is the fail-closed plan/state inspection.
     expect(gate).toMatch(/OPERATOR-ACCEPTED RESIDUAL/);
-    expect(gate).toMatch(/local_authentication_disabled/);
+    expect(gate).toMatch(/local_authentication_enabled/);
     expect(gate).toMatch(/coupled[- ]invariant/i);
     expect(gate).toMatch(/tf-plan-secret-inspection\.sh/);
     // It is explicitly NOT a blanket App Insights exemption — the allowance is
@@ -425,12 +425,12 @@ describe('MG-24 S1: the static gate documents the operator-accepted App Insights
     // Value-targeted: a secret Terraform attribute/var reference or a literal
     // ingestion-key marker in app_settings is flagged, EXCEPT the accepted AI
     // conn-string var — and even that is a VIOLATION when
-    // local_authentication_disabled is not set on the AI resource.
+    // local_authentication_enabled is not set to false on the AI resource.
     expect(gate).toMatch(/\\\.connection_string/);
     expect(gate).toMatch(/\\\.instrumentation_key/);
     expect(gate).toMatch(/InstrumentationKey=/);
     // The cross-field conditional: full conn string WITHOUT local auth disabled fails.
-    expect(gate).toMatch(/local_authentication_disabled/);
+    expect(gate).toMatch(/local_authentication_enabled/);
     expect(gate).toMatch(/coupled-invariant violation/);
   });
 
@@ -497,7 +497,7 @@ describe('MG-24 S1: the README wires the fail-closed plan/state inspection as a 
   it('documents the corrected App Insights (local-auth-disabled) coupling', () => {
     // The README's security note must reflect the corrected model: the full conn
     // string is present but the ikey cannot authenticate under local auth disabled.
-    expect(readme).toMatch(/local_authentication_disabled/);
+    expect(readme).toMatch(/local_authentication_enabled/);
   });
 });
 
@@ -531,7 +531,7 @@ describe('MG-24 S1: the static gate behaves — accepts the residual, catches re
     expect(code).toBe(0);
   });
 
-  it('FAILS when the FULL AI conn string is wired but local_authentication_disabled is removed', () => {
+  it('FAILS when the FULL AI conn string is wired but local auth is re-enabled (local_authentication_enabled flipped to true)', () => {
     // The coupled invariant, exercised: the same full-conn-string app_setting
     // that is ACCEPTED while local auth is disabled becomes a VIOLATION the
     // moment the AAD-only lock is removed (the ikey could then authenticate).
@@ -541,20 +541,21 @@ describe('MG-24 S1: the static gate behaves — accepts the residual, catches re
       copyInfra(dst);
       const rootMain = path.join(dst, 'main.tf');
       const src = fs.readFileSync(rootMain, 'utf8');
-      // Break the coupling: disable the AAD-only lock while the full conn string
-      // remains in the Function App app_settings. Anchor to the real assignment
-      // line (`^\s*local_authentication_disabled`) — a bare token replace would
-      // hit the prose COMMENT occurrence first and leave the code untouched.
+      // Break the coupling: re-enable local auth (flip the AAD-only lock OFF)
+      // while the full conn string remains in the Function App app_settings.
+      // Anchor to the real assignment line (`^\s*local_authentication_enabled`) —
+      // a bare token replace would hit the prose COMMENT occurrence first and
+      // leave the code untouched.
       const unlocked = src.replace(
-        /^(\s*)local_authentication_disabled\s*=\s*true/m,
-        '$1local_authentication_disabled = false'
+        /^(\s*)local_authentication_enabled\s*=\s*false/m,
+        '$1local_authentication_enabled = true'
       );
       expect(unlocked).not.toEqual(src); // the flag existed
-      expect(unlocked).toMatch(/^\s*local_authentication_disabled\s*=\s*false/m); // code line flipped
+      expect(unlocked).toMatch(/^\s*local_authentication_enabled\s*=\s*true/m); // code line flipped
       fs.writeFileSync(rootMain, unlocked);
       const { code, out } = runGate(dst);
       expect(code).not.toBe(0);
-      expect(out).toMatch(/coupled-invariant violation|WITHOUT local_authentication_disabled/);
+      expect(out).toMatch(/coupled-invariant violation|WITHOUT local_authentication_enabled/);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -698,7 +699,9 @@ describe('MG-24 S1: the fail-closed plan/state inspection walks real VALUES (tf-
               type: 'azurerm_application_insights',
               name: 'main',
               values: {
-                local_authentication_disabled: opts?.localAuthDisabled ?? true,
+                // Inverted attribute: local auth DISABLED (the safe default) is
+                // `local_authentication_enabled: false` — azurerm v5 rename.
+                local_authentication_enabled: !(opts?.localAuthDisabled ?? true),
                 instrumentation_key: IKEY,
               },
             },
@@ -734,7 +737,7 @@ describe('MG-24 S1: the fail-closed plan/state inspection walks real VALUES (tf-
     expect(out).toMatch(/input not found/);
   });
 
-  it('PASSES a real plan with the accepted-AI residual (managed ikey, local_authentication_disabled=true)', () => {
+  it('PASSES a real plan with the accepted-AI residual (managed ikey, local_authentication_enabled=false)', () => {
     const connString = `InstrumentationKey=${IKEY};IngestionEndpoint=https://x.in.applicationinsights.azure.com/`;
     const { code, out } = runInspect(writePlan(planWith(connString)));
     expect(code).toBe(0);

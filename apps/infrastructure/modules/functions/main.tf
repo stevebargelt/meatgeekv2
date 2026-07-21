@@ -13,7 +13,7 @@
 #     APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD. The FULL
 #     TF-managed connection string (InstrumentationKey included, as Microsoft
 #     requires) is placed in app settings, but the ikey CANNOT authenticate
-#     ingestion because the AI resource sets local_authentication_disabled=true
+#     ingestion because the AI resource sets local_authentication_enabled=false
 #     (AAD-only). This residual is safe ONLY while local auth stays disabled —
 #     enforced by the pre-apply secret-inspection gate. See the MG-24 ADR.
 #   * CORS is explicit per-environment (no wildcard). App Service Authentication
@@ -93,7 +93,7 @@ resource "azurerm_linux_function_app" "main" {
     # authenticate with an AAD token. The FULL connection string (InstrumentationKey
     # included) is required by Microsoft as the destination-resource identifier
     # even under Entra-only ingestion — but the ikey CANNOT authenticate because
-    # local_authentication_disabled=true on the AI resource. This ikey-in-state
+    # local_authentication_enabled=false on the AI resource. This ikey-in-state
     # residual is safe ONLY while local auth stays disabled; the pre-apply
     # secret-inspection gate enforces that coupling.
     "APPLICATIONINSIGHTS_AUTHENTICATION_STRING" = "Authorization=AAD"

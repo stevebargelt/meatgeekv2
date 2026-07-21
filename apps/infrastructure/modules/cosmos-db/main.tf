@@ -34,7 +34,7 @@ resource "azurerm_cosmosdb_account" "main" {
   # local auth off. This makes the in-state key a present-but-non-authenticating
   # residual, mirroring the App Insights posture (MG-24 ADR). The pre-apply
   # secret-inspection gate rejects this account if this flag is ever removed.
-  local_authentication_disabled = true
+  local_authentication_enabled = false
 
   consistency_policy {
     consistency_level       = var.consistency_level
