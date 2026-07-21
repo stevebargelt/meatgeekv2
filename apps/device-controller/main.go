@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -17,6 +18,7 @@ import (
 
 	dc_i2c "github.com/davecheney/i2c"
 	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
+	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/telemetry"
 
 	// Updated to gobot.io/x/gobot/v2 for Go 1.25 compatibility
 	"gobot.io/x/gobot/v2"
@@ -37,6 +39,19 @@ var SmokerStatus = Status {
 }
 
 func main() {
+
+    // Re-add observability (MG-6). Telemetry is configured from the environment
+    // (APPINSIGHTS_CONNECTION_STRING); an empty value runs a no-op exporter so
+    // the controller works fully offline. device.id comes from the SmokerID.
+    shutdownTelemetry, err := telemetry.Setup(context.Background(), telemetry.ConfigFromEnv(SmokerStatus.SmokerID))
+    check(err)
+    defer func() {
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        if err := shutdownTelemetry(shutdownCtx); err != nil {
+            log.Printf("telemetry shutdown: %v", err)
+        }
+    }()
 
     manager := gobot.NewManager()
     deviceApi := api.NewAPI(manager)

@@ -414,7 +414,7 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runPublisher(ctx, q, iotClient, deviceID)
+		runPublisher(ctx, q, iotClient, deviceID, tracer)
 	}()
 
 	// Wait for ctx cancellation. The collector closes its samples
@@ -439,6 +439,43 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	return nil
 }
 
+// buildPublishProperties assembles the IoT Hub message properties for one
+// record: the deterministic messageId, the optional correlation.id
+// (carried since #5), and the injected W3C traceparent from the active
+// span in ctx. The traceparent lets the downstream Functions/API layers
+// continue the distributed trace; correlation.id is retained alongside it.
+func buildPublishProperties(ctx context.Context, deviceID, messageID string, rec queueRecord) map[string]string {
+	props := map[string]string{
+		iothub.MessageIDPropertyName: messageID,
+	}
+	if rec.Correlation != "" {
+		props[iothub.CorrelationIDPropertyName] = rec.Correlation
+	}
+	// Inject the W3C traceparent (and any tracestate) from the publish
+	// span. When tracing is in no-op/dev mode with a valid span context,
+	// a traceparent is still emitted; with no span it is a no-op.
+	telemetry.InjectTraceContext(ctx, props)
+	return props
+}
+
+// cookIDFromPayload best-effort extracts the cookId from a rendered
+// TemperatureReading payload so it can be stamped as the cook.id custom
+// dimension. Returns "" when the payload is unparseable or cookId is
+// absent (the V2 nullable behavior); dimension stamping is non-critical
+// so parse failure is swallowed rather than dropping the publish.
+func cookIDFromPayload(payload json.RawMessage) string {
+	var reading struct {
+		CookID *string `json:"cookId"`
+	}
+	if err := json.Unmarshal(payload, &reading); err != nil {
+		return ""
+	}
+	if reading.CookID == nil {
+		return ""
+	}
+	return *reading.CookID
+}
+
 // runPublisher drains the queue head-first, publishing each record and
 // only Ack'ing on success. On publish failure the record stays at the
 // head; the loop sleeps publishRetryDelay before trying again. On a fully
@@ -451,6 +488,7 @@ func runPublisher(
 		Close() error
 	},
 	deviceID string,
+	tracer trace.Tracer,
 ) {
 	for {
 		if ctx.Err() != nil {
@@ -479,17 +517,27 @@ func runPublisher(
 			continue
 		}
 
-		messageID := wire.MintMessageId(deviceID, rec.Timestamp, rec.Seq)
-		props := map[string]string{
-			iothub.MessageIDPropertyName: messageID,
-		}
-		if rec.Correlation != "" {
-			props[iothub.CorrelationIDPropertyName] = rec.Correlation
-		}
+		// Start a per-record publish span. Its context is what we inject
+		// as the W3C traceparent property, so it must wrap the property
+		// build + publish. span.End is deferred via a closure below so it
+		// fires on every loop-continue path.
+		publishCtx, span := tracer.Start(ctx, "publisher.publish")
 
-		publishCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := client.PublishTelemetry(publishCtx, rec.Payload, props)
+		messageID := wire.MintMessageId(deviceID, rec.Timestamp, rec.Seq)
+		props := buildPublishProperties(publishCtx, deviceID, messageID, rec)
+		// Stamp the six standard custom dimensions on the span so the
+		// exported trace is pivotable on device/cook/correlation/path.
+		span.SetAttributes(telemetry.Dimensions{
+			DeviceID:       deviceID,
+			CookID:         cookIDFromPayload(rec.Payload),
+			CorrelationID:  rec.Correlation,
+			ProcessingPath: "queue-publish",
+		}.Attributes()...)
+
+		timeoutCtx, cancel := context.WithTimeout(publishCtx, 30*time.Second)
+		err := client.PublishTelemetry(timeoutCtx, rec.Payload, props)
 		cancel()
+		span.End()
 
 		if err != nil {
 			logrus.WithError(err).
