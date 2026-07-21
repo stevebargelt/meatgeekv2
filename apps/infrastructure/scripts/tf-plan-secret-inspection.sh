@@ -192,28 +192,37 @@ ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type
 
 # The AI resource's OWN computed connection_string / instrumentation_key living in
 # its resource block is the inherent-in-state residual (a TF-managed resource
-# always stores its own computed attributes). We do NOT scan those resource
-# attributes; we scan the SINKS (app_settings / outputs). Collect the ikey values
+# always stores its own computed attributes). We do NOT credential-scan the raw
+# attribute VALUE (a TF-managed AI always carries it, so that would always trip);
+# instead App Insights is folded into the data-service local-auth enforcement in
+# --- 2b below, so the inherent residual is accepted ONLY when this AI resource
+# disables local auth (identical treatment to Cosmos/Storage/SignalR/Event Hubs).
+# Separately we scan the SINKS (app_settings / outputs). Collect the ikey values
 # so a bare instrumentation key copied verbatim into a sink can still be caught.
 # (Pre-apply the ikey may be known-after-apply/unknown; then this list is empty —
 # another reason the post-apply STATE run is required.)
 ai_ikeys="$(printf '%s\n' "${RESOURCES}" | jq -r '[.[] | select(.type=="azurerm_application_insights") | .values.instrumentation_key] | map(select(. != null and . != "")) | unique | .[]' 2>/dev/null || true)"
 
 # --- 2b. Collect the INHERENT-KEY data-service resources ---------------------
-# Cosmos DB, Storage, SignalR, the Event Hubs namespace, and IoT Hub each store
-# their OWN computed key / connection-string attributes in state (primary_key,
-# connection_strings, primary_access_key, the namespace's auto-created
-# RootManageSharedAccessKey, shared_access_policy[].primary_key …) — a TF-managed
+# Cosmos DB, Storage, SignalR, the Event Hubs namespace, App Insights, and IoT Hub
+# each store their OWN computed key / connection-string / instrumentation-key
+# attributes in state (primary_key, connection_strings, primary_access_key, the
+# namespace's auto-created RootManageSharedAccessKey, shared_access_policy[].primary_key,
+# the App Insights instrumentation_key / connection_string …) — a TF-managed
 # resource ALWAYS persists its computed attributes, and there is no argument that
 # suppresses them. Unlike a sink, these are inherent. They are a
 # NON-authenticating residual ONLY when local/key auth is DISABLED on the
 # resource (so the in-state key cannot authenticate). If local auth is left
-# ENABLED, that in-state key IS a live credential -> VIOLATION. The
-# disable-flag differs per service:
-#     azurerm_cosmosdb_account   -> local_authentication_disabled == true
-#     azurerm_storage_account    -> shared_access_key_enabled     == false
-#     azurerm_signalr_service    -> local_auth_enabled            == false
-#     azurerm_eventhub_namespace -> local_authentication_enabled  == false
+# ENABLED, that in-state key IS a live credential -> VIOLATION. App Insights is
+# enforced here IDENTICALLY to the other data services: its inherent
+# ikey/connection-string residual is accepted ONLY when THIS specific AI resource
+# sets local_authentication_disabled=true (else VIOLATION). The disable-flag
+# differs per service:
+#     azurerm_cosmosdb_account     -> local_authentication_disabled == true
+#     azurerm_storage_account      -> shared_access_key_enabled     == false
+#     azurerm_signalr_service      -> local_auth_enabled            == false
+#     azurerm_eventhub_namespace   -> local_authentication_enabled  == false
+#     azurerm_application_insights -> local_authentication_disabled == true
 # IoT Hub is the acknowledged EXCEPTION (devices/data-pusher/device-controller
 # authenticate with SAS keys, so key auth must stay on): its key attributes are
 # accepted WITH A NOTE, mitigated by restricted state access (MG-24 ADR).
@@ -229,14 +238,16 @@ data_service_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
           or .type=="azurerm_storage_account"
           or .type=="azurerm_signalr_service"
           or .type=="azurerm_eventhub_namespace"
+          or .type=="azurerm_application_insights"
           or .type=="azurerm_iothub")
     | { type: .type,
         address: .address,
         disabled: (
-          if   .type=="azurerm_cosmosdb_account"   then (.values.local_authentication_disabled == true)
-          elif .type=="azurerm_storage_account"    then (.values.shared_access_key_enabled == false)
-          elif .type=="azurerm_signalr_service"    then (.values.local_auth_enabled == false)
-          elif .type=="azurerm_eventhub_namespace" then (.values.local_authentication_enabled == false)
+          if   .type=="azurerm_cosmosdb_account"     then (.values.local_authentication_disabled == true)
+          elif .type=="azurerm_storage_account"      then (.values.shared_access_key_enabled == false)
+          elif .type=="azurerm_signalr_service"      then (.values.local_auth_enabled == false)
+          elif .type=="azurerm_eventhub_namespace"   then (.values.local_authentication_enabled == false)
+          elif .type=="azurerm_application_insights" then (.values.local_authentication_disabled == true)
           else false end)
       }
   ]
@@ -435,7 +446,7 @@ inspect_data_services() {
       echo "  · accepted inherent key residual (local/key auth disabled — the in-state key of ${rtype} is non-authenticating): ${raddr}"
       continue
     fi
-    report "resource" "${raddr}" "TF-managed ${rtype} persists its inherent key/connection-string attributes in state, but local/key auth is NOT disabled on it — that in-state key is a LIVE credential. Set local_authentication_disabled=true (Cosmos) / shared_access_key_enabled=false (Storage) / local_auth_enabled=false (SignalR) / local_authentication_enabled=false (Event Hubs namespace) to make the residual non-authenticating (MG-24 gate)"
+    report "resource" "${raddr}" "TF-managed ${rtype} persists its inherent key/connection-string/instrumentation-key attributes in state, but local/key auth is NOT disabled on it — that in-state key is a LIVE credential. Set local_authentication_disabled=true (Cosmos / App Insights) / shared_access_key_enabled=false (Storage) / local_auth_enabled=false (SignalR) / local_authentication_enabled=false (Event Hubs namespace) to make the residual non-authenticating (MG-24 gate)"
   done
 }
 

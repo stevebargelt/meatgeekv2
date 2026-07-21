@@ -54,21 +54,32 @@
 #   state — this is unavoidable while the resource is TF-managed. It is ACCEPTED
 #   as low-risk: App Insights telemetry is write-only, the Function App
 #   authenticates ingestion via AAD (Monitoring Metrics Publisher role +
-#   APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD) so the ingestion
-#   key is never used for authentication, and remote-state access is restricted.
-#   Correspondingly, main.tf:94-95 extracts ONLY the non-secret IngestionEndpoint
-#   substring — regex("IngestionEndpoint=([^;]+)", ...connection_string) wrapped
-#   in nonsensitive() — into a local, and only that endpoint reaches app_settings.
+#   APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD) so the embedded
+#   ingestion key is never used for authentication, and remote-state access is
+#   restricted.
 #
-#   The allowance is NARROW and does NOT widen the secret scans. It covers ONLY
-#   (a) the resource's own inherent computed attribute in state and (b) the
-#   endpoint-extraction local above. It is NOT a blanket App Insights exemption:
-#   checks 7 and 9 STILL FAIL on a real secret VALUE — a connection string /
-#   primary|secondary|access key / SharedAccessKey / instrumentation key —
-#   assigned into an app_settings map OR emitted as an output, for ANY service
-#   INCLUDING App Insights. A raw azurerm_application_insights.main.connection_string
-#   copied into app_settings or an output is caught by the .connection_string
-#   pattern below; the residual never sanctions that.
+#   SHIPPED MODEL (supersedes the earlier endpoint-only design): the Function App
+#   passes the FULL TF-managed App Insights connection string — InstrumentationKey
+#   INCLUDED — as APPLICATIONINSIGHTS_CONNECTION_STRING (root main.tf sets
+#   local.appinsights_connection_string = nonsensitive(azurerm_application_insights
+#   .main.connection_string); the functions module binds it verbatim). Microsoft
+#   REQUIRES the full connection string with its InstrumentationKey as the
+#   destination-resource identifier even under Entra, so this is REQUIRED and
+#   ACCEPTED — NOT a violation. The earlier design that extracted only the
+#   IngestionEndpoint substring into app_settings is SUPERSEDED and no longer how
+#   the stack is wired.
+#
+#   The allowance is a NARROW, COUPLED invariant — it does NOT widen the secret
+#   scans. The full AI connection string in app_settings is accepted ONLY while
+#   `local_authentication_disabled = true` on the azurerm_application_insights
+#   resource forces AAD-only ingestion, so the embedded ikey CANNOT authenticate.
+#   If local auth is NOT disabled, that very same full connection string in
+#   app_settings is a VIOLATION (check 9). And it is NOT a blanket App Insights
+#   exemption: checks 7 and 9 STILL FAIL on the AI connection string as an OUTPUT
+#   (an export surface — never accepted) and on every OTHER secret VALUE — a
+#   connection string / primary|secondary|access key / SharedAccessKey — for ANY
+#   service including App Insights. The authoritative runtime proof of the same
+#   coupled invariant is the plan/state gate (scripts/tf-plan-secret-inspection.sh).
 #
 # Usage: tf-static-checks.sh [INFRA_DIR]
 #   INFRA_DIR defaults to the directory that contains this script's parent
