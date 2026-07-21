@@ -200,6 +200,32 @@ require_tools() {
   az account show >/dev/null 2>&1 || die "Not authenticated. Run: az login"
 }
 
+# Idempotent role-assignment (create-if-absent), consistent with every other
+# resource here. On a modern Azure CLI `az role assignment create` returns a
+# non-zero "role assignment already exists" error for an already-present
+# (assignee, role, scope) tuple, which would break the stated safe-to-re-run
+# contract on the SECOND bootstrap run. Guard the create with a list-first
+# existence check. The list query is `|| true`-guarded so an empty/no-match
+# result (legitimate on a first run) does not abort under `set -euo pipefail`.
+ensure_role_assignment() {
+  local object_id="$1" principal_type="$2" role="$3" scope="$4"
+  local existing
+  existing="$(az role assignment list \
+    --assignee "$object_id" \
+    --role "$role" \
+    --scope "$scope" \
+    --query "[0].id" -o tsv 2>/dev/null || true)"
+  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+    return 0
+  fi
+  az role assignment create \
+    --assignee-object-id "$object_id" \
+    --assignee-principal-type "$principal_type" \
+    --role "$role" \
+    --scope "$scope" \
+    -o none
+}
+
 # --------------------------------------------------------------------------
 # 1. Durable remote-state storage + per-env containers (create-if-absent)
 # --------------------------------------------------------------------------
@@ -277,12 +303,7 @@ bootstrap_state_backend() {
   if [ -n "$operator_oid" ] && [ "$operator_oid" != "null" ]; then
     # Storage Blob Data Contributor on the state account so `--auth-mode login`
     # can create/list containers. Idempotent (create is a no-op if already held).
-    az role assignment create \
-      --assignee-object-id "$operator_oid" \
-      --assignee-principal-type User \
-      --role "Storage Blob Data Contributor" \
-      --scope "$state_sa_id" \
-      -o none 2>/dev/null || true
+    ensure_role_assignment "$operator_oid" User "Storage Blob Data Contributor" "$state_sa_id" 2>/dev/null || true
     ok "Storage Blob Data Contributor granted to the operator on ${STATE_STORAGE_ACCOUNT}"
     # Data-plane RBAC is eventually consistent; give the grant a moment to
     # propagate before the first `--auth-mode login` blob call.
@@ -385,12 +406,7 @@ JSON
     # `terraform plan` can read live resource state. This role CANNOT mutate
     # infrastructure — an accidental CI apply fails closed. Idempotent.
     log "Assigning ${CI_PLAN_ROLE} (plan/read-only) at subscription scope for ${env}"
-    az role assignment create \
-      --assignee-object-id "$sp_id" \
-      --assignee-principal-type ServicePrincipal \
-      --role "$CI_PLAN_ROLE" \
-      --scope "/subscriptions/${sub_id}" \
-      -o none
+    ensure_role_assignment "$sp_id" ServicePrincipal "$CI_PLAN_ROLE" "/subscriptions/${sub_id}"
     ok "${CI_PLAN_ROLE} granted to the ${env} CI identity (no write/apply role)"
 
     # Data-plane access to THIS ENVIRONMENT'S state container ONLY — not the
@@ -399,12 +415,7 @@ JSON
     # cannot touch prod.tfstate, and vice-versa.
     if [ -n "$state_sa_id" ]; then
       container_scope="${state_sa_id}/blobServices/default/containers/${container}"
-      az role assignment create \
-        --assignee-object-id "$sp_id" \
-        --assignee-principal-type ServicePrincipal \
-        --role "Storage Blob Data Contributor" \
-        --scope "$container_scope" \
-        -o none
+      ensure_role_assignment "$sp_id" ServicePrincipal "Storage Blob Data Contributor" "$container_scope"
       ok "Storage Blob Data Contributor granted on container ${container} ONLY"
     else
       warn "State storage account not found for blob-role scope — run state bootstrap first"
@@ -529,12 +540,7 @@ JSON
   # dev container ONLY. The deploy identity must never write state.
   if [ -n "$state_sa_id" ]; then
     container_scope="${state_sa_id}/blobServices/default/containers/${container}"
-    az role assignment create \
-      --assignee-object-id "$sp_id" \
-      --assignee-principal-type ServicePrincipal \
-      --role "Storage Blob Data Reader" \
-      --scope "$container_scope" \
-      -o none
+    ensure_role_assignment "$sp_id" ServicePrincipal "Storage Blob Data Reader" "$container_scope"
     ok "Storage Blob Data Reader granted on container ${container} ONLY (read-only)"
   else
     warn "State storage account not found for blob-role scope — run state bootstrap first"
