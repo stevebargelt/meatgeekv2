@@ -1,8 +1,10 @@
 ---
 id: MG-12
 type: story
-status: active
+status: done
 title: azurerm-v5-deprecation-cleanup
+closed: 2026-07-21
+closed_commit: c37397a0d2073a9f83947437266a72ccd7a98b84
 ---
 
 #### Context
