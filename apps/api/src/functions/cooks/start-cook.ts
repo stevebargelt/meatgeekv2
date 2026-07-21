@@ -49,14 +49,15 @@ export async function startCookHandler(
     // Parse request body
     const body = await request.json() as StartCookRequest;
     
-    // Validate required fields
-    if (!body.name || !body.deviceId || !body.meatType) {
+    // Validate required fields. name must be non-empty after trimming so a
+    // whitespace-only name never mints a Cook.
+    if (!body.name || body.name.trim().length === 0 || !body.deviceId || !body.meatType) {
       return {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
         jsonBody: {
           error: 'VALIDATION_ERROR',
-          message: 'Missing required fields: name, deviceId, meatType',
+          message: 'Missing required fields: name (non-empty), deviceId, meatType',
           requestId: context.invocationId
         }
       };
@@ -67,7 +68,7 @@ export async function startCookHandler(
       id: `cook-${Date.now()}`,
       userId: 'user-1', // TODO: Extract from auth token
       deviceId: body.deviceId,
-      name: body.name,
+      name: body.name.trim(),
       status: 'active',
       startTime: new Date().toISOString(),
       meatType: body.meatType,
