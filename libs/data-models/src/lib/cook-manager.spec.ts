@@ -386,10 +386,10 @@ describe('CookManager', () => {
       expect(result.errors).toContain('Cook name must be at least 3 characters');
     });
 
-    it('treats whitespace-only names as too short (validateCook trims, while createCook does not)', () => {
-      // BUG: cook-manager and DataValidator disagree on name trimming —
-      // CookManager.createCook passes request.name through verbatim; CookManager.validateCook
-      // (and DataValidator) trims before length check. Characterization test — follow-up needed.
+    it('treats whitespace-only names as too short (trim is now unified across createCook and validateCook)', () => {
+      // MG-9: name trimming is unified — CookManager.createCook, CookManager.validateCook,
+      // and DataValidator all trim before the length check, so a whitespace-only name
+      // collapses to '' and is rejected consistently. (Was a divergence pre-MG-9.)
       const result = CookManager.validateCook({
         name: '   ',
         deviceId: 'device-1',
