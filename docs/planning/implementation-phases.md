@@ -123,8 +123,8 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
 
 #### Authentication & Authorization
 - [ ] **Security Implementation**
-  - Supabase Auth integration for user management
-  - JWT token validation middleware with Supabase
+  - Azure Entra (App Service Easy Auth) integration for API authentication
+  - Platform-layer bearer-token validation via the Entra `access_as_user` scope
   - Role-based access control (device owners, read-only users, admin)
   - API key authentication for device communication
 
@@ -158,7 +158,7 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
 - **Device cook session management** working: cookId enrichment and state recovery
 - Shared components demonstrate consistency between mobile and web
 - Real-time temperature updates working end-to-end via lightweight Functions
-- Authentication and authorization protecting API endpoints with Supabase JWT
+- Authentication and authorization protecting API endpoints via Azure Entra Easy Auth
 
 ---
 
@@ -174,7 +174,7 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
   - Device settings and configuration
 
 - [ ] **Authentication Flow**
-  - Supabase Auth integration with multiple providers
+  - Azure Entra sign-in acquiring bearer tokens for the `access_as_user` API scope
   - Secure token storage with biometric unlock option
   - User profile management and device association
   - Social login support (Google, Apple, GitHub)

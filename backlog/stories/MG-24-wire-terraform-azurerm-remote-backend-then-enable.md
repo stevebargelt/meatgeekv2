@@ -6,6 +6,58 @@ title: greenfield V2 infrastructure bootstrap — remote state/identity + create
 created: 2026-07-19
 ---
 
+## LIVE BOOTSTRAP BLOCKED — operational review found blocking defects (2026-07-20)
+
+The deterministic layer merged (`21be588`, PR #4) but an OPERATOR OPERATIONAL review (reproducing the real path) found it does NOT actually work end-to-end. Static checks (fmt/validate/static-greps/bootstrap unit tests) + red-wide validated SHAPE, not the operational path. **Do NOT run the live bootstrap until the items below are corrected, merged, and RE-REVIEWED (with operational validation), and the runbook can actually complete MG-24 + unblock MG-21's authenticated dev proof.** MG-24 stays OPEN.
+
+### Corrective items (all blocking unless noted)
+1. **Dev CI plan is broken.** `.github/workflows/ci.yml` runs `terraform init -backend=false` then `plan` → fails "Backend initialization required" (reproduced) and would plan against empty state. Fix: `terraform init -backend-config=environments/backend-dev.hcl` and plan against persistent dev state (reconcile the TF-owned dev stack), as prod does. Structure it so it's meaningful only post-bootstrap.
+2. **App Insights AAD ingestion is wired WRONG (invalid, drops telemetry).** Endpoint-only `IngestionEndpoint=<url>` is invalid — Microsoft requires the InstrumentationKey in the connection string as the destination-resource IDENTIFIER, even under Entra auth. Fix: pass the FULL TF-managed connection string to `APPLICATIONINSIGHTS_CONNECTION_STRING`; keep `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD` + Monitoring Metrics Publisher; **set `local_authentication_disabled = true` on `azurerm_application_insights`** so the ikey cannot authenticate ingestion. REWRITE the ADR: the ikey remains in state/app_settings as an identifier but cannot authenticate (local auth disabled). Update the static gate to reflect the corrected model.
+3. **Authenticated MG-21 dev smoke is currently IMPOSSIBLE.** `functions_auth_client_id` defaults empty, no tfvars supplies one; Easy Auth rejects every request but configures NO identity provider. Fix: provision/document a SEPARATE dev Entra API auth registration (client/tenant/audience), configure Easy Auth with a real provider, and document the operator's token-acquisition path + how to invoke an authenticated endpoint. Do NOT reuse the GitHub deployment OIDC registration as the app's user/API auth design without explicit architecture + review.
+4. **"Deployment identities" cannot deploy.** `bootstrap.sh` grants the GitHub identities only **Reader**, but `app-deploy-prod.yml` uses that identity for `func publish` (Reader can't publish). Separate: CI Terraform PLAN identity = Reader + its env's state container; APP DEPLOYMENT identity = least-privilege publish scoped to its Function App. Stop calling the plan identities "deployment identities." Prod's deploy identity+role is a REQUIRED MG-25 AC before `PROD_DEPLOY_ENABLED`.
+5. **Runbook omits `ARM_SUBSCRIPTION_ID`.** AzureRM v4 requires it; `az account set` alone is insufficient. Export/pass `ARM_SUBSCRIPTION_ID` (or `subscription_id`) after verifying the selected subscription.
+6. **The "authoritative" secret inspection is not a gate.** The README grep matches field NAMES not values, `grep ... || echo "no secrets"` ALWAYS exits 0, it flags the accepted AI attributes, and it's not even in the runbook. Replace with a structured FAIL-CLOSED plan/state inspection: parse Terraform JSON, distinguish names from values, allow ONLY the accepted AI residual, reject prohibited credentials in app_settings/outputs, EXIT NONZERO on violation, and put it in the runbook BEFORE apply.
+7. **No-drift claim is false.** `modules/monitoring/main.tf` (~:33, :275) derives budget start dates from `timestamp()` (the static gate ignores them) → changes monthly → 2nd-plan-no-op breaks across month boundaries. Remove the drift; gate must catch it.
+8. **Bootstrap doc corrections:** containers are `tfstate-dev`/`tfstate-prod` (not `tfstate`); `STATE_CONTAINER` is NOT a supported override; state RBAC is container-scoped (not account-scoped); NO legacy `terraform.tfstate` is tracked/present (remove that false claim).
+9. **Global-uniqueness audit:** apply the deterministic subscription-derived suffix consistently to ALL globally-scoped names (state storage account, Function App, IoT Hub, Event Hubs namespace, SignalR) — or document + test a deliberate exception. (Only Cosmos + Functions storage currently have it.)
+
+### App-auth token/consent contract + refined defaults (OPERATOR-APPROVED 2026-07-20)
+
+Item 3 app-auth model = bearer-token VALIDATION-only (no interactive login, no client secret, token store disabled). Confirmed no browser AI producer exists, so `local_authentication_disabled=true` (item 2) is safe. Required contract:
+
+**Token issuance / consent (must be complete — not a bare --resource):**
+- The dev API Entra registration EXPOSES a delegated scope `access_as_user`; the smoke-test client app is explicitly authorized/preauthorized for that scope.
+- Operator token acquisition uses the v2 SCOPE form: `az account get-access-token --scope "${APP_ID_URI}/access_as_user"` (a bare `--resource` will NOT work without scope+consent config).
+
+**Easy Auth validation (require_authentication=true, unauthenticated_action=Return401, token store DISABLED, NO client secret):**
+- single dev tenant issuer; allowed audience = the EXACT API App ID URI; an explicit allowed client application; initially the operator/test identity if practical.
+
+**Registration lifecycle:** the dev API registration lives in the bootstrap boundary BUT is VERSION-CONTROLLED + IDEMPOTENTLY reconciled (e.g. `azuread_application`/scripted, NOT a portal/manual object). Dev and prod registrations remain SEPARATE.
+
+**Smoke-test evidence (MG-21):** no-token → 401; wrong-audience/wrong-client → rejected; valid-token → 2xx + the matching invocation log. NEVER log or attach the token.
+
+**Refined defaults (operator-approved):**
+- Separate identity client-id vars: `AZURE_PLAN_CLIENT_ID` (Reader + its env state container) and `AZURE_APP_DEPLOY_CLIENT_ID` (Website Contributor scoped ONLY to the Function App). Distinct principals.
+- Dev-plan CI job gated on repo variable `DEV_TF_BACKEND_READY` (set ONLY after backend/OIDC/GitHub wiring works) — skip-clean until then, no expected-red job.
+- Budget `start_date`: use a `time_static` resource persisted in remote state (or a required, validated environment-inception-date var) — NOT `timestamp()`, NOT a committed rolling default.
+- The suffixed state-account name is derived IDENTICALLY across bootstrap, backend init (`backend-*.hcl`), and the workflows — single derivation, no divergent hardcoding.
+
+### Data-service local-auth posture (operator decision 2026-07-20, red-wide round 11)
+
+Every TF-managed data service stores its own keys as INHERENT computed attributes in state (Cosmos primary_key, Storage primary_access_key, IoT Hub SAS keys, SignalR primary_access_key), the same as the App Insights ikey. Resolution: DISABLE local/key auth where SAFE so those in-state keys cannot authenticate; document the rest; correct the over-strong "no data-plane secrets in state" claim.
+- Cosmos: local_authentication_disabled = true (FA + IoT routing use MI + RBAC).
+- SignalR: AAD-only / local auth disabled (FA uses the SignalR RBAC role).
+- Storage: shared_access_key_enabled = false ONLY IF the Function host storage (AzureWebJobsStorage) is fully managed-identity; VERIFY first, else keep keys as a documented exception (do NOT break Functions).
+- IoT Hub: KEEP key/SAS auth (device / data-pusher / device-controller connectivity) as an explicit DOCUMENTED exception with restricted state access.
+- Extend the secret-inspection gate to VERIFY local-auth-disabled on Cosmos/Storage/SignalR (accept their key-attribute residual only when local auth is off, like the App Insights binding); IoT Hub is the acknowledged exception.
+- Extend the ADR (learnings/decisions/) to cover all four services + the IoT exception. Correct the claim in README/runbook/docs to: no data-plane secret is USED or reaches app_settings/outputs; access is identity-based; TF-managed resources inherent key attributes are in state but NON-AUTHENTICATING where local auth is disabled; IoT Hub retains key-based device auth (documented exception), state access restricted.
+### Re-review requirement
+Re-review MUST exercise/verify the OPERATIONAL path (init/plan command validity, AAD ingestion per MS docs, RBAC sufficiency for the operation, fail-closed gate actually exits nonzero, runbook completeness), not just static shape.
+
+## Status (2026-07-20)
+
+**Deterministic greenfield layer MERGED to main as `21be588` (PR #4).** Remote state + OIDC identity bootstrap, per-env isolated state, V2-owned Cosmos, V2 naming, no subscription-id/timestamp drift, FA-name single source, managed identity across all services with **no avoidable secrets in state** (the AI resource-attribute residual is operator-accepted + ADR'd), Easy-Auth default-deny, V1-safety static gate, bootstrap script + runbook. Reviewed via 6 red-wide rounds (secrets-in-state, open-API, OIDC-subject, gate-honesty all caught + fixed) + green CI. **MG-24 stays OPEN** — remaining = the OPERATOR's out-of-band greenfield bootstrap + dev `plan`/`apply` (the 10-step dev proof) that creates the V2 dev stack. See `docs/infrastructure/bootstrap-runbook.md`.
+
 ## Authoritative Azure facts (2026-07-20)
 
 - `meatgeek-dev-rg` was deliberately DELETED. MeatGeek **V2 has NO Azure dev or prod infrastructure**.

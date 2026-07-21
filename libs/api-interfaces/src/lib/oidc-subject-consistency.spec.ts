@@ -25,6 +25,19 @@
  * The MG-21 prod-deploy-split.spec.ts owns the workflow-YAML structural
  * invariants; this file owns only the cross-artifact subject-consistency
  * invariant. The two suites are intentionally non-duplicative.
+ *
+ * MG-24 corrective item 4 (two-identity separation) does NOT change this
+ * invariant. The OIDC subject is derived from the job's `environment:`, not from
+ * WHICH service-principal client-id the login presents. Both the plan/read
+ * identity (`vars.AZURE_CLIENT_ID`) and the app-deployment identity
+ * (`vars.AZURE_APP_DEPLOY_CLIENT_ID`) bind the SAME per-environment GitHub
+ * Environment, so both present the same bootstrap-federated subject — bootstrap
+ * federates the subject once per environment and both SPs authenticate under it.
+ * prod-deploy-split.spec.ts owns the which-identity assertion; this suite only
+ * guards that the identity swap did not drop the `environment:` binding (which
+ * would break the subject). The DEV_TF_BACKEND_READY gate is likewise invisible
+ * here — the job still declares `environment: development` regardless of its
+ * `if:` gate, so its subject is unchanged.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -131,5 +144,21 @@ describe('MG-24: OIDC subject consistency (workflow ↔ bootstrap federated cred
         expect(environment).toBe('production');
       }
     }
+  });
+
+  it('app-deploy-prod func-publish keeps its production environment after the two-identity swap (item 4)', () => {
+    // MG-24 item 4 swaps the func-publish login to the app-deployment identity
+    // (AZURE_APP_DEPLOY_CLIENT_ID). That is a DIFFERENT service principal, but its
+    // OIDC subject is still `…:environment:production` — the subject is env-derived,
+    // not identity-derived. Guard that the swap did not drop the `environment:`
+    // binding, which would leave the login with a non-bootstrap-federated subject.
+    const authedJobs = azureAuthedJobs('app-deploy-prod.yml');
+    expect(authedJobs.length).toBeGreaterThan(0);
+    const prodSubject = `repo:${githubRepo}:environment:production`;
+    for (const { environment } of authedJobs) {
+      expect(environment).toBe('production');
+      expect(bootstrapSubjects).toContain(`repo:${githubRepo}:environment:${environment}`);
+    }
+    expect(bootstrapSubjects).toContain(prodSubject);
   });
 });

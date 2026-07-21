@@ -284,8 +284,10 @@ nx serve mobile
 # Run web app in development
 nx serve web
 
-# Deploy API to Azure
-nx deploy api
+# Deploy API to Azure Functions.
+# The deploy target runs `func azure functionapp publish {args.functionApp}`,
+# so it needs --functionApp=<Function App name> (there is no --env flag):
+nx deploy api --functionApp=$(terraform output -raw function_app_name)
 
 # Lint all projects
 nx run-many --target=lint --all
@@ -2628,8 +2630,13 @@ module "functions" {
   resource_group_name = azurerm_resource_group.meatgeek.name
   location           = azurerm_resource_group.meatgeek.location
   environment        = var.environment
-  cosmos_connection  = module.cosmos_db.connection_string
-  iot_hub_connection = module.iot_hub.event_hub_connection_string
+  # Identity-based data access (MG-24): the Function App runs under a managed
+  # identity and reaches Cosmos / IoT-telemetry Event Hub via RBAC over
+  # NON-SECRET endpoints. The former `connection_string` / key outputs on these
+  # modules were removed — no connection string or primary key is ever passed.
+  # See learnings/decisions/mg-24-appinsights-key-in-terraform-state.md.
+  cosmos_account_endpoint = module.cosmos_db.endpoint
+  eventhub_namespace_fqdn = module.iot_hub.eventhub_namespace_fqdn
   tags              = local.common_tags
 }
 
@@ -3125,7 +3132,7 @@ export async function processTemperatureData(
       "name": "eventHubMessages",
       "direction": "in",
       "eventHubName": "iothub-ehub-meatgeek-12345-abcdef",
-      "connection": "EventHubConnectionString",
+      "connection": "IOTHUB_EVENTS",
       "cardinality": "many",
       "consumerGroup": "$Default"
     }
@@ -3134,6 +3141,16 @@ export async function processTemperatureData(
   "entryPoint": "default"
 }
 ```
+
+> **Identity-based Event Hub trigger (MG-24).** The binding's `"connection":
+> "IOTHUB_EVENTS"` above is the shipped, identity-based wiring — it is **not** a
+> connection-string setting. The earlier plaintext `EventHubConnectionString`
+> model was removed. The shipped Function App reaches the IoT-telemetry Event Hub
+> via its managed identity: Terraform provisions the non-secret setting
+> `IOTHUB_EVENTS__fullyQualifiedNamespace`, and the host resolves the
+> `__fullyQualifiedNamespace` suffix against the app identity. No connection
+> string is provisioned. See
+> `learnings/decisions/mg-24-appinsights-key-in-terraform-state.md`.
 
 **Architecture Pattern Summary:**
 
@@ -3701,7 +3718,7 @@ jobs:
 
 **Deployment Workflow:**
 
-> **Historical design note — superseded.** The single `deploy.yml` example below (one workflow, every push to `main`, conditionally building/deploying the web app) reflects the original plan and is **not** what shipped. The shipped model splits prod deploy into two standalone workflows: `infra-deploy-prod.yml` (Terraform infrastructure, `workflow_dispatch`-only and **plan-only** — `terraform init` + `plan`, no `apply`; auto-apply-on-merge and the apply step are deferred to MG-24 pending a Terraform remote state backend) and `app-deploy-prod.yml` (Functions **API only** via `nx deploy api --env=prod`). The app deploy is **CI-gated**: it triggers on `workflow_run` *after* the CI/CD Pipeline completes green on a push to `main`, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'` — there is **no** push trigger and **no** `workflow_dispatch` (retry via GitHub re-run). It builds its own artifact, verifies the Functions package, pins Azure Functions Core Tools, and consumes `AZURE_CREDENTIALS_PROD` as a `production`-environment secret. A stale-SHA guard skips (green) if `main` has advanced past the CI'd commit. There is **no** prod web / Static Web Apps deploy — the web app is deployed to dev only. Dev deployment (`deploy-dev`) still lives in `ci.yml`. See [CI/CD Pipeline](development/ci-cd.md) for the current, authoritative description. The YAML below is retained only as a record of the original intent.
+> **Historical design note — superseded.** The single `deploy.yml` example below (one workflow, every push to `main`, conditionally building/deploying the web app) reflects the original plan and is **not** what shipped. The shipped model splits prod deploy into two standalone workflows: `infra-deploy-prod.yml` (Terraform infrastructure, `workflow_dispatch`-only and **plan-only** — `terraform init` binding the per-env `azurerm` remote backend + `terraform plan`, no `apply`; the per-env remote backend (`backend-dev.hcl`/`backend-prod.hcl` with a derived state account) has since **shipped** under MG-24, but auto-apply-on-merge and the apply step stay deferred **by design** — a live greenfield apply is the operator's out-of-band acceptance step, not blocked on the backend) and `app-deploy-prod.yml` (Functions **API only** via `nx deploy api --functionApp=<prod Function App name>` — the deploy target runs `func azure functionapp publish {args.functionApp}` and takes no `--env` flag). The app deploy is **CI-gated**: it triggers on `workflow_run` *after* the CI/CD Pipeline completes green on a push to `main`, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'` — there is **no** push trigger and **no** `workflow_dispatch` (retry via GitHub re-run). It builds its own artifact, verifies the Functions package, pins Azure Functions Core Tools, and authenticates via **per-environment OIDC** — `azure/login@v2` with a GitHub-Environment-scoped federated credential (subject `environment:production`) and the `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` `production` Environment variables — **not** the retired long-lived `AZURE_CREDENTIALS_PROD` service-principal secret. A stale-SHA guard skips (green) if `main` has advanced past the CI'd commit. There is **no** prod web / Static Web Apps deploy — the web app is deployed to dev only. Dev deployment (`deploy-dev`) still lives in `ci.yml`. See [CI/CD Pipeline](development/ci-cd.md) for the current, authoritative description. The YAML below is retained only as a record of the original intent.
 
 ```yaml
 # .github/workflows/deploy.yml
@@ -3729,7 +3746,8 @@ jobs:
       - name: Deploy affected apps
         run: |
           if nx print-affected --select=projects | grep -q "api"; then
-            nx deploy api
+            # deploy target runs `func azure functionapp publish {args.functionApp}` (no --env flag)
+            nx deploy api --functionApp=<Function App name>
           fi
 
           if nx print-affected --select=projects | grep -q "web"; then

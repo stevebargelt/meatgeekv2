@@ -1,39 +1,66 @@
 # Authentication & Authorization
 
+> **Shipped V2 authentication is Azure Entra (App Service Easy Auth) — NOT Supabase.**
+> The MG-24 V2 infrastructure enforces authentication at the **platform layer**: the
+> Function App's `auth_settings_v2` / `active_directory_v2` provider validates inbound
+> Entra bearer tokens before any function runs (`require_authentication = true`,
+> `unauthenticated_action = Return401`, no client secret). See
+> [Terraform Setup → Authentication Integration](../infrastructure/terraform-setup.md#authentication-integration)
+> and the [bootstrap runbook](../infrastructure/bootstrap-runbook.md) for the shipped model.
+>
+> The **application-layer** sections further down (Authentication Methods, the JWT
+> middleware, RBAC, and the client/mobile SDK examples) describe an **earlier
+> Supabase-based design that was never implemented** — there is no Supabase code in
+> `apps/`/`libs/`. Treat them as an unbuilt proposal, not current behavior; they must
+> be reconciled to the Entra model (or removed) by the application owner before they
+> can be trusted.
+
 ## Overview
 
-MeatGeek V2 implements modern authentication using **Supabase Auth** as the primary authentication provider. This provides a cost-effective, developer-friendly solution with extensive feature support.
+MeatGeek V2 authenticates API callers with **Azure Entra** via Azure App Service
+**Easy Auth** (`auth_settings_v2`). Authentication is enforced by the platform in
+front of the Azure Functions host — the application code does not implement a token
+provider or a sign-in flow. There is **no Supabase** and no external auth provider in
+the V2 stack.
 
 ## Authentication Architecture
 
-### Why Supabase Auth?
+### Why Azure Entra Easy Auth?
 
-- **Cost-effective**: $25/month for 100K MAU (vs $700+ with Auth0)
-- **Open-source**: No vendor lock-in, can self-host if needed
-- **Feature-rich**: Supports all authentication methods and social providers
-- **Developer experience**: Simple SDK integration with TypeScript support
-- **Security**: SOC 2 Type II compliance and enterprise-grade security
+- **Fail-closed by construction**: a Terraform precondition refuses to deploy the
+  Function App unless an Entra identity provider is configured, so an anonymous API
+  can never ship.
+- **Platform-enforced**: every request is validated (`Return401` on a missing/invalid
+  token) before any function runs, independent of a function's own `authLevel`.
+- **No long-lived secret**: Easy Auth only *validates* bearer tokens — no client
+  secret is set and no token is stored at rest (`token_store_enabled = false`).
+- **First-class Azure integration**: the identity provider is wired through the same
+  Terraform apply as the rest of the V2 stack; the dev Entra API registration is
+  created by the bootstrap.
 
 ### Integration Strategy
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Mobile/Web    │───▶│   Supabase Auth  │───▶│  Azure Functions│
-│   Applications  │    │    (JWT Tokens)  │    │  (JWT Validation)│
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                                        │
-                                                        ▼
-                                               ┌─────────────────┐
-                                               │   CosmosDB      │
-                                               │   (User Data)   │
-                                               └─────────────────┘
+┌─────────────────┐    ┌──────────────────┐    ┌──────────────────────────┐
+│   Mobile/Web    │───▶│   Azure Entra    │───▶│   Azure Functions        │
+│   Applications  │    │  (bearer tokens) │    │  (Easy Auth validates)   │
+└─────────────────┘    └──────────────────┘    └──────────────────────────┘
+                                                          │
+                                                          ▼
+                                                 ┌─────────────────┐
+                                                 │   CosmosDB      │
+                                                 │   (User Data)   │
+                                                 └─────────────────┘
 ```
 
-**Key Benefits:**
-- Use Supabase Auth for authentication only
-- Keep CosmosDB for application data storage
-- Leverage Azure Functions for API endpoints with JWT validation
-- Clean integration with Azure infrastructure
+**Key points:**
+- Clients acquire an Entra bearer token for the API's delegated `access_as_user`
+  scope (`api://<api-app-id>/access_as_user`).
+- Easy Auth validates the token's audience (`allowed_audiences` = the API App ID URI)
+  and the calling client (`allowed_applications` = the pre-authorized client id) at
+  the platform layer — the function never sees an unauthenticated request.
+- CosmosDB remains the application data store; access to it is via the Function App's
+  managed identity, not the caller's token.
 
 ## Authentication Methods Supported
 
@@ -91,10 +118,15 @@ interface MeatGeekJWTPayload {
 
 ### Token Validation Requirements
 
-1. **Signature Verification**: Validate JWT signature using Supabase public key
-2. **Expiration Check**: Ensure token is not expired
-3. **Audience Validation**: Verify token is for MeatGeek application
-4. **Issuer Validation**: Confirm token issued by trusted Supabase instance
+Token validation is performed by **Easy Auth at the platform layer** (not by
+application code), against the Entra identity provider:
+
+1. **Signature Verification**: Validate the JWT signature against the Entra tenant's
+   published signing keys (`tenant_auth_endpoint` = `https://login.microsoftonline.com/<tenant-id>/v2.0`)
+2. **Expiration Check**: Ensure the token is not expired
+3. **Audience Validation**: Verify `aud` matches the API App ID URI (`allowed_audiences`)
+4. **Client Validation**: Verify the calling client's `appid`/`azp` is pre-authorized
+   (`allowed_applications`); reject tokens minted by any other client
 
 ## Role-Based Access Control (RBAC)
 

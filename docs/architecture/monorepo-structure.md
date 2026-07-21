@@ -511,7 +511,7 @@ nx affected:lint                    # Lint affected projects
 # Infrastructure and deployment
 nx plan infrastructure --env=dev    # Plan Terraform changes
 nx apply infrastructure --env=dev   # Apply infrastructure
-nx deploy api                       # Deploy Azure Functions
+nx deploy api --functionApp=<name>  # Deploy Azure Functions (func publish; no --env)
 ```
 
 ## Project Dependencies

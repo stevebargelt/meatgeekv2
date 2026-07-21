@@ -25,6 +25,17 @@ resource "azurerm_cosmosdb_account" "main" {
   free_tier_enabled                = var.enable_free_tier
   multiple_write_locations_enabled = var.enable_multiple_write_locations
 
+  # Disable local (account-key / connection-string) authentication so the
+  # account's inherent computed key attributes (primary_key, connection_strings)
+  # — which Terraform stores in state for ANY managed resource — CANNOT
+  # authenticate a data-plane request. Access is AAD/RBAC only: the Function App
+  # and the IoT Hub identity each hold "Cosmos DB Built-in Data Contributor"
+  # (data-plane SQL role assignments in the root module), which keep working with
+  # local auth off. This makes the in-state key a present-but-non-authenticating
+  # residual, mirroring the App Insights posture (MG-24 ADR). The pre-apply
+  # secret-inspection gate rejects this account if this flag is ever removed.
+  local_authentication_disabled = true
+
   consistency_policy {
     consistency_level       = var.consistency_level
     max_interval_in_seconds = var.consistency_level == "BoundedStaleness" ? var.consistency_max_interval_in_seconds : null

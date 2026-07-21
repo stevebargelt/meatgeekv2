@@ -35,6 +35,17 @@ jobs:
   deploy-api:
     # Deploy only when the triggering CI run: succeeded, was a push (not a PR),
     # targeted main, AND the operator has flipped the PROD_DEPLOY_ENABLED switch.
+    #
+    # MG-25 PREREQUISITE (must exist BEFORE PROD_DEPLOY_ENABLED is set to 'true'):
+    # this job authenticates as the PROD app-deployment identity
+    # (vars.AZURE_APP_DEPLOY_CLIENT_ID for the production environment) with its
+    # `Website Contributor` role scoped to the prod Function App. MG-24 provisions
+    # ONLY the *dev* app-deployment identity (bootstrap.sh); the prod counterpart
+    # + its role assignment are an MG-25 deliverable and are NOT provisioned by
+    # this repo. Enabling PROD_DEPLOY_ENABLED before MG-25 has created that prod
+    # identity+role will make the azure/login step below fail closed (no valid
+    # OIDC federation / insufficient rights) rather than deploy — intended: the
+    # switch must not be flipped until the prerequisite is in place.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
@@ -99,11 +110,23 @@ jobs:
         if: steps.freshness.outputs.fresh == 'true'
         run: npm i -g azure-functions-core-tools@${{ env.FUNC_CORE_TOOLS_VERSION }}
 
-      - name: Azure login (OIDC)
+      # APP DEPLOYMENT identity (MG-24 two-identity model). Function-App publish is
+      # a data-plane action a Reader/plan identity cannot perform, so this login
+      # uses the SEPARATE least-privilege APP-DEPLOYMENT identity
+      # (AZURE_APP_DEPLOY_CLIENT_ID: Website Contributor scoped to the Function App
+      # only), NOT the plan/read identity (AZURE_CLIENT_ID: Reader + state).
+      #
+      # This workflow only CONSUMES vars.AZURE_APP_DEPLOY_CLIENT_ID — it does NOT
+      # provision it. For PRODUCTION that identity + its `Website Contributor` role
+      # assignment are an MG-25 prerequisite (MG-24's bootstrap.sh provisions the
+      # DEV app-deployment identity only, and explicitly documents the prod one as
+      # a deferred MG-25 gap). It must exist before PROD_DEPLOY_ENABLED is enabled;
+      # until then this login fails closed rather than deploying with a wrong role.
+      - name: Azure login (OIDC — app deployment identity)
         if: steps.freshness.outputs.fresh == 'true'
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          client-id: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
@@ -123,7 +146,14 @@ jobs:
         if: steps.freshness.outputs.fresh == 'true'
         run: |
           cd apps/infrastructure
-          terraform init -reconfigure -backend-config=environments/backend-prod.hcl
+          # Bind the per-env remote backend (prod state key meatgeek-v2/prod.tfstate)
+          # to read the function_app_name output. The state-account name is derived
+          # ONCE from the subscription id by the shared helper and injected as an
+          # extra -backend-config (single source, no literal in the hcl).
+          STATE_ACCOUNT="$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
+          terraform init -reconfigure \
+            -backend-config=environments/backend-prod.hcl \
+            -backend-config="storage_account_name=$STATE_ACCOUNT"
           NAME=$(terraform output -raw function_app_name)
           if [ -z "$NAME" ]; then
             echo "function_app_name Terraform output was empty — aborting deploy." >&2

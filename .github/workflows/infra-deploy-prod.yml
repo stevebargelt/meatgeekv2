@@ -75,8 +75,14 @@ jobs:
         # PLAN-ONLY by design — no `terraform apply` in this workflow. The live
         # greenfield prod apply is the operator's out-of-band acceptance step.
         # Bind the per-env remote backend at init so prod uses its ISOLATED state
-        # key (meatgeek-v2/prod.tfstate); -reconfigure handles env switches.
+        # key (meatgeek-v2/prod.tfstate); -reconfigure handles env switches. The
+        # state-account name is derived ONCE from the subscription id by the shared
+        # helper and injected as an extra -backend-config (single source, no literal
+        # in the hcl). ARM_SUBSCRIPTION_ID is already exported (job env).
         run: |
           cd apps/infrastructure
-          terraform init -reconfigure -backend-config=environments/backend-prod.hcl
+          STATE_ACCOUNT="$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
+          terraform init -reconfigure \
+            -backend-config=environments/backend-prod.hcl \
+            -backend-config="storage_account_name=$STATE_ACCOUNT"
           terraform plan -var-file=environments/prod.tfvars -out=tfplan

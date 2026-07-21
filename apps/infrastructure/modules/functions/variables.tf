@@ -26,8 +26,13 @@ variable "storage_account_name" {
   type        = string
 }
 
-variable "application_insights_ingestion_endpoint" {
-  description = "Non-secret Application Insights ingestion endpoint URL (the IngestionEndpoint parsed out of the AI connection string in the root module). Telemetry ingestion is identity-based (AAD): the Function App's managed identity is granted 'Monitoring Metrics Publisher' on the App Insights resource and the host authenticates with APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD, so NO instrumentation/ingestion key or secret connection-string value is placed in app_settings or Terraform state."
+variable "global_suffix" {
+  description = "Deterministic, subscription-derived suffix appended to the GLOBALLY-scoped Function App name so a greenfield apply cannot collide with a pre-existing Function App anywhere in Azure. Supplied by the root module (local.global_name_suffix); shared verbatim with the IoT Hub, Event Hubs namespace, and SignalR modules."
+  type        = string
+}
+
+variable "application_insights_connection_string" {
+  description = "FULL Terraform-managed Application Insights connection string (InstrumentationKey included), set as APPLICATIONINSIGHTS_CONNECTION_STRING. Microsoft requires the connection string — with the ikey as the destination-resource identifier — even under Entra-only ingestion. The ikey is a NON-credential here because the root module sets local_authentication_disabled=true on the App Insights resource, forcing AAD-only ingestion (the host authenticates via APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD + the Monitoring Metrics Publisher role). This residual is safe ONLY while local auth stays disabled — enforced by the pre-apply secret-inspection gate."
   type        = string
 }
 
@@ -77,9 +82,32 @@ variable "auth_active_directory_tenant_id" {
 }
 
 variable "auth_allowed_audiences" {
-  description = "Allowed token audiences for App Service Authentication. Only consumed when auth_active_directory_client_id is set."
+  description = "Allowed token audiences for App Service Authentication. Only consumed when auth_active_directory_client_id is set. Carries the API App ID URI (e.g. api://<dev-api-client-id>)."
   type        = list(string)
   default     = []
+}
+
+variable "auth_allowed_client_app_ids" {
+  description = <<-EOT
+    Client (CALLING) application ids allowed by Easy Auth's `allowed_applications`.
+    Easy Auth's allowed_applications validates the CALLING client's appid/azp claim
+    — NOT the API registration. So this must be the SMOKE-TEST CLIENT's app id(s),
+    not auth_active_directory_client_id (which is the API registration and belongs
+    on client_id + allowed_audiences). For the operator's
+    `az account get-access-token --scope <API App ID URI>/access_as_user`, the
+    calling client is the Azure CLI PUBLIC client 04b07795-8ddb-461a-bbee-02f9e1bf7b46,
+    so that is the default; override with a dedicated dev client if preferred.
+    Every id here MUST also be pre-authorized for the access_as_user scope on the dev
+    API registration (bootstrap preAuthorizedApplications) so token acquisition needs
+    no consent prompt. Only consumed when auth_active_directory_client_id is set. A
+    token minted for any client NOT in this list is rejected at the platform layer.
+  EOT
+  type        = list(string)
+  default     = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]
+  validation {
+    condition     = !contains(var.auth_allowed_client_app_ids, "")
+    error_message = "auth_allowed_client_app_ids must not contain an empty string; provide the calling client app id(s) (default: the Azure CLI public client)."
+  }
 }
 
 variable "tags" {

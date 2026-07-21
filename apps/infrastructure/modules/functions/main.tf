@@ -10,11 +10,17 @@
 #   * Application Insights ingestion is identity-based (AAD): the managed
 #     identity is granted 'Monitoring Metrics Publisher' on the App Insights
 #     resource (root module) and the host authenticates telemetry via
-#     APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD. Only the
-#     NON-SECRET ingestion endpoint is placed in app settings — no
-#     instrumentation/ingestion key or secret connection string enters state.
-#   * CORS is explicit per-environment (no wildcard); App Service Authentication
-#     default-DENIES every request until an identity provider is configured.
+#     APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD. The FULL
+#     TF-managed connection string (InstrumentationKey included, as Microsoft
+#     requires) is placed in app settings, but the ikey CANNOT authenticate
+#     ingestion because the AI resource sets local_authentication_disabled=true
+#     (AAD-only). This residual is safe ONLY while local auth stays disabled —
+#     enforced by the pre-apply secret-inspection gate. See the MG-24 ADR.
+#   * CORS is explicit per-environment (no wildcard). App Service Authentication
+#     is FAIL-CLOSED: the module refuses to deploy (plan precondition) unless an
+#     Entra identity provider is configured, so an anonymous Function App can
+#     never be shipped; once configured every request is validated at the
+#     platform layer (Return401 on no/invalid token) before any function runs.
 
 locals {
   # Globally-unique storage account name. Storage account names must be 3-24
@@ -55,7 +61,11 @@ resource "azurerm_service_plan" "functions" {
 
 # Azure Function App
 resource "azurerm_linux_function_app" "main" {
-  name                = "${var.resource_prefix}-func"
+  # Globally-unique name: the FDQN <name>.azurewebsites.net must be unique across
+  # all of Azure, so the subscription-derived global_suffix is appended (same
+  # suffix shared with IoT Hub / Event Hubs / SignalR). "-func-" + 12 hex chars
+  # keeps the name inside the 60-char Function App limit.
+  name                = "${var.resource_prefix}-func-${var.global_suffix}"
   resource_group_name = var.resource_group_name
   location            = var.location
 
@@ -80,12 +90,14 @@ resource "azurerm_linux_function_app" "main" {
     # Application Insights — identity-based (AAD) telemetry ingestion. The
     # managed identity is granted 'Monitoring Metrics Publisher' on the App
     # Insights resource (root module); Authorization=AAD makes the host
-    # authenticate with an AAD token, so NO instrumentation/ingestion key lands
-    # here. The connection string carries ONLY the non-secret ingestion endpoint
-    # (no InstrumentationKey / secret) — the resource is identified via the
-    # AAD-authorized publisher role, not an ingestion key.
+    # authenticate with an AAD token. The FULL connection string (InstrumentationKey
+    # included) is required by Microsoft as the destination-resource identifier
+    # even under Entra-only ingestion — but the ikey CANNOT authenticate because
+    # local_authentication_disabled=true on the AI resource. This ikey-in-state
+    # residual is safe ONLY while local auth stays disabled; the pre-apply
+    # secret-inspection gate enforces that coupling.
     "APPLICATIONINSIGHTS_AUTHENTICATION_STRING" = "Authorization=AAD"
-    "APPLICATIONINSIGHTS_CONNECTION_STRING"     = "IngestionEndpoint=${var.application_insights_ingestion_endpoint}"
+    "APPLICATIONINSIGHTS_CONNECTION_STRING"     = var.application_insights_connection_string
     "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE"   = "50"
 
     # Cosmos DB — identity-based. Endpoint is non-secret; data-plane access is
@@ -116,34 +128,90 @@ resource "azurerm_linux_function_app" "main" {
     }
   }
 
-  # App Service Authentication (Easy Auth). Default-DENY: until an identity
-  # provider (Entra ID) is wired via var.auth_active_directory_client_id, every
-  # unauthenticated request is rejected with 401 at the platform layer — BEFORE
-  # any function runs — so no business endpoint (e.g. startCook) is reachable
-  # anonymously regardless of its per-function authLevel. This is the S2
-  # default-deny posture; Function keys are never distributed to clients.
-  auth_settings_v2 {
-    auth_enabled           = true
-    require_authentication = true
-    unauthenticated_action = "Return401"
+  # App Service Authentication (Easy Auth). FAIL-CLOSED.
+  #
+  # Azure requires auth_settings_v2 to declare AT LEAST ONE identity provider —
+  # an "authentication required but no provider" block is not a valid plan. So we
+  # cannot express default-deny as an empty provider list. Instead the ENTIRE
+  # auth_settings_v2 block is present ONLY when the Entra API registration is
+  # configured (var.auth_active_directory_client_id set), and the precondition
+  # below REFUSES the plan when it is not. Net effect: it is impossible to deploy
+  # this Function App without platform-enforced authentication — an unconfigured
+  # deployment fails closed at plan time rather than silently shipping an
+  # anonymous app. No business endpoint (e.g. startCook) is ever reachable
+  # anonymously regardless of its per-function authLevel.
+  #
+  # When configured, this is API/bearer-token VALIDATION only — NOT an interactive
+  # sign-in flow: no client secret is set (client-secret-free bearer validation),
+  # allowed_audiences carries the exact API App ID URI (the API registration), and
+  # the token store is disabled (no token-at-rest).
+  #
+  # allowed_applications validates the CALLING CLIENT's appid/azp claim, NOT the API
+  # registration — so it is set to var.auth_allowed_client_app_ids (the smoke-test
+  # client: the Azure CLI public client by default, or a dedicated dev client), each
+  # of which the dev API registration pre-authorizes for access_as_user. A token
+  # minted by any OTHER client is rejected at the platform layer. (Binding the API
+  # registration's OWN client id here would be wrong — the API is never the caller.)
+  dynamic "auth_settings_v2" {
+    for_each = var.auth_active_directory_client_id == "" ? [] : [1]
+    content {
+      auth_enabled           = true
+      require_authentication = true
+      unauthenticated_action = "Return401"
 
-    # Entra ID provider, configured only when a client id is supplied. With no
-    # provider AND require_authentication=true, the platform denies everything
-    # (fail-closed) — the intended default until the auth design is finalized.
-    dynamic "active_directory_v2" {
-      for_each = var.auth_active_directory_client_id == "" ? [] : [1]
-      content {
-        client_id                   = var.auth_active_directory_client_id
-        tenant_auth_endpoint        = "https://login.microsoftonline.com/${var.auth_active_directory_tenant_id}/v2.0"
-        allowed_audiences           = var.auth_allowed_audiences
-        www_authentication_disabled = false
+      active_directory_v2 {
+        client_id            = var.auth_active_directory_client_id
+        tenant_auth_endpoint = "https://login.microsoftonline.com/${var.auth_active_directory_tenant_id}/v2.0"
+        allowed_audiences    = var.auth_allowed_audiences
+        allowed_applications = var.auth_allowed_client_app_ids
+        # Bearer-validation-only API: no interactive caller, so suppress the
+        # WWW-Authenticate challenge. An unauthenticated request gets a clean 401
+        # (unauthenticated_action = Return401) with no browser sign-in challenge.
+        www_authentication_disabled = true
+      }
+
+      login {
+        token_store_enabled = false
       }
     }
-
-    login {}
   }
 
   tags = var.tags
+
+  lifecycle {
+    # Fail-closed: refuse to deploy without platform authentication. Converts the
+    # (otherwise cryptic) "auth_settings_v2 needs >=1 provider" provider error
+    # into an explicit, testable guard. Populate auth_active_directory_client_id
+    # from the dev API Entra registration (see the MG-24 bootstrap runbook's
+    # token-acquisition path) before applying.
+    precondition {
+      condition     = var.auth_active_directory_client_id != ""
+      error_message = "Function App Easy Auth is not configured: set auth_active_directory_client_id to the dev API Entra registration client id (MG-24 runbook). An empty value cannot produce a valid auth_settings_v2 (Azure requires >=1 identity provider), so deployment is refused fail-closed rather than shipping an anonymous Function App."
+    }
+    # Easy Auth is all-or-nothing here: a client_id alone yields an INCOMPLETE
+    # active_directory_v2 block. tenant_auth_endpoint (built from tenant_id) fixes
+    # the token issuer, and allowed_audiences fixes which audience is accepted; if
+    # either is empty, bearer validation rejects EVERY token (wrong issuer / no
+    # allowed audience) and the step-9 authenticated smoke test fails. So once auth
+    # is enabled (client_id != ""), require both fail-closed too.
+    precondition {
+      condition     = var.auth_active_directory_client_id == "" || var.auth_active_directory_tenant_id != ""
+      error_message = "Function App Easy Auth is incompletely configured: auth_active_directory_client_id is set but auth_active_directory_tenant_id is empty. tenant_auth_endpoint would point at an invalid issuer and bearer validation would reject every token. Set auth_active_directory_tenant_id to the dev API Entra tenant id (MG-24 runbook)."
+    }
+    precondition {
+      condition     = var.auth_active_directory_client_id == "" || length(var.auth_allowed_audiences) > 0
+      error_message = "Function App Easy Auth is incompletely configured: auth_active_directory_client_id is set but auth_allowed_audiences is empty. With no allowed audience, bearer validation rejects every token. Set auth_allowed_audiences to the dev API's accepted audience(s) (MG-24 runbook)."
+    }
+    # allowed_applications validates the CALLING CLIENT's appid/azp claim, but Azure
+    # Easy Auth treats an EMPTY allowed_applications as NO calling-client restriction:
+    # any client holding a valid token for an allowed audience is accepted, silently
+    # disabling the stated calling-client guarantee. So once auth is enabled require a
+    # NON-EMPTY allowed_client_app_ids fail-closed too.
+    precondition {
+      condition     = var.auth_active_directory_client_id == "" || length(var.auth_allowed_client_app_ids) > 0
+      error_message = "Function App Easy Auth is incompletely configured: auth_active_directory_client_id is set but auth_allowed_client_app_ids is empty. Azure Easy Auth treats an empty allowed_applications as no calling-client restriction, so ANY client holding a token for an allowed audience could call the API, contradicting the bearer-validation-only contract. Set auth_allowed_client_app_ids to the calling client app id(s) — the smoke-test client (the Azure CLI public client 04b07795-8ddb-461a-bbee-02f9e1bf7b46 by default, or a dedicated dev client) (MG-24 runbook)."
+    }
+  }
 }
 
 # --- Identity-based access grants for the Function App managed identity ------

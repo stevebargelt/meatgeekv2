@@ -326,10 +326,47 @@ export class EventDataAdapter {
 
 The Function App runs under a **system-assigned managed identity**, and every
 backing service (Cosmos DB, IoT/Event Hub telemetry, SignalR, host storage) is
-reached **identity-based**: the settings carry only **non-secret endpoints**, and
-data-plane access is granted by RBAC role assignments on the identity. **No
-connection strings or primary keys** are placed in app settings or Terraform
-state. These are exactly the settings Terraform configures on the Function App:
+reached **identity-based**: those settings carry only **non-secret endpoints**,
+and data-plane access is granted by RBAC role assignments on the identity. **No
+service data-plane credential or key VALUE is USED** — no Cosmos/Storage/IoT/SignalR
+connection string or primary key is placed in `app_settings` or surfaced as a
+Terraform output.
+
+Those keys are **not, however, absent from Terraform state**. Every TF-managed
+data service exposes its own key / connection-string as an **inherent computed
+attribute**, and Terraform reads those attributes back into state on each apply
+**by construction** — no `azurerm` argument suppresses them. So the Cosmos
+account's keys, the Storage account's access keys, the SignalR service's access
+key, the Event Hubs namespace's auto-created `RootManageSharedAccessKey`, and the
+IoT Hub's SAS policy keys are all present in state. The security
+posture is not "no keys in state," it is **keys that cannot authenticate**:
+local/key auth is **disabled** on the services where doing so is safe —
+`local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
+on SignalR, `shared_access_key_enabled = false` on the Functions storage account
+(host storage is `storage_uses_managed_identity`), and
+`local_authentication_enabled = false` on the Event Hubs namespace (both its
+producer — the identity-based IoT Hub routing endpoint — and its consumer — the
+Function App via *Azure Event Hubs Data Receiver* — are AAD, so the RootManage key
+is unused). For those four the in-state
+key is a **present-but-non-authenticating residual**. **IoT Hub is the SOLE
+documented exception:** its SAS keys stay **live** because real devices, the
+data-pusher, and the device-controller authenticate with them (the device SDKs'
+supported path), so disabling local auth would sever device connectivity; that
+residual is mitigated by **restricted, container-scoped RBAC state access** and
+SAS-key rotation. `APPLICATIONINSIGHTS_CONNECTION_STRING` is the same class of
+residual: the full App Insights value **including its `InstrumentationKey`** is
+present in `app_settings` and state, but that ikey is a **non-authenticating
+destination identifier**, not a credential —
+`local_authentication_disabled = true` on the App Insights resource forces
+AAD-only ingestion, so the ikey cannot authenticate anything (see the detailed
+note below). Each acceptance holds **only while local/key auth stays disabled**
+on Cosmos / SignalR / Storage / Event Hubs namespace / App Insights, a coupling
+**fail-closed enforced** by the pre-apply `tf-plan-secret-inspection.sh` gate
+(which also accepts the IoT Hub keys with a printed note as the acknowledged
+exception). See
+[ADR: Data-service keys in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
+
+These are exactly the settings Terraform configures on the Function App:
 
 ```bash
 # Runtime
@@ -338,11 +375,15 @@ WEBSITE_NODE_DEFAULT_VERSION=~20
 
 # Application Insights — identity-based (AAD) telemetry ingestion. The managed
 # identity holds "Monitoring Metrics Publisher" on the App Insights resource and
-# the host authenticates with an AAD token, so NO instrumentation/ingestion key
-# is set. The connection string carries only the NON-SECRET ingestion endpoint;
-# there is no secret connection string to configure.
+# the host authenticates with an AAD token (APPLICATIONINSIGHTS_AUTHENTICATION_STRING).
+# APPLICATIONINSIGHTS_CONNECTION_STRING is the FULL connection string —
+# InstrumentationKey included, because Microsoft requires the ikey as the
+# destination-resource identifier even under Entra-only ingestion — but that ikey
+# CANNOT authenticate: local_authentication_disabled=true on the App Insights
+# resource forces AAD-only ingestion, so the ikey is an inert, non-credential
+# identifier, not a secret to protect.
 APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD
-APPLICATIONINSIGHTS_CONNECTION_STRING=IngestionEndpoint=<insights-ingestion-endpoint>
+APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=<ikey>;IngestionEndpoint=<insights-ingestion-endpoint>;LiveEndpoint=<insights-live-endpoint>
 APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50
 
 # Cosmos DB — identity-based. NON-SECRET account endpoint only; the managed
@@ -362,38 +403,47 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > The `__accountEndpoint` / `__fullyQualifiedNamespace` / `__serviceUri` suffixes
 > are the Functions host's convention for identity-based bindings: the host
 > resolves each service using the app's managed identity against the non-secret
-> endpoint, so there is no secret to leak. Host storage is likewise identity-based
-> (`storage_uses_managed_identity`), so no storage account key is written either.
+> endpoint, so **no service key is written to app settings**. Host storage is
+> likewise identity-based (`storage_uses_managed_identity`), so no storage account
+> key reaches app settings either. (The services' inherent keys still exist as
+> computed attributes in Terraform state, made non-authenticating by disabling
+> local/key auth — IoT Hub excepted — as described above.)
 >
 > Application Insights follows the same identity-based model: telemetry is
 > published with an AAD token — `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`
 > plus a **Monitoring Metrics Publisher** role assignment on the App Insights
-> resource — so no instrumentation/ingestion key is placed in app settings.
-> `APPLICATIONINSIGHTS_CONNECTION_STRING` carries only the non-secret
-> `IngestionEndpoint`; Terraform parses it out of the platform-generated
-> connection string and deliberately drops the key portion. The App Insights
-> resource's computed `instrumentation_key`/`connection_string` still land in
-> Terraform state as an inherent computed attribute — an accepted, telemetry-write-only
-> residual documented in
+> resource. `APPLICATIONINSIGHTS_CONNECTION_STRING` is the **full**
+> Terraform-managed connection string, **`InstrumentationKey` included** —
+> Microsoft requires the ikey as the **destination-resource identifier** even
+> under Entra-only ingestion, so the endpoint-only value is not used. That ikey
+> **cannot authenticate ingestion**: the App Insights resource sets
+> **`local_authentication_disabled = true`**, so only an AAD token (Monitoring
+> Metrics Publisher) is accepted and an ikey-only client is rejected. The ikey
+> therefore lands in this app setting and in Terraform state as an **inert,
+> non-credential** telemetry-destination identifier — an accepted residual that
+> is safe **only while local auth stays disabled**, a coupling enforced by the
+> pre-apply secret-inspection gate. See
 > [ADR: App Insights instrumentation key remains in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 ## Function Deployment
 
 ### **Development Deployment**:
 ```bash
-# Build and deploy to development environment
+# Build and deploy to development environment.
+# The deploy target runs `func azure functionapp publish {args.functionApp}`,
+# so pass --functionApp=<Function App name> (there is no --env flag).
 nx build api --configuration=development
-nx deploy api --env=dev
+nx deploy api --functionApp=$(terraform output -raw function_app_name)
 ```
 
 ### **Production Deployment**:
 ```bash
 # Build optimized production bundle
 nx build api --configuration=production
-nx deploy api --env=prod
+nx deploy api --functionApp=<prod Function App name>
 ```
 
-> In production this runs from CI, not by hand. The `app-deploy-prod.yml` workflow invokes `nx deploy api --env=prod` automatically **after the CI/CD Pipeline completes green on a push to `main`**, gated by the `PROD_DEPLOY_ENABLED` repository variable. See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod).
+> In production this runs from CI, not by hand. The `app-deploy-prod.yml` workflow invokes `nx deploy api --functionApp=<prod Function App name>` automatically **after the CI/CD Pipeline completes green on a push to `main`**, gated by the `PROD_DEPLOY_ENABLED` repository variable. See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod).
 
 ## Performance Optimizations
 

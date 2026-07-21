@@ -71,8 +71,14 @@ APPINSIGHTS_CONNECTION_STRING=your-appinsights-connection-string
 ### 3. Set Up Development Infrastructure
 
 ```bash
-# Initialize Terraform for development environment
-nx init infrastructure
+# Initialize Terraform against the dev remote backend. The state-account name is
+# derived from the subscription id and injected as an extra -backend-config (the
+# backend-*.hcl files omit it), so init it directly rather than via `nx init`,
+# which does not pass storage_account_name. ARM_SUBSCRIPTION_ID must be exported.
+cd apps/infrastructure
+terraform init -reconfigure \
+  -backend-config=environments/backend-dev.hcl \
+  -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
 
 # Plan and apply development infrastructure
 nx plan infrastructure --env=dev

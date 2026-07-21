@@ -163,9 +163,31 @@ variable "functions_auth_tenant_id" {
 }
 
 variable "functions_auth_allowed_audiences" {
-  description = "Allowed token audiences for Function App authentication (only used when functions_auth_client_id is set)."
+  description = "Allowed token audiences for Function App authentication (only used when functions_auth_client_id is set). Carries the API App ID URI (e.g. api://<dev-api-client-id>)."
   type        = list(string)
   default     = []
+}
+
+variable "functions_auth_allowed_client_app_ids" {
+  description = "Client (CALLING) application ids allowed by the Function App's Easy Auth allowed_applications. This validates the calling client's appid/azp — NOT the API registration (functions_auth_client_id). Defaults to the Azure CLI public client (04b07795-8ddb-461a-bbee-02f9e1bf7b46), which is the caller for `az account get-access-token --scope <API App ID URI>/access_as_user`; override with a dedicated dev client. Each id must be pre-authorized on the dev API registration (bootstrap preAuthorizedApplications). Only used when functions_auth_client_id is set."
+  type        = list(string)
+  default     = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]
+}
+
+# App-deployment identity → Function App publish RBAC (MG-24 item 4).
+# The SERVICE PRINCIPAL OBJECT ID (not the appId/client id) of the SEPARATE
+# app-deployment identity that `func publish` runs as. It is created by the
+# bootstrap (Part 1) BEFORE this apply, and the bootstrap emits its object id as
+# AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID. Setting it here makes THIS apply create
+# the `Website Contributor` role assignment (scoped to the Function App alone)
+# in the SAME apply that creates the Function App — so `func publish` works
+# immediately after, with no missing post-apply grant step. Left empty (default)
+# the assignment is skipped and the plan still validates; REQUIRED for any
+# environment you intend to deploy code to.
+variable "app_deploy_principal_object_id" {
+  description = "Service principal OBJECT ID of the app-deployment identity (bootstrap-emitted AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID). When non-empty, this apply grants it Website Contributor scoped to the Function App alone so `func publish` works post-apply. Empty (default) skips the grant and still validates; required for a deployable environment."
+  type        = string
+  default     = ""
 }
 
 # Security Configuration

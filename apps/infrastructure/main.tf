@@ -84,16 +84,27 @@ locals {
   # 19, mgv2prod<hash> = 20).
   functions_storage_account_name = "mgv2${var.environment}${substr(sha1("${data.azurerm_client_config.current.subscription_id}-funcstorage"), 0, 12)}"
 
-  # Non-secret Application Insights ingestion endpoint, parsed out of the AI
-  # connection string. The instrumentation/ingestion key portion is deliberately
-  # NOT propagated to the Function App: ingestion is identity-based (AAD) via the
-  # Monitoring Metrics Publisher role assignment below plus
-  # APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD, so only this
-  # non-secret endpoint reaches app_settings/state. nonsensitive() is intentional
-  # and safe here — the IngestionEndpoint URL is not a credential.
-  appinsights_ingestion_endpoint = nonsensitive(
-    try(regex("IngestionEndpoint=([^;]+)", azurerm_application_insights.main.connection_string)[0], "")
-  )
+  # Deterministic, subscription-derived suffix for GLOBALLY-scoped resource names
+  # (Function App, IoT Hub, Event Hubs namespace, SignalR). A greenfield apply in
+  # any subscription gets a name that cannot collide with a pre-existing global
+  # resource. Deterministic (subscription-derived hash, no wall-clock / random)
+  # so it is stable across plans; 12 hex chars keeps every derived name inside
+  # Azure's per-service length limits. Threaded to each module as `global_suffix`.
+  global_name_suffix = substr(sha1("${data.azurerm_client_config.current.subscription_id}-global"), 0, 12)
+
+  # FULL Terraform-managed Application Insights connection string — including the
+  # InstrumentationKey. Microsoft requires the connection string (with the ikey
+  # as the destination-resource identifier) as APPLICATIONINSIGHTS_CONNECTION_STRING
+  # even under Entra-only ingestion. The ikey is NOT a usable credential here:
+  # `local_authentication_disabled = true` on azurerm_application_insights.main
+  # (below) forces AAD-only ingestion — the host authenticates with a Monitoring
+  # Metrics Publisher AAD token (Authorization=AAD), and an ikey-only client is
+  # rejected. This residual is safe ONLY while local auth stays disabled; the
+  # pre-apply secret-inspection gate (scripts/tf-plan-secret-inspection.sh)
+  # enforces that coupling. nonsensitive() is intentional: with local auth
+  # disabled the string is not a credential, and keeping it un-redacted lets the
+  # fail-closed gate inspect the accepted residual. See the MG-24 ADR.
+  appinsights_connection_string = nonsensitive(azurerm_application_insights.main.connection_string)
 }
 
 # Data sources for existing resources (if any)
@@ -131,6 +142,14 @@ resource "azurerm_application_insights" "main" {
   workspace_id        = azurerm_log_analytics_workspace.main.id
   sampling_percentage = 50
 
+  # Disable local (ingestion-key) authentication: telemetry can ONLY be ingested
+  # with an Entra (AAD) token. This is what makes the InstrumentationKey inside
+  # the connection string a non-credential — it cannot authenticate ingestion.
+  # The Function App publishes via its managed identity + the Monitoring Metrics
+  # Publisher role assignment below. Do not re-enable without revisiting the
+  # secret-in-state posture (MG-24 ADR + tf-plan-secret-inspection.sh gate).
+  local_authentication_disabled = true
+
   tags = merge(local.common_tags, {
     Service = "Monitoring"
   })
@@ -141,6 +160,7 @@ module "iot_hub" {
   source = "./modules/iot-hub"
 
   resource_prefix     = local.resource_prefix
+  global_suffix       = local.global_name_suffix
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
 
@@ -151,6 +171,13 @@ module "iot_hub" {
   cosmos_account_endpoint = module.cosmos_db.endpoint
   cosmos_database_name    = module.cosmos_db.database_name
   cosmos_container_name   = "temperatures"
+
+  # Dependency handle: the Cosmos routing endpoint uses the IoT Hub identity, so
+  # it must be created only AFTER that identity holds the data-plane role. Only
+  # the endpoint (not azurerm_iothub.main) consumes this, so the graph stays
+  # acyclic even though the role assignment itself depends on this module's
+  # identity_principal_id output (MG-24).
+  cosmos_role_assignment_id = azurerm_cosmosdb_sql_role_assignment.iot_hub_writer.id
 
   tags = local.common_tags
 }
@@ -197,17 +224,20 @@ module "azure_functions" {
   source = "./modules/functions"
 
   resource_prefix     = local.resource_prefix
+  global_suffix       = local.global_name_suffix
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
 
   functions_app_service_plan_sku = var.functions_app_service_plan_sku
   storage_account_name           = local.functions_storage_account_name
 
-  # App Insights telemetry wiring — identity-based (AAD). Only the NON-SECRET
-  # ingestion endpoint is passed; the managed identity is granted Monitoring
-  # Metrics Publisher below and the host authenticates via Authorization=AAD, so
-  # no instrumentation/ingestion key or secret connection string enters state.
-  application_insights_ingestion_endpoint = local.appinsights_ingestion_endpoint
+  # App Insights telemetry wiring — identity-based (AAD). The FULL TF-managed
+  # connection string (InstrumentationKey included, per Microsoft's requirement)
+  # is passed; the managed identity is granted Monitoring Metrics Publisher below
+  # and the host authenticates via Authorization=AAD. The ikey cannot ingest
+  # because local_authentication_disabled=true on the AI resource — so this is a
+  # non-credential residual, enforced by the pre-apply secret-inspection gate.
+  application_insights_connection_string = local.appinsights_connection_string
 
   # Identity-based service endpoints (NON-SECRET). Runtime authorization is via
   # the Function App's managed identity + the role assignments below.
@@ -220,6 +250,9 @@ module "azure_functions" {
   auth_active_directory_client_id = var.functions_auth_client_id
   auth_active_directory_tenant_id = var.functions_auth_tenant_id
   auth_allowed_audiences          = var.functions_auth_allowed_audiences
+  # CALLING-client allowlist (validates the token's appid/azp — the smoke-test
+  # client), NOT the API registration. Default: the Azure CLI public client.
+  auth_allowed_client_app_ids = var.functions_auth_allowed_client_app_ids
 
   tags = local.common_tags
 
@@ -260,12 +293,36 @@ resource "azurerm_role_assignment" "functions_signalr" {
 # publishes telemetry with an AAD token (identity-based ingestion) instead of an
 # instrumentation/ingestion key. Combined with
 # APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD on the app, this
-# closes the last runtime-secret-in-state path — no ingestion key / secret
-# connection string is placed in app_settings or Terraform state (MG-24 S1).
+# makes ingestion AAD-only. The FULL App Insights connection string
+# (InstrumentationKey included, as the destination-resource identifier Microsoft
+# requires) IS in app_settings and the ikey is inherently in Terraform state, but
+# it is NON-AUTHENTICATING: local_authentication_disabled=true on the AI resource
+# forces Entra-only ingestion, so the ikey cannot ingest. This residual is safe
+# ONLY while local auth stays disabled — enforced by the pre-apply secret-
+# inspection gate (MG-24 S1). See the MG-24 ADR.
 resource "azurerm_role_assignment" "functions_appinsights_publisher" {
   scope                = azurerm_application_insights.main.id
   role_definition_name = "Monitoring Metrics Publisher"
   principal_id         = module.azure_functions.identity_principal_id
+}
+
+# App-deployment identity → Function App publish RBAC (MG-24 item 4).
+# `Website Contributor` scoped to the Function App ALONE so the SEPARATE
+# app-deployment SP can run `func publish`. A Reader (the plan identity) cannot
+# publish, which is why publishing is a distinct identity with this scoped role.
+# Created in the SAME apply as the Function App — closing the sequencing gap
+# where the FA only exists post-apply and nothing granted the publish role.
+# Guarded by count: when var.app_deploy_principal_object_id is empty (e.g. a bare
+# `terraform validate` / plan without the bootstrap-emitted object id) the
+# assignment is skipped and the plan still validates. Set the var (from the
+# bootstrap coordinate) for any environment you deploy code to. The object id is
+# the SP's OBJECT id — created by bootstrap phase 1, BEFORE this apply — so no
+# apply-time-computed principal is referenced and the graph stays acyclic.
+resource "azurerm_role_assignment" "functions_app_deploy_publisher" {
+  count                = var.app_deploy_principal_object_id != "" ? 1 : 0
+  scope                = module.azure_functions.function_app_id
+  role_definition_name = "Website Contributor"
+  principal_id         = var.app_deploy_principal_object_id
 }
 
 # SignalR Module
@@ -273,6 +330,7 @@ module "signalr" {
   source = "./modules/signalr"
 
   resource_prefix     = local.resource_prefix
+  global_suffix       = local.global_name_suffix
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
 

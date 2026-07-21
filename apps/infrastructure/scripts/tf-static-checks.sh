@@ -54,21 +54,32 @@
 #   state — this is unavoidable while the resource is TF-managed. It is ACCEPTED
 #   as low-risk: App Insights telemetry is write-only, the Function App
 #   authenticates ingestion via AAD (Monitoring Metrics Publisher role +
-#   APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD) so the ingestion
-#   key is never used for authentication, and remote-state access is restricted.
-#   Correspondingly, main.tf:94-95 extracts ONLY the non-secret IngestionEndpoint
-#   substring — regex("IngestionEndpoint=([^;]+)", ...connection_string) wrapped
-#   in nonsensitive() — into a local, and only that endpoint reaches app_settings.
+#   APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD) so the embedded
+#   ingestion key is never used for authentication, and remote-state access is
+#   restricted.
 #
-#   The allowance is NARROW and does NOT widen the secret scans. It covers ONLY
-#   (a) the resource's own inherent computed attribute in state and (b) the
-#   endpoint-extraction local above. It is NOT a blanket App Insights exemption:
-#   checks 7 and 9 STILL FAIL on a real secret VALUE — a connection string /
-#   primary|secondary|access key / SharedAccessKey / instrumentation key —
-#   assigned into an app_settings map OR emitted as an output, for ANY service
-#   INCLUDING App Insights. A raw azurerm_application_insights.main.connection_string
-#   copied into app_settings or an output is caught by the .connection_string
-#   pattern below; the residual never sanctions that.
+#   SHIPPED MODEL (supersedes the earlier endpoint-only design): the Function App
+#   passes the FULL TF-managed App Insights connection string — InstrumentationKey
+#   INCLUDED — as APPLICATIONINSIGHTS_CONNECTION_STRING (root main.tf sets
+#   local.appinsights_connection_string = nonsensitive(azurerm_application_insights
+#   .main.connection_string); the functions module binds it verbatim). Microsoft
+#   REQUIRES the full connection string with its InstrumentationKey as the
+#   destination-resource identifier even under Entra, so this is REQUIRED and
+#   ACCEPTED — NOT a violation. The earlier design that extracted only the
+#   IngestionEndpoint substring into app_settings is SUPERSEDED and no longer how
+#   the stack is wired.
+#
+#   The allowance is a NARROW, COUPLED invariant — it does NOT widen the secret
+#   scans. The full AI connection string in app_settings is accepted ONLY while
+#   `local_authentication_disabled = true` on the azurerm_application_insights
+#   resource forces AAD-only ingestion, so the embedded ikey CANNOT authenticate.
+#   If local auth is NOT disabled, that very same full connection string in
+#   app_settings is a VIOLATION (check 9). And it is NOT a blanket App Insights
+#   exemption: checks 7 and 9 STILL FAIL on the AI connection string as an OUTPUT
+#   (an export surface — never accepted) and on every OTHER secret VALUE — a
+#   connection string / primary|secondary|access key / SharedAccessKey — for ANY
+#   service including App Insights. The authoritative runtime proof of the same
+#   coupled invariant is the plan/state gate (scripts/tf-plan-secret-inspection.sh).
 #
 # Usage: tf-static-checks.sh [INFRA_DIR]
 #   INFRA_DIR defaults to the directory that contains this script's parent
@@ -112,12 +123,17 @@ sub_hits="$(grep -rEn "subscription_id[[:space:]]*=[[:space:]]*\"${UUID_RE}\"" "
 v1_hits="$(grep -rEn "${V1_SUB_ID}" "${TF_INCLUDES[@]}" "${INFRA_DIR}" 2>/dev/null || true)"
 check "no hardcoded subscription id" "$(printf '%s\n%s' "${sub_hits}" "${v1_hits}" | grep -v '^$' || true)"
 
-# --- 2. Tag drift via raw timestamp() ---------------------------------------
-# A bare timestamp() re-evaluates every plan and churns tags. formatdate(...,
-# timestamp())-normalized values (used elsewhere for budget windows) are out of
-# scope for this gate and are excluded.
-ts_hits="$(grep -rEn 'timestamp\(' "${TF_INCLUDES[@]}" "${INFRA_DIR}" 2>/dev/null | grep -v 'formatdate(' || true)"
-check "no raw timestamp() tag drift" "${ts_hits}"
+# --- 2. Tag / budget-window drift via timestamp() ---------------------------
+# MG-24 item 7 CORRECTION: timestamp() is now forbidden ANYWHERE — including
+# wrapped in formatdate(). The previous gate excluded `formatdate(..., timestamp())`,
+# which is exactly how the monitoring module's budget start_date silently rolled
+# over each month boundary (formatdate("YYYY-MM-01...", timestamp()) recomputes to
+# the current month every plan, so a 2nd plan across a month boundary is NOT a
+# no-op). The stable replacement is a persisted `time_static` anchor. So: fail on
+# ANY timestamp() call in the Terraform sources, formatdate-wrapped or not.
+# Comment lines are stripped so the explanatory note in a .tf file can't self-trip.
+ts_hits="$(grep -rEn 'timestamp\(' "${TF_INCLUDES[@]}" "${INFRA_DIR}" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+check "no timestamp() drift (formatdate-wrapped included)" "${ts_hits}"
 
 # --- 3. No V1 shared-Cosmos adoption ----------------------------------------
 cosmos_hits="$(grep -rEn 'existing_cosmos_' "${TF_INCLUDES[@]}" "${INFRA_DIR}" 2>/dev/null || true)"
@@ -213,31 +229,73 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   if ! grep -qE 'storage_uses_managed_identity[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then
     func_posture+="Function App does not use managed-identity host storage (storage_uses_managed_identity)"$'\n'
   fi
-  # No secret VALUE in app_settings for ANY service — App Insights included, no
-  # exemption for a secret VALUE (MG-24 S1). This targets secret VALUES, not
-  # setting NAMES: a sensitive Terraform attribute reference (.connection_string /
-  # .instrumentation_key / .primary_key / .primary_access_key /
-  # .primary_connection_string), a var whose name ends in *connection_string /
+  # No secret VALUE in app_settings for ANY service — App Insights included, with
+  # exactly ONE cross-field-conditional exemption (MG-24 item 2). This targets
+  # secret VALUES, not setting NAMES: a sensitive Terraform attribute reference
+  # (.connection_string / .instrumentation_key / .primary_key / .primary_access_key
+  # / .primary_connection_string), a var whose name ends in *connection_string /
   # *instrumentation_key, a literal ingestion/account/SAS key marker
   # (InstrumentationKey= / AccountKey= / SharedAccessKey=), or a raw
-  # storage_account_access_key. The standard APPLICATIONINSIGHTS_CONNECTION_STRING
-  # SETTING is allowed ONLY because its value is the non-secret ingestion endpoint
-  # (IngestionEndpoint=...) under AAD ingestion — if it ever carried an
-  # instrumentation key or a .connection_string reference again, one of the
-  # patterns below catches it. The operator-accepted residual documented at the
-  # top of this file covers ONLY the endpoint-extraction local in main.tf, NEVER
-  # a raw key here: a raw azurerm_application_insights.main.connection_string (or
-  # .instrumentation_key) copied into app_settings is caught by .connection_string
-  # / .instrumentation_key below. The hypothetical *_CONNECTION_STRING setting
-  # names for the identity services stay flagged too.
+  # storage_account_access_key.
+  #
+  # MG-24 item 2 CORRECTION — the coupled App Insights invariant:
+  #   The Function App now passes the FULL TF-managed App Insights connection
+  #   string (InstrumentationKey included — Microsoft requires it as the
+  #   destination-resource identifier even under Entra) as
+  #   `var.application_insights_connection_string`. That would normally trip the
+  #   `var\..*connection_string` pattern below. It is ALLOWED — but ONLY when the
+  #   root main.tf sets `local_authentication_disabled = true` on the
+  #   azurerm_application_insights resource, which forces AAD-only ingestion so the
+  #   embedded ikey CANNOT authenticate. This is a CROSS-FIELD conditional, not an
+  #   unconditional App Insights allow: if local auth is NOT disabled, the very
+  #   same `var.application_insights_connection_string` in app_settings is a
+  #   VIOLATION (the ikey could then authenticate). The exemption is scoped to
+  #   THIS one var token and drops a line only when it carries no OTHER secret
+  #   marker; every other secret VALUE — for App Insights or any other service —
+  #   stays flagged. The AUTHORITATIVE runtime proof of this same invariant is the
+  #   plan/state gate (scripts/tf-plan-secret-inspection.sh, check 12).
+  #
   # Same best-effort DIRECT + INDIRECT approach as check 7: literal secret
   # attribute/var references AND obfuscated index refs (a resource/module/data/
   # local reference indexed with a dynamically-assembled key or a secret-fragment
   # string literal). Numeric attribute indexing (`.identity[0]`) is not matched.
   APPSETTING_SECRET_RE='\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING|(azurerm_|module\.|data\.|local\.)[A-Za-z0-9_.]+\[[[:space:]]*(format|join|lookup|element|coalesce|try)\(|\[[[:space:]]*"[^"]*(connection|instrumentation|primary_key|secondary_key|access_key|shared_access|password)[^"]*"[[:space:]]*\]'
+
+  # Is telemetry local auth disabled on the AI resource in the ROOT main.tf? Only
+  # then is the full-conn-string exemption unlocked (the coupled invariant). We
+  # extract the azurerm_application_insights resource block and look for the flag
+  # INSIDE it, so a stray local_authentication_disabled elsewhere can't unlock it.
+  ROOT_MAIN="${INFRA_DIR}/main.tf"
+  ai_local_auth_disabled=0
+  ALLOWED_AI_VAR='var\.application_insights_connection_string'
+  if [[ -f "${ROOT_MAIN}" ]]; then
+    ai_block="$(awk '/resource[[:space:]]+"azurerm_application_insights"/{f=1} f{print} f&&/^}/{f=0}' "${ROOT_MAIN}" 2>/dev/null || true)"
+    if echo "${ai_block}" | grep -qE 'local_authentication_disabled[[:space:]]*=[[:space:]]*true'; then
+      ai_local_auth_disabled=1
+    fi
+  fi
+
   cs_settings="$(grep -nE "${APPSETTING_SECRET_RE}" "${FUNC_MAIN}" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  # Apply the coupled-invariant exemption: when local auth is disabled, drop a hit
+  # line whose ONLY secret token is the accepted AI conn-string var (re-test the
+  # line with that token stripped — if another secret remains, keep it flagged).
+  if [[ -n "${cs_settings}" && "${ai_local_auth_disabled}" -eq 1 ]]; then
+    kept=""
+    while IFS= read -r line; do
+      [[ -z "${line}" ]] && continue
+      stripped="${line//var.application_insights_connection_string/}"
+      if echo "${stripped}" | grep -qE "${APPSETTING_SECRET_RE}"; then
+        kept+="${line}"$'\n'   # a DIFFERENT secret is on this line — still a violation
+      fi
+    done <<< "${cs_settings}"
+    cs_settings="${kept%$'\n'}"
+  fi
   if [[ -n "${cs_settings}" ]]; then
-    func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
+    if [[ "${ai_local_auth_disabled}" -eq 0 ]] && echo "${cs_settings}" | grep -qE "${ALLOWED_AI_VAR}"; then
+      func_posture+="full App Insights connection string in app_settings WITHOUT local_authentication_disabled=true on azurerm_application_insights (coupled-invariant violation — ikey could authenticate; MG-24 item 2):"$'\n'"${cs_settings}"$'\n'
+    else
+      func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
+    fi
   fi
   # Default-deny App Service Authentication.
   if ! grep -qE 'require_authentication[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then
@@ -284,30 +342,42 @@ else
 fi
 check "IoT Hub routing endpoint: identity-based, no SAS connection string" "${iot_routing%$'\n'}"
 
-# --- 12. Authoritative plan/state secret inspection is a REQUIRED pre-apply --
-# gate in the README (MG-24 red-fix). The static output scan (check 7) is
-# best-effort and cannot semantically prove no sensitive VALUE materializes;
-# `terraform show -json <plan> | grep -iE 'connection_string|primary_key|
-# SharedAccessKey|InstrumentationKey'` is what actually guarantees it. Assert the
-# README documents this inspection AND marks it REQUIRED before the first apply,
-# so the authoritative gate can't silently rot into an optional footnote.
+# --- 12. Authoritative FAIL-CLOSED plan/state secret inspection is a REQUIRED --
+# pre-apply gate in the README (MG-24 item 6). The static output scan (check 7)
+# is best-effort and cannot semantically prove no sensitive VALUE materializes.
+# The OLD authoritative gate was a README one-liner
+#   `terraform show -json <plan> | grep -iE '...' || echo "no secrets ✓"`
+# which ALWAYS exits 0 (the `|| echo` swallows the failure) — it prints a warning
+# but never BLOCKS an apply. MG-24 item 6 replaces it with the fail-closed script
+# scripts/tf-plan-secret-inspection.sh, which EXITS NONZERO on any violation. So
+# check 12 now asserts the README documents THAT script AND marks it REQUIRED
+# before the first apply. The always-green `grep ... || echo` shape is explicitly
+# rejected here so it cannot creep back in as the documented gate. (The README
+# lives in INFRA_DIR; the operator runbook under docs/ carries the same script per
+# the docs step — this gate anchors on the in-tree README that ships with the
+# stack.)
 README="${INFRA_DIR}/README.md"
 runbook=""
 if [[ -f "${README}" ]]; then
   readme_live="$(grep -vE '^[[:space:]]*#' "${README}" 2>/dev/null || true)"
-  if ! echo "${readme_live}" | grep -qE 'terraform show -json'; then
-    runbook+="README does not document the 'terraform show -json' plan/state secret inspection"$'\n'
-  fi
-  if ! echo "${readme_live}" | grep -qiE 'connection_string\|primary_key\|SharedAccessKey\|InstrumentationKey'; then
-    runbook+="README plan-inspection grep does not cover the authoritative secret markers (connection_string|primary_key|SharedAccessKey|InstrumentationKey)"$'\n'
+  if ! echo "${readme_live}" | grep -qE 'tf-plan-secret-inspection\.sh'; then
+    runbook+="README does not document the fail-closed scripts/tf-plan-secret-inspection.sh plan/state gate"$'\n'
   fi
   if ! echo "${readme_live}" | grep -qiE 'REQUIRED.*pre-apply|pre-apply.*REQUIRED|required before the first apply|required pre-apply'; then
     runbook+="README does not mark the plan/state secret inspection as a REQUIRED pre-apply gate"$'\n'
   fi
+  # Reject the always-green shape as the DOCUMENTED gate: a `terraform show -json`
+  # (or the script) piped to grep and neutralized with `|| echo`/`|| true` exits 0
+  # regardless of findings, so it can never block an apply. If such a line is what
+  # the README presents, the fail-closed gate has rotted back to a footnote.
+  green_shape="$(echo "${readme_live}" | grep -nE '(terraform show -json|tf-plan-secret-inspection)[^|]*\|[^|]*grep' 2>/dev/null | grep -E '\|\|[[:space:]]*(echo|true|:)' || true)"
+  if [[ -n "${green_shape}" ]]; then
+    runbook+="README documents an ALWAYS-GREEN inspection (grep ... || echo/true), which never blocks an apply — use the fail-closed tf-plan-secret-inspection.sh instead:"$'\n'"${green_shape}"$'\n'
+  fi
 else
   runbook="README.md not found"
 fi
-check "authoritative plan/state secret inspection is a required pre-apply gate (README)" "${runbook%$'\n'}"
+check "fail-closed plan/state secret inspection is a required pre-apply gate (README)" "${runbook%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then

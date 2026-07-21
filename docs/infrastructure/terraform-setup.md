@@ -61,31 +61,48 @@ terraform {
 ```
 
 ```hcl
-# environments/backend-dev.hcl
-resource_group_name  = "meatgeek-v2-tfstate-rg"
-storage_account_name = "meatgeekv2tfstate"
-container_name       = "tfstate"
-key                  = "meatgeek-v2/dev.tfstate"
+# environments/backend-dev.hcl — storage_account_name is DELIBERATELY absent
+resource_group_name = "meatgeek-v2-tfstate-rg"
+container_name      = "tfstate-dev"
+key                 = "meatgeek-v2/dev.tfstate"
+use_azuread_auth    = true
 ```
 
 ```hcl
-# environments/backend-prod.hcl
-resource_group_name  = "meatgeek-v2-tfstate-rg"
-storage_account_name = "meatgeekv2tfstate"
-container_name       = "tfstate"
-key                  = "meatgeek-v2/prod.tfstate"
+# environments/backend-prod.hcl — storage_account_name is DELIBERATELY absent
+resource_group_name = "meatgeek-v2-tfstate-rg"
+container_name      = "tfstate-prod"
+key                 = "meatgeek-v2/prod.tfstate"
+use_azuread_auth    = true
 ```
 
-The state account (`meatgeekv2tfstate`) is created **once** by the bootstrap
+dev and prod use **distinct, per-environment containers** (`tfstate-dev` /
+`tfstate-prod`) — not one shared `tfstate` container — so their state can never
+collide and each CI identity's data-plane state access is RBAC-scoped to its own
+container only.
+
+The state-account **name** is **deliberately not** in the `backend-*.hcl` files
+and is **not** a hardcoded literal: it is **derived** from the subscription id
+by the single sourced helper `scripts/state-account-name.sh` (`meatgeekv2tf` +
+first 12 hex of `sha1(subscription-id)` = 24 chars), so it is globally unique
+per subscription and identical everywhere it is used (bootstrap, CI, the
+runbook). Having exactly one derivation is what guarantees the bootstrap, the
+backend init, and every workflow can never bind divergent account names. The
+state account is created **once** by the bootstrap
 (`apps/infrastructure/bootstrap/bootstrap.sh`) — you do **not** create it by
 hand, and the legacy V1 shared state account is deliberately **not** used.
 
-Initialize with a **clean** init (never migrate local state):
+Initialize with a **clean** init, injecting the derived account name as an extra
+`-backend-config` (never migrate local state):
 
 ```bash
 rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
-terraform init -reconfigure -backend-config=environments/backend-dev.hcl
+terraform init -reconfigure \
+  -backend-config=environments/backend-dev.hcl \
+  -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
 ```
+
+(`ARM_SUBSCRIPTION_ID` must be exported first — see the runbook Prerequisites.)
 
 ### Provider configuration
 
@@ -142,9 +159,13 @@ locals {
 }
 ```
 
-The **Function App** is named `${local.resource_prefix}-func`
-(`meatgeek-v2-${environment}-func`) and exposed as the `function_app_name`
-output — the single name the app deploy consumes.
+The **Function App** is named `${var.resource_prefix}-func-${var.global_suffix}`
+(`meatgeek-v2-${environment}-func-<suffix>`, e.g. `meatgeek-v2-dev-func-abc123def456`)
+and exposed as the `function_app_name` output — the single name the app deploy
+consumes. The trailing `<suffix>` is the deterministic, subscription-derived
+`global_name_suffix` (a 12-char `sha1` of `${subscription_id}-global`) shared with
+the IoT Hub, Event Hubs namespace, and SignalR; it guarantees the globally-scoped
+Function App name cannot collide with a pre-existing resource on a greenfield apply.
 
 ### V2-owned Cosmos DB
 
@@ -173,7 +194,10 @@ module "cosmos_db" {
 ## Nx Integration
 
 `project.json` wraps the Terraform commands. The `init` target is **env-aware**
-and passes `-reconfigure` so switching environments re-binds the backend:
+and passes `-reconfigure` so switching environments re-binds the backend. Note it
+binds **only** the `-backend-config=environments/backend-{env}.hcl` file and does
+**not** inject the derived `storage_account_name` — so it is not sufficient to bind
+the remote backend by itself (see the caveat under Common Nx commands below):
 
 ```jsonc
 {
@@ -194,12 +218,21 @@ and passes `-reconfigure` so switching environments re-binds the backend:
 ### Common Nx commands
 
 ```bash
-nx init     infrastructure --env=dev
+nx init     infrastructure --env=dev     # binds the hcl only — see caveat below
 nx plan     infrastructure --env=dev
 nx apply    infrastructure --env=dev     # operator-run only, never CI
 nx validate infrastructure
 nx destroy  infrastructure --env=dev
 ```
+
+> **`nx init` does not bind the remote backend on its own.** The `init` wrapper
+> runs `terraform init -reconfigure -backend-config=environments/backend-{env}.hcl`
+> **without** the derived `storage_account_name`, which the `backend-*.hcl` files
+> deliberately omit — so on a clean checkout it cannot resolve the state account.
+> To bind the remote backend, run `terraform init` directly with **both**
+> `-backend-config` flags (as shown above and in the [bootstrap runbook](./bootstrap-runbook.md),
+> and as the CI/CD workflows do). Once the backend is bound, `nx plan` / `nx apply`
+> operate against it normally.
 
 ## Environment Management
 
@@ -238,7 +271,9 @@ CI **never** runs `terraform apply`. The authoritative model:
 - **`.github/workflows/infra-deploy-prod.yml`** — authenticates via **OIDC**
   (`id-token: write`, `azure/login` with the per-environment federated
   credential; no long-lived service-principal secret), binds prod remote state
-  (`-backend-config=environments/backend-prod.hcl`), runs under the `production`
+  (`terraform init -reconfigure -backend-config=environments/backend-prod.hcl`
+  plus `-backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"`),
+  runs under the `production`
   GitHub Environment gate, and **ends at `terraform plan`**. There is **no**
   `apply`.
 - **`.github/workflows/app-deploy-prod.yml`** — reads
@@ -294,7 +329,11 @@ runbook), and the workflow↔bootstrap subject alignment is asserted in CI by
    ```bash
    cd apps/infrastructure
    rm -f terraform.tfstate terraform.tfstate.backup && rm -rf .terraform
-   nx init infrastructure --env=dev
+   # Bind the remote backend with the derived state-account name (the `nx init`
+   # wrapper does NOT inject storage_account_name, so init it directly):
+   terraform init -reconfigure \
+     -backend-config=environments/backend-dev.hcl \
+     -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
    nx plan infrastructure --env=dev
    # apply is operator-run per the runbook, after human plan review
    ```
@@ -304,19 +343,43 @@ is in the **[bootstrap runbook](./bootstrap-runbook.md)**.
 
 ## Authentication Integration
 
-MeatGeek V2 uses **Supabase Auth** as the external authentication provider:
+MeatGeek V2 authenticates callers with **Azure Entra (App Service Easy Auth)** at
+the platform layer — there is **no** Supabase and **no** external auth provider.
+The Function App enables `auth_settings_v2` with an `active_directory_v2` identity
+provider (`modules/functions/main.tf`) and is **fail-closed**: a module
+precondition refuses to deploy unless the Entra API registration is configured, so
+an anonymous Function App can never ship. Every request is validated at the
+platform layer **before any function runs** — `require_authentication = true` with
+`unauthenticated_action = "Return401"`, so a missing/invalid bearer token is
+rejected with 401 regardless of a function's own `authLevel`.
 
-- No identity-provider infrastructure needed in Terraform
-- Azure Functions validate JWTs from Supabase
-- Reduced infrastructure complexity and cost
+This is **bearer-token validation only**, not an interactive sign-in flow:
 
-Function App settings required:
+- **No client secret** is set — Easy Auth only *validates* inbound tokens, it never
+  performs a login redirect or holds a credential.
+- **`allowed_audiences`** carries the exact **API App ID URI** (`api://<api-app-id>`) —
+  the token's `aud` must match the dev Entra API registration.
+- **`allowed_applications`** validates the **calling client's** `appid`/`azp` claim
+  (the pre-authorized client — the Azure CLI public client by default, or a dedicated
+  dev client). A token minted by any other client is rejected.
+- **`token_store_enabled = false`** — no token is persisted at rest.
+
+The Entra API registration (the delegated `access_as_user` scope on
+`api://<api-app-id>`) is created by the **[bootstrap](./bootstrap-runbook.md)**, not
+Terraform; the operator wires its coordinates into `environments/dev.tfvars`
+(`functions_auth_client_id`, `functions_auth_tenant_id`,
+`functions_auth_allowed_audiences`, `functions_auth_allowed_client_app_ids`). Acquire
+an operator token for the authenticated smoke test with:
 
 ```bash
-SUPABASE_URL=<your-supabase-project-url>
-SUPABASE_ANON_KEY=<your-supabase-anon-key>
-SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
+APP_ID_URI=$(az ad app show --id <api-app-id> --query 'identifierUris[0]' -o tsv)
+az account get-access-token --scope "${APP_ID_URI}/access_as_user"
 ```
+
+No `SUPABASE_*` (or any other auth-provider) app settings exist on the Function App —
+authentication is enforced entirely by the platform via the Entra identity provider.
+See the **[bootstrap runbook](./bootstrap-runbook.md)** for the full Entra registration
+and authenticated-smoke-test procedure.
 
 > **Identity-based service access (MG-24).** The Function App runs under a
 > **system-assigned managed identity**, and access to Cosmos DB, IoT/Event Hub
@@ -324,9 +387,20 @@ SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
 > assignments** on that identity. App settings carry only **non-secret
 > endpoints** (`COSMOSDB__accountEndpoint`,
 > `IOTHUB_EVENTS__fullyQualifiedNamespace`,
-> `AzureSignalRConnectionString__serviceUri`) — **no connection strings or
-> primary keys** are injected as app settings or written to Terraform state, so
-> there is no plaintext secret to route through Key Vault. See
+> `AzureSignalRConnectionString__serviceUri`) — **no connection-string or
+> primary-key VALUE is injected as an app setting or surfaced as a Terraform
+> output**, so there is no plaintext secret to route through Key Vault. Each data
+> service's key does still exist as an inherent **computed attribute** in state
+> (true of any TF-managed resource); the control is to render those keys
+> non-authenticating by disabling local/key auth where safe
+> (`local_authentication_disabled` on Cosmos, `local_auth_enabled = false` on
+> SignalR, `shared_access_key_enabled = false` on host storage,
+> `local_authentication_enabled = false` on the Event Hubs namespace), with **IoT
+> Hub the SOLE documented exception** (device SAS auth kept; restricted state
+> access as the mitigation). The coupling is enforced by the fail-closed
+> `scripts/tf-plan-secret-inspection.sh` gate. See
+> [ADR: data-service keys in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md)
+> and
 > [Azure Functions API → Application Settings](../api/azure-functions.md#application-settings).
 
 ## Static Validation

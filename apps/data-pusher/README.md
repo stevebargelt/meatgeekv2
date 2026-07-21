@@ -48,17 +48,36 @@ Device Controller (V1 HTTP API) ──┐
 ### Connection string (per device)
 
 The pusher requires a **device-scoped** IoT Hub connection string (it parses the
-`DeviceId` out of it and refuses to start with a hub-owner string). The source
-of truth for these strings is the Terraform output `iot_hub_device_connection_strings`
-declared in `apps/infrastructure/outputs.tf:45` — there is one string per
-provisioned device.
+`DeviceId` out of it and refuses to start with a hub-owner string). This string
+is a **device credential**: it is **retrieved on demand from IoT Hub via the
+Azure CLI at provisioning time and is NEVER stored in Terraform state or exported
+as a Terraform output**. The former `iot_hub_device_connection_strings` output
+was removed in MG-24 S1 precisely so no device SAS key persists in state/outputs.
+IoT Hub device SAS auth is the one documented key-auth exception (see the
+[ADR](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md)), so
+the device legitimately needs this string — but it is minted/read straight from
+the hub, not from Terraform.
 
-Retrieve a device's connection string with:
+Create the device identity once (idempotent — safe to skip if it already exists),
+then read its connection string. The hub name is the non-secret `iot_hub_name`
+Terraform output:
 
 ```bash
 cd apps/infrastructure
-terraform output -json iot_hub_device_connection_strings | jq -r '.["meatgeek3"]'
+HUB="$(terraform output -raw iot_hub_name)"
+DEVICE=meatgeek3
+
+# Create the device identity first if it does not exist yet:
+az iot hub device-identity create --hub-name "$HUB" --device-id "$DEVICE"
+
+# Retrieve the device-scoped connection string on demand (never stored in TF):
+az iot hub device-identity connection-string show \
+  --hub-name "$HUB" --device-id "$DEVICE" -o tsv
 ```
+
+Treat the output as a secret — it carries the device SAS-signing key. Do not
+capture it into Terraform state, an output, a log, or version control: read it at
+provisioning time and write it straight into the pusher's env file (below).
 
 ### Environment variables
 
@@ -141,8 +160,12 @@ and reads secrets from an `EnvironmentFile` rather than inlining them.
 
 ### Operator install procedure (on the Pi)
 
-1. **Provision the per-device IoT Hub connection string.** Pull it from
-   `terraform output -json iot_hub_device_connection_strings` (see above).
+1. **Provision the per-device IoT Hub connection string.** Retrieve it on demand
+   from IoT Hub via the Azure CLI (`az iot hub device-identity connection-string
+   show --hub-name "$(terraform output -raw iot_hub_name)" --device-id <device>`;
+   create the identity first with `az iot hub device-identity create` if it does
+   not exist — see "Connection string (per device)" above). It is a device
+   credential fetched at provisioning time, never a Terraform output/state value.
 2. **Write the secret file** (one shot, before first `make install`):
 
    ```bash
@@ -216,9 +239,8 @@ az account set --subscription <subscription-id>
 
 If step 1 fails: check the pusher journal (`make logs`) — most often it's a
 connection-string problem (hub-scoped instead of device-scoped) or the env
-file isn't being read. The pusher logs an actionable error referencing
-`iot_hub_device_connection_strings` on startup if the conn-string shape is
-wrong.
+file isn't being read. The pusher logs an actionable error on startup if the
+connection-string shape is wrong (hub-scoped instead of device-scoped).
 
 If step 1 succeeds but step 2 doesn't: the IoT Hub route configuration is
 the suspect, not the pusher. See `apps/infrastructure` for the route
@@ -273,9 +295,11 @@ Plus IoT Hub message properties: `messageId`, `correlation.id`.
 
 ## Troubleshooting
 
-- **"connection string is not device-scoped"** — the string came from
-  `iot_hub_connection_string` (hub-owner). Use
-  `iot_hub_device_connection_strings[<device-id>]` instead.
+- **"connection string is not device-scoped"** — you used a hub-owner
+  (`iothubowner`) string. Retrieve the **device-scoped** string instead with
+  `az iot hub device-identity connection-string show --hub-name "$(terraform
+  output -raw iot_hub_name)" --device-id <device-id>` (see "Connection string
+  (per device)").
 - **"failed to read /etc/meatgeek-pusher/env"** — file missing, wrong owner,
   or wrong mode. The unit runs as `pi`; the file should be `root:root` /
   `0600` and at the documented path.
