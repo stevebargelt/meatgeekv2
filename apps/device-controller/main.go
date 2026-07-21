@@ -41,7 +41,7 @@ var SmokerStatus = Status {
 func main() {
 
     // Re-add observability (MG-6). Telemetry is configured from the environment
-    // (APPINSIGHTS_CONNECTION_STRING); an empty value runs a no-op exporter so
+    // (APPLICATIONINSIGHTS_CONNECTION_STRING); an empty value runs a no-op exporter so
     // the controller works fully offline. device.id comes from the SmokerID.
     shutdownTelemetry, err := telemetry.Setup(context.Background(), telemetry.ConfigFromEnv(SmokerStatus.SmokerID))
     check(err)

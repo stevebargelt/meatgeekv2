@@ -5,7 +5,8 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
  * Initialise Azure Monitor OpenTelemetry for the Functions host.
  *
  * The Application Insights connection string is read STRICTLY from
- * `process.env.APPINSIGHTS_CONNECTION_STRING` — there is deliberately no literal
+ * `process.env.APPLICATIONINSIGHTS_CONNECTION_STRING` (the Azure-standard name
+ * the Function App sets — see modules/functions/main.tf) — there is deliberately no literal
  * fallback, so a misconfigured environment fails safe (telemetry off) rather
  * than shipping to a stale or default resource.
  *
@@ -18,11 +19,11 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
  * without a live Application Insights resource.
  */
 export function initializeTelemetry(): void {
-  const connectionString = process.env['APPINSIGHTS_CONNECTION_STRING'];
+  const connectionString = process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'];
 
   if (!connectionString) {
     console.log(
-      'initializeTelemetry: APPINSIGHTS_CONNECTION_STRING is unset — skipping Azure Monitor setup'
+      'initializeTelemetry: APPLICATIONINSIGHTS_CONNECTION_STRING is unset — skipping Azure Monitor setup'
     );
     return;
   }

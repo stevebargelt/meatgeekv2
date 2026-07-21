@@ -21,6 +21,16 @@ Why the exemptions:
 
 Lanes 1 and 2 share one Application Insights resource, so backend and web correlate natively. Lane 3 (Sentry) is a **separate backend by design** — see [Sentry vs Application Insights: Ownership Boundary](#sentry-vs-application-insights-ownership-boundary) and the [Trace-ID Copy-Paste Join Workflow](#trace-id-copy-paste-join-workflow-mobile--backend) for how mobile↔backend debugging crosses that boundary.
 
+## MG-6 Implementation Status
+
+MG-6 lands observability in three buckets. This section is the authoritative status; the rest of the document describes the target design, some of which is shipped and some of which is still gated.
+
+- **Bucket A — OTel instrumentation (IMPLEMENTED).** The OTel discipline described here is shipped across `data-pusher`, `device-controller`, and the `api` Functions app, plus this document. Both Go services run an OTel `TracerProvider` with `AlwaysSample` and a swappable span exporter (a no-op exporter offline; an OTLP/HTTP exporter aimed at the App Insights ingestion endpoint when a connection string is present), and set W3C Trace Context as the global propagator. The Functions app runs the `@azure/monitor-opentelemetry` distribution with fixed-ratio 50% sampling. A W3C `traceparent` propagates `device-controller → data-pusher → IoT Hub → Functions`.
+- **Bucket B — Sentry org / project architecture (PENDING operator decision).** The React Native lane's `traceparent` injection contract is designable now (see [Sentry (React Native lane)](#sentry-react-native-lane)), but the Sentry organization, project structure, and DSN specifics await an operator decision and are not yet wired.
+- **Bucket C — live Azure Monitor alerts + end-to-end trace smoke + live IoT-Hub receiver (BLOCKED).** Standing up live alerts, a real end-to-end trace smoke test, and a live IoT-Hub receiver is **blocked on the MG-24 greenfield bootstrap**. The KQL, dashboard, and alert definitions below are authored against the standard dimensions but are not yet deployed against a live resource.
+
+> **Connection-string env vars differ by runtime.** The Functions app reads the Azure-standard `APPLICATIONINSIGHTS_CONNECTION_STRING` (the Terraform-managed app setting). The two Go services read `APPINSIGHTS_CONNECTION_STRING`. Both are env-var only — never hardcoded — but the names are not interchangeable; set the one that matches the runtime.
+
 ## Architecture
 
 ### **Three Pillars of Observability**
@@ -116,7 +126,7 @@ export function initializeTelemetry() {
 
 #### **Go services — `data-pusher` and `device-controller`**
 
-Both Go services share one setup pattern. The canonical implementation is the tracing bootstrap at `apps/data-pusher/internal/telemetry/tracing.go`; `device-controller` mirrors it. The snippet below reflects the **current shipped skeleton** — an OTel `TracerProvider` with `AlwaysSample`, a no-op exporter for local development, and the Azure Monitor exporter being wired in over this ticket (MG-6).
+Both Go services share one setup pattern. The canonical implementation is the tracing bootstrap at `apps/data-pusher/internal/telemetry/tracing.go`; `device-controller` mirrors it. The snippet below reflects the **shipped implementation** — an OTel `TracerProvider` with `AlwaysSample`, a swappable span exporter (a no-op exporter offline; an OTLP/HTTP exporter aimed at the App Insights ingestion endpoint when a connection string is present), and W3C Trace Context set as the global propagator so the `traceparent` injected onto IoT Hub messages flows downstream.
 
 ```go
 // apps/data-pusher/internal/telemetry/tracing.go
@@ -128,6 +138,7 @@ import (
 
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+    "go.opentelemetry.io/otel/propagation"
     "go.opentelemetry.io/otel/sdk/resource"
     "go.opentelemetry.io/otel/sdk/trace"
     semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -148,15 +159,18 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
 
     var exporter trace.SpanExporter
     if appInsightsConnStr != "" {
-        // MG-6: wire the Azure Monitor OTel exporter here, fed from
-        // APPLICATIONINSIGHTS_CONNECTION_STRING (env var only, never hardcoded).
-        // Skeleton currently uses an OTLP/HTTP exporter as a placeholder.
-        exporter, err = otlptracehttp.New(ctx, otlptracehttp.WithInsecure())
+        // Real export path: a swappable span exporter — an OTLP/HTTP exporter
+        // aimed at the App Insights ingestion endpoint parsed from the
+        // connection string. The connection string is sourced from
+        // APPINSIGHTS_CONNECTION_STRING on the Go services (env var only,
+        // never hardcoded). Swappable by design until the Azure Monitor Go
+        // exporter is GA.
+        exporter, err = otlptracehttp.New(ctx) // → App Insights ingestion endpoint
         if err != nil {
             return nil, fmt.Errorf("failed to create exporter: %w", err)
         }
     } else {
-        // Local development — no connection string, traces go nowhere.
+        // Dev / offline mode — no connection string, spans dropped locally.
         exporter = &noOpExporter{}
     }
 
@@ -167,11 +181,15 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
     )
     otel.SetTracerProvider(tp)
 
+    // W3C Trace Context: makes the traceparent injected onto IoT Hub messages
+    // interoperate with the downstream Functions / API layers.
+    otel.SetTextMapPropagator(propagation.TraceContext{})
+
     return func() { _ = tp.Shutdown(context.Background()) }, nil
 }
 ```
 
-> **Status (MG-6):** the exporter above is an OTLP/HTTP **placeholder**; wiring the Azure Monitor exporter and instrumenting the publish path is in-flight this ticket. Connection strings and endpoints are supplied **via environment variables only** — no hardcoded values. Per-span dimensions such as `device.id` are attached on the spans (see [Tracing Strategy](#tracing-strategy)), not baked onto the resource.
+> **Status (MG-6, Bucket A — implemented):** the Go services ship an OTel `TracerProvider` with `AlwaysSample`, a swappable span exporter (no-op offline; OTLP/HTTP to the App Insights ingestion endpoint when a connection string is present), and W3C Trace Context propagation across `device-controller → data-pusher → IoT Hub`. Connection strings and endpoints are supplied **via environment variables only** — `APPINSIGHTS_CONNECTION_STRING` on the Go services, `APPLICATIONINSIGHTS_CONNECTION_STRING` on the Functions app — with no hardcoded values. Per-span dimensions such as `device.id` are attached on the spans (see [Tracing Strategy](#tracing-strategy)); the environment-invariant dimensions (`component`, `environment`) are also copied onto the resource.
 
 ## Custom Dimensions Standard
 

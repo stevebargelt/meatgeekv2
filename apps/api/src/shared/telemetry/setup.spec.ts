@@ -16,7 +16,7 @@ describe('initializeTelemetry', () => {
     jest.clearAllMocks();
     // Fresh env per test; strip the two keys the SUT reads.
     process.env = { ...ORIGINAL_ENV };
-    delete process.env['APPINSIGHTS_CONNECTION_STRING'];
+    delete process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'];
     delete process.env['ENVIRONMENT'];
     jest.spyOn(console, 'log').mockImplementation(() => undefined);
   });
@@ -26,19 +26,19 @@ describe('initializeTelemetry', () => {
     jest.restoreAllMocks();
   });
 
-  it('is a no-op when APPINSIGHTS_CONNECTION_STRING is unset', () => {
+  it('is a no-op when APPLICATIONINSIGHTS_CONNECTION_STRING is unset', () => {
     initializeTelemetry();
     expect(mockUseAzureMonitor).not.toHaveBeenCalled();
   });
 
-  it('is a no-op when APPINSIGHTS_CONNECTION_STRING is empty', () => {
-    process.env['APPINSIGHTS_CONNECTION_STRING'] = '';
+  it('is a no-op when APPLICATIONINSIGHTS_CONNECTION_STRING is empty', () => {
+    process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = '';
     initializeTelemetry();
     expect(mockUseAzureMonitor).not.toHaveBeenCalled();
   });
 
-  it('reads the connection string only from the APPINSIGHTS_CONNECTION_STRING env var', () => {
-    process.env['APPINSIGHTS_CONNECTION_STRING'] =
+  it('reads the connection string only from the APPLICATIONINSIGHTS_CONNECTION_STRING env var', () => {
+    process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] =
       'InstrumentationKey=test-key;IngestionEndpoint=https://example/';
 
     initializeTelemetry();
@@ -51,7 +51,7 @@ describe('initializeTelemetry', () => {
   });
 
   it('calls useAzureMonitor with samplingRatio 0.5', () => {
-    process.env['APPINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+    process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
 
     initializeTelemetry();
 
@@ -60,7 +60,7 @@ describe('initializeTelemetry', () => {
   });
 
   it('carries a resource with service.name=meatgeek-api and the environment', () => {
-    process.env['APPINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+    process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
     process.env['ENVIRONMENT'] = 'staging';
 
     initializeTelemetry();
@@ -71,7 +71,7 @@ describe('initializeTelemetry', () => {
   });
 
   it('defaults the environment attribute to "dev" when ENVIRONMENT is unset', () => {
-    process.env['APPINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+    process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
 
     initializeTelemetry();
 

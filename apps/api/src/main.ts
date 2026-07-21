@@ -2,7 +2,7 @@ import { app } from '@azure/functions';
 
 // Initialise Azure Monitor OpenTelemetry BEFORE any handler registration so the
 // SDK instruments the Functions host from the first invocation. No-op locally /
-// in CI when APPINSIGHTS_CONNECTION_STRING is unset.
+// in CI when APPLICATIONINSIGHTS_CONNECTION_STRING is unset.
 import { initializeTelemetry } from './shared/telemetry/setup';
 
 initializeTelemetry();

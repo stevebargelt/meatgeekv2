@@ -16,7 +16,7 @@ import (
 // SetupTracing initializes OpenTelemetry tracing for the pusher.
 //
 // Exporter selection is driven ONLY by appInsightsConnStr (sourced from
-// APPINSIGHTS_CONNECTION_STRING — never a literal):
+// APPLICATIONINSIGHTS_CONNECTION_STRING — never a literal):
 //
 //   - empty  -> a no-op exporter (dev / offline mode); no network, no panic.
 //   - set    -> a real span exporter built by newSpanExporter.

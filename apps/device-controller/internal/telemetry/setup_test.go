@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // fakeConnString is a non-empty placeholder that only exercises the
@@ -94,17 +96,24 @@ func TestSetup_SamplerIsAlwaysSample(t *testing.T) {
 	}
 }
 
-func TestNewResource_CarriesCustomDimensions(t *testing.T) {
+func TestNewResource_CarriesSixStandardDimensions(t *testing.T) {
 	cfg := Config{DeviceID: "meatgeek3", Environment: "staging"}
 	res := newResource(cfg)
 	set := res.Set()
 
+	// All six standard MeatGeek dimension keys must be present with the
+	// device-level values. cook.id / correlation.id have no live value at the
+	// device level so they default to "none"; processing.path is fixed to
+	// "device". The key strings must match data-pusher exactly (join columns).
 	cases := []struct {
 		key  string
 		want string
 	}{
 		{attrDeviceID, "meatgeek3"},
-		{attrComponent, componentName}, // "device"
+		{attrCookID, unsetDimension},         // "none"
+		{attrCorrelationID, unsetDimension},  // "none"
+		{attrProcessingPath, processingPath}, // "device"
+		{attrComponent, componentName},       // "device"
 		{attrEnvironment, "staging"},
 	}
 	for _, tc := range cases {
@@ -121,6 +130,73 @@ func TestNewResource_CarriesCustomDimensions(t *testing.T) {
 	// component must be exactly "device".
 	if v, _ := set.Value(attribute.Key(attrComponent)); v.AsString() != "device" {
 		t.Errorf("component dimension = %q, want %q", v.AsString(), "device")
+	}
+}
+
+func TestSetup_SetsW3CPropagatorGlobally(t *testing.T) {
+	// Reset to a non-W3C propagator first so we prove Setup installs it.
+	otel.SetTextMapPropagator(propagation.Baggage{})
+
+	shutdown, err := Setup(context.Background(), Config{DeviceID: "meatgeek3"})
+	if err != nil {
+		t.Fatalf("Setup returned error: %v", err)
+	}
+	defer func() { _ = shutdown(shutdownCtx(t)) }()
+
+	got := otel.GetTextMapPropagator()
+	if _, ok := got.(propagation.TraceContext); !ok {
+		t.Fatalf("global TextMapPropagator = %T, want propagation.TraceContext (W3C)", got)
+	}
+}
+
+func TestSetup_ConnStringWithIngestionEndpoint_BuildsExporter(t *testing.T) {
+	// A connection string carrying an IngestionEndpoint must construct the
+	// OTLP exporter aimed at that endpoint, with no error and no live backend.
+	connStr := "InstrumentationKey=abc123;IngestionEndpoint=https://ingest.invalid/"
+	cfg := Config{DeviceID: "meatgeek3", ConnectionString: connStr, Environment: "prod"}
+
+	tp, err := newTracerProvider(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("newTracerProvider (endpoint conn): unexpected error: %v", err)
+	}
+	if err := tp.Shutdown(shutdownCtx(t)); err != nil {
+		t.Fatalf("shutdown (endpoint conn): unexpected error: %v", err)
+	}
+}
+
+func TestIngestionEndpoint(t *testing.T) {
+	cases := []struct {
+		name    string
+		connStr string
+		want    string
+	}{
+		{
+			name:    "standard app insights string",
+			connStr: "InstrumentationKey=k;IngestionEndpoint=https://westus2.in.applicationinsights.azure.com/;LiveEndpoint=https://x/",
+			want:    "https://westus2.in.applicationinsights.azure.com/",
+		},
+		{
+			name:    "case-insensitive key",
+			connStr: "ingestionendpoint=https://lower.local/",
+			want:    "https://lower.local/",
+		},
+		{
+			name:    "absent endpoint",
+			connStr: "InstrumentationKey=k",
+			want:    "",
+		},
+		{
+			name:    "empty",
+			connStr: "",
+			want:    "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ingestionEndpoint(tc.connStr); got != tc.want {
+				t.Errorf("ingestionEndpoint(%q) = %q, want %q", tc.connStr, got, tc.want)
+			}
+		})
 	}
 }
 

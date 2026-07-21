@@ -130,7 +130,7 @@ func parseFlags() Config {
 		"Device id used when --mock-iot is set (production sourced from the conn-string)")
 
 	flag.StringVar(&config.AppInsightsKey, "appinsights-key",
-		getEnvString("APPINSIGHTS_CONNECTION_STRING", ""),
+		getEnvString("APPLICATIONINSIGHTS_CONNECTION_STRING", ""),
 		"Application Insights connection string")
 
 	flag.StringVar(&config.SignalRHubURL, "signalr-hub-url",
