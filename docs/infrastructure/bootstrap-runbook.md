@@ -397,10 +397,10 @@ prohibited credential VALUE reached a Function App `app_setting` or an output
 key). It also inspects the **inherent computed key attributes** of the data
 services and accepts a residual only when auth cannot use it: the full AI
 connection string in an `app_setting` **only** when
-`azurerm_application_insights` sets `local_authentication_disabled = true`; the
+`azurerm_application_insights` sets `local_authentication_enabled = false`; the
 inherent key of a Cosmos / SignalR / Storage / Event Hubs namespace resource
 **only** when that resource disables local/key auth
-(`local_authentication_disabled = true` / `local_auth_enabled = false` /
+(`local_authentication_enabled = false` / `local_auth_enabled = false` /
 `shared_access_key_enabled = false` / `local_authentication_enabled = false`) —
 otherwise it is a **VIOLATION** (a live in-state key); and `azurerm_iothub` keys
 as the **acknowledged exception** (accepted with a note — device SAS auth kept).
@@ -694,7 +694,7 @@ Never add auto-apply to CI. Apply stays an operator action per this runbook.
   posture: each data service's key still exists as an inherent *computed
   attribute* in state — as for any TF-managed resource; the control is to make it
   non-authenticating by disabling local/key auth where safe —
-  `local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
+  `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
   on SignalR, `shared_access_key_enabled = false` on host storage,
   `local_authentication_enabled = false` on the Event Hubs namespace. **IoT Hub is
   the SOLE documented exception:** device/data-pusher/device-controller SAS auth is
@@ -707,7 +707,7 @@ Never add auto-apply to CI. Apply stays an operator action per this runbook.
   Insights is wired via the **full**
   TF-managed connection string (InstrumentationKey included — Microsoft requires
   it as the destination-resource identifier even under Entra), but the embedded
-  ikey **cannot authenticate**: `local_authentication_disabled = true` on the
+  ikey **cannot authenticate**: `local_authentication_enabled = false` on the
   App Insights resource forces AAD-only ingestion (`Monitoring Metrics
 Publisher` + `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`).
   The connection string is a **present-but-non-authenticating** residual, safe

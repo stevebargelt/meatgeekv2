@@ -341,7 +341,7 @@ key, the Event Hubs namespace's auto-created `RootManageSharedAccessKey`, and th
 IoT Hub's SAS policy keys are all present in state. The security
 posture is not "no keys in state," it is **keys that cannot authenticate**:
 local/key auth is **disabled** on the services where doing so is safe —
-`local_authentication_disabled = true` on Cosmos, `local_auth_enabled = false`
+`local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
 on SignalR, `shared_access_key_enabled = false` on the Functions storage account
 (host storage is `storage_uses_managed_identity`), and
 `local_authentication_enabled = false` on the Event Hubs namespace (both its
@@ -357,7 +357,7 @@ SAS-key rotation. `APPLICATIONINSIGHTS_CONNECTION_STRING` is the same class of
 residual: the full App Insights value **including its `InstrumentationKey`** is
 present in `app_settings` and state, but that ikey is a **non-authenticating
 destination identifier**, not a credential —
-`local_authentication_disabled = true` on the App Insights resource forces
+`local_authentication_enabled = false` on the App Insights resource forces
 AAD-only ingestion, so the ikey cannot authenticate anything (see the detailed
 note below). Each acceptance holds **only while local/key auth stays disabled**
 on Cosmos / SignalR / Storage / Event Hubs namespace / App Insights, a coupling
@@ -379,7 +379,7 @@ WEBSITE_NODE_DEFAULT_VERSION=~20
 # APPLICATIONINSIGHTS_CONNECTION_STRING is the FULL connection string —
 # InstrumentationKey included, because Microsoft requires the ikey as the
 # destination-resource identifier even under Entra-only ingestion — but that ikey
-# CANNOT authenticate: local_authentication_disabled=true on the App Insights
+# CANNOT authenticate: local_authentication_enabled=false on the App Insights
 # resource forces AAD-only ingestion, so the ikey is an inert, non-credential
 # identifier, not a secret to protect.
 APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD
@@ -417,7 +417,7 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > Microsoft requires the ikey as the **destination-resource identifier** even
 > under Entra-only ingestion, so the endpoint-only value is not used. That ikey
 > **cannot authenticate ingestion**: the App Insights resource sets
-> **`local_authentication_disabled = true`**, so only an AAD token (Monitoring
+> **`local_authentication_enabled = false`**, so only an AAD token (Monitoring
 > Metrics Publisher) is accepted and an ikey-only client is rejected. The ikey
 > therefore lands in this app setting and in Terraform state as an **inert,
 > non-credential** telemetry-destination identifier — an accepted residual that

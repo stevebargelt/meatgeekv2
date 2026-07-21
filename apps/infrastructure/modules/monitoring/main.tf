@@ -89,9 +89,8 @@ resource "azurerm_monitor_diagnostic_setting" "iot_hub" {
     category = "C2DCommands"
   }
 
-  metric {
+  enabled_metric {
     category = "AllMetrics"
-    enabled  = true
   }
 }
 
@@ -107,9 +106,8 @@ resource "azurerm_monitor_diagnostic_setting" "cosmos_db" {
     category = "QueryRuntimeStatistics"
   }
 
-  metric {
+  enabled_metric {
     category = "AllMetrics"
-    enabled  = true
   }
 }
 
@@ -122,9 +120,8 @@ resource "azurerm_monitor_diagnostic_setting" "function_app" {
     category = "FunctionAppLogs"
   }
 
-  metric {
+  enabled_metric {
     category = "AllMetrics"
-    enabled  = true
   }
 }
 
@@ -143,9 +140,8 @@ resource "azurerm_monitor_diagnostic_setting" "signalr" {
     category = "HttpRequestLogs"
   }
 
-  metric {
+  enabled_metric {
     category = "AllMetrics"
-    enabled  = true
   }
 }
 

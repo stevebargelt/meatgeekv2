@@ -71,7 +71,7 @@
 #
 #   The allowance is a NARROW, COUPLED invariant — it does NOT widen the secret
 #   scans. The full AI connection string in app_settings is accepted ONLY while
-#   `local_authentication_disabled = true` on the azurerm_application_insights
+#   `local_authentication_enabled = false` on the azurerm_application_insights
 #   resource forces AAD-only ingestion, so the embedded ikey CANNOT authenticate.
 #   If local auth is NOT disabled, that very same full connection string in
 #   app_settings is a VIOLATION (check 9). And it is NOT a blanket App Insights
@@ -244,7 +244,7 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   #   destination-resource identifier even under Entra) as
   #   `var.application_insights_connection_string`. That would normally trip the
   #   `var\..*connection_string` pattern below. It is ALLOWED — but ONLY when the
-  #   root main.tf sets `local_authentication_disabled = true` on the
+  #   root main.tf sets `local_authentication_enabled = false` on the
   #   azurerm_application_insights resource, which forces AAD-only ingestion so the
   #   embedded ikey CANNOT authenticate. This is a CROSS-FIELD conditional, not an
   #   unconditional App Insights allow: if local auth is NOT disabled, the very
@@ -264,13 +264,13 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # Is telemetry local auth disabled on the AI resource in the ROOT main.tf? Only
   # then is the full-conn-string exemption unlocked (the coupled invariant). We
   # extract the azurerm_application_insights resource block and look for the flag
-  # INSIDE it, so a stray local_authentication_disabled elsewhere can't unlock it.
+  # INSIDE it, so a stray local_authentication_enabled elsewhere can't unlock it.
   ROOT_MAIN="${INFRA_DIR}/main.tf"
   ai_local_auth_disabled=0
   ALLOWED_AI_VAR='var\.application_insights_connection_string'
   if [[ -f "${ROOT_MAIN}" ]]; then
     ai_block="$(awk '/resource[[:space:]]+"azurerm_application_insights"/{f=1} f{print} f&&/^}/{f=0}' "${ROOT_MAIN}" 2>/dev/null || true)"
-    if echo "${ai_block}" | grep -qE 'local_authentication_disabled[[:space:]]*=[[:space:]]*true'; then
+    if echo "${ai_block}" | grep -qE 'local_authentication_enabled[[:space:]]*=[[:space:]]*false'; then
       ai_local_auth_disabled=1
     fi
   fi
@@ -292,7 +292,7 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   fi
   if [[ -n "${cs_settings}" ]]; then
     if [[ "${ai_local_auth_disabled}" -eq 0 ]] && echo "${cs_settings}" | grep -qE "${ALLOWED_AI_VAR}"; then
-      func_posture+="full App Insights connection string in app_settings WITHOUT local_authentication_disabled=true on azurerm_application_insights (coupled-invariant violation — ikey could authenticate; MG-24 item 2):"$'\n'"${cs_settings}"$'\n'
+      func_posture+="full App Insights connection string in app_settings WITHOUT local_authentication_enabled=false on azurerm_application_insights (coupled-invariant violation — ikey could authenticate; MG-24 item 2):"$'\n'"${cs_settings}"$'\n'
     else
       func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
     fi

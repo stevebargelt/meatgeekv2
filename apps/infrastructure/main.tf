@@ -96,7 +96,7 @@ locals {
   # InstrumentationKey. Microsoft requires the connection string (with the ikey
   # as the destination-resource identifier) as APPLICATIONINSIGHTS_CONNECTION_STRING
   # even under Entra-only ingestion. The ikey is NOT a usable credential here:
-  # `local_authentication_disabled = true` on azurerm_application_insights.main
+  # `local_authentication_enabled = false` on azurerm_application_insights.main
   # (below) forces AAD-only ingestion — the host authenticates with a Monitoring
   # Metrics Publisher AAD token (Authorization=AAD), and an ikey-only client is
   # rejected. This residual is safe ONLY while local auth stays disabled; the
@@ -148,7 +148,7 @@ resource "azurerm_application_insights" "main" {
   # The Function App publishes via its managed identity + the Monitoring Metrics
   # Publisher role assignment below. Do not re-enable without revisiting the
   # secret-in-state posture (MG-24 ADR + tf-plan-secret-inspection.sh gate).
-  local_authentication_disabled = true
+  local_authentication_enabled = false
 
   tags = merge(local.common_tags, {
     Service = "Monitoring"
@@ -235,7 +235,7 @@ module "azure_functions" {
   # connection string (InstrumentationKey included, per Microsoft's requirement)
   # is passed; the managed identity is granted Monitoring Metrics Publisher below
   # and the host authenticates via Authorization=AAD. The ikey cannot ingest
-  # because local_authentication_disabled=true on the AI resource — so this is a
+  # because local_authentication_enabled=false on the AI resource — so this is a
   # non-credential residual, enforced by the pre-apply secret-inspection gate.
   application_insights_connection_string = local.appinsights_connection_string
 
@@ -296,7 +296,7 @@ resource "azurerm_role_assignment" "functions_signalr" {
 # makes ingestion AAD-only. The FULL App Insights connection string
 # (InstrumentationKey included, as the destination-resource identifier Microsoft
 # requires) IS in app_settings and the ikey is inherently in Terraform state, but
-# it is NON-AUTHENTICATING: local_authentication_disabled=true on the AI resource
+# it is NON-AUTHENTICATING: local_authentication_enabled=false on the AI resource
 # forces Entra-only ingestion, so the ikey cannot ingest. This residual is safe
 # ONLY while local auth stays disabled — enforced by the pre-apply secret-
 # inspection gate (MG-24 S1). See the MG-24 ADR.

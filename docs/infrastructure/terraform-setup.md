@@ -393,7 +393,7 @@ and authenticated-smoke-test procedure.
 > service's key does still exist as an inherent **computed attribute** in state
 > (true of any TF-managed resource); the control is to render those keys
 > non-authenticating by disabling local/key auth where safe
-> (`local_authentication_disabled` on Cosmos, `local_auth_enabled = false` on
+> (`local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false` on
 > SignalR, `shared_access_key_enabled = false` on host storage,
 > `local_authentication_enabled = false` on the Event Hubs namespace), with **IoT
 > Hub the SOLE documented exception** (device SAS auth kept; restricted state

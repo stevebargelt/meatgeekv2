@@ -63,7 +63,7 @@ run "host_storage_is_managed_identity_only" {
 # item 2 — the FULL App Insights connection string (InstrumentationKey included)
 # is wired verbatim as APPLICATIONINSIGHTS_CONNECTION_STRING (NOT an
 # endpoint-only literal), alongside Authorization=AAD. The ikey is a
-# non-credential because the root sets local_authentication_disabled=true on the
+# non-credential because the root sets local_authentication_enabled=false on the
 # AI resource (that coupling is enforced by the pre-apply inspection gate).
 run "appinsights_full_connection_string_aad" {
   command = plan

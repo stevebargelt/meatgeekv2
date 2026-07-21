@@ -51,7 +51,7 @@
 #         the FULL App Insights connection string (InstrumentationKey=...;
 #         IngestionEndpoint=...) in a Function App app_setting — allowed ONLY when
 #         BOTH (a) the plan's azurerm_application_insights resource sets
-#         local_authentication_disabled = true (forcing AAD-only ingestion so the
+#         local_authentication_enabled = false (forcing AAD-only ingestion so the
 #         embedded instrumentation key CANNOT authenticate) AND (b) the embedded
 #         InstrumentationKey is one of THIS plan/state's OWN managed App Insights
 #         ikeys (ai_ikeys). The exception is bound to the managed resource: a
@@ -188,7 +188,7 @@ RESOURCES="$(printf '%s\n' "${JSON}" | jq -c '
 # at least one AI resource before treating the residual as accepted. select(. !=
 # null) keeps a genuine `false` (which jq's `//` would wrongly drop).
 ai_count="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights")] | length' 2>/dev/null)" || die "cannot inspect: failed to collect App Insights count from ${SRC}"
-ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights") | .values.local_authentication_disabled | select(. != null)] | (length > 0) and all(. == true)' 2>/dev/null)" || die "cannot inspect: failed to collect App Insights local-auth-disabled from ${SRC}"
+ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights") | .values.local_authentication_enabled | select(. != null)] | (length > 0) and all(. == false)' 2>/dev/null)" || die "cannot inspect: failed to collect App Insights local-auth-disabled from ${SRC}"
 
 # The AI resource's OWN computed connection_string / instrumentation_key living in
 # its resource block is the inherent-in-state residual (a TF-managed resource
@@ -222,13 +222,13 @@ ai_ikeys="$(printf '%s\n' "${ai_ikeys}" | sort -u)"
 # ENABLED, that in-state key IS a live credential -> VIOLATION. App Insights is
 # enforced here IDENTICALLY to the other data services: its inherent
 # ikey/connection-string residual is accepted ONLY when THIS specific AI resource
-# sets local_authentication_disabled=true (else VIOLATION). The disable-flag
+# sets local_authentication_enabled=false (else VIOLATION). The disable-flag
 # differs per service:
-#     azurerm_cosmosdb_account     -> local_authentication_disabled == true
+#     azurerm_cosmosdb_account     -> local_authentication_enabled  == false
 #     azurerm_storage_account      -> shared_access_key_enabled     == false
 #     azurerm_signalr_service      -> local_auth_enabled            == false
 #     azurerm_eventhub_namespace   -> local_authentication_enabled  == false
-#     azurerm_application_insights -> local_authentication_disabled == true
+#     azurerm_application_insights -> local_authentication_enabled  == false
 # IoT Hub is the acknowledged EXCEPTION (devices/data-pusher/device-controller
 # authenticate with SAS keys, so key auth must stay on): its key attributes are
 # accepted WITH A NOTE, mitigated by restricted state access (MG-24 ADR).
@@ -249,11 +249,11 @@ data_service_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
     | { type: .type,
         address: .address,
         disabled: (
-          if   .type=="azurerm_cosmosdb_account"     then (.values.local_authentication_disabled == true)
+          if   .type=="azurerm_cosmosdb_account"     then (.values.local_authentication_enabled == false)
           elif .type=="azurerm_storage_account"      then (.values.shared_access_key_enabled == false)
           elif .type=="azurerm_signalr_service"      then (.values.local_auth_enabled == false)
           elif .type=="azurerm_eventhub_namespace"   then (.values.local_authentication_enabled == false)
-          elif .type=="azurerm_application_insights" then (.values.local_authentication_disabled == true)
+          elif .type=="azurerm_application_insights" then (.values.local_authentication_enabled == false)
           else false end)
       }
   ]
@@ -423,7 +423,7 @@ inspect_rows() {
         # non-empty AND provably managed.
         embedded_ikey="$(printf '%s' "${value}" | grep -oiE 'InstrumentationKey=[^;"]+' | head -n1 | cut -d= -f2)"
         if [ -n "${embedded_ikey}" ] && ikey_is_managed "${embedded_ikey}"; then
-          echo "  · accepted App Insights residual (managed ikey non-authenticating; local_authentication_disabled=true): ${path}"
+          echo "  · accepted App Insights residual (managed ikey non-authenticating; local_authentication_enabled=false): ${path}"
           continue
         fi
         report "${kind}" "${path}" "App Insights connection string carries an InstrumentationKey (${embedded_ikey:-<none>}) that is NOT one of the plan/state's managed azurerm_application_insights instrumentation_key values — a foreign/lookalike connection string is not the accepted residual (ai_count=${ai_count})"
@@ -434,7 +434,7 @@ inspect_rows() {
         continue
       fi
       # app_setting but local auth NOT disabled → the coupled invariant is broken.
-      report "${kind}" "${path}" "full App Insights connection string (InstrumentationKey present) in app_settings WITHOUT local_authentication_disabled=true on azurerm_application_insights — the embedded ikey could authenticate ingestion (MG-24 item 2 invariant violated; ai_count=${ai_count})"
+      report "${kind}" "${path}" "full App Insights connection string (InstrumentationKey present) in app_settings WITHOUT local_authentication_enabled=false on azurerm_application_insights — the embedded ikey could authenticate ingestion (MG-24 item 2 invariant violated; ai_count=${ai_count})"
       continue
     fi
 
@@ -461,11 +461,11 @@ inspect_data_services() {
       echo "  · accepted inherent key residual (local/key auth disabled — the in-state key of ${rtype} is non-authenticating): ${raddr}"
       continue
     fi
-    report "resource" "${raddr}" "TF-managed ${rtype} persists its inherent key/connection-string/instrumentation-key attributes in state, but local/key auth is NOT disabled on it — that in-state key is a LIVE credential. Set local_authentication_disabled=true (Cosmos / App Insights) / shared_access_key_enabled=false (Storage) / local_auth_enabled=false (SignalR) / local_authentication_enabled=false (Event Hubs namespace) to make the residual non-authenticating (MG-24 gate)"
+    report "resource" "${raddr}" "TF-managed ${rtype} persists its inherent key/connection-string/instrumentation-key attributes in state, but local/key auth is NOT disabled on it — that in-state key is a LIVE credential. Set local_authentication_enabled=false (Cosmos / App Insights / Event Hubs namespace) / shared_access_key_enabled=false (Storage) / local_auth_enabled=false (SignalR) to make the residual non-authenticating (MG-24 gate)"
   done
 }
 
-echo "tf-plan-secret-inspection: inspecting ${SRC} (App Insights resources: ${ai_count}, local_authentication_disabled(all)=${ai_local_auth_disabled})"
+echo "tf-plan-secret-inspection: inspecting ${SRC} (App Insights resources: ${ai_count}, local-auth-disabled(all)=${ai_local_auth_disabled})"
 
 # Feed both sink sets through the classifier. We stage the rows in a temp file and
 # read inspect_rows with `< file` (not a pipe / process substitution — neither is
