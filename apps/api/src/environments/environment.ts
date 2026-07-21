@@ -11,6 +11,6 @@ export const environment = {
     connectionString: process.env['SIGNALR_CONNECTION_STRING'] || '',
   },
   appInsights: {
-    connectionString: process.env['APPINSIGHTS_CONNECTION_STRING'] || '',
+    connectionString: process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] || '',
   },
 };

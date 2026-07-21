@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -17,6 +18,10 @@ import (
 
 	dc_i2c "github.com/davecheney/i2c"
 	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
+	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/httptrace"
+	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/telemetry"
+
+	"go.opentelemetry.io/otel"
 
 	// Updated to gobot.io/x/gobot/v2 for Go 1.25 compatibility
 	"gobot.io/x/gobot/v2"
@@ -38,9 +43,28 @@ var SmokerStatus = Status {
 
 func main() {
 
+    // Re-add observability (MG-6). Telemetry is configured from the environment
+    // (APPLICATIONINSIGHTS_CONNECTION_STRING); an empty value runs a no-op exporter so
+    // the controller works fully offline. device.id comes from the SmokerID.
+    shutdownTelemetry, err := telemetry.Setup(context.Background(), telemetry.ConfigFromEnv(SmokerStatus.SmokerID))
+    check(err)
+    defer func() {
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        if err := shutdownTelemetry(shutdownCtx); err != nil {
+            log.Printf("telemetry shutdown: %v", err)
+        }
+    }()
+
     manager := gobot.NewManager()
     deviceApi := api.NewAPI(manager)
     deviceApi.Port = "3000"
+
+    // Continue the W3C trace injected by the data-pusher collector on the
+    // inbound get_status hop (MG-6). This gobot middleware runs per-request with
+    // access to the raw *http.Request, extracts the `traceparent`, and opens a
+    // server span parented to the upstream trace.
+    deviceApi.AddHandler(httptrace.Middleware(otel.Tracer("device-controller")))
 
     deviceApi.AddHandler(func(w http.ResponseWriter, r *http.Request) {
     fmt.Fprintf(w, "Hello, %q \n", html.EscapeString(r.URL.Path))

@@ -26,6 +26,14 @@ const CorrelationIDPropertyName = "correlation.id"
 // dedupe replays.
 const MessageIDPropertyName = "messageId"
 
+// TraceParentPropertyName is the IoT Hub message-property key used to
+// carry the W3C Trace Context traceparent (MG-6). The publisher injects
+// the active publish span's context here so the downstream Functions/API
+// layers can continue the distributed trace. Mirrors
+// telemetry.TraceParentKey; kept here so the property contract is visible
+// alongside the other IoT Hub property names.
+const TraceParentPropertyName = "traceparent"
+
 const (
 	defaultSASTokenTTL     = 1 * time.Hour
 	defaultConnectTimeout  = 10 * time.Second

@@ -88,7 +88,7 @@ provisioning time and write it straight into the pusher's env file (below).
 | `POLL_INTERVAL`                | Polling interval                                                 | `5s`                   |
 | `DEBUG`                        | Enable debug logging                                             | `false`                |
 | `MOCK_IOT`                     | Use mock IoT Hub (development only)                              | `false`                |
-| `APPINSIGHTS_CONNECTION_STRING`| Application Insights connection string (used by ticket #6)       | (none)                 |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING`| Application Insights connection string (used by ticket #6)       | (none)                 |
 
 All variables can be overridden as CLI flags (`--device-url`, `--poll-interval`, etc.).
 

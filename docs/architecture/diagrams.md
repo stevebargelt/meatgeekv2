@@ -112,7 +112,7 @@ app. All Azure managed services exist today (provisioned by Terraform
 in `apps/infrastructure/modules/`). Ticket #6 changes **deployment
 artifacts** rather than topology: the Pi binaries gain the Azure
 Monitor Go exporter (dashed orange), the Functions app gains the
-`@azure/monitor-opentelemetry` package, and `APPINSIGHTS_CONNECTION_STRING`
+`@azure/monitor-opentelemetry` package, and `APPLICATIONINSIGHTS_CONNECTION_STRING`
 becomes a required env var on both sides. Sentry is shown as an
 external SaaS dependency that the mobile app will talk to (ticket #7,
 red-outlined as blocked here).
@@ -130,7 +130,7 @@ flowchart LR
         dpBin[data-pusher binary<br/>built via nx build-arm<br/>queue at /var/lib/meatgeek-pusher/queue<br/>state at cooksession.DefaultStatePath]
         otelGo1[OTel Go SDK<br/>+ Azure Monitor exporter]:::proposed
         otelGo2[OTel Go SDK<br/>+ Azure Monitor exporter]:::proposed
-        envPi[/env: APPINSIGHTS_CONNECTION_STRING<br/>IOTHUB_CONNECTION_STRING<br/>SIGNALR_HUB_URL, API_BASE_URL/]:::proposed
+        envPi[/env: APPLICATIONINSIGHTS_CONNECTION_STRING<br/>IOTHUB_CONNECTION_STRING<br/>SIGNALR_HUB_URL, API_BASE_URL/]:::proposed
     end
 
     subgraph AzurePaaS["Azure - meatgeek-env-rg"]
