@@ -37,7 +37,7 @@ nx serve mobile       # React Native mobile app
 
 Real secrets and Azure connection strings must **never** be committed. Keep them out of the repo:
 
-- Put local secrets in the **untracked** `apps/api/local.settings.json` (already gitignored) and/or supply them as environment variables: `COSMOSDB_CONNECTION_STRING`, `IOTHUB_CONNECTION_STRING`, `SIGNALR_CONNECTION_STRING`, `APPINSIGHTS_CONNECTION_STRING`, and related keys.
+- Put local secrets in the **untracked** `apps/api/local.settings.json` (already gitignored) and/or supply them as environment variables: `COSMOSDB_CONNECTION_STRING`, `IOTHUB_CONNECTION_STRING`, `SIGNALR_CONNECTION_STRING`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, and related keys.
 - The fallback values committed in `apps/api/src/environments/environment.development.ts` are **not** real credentials — they are the publicly documented Azure Cosmos DB Emulator default key and explicit `fake-key` placeholders, used only when the environment variables above are unset.
 
 ## 🏗️ System Architecture
