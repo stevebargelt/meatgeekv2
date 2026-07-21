@@ -500,6 +500,38 @@ describe('TemperatureCalculator', () => {
       const grill = calc.detectAnomalies(readings).find((a) => a.probe === 'grill');
       expect(grill?.timestamp).toBe(t1);
     });
+
+    it('honors custom thresholds passed by the caller', () => {
+      // Δ=+20 is a low-severity spike under the defaults (>15), but with tighter
+      // thresholds it becomes high (>10); with looser ones it is not an anomaly.
+      const readings = readingsForProbe('grillTemp', [100, 120]); // Δ=+20
+
+      const tight = calc
+        .detectAnomalies(readings, { high: 10, medium: 5, low: 2 })
+        .find((a) => a.probe === 'grill');
+      expect(tight?.anomaly).toBe('spike');
+      expect(tight?.severity).toBe('high');
+
+      const loose = calc
+        .detectAnomalies(readings, { high: 100, medium: 50, low: 30 })
+        .find((a) => a.probe === 'grill');
+      expect(loose).toBeUndefined();
+    });
+  });
+
+  describe('calculateRSquared (NaN guard)', () => {
+    it('returns 0 (not NaN) when normalizedTimes are identical (zero-variance x-axis)', () => {
+      const calc = new TemperatureCalculator();
+      // Identical time points make the upstream regression slope a 0/0 = NaN;
+      // calculateRSquared must still yield a defined value rather than NaN.
+      const r2 = (
+        calc as unknown as {
+          calculateRSquared(t: number[], x: number[], s: number): number;
+        }
+      ).calculateRSquared([100, 110, 120], [5, 5, 5], NaN);
+      expect(Number.isNaN(r2)).toBe(false);
+      expect(r2).toBe(0);
+    });
   });
 
   describe('estimateCompletionTime', () => {
@@ -549,6 +581,30 @@ describe('TemperatureCalculator', () => {
       expect(result.estimatedMinutes).toBeNull();
       expect(result.confidence).toBe('low');
       expect(result.estimatedCompletionTime).toBeNull();
+    });
+
+    it('returns null/low and does NOT throw when all readings share an identical timestamp (zero-variance time axis)', () => {
+      // Identical timestamps make the regression denominator 0 and slope 0/0 =
+      // NaN. Without the degenerate-denominator guard this falls through to
+      // Math.ceil(remaining/NaN)=NaN and new Date(NaN).toISOString() throws
+      // RangeError "Invalid time value".
+      const ts = '2026-01-01T00:00:00.000Z';
+      const readings = [
+        makeReading({ timestamp: ts, probe1Temp: 100 }),
+        makeReading({ timestamp: ts, probe1Temp: 110 }),
+        makeReading({ timestamp: ts, probe1Temp: 120 }),
+        makeReading({ timestamp: ts, probe1Temp: 130 }),
+        makeReading({ timestamp: ts, probe1Temp: 140 }),
+      ];
+      let result!: ReturnType<typeof calc.estimateCompletionTime>;
+      expect(() => {
+        result = calc.estimateCompletionTime(readings, 200, 'probe1Temp');
+      }).not.toThrow();
+      expect(result).toEqual({
+        estimatedMinutes: null,
+        confidence: 'low',
+        estimatedCompletionTime: null,
+      });
     });
 
     it('returns high confidence when r²>0.8 AND n>=8 (perfectly linear, 8 readings)', () => {

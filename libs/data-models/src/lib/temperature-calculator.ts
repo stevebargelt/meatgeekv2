@@ -138,9 +138,22 @@ export class TemperatureCalculator {
   }
 
   /**
-   * Detects temperature anomalies
+   * Detects temperature anomalies.
+   *
+   * `thresholds` are the °F change (vs. the previous reading) at which a
+   * spike/drop is classified. Defaults preserve the original behavior: >high →
+   * high severity, >medium → medium, >low → low. They are configurable because
+   * the right sensitivity depends on the probe placement and cook (e.g. a fast
+   * searing cook tolerates larger swings than low-and-slow).
    */
-  detectAnomalies(readings: TemperatureReading[]): Array<{
+  detectAnomalies(
+    readings: TemperatureReading[],
+    thresholds: { high: number; medium: number; low: number } = {
+      high: 50,
+      medium: 25,
+      low: 15,
+    }
+  ): Array<{
     timestamp: string;
     anomaly: 'spike' | 'drop' | 'disconnect';
     probe: string;
@@ -185,13 +198,13 @@ export class TemperatureCalculator {
         let severity: 'low' | 'medium' | 'high' = 'low';
         let anomaly: 'spike' | 'drop' | null = null;
 
-        if (absChange > 50) {
+        if (absChange > thresholds.high) {
           severity = 'high';
           anomaly = change > 0 ? 'spike' : 'drop';
-        } else if (absChange > 25) {
+        } else if (absChange > thresholds.medium) {
           severity = 'medium';
           anomaly = change > 0 ? 'spike' : 'drop';
-        } else if (absChange > 15) {
+        } else if (absChange > thresholds.low) {
           severity = 'low';
           anomaly = change > 0 ? 'spike' : 'drop';
         }
@@ -257,9 +270,24 @@ export class TemperatureCalculator {
     const sumXY = normalizedTimes.reduce((sum, x, i) => sum + x * recentReadings[i].temperature, 0);
     const sumXX = normalizedTimes.reduce((sum, x) => sum + x * x, 0);
 
-    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    // When every recent reading shares an identical timestamp the normalized
+    // times are all 0, so this denominator is 0 and the slope divide is 0/0 =
+    // NaN. Guard it before dividing — an all-identical time axis carries no
+    // derivable trend, so return the same low-confidence no-estimate result the
+    // non-positive-slope branch does. (NaN also slips past `slope <= 0`, which
+    // would otherwise crash the downstream Date construction.)
+    const denom = n * sumXX - sumX * sumX;
+    if (denom === 0) {
+      return {
+        estimatedMinutes: null,
+        confidence: 'low',
+        estimatedCompletionTime: null,
+      };
+    }
 
-    if (slope <= 0) {
+    const slope = (n * sumXY - sumX * sumY) / denom;
+
+    if (!Number.isFinite(slope) || slope <= 0) {
       return {
         estimatedMinutes: null,
         confidence: 'low',
@@ -308,6 +336,10 @@ export class TemperatureCalculator {
     }
     
     if (ssTot === 0) return 0;
-    return 1 - (ssRes / ssTot);
+    const rSquared = 1 - ssRes / ssTot;
+    // Guard NaN: when all time points are identical the upstream slope divide is
+    // 0/0 → NaN, which would propagate through here and poison the confidence
+    // calculation. Fall back to a defined 0 (no explanatory power).
+    return isFinite(rSquared) ? rSquared : 0;
   }
 }

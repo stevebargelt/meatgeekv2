@@ -126,6 +126,28 @@ export const MEAT_TYPES = {
 } as const;
 
 /**
+ * Resolves a user-supplied meat type to its canonical MEAT_TYPES key.
+ *
+ * The KEY (e.g. 'PORK_SHOULDER') is the single canonical identifier — stable,
+ * storage-facing, and what cook creation uses to derive default temps. Matches
+ * case-insensitively against the keys first, then against the display names
+ * (e.g. 'Pork Shoulder') so callers passing either form resolve without regressing.
+ */
+export function resolveMeatType(
+  input: string
+): keyof typeof MEAT_TYPES | undefined {
+  const normalized = input.toLowerCase();
+  const keys = Object.keys(MEAT_TYPES) as Array<keyof typeof MEAT_TYPES>;
+
+  const byKey = keys.find((key) => key.toLowerCase() === normalized);
+  if (byKey) {
+    return byKey;
+  }
+
+  return keys.find((key) => MEAT_TYPES[key].name.toLowerCase() === normalized);
+}
+
+/**
  * API endpoints
  */
 export const API_ENDPOINTS = {
@@ -195,6 +217,14 @@ export const VALIDATION = {
   COOK_NAME: {
     MIN_LENGTH: 3,
     MAX_LENGTH: 50,
+  },
+  // Unified weight contract (pounds): ERROR when weight <= MIN_EXCLUSIVE or
+  // > MAX; WARN when WARN_ABOVE < weight <= MAX. Shared by cook-manager and
+  // DataValidator so both surfaces agree.
+  WEIGHT: {
+    MIN_EXCLUSIVE: 0,
+    MAX: 100,
+    WARN_ABOVE: 50,
   },
   DEVICE_NAME: {
     MIN_LENGTH: 3,
