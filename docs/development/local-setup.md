@@ -65,7 +65,7 @@ DEVICE_CONNECTION_STRING=your-device-connection-string
 SIGNALR_CONNECTION_STRING=your-signalr-connection-string
 
 # Application Insights
-APPINSIGHTS_CONNECTION_STRING=your-appinsights-connection-string
+APPLICATIONINSIGHTS_CONNECTION_STRING=your-appinsights-connection-string
 ```
 
 ### 3. Set Up Development Infrastructure
