@@ -270,9 +270,24 @@ export class TemperatureCalculator {
     const sumXY = normalizedTimes.reduce((sum, x, i) => sum + x * recentReadings[i].temperature, 0);
     const sumXX = normalizedTimes.reduce((sum, x) => sum + x * x, 0);
 
-    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    // When every recent reading shares an identical timestamp the normalized
+    // times are all 0, so this denominator is 0 and the slope divide is 0/0 =
+    // NaN. Guard it before dividing — an all-identical time axis carries no
+    // derivable trend, so return the same low-confidence no-estimate result the
+    // non-positive-slope branch does. (NaN also slips past `slope <= 0`, which
+    // would otherwise crash the downstream Date construction.)
+    const denom = n * sumXX - sumX * sumX;
+    if (denom === 0) {
+      return {
+        estimatedMinutes: null,
+        confidence: 'low',
+        estimatedCompletionTime: null,
+      };
+    }
 
-    if (slope <= 0) {
+    const slope = (n * sumXY - sumX * sumY) / denom;
+
+    if (!Number.isFinite(slope) || slope <= 0) {
       return {
         estimatedMinutes: null,
         confidence: 'low',
