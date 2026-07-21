@@ -38,17 +38,30 @@ export async function stopCookHandler(
     // Functions invocation id (matches start-cook).
     const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
 
+    const endTime = new Date().toISOString();
+
     // Complete the cook (still a mock — the durable write lands in a later
     // ticket). The envelope-level cook data is what the pusher consumes.
+    //
+    // PLACEHOLDER VALUES: there is no persisted cook to read back (start-cook is
+    // a mock — DEC-3; the persist-or-minimize decision is tracked in the MG-14
+    // follow-up ticket), so name/startTime/meatType cannot be the real values.
+    // We emit schema-VALID synthetic placeholders instead of empty strings so
+    // the payload conforms to the Cook schema (name minLength 3, startTime
+    // date-time). The Go data-pusher consumer does NOT read name/startTime on
+    // cook_stopped — it keys off payload.id — so synthetic values are safe:
+    //   - name:      `Cook ${cookId}` (obviously synthetic, >= 3 chars)
+    //   - startTime: reuse endTime (true start unknown; documented approximation)
+    //   - meatType:  'unknown' (valid non-empty string; meatType is optional)
     const cook: Cook = {
       id: cookId,
       userId: 'user-1', // TODO: Extract from auth token
       deviceId: body.deviceId,
-      name: '',
+      name: `Cook ${cookId}`,
       status: 'completed',
-      startTime: '',
-      endTime: new Date().toISOString(),
-      meatType: '',
+      startTime: endTime,
+      endTime,
+      meatType: 'unknown',
     };
 
     context.log(`Stopped cook: ${cook.id} for device: ${body.deviceId}`);

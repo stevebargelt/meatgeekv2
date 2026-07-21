@@ -255,6 +255,12 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
     expect(env.payload.status).toBe('completed');
     expect(env.correlation.id).toBe('req-stop');
 
+    // The stop payload is a synthetic (non-persisted) Cook but must still be
+    // schema-VALID: name >= 3 chars, startTime a parseable ISO-8601 date-time.
+    // The Go consumer keys off payload.id and ignores name/startTime here.
+    expect(env.payload.name.length).toBeGreaterThanOrEqual(3);
+    expect(Number.isNaN(Date.parse(env.payload.startTime))).toBe(false);
+
     expect((res as { status: number }).status).toBe(200);
   });
 

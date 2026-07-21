@@ -63,6 +63,12 @@ describe('stopCookHandler', () => {
     expect(envelope.payload.id).toBe('cook-abc');
     expect(envelope.payload.status).toBe('completed');
 
+    // The (placeholder) payload must still be schema-VALID per the Cook schema
+    // even though the cook is not persisted: name >= 3 chars, startTime a
+    // parseable ISO-8601 date-time. See stop-cook.ts for why these are synthetic.
+    expect(envelope.payload.name.length).toBeGreaterThanOrEqual(3);
+    expect(Number.isNaN(Date.parse(envelope.payload.startTime))).toBe(false);
+
     expect(res.status).toBe(200);
   });
 
