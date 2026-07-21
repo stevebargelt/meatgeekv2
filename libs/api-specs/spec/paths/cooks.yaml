@@ -234,6 +234,10 @@ cook-stop:
       `deviceId` presence (400 VALIDATION_ERROR if missing) and returns 200 with
       the completed Cook directly (NOT wrapped in ApiResponse). The emitted
       cook is a synthetic placeholder — the cook is not yet persisted (DEC-3).
+      No 404 is documented: the handler synthesizes the Cook from the path
+      `cookId` and performs no lookup, so a not-found response is unreachable
+      today. A 404 not-found will be introduced once cook persistence/lookup
+      lands (tracked as MG-31).
     tags: [cooks]
     parameters:
       - name: cookId
@@ -271,12 +275,6 @@ cook-stop:
               $ref: '../components/schemas/cook.yaml#/Cook'
       '400':
         description: Validation failure (missing deviceId).
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '404':
-        description: Cook not found.
         content:
           application/json:
             schema:

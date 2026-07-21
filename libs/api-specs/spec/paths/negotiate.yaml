@@ -1,0 +1,47 @@
+# SignalR negotiate path item.
+# Top-level key is referenced from openapi.yaml's `paths` block.
+#
+# Implementation status:
+#   - negotiate : POST implemented (apps/api/src/functions/signalr/negotiate.ts;
+#                 route 'negotiate', POST — apps/api/src/main.ts).
+
+negotiate:
+  post:
+    operationId: negotiate
+    summary: SignalR negotiate
+    description: |
+      SignalR handshake endpoint. Mirrors the SHIPPED handler
+      apps/api/src/functions/signalr/negotiate.ts: requires a `deviceId` QUERY
+      parameter (400 VALIDATION_ERROR if missing) and returns 200 with the
+      SignalRConnectionInfo ({ url, accessToken }) resolved by the Functions
+      `signalRConnectionInfo` input binding. The `deviceId` is bound to the
+      connection's SignalR user group so per-device fan-out works (DEC-4 / MG-30).
+      Response body is the bare connection info (NOT wrapped in ApiResponse).
+    tags: [cooks]
+    parameters:
+      - name: deviceId
+        in: query
+        required: true
+        description: |
+          Device whose user group the negotiated connection joins. Missing
+          deviceId is a 400 (handler rejects before resolving connection info).
+        schema:
+          type: string
+    responses:
+      '200':
+        description: SignalR connection info for the client to open its WebSocket.
+        headers:
+          X-Request-ID:
+            description: Functions invocation id (correlation handle).
+            schema:
+              type: string
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/signalr-payloads.yaml#/SignalRConnectionInfo'
+      '400':
+        description: Missing deviceId query parameter.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
