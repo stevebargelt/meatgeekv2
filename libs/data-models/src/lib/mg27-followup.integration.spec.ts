@@ -18,7 +18,7 @@
  * A regression that reintroduces the truthy ADC gate or the `?.trim() ?? name`
  * fallback passes the old per-file specs but must fail here.
  */
-import { describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { CookManager } from './cook-manager';
 import { TemperatureCalculator } from './temperature-calculator';
 import type { StartCookRequest, TemperatureReading } from '@meatgeekv2/api-interfaces';
@@ -110,6 +110,59 @@ describe('MG-27 — ADC=0 boundary routing (processDeviceReading)', () => {
     expect(zero.grillTemp).toBe(absent.grillTemp); // 0 ≡ absent (both undefined)
     expect(real.grillTemp).not.toBe(zero.grillTemp); // real reading ≠ sentinel
     expect(typeof real.grillTemp).toBe('number');
+  });
+});
+
+describe('MG-27 — ADC=0 is ROUTED through convertAdcToTemperature (white-box path)', () => {
+  // The consistency assertions above prove 0, out-of-range and absent AGREE on
+  // the output — but the old buggy truthy gate produced that same output (0 is
+  // falsy → skipped to undefined, exactly like absent). Black-box output cannot
+  // tell the fix from the bug. The one observable difference is the CODE PATH:
+  // the fixed presence check hands a present 0 to convertAdcToTemperature; the
+  // truthy gate never calls it for 0. These spy-based tests pin that path and go
+  // red against a truthy-gate regression.
+  let calc: TemperatureCalculator;
+  let spy: ReturnType<typeof jest.spyOn>;
+
+  beforeEach(() => {
+    calc = new TemperatureCalculator();
+    spy = jest.spyOn(calc, 'convertAdcToTemperature');
+  });
+
+  afterEach(() => {
+    spy.mockRestore();
+  });
+
+  it.each(PROBES)(
+    'a present ADC=0 on $adc is passed to convertAdcToTemperature (a truthy gate would skip it)',
+    ({ adc }) => {
+      calc.processDeviceReading(baseReading({ [adc]: 0 }));
+      // Correction is the 2nd arg. Old truthy gate never reaches this call for 0.
+      expect(spy).toHaveBeenCalledWith(0, expect.any(Number));
+    }
+  );
+
+  it('routes a present ADC=0 on ALL probes through convertAdcToTemperature (5 calls with 0)', () => {
+    calc.processDeviceReading(
+      baseReading({ grillAdc: 0, probe1Adc: 0, probe2Adc: 0, probe3Adc: 0, probe4Adc: 0 })
+    );
+    expect(spy).toHaveBeenCalledTimes(PROBES.length);
+    expect(spy).toHaveBeenCalledWith(0, expect.any(Number));
+  });
+
+  it('a genuinely-absent probe is NOT routed through convertAdcToTemperature', () => {
+    calc.processDeviceReading(baseReading());
+    // The presence check correctly skips absent probes — no conversion call.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('convertAdcToTemperature is never called with undefined (present 0 routes, absent skips)', () => {
+    // grill present as 0, the other four absent: exactly one call, and never with
+    // undefined. Proves the presence check discriminates 0 from absent by PATH.
+    calc.processDeviceReading(baseReading({ grillAdc: 0 }));
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(0, expect.any(Number));
+    expect(spy).not.toHaveBeenCalledWith(undefined, expect.anything());
   });
 });
 
