@@ -202,6 +202,15 @@ resource "azurerm_linux_function_app" "main" {
       condition     = var.auth_active_directory_client_id == "" || length(var.auth_allowed_audiences) > 0
       error_message = "Function App Easy Auth is incompletely configured: auth_active_directory_client_id is set but auth_allowed_audiences is empty. With no allowed audience, bearer validation rejects every token. Set auth_allowed_audiences to the dev API's accepted audience(s) (MG-24 runbook)."
     }
+    # allowed_applications validates the CALLING CLIENT's appid/azp claim, but Azure
+    # Easy Auth treats an EMPTY allowed_applications as NO calling-client restriction:
+    # any client holding a valid token for an allowed audience is accepted, silently
+    # disabling the stated calling-client guarantee. So once auth is enabled require a
+    # NON-EMPTY allowed_client_app_ids fail-closed too.
+    precondition {
+      condition     = var.auth_active_directory_client_id == "" || length(var.auth_allowed_client_app_ids) > 0
+      error_message = "Function App Easy Auth is incompletely configured: auth_active_directory_client_id is set but auth_allowed_client_app_ids is empty. Azure Easy Auth treats an empty allowed_applications as no calling-client restriction, so ANY client holding a token for an allowed audience could call the API, contradicting the bearer-validation-only contract. Set auth_allowed_client_app_ids to the calling client app id(s) — the smoke-test client (the Azure CLI public client 04b07795-8ddb-461a-bbee-02f9e1bf7b46 by default, or a dedicated dev client) (MG-24 runbook)."
+    }
   }
 }
 
