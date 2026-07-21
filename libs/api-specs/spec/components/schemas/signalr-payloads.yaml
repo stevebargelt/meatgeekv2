@@ -1,6 +1,6 @@
 # SignalR message payloads.
 #
-# These schemas describe messages emitted over the SignalR `temperatureHub`
+# Most schemas here describe messages emitted over the SignalR `temperatureHub`
 # channel — they are NOT HTTP endpoints. See openapi.yaml info.description
 # for the channel/transport prose note.
 #
@@ -8,6 +8,31 @@
 # can stitch a single user action to log entries across device → IoT Hub →
 # Functions → SignalR → client. The discriminator on `type` lets generators
 # produce a typed union per language (Go interface, TS discriminated union).
+#
+# EXCEPTION: SignalRConnectionInfo (below) is NOT a channel message — it is the
+# HTTP response body of POST /negotiate, produced by the Functions
+# `signalRConnectionInfo` input binding. It is kept in this SignalR-domain file
+# so codegen groups the negotiate handshake type with the channel payloads.
+
+SignalRConnectionInfo:
+  type: object
+  description: |
+    SignalR connection info returned by POST /negotiate. Mirrors the
+    `signalRConnectionInfo` input binding output resolved by the Functions
+    runtime in apps/api/src/functions/signalr/negotiate.ts — the client uses
+    `url` + `accessToken` to open its WebSocket to the temperatureHub.
+  required:
+    - url
+    - accessToken
+  additionalProperties: false
+  properties:
+    url:
+      type: string
+      format: uri
+      description: Absolute WebSocket/HTTP endpoint the client connects to.
+    accessToken:
+      type: string
+      description: Short-lived JWT the client presents when opening the connection.
 
 SignalRMessageType:
   type: string

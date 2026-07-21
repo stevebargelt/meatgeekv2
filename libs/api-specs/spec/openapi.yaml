@@ -21,8 +21,9 @@ info:
 
     ## Source-of-truth note
 
-    Routes for the four currently-implemented HTTP endpoints
-    (GET /cooks, POST /cooks, GET /temperatures/current/{deviceId},
+    Routes for the six currently-implemented HTTP endpoints
+    (GET /cooks, POST /cooks, POST /cooks/{cookId}/stop,
+    POST /negotiate, GET /temperatures/current/{deviceId},
     GET /devices) match `apps/api/src/main.ts` route templates
     character-for-character — these are the contract. Endpoints whose
     description starts with `NOT YET IMPLEMENTED -` represent the planned
@@ -55,10 +56,17 @@ paths:
     $ref: './paths/cooks.yaml#/cook-item'
   /cooks/{id}/start:
     $ref: './paths/cooks.yaml#/cook-start'
-  /cooks/{id}/stop:
+  # Shipped route (apps/api/src/main.ts): cooks/{cookId}/stop — path
+  # template var matches the cook-stop operation's `cookId` path param.
+  # The planned {id} routes above will align their param name when implemented.
+  /cooks/{cookId}/stop:
     $ref: './paths/cooks.yaml#/cook-stop'
   /cooks/{id}/history:
     $ref: './paths/cooks.yaml#/cook-history'
+  # Shipped route (apps/api/src/main.ts): route 'negotiate', POST — SignalR
+  # handshake handled by apps/api/src/functions/signalr/negotiate.ts.
+  /negotiate:
+    $ref: './paths/negotiate.yaml#/negotiate'
   /temperatures/current/{deviceId}:
     $ref: './paths/temperatures.yaml#/temperatures-current'
   /temperatures/history:
@@ -128,6 +136,8 @@ components:
 
     # SignalR payloads — message envelopes for the temperatureHub channel,
     # not HTTP endpoints. See info.description for the transport note.
+    SignalRConnectionInfo:
+      $ref: './components/schemas/signalr-payloads.yaml#/SignalRConnectionInfo'
     SignalRMessageType:
       $ref: './components/schemas/signalr-payloads.yaml#/SignalRMessageType'
     CorrelationContext:

@@ -228,25 +228,53 @@ cook-stop:
     operationId: stopCook
     summary: Stop an active cook
     description: |
-      NOT YET IMPLEMENTED - Moves cook id=`{id}` to `completed`, sets endTime
-      to now(), and emits a `cook_stopped` SignalR message. Idempotent: a
-      cook already in `completed` returns 200 unchanged.
+      Moves cook id=`{cookId}` to `completed`, sets endTime to now(), and emits
+      a `cook_stopped` SignalR message on the device's user group. Mirrors the
+      SHIPPED handler apps/api/src/functions/cooks/stop-cook.ts: validates
+      `deviceId` presence (400 VALIDATION_ERROR if missing) and returns 200 with
+      the completed Cook directly (NOT wrapped in ApiResponse). The emitted
+      cook is a synthetic placeholder — the cook is not yet persisted (DEC-3).
+      No 404 is documented: the handler synthesizes the Cook from the path
+      `cookId` and performs no lookup, so a not-found response is unreachable
+      today. A 404 not-found will be introduced once cook persistence/lookup
+      lands (tracked as MG-31).
     tags: [cooks]
     parameters:
-      - name: id
+      - name: cookId
         in: path
         required: true
+        description: Id of the cook to stop (route is cooks/{cookId}/stop).
         schema:
           type: string
+    requestBody:
+      required: true
+      description: |
+        Handler requires `deviceId` (scopes the emitted cook_stopped SignalR
+        message to the device's user group); missing deviceId is a 400.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required:
+              - deviceId
+            properties:
+              deviceId:
+                type: string
     responses:
       '200':
         description: Cook now completed.
+        headers:
+          X-Request-ID:
+            description: Correlation id (propagated X-Request-ID or invocation id).
+            schema:
+              type: string
         content:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/Cook'
-      '404':
-        description: Cook not found.
+      '400':
+        description: Validation failure (missing deviceId).
         content:
           application/json:
             schema:

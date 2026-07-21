@@ -1,4 +1,10 @@
 import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
+import {
+  buildCookEnvelope,
+  COOK_STARTED,
+  signalROutput,
+  SignalROutputMessage,
+} from '../signalr/envelope';
 
 export interface StartCookRequest {
   name: string;
@@ -70,6 +76,17 @@ export async function startCookHandler(
     };
 
     context.log(`Started cook: ${newCook.id} for device: ${body.deviceId}`);
+
+    // Correlation id propagates from the inbound request when present, else the
+    // Functions invocation id. Emit AFTER the cook is minted; userId scopes
+    // delivery to the device's SignalR user group.
+    const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
+    const message: SignalROutputMessage = {
+      target: COOK_STARTED,
+      userId: body.deviceId,
+      arguments: [buildCookEnvelope(COOK_STARTED, newCook, correlationId)],
+    };
+    context.extraOutputs.set(signalROutput, [message]);
 
     return {
       status: 201,
