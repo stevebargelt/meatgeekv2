@@ -1,8 +1,10 @@
 ---
 id: MG-11
 type: story
-status: active
+status: done
 title: data-pusher-module-path-rename
+closed: 2026-07-21
+closed_commit: bb72843136f64ac45dfc08cdd6f8956e87629b85
 ---
 
 #### Context
