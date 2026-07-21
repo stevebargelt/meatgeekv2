@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"meatgeek-pusher/internal/iothub"
-	"meatgeek-pusher/internal/queue"
-	"meatgeek-pusher/internal/telemetry"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
 
 	"go.opentelemetry.io/otel"
 )
