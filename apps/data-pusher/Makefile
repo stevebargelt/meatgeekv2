@@ -97,7 +97,7 @@ deploy-to-pi: build-arm
 init-dev:
 	@echo "Initializing development environment..."
 	mkdir -p dist
-	go mod init meatgeek-pusher 2>/dev/null || true
+	go mod init github.com/stevebargelt/meatgeekv2/apps/data-pusher 2>/dev/null || true
 	go mod tidy
 	@echo "✅ Development environment ready"
 
