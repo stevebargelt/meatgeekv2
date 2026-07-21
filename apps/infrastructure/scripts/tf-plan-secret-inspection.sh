@@ -201,7 +201,13 @@ ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type
 # so a bare instrumentation key copied verbatim into a sink can still be caught.
 # (Pre-apply the ikey may be known-after-apply/unknown; then this list is empty —
 # another reason the post-apply STATE run is required.)
-ai_ikeys="$(printf '%s\n' "${RESOURCES}" | jq -r '[.[] | select(.type=="azurerm_application_insights") | .values.instrumentation_key] | map(select(. != null and . != "")) | unique | .[]' 2>/dev/null || true)"
+# Fail-closed like the collectors above: a jq FAILURE must die, NOT be swallowed by
+# `|| true` into an empty set that disables the bare-ikey-in-sink detection. jq is
+# the last command in this substitution, so `$(...)` carries jq's exit status —
+# capture it here, then dedup separately (a jq that succeeds with no ikeys is the
+# legitimate known-after-apply empty result noted above and still proceeds).
+ai_ikeys="$(printf '%s\n' "${RESOURCES}" | jq -r '[.[] | select(.type=="azurerm_application_insights") | .values.instrumentation_key] | map(select(. != null and . != "")) | .[]' 2>/dev/null)" || die "cannot inspect: failed to collect App Insights instrumentation keys from ${SRC}"
+ai_ikeys="$(printf '%s\n' "${ai_ikeys}" | sort -u)"
 
 # --- 2b. Collect the INHERENT-KEY data-service resources ---------------------
 # Cosmos DB, Storage, SignalR, the Event Hubs namespace, App Insights, and IoT Hub

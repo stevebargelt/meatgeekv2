@@ -188,6 +188,20 @@ resource "azurerm_linux_function_app" "main" {
       condition     = var.auth_active_directory_client_id != ""
       error_message = "Function App Easy Auth is not configured: set auth_active_directory_client_id to the dev API Entra registration client id (MG-24 runbook). An empty value cannot produce a valid auth_settings_v2 (Azure requires >=1 identity provider), so deployment is refused fail-closed rather than shipping an anonymous Function App."
     }
+    # Easy Auth is all-or-nothing here: a client_id alone yields an INCOMPLETE
+    # active_directory_v2 block. tenant_auth_endpoint (built from tenant_id) fixes
+    # the token issuer, and allowed_audiences fixes which audience is accepted; if
+    # either is empty, bearer validation rejects EVERY token (wrong issuer / no
+    # allowed audience) and the step-9 authenticated smoke test fails. So once auth
+    # is enabled (client_id != ""), require both fail-closed too.
+    precondition {
+      condition     = var.auth_active_directory_client_id == "" || var.auth_active_directory_tenant_id != ""
+      error_message = "Function App Easy Auth is incompletely configured: auth_active_directory_client_id is set but auth_active_directory_tenant_id is empty. tenant_auth_endpoint would point at an invalid issuer and bearer validation would reject every token. Set auth_active_directory_tenant_id to the dev API Entra tenant id (MG-24 runbook)."
+    }
+    precondition {
+      condition     = var.auth_active_directory_client_id == "" || length(var.auth_allowed_audiences) > 0
+      error_message = "Function App Easy Auth is incompletely configured: auth_active_directory_client_id is set but auth_allowed_audiences is empty. With no allowed audience, bearer validation rejects every token. Set auth_allowed_audiences to the dev API's accepted audience(s) (MG-24 runbook)."
+    }
   }
 }
 
