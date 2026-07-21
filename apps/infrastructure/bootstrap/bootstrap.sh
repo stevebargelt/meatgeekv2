@@ -383,13 +383,7 @@ bootstrap_oidc_identity() {
     # env's identity trusts ONLY its own environment.
     cred_name="github-${env}"
     subject="repo:${GITHUB_REPO}:environment:${env}"
-    existing="$(az ad app federated-credential list --id "$app_id" \
-      --query "[?name=='${cred_name}'].name | [0]" -o tsv 2>/dev/null || true)"
-    if [ -n "$existing" ] && [ "$existing" != "null" ]; then
-      ok "Federated credential already exists: ${cred_name} (${subject})"
-    else
-      log "Creating federated credential: ${cred_name} -> ${subject}"
-      az ad app federated-credential create --id "$app_id" --parameters "$(cat <<JSON
+    fc_params="$(cat <<JSON
 {
   "name": "${cred_name}",
   "issuer": "${OIDC_ISSUER}",
@@ -398,8 +392,25 @@ bootstrap_oidc_identity() {
   "description": "GitHub Actions OIDC for the '${env}' environment of ${GITHUB_REPO}"
 }
 JSON
-)" -o none
+)"
+    # Reconcile on SUBJECT, not just name: the subject IS the OIDC trust binding,
+    # so a credential with the right name but a stale subject (prior repo/env or
+    # subject-format change) would bind federation to the WRONG trust. Query the
+    # existing SUBJECT and update it when it drifts from the desired value.
+    existing_subject="$(az ad app federated-credential list --id "$app_id" \
+      --query "[?name=='${cred_name}'].subject | [0]" -o tsv 2>/dev/null || true)"
+    if [ -z "$existing_subject" ] || [ "$existing_subject" = "null" ]; then
+      log "Creating federated credential: ${cred_name} -> ${subject}"
+      az ad app federated-credential create --id "$app_id" --parameters "$fc_params" -o none
       ok "Federated credential created: ${cred_name}"
+    elif [ "$existing_subject" = "$subject" ]; then
+      ok "Federated credential already exists (subject matches): ${cred_name} (${subject})"
+    else
+      log "Reconciling federated credential subject: ${cred_name} (${existing_subject} -> ${subject})"
+      az ad app federated-credential delete --id "$app_id" \
+        --federated-credential-id "$cred_name" -o none
+      az ad app federated-credential create --id "$app_id" --parameters "$fc_params" -o none
+      ok "Federated credential subject reconciled: ${cred_name} -> ${subject}"
     fi
 
     # Least-privilege role: Reader (plan/read) at the subscription scope so

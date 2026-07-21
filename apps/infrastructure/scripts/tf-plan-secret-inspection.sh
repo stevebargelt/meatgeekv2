@@ -187,8 +187,8 @@ RESOURCES="$(printf '%s\n' "${JSON}" | jq -c '
 # NOT safe and must be rejected. `all` over an empty set is true, so also require
 # at least one AI resource before treating the residual as accepted. select(. !=
 # null) keeps a genuine `false` (which jq's `//` would wrongly drop).
-ai_count="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights")] | length')"
-ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights") | .values.local_authentication_disabled | select(. != null)] | (length > 0) and all(. == true)')"
+ai_count="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights")] | length' 2>/dev/null)" || die "cannot inspect: failed to collect App Insights count from ${SRC}"
+ai_local_auth_disabled="$(printf '%s\n' "${RESOURCES}" | jq '[.[] | select(.type=="azurerm_application_insights") | .values.local_authentication_disabled | select(. != null)] | (length > 0) and all(. == true)' 2>/dev/null)" || die "cannot inspect: failed to collect App Insights local-auth-disabled from ${SRC}"
 
 # The AI resource's OWN computed connection_string / instrumentation_key living in
 # its resource block is the inherent-in-state residual (a TF-managed resource
