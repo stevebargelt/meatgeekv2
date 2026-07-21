@@ -178,13 +178,15 @@ describe('MG-9 cross-surface unification', () => {
       expect(cm.errors).toEqual([]);
     });
 
-    it('a whitespace-only name is rejected consistently by both surfaces', () => {
-      // createCook now trims (was verbatim pre-MG-9) → stores '' for '   '
-      const cook = CookManager.createCook(baseRequest({ name: '   ' }), 'user-1');
-      expect(cook.name).toBe('');
+    it('a whitespace-only name is rejected consistently across all surfaces', () => {
+      // MG-28: createCook now fails fast on a whitespace-only name (was: stored '')
+      // so it can never emit a Cook violating the required non-empty-name invariant.
+      expect(() => CookManager.createCook(baseRequest({ name: '   ' }), 'user-1')).toThrow(
+        'createCook: cook name must not be empty or whitespace-only'
+      );
 
-      // Both validators flag the resulting empty/short name.
-      const cm = CookManager.validateCook({ ...cook, name: '   ' });
+      // The validator surfaces flag the same whitespace-only name.
+      const cm = CookManager.validateCook({ name: '   ', deviceId: 'device-1', meatType: 'BRISKET' });
       expect(cm.errors).toContain('Cook name must be at least 3 characters');
 
       const dv = DataValidator.validateStartCookRequest(baseRequest({ name: '   ' }));

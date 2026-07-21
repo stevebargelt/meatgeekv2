@@ -177,7 +177,6 @@ describe('MG-27 — createCook name is always a trimmed, defined string', () => 
     ['  padded  ', 'padded'],
     ['\tTabbed\n', 'Tabbed'],
     ['NoTrimNeeded', 'NoTrimNeeded'],
-    ['   ', ''], // whitespace-only trims to empty string — still a defined string
     ['a', 'a'],
   ])('name %p is stored as the defined string %p', (input, expected) => {
     const cook = CookManager.createCook(baseRequest({ name: input }), 'user-1');
@@ -188,10 +187,18 @@ describe('MG-27 — createCook name is always a trimmed, defined string', () => 
   });
 
   it('the stored name is a defined string for any valid StartCookRequest', () => {
-    for (const name of ['Brisket', '  Pork  ', 'Ribs', '   ', 'x']) {
+    for (const name of ['Brisket', '  Pork  ', 'Ribs', 'x']) {
       const cook = CookManager.createCook(baseRequest({ name }), 'user-1');
       expect(typeof cook.name).toBe('string');
       expect(cook.name).toBe(name.trim());
     }
+  });
+
+  // MG-28: a whitespace-only name trims to '' and would violate Cook.name's
+  // required non-empty invariant, so createCook fails fast instead of emitting it.
+  it('throws for a whitespace-only name rather than storing an empty string', () => {
+    expect(() => CookManager.createCook(baseRequest({ name: '   ' }), 'user-1')).toThrow(
+      'createCook: cook name must not be empty or whitespace-only'
+    );
   });
 });

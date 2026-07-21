@@ -89,4 +89,27 @@ describe('startCookHandler', () => {
     expect(res.status).toBe(400);
     expect(messages()).toBeUndefined();
   });
+
+  it('returns 400 with no SignalR message when name is whitespace-only', async () => {
+    const { ctx, messages } = mockContext();
+    const res = await startCookHandler(
+      mockRequest({ name: '   ', deviceId: 'meatgeek3', meatType: 'brisket' }),
+      ctx
+    );
+
+    expect(res.status).toBe(400);
+    expect((res.jsonBody as { error: string }).error).toBe('VALIDATION_ERROR');
+    expect(messages()).toBeUndefined();
+  });
+
+  it('stores the trimmed name in the 201 body when name has surrounding whitespace', async () => {
+    const { ctx } = mockContext();
+    const res = await startCookHandler(
+      mockRequest({ name: '  Weekend Brisket  ', deviceId: 'meatgeek3', meatType: 'brisket' }),
+      ctx
+    );
+
+    expect(res.status).toBe(201);
+    expect((res.jsonBody as { name: string }).name).toBe('Weekend Brisket');
+  });
 });
