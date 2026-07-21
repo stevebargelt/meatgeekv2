@@ -160,11 +160,14 @@ resource "azurerm_linux_function_app" "main" {
       unauthenticated_action = "Return401"
 
       active_directory_v2 {
-        client_id                   = var.auth_active_directory_client_id
-        tenant_auth_endpoint        = "https://login.microsoftonline.com/${var.auth_active_directory_tenant_id}/v2.0"
-        allowed_audiences           = var.auth_allowed_audiences
-        allowed_applications        = var.auth_allowed_client_app_ids
-        www_authentication_disabled = false
+        client_id            = var.auth_active_directory_client_id
+        tenant_auth_endpoint = "https://login.microsoftonline.com/${var.auth_active_directory_tenant_id}/v2.0"
+        allowed_audiences    = var.auth_allowed_audiences
+        allowed_applications = var.auth_allowed_client_app_ids
+        # Bearer-validation-only API: no interactive caller, so suppress the
+        # WWW-Authenticate challenge. An unauthenticated request gets a clean 401
+        # (unauthenticated_action = Return401) with no browser sign-in challenge.
+        www_authentication_disabled = true
       }
 
       login {

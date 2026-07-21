@@ -343,19 +343,43 @@ is in the **[bootstrap runbook](./bootstrap-runbook.md)**.
 
 ## Authentication Integration
 
-MeatGeek V2 uses **Supabase Auth** as the external authentication provider:
+MeatGeek V2 authenticates callers with **Azure Entra (App Service Easy Auth)** at
+the platform layer — there is **no** Supabase and **no** external auth provider.
+The Function App enables `auth_settings_v2` with an `active_directory_v2` identity
+provider (`modules/functions/main.tf`) and is **fail-closed**: a module
+precondition refuses to deploy unless the Entra API registration is configured, so
+an anonymous Function App can never ship. Every request is validated at the
+platform layer **before any function runs** — `require_authentication = true` with
+`unauthenticated_action = "Return401"`, so a missing/invalid bearer token is
+rejected with 401 regardless of a function's own `authLevel`.
 
-- No identity-provider infrastructure needed in Terraform
-- Azure Functions validate JWTs from Supabase
-- Reduced infrastructure complexity and cost
+This is **bearer-token validation only**, not an interactive sign-in flow:
 
-Function App settings required:
+- **No client secret** is set — Easy Auth only *validates* inbound tokens, it never
+  performs a login redirect or holds a credential.
+- **`allowed_audiences`** carries the exact **API App ID URI** (`api://<api-app-id>`) —
+  the token's `aud` must match the dev Entra API registration.
+- **`allowed_applications`** validates the **calling client's** `appid`/`azp` claim
+  (the pre-authorized client — the Azure CLI public client by default, or a dedicated
+  dev client). A token minted by any other client is rejected.
+- **`token_store_enabled = false`** — no token is persisted at rest.
+
+The Entra API registration (the delegated `access_as_user` scope on
+`api://<api-app-id>`) is created by the **[bootstrap](./bootstrap-runbook.md)**, not
+Terraform; the operator wires its coordinates into `environments/dev.tfvars`
+(`functions_auth_client_id`, `functions_auth_tenant_id`,
+`functions_auth_allowed_audiences`, `functions_auth_allowed_client_app_ids`). Acquire
+an operator token for the authenticated smoke test with:
 
 ```bash
-SUPABASE_URL=<your-supabase-project-url>
-SUPABASE_ANON_KEY=<your-supabase-anon-key>
-SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
+APP_ID_URI=$(az ad app show --id <api-app-id> --query 'identifierUris[0]' -o tsv)
+az account get-access-token --scope "${APP_ID_URI}/access_as_user"
 ```
+
+No `SUPABASE_*` (or any other auth-provider) app settings exist on the Function App —
+authentication is enforced entirely by the platform via the Entra identity provider.
+See the **[bootstrap runbook](./bootstrap-runbook.md)** for the full Entra registration
+and authenticated-smoke-test procedure.
 
 > **Identity-based service access (MG-24).** The Function App runs under a
 > **system-assigned managed identity**, and access to Cosmos DB, IoT/Event Hub

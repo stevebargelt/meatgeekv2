@@ -261,6 +261,12 @@ data_service_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
 # --- 3. Collect the sink VALUES (app_settings + outputs) as TSV --------------
 # Each line: <sink-kind>\t<address/path>\t<value>. We emit the VALUE side only.
 # sort -u dedups identical rows the planned_values/resource_changes union produces.
+# Fail-closed like the data-service universe above: a jq FAILURE (malformed doc,
+# broken filter) must die, NOT be swallowed by `|| true` into an empty set that
+# walks nothing and PASSes. jq is the last command in this command substitution,
+# so `$(...)` carries jq's exit status regardless of pipefail — capture it here,
+# then dedup separately (a jq that succeeds with no matching app_settings is a
+# legitimate empty result and still proceeds).
 app_setting_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
   .[]
   | select(.type | test("function_app|web_app|app_service"))
@@ -269,10 +275,12 @@ app_setting_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
   | to_entries[]
   | ["app_setting", ($r.address + " :: app_settings[\"" + .key + "\"]"), (.value | tostring)]
   | @tsv
-' 2>/dev/null | sort -u || true)"
+' 2>/dev/null)" || die "cannot inspect: failed to collect Function App / Web App / App Service app_settings sink values from ${SRC}"
+app_setting_rows="$(printf '%s\n' "${app_setting_rows}" | sort -u)"
 
 # Outputs live under different keys by mode: .planned_values.outputs (plan),
 # .values.outputs (state), and .output_changes[].after (plan deltas). Union all.
+# Same fail-closed discipline: jq failure dies, an empty output set proceeds.
 output_rows="$(printf '%s\n' "${JSON}" | jq -r '
   (
     ((.planned_values.outputs // {}) | to_entries[] | {k: .key, v: .value.value}),
@@ -281,7 +289,8 @@ output_rows="$(printf '%s\n' "${JSON}" | jq -r '
   )
   | ["output", ("output." + .k), (.v | tostring)]
   | @tsv
-' 2>/dev/null | sort -u || true)"
+' 2>/dev/null)" || die "cannot inspect: failed to collect root/output sink values from ${SRC}"
+output_rows="$(printf '%s\n' "${output_rows}" | sort -u)"
 
 # --- 4. Classify every collected VALUE --------------------------------------
 # CREDENTIAL markers that appear INSIDE a secret VALUE (right-hand side). These
