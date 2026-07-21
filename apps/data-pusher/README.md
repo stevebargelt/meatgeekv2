@@ -321,5 +321,3 @@ nx serve data-pusher      # calls make dev
   propagation across the IoT Hub seam. Will finalize the `correlation.id`
   property contract.
 - **#8** — Workspace ESLint config repair so `nx build data-pusher` works.
-- **#11** — Rename the Go module path from `meatgeek-pusher` to the
-  workspace convention.

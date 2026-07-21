@@ -1,4 +1,4 @@
-module meatgeek-pusher
+module github.com/stevebargelt/meatgeekv2/apps/data-pusher
 
 go 1.24.0
 

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"meatgeek-pusher/internal/queue"
-	"meatgeek-pusher/internal/wire"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
 
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"

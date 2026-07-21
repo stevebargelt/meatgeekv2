@@ -23,7 +23,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	"meatgeek-pusher/internal/wire"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
 )
 
 // Sample is what the collector emits on each successful poll. The producer
