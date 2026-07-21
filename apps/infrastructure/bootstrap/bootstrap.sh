@@ -227,6 +227,45 @@ ensure_role_assignment() {
 }
 
 # --------------------------------------------------------------------------
+# Reconcile a GitHub-Actions OIDC federated credential on SUBJECT, not just
+# name. The subject IS the OIDC trust binding, so a credential with the right
+# name but a stale/wrong subject (prior repo/env or subject-format change)
+# would bind federation to the WRONG trust. Create-if-absent /
+# no-op-if-subject-matches / delete+recreate-if-subject-drifts. Single helper
+# for BOTH the plan/read and app-deploy credentials so the reconciliation can
+# never drift between them again.
+# --------------------------------------------------------------------------
+ensure_federated_credential() {
+  local app_id="$1" cred_name="$2" subject="$3" description="$4"
+  local fc_params existing_subject
+  fc_params="$(cat <<JSON
+{
+  "name": "${cred_name}",
+  "issuer": "${OIDC_ISSUER}",
+  "subject": "${subject}",
+  "audiences": ["${OIDC_AUDIENCE}"],
+  "description": "${description}"
+}
+JSON
+)"
+  existing_subject="$(az ad app federated-credential list --id "$app_id" \
+    --query "[?name=='${cred_name}'].subject | [0]" -o tsv 2>/dev/null || true)"
+  if [ -z "$existing_subject" ] || [ "$existing_subject" = "null" ]; then
+    log "Creating federated credential: ${cred_name} -> ${subject}"
+    az ad app federated-credential create --id "$app_id" --parameters "$fc_params" -o none
+    ok "Federated credential created: ${cred_name}"
+  elif [ "$existing_subject" = "$subject" ]; then
+    ok "Federated credential already exists (subject matches): ${cred_name} (${subject})"
+  else
+    log "Reconciling federated credential subject: ${cred_name} (${existing_subject} -> ${subject})"
+    az ad app federated-credential delete --id "$app_id" \
+      --federated-credential-id "$cred_name" -o none
+    az ad app federated-credential create --id "$app_id" --parameters "$fc_params" -o none
+    ok "Federated credential subject reconciled: ${cred_name} -> ${subject}"
+  fi
+}
+
+# --------------------------------------------------------------------------
 # 1. Durable remote-state storage + per-env containers (create-if-absent)
 # --------------------------------------------------------------------------
 bootstrap_state_backend() {
@@ -348,7 +387,7 @@ bootstrap_oidc_identity() {
     --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" \
     --query id -o tsv 2>/dev/null || true)"
 
-  local env tfenv app_name app_id sp_id cred_name subject container container_scope existing
+  local env tfenv app_name app_id sp_id cred_name subject container container_scope
   for env in $GITHUB_ENVIRONMENTS; do
     tfenv="$(tf_env_for "$env")"
     app_name="${AAD_APP_NAME}-${tfenv}"
@@ -383,35 +422,12 @@ bootstrap_oidc_identity() {
     # env's identity trusts ONLY its own environment.
     cred_name="github-${env}"
     subject="repo:${GITHUB_REPO}:environment:${env}"
-    fc_params="$(cat <<JSON
-{
-  "name": "${cred_name}",
-  "issuer": "${OIDC_ISSUER}",
-  "subject": "${subject}",
-  "audiences": ["${OIDC_AUDIENCE}"],
-  "description": "GitHub Actions OIDC for the '${env}' environment of ${GITHUB_REPO}"
-}
-JSON
-)"
-    # Reconcile on SUBJECT, not just name: the subject IS the OIDC trust binding,
-    # so a credential with the right name but a stale subject (prior repo/env or
-    # subject-format change) would bind federation to the WRONG trust. Query the
-    # existing SUBJECT and update it when it drifts from the desired value.
-    existing_subject="$(az ad app federated-credential list --id "$app_id" \
-      --query "[?name=='${cred_name}'].subject | [0]" -o tsv 2>/dev/null || true)"
-    if [ -z "$existing_subject" ] || [ "$existing_subject" = "null" ]; then
-      log "Creating federated credential: ${cred_name} -> ${subject}"
-      az ad app federated-credential create --id "$app_id" --parameters "$fc_params" -o none
-      ok "Federated credential created: ${cred_name}"
-    elif [ "$existing_subject" = "$subject" ]; then
-      ok "Federated credential already exists (subject matches): ${cred_name} (${subject})"
-    else
-      log "Reconciling federated credential subject: ${cred_name} (${existing_subject} -> ${subject})"
-      az ad app federated-credential delete --id "$app_id" \
-        --federated-credential-id "$cred_name" -o none
-      az ad app federated-credential create --id "$app_id" --parameters "$fc_params" -o none
-      ok "Federated credential subject reconciled: ${cred_name} -> ${subject}"
-    fi
+    # Reconcile on SUBJECT, not just name (see ensure_federated_credential): the
+    # subject IS the OIDC trust binding, so a credential with the right name but
+    # a stale subject (prior repo/env or subject-format change) would bind
+    # federation to the WRONG trust.
+    ensure_federated_credential "$app_id" "$cred_name" "$subject" \
+      "GitHub Actions OIDC for the '${env}' environment of ${GITHUB_REPO}"
 
     # Least-privilege role: Reader (plan/read) at the subscription scope so
     # `terraform plan` can read live resource state. This role CANNOT mutate
@@ -486,7 +502,7 @@ bootstrap_deploy_identity() {
   # DEV ONLY. Prod app-deployment identity is MG-25 (see runbook / summary).
   local env="development" tfenv="dev"
   local app_name="${AAD_DEPLOY_APP_NAME}-${tfenv}"
-  local container app_id sp_id cred_name subject existing container_scope
+  local container app_id sp_id cred_name subject container_scope
   container="$(state_container_for "$env")"
 
   log "── dev APP-DEPLOYMENT identity ${app_name} (publish-only, separate SP)"
@@ -516,24 +532,11 @@ bootstrap_deploy_identity() {
   # app's client id (AZURE_APP_DEPLOY_CLIENT_ID) rather than the plan identity's.
   cred_name="github-appdeploy-${env}"
   subject="repo:${GITHUB_REPO}:environment:${env}"
-  existing="$(az ad app federated-credential list --id "$app_id" \
-    --query "[?name=='${cred_name}'].name | [0]" -o tsv 2>/dev/null || true)"
-  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
-    ok "Federated credential already exists: ${cred_name} (${subject})"
-  else
-    log "Creating federated credential: ${cred_name} -> ${subject}"
-    az ad app federated-credential create --id "$app_id" --parameters "$(cat <<JSON
-{
-  "name": "${cred_name}",
-  "issuer": "${OIDC_ISSUER}",
-  "subject": "${subject}",
-  "audiences": ["${OIDC_AUDIENCE}"],
-  "description": "GitHub Actions OIDC (app-deploy) for the '${env}' environment of ${GITHUB_REPO}"
-}
-JSON
-)" -o none
-    ok "Federated credential created: ${cred_name}"
-  fi
+  # Reconcile on SUBJECT, not just name (see ensure_federated_credential): a
+  # credential with the right name but a stale/wrong subject would bind
+  # deployment federation to the WRONG trust.
+  ensure_federated_credential "$app_id" "$cred_name" "$subject" \
+    "GitHub Actions OIDC (app-deploy) for the '${env}' environment of ${GITHUB_REPO}"
 
   # Publish role: `${DEPLOY_APP_ROLE}` (Website Contributor) scoped to the dev
   # Function App ALONE. This role is now created by TERRAFORM in the SAME apply
