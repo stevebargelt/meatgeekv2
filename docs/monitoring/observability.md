@@ -642,21 +642,24 @@ Rules:
 
 ## Trace-ID Copy-Paste Join Workflow (mobile ↔ backend)
 
-When a bug spans the mobile app and the backend (e.g. "I hit *Start Cook* on my phone and nothing happened"), the two halves live in two different tools. You join them **manually** by carrying one id across the boundary. This works because the RN client injects a **W3C `traceparent`** on its outbound HTTP calls, and the backend OTel pipeline preserves that trace id end-to-end (see [Sentry — traceparent injection contract](#sentry-react-native-lane) below).
+When a bug spans the mobile app and the backend (e.g. "I hit *Start Cook* on my phone and nothing happened"), the two halves live in two different tools. You join them **manually** by carrying one id across the boundary. This works because the RN client injects a **W3C `traceparent`** on its outbound HTTP calls, and the Functions app's default OTel propagator (in `@azure/monitor-opentelemetry`) **continues** that inbound HTTP trace rather than starting a new one — so the mobile trace id lands on the standard App Insights `operation_Id` automatically (see [Sentry — traceparent injection contract](#sentry-react-native-lane) below). Full preservation *through* the backend (`Functions → CosmosDB → SignalR`) is not yet verified in a running system — there is no live backend until MG-24 — so the reliable join key today is the inbound-request `operation_Id`.
 
 Step by step:
 
 1. **Reproduce (or locate) the failing action in Sentry.** Open the Sentry issue / transaction for the mobile event. Sentry records the outbound request's trace context on the event.
 2. **Copy the trace id.** From the Sentry event, copy the **trace id** (the 32-hex-char id, i.e. the middle field of the `traceparent` the client sent: `00-<trace-id>-<span-id>-01`). This is the join key.
 3. **Switch to Application Insights** for the backend resource (lanes 1–2).
-4. **Paste the trace id into a Transaction Search / Logs query.** The backend surfaces it as `correlation.id` (restored from the inbound trace context onto the standard span dimension), so:
+4. **Paste the trace id into a Transaction Search / Logs query.** Because the distro continues the inbound trace, the backend surfaces it on the standard **`operation_Id`** dimension automatically — that is the live join key. (Restoring the same id onto the `correlation.id` custom dimension is *target* state: it depends on the `extractCorrelation` helper that is **not yet wired** into a running receiver — see the Bucket-C caveats above and [MG-24]. Match `correlation.id` too, but treat any hit on it as target-state, not guaranteed today.)
 
    ```kql
    // Backend half of a mobile-initiated request — paste the trace id from Sentry
    let traceId = "PASTE_TRACE_ID_FROM_SENTRY";
    union traces, requests, dependencies, exceptions
-   | where customDimensions['correlation.id'] == traceId
-       or operation_Id == traceId
+   // operation_Id is the LIVE match (distro continues the inbound HTTP trace).
+   // correlation.id is TARGET-STATE — populated only once extractCorrelation is
+   // wired into a live receiver (Bucket C / MG-24); it may return nothing today.
+   | where operation_Id == traceId
+       or customDimensions['correlation.id'] == traceId
    | project timestamp, itemType, operation_Name,
              component = tostring(customDimensions['component']),
              processing_path = tostring(customDimensions['processing.path']),
@@ -667,7 +670,7 @@ Step by step:
 5. **Read the backend timeline.** You now see every backend hop (`device`/`function`/`iot-hub`/`client`) for that one request, including any exception, alongside the Sentry-side mobile view. The mobile symptom and the backend cause are correlated by hand, through the shared trace id.
 6. **Annotate both sides.** When you resolve it, note the trace id on both the Sentry issue and the App Insights investigation so the join is reproducible. The tools stay separate; the trace id is the durable link.
 
-> The join key is the **W3C trace id**, surfaced as `correlation.id` on the backend. It is *not* a Sentry↔App-Insights integration and requires no cross-tool credentials — just copy-paste.
+> The join key is the **W3C trace id**, surfaced on the backend as `operation_Id` (the distro continues the inbound trace); the matching `correlation.id` dimension is target-state until the restore helper is wired (Bucket C / MG-24). It is *not* a Sentry↔App-Insights integration and requires no cross-tool credentials — just copy-paste.
 
 ## Sentry (React Native lane)
 
@@ -678,8 +681,8 @@ Sentry is the observability backend for the **React Native** mobile app only. It
 This contract can and should be nailed down now, independent of Sentry org/project shape:
 
 - **Outbound injection (client).** The RN client injects a **W3C `traceparent`** header on every outbound HTTP request to the backend, format `00-<trace-id>-<span-id>-<flags>`. Sentry's React Native tracing produces this from the active mobile transaction; the client attaches it to the API request headers (`@sentry/react-native` HTTP instrumentation / `tracePropagationTargets` scoped to the API host).
-- **Backend preservation.** The Functions app runs W3C Trace Context propagation (the default OTel propagator in `@azure/monitor-opentelemetry`). It **continues** the incoming trace rather than starting a new one, so the mobile-originated `trace-id` is preserved through `Functions → CosmosDB → SignalR`. The inbound `trace-id` is restored onto the standard **`correlation.id`** span dimension (same mechanism the device→IoT-Hub path uses via the `correlation.id` message property).
-- **Join semantics.** Because the client's `trace-id` is what the backend stores as `correlation.id`, the copy-paste workflow above is a direct id match — no translation table. Trace context is the contract; the two backends never talk to each other.
+- **Backend preservation.** The Functions app runs W3C Trace Context propagation (the default OTel propagator in `@azure/monitor-opentelemetry`). It **continues** the incoming trace rather than starting a new one, so the mobile-originated `trace-id` lands on the standard App Insights **`operation_Id`** automatically — this is live distro behavior and needs no custom wiring. Two things are **not** yet operational: (1) restoring that id onto the **`correlation.id`** span dimension is scaffolding only — the `extractCorrelation` helper (same mechanism the device→IoT-Hub path documents via the `correlation.id` message property) is **not wired** into a running receiver (Bucket C / MG-24); and (2) preservation *through* `Functions → CosmosDB → SignalR` is a target that is **not yet verified in a running system** (no live backend until MG-24).
+- **Join semantics.** The live direct id match is on **`operation_Id`** — the client's `trace-id` is what the distro records there, so the copy-paste workflow above needs no translation table. Matching the same id on `correlation.id` becomes available once the restore helper is wired (target state, Bucket C / MG-24). Trace context is the contract; the two backends never talk to each other.
 - **DSN management (contract, not values).** Each Sentry project/environment is addressed by a **DSN supplied via environment variable** (e.g. `SENTRY_DSN`), never hardcoded in the mobile bundle — the same env-var-only discipline the backend uses for `APPLICATIONINSIGHTS_CONNECTION_STRING`. The *number* of DSNs depends on the project-structure decision below.
 
 ### ⚠️ PENDING OPERATOR DECISION — Sentry org / project structure / DSN specifics
