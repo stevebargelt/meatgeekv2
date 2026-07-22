@@ -35,10 +35,12 @@ processors:
 
 exporters:
   # azuremonitor is the OpenTelemetry-Collector-Contrib exporter that translates
-  # OTLP into the Application Insights ingestion protocol (and handles auth).
-  # With no explicit connection_string set, it reads
-  # APPLICATIONINSIGHTS_CONNECTION_STRING from the environment.
-  azuremonitor: {}
+  # OTLP into the Application Insights ingestion protocol (and handles auth). The
+  # App Insights connection string is injected at runtime via env-var
+  # substitution — the literal value is NEVER committed here. Supply
+  # APPLICATIONINSIGHTS_CONNECTION_STRING as a Container App secret / env var.
+  azuremonitor:
+    connection_string: "${APPLICATIONINSIGHTS_CONNECTION_STRING}"
 
 service:
   pipelines:

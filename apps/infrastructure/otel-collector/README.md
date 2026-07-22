@@ -42,14 +42,19 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318
 
 The HTTP exporter used in this repo
 (`go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp`) targets the
-`:4318` HTTP endpoint. A service with an **empty**
-`APPLICATIONINSIGHTS_CONNECTION_STRING` still selects a no-op exporter and runs
-fully offline (e.g. a Raspberry Pi with no backend reachable) — the collector is
-only reached when a service is configured to export.
+`:4318` HTTP endpoint. Exporter selection on the edge services is gated **solely
+on `OTEL_EXPORTER_OTLP_ENDPOINT`**: a service with an **empty** (or
+whitespace-only) `OTEL_EXPORTER_OTLP_ENDPOINT` selects a no-op exporter and runs
+fully offline (e.g. a Raspberry Pi with no backend reachable), while a set
+endpoint selects the real OTLP exporter that reaches this collector. The edge
+services never read `APPLICATIONINSIGHTS_CONNECTION_STRING` at all.
 
-> Note: only the **collector** needs `APPLICATIONINSIGHTS_CONNECTION_STRING`.
-> With a central collector the edge services no longer need the App Insights
-> connection string at all; they just need `OTEL_EXPORTER_OTLP_ENDPOINT`.
+> Note: the two gates are on **different** env vars and belong to **different**
+> tiers. The **edge services** gate OTLP export on `OTEL_EXPORTER_OTLP_ENDPOINT`
+> (empty → no-op, offline). The **collector** gates its App Insights export on
+> `APPLICATIONINSIGHTS_CONNECTION_STRING` — that variable belongs to the
+> collector only. With a central collector the edge services need just
+> `OTEL_EXPORTER_OTLP_ENDPOINT` and never the App Insights connection string.
 
 ## Recommended deployment: central collector (BLOCKED-on-MG-24)
 
