@@ -270,7 +270,7 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   ALLOWED_AI_VAR='var\.application_insights_connection_string'
   if [[ -f "${ROOT_MAIN}" ]]; then
     ai_block="$(awk '/resource[[:space:]]+"azurerm_application_insights"/{f=1} f{print} f&&/^}/{f=0}' "${ROOT_MAIN}" 2>/dev/null || true)"
-    if echo "${ai_block}" | grep -qE 'local_authentication_enabled[[:space:]]*=[[:space:]]*false'; then
+    if grep -qE 'local_authentication_enabled[[:space:]]*=[[:space:]]*false' <<< "${ai_block}"; then
       ai_local_auth_disabled=1
     fi
   fi
@@ -284,14 +284,14 @@ if [[ -f "${FUNC_MAIN}" ]]; then
     while IFS= read -r line; do
       [[ -z "${line}" ]] && continue
       stripped="${line//var.application_insights_connection_string/}"
-      if echo "${stripped}" | grep -qE "${APPSETTING_SECRET_RE}"; then
+      if grep -qE "${APPSETTING_SECRET_RE}" <<< "${stripped}"; then
         kept+="${line}"$'\n'   # a DIFFERENT secret is on this line — still a violation
       fi
     done <<< "${cs_settings}"
     cs_settings="${kept%$'\n'}"
   fi
   if [[ -n "${cs_settings}" ]]; then
-    if [[ "${ai_local_auth_disabled}" -eq 0 ]] && echo "${cs_settings}" | grep -qE "${ALLOWED_AI_VAR}"; then
+    if [[ "${ai_local_auth_disabled}" -eq 0 ]] && grep -qE "${ALLOWED_AI_VAR}" <<< "${cs_settings}"; then
       func_posture+="full App Insights connection string in app_settings WITHOUT local_authentication_enabled=false on azurerm_application_insights (coupled-invariant violation — ikey could authenticate; MG-24 item 2):"$'\n'"${cs_settings}"$'\n'
     else
       func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
@@ -328,13 +328,13 @@ IOT_MAIN="${INFRA_DIR}/modules/iot-hub/main.tf"
 iot_routing=""
 if [[ -f "${IOT_MAIN}" ]]; then
   iot_live="$(grep -vE '^[[:space:]]*#' "${IOT_MAIN}")"
-  if ! echo "${iot_live}" | grep -qE 'authentication_type[[:space:]]*=[[:space:]]*"identityBased"'; then
+  if ! grep -qE 'authentication_type[[:space:]]*=[[:space:]]*"identityBased"' <<< "${iot_live}"; then
     iot_routing+="Event Hubs routing endpoint is not identity-based (authentication_type = \"identityBased\" absent)"$'\n'
   fi
-  if echo "${iot_live}" | grep -qE 'connection_string[[:space:]]*='; then
-    iot_routing+="a connection_string is present in the IoT Hub module (SAS secret in state):"$'\n'"$(echo "${iot_live}" | grep -nE 'connection_string[[:space:]]*=')"$'\n'
+  if grep -qE 'connection_string[[:space:]]*=' <<< "${iot_live}"; then
+    iot_routing+="a connection_string is present in the IoT Hub module (SAS secret in state):"$'\n'"$(grep -nE 'connection_string[[:space:]]*=' <<< "${iot_live}")"$'\n'
   fi
-  if echo "${iot_live}" | grep -qE 'azurerm_eventhub_authorization_rule'; then
+  if grep -qE 'azurerm_eventhub_authorization_rule' <<< "${iot_live}"; then
     iot_routing+="an azurerm_eventhub_authorization_rule (SAS key source) still exists in the IoT Hub module"$'\n'
   fi
 else
@@ -360,17 +360,17 @@ README="${INFRA_DIR}/README.md"
 runbook=""
 if [[ -f "${README}" ]]; then
   readme_live="$(grep -vE '^[[:space:]]*#' "${README}" 2>/dev/null || true)"
-  if ! echo "${readme_live}" | grep -qE 'tf-plan-secret-inspection\.sh'; then
+  if ! grep -qE 'tf-plan-secret-inspection\.sh' <<< "${readme_live}"; then
     runbook+="README does not document the fail-closed scripts/tf-plan-secret-inspection.sh plan/state gate"$'\n'
   fi
-  if ! echo "${readme_live}" | grep -qiE 'REQUIRED.*pre-apply|pre-apply.*REQUIRED|required before the first apply|required pre-apply'; then
+  if ! grep -qiE 'REQUIRED.*pre-apply|pre-apply.*REQUIRED|required before the first apply|required pre-apply' <<< "${readme_live}"; then
     runbook+="README does not mark the plan/state secret inspection as a REQUIRED pre-apply gate"$'\n'
   fi
   # Reject the always-green shape as the DOCUMENTED gate: a `terraform show -json`
   # (or the script) piped to grep and neutralized with `|| echo`/`|| true` exits 0
   # regardless of findings, so it can never block an apply. If such a line is what
   # the README presents, the fail-closed gate has rotted back to a footnote.
-  green_shape="$(echo "${readme_live}" | grep -nE '(terraform show -json|tf-plan-secret-inspection)[^|]*\|[^|]*grep' 2>/dev/null | grep -E '\|\|[[:space:]]*(echo|true|:)' || true)"
+  green_shape="$(grep -nE '(terraform show -json|tf-plan-secret-inspection)[^|]*\|[^|]*grep' <<< "${readme_live}" 2>/dev/null | grep -E '\|\|[[:space:]]*(echo|true|:)' || true)"
   if [[ -n "${green_shape}" ]]; then
     runbook+="README documents an ALWAYS-GREEN inspection (grep ... || echo/true), which never blocks an apply — use the fail-closed tf-plan-secret-inspection.sh instead:"$'\n'"${green_shape}"$'\n'
   fi
