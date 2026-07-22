@@ -251,7 +251,7 @@ tenant, and has **no client secret**. The script prints its coordinates:
 DEV_API_CLIENT_ID   = <api appId>
 DEV_API_TENANT_ID   = <tenantId>
 DEV_API_APP_ID_URI  = api://<api appId>   # the audience Easy Auth validates
-functions_auth_allowed_client_app_ids = [<calling client(s)>]   # allowed_applications
+functions_auth_allowed_client_app_ids = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]   # calling client(s) — allowed_applications, QUOTED HCL
 ```
 
 `DEV_API_APP_ID_URI` is the value the Step 6a token-acquisition scope needs. It is

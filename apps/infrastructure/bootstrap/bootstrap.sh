@@ -153,6 +153,100 @@ ok()   { printf '\033[0;32m✅ %s\033[0m\n' "$*"; }
 warn() { printf '\033[0;33m⚠️  %s\033[0m\n' "$*"; }
 die()  { printf '\033[0;31m❌ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Run an az DISCOVERY/read query (a *list* whose empty result means "resource
+# absent"), distinguishing ABSENCE from a REAL error. A blanket `|| true` on a
+# discovery collapses a transient Azure failure (auth / throttling / network)
+# into an empty string, making it indistinguishable from "not found" — so the
+# create-if-absent callers would then WRONGLY proceed to create a duplicate. This
+# helper captures the command's exit status SEPARATELY from its stdout: a clean
+# exit (status 0) with empty stdout is a legitimate ABSENT (the caller creates);
+# a NON-ZERO exit is a genuine error and we FAIL LOUD. Use it ONLY with list-style
+# queries (`az … list … --query '[0].…'`) that return empty-with-exit-0 when there
+# is no match — NOT with `az … show`, which returns non-zero for not-found and so
+# cannot distinguish absence from error (use a `list --filter` form instead).
+#   usage: value="$(az_discover "<what>" az ad app list --display-name X --query '[0].appId' -o tsv)"
+az_discover() {
+  local what="$1"; shift
+  local out status=0
+  # `|| status=$?` keeps the command-substitution failure from aborting under
+  # `set -e` before we can inspect the status.
+  out="$("$@")" || status=$?
+  if [ "$status" -ne 0 ]; then
+    die "discovery failed while checking for ${what} (az exited ${status}) — this is a REAL Azure error (auth / throttling / network), NOT resource-absent. Aborting rather than risk creating a duplicate. Command: $*"
+  fi
+  printf '%s' "$out"
+}
+
+# Decide create-vs-skip for an `az … show` EXISTENCE check, distinguishing a
+# genuinely ABSENT resource from a REAL error. Unlike a *list* (empty result +
+# exit 0 = absent, handled by az_discover), `az … show` on a missing resource
+# exits NON-ZERO and reports not-found — az CLI exit code 3, and/or a
+# ResourceNotFound / ContainerNotFound / "not found" / "does not exist" marker in
+# its output. An auth / throttle / network failure ALSO exits non-zero, but
+# WITHOUT that not-found signal. A bare `if az … show; then … else <create>`
+# treats BOTH as absent, so a transient Azure error triggers an ERRONEOUS create
+# attempt against a resource that may already exist. This helper captures the
+# command's output (stdout+stderr) and exit status separately and reports:
+#   * exit 0             -> resource PRESENT -> return 1 (caller SKIPS create)
+#   * a not-found signal -> resource ABSENT  -> return 0 (caller CREATES)
+#   * any OTHER non-zero -> REAL error       -> die (fail loud, name the exit)
+# Use ONLY with `az … show` (or another not-found-non-zero) existence check used
+# to decide create-vs-skip.
+#   usage: if resource_absent_or_die "storage account X" \
+#              az storage account show --name X --resource-group Y -o none; then
+#            <create>
+#          fi
+resource_absent_or_die() {
+  local what="$1"; shift
+  local out status=0
+  # Capture stdout+stderr together so a not-found marker on stderr is inspectable;
+  # `|| status=$?` keeps `set -e` from aborting before we can classify the exit.
+  out="$("$@" 2>&1)" || status=$?
+  if [ "$status" -eq 0 ]; then
+    return 1   # present → caller skips create
+  fi
+  # Not-found signal: az CLI exit code 3, OR an explicit not-found marker in the
+  # captured output. Everything else non-zero is a REAL error (auth / throttling /
+  # network) and must NOT be mistaken for absence.
+  if [ "$status" -eq 3 ] \
+     || printf '%s' "$out" | grep -qiE 'ResourceNotFound|ContainerNotFound|not[[:space:]_-]?found|does not exist|could not be found|was not found'; then
+    return 0   # genuinely absent → caller creates
+  fi
+  die "existence check for ${what} failed (az exited ${status}) — this is a REAL Azure error (auth / throttling / network), NOT resource-absent. Refusing to attempt a create that could collide with an existing resource. Command: $*  |  az: ${out}"
+}
+
+# Assert a token is a bare AAD/Azure GUID (8-4-4-4-12 hex). Caller-controlled
+# client/app ids (SMOKE_TEST_CLIENT_IDS → the emitted
+# functions_auth_allowed_client_app_ids HCL list and the Graph
+# preAuthorizedApplications manifest) are rendered VERBATIM into those artifacts,
+# so a malformed value (embedded quote, space, or non-UUID) would yield INVALID
+# HCL / a bogus manifest. Reject it LOUD — naming the offending value and its
+# source env var — rather than emit a broken artifact. Quoting alone is not
+# enough: for a client-app-id list the correct behavior is to REJECT a non-UUID.
+assert_uuid() {
+  local value="$1" source="${2:-value}"
+  if ! [[ "$value" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    die "invalid client/app id '${value}' from ${source}: expected a bare GUID (8-4-4-4-12 hex). Refusing to emit invalid HCL/manifest."
+  fi
+}
+
+# Render a SPACE-SEPARATED list of values as a VALID HCL list of quoted strings,
+# so copy-paste tfvars guidance parses (Terraform rejects bare/unquoted tokens):
+#   "id1 id2" -> ["id1", "id2"]      ""  -> []
+# Every token is VALIDATED as a bare GUID (assert_uuid) before it is rendered, so
+# a malformed id fails loud instead of producing broken HCL. Used for
+# functions_auth_allowed_client_app_ids in the emitted dev.tfvars block. The
+# optional second arg names the source env var for the failure message.
+hcl_string_list() {
+  local values="$1" source="${2:-value}" out="" v
+  for v in $values; do
+    [ -z "$v" ] && continue
+    assert_uuid "$v" "$source"
+    out="${out:+${out}, }\"${v}\""
+  done
+  printf '[%s]' "$out"
+}
+
 # Map a GitHub Environment name to its Terraform environment / state container.
 # GitHub uses the full words `development`/`production` (which is what the
 # workflow `environment:` values — and therefore the OIDC subjects — use);
@@ -205,16 +299,21 @@ require_tools() {
 # non-zero "role assignment already exists" error for an already-present
 # (assignee, role, scope) tuple, which would break the stated safe-to-re-run
 # contract on the SECOND bootstrap run. Guard the create with a list-first
-# existence check. The list query is `|| true`-guarded so an empty/no-match
-# result (legitimate on a first run) does not abort under `set -euo pipefail`.
+# existence check. The list query runs through az_discover so an empty/no-match
+# result (legitimate on a first run) proceeds to create, while a REAL Azure error
+# fails loud instead of being masked as absence under `set -euo pipefail`.
 ensure_role_assignment() {
   local object_id="$1" principal_type="$2" role="$3" scope="$4"
   local existing
-  existing="$(az role assignment list \
+  # Discovery: distinguish "no such assignment yet" (clean exit, empty → create)
+  # from a REAL Azure error (non-zero → die) instead of a blanket `|| true` that
+  # would mask the error and wrongly proceed to create.
+  existing="$(az_discover "existing role assignment (${role} on ${scope})" \
+    az role assignment list \
     --assignee "$object_id" \
     --role "$role" \
     --scope "$scope" \
-    --query "[0].id" -o tsv 2>/dev/null || true)"
+    --query "[0].id" -o tsv)"
   if [ -n "$existing" ] && [ "$existing" != "null" ]; then
     return 0
   fi
@@ -224,6 +323,30 @@ ensure_role_assignment() {
     --role "$role" \
     --scope "$scope" \
     -o none
+}
+
+# Data-plane RBAC (Storage Blob Data roles) is EVENTUALLY CONSISTENT: a freshly
+# granted role is not immediately effective for `--auth-mode login` blob calls.
+# Poll (bounded attempts + backoff) for an AAD data-plane op against the account
+# to succeed, instead of a blind fixed sleep. This waits ONLY for the verified
+# propagation condition — the grant itself already succeeded (fail-loud), so this
+# never masks an authorization error; if it never propagates within the bound we
+# fail with a clear message rather than proceeding into a confusing blob error.
+wait_for_blob_data_plane() {
+  local account="$1" attempt=1 max_attempts=12 delay=5
+  while :; do
+    if az storage container list --account-name "$account" --auth-mode login -o none 2>/dev/null; then
+      ok "Data-plane RBAC effective for --auth-mode login on ${account}"
+      return 0
+    fi
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      die "Storage data-plane RBAC did not become effective on ${account} after ${max_attempts} attempts; the operator's Storage Blob Data grant has not propagated — re-run the bootstrap in a few minutes."
+    fi
+    log "Waiting for data-plane RBAC to propagate on ${account} (attempt ${attempt}/${max_attempts}, ${delay}s)…"
+    sleep "$delay"
+    attempt=$((attempt+1))
+    [ "$delay" -lt 20 ] && delay=$((delay+5))
+  done
 }
 
 # --------------------------------------------------------------------------
@@ -248,8 +371,9 @@ ensure_federated_credential() {
 }
 JSON
 )"
-  existing_subject="$(az ad app federated-credential list --id "$app_id" \
-    --query "[?name=='${cred_name}'].subject | [0]" -o tsv 2>/dev/null || true)"
+  existing_subject="$(az_discover "federated credential '${cred_name}' on app ${app_id}" \
+    az ad app federated-credential list --id "$app_id" \
+    --query "[?name=='${cred_name}'].subject | [0]" -o tsv)"
   if [ -z "$existing_subject" ] || [ "$existing_subject" = "null" ]; then
     log "Creating federated credential: ${cred_name} -> ${subject}"
     az ad app federated-credential create --id "$app_id" --parameters "$fc_params" -o none
@@ -293,9 +417,12 @@ bootstrap_state_backend() {
     -o none
   ok "Resource group ready: ${STATE_RG}"
 
-  if az storage account show --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" -o none 2>/dev/null; then
-    ok "Storage account already exists: ${STATE_STORAGE_ACCOUNT}"
-  else
+  # Existence check via resource_absent_or_die: a genuine not-found (exit 3 /
+  # ResourceNotFound) proceeds to CREATE; a REAL error (auth / throttle / network)
+  # fails loud instead of triggering an erroneous create. Do NOT revert to a bare
+  # `if az … show; then … else create` — that treats every non-zero as absence.
+  if resource_absent_or_die "storage account ${STATE_STORAGE_ACCOUNT}" \
+      az storage account show --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" -o none; then
     log "Creating state storage account: ${STATE_STORAGE_ACCOUNT}"
     # Hardened for a state store: TLS1.2 floor, no public blob access,
     # HTTPS-only, key-based & AAD auth both usable by the backend.
@@ -311,6 +438,8 @@ bootstrap_state_backend() {
       --tags Project="MeatGeek V2" ManagedBy="bootstrap.sh" Purpose="terraform-remote-state" \
       -o none
     ok "Storage account created: ${STATE_STORAGE_ACCOUNT}"
+  else
+    ok "Storage account already exists: ${STATE_STORAGE_ACCOUNT}"
   fi
 
   # State-file protection: blob versioning + soft delete so a bad apply/lock
@@ -342,11 +471,15 @@ bootstrap_state_backend() {
   if [ -n "$operator_oid" ] && [ "$operator_oid" != "null" ]; then
     # Storage Blob Data Contributor on the state account so `--auth-mode login`
     # can create/list containers. Idempotent (create is a no-op if already held).
-    ensure_role_assignment "$operator_oid" User "Storage Blob Data Contributor" "$state_sa_id" 2>/dev/null || true
+    # FAIL LOUD on a genuine authorization/role-assignment failure — no blanket
+    # `|| true` that would print a false "granted". A real AuthorizationFailed
+    # (operator lacks User Access Administrator/Owner) must abort here.
+    ensure_role_assignment "$operator_oid" User "Storage Blob Data Contributor" "$state_sa_id" \
+      || die "failed to grant the operator 'Storage Blob Data Contributor' on ${STATE_STORAGE_ACCOUNT} — the signed-in principal likely lacks Owner/User Access Administrator on the state account."
     ok "Storage Blob Data Contributor granted to the operator on ${STATE_STORAGE_ACCOUNT}"
-    # Data-plane RBAC is eventually consistent; give the grant a moment to
-    # propagate before the first `--auth-mode login` blob call.
-    sleep 20
+    # Wait (bounded poll, not a blind sleep) for the just-granted data-plane role
+    # to become effective before the first `--auth-mode login` container call.
+    wait_for_blob_data_plane "$STATE_STORAGE_ACCOUNT"
   else
     warn "Could not resolve the signed-in user's object id — ensure the operator"
     warn "holds a Storage Blob Data role on ${STATE_STORAGE_ACCOUNT} so --auth-mode"
@@ -356,18 +489,23 @@ bootstrap_state_backend() {
   local env container
   for env in $GITHUB_ENVIRONMENTS; do
     container="$(state_container_for "$env")"
-    if az storage container show \
+    # Existence check via resource_absent_or_die (NOT a bare `if az … show`, which
+    # would discard stderr and treat every non-zero — auth / throttle / network —
+    # as absence): a genuine ContainerNotFound proceeds to CREATE; a REAL error
+    # fails loud rather than triggering an erroneous create.
+    if resource_absent_or_die "state container ${container}" \
+        az storage container show \
         --name "$container" \
         --account-name "$STATE_STORAGE_ACCOUNT" \
-        --auth-mode login -o none 2>/dev/null; then
-      ok "State container already exists: ${container}"
-    else
+        --auth-mode login -o none; then
       az storage container create \
         --name "$container" \
         --account-name "$STATE_STORAGE_ACCOUNT" \
         --auth-mode login \
         -o none
       ok "State container created: ${container}"
+    else
+      ok "State container already exists: ${container}"
     fi
   done
 }
@@ -383,9 +521,13 @@ bootstrap_oidc_identity() {
   local sub_id tenant_id state_sa_id
   sub_id="$(az account show --query id -o tsv)"
   tenant_id="$(az account show --query tenantId -o tsv)"
-  state_sa_id="$(az storage account show \
+  # State account was created (fail-loud) by bootstrap_state_backend, so a lookup
+  # failure here is a REAL error, not "absent" — fail loud rather than a blanket
+  # `|| true` that would silently skip the per-env blob-role grant.
+  state_sa_id="$(az_discover "state storage account ${STATE_STORAGE_ACCOUNT}" \
+    az storage account show \
     --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" \
-    --query id -o tsv 2>/dev/null || true)"
+    --query id -o tsv)"
 
   local env tfenv app_name app_id sp_id cred_name subject container container_scope
   for env in $GITHUB_ENVIRONMENTS; do
@@ -396,21 +538,28 @@ bootstrap_oidc_identity() {
     log "── Environment '${env}' (tf: ${tfenv}) — PLAN/READ identity ${app_name}"
 
     # AAD application PER ENVIRONMENT (create-if-absent, keyed by display name).
-    app_id="$(az ad app list --display-name "$app_name" --query '[0].appId' -o tsv 2>/dev/null || true)"
+    # Discovery distinguishes absent (empty, exit 0 → create) from a real error.
+    app_id="$(az_discover "AAD application '${app_name}'" \
+      az ad app list --display-name "$app_name" --query '[0].appId' -o tsv)"
     if [ -z "$app_id" ] || [ "$app_id" = "null" ]; then
       log "Creating AAD application: ${app_name}"
-      app_id="$(az ad app create --display-name "$app_name" --query appId -o tsv)"
+      app_id="$(az ad app create --display-name "$app_name" --query appId -o tsv)" \
+        || die "failed to create the AAD application '${app_name}' for the ${env} plan/read identity — check tenant app-registration permissions."
       ok "AAD application created: ${app_id}"
     else
       ok "AAD application already exists: ${app_id}"
     fi
 
     # Service principal (create-if-absent). No password/secret is ever
-    # generated — federation is the only credential.
-    sp_id="$(az ad sp show --id "$app_id" --query id -o tsv 2>/dev/null || true)"
+    # generated — federation is the only credential. Use `sp list --filter` (not
+    # `sp show`, which returns non-zero for not-found and so can't distinguish
+    # absence from a real error) so absent = empty/exit-0.
+    sp_id="$(az_discover "service principal for app ${app_id}" \
+      az ad sp list --filter "appId eq '${app_id}'" --query '[0].id' -o tsv)"
     if [ -z "$sp_id" ] || [ "$sp_id" = "null" ]; then
       log "Creating service principal for ${app_id}"
-      sp_id="$(az ad sp create --id "$app_id" --query id -o tsv)"
+      sp_id="$(az ad sp create --id "$app_id" --query id -o tsv)" \
+        || die "failed to create the service principal for the ${env} plan/read identity (${app_id}) — check you may create service principals in the tenant."
       ok "Service principal created: ${sp_id}"
     else
       ok "Service principal already exists: ${sp_id}"
@@ -495,9 +644,12 @@ bootstrap_deploy_identity() {
   local sub_id tenant_id state_sa_id
   sub_id="$(az account show --query id -o tsv)"
   tenant_id="$(az account show --query tenantId -o tsv)"
-  state_sa_id="$(az storage account show \
+  # Fail loud on a state-account lookup error (the account already exists from
+  # bootstrap_state_backend) rather than a blanket `|| true` masking it as absent.
+  state_sa_id="$(az_discover "state storage account ${STATE_STORAGE_ACCOUNT}" \
+    az storage account show \
     --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" \
-    --query id -o tsv 2>/dev/null || true)"
+    --query id -o tsv)"
 
   # DEV ONLY. Prod app-deployment identity is MG-25 (see runbook / summary).
   local env="development" tfenv="dev"
@@ -507,21 +659,26 @@ bootstrap_deploy_identity() {
 
   log "── dev APP-DEPLOYMENT identity ${app_name} (publish-only, separate SP)"
 
-  app_id="$(az ad app list --display-name "$app_name" --query '[0].appId' -o tsv 2>/dev/null || true)"
+  app_id="$(az_discover "AAD application '${app_name}'" \
+    az ad app list --display-name "$app_name" --query '[0].appId' -o tsv)"
   if [ -z "$app_id" ] || [ "$app_id" = "null" ]; then
     log "Creating AAD application: ${app_name}"
-    app_id="$(az ad app create --display-name "$app_name" --query appId -o tsv)"
+    app_id="$(az ad app create --display-name "$app_name" --query appId -o tsv)" \
+      || die "failed to create the AAD application '${app_name}' for the dev app-deployment identity — check tenant app-registration permissions."
     ok "AAD application created: ${app_id}"
   else
     ok "AAD application already exists: ${app_id}"
   fi
 
   # Service principal (create-if-absent). NO password/secret — OIDC federation
-  # is the only credential for this identity too.
-  sp_id="$(az ad sp show --id "$app_id" --query id -o tsv 2>/dev/null || true)"
+  # is the only credential for this identity too. `sp list --filter` (not
+  # `sp show`) so absent = empty/exit-0 and a real error stays non-zero.
+  sp_id="$(az_discover "service principal for app ${app_id}" \
+    az ad sp list --filter "appId eq '${app_id}'" --query '[0].id' -o tsv)"
   if [ -z "$sp_id" ] || [ "$sp_id" = "null" ]; then
     log "Creating service principal for ${app_id}"
-    sp_id="$(az ad sp create --id "$app_id" --query id -o tsv)"
+    sp_id="$(az ad sp create --id "$app_id" --query id -o tsv)" \
+      || die "failed to create the service principal for the dev app-deployment identity (${app_id}) — check you may create service principals in the tenant."
     ok "Service principal created: ${sp_id}"
   else
     ok "Service principal already exists: ${sp_id}"
@@ -547,8 +704,8 @@ bootstrap_deploy_identity() {
   # post-apply re-run would collide with Terraform's own assignment. Instead we
   # EMIT this identity's SP OBJECT ID below so the operator sets
   # app_deploy_principal_object_id in dev.tfvars and the single apply grants it.
-  # The SP object id is $sp_id (resolved above via `az ad sp show --id <appId>
-  # --query id`). No Function-App lookup is needed here.
+  # The SP object id is $sp_id (resolved above via `az ad sp list --filter
+  # "appId eq <appId>" --query [0].id`). No Function-App lookup is needed here.
 
   # State read for publish (resolve outputs) — READER, not Contributor, on the
   # dev container ONLY. The deploy identity must never write state.
@@ -602,12 +759,14 @@ bootstrap_dev_api_registration() {
 
   log "── dev ENTRA API auth registration ${DEV_API_APP_NAME} (scope ${DEV_API_SCOPE_NAME})"
 
-  app_id="$(az ad app list --display-name "$DEV_API_APP_NAME" --query '[0].appId' -o tsv 2>/dev/null || true)"
+  app_id="$(az_discover "dev API registration '${DEV_API_APP_NAME}'" \
+    az ad app list --display-name "$DEV_API_APP_NAME" --query '[0].appId' -o tsv)"
   if [ -z "$app_id" ] || [ "$app_id" = "null" ]; then
     log "Creating dev API registration: ${DEV_API_APP_NAME}"
     # Single tenant (AzureADMyOrg): the dev API is not multi-tenant.
     app_id="$(az ad app create --display-name "$DEV_API_APP_NAME" \
-      --sign-in-audience AzureADMyOrg --query appId -o tsv)"
+      --sign-in-audience AzureADMyOrg --query appId -o tsv)" \
+      || die "failed to create the dev API registration '${DEV_API_APP_NAME}' — check tenant app-registration permissions."
     ok "Dev API registration created: ${app_id}"
   else
     ok "Dev API registration already exists: ${app_id}"
@@ -625,6 +784,10 @@ bootstrap_dev_api_registration() {
   local preauth_entries="" cid seen=" " preauth_ids=""
   for cid in $SMOKE_TEST_CLIENT_IDS; do
     [ -z "$cid" ] && continue
+    # Caller-controlled id rendered verbatim into the Graph preAuthorizedApplications
+    # manifest AND the emitted functions_auth_allowed_client_app_ids HCL — validate
+    # it is a bare GUID (fail loud) before it can produce a bogus manifest / broken HCL.
+    assert_uuid "$cid" "SMOKE_TEST_CLIENT_IDS"
     case "$seen" in *" $cid "*) continue ;; esac
     seen="${seen}${cid} "
     preauth_ids="${preauth_ids:+${preauth_ids} }${cid}"
@@ -666,8 +829,15 @@ JSON
   ok "Delegated scope '${DEV_API_SCOPE_NAME}' exposed on ${app_uri} (no client secret)"
 
   # Enterprise app (SP) so the API can be granted admin consent in the tenant.
-  if [ -z "$(az ad sp show --id "$app_id" --query id -o tsv 2>/dev/null || true)" ]; then
-    az ad sp create --id "$app_id" -o none || true
+  # Guarded create-if-absent: `sp list --filter` distinguishes absent (empty,
+  # exit 0) from a REAL discovery error (non-zero → die via az_discover), and the
+  # create itself FAILS LOUD — no `|| true` that would report a phantom "created".
+  local api_sp_id
+  api_sp_id="$(az_discover "service principal for the dev API registration (${app_id})" \
+    az ad sp list --filter "appId eq '${app_id}'" --query '[0].id' -o tsv)"
+  if [ -z "$api_sp_id" ] || [ "$api_sp_id" = "null" ]; then
+    az ad sp create --id "$app_id" -o none \
+      || die "failed to create the service principal for the dev API registration (${app_id})"
     ok "Service principal created for the dev API registration"
   fi
 
@@ -692,7 +862,7 @@ Wire these into environments/dev.tfvars (functions_auth_*) post-bootstrap:
   functions_auth_tenant_id          = "${tenant_id}"
   functions_auth_allowed_audiences  = ["${app_uri}"]
 
-  functions_auth_allowed_client_app_ids = [${preauth_ids// /, }]  # calling client(s)
+  functions_auth_allowed_client_app_ids = $(hcl_string_list "$preauth_ids" "SMOKE_TEST_CLIENT_IDS")  # calling client(s)
 
   Delegated scope: ${app_uri}/${DEV_API_SCOPE_NAME}
   Operator token:  APP_ID_URI=\$(az ad app show --id ${app_id} --query 'identifierUris[0]' -o tsv)

@@ -144,12 +144,16 @@ else bad "state blob role must be scoped per-env container, not whole account"; 
 # must NEVER get one (that would give dev access to prod state). The ONE permitted
 # whole-account grant is the OPERATOR's Storage Blob Data role (item 2) — creating
 # a state container is an account-level data-plane op that cannot be
-# container-scoped — and it must be a User-principal grant, not an SP grant. So
-# expect EXACTLY ONE `--scope "$state_sa_id"`, tied to the operator (signed-in-user).
-whole_acct_scopes="$(grep -Ec -- '--scope[[:space:]]+"\$state_sa_id"' "$BOOT" || true)"
-if [ "${whole_acct_scopes:-0}" -eq 1 ] && grep -q 'signed-in-user' "$BOOT"; then
+# container-scoped — and it must be a User-principal grant, not an SP grant.
+# All role grants now flow through the ensure_role_assignment helper
+# (object_id principal_type role scope); assert EXACTLY ONE grant whose scope is
+# the whole account ("$state_sa_id"), and that it is the operator's User grant.
+whole_acct_scopes="$(grep -Ec 'ensure_role_assignment[[:space:]].*[[:space:]]"\$state_sa_id"([[:space:]]|$|\\)' "$BOOT" || true)"
+if [ "${whole_acct_scopes:-0}" -eq 1 ] \
+   && grep -Eq 'ensure_role_assignment[[:space:]]+"\$operator_oid"[[:space:]]+User[[:space:]]+"Storage Blob Data Contributor"[[:space:]]+"\$state_sa_id"' "$BOOT" \
+   && grep -q 'signed-in-user' "$BOOT"; then
   ok "only the operator holds a whole-account blob grant (item 2); SP grants stay container-scoped"
-else bad "the only whole-account blob-role grant may be the operator's (item 2); SP state grants must be container-scoped"; fi
+else bad "the only whole-account blob-role grant may be the operator's User grant (item 2); SP state grants must be container-scoped"; fi
 
 # --- Per-env state CONTAINERS (isolation): tfstate-<env> ---------------------
 if grep -q 'state_container_for() { echo "tfstate-' "$BOOT"; then
@@ -161,19 +165,25 @@ else bad "state containers must be per-environment (tfstate-<env>)"; fi
 # would leak a live credential into process listings). No account key is fetched
 # and no `--auth-mode key --account-key` call exists; container ops use AAD
 # (`--auth-mode login`) instead, backed by an operator Storage Blob DATA grant.
-# Ignore comment lines so the note explaining the fix doesn't self-trip.
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q -- '--account-key'; then
+# Ignore comment lines so the note explaining the fix doesn't self-trip. Compute
+# the non-comment body ONCE into a var and search it with a here-string (not a
+# `grep -v | grep -q` pipe: grep -q short-circuits and SIGPIPEs the upstream
+# grep, which under `pipefail` non-deterministically fails the pipeline).
+BOOT_NONCOMMENT="$(grep -vE '^[[:space:]]*#' "$BOOT")"
+if grep -q -- '--account-key' <<<"$BOOT_NONCOMMENT"; then
   bad "no storage account key may appear on the command line (leaks via argv)"
 else ok "no storage account key on argv (no --account-key)"; fi
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q 'az storage account keys list'; then
+if grep -q 'az storage account keys list' <<<"$BOOT_NONCOMMENT"; then
   bad "bootstrap must not fetch a storage account key for container ops"
 else ok "bootstrap does not fetch a storage account key"; fi
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q -- '--auth-mode login'; then
+if grep -q -- '--auth-mode login' <<<"$BOOT_NONCOMMENT"; then
   ok "container ops use AAD data-plane auth (--auth-mode login), no secret on argv"
 else bad "container ops must use --auth-mode login (no account key on argv)"; fi
 # The operator gets a Storage Blob DATA role so --auth-mode login works, mirroring
-# the per-env Storage Blob Data grants issued to the CI/deploy SPs.
-if grep -q 'signed-in-user' "$BOOT" && grep -q -- '--role "Storage Blob Data Contributor"' "$BOOT"; then
+# the per-env Storage Blob Data grants issued to the CI/deploy SPs. The grant now
+# goes through the ensure_role_assignment helper as a User-principal assignment.
+if grep -q 'signed-in-user' "$BOOT" \
+   && grep -Eq 'ensure_role_assignment[[:space:]]+"\$operator_oid"[[:space:]]+User[[:space:]]+"Storage Blob Data Contributor"' "$BOOT"; then
   ok "operator granted Storage Blob Data Contributor for AAD container ops"
 else bad "operator must get a Storage Blob DATA role so --auth-mode login can create containers"; fi
 
@@ -306,10 +316,12 @@ if grep -q 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" \
    && grep -A5 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" | grep -q 'default *= ""'; then
   ok "app_deploy_principal_object_id variable exists and defaults to empty"
 else bad "app_deploy_principal_object_id variable must exist with an empty default"; fi
-# Deploy identity's state access is READ-ONLY (Reader, not Contributor).
-if grep -q -- '--role "Storage Blob Data Reader"' "$BOOT"; then
-  ok "deploy identity gets Storage Blob Data READER on state (read-only)"
-else bad "deploy identity must get read-only state access (Storage Blob Data Reader)"; fi
+# Deploy identity's state access is READ-ONLY (Reader, not Contributor). The
+# grant flows through ensure_role_assignment as an SP-principal assignment scoped
+# to the dev container ("$container_scope"), not the whole account.
+if grep -Eq 'ensure_role_assignment[[:space:]]+"\$sp_id"[[:space:]]+ServicePrincipal[[:space:]]+"Storage Blob Data Reader"[[:space:]]+"\$container_scope"' "$BOOT"; then
+  ok "deploy identity gets Storage Blob Data READER on state (read-only, container-scoped)"
+else bad "deploy identity must get read-only state access (Storage Blob Data Reader) via ensure_role_assignment, container-scoped"; fi
 # Emits the client id the app-deploy job consumes.
 if grep -q 'AZURE_APP_DEPLOY_CLIENT_ID' "$BOOT"; then
   ok "bootstrap emits AZURE_APP_DEPLOY_CLIENT_ID for the app-deploy job"
@@ -362,6 +374,194 @@ else bad "bootstrap must emit the dev API App ID URI coordinate (DEV_API_APP_ID_
 if grep -Fq "identifierUris[0]" "$BOOT"; then
   ok "bootstrap prints the App ID URI retrieval command (az ad app show … identifierUris[0])"
 else bad "bootstrap must print an App ID URI retrieval command (identifierUris[0])"; fi
+
+# ===========================================================================
+# F1/F5: the copy-paste tfvars/HCL the bootstrap EMITS must be VALID HCL
+# ===========================================================================
+# The previous emit printed functions_auth_allowed_client_app_ids as
+# [uuid1, uuid2] — UNQUOTED uuids, which Terraform rejects. bootstrap.sh is
+# sourced above, so the pure renderer hcl_string_list is callable directly.
+#
+# 1) The renderer quotes every element and brackets the list.
+hcl_list_out="$(hcl_string_list "04b07795-8ddb-461a-bbee-02f9e1bf7b46 33333333-3333-3333-3333-333333333333")"
+if [ "$hcl_list_out" = '["04b07795-8ddb-461a-bbee-02f9e1bf7b46", "33333333-3333-3333-3333-333333333333"]' ]; then
+  ok "hcl_string_list quotes every element (valid HCL list literal)"
+else
+  bad "hcl_string_list must emit a quoted HCL list (got '$hcl_list_out')"
+fi
+# 2) Empty input renders as [] (valid HCL), not a syntax error.
+[ "$(hcl_string_list "")" = "[]" ] && ok "hcl_string_list renders empty input as []" \
+  || bad "hcl_string_list of empty input must be []"
+
+# 3) Assemble the EXACT functions_auth_* block the bootstrap emits (with sample
+#    values) and assert it parses as valid HCL. Prefer terraform fmt (a real HCL
+#    parser) when available; else fall back to a portable structural check that
+#    every list element is quoted (no bare uuid survives quote-stripping).
+gen_block="$(cat <<TFVARS
+functions_auth_client_id          = "11111111-1111-1111-1111-111111111111"
+functions_auth_tenant_id          = "22222222-2222-2222-2222-222222222222"
+functions_auth_allowed_audiences  = ["api://11111111-1111-1111-1111-111111111111"]
+functions_auth_allowed_client_app_ids = $(hcl_string_list "04b07795-8ddb-461a-bbee-02f9e1bf7b46 33333333-3333-3333-3333-333333333333")
+TFVARS
+)"
+if command -v terraform >/dev/null 2>&1; then
+  if printf '%s\n' "$gen_block" | terraform fmt - >/dev/null 2>&1; then
+    ok "emitted functions_auth_* tfvars block is valid HCL (terraform fmt parsed it)"
+  else
+    bad "emitted functions_auth_* tfvars block is INVALID HCL (terraform fmt failed to parse it)"
+  fi
+else
+  # Portable fallback: strip every "quoted" segment from the client-app-ids list;
+  # anything alphanumeric left inside the brackets is an UNQUOTED (invalid) token.
+  list_rhs="$(printf '%s\n' "$gen_block" | grep 'functions_auth_allowed_client_app_ids')"
+  list_rhs="${list_rhs#*=}"
+  residue="$(printf '%s' "$list_rhs" | sed 's/"[^"]*"//g')"
+  if printf '%s' "$residue" | grep -Eq '[0-9A-Za-z_-]'; then
+    bad "emitted client-app-ids list contains an UNQUOTED token (invalid HCL): residue='$residue'"
+  else
+    ok "emitted client-app-ids list has every element quoted (portable HCL check; terraform not installed)"
+  fi
+fi
+
+# ===========================================================================
+# F1 (round-2 hardening): hcl_string_list REJECTS non-UUID / HCL-breaking tokens
+# ===========================================================================
+# Quoting alone is not enough — a malformed client-app id (embedded quote, space,
+# or a non-UUID token) must FAIL LOUD rather than be emitted as (broken) HCL. The
+# renderer validates every token as a bare GUID (assert_uuid) and dies otherwise.
+# Run each rejecting call in a SUBSHELL so die's `exit 1` cannot abort the runner.
+if (hcl_string_list "not-a-uuid" SMOKE_TEST_CLIENT_IDS >/dev/null 2>&1); then
+  bad "hcl_string_list must REJECT a non-UUID token (emitted a value instead of dying)"
+else ok "hcl_string_list rejects a non-UUID token (fail-loud)"; fi
+if (hcl_string_list '11111111-1111-1111-1111-11111111111"' SMOKE_TEST_CLIENT_IDS >/dev/null 2>&1); then
+  bad "hcl_string_list must REJECT a token containing a quote (HCL-breaking)"
+else ok "hcl_string_list rejects a token containing an embedded quote"; fi
+if (hcl_string_list "04b07795-8ddb-461a-bbee-02f9e1bf7b46 not a uuid" X >/dev/null 2>&1); then
+  bad "hcl_string_list must REJECT a space-split non-UUID token"
+else ok "hcl_string_list rejects a space-embedded non-UUID token"; fi
+# The happy path (valid GUIDs) still renders a quoted HCL list.
+if [ "$(hcl_string_list '04b07795-8ddb-461a-bbee-02f9e1bf7b46')" = '["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]' ]; then
+  ok "hcl_string_list still renders valid GUIDs as a quoted HCL list"
+else bad "hcl_string_list must still render valid GUIDs"; fi
+# assert_uuid is the shared validator (used by the preauth loop too).
+if (assert_uuid "not-a-uuid" X 2>/dev/null); then
+  bad "assert_uuid must reject a non-UUID"
+else ok "assert_uuid rejects a non-UUID token"; fi
+if assert_uuid "04b07795-8ddb-461a-bbee-02f9e1bf7b46" X 2>/dev/null; then
+  ok "assert_uuid accepts a bare GUID"
+else bad "assert_uuid must accept a bare GUID"; fi
+
+# ===========================================================================
+# F3 (round-2): az discovery distinguishes NOT-FOUND from a REAL error
+# ===========================================================================
+# A blanket `|| true` on a discovery/list/show collapses a transient Azure error
+# (auth / throttling / network) into an empty result, so a create-if-absent caller
+# wrongly proceeds to CREATE. The az_discover helper captures exit status
+# SEPARATELY and dies on a non-zero exit; assert it exists and is wired in.
+if grep -q '^az_discover()' "$BOOT"; then
+  ok "az_discover helper exists (distinguishes absent from real error)"
+else bad "bootstrap must define an az_discover helper (distinguish absent from error)"; fi
+# az_discover behaves: clean exit passes stdout through; non-zero exit dies.
+if [ "$(az_discover "clean" printf 'hello')" = "hello" ]; then
+  ok "az_discover passes through stdout on a clean exit"
+else bad "az_discover must pass through stdout on a clean (exit-0) discovery"; fi
+if (az_discover "boom" bash -c 'exit 3' >/dev/null 2>&1); then
+  bad "az_discover must die on a non-zero discovery exit"
+else ok "az_discover dies on a non-zero discovery exit (real error, not absence)"; fi
+# The create-if-absent discoveries route through az_discover, not `|| true`.
+if grep -q 'az_discover .*az ad app list' "$BOOT"; then
+  ok "AAD app discovery routes through az_discover"
+else bad "AAD app discovery must route through az_discover"; fi
+# SP discovery uses `sp list --filter` (absent = empty/exit-0) — az_discover is on
+# the preceding continuation line — and NEVER `sp show` (which returns non-zero for
+# not-found and so can't distinguish absence from a real error).
+if grep -q "az ad sp list --filter \"appId eq" "$BOOT" && ! grep -q 'az ad sp show' "$BOOT"; then
+  ok "service-principal discovery uses 'sp list --filter' (absent = empty/exit-0), no 'sp show'"
+else bad "SP discovery must use 'az ad sp list --filter' (not 'sp show', which can't distinguish absent from error)"; fi
+# No blanket `|| true` may remain on these discovery calls (the masking hazard).
+for pat in 'az ad app list .*\|\| true' \
+           'az ad sp show .*\|\| true' \
+           'az ad app federated-credential list .*\|\| true' \
+           'az role assignment list .*\|\| true' ; do
+  if grep -Eq "$pat" "$BOOT"; then
+    bad "blanket '|| true' still masks a real error on discovery: /$pat/"
+  else ok "no blanket '|| true' masking on discovery: /$pat/"; fi
+done
+
+# ===========================================================================
+# F2 (round-2): every `az ad sp create` FAILS LOUD (|| die) — no phantom success
+# ===========================================================================
+# Each service-principal create must be paired with `|| die` (the die is on the
+# continuation line for the `x="$(...)" \` form), so a genuine create failure
+# aborts with a clear message instead of a bare success line after a failed create.
+sp_create_lines="$(grep -c 'az ad sp create' "$BOOT" || true)"
+sp_create_guarded="$(grep -A2 'az ad sp create' "$BOOT" | grep -c '|| die' || true)"
+if [ "${sp_create_lines:-0}" -ge 3 ] && [ "${sp_create_guarded:-0}" -eq "${sp_create_lines:-0}" ]; then
+  ok "every 'az ad sp create' is guarded by || die (${sp_create_guarded}/${sp_create_lines} fail-loud)"
+else bad "each 'az ad sp create' must fail loud (|| die); guarded=${sp_create_guarded} total=${sp_create_lines}"; fi
+# The AAD app creates are likewise fail-loud (no phantom appId after a failed
+# create). -A2 covers the dev-API create, whose `|| die` is two lines down (the
+# --sign-in-audience flag is on the intervening continuation line).
+app_create_lines="$(grep -c 'az ad app create' "$BOOT" || true)"
+app_create_guarded="$(grep -A2 'az ad app create' "$BOOT" | grep -c '|| die' || true)"
+if [ "${app_create_lines:-0}" -ge 3 ] && [ "${app_create_guarded:-0}" -eq "${app_create_lines:-0}" ]; then
+  ok "every 'az ad app create' is guarded by || die (${app_create_guarded}/${app_create_lines} fail-loud)"
+else bad "each 'az ad app create' must fail loud (|| die); guarded=${app_create_guarded} total=${app_create_lines}"; fi
+
+# ===========================================================================
+# F4 (round-3): `az … show` EXISTENCE checks distinguish NOT-FOUND from a REAL error
+# ===========================================================================
+# The same masked-error hazard as F3, but on the create-vs-skip EXISTENCE checks
+# (storage account + per-env state container). A bare `if az … show; then … else
+# <create>` fires the create branch for ANY non-zero exit (auth / throttle /
+# network), not just genuine absence — so a real Azure error causes an erroneous
+# create attempt. The resource_absent_or_die helper classifies the exit: a
+# not-found signal (az exit 3, or a ResourceNotFound/ContainerNotFound marker) is
+# ABSENT (create); any other non-zero is a REAL error (die).
+if grep -q '^resource_absent_or_die()' "$BOOT"; then
+  ok "resource_absent_or_die helper exists (distinguishes not-found from a real 'show' error)"
+else bad "bootstrap must define resource_absent_or_die for 'az … show' existence checks"; fi
+
+# BEHAVIOUR: exit 0 -> PRESENT (return non-zero, caller skips create).
+if resource_absent_or_die "present" true; then
+  bad "resource_absent_or_die must report PRESENT (non-absent) on a clean exit-0 show"
+else ok "resource_absent_or_die reports present on exit-0 (caller skips create)"; fi
+# az CLI not-found exit code 3 -> ABSENT (return 0, caller creates).
+if resource_absent_or_die "absent-exit3" bash -c 'exit 3'; then
+  ok "resource_absent_or_die reports ABSENT on az not-found exit 3 (caller creates)"
+else bad "resource_absent_or_die must report absent on a not-found exit 3"; fi
+# A ContainerNotFound marker on a NON-3 exit -> ABSENT (container show can exit 1).
+if resource_absent_or_die "absent-marker" bash -c 'echo "ErrorCode:ContainerNotFound" >&2; exit 1'; then
+  ok "resource_absent_or_die treats a ContainerNotFound marker (exit 1) as ABSENT"
+else bad "resource_absent_or_die must treat a not-found marker as absent even on a non-3 exit"; fi
+# A ResourceNotFound marker (storage account show) -> ABSENT.
+if resource_absent_or_die "absent-rnf" bash -c 'echo "(ResourceNotFound) not found" >&2; exit 1'; then
+  ok "resource_absent_or_die treats a ResourceNotFound marker as ABSENT"
+else bad "resource_absent_or_die must treat a ResourceNotFound marker as absent"; fi
+# A REAL error (non-3 exit, NO not-found marker) -> DIE (fail loud, not "absent").
+# Run in a SUBSHELL so die's `exit 1` cannot abort the runner.
+if (resource_absent_or_die "authfail" bash -c 'echo "(AuthorizationFailed) forbidden" >&2; exit 1' >/dev/null 2>&1); then
+  bad "resource_absent_or_die must DIE on a real auth error, not treat it as absent"
+else ok "resource_absent_or_die dies on a real auth error (not mistaken for absence)"; fi
+# An unrecognized non-zero (e.g. a network exit 4, no marker) -> DIE.
+if (resource_absent_or_die "netfail" bash -c 'exit 4' >/dev/null 2>&1); then
+  bad "resource_absent_or_die must DIE on an unrecognized non-zero exit (real error)"
+else ok "resource_absent_or_die dies on an unrecognized non-zero exit (real error)"; fi
+
+# WIRING: the storage-account + state-container create-deciders route through the
+# helper, and NO bare `if az storage … show` create-decider remains.
+if grep -Eq 'resource_absent_or_die "storage account' "$BOOT" \
+   && grep -A2 'resource_absent_or_die "storage account' "$BOOT" | grep -q 'az storage account show'; then
+  ok "storage-account existence check routes through resource_absent_or_die"
+else bad "storage-account create-vs-skip must route through resource_absent_or_die"; fi
+if grep -Eq 'resource_absent_or_die "state container' "$BOOT" \
+   && grep -A3 'resource_absent_or_die "state container' "$BOOT" | grep -q 'az storage container show'; then
+  ok "state-container existence check routes through resource_absent_or_die"
+else bad "state-container create-vs-skip must route through resource_absent_or_die"; fi
+# No bare `if az storage … show` create-decider (treats every non-zero as absent).
+if grep -Eq 'if az storage (account|container) show' "$BOOT"; then
+  bad "a bare 'if az storage … show' create-decider remains (treats every non-zero as absent)"
+else ok "no bare 'if az storage … show' create-decider (all route through resource_absent_or_die)"; fi
 
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
