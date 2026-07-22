@@ -177,6 +177,44 @@ az_discover() {
   printf '%s' "$out"
 }
 
+# Decide create-vs-skip for an `az … show` EXISTENCE check, distinguishing a
+# genuinely ABSENT resource from a REAL error. Unlike a *list* (empty result +
+# exit 0 = absent, handled by az_discover), `az … show` on a missing resource
+# exits NON-ZERO and reports not-found — az CLI exit code 3, and/or a
+# ResourceNotFound / ContainerNotFound / "not found" / "does not exist" marker in
+# its output. An auth / throttle / network failure ALSO exits non-zero, but
+# WITHOUT that not-found signal. A bare `if az … show; then … else <create>`
+# treats BOTH as absent, so a transient Azure error triggers an ERRONEOUS create
+# attempt against a resource that may already exist. This helper captures the
+# command's output (stdout+stderr) and exit status separately and reports:
+#   * exit 0             -> resource PRESENT -> return 1 (caller SKIPS create)
+#   * a not-found signal -> resource ABSENT  -> return 0 (caller CREATES)
+#   * any OTHER non-zero -> REAL error       -> die (fail loud, name the exit)
+# Use ONLY with `az … show` (or another not-found-non-zero) existence check used
+# to decide create-vs-skip.
+#   usage: if resource_absent_or_die "storage account X" \
+#              az storage account show --name X --resource-group Y -o none; then
+#            <create>
+#          fi
+resource_absent_or_die() {
+  local what="$1"; shift
+  local out status=0
+  # Capture stdout+stderr together so a not-found marker on stderr is inspectable;
+  # `|| status=$?` keeps `set -e` from aborting before we can classify the exit.
+  out="$("$@" 2>&1)" || status=$?
+  if [ "$status" -eq 0 ]; then
+    return 1   # present → caller skips create
+  fi
+  # Not-found signal: az CLI exit code 3, OR an explicit not-found marker in the
+  # captured output. Everything else non-zero is a REAL error (auth / throttling /
+  # network) and must NOT be mistaken for absence.
+  if [ "$status" -eq 3 ] \
+     || printf '%s' "$out" | grep -qiE 'ResourceNotFound|ContainerNotFound|not[[:space:]_-]?found|does not exist|could not be found|was not found'; then
+    return 0   # genuinely absent → caller creates
+  fi
+  die "existence check for ${what} failed (az exited ${status}) — this is a REAL Azure error (auth / throttling / network), NOT resource-absent. Refusing to attempt a create that could collide with an existing resource. Command: $*  |  az: ${out}"
+}
+
 # Assert a token is a bare AAD/Azure GUID (8-4-4-4-12 hex). Caller-controlled
 # client/app ids (SMOKE_TEST_CLIENT_IDS → the emitted
 # functions_auth_allowed_client_app_ids HCL list and the Graph
@@ -379,9 +417,12 @@ bootstrap_state_backend() {
     -o none
   ok "Resource group ready: ${STATE_RG}"
 
-  if az storage account show --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" -o none 2>/dev/null; then
-    ok "Storage account already exists: ${STATE_STORAGE_ACCOUNT}"
-  else
+  # Existence check via resource_absent_or_die: a genuine not-found (exit 3 /
+  # ResourceNotFound) proceeds to CREATE; a REAL error (auth / throttle / network)
+  # fails loud instead of triggering an erroneous create. Do NOT revert to a bare
+  # `if az … show; then … else create` — that treats every non-zero as absence.
+  if resource_absent_or_die "storage account ${STATE_STORAGE_ACCOUNT}" \
+      az storage account show --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" -o none; then
     log "Creating state storage account: ${STATE_STORAGE_ACCOUNT}"
     # Hardened for a state store: TLS1.2 floor, no public blob access,
     # HTTPS-only, key-based & AAD auth both usable by the backend.
@@ -397,6 +438,8 @@ bootstrap_state_backend() {
       --tags Project="MeatGeek V2" ManagedBy="bootstrap.sh" Purpose="terraform-remote-state" \
       -o none
     ok "Storage account created: ${STATE_STORAGE_ACCOUNT}"
+  else
+    ok "Storage account already exists: ${STATE_STORAGE_ACCOUNT}"
   fi
 
   # State-file protection: blob versioning + soft delete so a bad apply/lock
@@ -446,18 +489,23 @@ bootstrap_state_backend() {
   local env container
   for env in $GITHUB_ENVIRONMENTS; do
     container="$(state_container_for "$env")"
-    if az storage container show \
+    # Existence check via resource_absent_or_die (NOT a bare `if az … show`, which
+    # would discard stderr and treat every non-zero — auth / throttle / network —
+    # as absence): a genuine ContainerNotFound proceeds to CREATE; a REAL error
+    # fails loud rather than triggering an erroneous create.
+    if resource_absent_or_die "state container ${container}" \
+        az storage container show \
         --name "$container" \
         --account-name "$STATE_STORAGE_ACCOUNT" \
-        --auth-mode login -o none 2>/dev/null; then
-      ok "State container already exists: ${container}"
-    else
+        --auth-mode login -o none; then
       az storage container create \
         --name "$container" \
         --account-name "$STATE_STORAGE_ACCOUNT" \
         --auth-mode login \
         -o none
       ok "State container created: ${container}"
+    else
+      ok "State container already exists: ${container}"
     fi
   done
 }

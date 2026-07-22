@@ -508,6 +508,61 @@ if [ "${app_create_lines:-0}" -ge 3 ] && [ "${app_create_guarded:-0}" -eq "${app
   ok "every 'az ad app create' is guarded by || die (${app_create_guarded}/${app_create_lines} fail-loud)"
 else bad "each 'az ad app create' must fail loud (|| die); guarded=${app_create_guarded} total=${app_create_lines}"; fi
 
+# ===========================================================================
+# F4 (round-3): `az … show` EXISTENCE checks distinguish NOT-FOUND from a REAL error
+# ===========================================================================
+# The same masked-error hazard as F3, but on the create-vs-skip EXISTENCE checks
+# (storage account + per-env state container). A bare `if az … show; then … else
+# <create>` fires the create branch for ANY non-zero exit (auth / throttle /
+# network), not just genuine absence — so a real Azure error causes an erroneous
+# create attempt. The resource_absent_or_die helper classifies the exit: a
+# not-found signal (az exit 3, or a ResourceNotFound/ContainerNotFound marker) is
+# ABSENT (create); any other non-zero is a REAL error (die).
+if grep -q '^resource_absent_or_die()' "$BOOT"; then
+  ok "resource_absent_or_die helper exists (distinguishes not-found from a real 'show' error)"
+else bad "bootstrap must define resource_absent_or_die for 'az … show' existence checks"; fi
+
+# BEHAVIOUR: exit 0 -> PRESENT (return non-zero, caller skips create).
+if resource_absent_or_die "present" true; then
+  bad "resource_absent_or_die must report PRESENT (non-absent) on a clean exit-0 show"
+else ok "resource_absent_or_die reports present on exit-0 (caller skips create)"; fi
+# az CLI not-found exit code 3 -> ABSENT (return 0, caller creates).
+if resource_absent_or_die "absent-exit3" bash -c 'exit 3'; then
+  ok "resource_absent_or_die reports ABSENT on az not-found exit 3 (caller creates)"
+else bad "resource_absent_or_die must report absent on a not-found exit 3"; fi
+# A ContainerNotFound marker on a NON-3 exit -> ABSENT (container show can exit 1).
+if resource_absent_or_die "absent-marker" bash -c 'echo "ErrorCode:ContainerNotFound" >&2; exit 1'; then
+  ok "resource_absent_or_die treats a ContainerNotFound marker (exit 1) as ABSENT"
+else bad "resource_absent_or_die must treat a not-found marker as absent even on a non-3 exit"; fi
+# A ResourceNotFound marker (storage account show) -> ABSENT.
+if resource_absent_or_die "absent-rnf" bash -c 'echo "(ResourceNotFound) not found" >&2; exit 1'; then
+  ok "resource_absent_or_die treats a ResourceNotFound marker as ABSENT"
+else bad "resource_absent_or_die must treat a ResourceNotFound marker as absent"; fi
+# A REAL error (non-3 exit, NO not-found marker) -> DIE (fail loud, not "absent").
+# Run in a SUBSHELL so die's `exit 1` cannot abort the runner.
+if (resource_absent_or_die "authfail" bash -c 'echo "(AuthorizationFailed) forbidden" >&2; exit 1' >/dev/null 2>&1); then
+  bad "resource_absent_or_die must DIE on a real auth error, not treat it as absent"
+else ok "resource_absent_or_die dies on a real auth error (not mistaken for absence)"; fi
+# An unrecognized non-zero (e.g. a network exit 4, no marker) -> DIE.
+if (resource_absent_or_die "netfail" bash -c 'exit 4' >/dev/null 2>&1); then
+  bad "resource_absent_or_die must DIE on an unrecognized non-zero exit (real error)"
+else ok "resource_absent_or_die dies on an unrecognized non-zero exit (real error)"; fi
+
+# WIRING: the storage-account + state-container create-deciders route through the
+# helper, and NO bare `if az storage … show` create-decider remains.
+if grep -Eq 'resource_absent_or_die "storage account' "$BOOT" \
+   && grep -A2 'resource_absent_or_die "storage account' "$BOOT" | grep -q 'az storage account show'; then
+  ok "storage-account existence check routes through resource_absent_or_die"
+else bad "storage-account create-vs-skip must route through resource_absent_or_die"; fi
+if grep -Eq 'resource_absent_or_die "state container' "$BOOT" \
+   && grep -A3 'resource_absent_or_die "state container' "$BOOT" | grep -q 'az storage container show'; then
+  ok "state-container existence check routes through resource_absent_or_die"
+else bad "state-container create-vs-skip must route through resource_absent_or_die"; fi
+# No bare `if az storage … show` create-decider (treats every non-zero as absent).
+if grep -Eq 'if az storage (account|container) show' "$BOOT"; then
+  bad "a bare 'if az storage … show' create-decider remains (treats every non-zero as absent)"
+else ok "no bare 'if az storage … show' create-decider (all route through resource_absent_or_die)"; fi
+
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
