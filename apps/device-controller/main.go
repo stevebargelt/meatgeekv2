@@ -44,8 +44,10 @@ var SmokerStatus = Status {
 func main() {
 
     // Re-add observability (MG-6). Telemetry is configured from the environment
-    // (APPLICATIONINSIGHTS_CONNECTION_STRING); an empty value runs a no-op exporter so
+    // (OTEL_EXPORTER_OTLP_ENDPOINT); an empty value runs a no-op exporter so
     // the controller works fully offline. device.id comes from the SmokerID.
+    // The App Insights connection string lives only on the collector, which
+    // fronts Azure Monitor; this edge service never reads it.
     shutdownTelemetry, err := telemetry.Setup(context.Background(), telemetry.ConfigFromEnv(SmokerStatus.SmokerID))
     check(err)
     defer func() {

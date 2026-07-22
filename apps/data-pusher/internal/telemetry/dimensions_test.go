@@ -95,7 +95,7 @@ func TestDimensions_EnvironmentFromEnv(t *testing.T) {
 // writes a W3C traceparent into a property map when the context carries a
 // recording span, which is the mechanism the publisher relies on.
 func TestInjectTraceContext_EmitsTraceparent(t *testing.T) {
-	shutdown, err := SetupTracing(context.Background(), "")
+	shutdown, err := SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing: %v", err)
 	}

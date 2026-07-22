@@ -70,7 +70,6 @@ type Config struct {
 	Debug                bool
 	MockIoT              bool
 	MockDeviceID         string
-	AppInsightsKey       string
 	SignalRHubURL        string
 	APIBaseURL           string
 	QueueDir             string
@@ -87,7 +86,7 @@ func main() {
 	}).Info("Starting MeatGeek Data Pusher")
 
 	ctx := context.Background()
-	shutdown, err := telemetry.SetupTracing(ctx, config.AppInsightsKey)
+	shutdown, err := telemetry.SetupTracing(ctx)
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to set up tracing")
 	}
@@ -128,10 +127,6 @@ func parseFlags() Config {
 	flag.StringVar(&config.MockDeviceID, "mock-device-id",
 		getEnvString("MOCK_DEVICE_ID", "meatgeek-mock"),
 		"Device id used when --mock-iot is set (production sourced from the conn-string)")
-
-	flag.StringVar(&config.AppInsightsKey, "appinsights-key",
-		getEnvString("APPLICATIONINSIGHTS_CONNECTION_STRING", ""),
-		"Application Insights connection string")
 
 	flag.StringVar(&config.SignalRHubURL, "signalr-hub-url",
 		getEnvString("SIGNALR_HUB_URL", ""),

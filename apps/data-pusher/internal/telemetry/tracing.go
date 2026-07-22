@@ -29,10 +29,11 @@ const EnvOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
 //   - set           -> a real OTLP/HTTP span exporter built by newSpanExporter.
 //
 // The exporter endpoint comes SOLELY from OTEL_EXPORTER_OTLP_ENDPOINT. No
-// connection string (App Insights or otherwise) is ever parsed to derive the
-// OTLP endpoint — the App Insights ingestion endpoint is not an OTLP receiver,
-// so steering the exporter at it was wrong. The second parameter is retained
-// only for call-site compatibility during the F2 rework and is unused.
+// connection string (App Insights or otherwise) is ever read or parsed — the
+// App Insights connection string lives only on the collector, which fronts
+// Azure Monitor; the edge services push OTLP to the collector and never touch
+// it. The App Insights ingestion endpoint is not an OTLP receiver, so steering
+// the exporter at it would be wrong.
 //
 // The concrete backend is swappable: newSpanExporter is a package var so the
 // backend can be replaced (e.g. an Azure Monitor Go exporter once it is GA)
@@ -42,7 +43,7 @@ const EnvOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
 // traceparent injected onto IoT Hub messages interoperates with the
 // downstream Functions/API layers. Sampling is AlwaysSample. The returned
 // shutdown func is always non-nil.
-func SetupTracing(ctx context.Context, _ string) (func(), error) {
+func SetupTracing(ctx context.Context) (func(), error) {
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName("meatgeek-pusher"),

@@ -102,7 +102,7 @@ func mustReading(t *testing.T, cookID string) json.RawMessage {
 // and asserts the published message properties carry the injected W3C
 // traceparent alongside the retained correlation.id and messageId.
 func TestRunPublisher_InjectsTraceparentAsMessageProperty(t *testing.T) {
-	shutdown, err := telemetry.SetupTracing(context.Background(), "")
+	shutdown, err := telemetry.SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestRunPublisher_InjectsTraceparentAsMessageProperty(t *testing.T) {
 }
 
 func TestBuildPublishProperties_TraceparentAndCorrelation(t *testing.T) {
-	shutdown, err := telemetry.SetupTracing(context.Background(), "")
+	shutdown, err := telemetry.SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestBuildPublishProperties_TraceparentAndCorrelation(t *testing.T) {
 }
 
 func TestBuildPublishProperties_NoCorrelationOmitsKey(t *testing.T) {
-	shutdown, _ := telemetry.SetupTracing(context.Background(), "")
+	shutdown, _ := telemetry.SetupTracing(context.Background())
 	defer shutdown()
 
 	tracer := otel.Tracer("test")
@@ -223,7 +223,7 @@ func TestBuildPublishProperties_NoCorrelationOmitsKey(t *testing.T) {
 // reading carries THAT reading's own per-reading traceparent (same trace id
 // as the reading span, not the process span).
 func TestPerReadingTrace_DistinctAndCarriedOnMessage(t *testing.T) {
-	shutdown, err := telemetry.SetupTracing(context.Background(), "")
+	shutdown, err := telemetry.SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestPerReadingTrace_DistinctAndCarriedOnMessage(t *testing.T) {
 // (simulating a disk persist + recover across a process restart) and the
 // dequeued consumer/publish span CONTINUES that same reading trace.
 func TestQueueRecord_TraceparentPersistsAndContinues(t *testing.T) {
-	shutdown, err := telemetry.SetupTracing(context.Background(), "")
+	shutdown, err := telemetry.SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing: %v", err)
 	}

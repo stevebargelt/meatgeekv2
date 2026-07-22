@@ -30,7 +30,7 @@ func TestSetupTracing_NoOTLPEndpoint_UsesNoOpExporter(t *testing.T) {
 		return &noOpExporter{}, nil
 	})
 
-	shutdown, err := SetupTracing(context.Background(), "")
+	shutdown, err := SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing returned error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestSetupTracing_WhitespaceOTLPEndpoint_UsesNoOpExporter(t *testing.T) {
 		return &noOpExporter{}, nil
 	})
 
-	shutdown, err := SetupTracing(context.Background(), "")
+	shutdown, err := SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing returned error: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestSetupTracing_OTLPEndpointSet_BuildsRealExporter(t *testing.T) {
 		return &noOpExporter{}, nil
 	})
 
-	shutdown, err := SetupTracing(context.Background(), "")
+	shutdown, err := SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing returned error: %v", err)
 	}
@@ -89,30 +89,6 @@ func TestSetupTracing_OTLPEndpointSet_BuildsRealExporter(t *testing.T) {
 	}
 }
 
-func TestSetupTracing_ConnStringDoesNotSteerExporter(t *testing.T) {
-	// Security regression guard: a non-empty App Insights connection string
-	// (second arg) must NOT enable or steer the exporter. With no OTLP endpoint
-	// configured, the no-op path is taken regardless of the connection string.
-	t.Setenv(EnvOTLPEndpoint, "")
-
-	called := false
-	withStubExporter(t, func(context.Context) (trace.SpanExporter, error) {
-		called = true
-		return &noOpExporter{}, nil
-	})
-
-	connStr := "InstrumentationKey=abc123;IngestionEndpoint=https://ingest.invalid/"
-	shutdown, err := SetupTracing(context.Background(), connStr)
-	if err != nil {
-		t.Fatalf("SetupTracing returned error: %v", err)
-	}
-	defer shutdown()
-
-	if called {
-		t.Error("a connection string must NOT enable the exporter — the OTLP endpoint comes ONLY from OTEL_EXPORTER_OTLP_ENDPOINT")
-	}
-}
-
 // TestSetupTracing_RealExporterOffline exercises the DEFAULT newSpanExporter
 // (the real OTLP-backed one) with OTEL_EXPORTER_OTLP_ENDPOINT set to an
 // unreachable endpoint, asserting it constructs without error and yields a
@@ -121,7 +97,7 @@ func TestSetupTracing_ConnStringDoesNotSteerExporter(t *testing.T) {
 func TestSetupTracing_RealExporterOffline(t *testing.T) {
 	t.Setenv(EnvOTLPEndpoint, "http://collector.invalid:4318")
 
-	shutdown, err := SetupTracing(context.Background(), "")
+	shutdown, err := SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing with real exporter errored offline: %v", err)
 	}
@@ -136,7 +112,7 @@ func TestSetupTracing_SetsW3CPropagatorGlobally(t *testing.T) {
 	// Reset to a non-W3C propagator first so we prove SetupTracing sets it.
 	otel.SetTextMapPropagator(propagation.Baggage{})
 
-	shutdown, err := SetupTracing(context.Background(), "")
+	shutdown, err := SetupTracing(context.Background())
 	if err != nil {
 		t.Fatalf("SetupTracing returned error: %v", err)
 	}
