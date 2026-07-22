@@ -423,6 +423,91 @@ else
   fi
 fi
 
+# ===========================================================================
+# F1 (round-2 hardening): hcl_string_list REJECTS non-UUID / HCL-breaking tokens
+# ===========================================================================
+# Quoting alone is not enough — a malformed client-app id (embedded quote, space,
+# or a non-UUID token) must FAIL LOUD rather than be emitted as (broken) HCL. The
+# renderer validates every token as a bare GUID (assert_uuid) and dies otherwise.
+# Run each rejecting call in a SUBSHELL so die's `exit 1` cannot abort the runner.
+if (hcl_string_list "not-a-uuid" SMOKE_TEST_CLIENT_IDS >/dev/null 2>&1); then
+  bad "hcl_string_list must REJECT a non-UUID token (emitted a value instead of dying)"
+else ok "hcl_string_list rejects a non-UUID token (fail-loud)"; fi
+if (hcl_string_list '11111111-1111-1111-1111-11111111111"' SMOKE_TEST_CLIENT_IDS >/dev/null 2>&1); then
+  bad "hcl_string_list must REJECT a token containing a quote (HCL-breaking)"
+else ok "hcl_string_list rejects a token containing an embedded quote"; fi
+if (hcl_string_list "04b07795-8ddb-461a-bbee-02f9e1bf7b46 not a uuid" X >/dev/null 2>&1); then
+  bad "hcl_string_list must REJECT a space-split non-UUID token"
+else ok "hcl_string_list rejects a space-embedded non-UUID token"; fi
+# The happy path (valid GUIDs) still renders a quoted HCL list.
+if [ "$(hcl_string_list '04b07795-8ddb-461a-bbee-02f9e1bf7b46')" = '["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]' ]; then
+  ok "hcl_string_list still renders valid GUIDs as a quoted HCL list"
+else bad "hcl_string_list must still render valid GUIDs"; fi
+# assert_uuid is the shared validator (used by the preauth loop too).
+if (assert_uuid "not-a-uuid" X 2>/dev/null); then
+  bad "assert_uuid must reject a non-UUID"
+else ok "assert_uuid rejects a non-UUID token"; fi
+if assert_uuid "04b07795-8ddb-461a-bbee-02f9e1bf7b46" X 2>/dev/null; then
+  ok "assert_uuid accepts a bare GUID"
+else bad "assert_uuid must accept a bare GUID"; fi
+
+# ===========================================================================
+# F3 (round-2): az discovery distinguishes NOT-FOUND from a REAL error
+# ===========================================================================
+# A blanket `|| true` on a discovery/list/show collapses a transient Azure error
+# (auth / throttling / network) into an empty result, so a create-if-absent caller
+# wrongly proceeds to CREATE. The az_discover helper captures exit status
+# SEPARATELY and dies on a non-zero exit; assert it exists and is wired in.
+if grep -q '^az_discover()' "$BOOT"; then
+  ok "az_discover helper exists (distinguishes absent from real error)"
+else bad "bootstrap must define an az_discover helper (distinguish absent from error)"; fi
+# az_discover behaves: clean exit passes stdout through; non-zero exit dies.
+if [ "$(az_discover "clean" printf 'hello')" = "hello" ]; then
+  ok "az_discover passes through stdout on a clean exit"
+else bad "az_discover must pass through stdout on a clean (exit-0) discovery"; fi
+if (az_discover "boom" bash -c 'exit 3' >/dev/null 2>&1); then
+  bad "az_discover must die on a non-zero discovery exit"
+else ok "az_discover dies on a non-zero discovery exit (real error, not absence)"; fi
+# The create-if-absent discoveries route through az_discover, not `|| true`.
+if grep -q 'az_discover .*az ad app list' "$BOOT"; then
+  ok "AAD app discovery routes through az_discover"
+else bad "AAD app discovery must route through az_discover"; fi
+# SP discovery uses `sp list --filter` (absent = empty/exit-0) — az_discover is on
+# the preceding continuation line — and NEVER `sp show` (which returns non-zero for
+# not-found and so can't distinguish absence from a real error).
+if grep -q "az ad sp list --filter \"appId eq" "$BOOT" && ! grep -q 'az ad sp show' "$BOOT"; then
+  ok "service-principal discovery uses 'sp list --filter' (absent = empty/exit-0), no 'sp show'"
+else bad "SP discovery must use 'az ad sp list --filter' (not 'sp show', which can't distinguish absent from error)"; fi
+# No blanket `|| true` may remain on these discovery calls (the masking hazard).
+for pat in 'az ad app list .*\|\| true' \
+           'az ad sp show .*\|\| true' \
+           'az ad app federated-credential list .*\|\| true' \
+           'az role assignment list .*\|\| true' ; do
+  if grep -Eq "$pat" "$BOOT"; then
+    bad "blanket '|| true' still masks a real error on discovery: /$pat/"
+  else ok "no blanket '|| true' masking on discovery: /$pat/"; fi
+done
+
+# ===========================================================================
+# F2 (round-2): every `az ad sp create` FAILS LOUD (|| die) — no phantom success
+# ===========================================================================
+# Each service-principal create must be paired with `|| die` (the die is on the
+# continuation line for the `x="$(...)" \` form), so a genuine create failure
+# aborts with a clear message instead of a bare success line after a failed create.
+sp_create_lines="$(grep -c 'az ad sp create' "$BOOT" || true)"
+sp_create_guarded="$(grep -A2 'az ad sp create' "$BOOT" | grep -c '|| die' || true)"
+if [ "${sp_create_lines:-0}" -ge 3 ] && [ "${sp_create_guarded:-0}" -eq "${sp_create_lines:-0}" ]; then
+  ok "every 'az ad sp create' is guarded by || die (${sp_create_guarded}/${sp_create_lines} fail-loud)"
+else bad "each 'az ad sp create' must fail loud (|| die); guarded=${sp_create_guarded} total=${sp_create_lines}"; fi
+# The AAD app creates are likewise fail-loud (no phantom appId after a failed
+# create). -A2 covers the dev-API create, whose `|| die` is two lines down (the
+# --sign-in-audience flag is on the intervening continuation line).
+app_create_lines="$(grep -c 'az ad app create' "$BOOT" || true)"
+app_create_guarded="$(grep -A2 'az ad app create' "$BOOT" | grep -c '|| die' || true)"
+if [ "${app_create_lines:-0}" -ge 3 ] && [ "${app_create_guarded:-0}" -eq "${app_create_lines:-0}" ]; then
+  ok "every 'az ad app create' is guarded by || die (${app_create_guarded}/${app_create_lines} fail-loud)"
+else bad "each 'az ad app create' must fail loud (|| die); guarded=${app_create_guarded} total=${app_create_lines}"; fi
+
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
