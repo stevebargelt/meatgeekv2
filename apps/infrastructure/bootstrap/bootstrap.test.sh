@@ -601,82 +601,80 @@ if grep -Eiq 'SERVICE PRINCIPAL.*skipping.*Storage Blob Data' "$BOOT"; then
   ok "SP session logs a clear 'skipping the per-operator Storage Blob Data grant (by design)' message"
 else bad "SP session must LOG a clear by-design skip of the operator Storage Blob Data grant"; fi
 
+# NOTE: the `az` mocks below are defined at TOP LEVEL (not inside the `$(...)`
+# / `(...)` that follows). System Bash 3.2 (macOS) has a parser bug that makes a
+# function definition INSIDE a command substitution abort with a 127 parse error
+# mid-suite; defining the mock first and calling only the helper inside the
+# substitution/subshell is valid on Bash 3.2 and 4/5 alike. `operator_state_grant_oid`
+# calls `az`, so the mock must keep the name `az`; each block redefines it.
+
 # BEHAVIOUR (1): a SERVICE PRINCIPAL session yields SKIP_SP and does NOT die, and
 # does NOT even call 'signed-in-user show' (which legitimately fails for an SP).
-sp_out="$(
-  az() {
-    case "$*" in
-      "account show --query user.type -o tsv") echo "servicePrincipal" ;;
-      "ad signed-in-user show --query id -o tsv") echo "SHOULD-NOT-BE-CALLED"; return 0 ;;
-      *) return 0 ;;
-    esac
-  }
-  operator_state_grant_oid 2>/dev/null
-)"
+az() {
+  case "$*" in
+    "account show --query user.type -o tsv") echo "servicePrincipal" ;;
+    "ad signed-in-user show --query id -o tsv") echo "SHOULD-NOT-BE-CALLED"; return 0 ;;
+    *) return 0 ;;
+  esac
+}
+sp_out="$(operator_state_grant_oid 2>/dev/null)"
 if [ "$sp_out" = "SKIP_SP" ]; then
   ok "SP session -> operator_state_grant_oid emits SKIP_SP (deliberate fail-soft, no die, no signed-in-user call)"
 else bad "SP session must yield SKIP_SP (got '$sp_out')"; fi
 
 # BEHAVIOUR (2): a USER session whose signed-in-user lookup FAILS (Graph/auth/
-# network) must DIE LOUDLY (non-zero) — never silently skip the grant. Run in a
-# SUBSHELL so die's `exit 1` cannot abort the runner.
-if (
-  az() {
-    case "$*" in
-      "account show --query user.type -o tsv") echo "user" ;;
-      "ad signed-in-user show --query id -o tsv") return 1 ;;
-      *) return 0 ;;
-    esac
-  }
-  operator_state_grant_oid >/dev/null 2>&1
-); then
+# network) must DIE LOUDLY (non-zero) — never silently skip the grant. Run the
+# helper in a SUBSHELL so die's `exit 1` cannot abort the runner.
+az() {
+  case "$*" in
+    "account show --query user.type -o tsv") echo "user" ;;
+    "ad signed-in-user show --query id -o tsv") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+if ( operator_state_grant_oid >/dev/null 2>&1 ); then
   bad "USER session with a FAILED signed-in-user lookup must DIE (Graph/auth/network), not silently skip the operator grant"
 else ok "USER session + failed signed-in-user lookup -> operator_state_grant_oid dies loudly (no masked skip)"; fi
 
 # BEHAVIOUR (3): a USER session that resolves an object id returns it verbatim so
 # the caller proceeds to the existing fail-loud role assignment.
-usr_out="$(
-  az() {
-    case "$*" in
-      "account show --query user.type -o tsv") echo "user" ;;
-      "ad signed-in-user show --query id -o tsv") echo "11111111-2222-3333-4444-555555555555" ;;
-      *) return 0 ;;
-    esac
-  }
-  operator_state_grant_oid 2>/dev/null
-)"
+az() {
+  case "$*" in
+    "account show --query user.type -o tsv") echo "user" ;;
+    "ad signed-in-user show --query id -o tsv") echo "11111111-2222-3333-4444-555555555555" ;;
+    *) return 0 ;;
+  esac
+}
+usr_out="$(operator_state_grant_oid 2>/dev/null)"
 if [ "$usr_out" = "11111111-2222-3333-4444-555555555555" ]; then
   ok "USER session -> operator_state_grant_oid returns the resolved object id (proceeds to the grant)"
 else bad "USER session must yield the resolved object id (got '$usr_out')"; fi
 
 # BEHAVIOUR (4): a USER session that returns an EMPTY id (Graph success, no id) is
 # an anomaly -> DIE, not a silent skip.
-if (
-  az() {
-    case "$*" in
-      "account show --query user.type -o tsv") echo "user" ;;
-      "ad signed-in-user show --query id -o tsv") echo "" ;;
-      *) return 0 ;;
-    esac
-  }
-  operator_state_grant_oid >/dev/null 2>&1
-); then
+az() {
+  case "$*" in
+    "account show --query user.type -o tsv") echo "user" ;;
+    "ad signed-in-user show --query id -o tsv") echo "" ;;
+    *) return 0 ;;
+  esac
+}
+if ( operator_state_grant_oid >/dev/null 2>&1 ); then
   bad "USER session returning an EMPTY object id must DIE (Graph/auth anomaly), not silently skip"
 else ok "USER session + empty object id -> operator_state_grant_oid dies loudly"; fi
 
 # BEHAVIOUR (5): a REAL error fetching the principal TYPE itself (auth/throttle/
 # network) must fail loud (via az_discover) rather than be mistaken for non-SP.
-if (
-  az() {
-    case "$*" in
-      "account show --query user.type -o tsv") return 1 ;;
-      *) return 0 ;;
-    esac
-  }
-  operator_state_grant_oid >/dev/null 2>&1
-); then
+az() {
+  case "$*" in
+    "account show --query user.type -o tsv") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+if ( operator_state_grant_oid >/dev/null 2>&1 ); then
   bad "a real error fetching the principal type must DIE (az_discover), not be treated as a non-SP user"
 else ok "principal-type query error -> operator_state_grant_oid dies loudly (via az_discover)"; fi
+unset -f az
 
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
