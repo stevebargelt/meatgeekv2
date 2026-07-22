@@ -349,6 +349,49 @@ wait_for_blob_data_plane() {
   done
 }
 
+# Resolve the object id of the signed-in principal for the OPERATOR Storage Blob
+# Data grant — but ONLY when a per-operator grant actually applies. This exists
+# to keep two DIFFERENT cases from collapsing into the same empty→silent-skip
+# path (F4/F6, the "masked Azure error"):
+#
+#   (a) EXPECTED: the session principal is a SERVICE PRINCIPAL (CI/automation).
+#       `az ad signed-in-user show` legitimately fails for an SP (there is no
+#       interactive "signed-in user"), and the per-OPERATOR grant is simply not
+#       applicable. This is a deliberate FAIL-SOFT: emit SKIP_SP so the caller
+#       logs a clear "by design, not a failure" notice and moves on. Do NOT die.
+#
+#   (b) GENUINE FAILURE for a real USER session (Microsoft Graph down, auth/token
+#       error, network): the object-id lookup must FAIL LOUD, never be silently
+#       swallowed. Previously the whole thing hung off `… 2>/dev/null || true`,
+#       so a real user's Graph outage looked identical to an SP session and the
+#       operator's Storage-Blob-Data grant was skipped with nobody the wiser.
+#
+# Determine the principal TYPE first (az account show → user.type: `user` vs
+# `servicePrincipal`), then branch. The type query itself routes through
+# az_discover, so a REAL error fetching the type also fails loud rather than
+# being mistaken for "not an SP". Prints SKIP_SP (SP session) or the bare object
+# id (user session) on stdout; dies on a genuine user-session lookup failure.
+operator_state_grant_oid() {
+  local ptype oid
+  ptype="$(az_discover "signed-in principal type" \
+    az account show --query user.type -o tsv)"
+  if [ "$ptype" = "servicePrincipal" ]; then
+    # (a) SP session — the per-operator Storage Blob Data grant is N/A by design.
+    printf 'SKIP_SP'
+    return 0
+  fi
+  # (b) USER session (or any non-SP type): resolve the object id WITHOUT a
+  # masking `|| true`. A non-zero exit (Graph/auth/network) fails loud here.
+  oid="$(az ad signed-in-user show --query id -o tsv)" \
+    || die "could not resolve the signed-in USER's object id via 'az ad signed-in-user show' (Microsoft Graph unreachable / auth/token error / network). Refusing to SILENTLY SKIP the operator's 'Storage Blob Data Contributor' grant on ${STATE_STORAGE_ACCOUNT} — re-authenticate (az login) or retry once Graph is reachable, then re-run the bootstrap."
+  # A user session that returns an EMPTY/null id is itself an anomaly (Graph
+  # returned success but no id) — treat it as a genuine failure, not a skip.
+  if [ -z "$oid" ] || [ "$oid" = "null" ]; then
+    die "'az ad signed-in-user show' returned an EMPTY object id for a USER session (Graph/auth anomaly). Refusing to silently skip the operator's 'Storage Blob Data Contributor' grant on ${STATE_STORAGE_ACCOUNT}."
+  fi
+  printf '%s' "$oid"
+}
+
 # --------------------------------------------------------------------------
 # Reconcile a GitHub-Actions OIDC federated credential on SUBJECT, not just
 # name. The subject IS the OIDC trust binding, so a credential with the right
@@ -465,25 +508,34 @@ bootstrap_state_backend() {
   # SPs — so the container ops authenticate via the operator's AAD token and NO
   # secret ever appears on argv. No account key is fetched at all.
   local operator_oid state_sa_id
-  operator_oid="$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)"
+  # Determine the signed-in principal TYPE first, then branch (see
+  # operator_state_grant_oid). An SP session yields SKIP_SP (deliberate
+  # fail-soft); a USER session yields the object id or DIES LOUD on a genuine
+  # Graph/auth/network failure — no blanket `|| true` masking a real error.
+  operator_oid="$(operator_state_grant_oid)"
   state_sa_id="$(az storage account show \
     --name "$STATE_STORAGE_ACCOUNT" --resource-group "$STATE_RG" --query id -o tsv)"
-  if [ -n "$operator_oid" ] && [ "$operator_oid" != "null" ]; then
-    # Storage Blob Data Contributor on the state account so `--auth-mode login`
-    # can create/list containers. Idempotent (create is a no-op if already held).
-    # FAIL LOUD on a genuine authorization/role-assignment failure — no blanket
-    # `|| true` that would print a false "granted". A real AuthorizationFailed
-    # (operator lacks User Access Administrator/Owner) must abort here.
+  if [ "$operator_oid" = "SKIP_SP" ]; then
+    # Legitimate FAIL-SOFT: the session is a SERVICE PRINCIPAL, so the per-operator
+    # 'Storage Blob Data Contributor' grant is NOT APPLICABLE — skip it by design
+    # (this is not a failure). Whatever principal runs `terraform init` against
+    # this backend must already hold a Storage Blob Data role on the state account;
+    # granting that to an arbitrary automation SP is intentionally out of scope
+    # here (that is what the per-env CI/deploy SP grants below cover).
+    log "Signed-in principal is a SERVICE PRINCIPAL — skipping the per-operator 'Storage Blob Data Contributor' grant on ${STATE_STORAGE_ACCOUNT} (not applicable to an SP session; by design, not a failure)."
+  else
+    # USER session with a resolved object id. Storage Blob Data Contributor on the
+    # state account so `--auth-mode login` can create/list containers. Idempotent
+    # (create is a no-op if already held). FAIL LOUD on a genuine authorization/
+    # role-assignment failure — no blanket `|| true` that would print a false
+    # "granted". A real AuthorizationFailed (operator lacks User Access
+    # Administrator/Owner) must abort here.
     ensure_role_assignment "$operator_oid" User "Storage Blob Data Contributor" "$state_sa_id" \
       || die "failed to grant the operator 'Storage Blob Data Contributor' on ${STATE_STORAGE_ACCOUNT} — the signed-in principal likely lacks Owner/User Access Administrator on the state account."
     ok "Storage Blob Data Contributor granted to the operator on ${STATE_STORAGE_ACCOUNT}"
     # Wait (bounded poll, not a blind sleep) for the just-granted data-plane role
     # to become effective before the first `--auth-mode login` container call.
     wait_for_blob_data_plane "$STATE_STORAGE_ACCOUNT"
-  else
-    warn "Could not resolve the signed-in user's object id — ensure the operator"
-    warn "holds a Storage Blob Data role on ${STATE_STORAGE_ACCOUNT} so --auth-mode"
-    warn "login can create the state containers (no account key is used)."
   fi
 
   local env container

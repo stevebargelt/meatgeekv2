@@ -563,6 +563,121 @@ if grep -Eq 'if az storage (account|container) show' "$BOOT"; then
   bad "a bare 'if az storage … show' create-decider remains (treats every non-zero as absent)"
 else ok "no bare 'if az storage … show' create-decider (all route through resource_absent_or_die)"; fi
 
+# ===========================================================================
+# F4 (reopened): operator Storage-Blob-Data grant — SP-skip vs user-fail-loud
+# ===========================================================================
+# The old resolution was `operator_oid="$(az ad signed-in-user show … 2>/dev/null
+# || true)"`, which collapsed TWO different cases into one empty→silent-skip path:
+#   (a) EXPECTED: a SERVICE PRINCIPAL session (CI/automation) for which
+#       'signed-in-user show' legitimately fails — the per-operator grant is N/A
+#       and skipping it is BY DESIGN, and
+#   (b) GENUINE failure for a real USER (Graph down / auth / network) — which was
+#       SILENTLY swallowed, dropping the operator's Storage-Blob-Data grant.
+# The fix detects the principal TYPE first (az account show → user.type) then
+# branches: SP → skip (log, no die); user → resolve WITHOUT the mask, DIE LOUD on
+# a genuine failure. Tests stub `az` (no real Azure), exercising the new branch.
+
+# The helper exists.
+if grep -q '^operator_state_grant_oid()' "$BOOT"; then
+  ok "operator_state_grant_oid helper exists (branches SP-skip vs user-fail-loud)"
+else bad "bootstrap must define operator_state_grant_oid (branch SP-skip vs user-fail-loud)"; fi
+
+# The principal TYPE is detected (az account show → user.type) before branching.
+if grep -q 'az account show --query user.type' "$BOOT"; then
+  ok "bootstrap detects the signed-in principal type (user vs servicePrincipal) before the operator grant"
+else bad "bootstrap must detect the principal type (az account show --query user.type) to branch SP vs user"; fi
+
+# The signed-in-user object-id lookup is no longer masked by `|| true`.
+if grep -Eq 'signed-in-user show[^\n]*\|\| true' "$BOOT"; then
+  bad "the signed-in-user object-id lookup must NOT be masked by '|| true' (collapses SP-skip and a real Graph/auth failure)"
+else ok "no '|| true' masking on the signed-in-user object-id lookup (F4 fixed)"; fi
+# ...and the exact old masked collapse is gone.
+if grep -q 'signed-in-user show --query id -o tsv 2>/dev/null || true' "$BOOT"; then
+  bad "the old masked 'signed-in-user … 2>/dev/null || true' resolution is still present"
+else ok "old masked signed-in-user resolution removed"; fi
+
+# The SP branch LOGS a clear, explicit by-design skip (not a silent drop).
+if grep -Eiq 'SERVICE PRINCIPAL.*skipping.*Storage Blob Data' "$BOOT"; then
+  ok "SP session logs a clear 'skipping the per-operator Storage Blob Data grant (by design)' message"
+else bad "SP session must LOG a clear by-design skip of the operator Storage Blob Data grant"; fi
+
+# BEHAVIOUR (1): a SERVICE PRINCIPAL session yields SKIP_SP and does NOT die, and
+# does NOT even call 'signed-in-user show' (which legitimately fails for an SP).
+sp_out="$(
+  az() {
+    case "$*" in
+      "account show --query user.type -o tsv") echo "servicePrincipal" ;;
+      "ad signed-in-user show --query id -o tsv") echo "SHOULD-NOT-BE-CALLED"; return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+  operator_state_grant_oid 2>/dev/null
+)"
+if [ "$sp_out" = "SKIP_SP" ]; then
+  ok "SP session -> operator_state_grant_oid emits SKIP_SP (deliberate fail-soft, no die, no signed-in-user call)"
+else bad "SP session must yield SKIP_SP (got '$sp_out')"; fi
+
+# BEHAVIOUR (2): a USER session whose signed-in-user lookup FAILS (Graph/auth/
+# network) must DIE LOUDLY (non-zero) — never silently skip the grant. Run in a
+# SUBSHELL so die's `exit 1` cannot abort the runner.
+if (
+  az() {
+    case "$*" in
+      "account show --query user.type -o tsv") echo "user" ;;
+      "ad signed-in-user show --query id -o tsv") return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  operator_state_grant_oid >/dev/null 2>&1
+); then
+  bad "USER session with a FAILED signed-in-user lookup must DIE (Graph/auth/network), not silently skip the operator grant"
+else ok "USER session + failed signed-in-user lookup -> operator_state_grant_oid dies loudly (no masked skip)"; fi
+
+# BEHAVIOUR (3): a USER session that resolves an object id returns it verbatim so
+# the caller proceeds to the existing fail-loud role assignment.
+usr_out="$(
+  az() {
+    case "$*" in
+      "account show --query user.type -o tsv") echo "user" ;;
+      "ad signed-in-user show --query id -o tsv") echo "11111111-2222-3333-4444-555555555555" ;;
+      *) return 0 ;;
+    esac
+  }
+  operator_state_grant_oid 2>/dev/null
+)"
+if [ "$usr_out" = "11111111-2222-3333-4444-555555555555" ]; then
+  ok "USER session -> operator_state_grant_oid returns the resolved object id (proceeds to the grant)"
+else bad "USER session must yield the resolved object id (got '$usr_out')"; fi
+
+# BEHAVIOUR (4): a USER session that returns an EMPTY id (Graph success, no id) is
+# an anomaly -> DIE, not a silent skip.
+if (
+  az() {
+    case "$*" in
+      "account show --query user.type -o tsv") echo "user" ;;
+      "ad signed-in-user show --query id -o tsv") echo "" ;;
+      *) return 0 ;;
+    esac
+  }
+  operator_state_grant_oid >/dev/null 2>&1
+); then
+  bad "USER session returning an EMPTY object id must DIE (Graph/auth anomaly), not silently skip"
+else ok "USER session + empty object id -> operator_state_grant_oid dies loudly"; fi
+
+# BEHAVIOUR (5): a REAL error fetching the principal TYPE itself (auth/throttle/
+# network) must fail loud (via az_discover) rather than be mistaken for non-SP.
+if (
+  az() {
+    case "$*" in
+      "account show --query user.type -o tsv") return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  operator_state_grant_oid >/dev/null 2>&1
+); then
+  bad "a real error fetching the principal type must DIE (az_discover), not be treated as a non-SP user"
+else ok "principal-type query error -> operator_state_grant_oid dies loudly (via az_discover)"; fi
+
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
