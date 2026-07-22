@@ -34,6 +34,15 @@ resource "azurerm_user_assigned_identity" "collector" {
 
 # --- Data Collection Endpoint (DCE) ------------------------------------------
 # The logs-ingestion endpoint the collector's otlphttp exporter targets.
+#
+# !!! UNVERIFIED PREVIEW SEMANTICS (MG-25 activation, tracked by MG-34) !!!
+# The exporter below targets `.logs_ingestion_endpoint` (the DCR Logs Ingestion
+# API URI). Whether Azure Monitor NATIVE OTLP INGESTION (PREVIEW) actually
+# accepts OTLP at that SAME endpoint — vs. a DEDICATED OTLP ingestion URI or a
+# DIFFERENT DCE attribute (and at what api-version) — is NOT confirmed here.
+# MUST be verified against the current Azure Monitor native-OTLP-ingestion
+# preview docs BEFORE the enable_native_otlp flag is flipped on. Do NOT treat
+# this attribute choice as proven.
 resource "azurerm_monitor_data_collection_endpoint" "otlp" {
   name                = "${var.resource_prefix}-otlp-dce"
   resource_group_name = var.resource_group_name
@@ -158,6 +167,22 @@ resource "azurerm_container_app" "collector" {
     identity_ids = [azurerm_user_assigned_identity.collector.id]
   }
 
+  # Deliver the repo's collector-config.yaml to the container as a Secret-backed
+  # volume file. FIX (MG-33 F1 review): without this, only the spool volume was
+  # mounted and otelcol-contrib fell back to its DEFAULT config (plain OTLP in /
+  # debug out — NO otlphttp/azureauth), so the authored native-OTLP config was
+  # never actually delivered. The YAML holds NO secrets (every Azure value is
+  # ${env:...}-substituted at runtime), but a Secret volume is the azurerm_
+  # container_app-native mechanism to materialize an arbitrary file at a fixed
+  # path. SINGLE SOURCE OF TRUTH: content is read from the repo file via file() —
+  # never a divergent copy. Secret names disallow dots, so the file lands as
+  # `collector-config` (no extension) and the container args point --config at it
+  # (otelcol's file provider ignores the extension).
+  secret {
+    name  = "collector-config"
+    value = file("${path.module}/../../otel-collector/collector-config.yaml")
+  }
+
   template {
     # Persistent spool volume backing the collector's file_storage sending_queue
     # (/var/lib/otelcol/file_storage). Azure File share associated to the managed
@@ -168,16 +193,34 @@ resource "azurerm_container_app" "collector" {
       storage_name = var.collector_storage_name
     }
 
+    # Secret-backed volume that materializes the collector-config secret as a file
+    # (filename == secret name == `collector-config`) under the mount path.
+    volume {
+      name         = "otel-config"
+      storage_type = "Secret"
+    }
+
     container {
       name   = "otel-collector"
       image  = var.collector_image
       cpu    = 0.5
       memory = "1Gi"
 
+      # Point otelcol-contrib at the delivered config file (overrides the image's
+      # default CMD of `--config /etc/otelcol-contrib/config.yaml`). The Secret
+      # volume mounts `collector-config` (no extension) into this dir.
+      args = ["--config", "/etc/otelcol/config/collector-config"]
+
       # Mount the persistent spool at the path collector-config.yaml expects.
       volume_mounts {
         name = "otel-file-storage"
         path = "/var/lib/otelcol/file_storage"
+      }
+
+      # Mount the delivered collector config (Secret volume) at the --config dir.
+      volume_mounts {
+        name = "otel-config"
+        path = "/etc/otelcol/config"
       }
 
       # Every Azure-specific value is Terraform-emitted (never hand-copied),
@@ -186,6 +229,9 @@ resource "azurerm_container_app" "collector" {
         name  = "AZURE_OTLP_UAI_CLIENT_ID"
         value = azurerm_user_assigned_identity.collector.client_id
       }
+      # UNVERIFIED PREVIEW SEMANTICS (see the DCE resource above / MG-34): whether
+      # `.logs_ingestion_endpoint` is the correct native-OTLP target must be
+      # confirmed against the Azure native-OTLP-ingestion preview docs at MG-25.
       env {
         name  = "AZURE_MONITOR_OTLP_ENDPOINT"
         value = azurerm_monitor_data_collection_endpoint.otlp.logs_ingestion_endpoint
@@ -202,6 +248,23 @@ resource "azurerm_container_app" "collector" {
   }
 
   tags = var.tags
+
+  # FLAG-PREREQUISITE ENFORCEMENT (MG-33 F1 review fix). This module is only
+  # instantiated when enable_native_otlp is true, so these preconditions ONLY
+  # evaluate on activation — with the flag OFF the module is not instantiated,
+  # zero resources plan, and `terraform validate` passes untouched. On plan/apply
+  # with the flag ON, an empty required input FAILS LOUD here rather than silently
+  # producing a broken Container App (no environment / no spool storage).
+  lifecycle {
+    precondition {
+      condition     = trimspace(var.container_app_environment_id) != ""
+      error_message = "enable_native_otlp is true but container_app_environment_id is empty. The Container Apps managed environment (MG-24) must exist and its id be supplied before the flag can activate."
+    }
+    precondition {
+      condition     = trimspace(var.collector_storage_name) != ""
+      error_message = "enable_native_otlp is true but collector_storage_name is empty. The Azure File storage association backing the collector's persistent spool (MG-24) must exist and its name be supplied before the flag can activate."
+    }
+  }
 
   # The identity + DCR must exist (and the role be granted) before the app runs.
   depends_on = [

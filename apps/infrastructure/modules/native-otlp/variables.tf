@@ -32,8 +32,13 @@ variable "container_app_environment_id" {
   default     = ""
 }
 
+# UNVERIFIED PREVIEW SEMANTICS (MG-25 activation, tracked by MG-34): 0.126.0 is
+# the floor for the azureauth extension existing, but the MINIMUM contrib version
+# Azure documents as supported for NATIVE OTLP INGESTION (PREVIEW) is NOT verified.
+# Confirm 0.128.0 suffices against the current Azure preview docs before flipping
+# enable_native_otlp on; bump the pin if the docs require a newer release.
 variable "collector_image" {
-  description = "PINNED collector container image. MUST be the CONTRIB distribution (otlphttp + azureauth + file_storage). Pin by tag AND digest for reproducibility."
+  description = "PINNED collector container image. MUST be the CONTRIB distribution (otlphttp + azureauth + file_storage). Pin by tag AND digest for reproducibility. UNVERIFIED: minimum version for Azure native-OTLP-ingestion preview not confirmed (MG-25/MG-34)."
   type        = string
   default     = "otel/opentelemetry-collector-contrib:0.128.0"
 }

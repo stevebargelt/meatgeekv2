@@ -29,13 +29,34 @@
 #   the azureauth extension first ships in contrib 0.126.0. Pin by tag AND
 #   resolve to a digest at deploy time (see README / Terraform container image).
 #   The core `otel/opentelemetry-collector` image does NOT include these.
+#
+#   !!! UNVERIFIED PREVIEW SEMANTICS — confirm at MG-25 activation (MG-34) !!!
+#   0.126.0 is the floor for the azureauth extension EXISTING, but the MINIMUM
+#   contrib version Azure DOCUMENTS as supported for NATIVE OTLP INGESTION
+#   (PREVIEW) is NOT verified. Confirm 0.128.0 satisfies the Azure preview docs'
+#   minimum (and the azureauth-extension feature level the ingestion path needs)
+#   BEFORE flipping enable_native_otlp on — bump the pin if the docs require a
+#   newer contrib release.
 
 extensions:
   # Entra (AAD) authenticator. Uses the Container App's USER-ASSIGNED managed
-  # identity (client id from env, Terraform-emitted). The token audience is
-  # derived from the request Host (monitor.azure.com) — the extension exposes no
-  # scope knob (see the azureauth extension docs). System-assigned would create
+  # identity (client id from env, Terraform-emitted). System-assigned would create
   # a create-then-grant ordering gap, so the identity is user-assigned.
+  #
+  # !!! UNVERIFIED PREVIEW SEMANTICS — confirm at MG-25 activation (MG-34) !!!
+  # This block sets NO explicit token scope, on the assumption the extension
+  # derives the audience from the request Host. The STANDARD Azure Monitor
+  # ingestion scope IS well-established as `https://monitor.azure.com/.default`
+  # (the DCR Logs Ingestion API audience), BUT two things are NOT verified for
+  # Azure Monitor NATIVE OTLP INGESTION (PREVIEW):
+  #   (1) whether native-OTLP ingestion uses that same monitor.azure.com audience
+  #       or a preview-specific one; and
+  #   (2) whether THIS azureauth extension auto-derives that scope from Host or
+  #       REQUIRES it to be set explicitly (e.g. a `scope:`/`resource:` field)
+  #       plus any `tenant_id`/`managed_identity` specifics.
+  # MUST be reconciled against the current azureauth-extension + Azure native-
+  # OTLP-ingestion preview docs BEFORE the enable_native_otlp flag is flipped on.
+  # Do NOT assume the omitted-scope form authenticates correctly as-is.
   azureauth:
     managed_identity:
       client_id: ${env:AZURE_OTLP_UAI_CLIENT_ID}
