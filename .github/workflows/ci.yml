@@ -162,6 +162,7 @@ jobs:
 
   validate-infrastructure:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -170,6 +171,10 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: '~1.9'
+          # The default setup-terraform wrapper intercepts stdin, which hangs
+          # `terraform fmt -` (used by bootstrap.test.sh to validate emitted HCL).
+          # No step here consumes the wrapper's outputs, so disable it.
+          terraform_wrapper: false
 
       - name: Terraform Format Check
         run: |
@@ -190,7 +195,9 @@ jobs:
         run: apps/infrastructure/scripts/tf-static-checks.sh
 
       - name: Bootstrap safety + emitted-HCL tests
-        run: bash apps/infrastructure/bootstrap/bootstrap.test.sh
+        # `< /dev/null` so nothing in the suite can block on the runner's stdin;
+        # `timeout` bounds any future hang instead of wedging the job.
+        run: timeout 180 bash apps/infrastructure/bootstrap/bootstrap.test.sh < /dev/null
 
   security-scan:
     runs-on: ubuntu-latest
