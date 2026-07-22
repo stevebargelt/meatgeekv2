@@ -2,16 +2,16 @@
 // device controller.
 //
 // NewRelic instrumentation was removed in ticket #4; this package re-adds
-// observability at the same main.go init site (MG-6). The Azure Monitor Go
-// exporter is not GA, so the concrete backend here is OTLP/HTTP behind the
-// OTel SpanExporter interface: the exporter targets the App Insights ingestion
-// endpoint parsed out of the connection string (or an OpenTelemetry Collector
-// pointed at it via OTEL_EXPORTER_OTLP_ENDPOINT), mirroring the data-pusher
-// telemetry package. Swap newSpanExporter for the Azure Monitor Go exporter
-// once it ships GA.
+// observability at the same main.go init site (MG-6). The concrete backend is
+// OTLP/HTTP behind the OTel SpanExporter interface, aimed at an OpenTelemetry
+// Collector named by the standard OTEL_EXPORTER_OTLP_ENDPOINT environment
+// variable (the collector in turn fronts Azure Monitor — F2). No App Insights
+// connection string is ever parsed to derive the endpoint: the App Insights
+// ingestion endpoint is not an OTLP receiver. Swap newSpanExporter for the
+// Azure Monitor Go exporter once it ships GA.
 //
 // The controller must run fully offline (e.g. a Raspberry Pi with no backend
-// reachable): an empty APPLICATIONINSIGHTS_CONNECTION_STRING selects a no-op
+// reachable): an unset/empty OTEL_EXPORTER_OTLP_ENDPOINT selects a no-op
 // exporter and Setup never panics.
 package telemetry
 
@@ -57,15 +57,15 @@ const (
 	unsetDimension = "none"
 )
 
-// Environment variables read by ConfigFromEnv. The connection string is read
-// from the environment ONLY — it is never hardcoded or committed.
+// Environment variables read by ConfigFromEnv.
 //
-// APPLICATIONINSIGHTS_CONNECTION_STRING is the Azure-standard name (the same
-// name Terraform sets on the Functions app settings); the device controller
-// reads it directly since it is edge-deployed rather than Terraform-managed.
+// OTEL_EXPORTER_OTLP_ENDPOINT is the standard OpenTelemetry variable naming the
+// OTLP collector the span exporter targets; an unset/empty value selects the
+// no-op exporter (offline path). ENVIRONMENT populates the environment custom
+// dimension.
 const (
-	EnvConnectionString = "APPLICATIONINSIGHTS_CONNECTION_STRING"
-	EnvEnvironment      = "ENVIRONMENT"
+	EnvOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	EnvEnvironment  = "ENVIRONMENT"
 )
 
 // ShutdownFunc flushes buffered spans and releases telemetry resources. It is
@@ -78,9 +78,6 @@ type ShutdownFunc func(context.Context) error
 type Config struct {
 	// DeviceID populates the device.id custom dimension (SmokerStatus.SmokerID).
 	DeviceID string
-	// ConnectionString is the Application Insights connection string
-	// (APPLICATIONINSIGHTS_CONNECTION_STRING). Empty selects the no-op exporter.
-	ConnectionString string
 	// Environment populates the environment custom dimension (ENVIRONMENT).
 	Environment string
 }
@@ -89,9 +86,8 @@ type Config struct {
 // device.id dimension.
 func ConfigFromEnv(deviceID string) Config {
 	return Config{
-		DeviceID:         deviceID,
-		ConnectionString: os.Getenv(EnvConnectionString),
-		Environment:      os.Getenv(EnvEnvironment),
+		DeviceID:    deviceID,
+		Environment: os.Getenv(EnvEnvironment),
 	}
 }
 
@@ -100,9 +96,9 @@ func ConfigFromEnv(deviceID string) Config {
 // func. It always samples (AlwaysSample) and attaches a resource carrying the
 // standard MeatGeek custom dimensions.
 //
-// With an empty ConnectionString the provider uses a no-op exporter so the
-// controller runs offline without an Application Insights / OTLP backend and
-// never panics. The returned ShutdownFunc always flushes and stops the
+// With OTEL_EXPORTER_OTLP_ENDPOINT unset/empty the provider uses a no-op
+// exporter so the controller runs offline without an OTLP collector reachable
+// and never panics. The returned ShutdownFunc always flushes and stops the
 // provider and is safe to defer.
 func Setup(ctx context.Context, cfg Config) (ShutdownFunc, error) {
 	tp, err := newTracerProvider(ctx, cfg)
@@ -121,7 +117,7 @@ func Setup(ctx context.Context, cfg Config) (ShutdownFunc, error) {
 // without installing the provider globally. Exposed (unexported) so tests can
 // inspect the constructed provider directly.
 func newTracerProvider(ctx context.Context, cfg Config) (*sdktrace.TracerProvider, error) {
-	exporter, err := newSpanExporter(ctx, cfg.ConnectionString)
+	exporter, err := newSpanExporter(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: building span exporter: %w", err)
 	}
@@ -153,44 +149,22 @@ func newResource(cfg Config) *resource.Resource {
 	)
 }
 
-// newSpanExporter returns the span exporter for the given Application Insights
-// connection string.
+// newSpanExporter returns the span exporter, selected SOLELY by the standard
+// OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
 //
-// An empty (or whitespace-only) connection string yields a no-op exporter so
-// the controller runs offline. A non-empty connection string yields the
-// OTLP/HTTP exporter — the swappable concrete backend behind the OTel
-// SpanExporter interface — aimed at the ingestion endpoint parsed from the
-// connection string (mirroring data-pusher). The exporter connects lazily, so
-// construction succeeds even with no live backend reachable.
-func newSpanExporter(ctx context.Context, connectionString string) (sdktrace.SpanExporter, error) {
-	if strings.TrimSpace(connectionString) == "" {
+// An unset (or whitespace-only) OTEL_EXPORTER_OTLP_ENDPOINT yields a no-op
+// exporter so the controller runs offline. When it is set, the OTLP/HTTP
+// exporter — the swappable concrete backend behind the OTel SpanExporter
+// interface — is constructed; otlptracehttp.New reads the endpoint (and the
+// other standard OTLP settings) from the environment itself, so the target
+// comes only from OTEL_EXPORTER_OTLP_ENDPOINT. No connection string is ever
+// consulted. The exporter connects lazily, so construction succeeds even with
+// no live backend reachable.
+func newSpanExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
+	if strings.TrimSpace(os.Getenv(EnvOTLPEndpoint)) == "" {
 		return noopExporter{}, nil
 	}
-	opts := []otlptracehttp.Option{}
-	if endpoint := ingestionEndpoint(connectionString); endpoint != "" {
-		opts = append(opts, otlptracehttp.WithEndpointURL(endpoint))
-	}
-	return otlptracehttp.New(ctx, opts...)
-}
-
-// ingestionEndpoint pulls the IngestionEndpoint value out of a standard App
-// Insights connection string (semicolon-separated key=value pairs, e.g.
-// "InstrumentationKey=...;IngestionEndpoint=https://...;..."). Returns "" when
-// absent, in which case the exporter falls back to the OTLP default endpoint
-// (or the OTEL_EXPORTER_OTLP_ENDPOINT env override). Mirrors data-pusher's
-// helper of the same name so both services parse the connection string
-// identically.
-func ingestionEndpoint(connStr string) string {
-	for _, part := range strings.Split(connStr, ";") {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(kv[0]), "IngestionEndpoint") {
-			return strings.TrimSpace(kv[1])
-		}
-	}
-	return ""
+	return otlptracehttp.New(ctx)
 }
 
 // noopExporter is a span exporter that discards every span. It backs the

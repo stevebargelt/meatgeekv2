@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -13,25 +14,36 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
+// EnvOTLPEndpoint is the standard OpenTelemetry environment variable naming the
+// OTLP receiver the span exporter targets. In the MeatGeek F2 topology this is
+// an OpenTelemetry Collector (which in turn fronts Azure Monitor) — NOT the App
+// Insights ingestion endpoint, which is not an OTLP receiver.
+const EnvOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
 // SetupTracing initializes OpenTelemetry tracing for the pusher.
 //
-// Exporter selection is driven ONLY by appInsightsConnStr (sourced from
-// APPLICATIONINSIGHTS_CONNECTION_STRING — never a literal):
+// Exporter selection is driven ONLY by the standard OTEL_EXPORTER_OTLP_ENDPOINT
+// environment variable (an OTLP collector endpoint):
 //
-//   - empty  -> a no-op exporter (dev / offline mode); no network, no panic.
-//   - set    -> a real span exporter built by newSpanExporter.
+//   - unset / empty -> a no-op exporter (dev / offline mode); no network, no panic.
+//   - set           -> a real OTLP/HTTP span exporter built by newSpanExporter.
 //
-// The concrete backend is swappable: the Azure Monitor Go exporter is not
-// a GA first-class module, so we target an OTLP endpoint (an OpenTelemetry
-// Collector or the App Insights ingestion endpoint parsed out of the
-// connection string). newSpanExporter is a package var so the backend can
-// be replaced without touching this function or its callers.
+// The exporter endpoint comes SOLELY from OTEL_EXPORTER_OTLP_ENDPOINT. No
+// connection string (App Insights or otherwise) is ever read or parsed — the
+// App Insights connection string lives only on the collector, which fronts
+// Azure Monitor; the edge services push OTLP to the collector and never touch
+// it. The App Insights ingestion endpoint is not an OTLP receiver, so steering
+// the exporter at it would be wrong.
+//
+// The concrete backend is swappable: newSpanExporter is a package var so the
+// backend can be replaced (e.g. an Azure Monitor Go exporter once it is GA)
+// without touching this function or its callers.
 //
 // The global TextMapPropagator is set to W3C Trace Context so the
 // traceparent injected onto IoT Hub messages interoperates with the
 // downstream Functions/API layers. Sampling is AlwaysSample. The returned
 // shutdown func is always non-nil.
-func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error) {
+func SetupTracing(ctx context.Context) (func(), error) {
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName("meatgeek-pusher"),
@@ -49,13 +61,14 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
 	}
 
 	var exporter trace.SpanExporter
-	if strings.TrimSpace(appInsightsConnStr) != "" {
-		exporter, err = newSpanExporter(ctx, appInsightsConnStr)
+	if strings.TrimSpace(os.Getenv(EnvOTLPEndpoint)) != "" {
+		exporter, err = newSpanExporter(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create span exporter: %w", err)
 		}
 	} else {
-		// Dev / offline mode: swallow spans locally, never dial out.
+		// Dev / offline mode: no OTLP collector configured, swallow spans
+		// locally and never dial out.
 		exporter = &noOpExporter{}
 	}
 
@@ -78,40 +91,18 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
 	}, nil
 }
 
-// newSpanExporter builds the concrete backing exporter from an App
-// Insights connection string. Swappable by design: today it constructs an
-// OTLP/HTTP exporter aimed at the endpoint parsed from the connection
-// string (an OTel Collector or the ingestion endpoint), which is the
-// pragmatic stand-in until the Azure Monitor Go exporter is GA. Replace
-// this var to swap the backend without touching SetupTracing.
+// newSpanExporter builds the concrete backing exporter, an OTLP/HTTP exporter
+// aimed at the OpenTelemetry Collector. otlptracehttp.New reads the endpoint
+// (and the other standard OTLP settings) from the OTEL_EXPORTER_OTLP_ENDPOINT
+// environment variable itself; no endpoint is passed explicitly, so the target
+// comes solely from the environment. Swappable by design: replace this var to
+// swap the backend without touching SetupTracing.
 //
 // otlptracehttp.New does NOT dial on construction (the transport connects
 // lazily on first export), so this returns a live exporter with no network
 // round-trip — safe to construct offline / in tests.
-var newSpanExporter = func(ctx context.Context, appInsightsConnStr string) (trace.SpanExporter, error) {
-	opts := []otlptracehttp.Option{}
-	if endpoint := ingestionEndpoint(appInsightsConnStr); endpoint != "" {
-		opts = append(opts, otlptracehttp.WithEndpointURL(endpoint))
-	}
-	return otlptracehttp.New(ctx, opts...)
-}
-
-// ingestionEndpoint pulls the IngestionEndpoint value out of a standard
-// App Insights connection string (semicolon-separated key=value pairs,
-// e.g. "InstrumentationKey=...;IngestionEndpoint=https://...;..."). Returns
-// "" when absent, in which case the exporter falls back to the OTLP
-// default endpoint (or the OTEL_EXPORTER_OTLP_ENDPOINT env override).
-func ingestionEndpoint(connStr string) string {
-	for _, part := range strings.Split(connStr, ";") {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(kv[0]), "IngestionEndpoint") {
-			return strings.TrimSpace(kv[1])
-		}
-	}
-	return ""
+var newSpanExporter = func(ctx context.Context) (trace.SpanExporter, error) {
+	return otlptracehttp.New(ctx)
 }
 
 // noOpExporter is a no-op SpanExporter for dev / offline mode: spans are

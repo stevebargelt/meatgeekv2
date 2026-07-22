@@ -70,7 +70,6 @@ type Config struct {
 	Debug                bool
 	MockIoT              bool
 	MockDeviceID         string
-	AppInsightsKey       string
 	SignalRHubURL        string
 	APIBaseURL           string
 	QueueDir             string
@@ -87,7 +86,7 @@ func main() {
 	}).Info("Starting MeatGeek Data Pusher")
 
 	ctx := context.Background()
-	shutdown, err := telemetry.SetupTracing(ctx, config.AppInsightsKey)
+	shutdown, err := telemetry.SetupTracing(ctx)
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to set up tracing")
 	}
@@ -129,10 +128,6 @@ func parseFlags() Config {
 		getEnvString("MOCK_DEVICE_ID", "meatgeek-mock"),
 		"Device id used when --mock-iot is set (production sourced from the conn-string)")
 
-	flag.StringVar(&config.AppInsightsKey, "appinsights-key",
-		getEnvString("APPLICATIONINSIGHTS_CONNECTION_STRING", ""),
-		"Application Insights connection string")
-
 	flag.StringVar(&config.SignalRHubURL, "signalr-hub-url",
 		getEnvString("SIGNALR_HUB_URL", ""),
 		"SignalR hub URL for cook lifecycle events. Empty disables the SignalR consumer; cooksession.Reconcile is then the sole cook-id authority.")
@@ -171,9 +166,15 @@ func setupLogging(debug bool) {
 // plus the metadata the publisher needs to mint a deterministic
 // IoT Hub message id and stamp the correlation property.
 type queueRecord struct {
-	Timestamp   time.Time       `json:"ts"`
-	Seq         uint64          `json:"seq"`
-	Correlation string          `json:"corr,omitempty"`
+	Timestamp   time.Time `json:"ts"`
+	Seq         uint64    `json:"seq"`
+	Correlation string    `json:"corr,omitempty"`
+	// Traceparent is the W3C trace context of the per-reading span opened at
+	// enqueue time. It is persisted INTO the record (and thus to disk) so the
+	// publish span can continue the same per-reading trace even after a process
+	// restart between enqueue and publish. Empty for legacy records; the
+	// publisher then starts its span from the process context (F3).
+	Traceparent string          `json:"tp,omitempty"`
 	Payload     json.RawMessage `json:"payload"`
 }
 
@@ -200,8 +201,12 @@ func (h *correlationHolder) Set(s string) {
 }
 
 func run(ctx context.Context, config Config, tracer trace.Tracer) error {
-	ctx, span := tracer.Start(ctx, "main.run")
-	defer span.End()
+	// No long-lived process-scoped span is opened here. Rooting every worker's
+	// work in a single "main.run" span is exactly what produced one giant
+	// trace per process lifetime (F3). Instead, each reading opens its own
+	// ROOT span at enqueue time (a per-reading trace), the publisher continues
+	// that trace from the persisted traceparent, and the collector's poll spans
+	// — started from this span-less ctx — become their own roots per poll.
 
 	logrus.WithFields(logrus.Fields{
 		"deviceURL":     config.DeviceURL,
@@ -354,26 +359,45 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	go func() {
 		defer wg.Done()
 		for sample := range tempCollector.Samples() {
+			// Open a NEW ROOT span for THIS reading so each reading gets its
+			// own trace id (a per-reading trace) instead of descending from the
+			// long-lived process span. WithNewRoot detaches from any span
+			// already carried on ctx, which is what stops the historical
+			// one-giant-trace-per-process behavior.
+			readingCtx, readingSpan := tracer.Start(ctx, "reading.enqueue", trace.WithNewRoot())
+
 			reading := wire.MapV1ToTemperatureReading(sample.Status, sample.Timestamp, sess.ActiveCookID())
 			readingBytes, mErr := json.Marshal(reading)
 			if mErr != nil {
 				logrus.WithError(mErr).Error("marshal TemperatureReading failed; dropping sample")
+				readingSpan.End()
 				continue
 			}
 			rec := queueRecord{
 				Timestamp:   sample.Timestamp,
 				Seq:         q.NextSeq(),
 				Correlation: corr.Get(),
+				// Persist THIS reading's traceparent so the publish span (even
+				// after a restart/recover) continues the same per-reading trace.
+				Traceparent: telemetry.ExtractTraceparent(readingCtx),
 				Payload:     readingBytes,
 			}
+			readingSpan.SetAttributes(telemetry.Dimensions{
+				DeviceID:       deviceID,
+				CookID:         cookIDFromPayload(readingBytes),
+				CorrelationID:  rec.Correlation,
+				ProcessingPath: "reading-enqueue",
+			}.Attributes()...)
 			recBytes, mErr := json.Marshal(rec)
 			if mErr != nil {
 				logrus.WithError(mErr).Error("marshal queueRecord failed; dropping sample")
+				readingSpan.End()
 				continue
 			}
 			if eErr := q.Enqueue(recBytes); eErr != nil {
 				logrus.WithError(eErr).Error("queue.Enqueue failed; dropping sample")
 			}
+			readingSpan.End()
 		}
 		logrus.Info("enqueuer: samples channel closed, exiting")
 	}()
@@ -517,11 +541,18 @@ func runPublisher(
 			continue
 		}
 
-		// Start a per-record publish span. Its context is what we inject
-		// as the W3C traceparent property, so it must wrap the property
-		// build + publish. span.End is deferred via a closure below so it
-		// fires on every loop-continue path.
-		publishCtx, span := tracer.Start(ctx, "publisher.publish")
+		// Continue the per-reading trace persisted at enqueue time. The stored
+		// traceparent rode on disk, so this linkage survives a process restart
+		// between enqueue and publish: the publish span shares the reading's
+		// trace id rather than descending from the long-lived process span.
+		// When the record carries no traceparent (legacy), parentCtx == ctx.
+		parentCtx := telemetry.ContextFromTraceparent(ctx, rec.Traceparent)
+
+		// Start a per-record publish span within that per-reading trace. Its
+		// context is what we inject as the W3C traceparent property, so the IoT
+		// Hub message carries a traceparent tied to the reading that produced
+		// it (not the process span). span.End fires on every loop-continue path.
+		publishCtx, span := tracer.Start(parentCtx, "publisher.publish")
 
 		messageID := wire.MintMessageId(deviceID, rec.Timestamp, rec.Seq)
 		props := buildPublishProperties(publishCtx, deviceID, messageID, rec)

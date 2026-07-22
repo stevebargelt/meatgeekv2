@@ -59,7 +59,7 @@ describe('initializeTelemetry', () => {
     expect(options.samplingRatio).toBe(0.5);
   });
 
-  it('carries a resource with service.name=meatgeek-api and the environment', () => {
+  it('carries a resource with the static standard dimensions: service.name, component, and environment', () => {
     process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
     process.env['ENVIRONMENT'] = 'staging';
 
@@ -67,7 +67,22 @@ describe('initializeTelemetry', () => {
 
     const options = mockUseAzureMonitor.mock.calls[0][0];
     expect(options.resource.attributes['service.name']).toBe('meatgeek-api');
+    expect(options.resource.attributes['component']).toBe('function');
     expect(options.resource.attributes['environment']).toBe('staging');
+  });
+
+  it('does NOT put per-span dimensions on the static resource', () => {
+    process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+
+    initializeTelemetry();
+
+    const options = mockUseAzureMonitor.mock.calls[0][0];
+    // device.id / cook.id / correlation.id / processing.path are per-request —
+    // supplied per span by correlation.ts, never as static resource attributes.
+    expect(options.resource.attributes['device.id']).toBeUndefined();
+    expect(options.resource.attributes['cook.id']).toBeUndefined();
+    expect(options.resource.attributes['correlation.id']).toBeUndefined();
+    expect(options.resource.attributes['processing.path']).toBeUndefined();
   });
 
   it('defaults the environment attribute to "dev" when ENVIRONMENT is unset', () => {
