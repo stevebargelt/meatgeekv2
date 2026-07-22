@@ -1,31 +1,91 @@
-# MeatGeek OTel Collector configuration.
+# MeatGeek OTel Collector configuration — NATIVE Azure Monitor OTLP path.
 #
-# Purpose (MG-33 / F2): the Go edge services (device-controller, data-pusher)
-# export OTLP to THIS collector, and the collector forwards to Azure
-# Application Insights via the azuremonitor exporter. An App Insights ingestion
-# endpoint does NOT speak raw OTLP, so pointing OTEL_EXPORTER_OTLP_ENDPOINT at
-# App Insights directly does not work — the collector is the required
-# translation hop (OTLP -> App Insights protocol/auth).
+# STATUS (MG-33 F1/F3): AUTHORED + STATIC-VALIDATED ONLY. This config is NOT yet
+# proven operational — live Go-span-to-App-Insights proof is gated on MG-34
+# (secure off-VNet edge ingress) + MG-24 (Container Apps env) + MG-25 (native
+# OTLP preview acceptance in the target region). Do not read a green
+# `otelcol-contrib validate` as "telemetry flows".
 #
-# The App Insights connection string is read from the environment
-# (APPLICATIONINSIGHTS_CONNECTION_STRING) and is NEVER committed here.
+# Purpose: the Go edge services (device-controller, data-pusher) export OTLP to
+# THIS collector; the collector forwards to Azure Monitor via the OUTBOUND
+# native-OTLP path — otlphttp -> a Data Collection Endpoint (DCE) logs-ingestion
+# URI -> a Data Collection Rule (DCR) whose transform lands traces in the
+# workspace-based App Insights tables (AppDependencies / AppTraces). This
+# REPLACES the previous `azuremonitor` (Breeze) exporter (MG-33: correct native
+# OTLP export, per operator decision 2026-07-22).
 #
-# See README.md for deployment (central Azure Container App, BLOCKED-on-MG-24).
+# Auth is Entra-only: the collector runs as an Azure Container App with a
+# USER-ASSIGNED managed identity that holds "Monitoring Metrics Publisher" ON
+# THE DCR (see the Terraform in ../ — enable_native_otlp module). The azureauth
+# extension mints an AAD token (audience https://monitor.azure.com, derived from
+# the request Host) — NO ingestion key, NO connection string here.
+#
+# EVERY Azure-specific value (DCE endpoint, DCR immutable id, stream name, UAI
+# client id, file-storage dir) is injected at runtime via env-var substitution
+# from Terraform outputs — NEVER hand-copied into this file. See README.md.
+#
+# PINNED IMAGE (F3): otel/opentelemetry-collector-contrib:0.128.0
+#   otlphttp + azureauth + file_storage all require the CONTRIB distribution;
+#   the azureauth extension first ships in contrib 0.126.0. Pin by tag AND
+#   resolve to a digest at deploy time (see README / Terraform container image).
+#   The core `otel/opentelemetry-collector` image does NOT include these.
+#
+#   !!! UNVERIFIED PREVIEW SEMANTICS — confirm at MG-25 activation (MG-34) !!!
+#   0.126.0 is the floor for the azureauth extension EXISTING, but the MINIMUM
+#   contrib version Azure DOCUMENTS as supported for NATIVE OTLP INGESTION
+#   (PREVIEW) is NOT verified. Confirm 0.128.0 satisfies the Azure preview docs'
+#   minimum (and the azureauth-extension feature level the ingestion path needs)
+#   BEFORE flipping enable_native_otlp on — bump the pin if the docs require a
+#   newer contrib release.
+
+extensions:
+  # Entra (AAD) authenticator. Uses the Container App's USER-ASSIGNED managed
+  # identity (client id from env, Terraform-emitted). System-assigned would create
+  # a create-then-grant ordering gap, so the identity is user-assigned.
+  #
+  # !!! UNVERIFIED PREVIEW SEMANTICS — confirm at MG-25 activation (MG-34) !!!
+  # This block sets NO explicit token scope, on the assumption the extension
+  # derives the audience from the request Host. The STANDARD Azure Monitor
+  # ingestion scope IS well-established as `https://monitor.azure.com/.default`
+  # (the DCR Logs Ingestion API audience), BUT two things are NOT verified for
+  # Azure Monitor NATIVE OTLP INGESTION (PREVIEW):
+  #   (1) whether native-OTLP ingestion uses that same monitor.azure.com audience
+  #       or a preview-specific one; and
+  #   (2) whether THIS azureauth extension auto-derives that scope from Host or
+  #       REQUIRES it to be set explicitly (e.g. a `scope:`/`resource:` field)
+  #       plus any `tenant_id`/`managed_identity` specifics.
+  # MUST be reconciled against the current azureauth-extension + Azure native-
+  # OTLP-ingestion preview docs BEFORE the enable_native_otlp flag is flipped on.
+  # Do NOT assume the omitted-scope form authenticates correctly as-is.
+  azureauth:
+    managed_identity:
+      client_id: ${env:AZURE_OTLP_UAI_CLIENT_ID}
+
+  # Persistent (WAL) spool so telemetry survives a collector restart instead of
+  # being lost from the in-memory queue. MUST be backed by a persistent volume
+  # on the Container App — an ephemeral overlay defeats the durability intent.
+  file_storage/otlp_queue:
+    directory: /var/lib/otelcol/file_storage
+    # Create the spool dir on startup if the mounted volume is empty (first boot).
+    create_directory: true
+    timeout: 10s
 
 receivers:
-  # Accept OTLP from the edge services over both transports. gRPC (4317) is the
-  # default the Go OTLP/gRPC exporter uses; http (4318) is what the Go
-  # otlptracehttp exporter in this repo targets via OTEL_EXPORTER_OTLP_ENDPOINT.
+  # OTLP receiver — bound to LOOPBACK ONLY (fail-closed boundary, MG-33/MG-34).
+  # The edge devices are OFF Azure's VNet and CANNOT reach this yet BY DESIGN:
+  # there is deliberately NO public OTLP listener and NO external ingress here.
+  # Secure off-VNet ingress (mTLS / auth-terminating proxy / private tunnel) is
+  # the SEPARATE blocking dependency MG-34; until it lands, only in-container
+  # senders can reach the receiver. Do NOT change these to 0.0.0.0 without MG-34.
   otlp:
     protocols:
       grpc:
-        endpoint: 0.0.0.0:4317
+        endpoint: 127.0.0.1:4317
       http:
-        endpoint: 0.0.0.0:4318
+        endpoint: 127.0.0.1:4318
 
 processors:
-  # Bound memory under bursty edge load; batch to reduce egress calls to App
-  # Insights. Both are safe, standard defaults for a forwarding collector.
+  # Bound memory under bursty edge load, then batch to reduce egress calls.
   memory_limiter:
     check_interval: 1s
     limit_percentage: 80
@@ -34,25 +94,49 @@ processors:
     timeout: 5s
 
 exporters:
-  # azuremonitor is the OpenTelemetry-Collector-Contrib exporter that translates
-  # OTLP into the Application Insights ingestion protocol (and handles auth). The
-  # App Insights connection string is injected at runtime via env-var
-  # substitution — the literal value is NEVER committed here. Supply
-  # APPLICATIONINSIGHTS_CONNECTION_STRING as a Container App secret / env var.
-  azuremonitor:
-    connection_string: "${APPLICATIONINSIGHTS_CONNECTION_STRING}"
+  # Native OTLP/HTTP to Azure Monitor via the DCE logs-ingestion endpoint. The
+  # DCE URI + DCR immutable id + stream name all come from Terraform outputs via
+  # env substitution (never hand-copied). azureauth supplies the AAD bearer
+  # token; the DCR routes/transforms the OTLP stream into AppDependencies /
+  # AppTraces on the workspace-based App Insights.
+  #
+  # Durability (F3): a PERSISTENT sending_queue backed by file_storage spools to
+  # disk (survives restart) + retry_on_failure with backoff for transient 5xx /
+  # throttling. max_elapsed_time: 0 => retry indefinitely rather than drop.
+  otlphttp/azuremonitor:
+    endpoint: ${env:AZURE_MONITOR_OTLP_ENDPOINT}
+    auth:
+      authenticator: azureauth
+    headers:
+      # DCR routing (Azure Monitor OTLP ingestion). Values are env-substituted
+      # from Terraform outputs; the exact header/route binding is finalized
+      # under the MG-25 native-OTLP preview acceptance.
+      x-ms-dcr-immutable-id: ${env:AZURE_MONITOR_DCR_IMMUTABLE_ID}
+      x-ms-stream-name: ${env:AZURE_MONITOR_STREAM_NAME}
+    sending_queue:
+      enabled: true
+      storage: file_storage/otlp_queue
+      num_consumers: 2
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 0
 
 service:
+  # Both net-new extensions must be listed here or they are not started.
+  extensions: [azureauth, file_storage/otlp_queue]
   pipelines:
     # Traces are the primary signal: the per-reading W3C trace chain (MG-33 /
-    # F3) flows edge service -> otlp receiver -> azuremonitor -> App Insights.
+    # F2/F3) flows edge service -> otlp receiver -> otlphttp/azuremonitor ->
+    # DCE/DCR -> App Insights (AppDependencies / AppTraces).
+    #
+    # NOTE: metrics are intentionally NOT wired here. The removed `azuremonitor`
+    # exporter carried metrics for free; native OTLP ingestion needs its OWN DCR
+    # stream + transform for metrics, which is out of scope for F1/F3 (traces).
+    # Adding metrics to the trace stream would misroute them. Deferred.
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [azuremonitor]
-    # The azuremonitor exporter also supports metrics; the edge services can
-    # export OTLP metrics through the same collector without extra wiring.
-    metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [azuremonitor]
+      exporters: [otlphttp/azuremonitor]

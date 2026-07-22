@@ -343,6 +343,43 @@ module "signalr" {
   tags = local.common_tags
 }
 
+# Native Azure Monitor OTLP path (MG-33 F1/F3) — DEFAULT-OFF, AUTHORED ONLY.
+#
+# Authors the OUTBOUND native-OTLP telemetry path: the edge Go services' OTLP
+# lands at a central collector Container App that forwards via otlphttp +
+# azureauth (user-assigned MI) to a DCE/DCR, which transforms it into the
+# workspace-based App Insights tables. This REPLACES the collector's former
+# `azuremonitor` (Breeze) exporter (see apps/infrastructure/otel-collector).
+#
+# count-guarded by var.enable_native_otlp (default false): with the flag OFF the
+# module is NOT instantiated and creates ZERO net-new resources, so
+# `terraform validate`/`plan` here are unchanged. APPLY is additionally gated on
+# MG-24 (the Container Apps environment does not exist yet — passed in via
+# var.container_app_environment_id), MG-25 (native-OTLP preview acceptance), and
+# MG-34 (secure off-VNet edge ingress + live proof). Production activation is a
+# deliberate flag flip, NOT a side effect of a normal apply. The
+# Monitoring Metrics Publisher role inside the module is scoped to the DCR (NOT
+# App Insights — deliberately different from functions_appinsights_publisher).
+module "native_otlp" {
+  count  = var.enable_native_otlp ? 1 : 0
+  source = "./modules/native-otlp"
+
+  resource_prefix     = local.resource_prefix
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+
+  # The DCR routes OTLP traces into the workspace-based App Insights tables, so
+  # it targets the SAME Log Analytics workspace App Insights is bound to.
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+
+  # MG-24 handles: the Container Apps environment + its Azure File storage
+  # association. Empty until then; REQUIRED before the flag can be flipped on.
+  container_app_environment_id = var.container_app_environment_id
+  collector_storage_name       = var.otlp_collector_storage_name
+
+  tags = local.common_tags
+}
+
 # Monitoring Module (additional monitoring beyond App Insights)
 module "monitoring" {
   source = "./modules/monitoring"

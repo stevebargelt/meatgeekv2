@@ -199,6 +199,29 @@ jobs:
         # `timeout` bounds any future hang instead of wedging the job.
         run: timeout 180 bash apps/infrastructure/bootstrap/bootstrap.test.sh < /dev/null
 
+      # Validate the native-OTLP collector config (MG-33 F1/F3) against the SAME
+      # PINNED contrib image the config comments/Terraform pin. otlphttp +
+      # azureauth + file_storage require the contrib distribution; azureauth
+      # first ships in contrib 0.126.0. Dummy env values satisfy the exporter's
+      # non-empty-endpoint check — validate is a static config check, it opens no
+      # network connection and ingests nothing. Exit 1 on any config error.
+      - name: Validate OTel Collector config (pinned contrib image)
+        env:
+          OTELCOL_CONTRIB_IMAGE: otel/opentelemetry-collector-contrib:0.128.0
+          AZURE_OTLP_UAI_CLIENT_ID: 00000000-0000-0000-0000-000000000000
+          AZURE_MONITOR_OTLP_ENDPOINT: https://example-dce.ingest.monitor.azure.com
+          AZURE_MONITOR_DCR_IMMUTABLE_ID: dcr-00000000000000000000000000000000
+          AZURE_MONITOR_STREAM_NAME: Custom-OtelTraces
+        run: |
+          docker run --rm \
+            -v "$PWD/apps/infrastructure/otel-collector:/cfg:ro" \
+            -e AZURE_OTLP_UAI_CLIENT_ID \
+            -e AZURE_MONITOR_OTLP_ENDPOINT \
+            -e AZURE_MONITOR_DCR_IMMUTABLE_ID \
+            -e AZURE_MONITOR_STREAM_NAME \
+            "$OTELCOL_CONTRIB_IMAGE" \
+            validate --config=/cfg/collector-config.yaml
+
   security-scan:
     runs-on: ubuntu-latest
     steps:

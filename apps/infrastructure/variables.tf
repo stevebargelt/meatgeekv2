@@ -240,6 +240,30 @@ variable "ingestion_cap_gb" {
   }
 }
 
+# Native Azure Monitor OTLP path (MG-33 F1/F3) — DEFAULT-OFF.
+# Gates the entire native-otlp module (collector Container App + DCE + DCR + UAI
+# + DCR-scoped role assignment). false => the module is not instantiated and ZERO
+# net-new resources are created, so `terraform validate`/`plan` are unchanged.
+# Flip to true ONLY after MG-24 (Container Apps env) + MG-25 (native-OTLP preview
+# acceptance) + MG-34 (secure edge ingress) — production activation is deliberate.
+variable "enable_native_otlp" {
+  description = "Enable the native Azure Monitor OTLP telemetry path (MG-33 F1/F3). Default false: no resources created; validate/plan unchanged. Flip on only after MG-24/MG-25/MG-34."
+  type        = bool
+  default     = false
+}
+
+variable "container_app_environment_id" {
+  description = "Resource id of the Container Apps managed environment (created by MG-24 bootstrap) that hosts the native-OTLP collector. Empty until MG-24 lands; required (non-empty) before enable_native_otlp can be flipped on."
+  type        = string
+  default     = ""
+}
+
+variable "otlp_collector_storage_name" {
+  description = "Name of the Container Apps environment storage (Azure File share) association backing the native-OTLP collector's persistent spool. Provisioned under MG-24; empty until then."
+  type        = string
+  default     = ""
+}
+
 # Admin Configuration
 variable "admin_email" {
   description = "Admin email address for alerts and notifications"

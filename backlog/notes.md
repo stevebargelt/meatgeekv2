@@ -1,13 +1,14 @@
-SESSION 2026-07-22 — external-operational-review corrections COMPLETE. All 6 findings from the operator's review are shipped:
-- F1/F5/F6 (bootstrap: valid emitted HCL + HCL-validation test + CI-gated bootstrap tests + fail-loud ||die + bounded RBAC poll replacing blind sleep) = MG-32, merged 24b4e38, CLOSED. Bootstrap is now SAFE to run.
-- F2/F3/F4 (Go OTLP->OTel Collector [operator-chosen], NOT App Insights ingestion; per-reading W3C root span + traceparent persisted in durable queue record; docs distinguish implemented scaffolding vs operational) = MG-33, merged 11ad979 (PR#15), CLOSED. red-wide converged at r8 PASS after an 8-round doc-overclaim sweep of observability.md; CI green.
+SESSION 2026-07-22 — SECOND operational-review corrections in progress.
 
-REMAINING — all operator/live/decision-gated (paused here):
-1. MG-24 greenfield Azure bootstrap KEYSTONE (now SAFE; 10-step runbook in docs/infrastructure/bootstrap-runbook.md). Unblocks MG-21/23/25, MG-14 AC5, MG-6 Bucket C, and the LIVE OTel pieces (central collector Container App deploy + live IoT-Hub receiver Function — the operational half of MG-33 scaffolding).
-2. MG-6 Bucket B — Sentry org/project decision (milestone mg-6-sentry-decision); then MG-7 mobile-sentry.
-3. MG-31 cook_stopped payload (persist real Cook vs minimize contract — rec: minimize).
-4. MG-30 device-group authz (needs user->device ownership model decision).
-LIVE/AC5-gated after MG-24: MG-14 AC5, MG-29, MG-6 Bucket C. DEFERRED Phase3: MG-13, MG-7.
+SECOND REVIEW (4 findings) STATUS:
+- F2 (High, trace not end-to-end: enqueuer WithNewRoot detached from poll trace) = FIXED, merged PR#16 (b492270). Sample.Traceparent carries the collector.poll context; enqueuer continues it (no WithNewRoot) → one trace id poll→device→queue→publish→IoT per reading; integration test asserts the join across all hops. MG-33 F3-AC now met.
+- F4 (Medium, bootstrap.sh:468 az signed-in-user ||true masked genuine Graph/auth failure) = FIXED, merged PR#17 (b1d79ef). New operator_state_grant_oid(): principal-type detect → SP=SKIP_SP fail-soft, user=fail-loud on lookup failure. MG-32 re-CLOSED (F1/F5/F6 all walked with evidence; zero non-comment ||true masks remain; no blind sleep).
+- F1 (High, collector can't auth: azuremonitor exporter=connection-string/local-auth but AI local_authentication_enabled=false) = OPERATOR DECIDED Option 2: native Azure Monitor OTLP (otlphttp + azureauth ext + Container App user-assigned MI; keep local auth disabled; dev-preview, MG-25 gates prod). Architecture-advisor design COMPLETE (run run-mg-33-f1-native-otlp-design-f963d6): key catches = Monitoring Metrics Publisher scoped to the DCR (not App Insights); user-assigned MI (avoids create-then-grant gap); default-off activation flag (count-guarded, validates now); hard authored-vs-operationally-verified line. AWAITING OPERATOR A/B: (A) start implementation_full authoring pipeline now w/ region+edge-ingress+MG-25-scope deferred to activation, or (B) settle edge-ingress security (off-VNet Raspberry Pi → collector auth: mTLS/token/private-link) first. NOT launched yet.
+- F3 (Medium, collector artifact not deployable/edge-safe: unpinned image, no queue/retry, 0.0.0.0 listener, no CI validate, README 'supported path' inaccurate, README implies MG-24 creates CApp env) = FOLDS INTO the F1 native-OTLP rewrite (pinned otelcol-contrib, sending_queue+retry, listener posture, CI otelcol validate, ADR). Handle within F1 implementation.
 
-SAFETY (unchanged): V2 greenfield — never touch V1; no local-state apply; no manual Azure resources; PROD_DEPLOY_ENABLED unset until MG-25.
-OPS: forge review-loop hangs here (nx plugin-worker) -> use forge invoke red-wide + green PR CI. Local npm 11.13 vs pinned 10.9.8 — never regen lockfile locally. data-pusher/dist binaries are gitignored (red-wide may false-flag stale local builds; repo is grep-clean).
+MG-33 STAYS OPEN until F1 authoring lands + F3 folded + (live proof is MG-24/MG-25-gated, NOT closeable now).
+
+REMAINING (operator/live/decision-gated): MG-24 bootstrap keystone (now even safer — F4 hardened); MG-6 Sentry decision; MG-30 device-ownership; MG-31 payload; MG-14 AC5; MG-29; MG-13/MG-7 Phase3.
+SAFETY: V2 greenfield — never touch V1; no local-state apply; local_authentication_enabled STAYS false; no manual Azure resources; PROD_DEPLOY_ENABLED unset until MG-25.
+LESSON REINFORCED: I closed MG-32/MG-33 prematurely on green-CI+red-wide (config SHAPE, not operational path). Both reopened + corrected. For F1 infra: 'authored + static-validated' ≠ 'operationally verified' — live Go-span-in-App-Insights proof is MG-24/MG-25-gated.
+OPS: forge review-loop hangs (nx plugin-worker) → forge invoke red-wide + green PR CI. gh pr merge --delete-branch SWITCHES local to main + deletes local branch. Local npm 11.13 vs pinned 10.9.8 — never regen lockfile locally. data-pusher/dist gitignored (red-wide may false-flag stale local builds).
