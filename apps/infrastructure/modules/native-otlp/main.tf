@@ -1,7 +1,10 @@
 # native-otlp module — OUTBOUND native Azure Monitor OTLP telemetry path.
 #
-# STATUS (MG-33 F1/F3): AUTHORED + STATIC-VALIDATED ONLY, DEFAULT-OFF. Nothing
-# here is proven operational. APPLY is gated on:
+# STATUS (MG-33 F1/F3, 3rd operational review + doc-verification pass):
+# AUTHORED + STATIC-VALIDATED ONLY, DEFAULT-OFF. The config shapes here are now
+# DOC-VERIFIED against Microsoft PRIMARY sources (see citations below), but are
+# STILL NOT proven OPERATIONAL — no live span has reached App Insights. APPLY is
+# gated on:
 #   - MG-24  — the Container Apps managed environment does not exist yet; this
 #              module references it via var.container_app_environment_id.
 #   - MG-25  — native-OTLP preview acceptance in the target region.
@@ -11,10 +14,28 @@
 # and `terraform validate` passes. Production activation is a deliberate flag
 # flip (MG-25), NOT a side effect of a normal apply.
 #
+# DOC-VERIFIED (primary Microsoft sources reconciled in the 3rd review):
+#   - MS Learn "Send OpenTelemetry data to Azure Monitor" / native OTLP ingestion
+#     (preview): the DCR uses the built-in `Microsoft-OTel-Traces-*` streams and a
+#     directDataSources.otelTraces data source enriched from an App Insights
+#     reference — NOT a hand-rolled custom stream + KQL transform.
+#   - AzureMonitorCommunity OTLP_DCE_DCR ARM template: the exact DCR body shape
+#     (references.applicationInsights / directDataSources.otelTraces /
+#     destinations.logAnalytics / dataFlows) reproduced in the azapi_resource
+#     below.
+#   - azureauthextension README: the extension key is `azure_auth` (current), the
+#     ingestion scope MUST be set EXPLICITLY (`scopes:`) — it is NOT derived from
+#     the request Host; audience is pinned from config.
+#   - Advisory GHSA-pjv4-3c63-699f: azure_auth inbound (receiver) auth bypass in
+#     0.124.0–0.150.0. Outbound (exporter) auth is unaffected, but the image pin
+#     is set > 0.150.0 so MG-34's future collector RECEIVER auth is outside the
+#     advisory range. See var.collector_image.
+#
 # Data flow (when activated):
-#   edge OTLP -> collector Container App (otlphttp + azureauth) -> DCE logs-
-#   ingestion endpoint -> DCR (stream + transform) -> Log Analytics workspace
-#   -> App Insights tables (AppTraces / AppDependencies).
+#   edge OTLP -> collector Container App (otlphttp + azure_auth) -> DCE logs-
+#   ingestion host / <dcr-immutable-id> / Microsoft-OTLP-Traces / otlp/v1/traces
+#   -> native-OTLP DCR (Microsoft-OTel-Traces-* streams) -> Log Analytics
+#   workspace -> App Insights trace tables.
 #
 # FAIL-CLOSED: the collector Container App has NO ingress block => no public
 # OTLP listener. Edges cannot reach it yet, BY DESIGN (MG-34 adds secure
@@ -33,16 +54,13 @@ resource "azurerm_user_assigned_identity" "collector" {
 }
 
 # --- Data Collection Endpoint (DCE) ------------------------------------------
-# The logs-ingestion endpoint the collector's otlphttp exporter targets.
-#
-# !!! UNVERIFIED PREVIEW SEMANTICS (MG-25 activation, tracked by MG-34) !!!
-# The exporter below targets `.logs_ingestion_endpoint` (the DCR Logs Ingestion
-# API URI). Whether Azure Monitor NATIVE OTLP INGESTION (PREVIEW) actually
-# accepts OTLP at that SAME endpoint — vs. a DEDICATED OTLP ingestion URI or a
-# DIFFERENT DCE attribute (and at what api-version) — is NOT confirmed here.
-# MUST be verified against the current Azure Monitor native-OTLP-ingestion
-# preview docs BEFORE the enable_native_otlp flag is flipped on. Do NOT treat
-# this attribute choice as proven.
+# The logs-ingestion host the collector's otlphttp exporter targets. KEPT as an
+# azurerm resource (not converted to azapi): the DCE is a stable, well-supported
+# azurerm resource and was NOT the broken part — only the DCR needed the native-
+# OTLP body shape that azurerm's azurerm_monitor_data_collection_rule cannot
+# express (directDataSources.otelTraces). Minimizing the azapi surface keeps the
+# diff readable. `.logs_ingestion_endpoint` supplies the ingestion host used to
+# build the full native-OTLP traces_endpoint URL (see locals below).
 resource "azurerm_monitor_data_collection_endpoint" "otlp" {
   name                = "${var.resource_prefix}-otlp-dce"
   resource_group_name = var.resource_group_name
@@ -54,85 +72,101 @@ resource "azurerm_monitor_data_collection_endpoint" "otlp" {
   tags = var.tags
 }
 
-# --- Data Collection Rule (DCR) ----------------------------------------------
-# Declares the incoming OTLP trace stream and transforms it into the
-# workspace-based App Insights tables. The transform_kql + output_stream binding
-# to the App tables is finalized under the MG-25 native-OTLP preview; the shape
-# here is the authored baseline (schema-valid, not yet operationally proven).
-resource "azurerm_monitor_data_collection_rule" "otlp" {
-  name                        = "${var.resource_prefix}-otlp-dcr"
-  resource_group_name         = var.resource_group_name
-  location                    = var.location
-  data_collection_endpoint_id = azurerm_monitor_data_collection_endpoint.otlp.id
+# --- Data Collection Rule (DCR) — NATIVE OTLP (azapi) ------------------------
+# DOC-VERIFIED corrective (3rd review): the previous azurerm_monitor_data_
+# collection_rule declared a hand-rolled custom stream + identity KQL transform
+# into Microsoft-AppDependencies. That is NOT a native-OTLP DCR and would not
+# ingest OTLP spans. The correct shape — per the AzureMonitorCommunity
+# OTLP_DCE_DCR ARM template and MS Learn native-OTLP docs — is a DCR that
+# references the App Insights resource and declares a directDataSources.otelTraces
+# data source over the BUILT-IN Microsoft-OTel-Traces-* streams. azurerm cannot
+# express this body, so it is authored via azapi against apiVersion 2024-03-11
+# (the api-version the MS template targets).
+#
+# STILL OPERATIONALLY UNVERIFIED (MG-25/MG-34): the body matches the MS primary
+# sources at authoring time, but no live span has been ingested. Do NOT treat a
+# green plan/validate as proof the path works end-to-end.
+resource "azapi_resource" "otlp_dcr" {
+  type      = "Microsoft.Insights/dataCollectionRules@2024-03-11"
+  name      = "${var.resource_prefix}-otlp-dcr"
+  location  = var.location
+  parent_id = var.resource_group_id
+  tags      = var.tags
 
-  destinations {
-    log_analytics {
-      workspace_resource_id = var.log_analytics_workspace_id
-      name                  = "appinsights-workspace"
+  body = {
+    properties = {
+      # Bind the DCR to the DCE so ingestion routes through the endpoint above.
+      dataCollectionEndpointId = azurerm_monitor_data_collection_endpoint.otlp.id
+
+      # App Insights reference used to enrich + resolve the destination resource
+      # for OTLP traces (per the MS ARM template). Named `applicationInsightsResource`
+      # and consumed by the otelTraces data source's enrichWithReference below.
+      references = {
+        applicationInsights = [
+          {
+            resourceId = var.application_insights_id
+            name       = "applicationInsightsResource"
+          }
+        ]
+      }
+
+      # Native-OTLP direct data source over the BUILT-IN OTel trace streams.
+      # enrichWithReference/replaceResourceIdWithReference tie spans to the App
+      # Insights resource above. Verbatim shape from the MS OTLP_DCE_DCR template.
+      directDataSources = {
+        otelTraces = [
+          {
+            streams                        = ["Microsoft-OTel-Traces-Spans", "Microsoft-OTel-Traces-Events", "Microsoft-OTel-Traces-Resources"]
+            enrichWithResourceAttributes   = ["*"]
+            enrichWithReference            = "applicationInsightsResource"
+            replaceResourceIdWithReference = true
+            name                           = "otelTracesDataSourceDirect"
+          }
+        ]
+      }
+
+      destinations = {
+        logAnalytics = [
+          {
+            workspaceResourceId = var.log_analytics_workspace_id
+            name                = "myLAW"
+          }
+        ]
+      }
+
+      dataFlows = [
+        {
+          streams      = ["Microsoft-OTel-Logs", "Microsoft-OTel-Traces-Spans", "Microsoft-OTel-Traces-Events", "Microsoft-OTel-Traces-Resources"]
+          destinations = ["myLAW"]
+        }
+      ]
     }
   }
 
-  # Incoming OTLP span stream. Columns are the representative OTLP span fields the
-  # transform reads; the authoritative column set is pinned under MG-25.
-  stream_declaration {
-    stream_name = var.otlp_stream_name
-    column {
-      name = "TimeGenerated"
-      type = "datetime"
-    }
-    column {
-      name = "TraceId"
-      type = "string"
-    }
-    column {
-      name = "SpanId"
-      type = "string"
-    }
-    column {
-      name = "ParentId"
-      type = "string"
-    }
-    column {
-      name = "Name"
-      type = "string"
-    }
-    column {
-      name = "Kind"
-      type = "string"
-    }
-    column {
-      name = "StartTime"
-      type = "datetime"
-    }
-    column {
-      name = "EndTime"
-      type = "datetime"
-    }
-    column {
-      name = "Attributes"
-      type = "dynamic"
-    }
-    column {
-      name = "Resource"
-      type = "dynamic"
-    }
-  }
+  # Export the server-computed immutable id so we can build the traces_endpoint
+  # URL and expose it as a module output. (azapi surfaces response fields only
+  # when explicitly exported.)
+  response_export_values = ["properties.immutableId"]
 
-  data_flow {
-    streams      = [var.otlp_stream_name]
-    destinations = ["appinsights-workspace"]
-    # Project the OTLP span stream onto the App Insights dependency table shape.
-    # Finalized under MG-25; kept minimal + identity-preserving here.
-    transform_kql = "source | extend TimeGenerated = TimeGenerated"
-    # Built-in App Insights table the transformed rows land in (per-reading W3C
-    # trace chain becomes queryable as AppDependencies; MG-33 F2/F3).
-    output_stream = "Microsoft-AppDependencies"
-  }
-
-  tags = var.tags
-
-  # The DCE must exist before the DCR references it.
+  # The DCE must exist before the DCR binds to it.
   depends_on = [azurerm_monitor_data_collection_endpoint.otlp]
+}
+
+# --- Native-OTLP ingestion coordinates ---------------------------------------
+# The full native-OTLP traces ingestion URL is built HERE (not hand-copied and
+# not passed as separate headers). Per the MS native-OTLP ingestion doc the shape
+# is fixed:
+#   https://<logs-dce-ingestion-host>/dataCollectionRules/<dcr-immutable-id>/streams/Microsoft-OTLP-Traces/otlp/v1/traces
+# The stream segment is the FIXED logical OTLP entry stream `Microsoft-OTLP-Traces`
+# (distinct from the DCR's internal Microsoft-OTel-Traces-* streams above). The
+# DCE `.logs_ingestion_endpoint` is already `https://<host>` (no trailing slash).
+locals {
+  dcr_immutable_id = azapi_resource.otlp_dcr.output.properties.immutableId
+  otlp_traces_endpoint = format(
+    "%s/dataCollectionRules/%s/streams/Microsoft-OTLP-Traces/otlp/v1/traces",
+    azurerm_monitor_data_collection_endpoint.otlp.logs_ingestion_endpoint,
+    local.dcr_immutable_id,
+  )
 }
 
 # --- RBAC: Monitoring Metrics Publisher SCOPED TO THE DCR --------------------
@@ -140,18 +174,19 @@ resource "azurerm_monitor_data_collection_rule" "otlp" {
 # NOT the Log Analytics workspace. Ingestion through the DCE/DCR authorizes
 # against the DCR. (Contrast the Function App's Breeze path at ../../main.tf,
 # whose Monitoring Metrics Publisher is scoped to App Insights — do NOT copy that
-# scope here; it would not authorize DCR ingestion.) MG-34 AC3 proves the
-# negative: remove THIS assignment and ingestion is rejected.
+# scope here; it would not authorize DCR ingestion.) The scope is now the AZAPI
+# DCR's id. MG-34 AC3 proves the negative: remove THIS assignment and ingestion
+# is rejected.
 resource "azurerm_role_assignment" "collector_dcr_publisher" {
-  scope                = azurerm_monitor_data_collection_rule.otlp.id
+  scope                = azapi_resource.otlp_dcr.id
   role_definition_name = "Monitoring Metrics Publisher"
   principal_id         = azurerm_user_assigned_identity.collector.principal_id
 }
 
 # --- Collector Container App -------------------------------------------------
-# Pinned contrib collector, wired to the DCE endpoint + DCR immutable id + UAI
-# client id via env (matching collector-config.yaml's env-var substitution). The
-# managed environment is created by MG-24; this references it by id.
+# Pinned contrib collector, wired to the single native-OTLP traces_endpoint URL +
+# UAI client id via env (matching collector-config.yaml's env-var substitution).
+# The managed environment is created by MG-24; this references it by id.
 #
 # FAIL-CLOSED: NO `ingress` block => no external/public listener. The collector
 # receiver binds loopback-only (collector-config.yaml). Edges reach it only once
@@ -170,7 +205,7 @@ resource "azurerm_container_app" "collector" {
   # Deliver the repo's collector-config.yaml to the container as a Secret-backed
   # volume file. FIX (MG-33 F1 review): without this, only the spool volume was
   # mounted and otelcol-contrib fell back to its DEFAULT config (plain OTLP in /
-  # debug out — NO otlphttp/azureauth), so the authored native-OTLP config was
+  # debug out — NO otlphttp/azure_auth), so the authored native-OTLP config was
   # never actually delivered. The YAML holds NO secrets (every Azure value is
   # ${env:...}-substituted at runtime), but a Secret volume is the azurerm_
   # container_app-native mechanism to materialize an arbitrary file at a fixed
@@ -229,20 +264,14 @@ resource "azurerm_container_app" "collector" {
         name  = "AZURE_OTLP_UAI_CLIENT_ID"
         value = azurerm_user_assigned_identity.collector.client_id
       }
-      # UNVERIFIED PREVIEW SEMANTICS (see the DCE resource above / MG-34): whether
-      # `.logs_ingestion_endpoint` is the correct native-OTLP target must be
-      # confirmed against the Azure native-OTLP-ingestion preview docs at MG-25.
+      # SINGLE native-OTLP ingestion URL (DOC-VERIFIED shape). Built in Terraform
+      # from the DCE ingestion host + the DCR immutable id (see locals). Replaces
+      # the former bare-endpoint + x-ms-dcr-immutable-id/x-ms-stream-name headers:
+      # the stream (Microsoft-OTLP-Traces) is fixed INSIDE this URL, so no header
+      # routing and no separate stream env are needed.
       env {
-        name  = "AZURE_MONITOR_OTLP_ENDPOINT"
-        value = azurerm_monitor_data_collection_endpoint.otlp.logs_ingestion_endpoint
-      }
-      env {
-        name  = "AZURE_MONITOR_DCR_IMMUTABLE_ID"
-        value = azurerm_monitor_data_collection_rule.otlp.immutable_id
-      }
-      env {
-        name  = "AZURE_MONITOR_STREAM_NAME"
-        value = var.otlp_stream_name
+        name  = "AZURE_MONITOR_OTLP_TRACES_ENDPOINT"
+        value = local.otlp_traces_endpoint
       }
     }
   }

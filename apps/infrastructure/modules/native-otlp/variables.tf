@@ -16,8 +16,24 @@ variable "resource_group_name" {
   type        = string
 }
 
+# The resource group RESOURCE ID (not just the name) — required as the azapi
+# DCR's parent_id (azapi addresses parents by full resource id, unlike azurerm
+# which takes resource_group_name). Passed from the root as azurerm_resource_group.main.id.
+variable "resource_group_id" {
+  description = "Resource id of the resource group (parent_id for the azapi native-OTLP DCR)."
+  type        = string
+}
+
 variable "location" {
   description = "Azure region"
+  type        = string
+}
+
+# App Insights resource id — the DCR's references.applicationInsights entry. The
+# native-OTLP DCR enriches spans from (and resolves the destination resource via)
+# this reference. Passed from the root as azurerm_application_insights.main.id.
+variable "application_insights_id" {
+  description = "Resource id of the workspace-based Application Insights component the native-OTLP DCR references for trace enrichment (references.applicationInsights)."
   type        = string
 }
 
@@ -32,15 +48,27 @@ variable "container_app_environment_id" {
   default     = ""
 }
 
-# UNVERIFIED PREVIEW SEMANTICS (MG-25 activation, tracked by MG-34): 0.126.0 is
-# the floor for the azureauth extension existing, but the MINIMUM contrib version
-# Azure documents as supported for NATIVE OTLP INGESTION (PREVIEW) is NOT verified.
-# Confirm 0.128.0 suffices against the current Azure preview docs before flipping
-# enable_native_otlp on; bump the pin if the docs require a newer release.
+# PINNED collector image — DOC-VERIFIED version floor (3rd review):
+#   >= 0.132.0  native-OTLP prerequisite feature level
+#   >= 0.148.0  the current `azure_auth` extension config syntax (key renamed
+#               from `azureauth`; explicit `scopes:` supported)
+#   >  0.150.0  OUTSIDE the GHSA-pjv4-3c63-699f azure_auth inbound-auth-bypass
+#               advisory range (0.124.0–0.150.0). Outbound (exporter) auth used
+#               here is UNAFFECTED, but pinning past the range means MG-34's
+#               FUTURE collector RECEIVER (inbound) auth cannot land on a version
+#               where azure_auth accepts unauthenticated inbound requests.
+# 0.151.0 satisfies all three. Pinned by tag AND @sha256 digest for reproducibility.
+#
+# DIGEST: sha256:d57bfe8eee2378f31cb1193239fbcac521d54a5a071fca2bfc106916a32b892d
+# was resolved from Docker Hub for the 0.151.0 multi-arch index at authoring time.
+# !!! AT DEPLOY: RE-RESOLVE AND RE-CONFIRM THIS DIGEST, and re-confirm the tag is
+# STRICTLY > 0.150.0 with GHSA-pjv4-3c63-699f's `patched` field verified for the
+# chosen release before flipping enable_native_otlp on. Do NOT trust a stale
+# digest across a rebuild of the same tag.
 variable "collector_image" {
-  description = "PINNED collector container image. MUST be the CONTRIB distribution (otlphttp + azureauth + file_storage). Pin by tag AND digest for reproducibility. UNVERIFIED: minimum version for Azure native-OTLP-ingestion preview not confirmed (MG-25/MG-34)."
+  description = "PINNED collector container image. MUST be the CONTRIB distribution (otlphttp + azure_auth + file_storage). Pinned by tag AND @sha256 digest. Floor >=0.132.0 (native OTLP), >=0.148.0 (azure_auth syntax), >0.150.0 (outside GHSA-pjv4-3c63-699f). Re-confirm the digest + advisory `patched` field at deploy (MG-25/MG-34)."
   type        = string
-  default     = "otel/opentelemetry-collector-contrib:0.128.0"
+  default     = "otel/opentelemetry-collector-contrib:0.151.0@sha256:d57bfe8eee2378f31cb1193239fbcac521d54a5a071fca2bfc106916a32b892d"
 }
 
 variable "collector_storage_name" {
@@ -49,11 +77,11 @@ variable "collector_storage_name" {
   default     = ""
 }
 
-variable "otlp_stream_name" {
-  description = "DCR stream name the collector's otlphttp exporter targets (x-ms-stream-name). Must match the stream_declaration below and the collector-config env value."
-  type        = string
-  default     = "Custom-OtelTraces"
-}
+# NOTE (3rd review): the former `otlp_stream_name` variable is REMOVED. Native
+# OTLP ingestion pins the stream inside the traces_endpoint URL segment (fixed
+# `Microsoft-OTLP-Traces`) and the DCR declares the built-in Microsoft-OTel-
+# Traces-* streams directly — there is no operator-tunable custom stream name and
+# no x-ms-stream-name header any more.
 
 variable "tags" {
   description = "Tags applied to all resources"
