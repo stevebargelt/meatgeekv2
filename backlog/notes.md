@@ -1,19 +1,13 @@
-**SESSION 2026-07-21 — END-OF-DAY HANDOFF. Operator was away all day; I shipped everything offline-closeable and paused at the operator/live/decision boundary.**
+SESSION 2026-07-22 — external-operational-review corrections COMPLETE. All 6 findings from the operator's review are shipped:
+- F1/F5/F6 (bootstrap: valid emitted HCL + HCL-validation test + CI-gated bootstrap tests + fail-loud ||die + bounded RBAC poll replacing blind sleep) = MG-32, merged 24b4e38, CLOSED. Bootstrap is now SAFE to run.
+- F2/F3/F4 (Go OTLP->OTel Collector [operator-chosen], NOT App Insights ingestion; per-reading W3C root span + traceparent persisted in durable queue record; docs distinguish implemented scaffolding vs operational) = MG-33, merged 11ad979 (PR#15), CLOSED. red-wide converged at r8 PASS after an 8-round doc-overclaim sweep of observability.md; CI green.
 
-**SHIPPED THIS SESSION (10 tickets):** MG-24 corrective (merged 4df8427; MG-24 stays OPEN for the operator live bootstrap), MG-9 (closed), MG-27 (closed), MG-14 AC1-4 (merged b291685; OPEN for AC5 live smoke), MG-26 (closed), MG-6 Bucket A (merged c638113; OPEN for B/C), MG-28 (closed), MG-11 (closed bb72843), MG-12 (closed c37397a), MG-10 (closed by supersession — MG-24 corrective + MG-12 met all 5 AC).
+REMAINING — all operator/live/decision-gated (paused here):
+1. MG-24 greenfield Azure bootstrap KEYSTONE (now SAFE; 10-step runbook in docs/infrastructure/bootstrap-runbook.md). Unblocks MG-21/23/25, MG-14 AC5, MG-6 Bucket C, and the LIVE OTel pieces (central collector Container App deploy + live IoT-Hub receiver Function — the operational half of MG-33 scaffolding).
+2. MG-6 Bucket B — Sentry org/project decision (milestone mg-6-sentry-decision); then MG-7 mobile-sentry.
+3. MG-31 cook_stopped payload (persist real Cook vs minimize contract — rec: minimize).
+4. MG-30 device-group authz (needs user->device ownership model decision).
+LIVE/AC5-gated after MG-24: MG-14 AC5, MG-29, MG-6 Bucket C. DEFERRED Phase3: MG-13, MG-7.
 
-**YOUR DECISIONS / ACTIONS NEEDED (all staged, nothing lost):**
-1. **MG-24 greenfield Azure bootstrap — THE KEYSTONE.** The 10-step operator sequence (bootstrap.sh -> plan -> HUMAN review -> apply -> publish commit 3dd4165 -> AUTHENTICATED smoke -> post-apply state gate) is in docs/infrastructure/bootstrap-runbook.md + earlier recap. Completing it CLOSES MG-24 and UNBLOCKS: MG-21, MG-23, MG-25, MG-14 AC5 (live SignalR smoke), MG-6 Bucket C (live alerts + E2E trace). Deterministic layer fully reviewed (23 red-wide rounds) + CI green; secret-inspection gate verified fail-closed.
-2. **MG-6 Bucket B — Sentry decision** (milestone mg-6-sentry-decision): create the Sentry org + choose ONE project + environments VS one project per app. Everything else in Bucket B cascades from it. Then MG-7 (Phase-3 mobile-sentry) unblocks.
-3. **MG-31 — cook_stopped payload** (milestone mg-31-payload): persist real Cook (needs a DB) OR minimize the CookStoppedMessage contract to {cookId,deviceId,stoppedAt} (my recommendation — AC3-aligned, Go consumer tolerates it, removes the placeholder hack). Cross-language contract change, so I left it for you.
-4. **MG-30 — device-group authz** (milestone mg-30-ownership): needs a user->device ownership model that does not exist yet. Decide: define ownership, or accept app-level-auth + deviceId-query scoping and close.
-
-**LIVE/AC5-GATED (do after MG-24 bootstrap):** MG-14 AC5 (authenticated E2E SignalR smoke), MG-29 (data-pusher negotiate handshake — resolve during the live smoke), MG-6 Bucket C (5 alerts + E2E trace).
-
-**DEFERRED (Phase 3+):** MG-13 (pact contracts), MG-7 (mobile Sentry — after MG-6 Bucket B).
-
-**SAFETY (unchanged):** V2 greenfield — never touch V1; no local-state apply; no manual Azure resources; PROD_DEPLOY_ENABLED stays unset until MG-25.
-
-**Ops notes:** forge review-loop HANGS here (nx plugin-worker) -> use forge invoke red-wide + green PR CI as the review gate. Local node_modules is missing @nx/webpack + @apidevtools/swagger-parser (nx build api / validate-spec fail LOCALLY only — rely on CI). Local npm is 11.13 vs pinned 10.9.8 — never regen the lockfile with local npm; let CI npm ci gate sync. red-wide result.json sometimes has a stray leading + char.
-
-**MG-32 CLOSED — main 24b4e383c08f10217dac496feb7317097d508275, 2026-07-22.** Bootstrap operational-review corrections (F1/F5/F6): emitted tfvars is valid HCL with per-token UUID validation (assert_uuid) + terraform-fmt-tested; bootstrap.test.sh 97/0 + CI-gated (with terraform_wrapper:false — the wrapper's stdin interception hung terraform fmt -); fail-loud SP+role creation + wait_for_blob_data_plane bounded RBAC-propagation poll + resource_absent_or_die/az_discover distinguish genuine not-found from a REAL Azure error (no masked failures). 3 red-wide rounds + a CI-hang fix. **BOOTSTRAP NOW SAFE TO RUN.** MG-33 (OTel F2/F3/F4 corrections) next — code done on build/mg-33-otel-rework, PR pending.
+SAFETY (unchanged): V2 greenfield — never touch V1; no local-state apply; no manual Azure resources; PROD_DEPLOY_ENABLED unset until MG-25.
+OPS: forge review-loop hangs here (nx plugin-worker) -> use forge invoke red-wide + green PR CI. Local npm 11.13 vs pinned 10.9.8 — never regen lockfile locally. data-pusher/dist binaries are gitignored (red-wide may false-flag stale local builds; repo is grep-clean).
