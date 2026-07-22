@@ -144,12 +144,16 @@ else bad "state blob role must be scoped per-env container, not whole account"; 
 # must NEVER get one (that would give dev access to prod state). The ONE permitted
 # whole-account grant is the OPERATOR's Storage Blob Data role (item 2) — creating
 # a state container is an account-level data-plane op that cannot be
-# container-scoped — and it must be a User-principal grant, not an SP grant. So
-# expect EXACTLY ONE `--scope "$state_sa_id"`, tied to the operator (signed-in-user).
-whole_acct_scopes="$(grep -Ec -- '--scope[[:space:]]+"\$state_sa_id"' "$BOOT" || true)"
-if [ "${whole_acct_scopes:-0}" -eq 1 ] && grep -q 'signed-in-user' "$BOOT"; then
+# container-scoped — and it must be a User-principal grant, not an SP grant.
+# All role grants now flow through the ensure_role_assignment helper
+# (object_id principal_type role scope); assert EXACTLY ONE grant whose scope is
+# the whole account ("$state_sa_id"), and that it is the operator's User grant.
+whole_acct_scopes="$(grep -Ec 'ensure_role_assignment[[:space:]].*[[:space:]]"\$state_sa_id"([[:space:]]|$|\\)' "$BOOT" || true)"
+if [ "${whole_acct_scopes:-0}" -eq 1 ] \
+   && grep -Eq 'ensure_role_assignment[[:space:]]+"\$operator_oid"[[:space:]]+User[[:space:]]+"Storage Blob Data Contributor"[[:space:]]+"\$state_sa_id"' "$BOOT" \
+   && grep -q 'signed-in-user' "$BOOT"; then
   ok "only the operator holds a whole-account blob grant (item 2); SP grants stay container-scoped"
-else bad "the only whole-account blob-role grant may be the operator's (item 2); SP state grants must be container-scoped"; fi
+else bad "the only whole-account blob-role grant may be the operator's User grant (item 2); SP state grants must be container-scoped"; fi
 
 # --- Per-env state CONTAINERS (isolation): tfstate-<env> ---------------------
 if grep -q 'state_container_for() { echo "tfstate-' "$BOOT"; then
@@ -161,19 +165,25 @@ else bad "state containers must be per-environment (tfstate-<env>)"; fi
 # would leak a live credential into process listings). No account key is fetched
 # and no `--auth-mode key --account-key` call exists; container ops use AAD
 # (`--auth-mode login`) instead, backed by an operator Storage Blob DATA grant.
-# Ignore comment lines so the note explaining the fix doesn't self-trip.
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q -- '--account-key'; then
+# Ignore comment lines so the note explaining the fix doesn't self-trip. Compute
+# the non-comment body ONCE into a var and search it with a here-string (not a
+# `grep -v | grep -q` pipe: grep -q short-circuits and SIGPIPEs the upstream
+# grep, which under `pipefail` non-deterministically fails the pipeline).
+BOOT_NONCOMMENT="$(grep -vE '^[[:space:]]*#' "$BOOT")"
+if grep -q -- '--account-key' <<<"$BOOT_NONCOMMENT"; then
   bad "no storage account key may appear on the command line (leaks via argv)"
 else ok "no storage account key on argv (no --account-key)"; fi
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q 'az storage account keys list'; then
+if grep -q 'az storage account keys list' <<<"$BOOT_NONCOMMENT"; then
   bad "bootstrap must not fetch a storage account key for container ops"
 else ok "bootstrap does not fetch a storage account key"; fi
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q -- '--auth-mode login'; then
+if grep -q -- '--auth-mode login' <<<"$BOOT_NONCOMMENT"; then
   ok "container ops use AAD data-plane auth (--auth-mode login), no secret on argv"
 else bad "container ops must use --auth-mode login (no account key on argv)"; fi
 # The operator gets a Storage Blob DATA role so --auth-mode login works, mirroring
-# the per-env Storage Blob Data grants issued to the CI/deploy SPs.
-if grep -q 'signed-in-user' "$BOOT" && grep -q -- '--role "Storage Blob Data Contributor"' "$BOOT"; then
+# the per-env Storage Blob Data grants issued to the CI/deploy SPs. The grant now
+# goes through the ensure_role_assignment helper as a User-principal assignment.
+if grep -q 'signed-in-user' "$BOOT" \
+   && grep -Eq 'ensure_role_assignment[[:space:]]+"\$operator_oid"[[:space:]]+User[[:space:]]+"Storage Blob Data Contributor"' "$BOOT"; then
   ok "operator granted Storage Blob Data Contributor for AAD container ops"
 else bad "operator must get a Storage Blob DATA role so --auth-mode login can create containers"; fi
 
@@ -306,10 +316,12 @@ if grep -q 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" \
    && grep -A5 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" | grep -q 'default *= ""'; then
   ok "app_deploy_principal_object_id variable exists and defaults to empty"
 else bad "app_deploy_principal_object_id variable must exist with an empty default"; fi
-# Deploy identity's state access is READ-ONLY (Reader, not Contributor).
-if grep -q -- '--role "Storage Blob Data Reader"' "$BOOT"; then
-  ok "deploy identity gets Storage Blob Data READER on state (read-only)"
-else bad "deploy identity must get read-only state access (Storage Blob Data Reader)"; fi
+# Deploy identity's state access is READ-ONLY (Reader, not Contributor). The
+# grant flows through ensure_role_assignment as an SP-principal assignment scoped
+# to the dev container ("$container_scope"), not the whole account.
+if grep -Eq 'ensure_role_assignment[[:space:]]+"\$sp_id"[[:space:]]+ServicePrincipal[[:space:]]+"Storage Blob Data Reader"[[:space:]]+"\$container_scope"' "$BOOT"; then
+  ok "deploy identity gets Storage Blob Data READER on state (read-only, container-scoped)"
+else bad "deploy identity must get read-only state access (Storage Blob Data Reader) via ensure_role_assignment, container-scoped"; fi
 # Emits the client id the app-deploy job consumes.
 if grep -q 'AZURE_APP_DEPLOY_CLIENT_ID' "$BOOT"; then
   ok "bootstrap emits AZURE_APP_DEPLOY_CLIENT_ID for the app-deploy job"
@@ -362,6 +374,54 @@ else bad "bootstrap must emit the dev API App ID URI coordinate (DEV_API_APP_ID_
 if grep -Fq "identifierUris[0]" "$BOOT"; then
   ok "bootstrap prints the App ID URI retrieval command (az ad app show … identifierUris[0])"
 else bad "bootstrap must print an App ID URI retrieval command (identifierUris[0])"; fi
+
+# ===========================================================================
+# F1/F5: the copy-paste tfvars/HCL the bootstrap EMITS must be VALID HCL
+# ===========================================================================
+# The previous emit printed functions_auth_allowed_client_app_ids as
+# [uuid1, uuid2] — UNQUOTED uuids, which Terraform rejects. bootstrap.sh is
+# sourced above, so the pure renderer hcl_string_list is callable directly.
+#
+# 1) The renderer quotes every element and brackets the list.
+hcl_list_out="$(hcl_string_list "04b07795-8ddb-461a-bbee-02f9e1bf7b46 33333333-3333-3333-3333-333333333333")"
+if [ "$hcl_list_out" = '["04b07795-8ddb-461a-bbee-02f9e1bf7b46", "33333333-3333-3333-3333-333333333333"]' ]; then
+  ok "hcl_string_list quotes every element (valid HCL list literal)"
+else
+  bad "hcl_string_list must emit a quoted HCL list (got '$hcl_list_out')"
+fi
+# 2) Empty input renders as [] (valid HCL), not a syntax error.
+[ "$(hcl_string_list "")" = "[]" ] && ok "hcl_string_list renders empty input as []" \
+  || bad "hcl_string_list of empty input must be []"
+
+# 3) Assemble the EXACT functions_auth_* block the bootstrap emits (with sample
+#    values) and assert it parses as valid HCL. Prefer terraform fmt (a real HCL
+#    parser) when available; else fall back to a portable structural check that
+#    every list element is quoted (no bare uuid survives quote-stripping).
+gen_block="$(cat <<TFVARS
+functions_auth_client_id          = "11111111-1111-1111-1111-111111111111"
+functions_auth_tenant_id          = "22222222-2222-2222-2222-222222222222"
+functions_auth_allowed_audiences  = ["api://11111111-1111-1111-1111-111111111111"]
+functions_auth_allowed_client_app_ids = $(hcl_string_list "04b07795-8ddb-461a-bbee-02f9e1bf7b46 33333333-3333-3333-3333-333333333333")
+TFVARS
+)"
+if command -v terraform >/dev/null 2>&1; then
+  if printf '%s\n' "$gen_block" | terraform fmt - >/dev/null 2>&1; then
+    ok "emitted functions_auth_* tfvars block is valid HCL (terraform fmt parsed it)"
+  else
+    bad "emitted functions_auth_* tfvars block is INVALID HCL (terraform fmt failed to parse it)"
+  fi
+else
+  # Portable fallback: strip every "quoted" segment from the client-app-ids list;
+  # anything alphanumeric left inside the brackets is an UNQUOTED (invalid) token.
+  list_rhs="$(printf '%s\n' "$gen_block" | grep 'functions_auth_allowed_client_app_ids')"
+  list_rhs="${list_rhs#*=}"
+  residue="$(printf '%s' "$list_rhs" | sed 's/"[^"]*"//g')"
+  if printf '%s' "$residue" | grep -Eq '[0-9A-Za-z_-]'; then
+    bad "emitted client-app-ids list contains an UNQUOTED token (invalid HCL): residue='$residue'"
+  else
+    ok "emitted client-app-ids list has every element quoted (portable HCL check; terraform not installed)"
+  fi
+fi
 
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"

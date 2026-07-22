@@ -189,6 +189,9 @@ jobs:
       - name: Static checks (V2 invariants)
         run: apps/infrastructure/scripts/tf-static-checks.sh
 
+      - name: Bootstrap safety + emitted-HCL tests
+        run: bash apps/infrastructure/bootstrap/bootstrap.test.sh
+
   security-scan:
     runs-on: ubuntu-latest
     steps:

@@ -153,6 +153,19 @@ ok()   { printf '\033[0;32m✅ %s\033[0m\n' "$*"; }
 warn() { printf '\033[0;33m⚠️  %s\033[0m\n' "$*"; }
 die()  { printf '\033[0;31m❌ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Render a SPACE-SEPARATED list of values as a VALID HCL list of quoted strings,
+# so copy-paste tfvars guidance parses (Terraform rejects bare/unquoted tokens):
+#   "id1 id2" -> ["id1", "id2"]      ""  -> []
+# Used for functions_auth_allowed_client_app_ids in the emitted dev.tfvars block.
+hcl_string_list() {
+  local out="" v
+  for v in $1; do
+    [ -z "$v" ] && continue
+    out="${out:+${out}, }\"${v}\""
+  done
+  printf '[%s]' "$out"
+}
+
 # Map a GitHub Environment name to its Terraform environment / state container.
 # GitHub uses the full words `development`/`production` (which is what the
 # workflow `environment:` values — and therefore the OIDC subjects — use);
@@ -224,6 +237,30 @@ ensure_role_assignment() {
     --role "$role" \
     --scope "$scope" \
     -o none
+}
+
+# Data-plane RBAC (Storage Blob Data roles) is EVENTUALLY CONSISTENT: a freshly
+# granted role is not immediately effective for `--auth-mode login` blob calls.
+# Poll (bounded attempts + backoff) for an AAD data-plane op against the account
+# to succeed, instead of a blind fixed sleep. This waits ONLY for the verified
+# propagation condition — the grant itself already succeeded (fail-loud), so this
+# never masks an authorization error; if it never propagates within the bound we
+# fail with a clear message rather than proceeding into a confusing blob error.
+wait_for_blob_data_plane() {
+  local account="$1" attempt=1 max_attempts=12 delay=5
+  while :; do
+    if az storage container list --account-name "$account" --auth-mode login -o none 2>/dev/null; then
+      ok "Data-plane RBAC effective for --auth-mode login on ${account}"
+      return 0
+    fi
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      die "Storage data-plane RBAC did not become effective on ${account} after ${max_attempts} attempts; the operator's Storage Blob Data grant has not propagated — re-run the bootstrap in a few minutes."
+    fi
+    log "Waiting for data-plane RBAC to propagate on ${account} (attempt ${attempt}/${max_attempts}, ${delay}s)…"
+    sleep "$delay"
+    attempt=$((attempt+1))
+    [ "$delay" -lt 20 ] && delay=$((delay+5))
+  done
 }
 
 # --------------------------------------------------------------------------
@@ -342,11 +379,15 @@ bootstrap_state_backend() {
   if [ -n "$operator_oid" ] && [ "$operator_oid" != "null" ]; then
     # Storage Blob Data Contributor on the state account so `--auth-mode login`
     # can create/list containers. Idempotent (create is a no-op if already held).
-    ensure_role_assignment "$operator_oid" User "Storage Blob Data Contributor" "$state_sa_id" 2>/dev/null || true
+    # FAIL LOUD on a genuine authorization/role-assignment failure — no blanket
+    # `|| true` that would print a false "granted". A real AuthorizationFailed
+    # (operator lacks User Access Administrator/Owner) must abort here.
+    ensure_role_assignment "$operator_oid" User "Storage Blob Data Contributor" "$state_sa_id" \
+      || die "failed to grant the operator 'Storage Blob Data Contributor' on ${STATE_STORAGE_ACCOUNT} — the signed-in principal likely lacks Owner/User Access Administrator on the state account."
     ok "Storage Blob Data Contributor granted to the operator on ${STATE_STORAGE_ACCOUNT}"
-    # Data-plane RBAC is eventually consistent; give the grant a moment to
-    # propagate before the first `--auth-mode login` blob call.
-    sleep 20
+    # Wait (bounded poll, not a blind sleep) for the just-granted data-plane role
+    # to become effective before the first `--auth-mode login` container call.
+    wait_for_blob_data_plane "$STATE_STORAGE_ACCOUNT"
   else
     warn "Could not resolve the signed-in user's object id — ensure the operator"
     warn "holds a Storage Blob Data role on ${STATE_STORAGE_ACCOUNT} so --auth-mode"
@@ -666,8 +707,12 @@ JSON
   ok "Delegated scope '${DEV_API_SCOPE_NAME}' exposed on ${app_uri} (no client secret)"
 
   # Enterprise app (SP) so the API can be granted admin consent in the tenant.
+  # Guarded create-if-absent: the `sp show` above distinguishes already-exists
+  # (no-op) from a genuine create failure, which must FAIL LOUD — no `|| true`
+  # that would report a phantom "created" after the create actually errored.
   if [ -z "$(az ad sp show --id "$app_id" --query id -o tsv 2>/dev/null || true)" ]; then
-    az ad sp create --id "$app_id" -o none || true
+    az ad sp create --id "$app_id" -o none \
+      || die "failed to create the service principal for the dev API registration (${app_id})"
     ok "Service principal created for the dev API registration"
   fi
 
@@ -692,7 +737,7 @@ Wire these into environments/dev.tfvars (functions_auth_*) post-bootstrap:
   functions_auth_tenant_id          = "${tenant_id}"
   functions_auth_allowed_audiences  = ["${app_uri}"]
 
-  functions_auth_allowed_client_app_ids = [${preauth_ids// /, }]  # calling client(s)
+  functions_auth_allowed_client_app_ids = $(hcl_string_list "$preauth_ids")  # calling client(s)
 
   Delegated scope: ${app_uri}/${DEV_API_SCOPE_NAME}
   Operator token:  APP_ID_URI=\$(az ad app show --id ${app_id} --query 'identifierUris[0]' -o tsv)
