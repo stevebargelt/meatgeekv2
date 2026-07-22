@@ -178,6 +178,24 @@ type queueRecord struct {
 	Payload     json.RawMessage `json:"payload"`
 }
 
+// startReadingSpan opens the per-reading `reading.enqueue` span as a
+// CONTINUATION of the trace the collector began at poll time. sampleTraceparent
+// is the `collector.poll` span's W3C trace context, captured on the Sample; the
+// same context was injected onto the device-controller request, so continuing
+// from it keeps ONE trace id spanning poll -> device request -> queue record ->
+// publish -> IoT message per reading (MG-33 F2).
+//
+// It deliberately does NOT use trace.WithNewRoot: a new root would mint a
+// second, disconnected trace id per reading (the F2 bug). Per-reading isolation
+// is instead preserved upstream — the collector starts a fresh `collector.poll`
+// span every tick, so each reading already rides its own trace. When
+// sampleTraceparent is empty (no-op tracing / legacy), ContextFromTraceparent
+// returns ctx unchanged and the span descends from ctx.
+func startReadingSpan(ctx context.Context, tracer trace.Tracer, sampleTraceparent string) (context.Context, trace.Span) {
+	parent := telemetry.ContextFromTraceparent(ctx, sampleTraceparent)
+	return tracer.Start(parent, "reading.enqueue")
+}
+
 // correlationHolder is a tiny atomic-string holder for the most-recently
 // observed SignalR correlation id. The SignalR consumer writes it on
 // every cook lifecycle envelope; the enqueuer reads it at the moment a
@@ -359,12 +377,12 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	go func() {
 		defer wg.Done()
 		for sample := range tempCollector.Samples() {
-			// Open a NEW ROOT span for THIS reading so each reading gets its
-			// own trace id (a per-reading trace) instead of descending from the
-			// long-lived process span. WithNewRoot detaches from any span
-			// already carried on ctx, which is what stops the historical
-			// one-giant-trace-per-process behavior.
-			readingCtx, readingSpan := tracer.Start(ctx, "reading.enqueue", trace.WithNewRoot())
+			// CONTINUE the per-reading trace that began at poll time (see
+			// startReadingSpan): the collector captured its `collector.poll`
+			// span's traceparent onto the Sample and injected the SAME context
+			// onto the device-controller request, so continuing from it keeps
+			// ONE trace id across poll -> device -> queue -> publish -> IoT.
+			readingCtx, readingSpan := startReadingSpan(ctx, tracer, sample.Traceparent)
 
 			reading := wire.MapV1ToTemperatureReading(sample.Status, sample.Timestamp, sess.ActiveCookID())
 			readingBytes, mErr := json.Marshal(reading)

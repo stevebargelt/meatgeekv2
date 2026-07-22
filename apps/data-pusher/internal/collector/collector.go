@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
 )
 
@@ -40,6 +41,17 @@ type Sample struct {
 	// pusher (UTC). The queue runner threads this into wire.MintMessageId
 	// so the message id stays stable across publish retries.
 	Timestamp time.Time
+
+	// Traceparent is the W3C trace context of the `collector.poll` span that
+	// produced this sample, captured at poll time and carried forward so the
+	// enqueuer can CONTINUE the same trace rather than mint a detached root.
+	// This is the missing link in the per-reading end-to-end trace: the poll
+	// span (and the traceparent injected on the device-controller request)
+	// share this trace id, and the enqueuer/queue-record/publish/IoT-message
+	// hops now continue it instead of starting fresh. The poll span ends when
+	// pollOnce returns (before the sample is dequeued downstream), so the
+	// linkage must ride on this persisted string, not on a live span handle.
+	Traceparent string
 }
 
 // gobotCommandResponse is the {"result": "<json-string>"} envelope that
@@ -126,6 +138,12 @@ func (c *Collector) pollOnce(ctx context.Context) error {
 	sample := Sample{
 		Status:    *status,
 		Timestamp: time.Now().UTC(),
+		// Capture the poll span's traceparent so downstream (enqueuer ->
+		// queue record -> publish -> IoT message) continues THIS trace. The
+		// same trace context was injected onto the device-controller request
+		// in newStatusRequest, so poll -> device -> queue -> publish share one
+		// trace id per reading.
+		Traceparent: telemetry.ExtractTraceparent(ctx),
 	}
 
 	select {
