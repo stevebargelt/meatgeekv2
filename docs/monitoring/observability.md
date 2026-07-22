@@ -78,7 +78,9 @@ CosmosDB   SignalR
          ▼
    Client Updates
 
-All paths share same correlation.id for end-to-end tracing
+Target: all paths share one correlation.id for end-to-end tracing.
+Device-side injection is implemented (Bucket A); backend restoration
+onto the correlation.id dimension is not yet wired (Bucket C / MG-24).
 ```
 
 ## Azure Monitor OpenTelemetry Distribution
@@ -667,7 +669,7 @@ Step by step:
    | order by timestamp asc
    ```
 
-5. **Read the backend timeline.** You now see every backend hop (`device`/`function`/`iot-hub`/`client`) for that one request, including any exception, alongside the Sentry-side mobile view. The mobile symptom and the backend cause are correlated by hand, through the shared trace id.
+5. **Read the backend timeline.** Today that means the **inbound Functions request trace** the distro continued onto `operation_Id`, plus whatever the distribution auto-instruments **in-process** for that request (including any exception) — matched alongside the Sentry-side mobile view. The mobile symptom and the backend cause are correlated by hand, through the shared trace id. The **full** `device → iot-hub → function → downstream` hop timeline — every hop carrying the shared id — is **target-state**: it depends on the live IoT-Hub receiver + collector (the `extractCorrelation` restore helper is unwired) and is not available until Bucket C / MG-24.
 6. **Annotate both sides.** When you resolve it, note the trace id on both the Sentry issue and the App Insights investigation so the join is reproducible. The tools stay separate; the trace id is the durable link.
 
 > The join key is the **W3C trace id**, surfaced on the backend as `operation_Id` (the distro continues the inbound trace); the matching `correlation.id` dimension is target-state until the restore helper is wired (Bucket C / MG-24). It is *not* a Sentry↔App-Insights integration and requires no cross-tool credentials — just copy-paste.
@@ -700,6 +702,8 @@ This contract can and should be nailed down now, independent of Sentry org/proje
 Until the operator records this decision, treat the project-structure and DSN details as **unresolved**; wire the RN SDK against a single env-var DSN placeholder and finalize once the model is chosen.
 
 ## Benefits of This Observability Strategy
+
+> These are the benefits at **full realization** of the strategy, not a claim that all of them are operational today. Device-side trace injection is live (Bucket A) and the Functions distro continues an inbound HTTP trace onto `operation_Id`; **cross-service correlation and complete end-to-end visibility across the parallel paths** land with the live IoT-Hub receiver + collector (Bucket C / MG-24).
 
 ### **For Development:**
 - ✅ **Complete visibility** into parallel processing paths
