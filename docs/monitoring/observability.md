@@ -263,6 +263,8 @@ export class CorrelationHelper {
 
 ### **End-to-End Tracing Flow**
 
+> **⚠️ Not yet operational end-to-end (Bucket C / MG-24-gated).** This diagram is the **target** flow. Only the device-side half is scaffolded today: `device-controller` and `data-pusher` mint a per-reading W3C trace and **inject a `traceparent` (and `correlation.id`) onto the outbound IoT Hub message** (Bucket A — implemented). The backend continuation hops — `IoT Hub → Azure Function → SignalR / CosmosDB` — are **not exercised in a running system**: the live IoT-Hub receiver Function that would *continue* the trace on the backend is **not built** (Bucket C, blocked on the MG-24 bootstrap), and the restore helper (`extractCorrelation`) is unit-tested but unwired. So everything downstream of `Data Pusher → IoT Hub` in this graph is **not-yet-operational scaffolding**, not live end-to-end preservation.
+
 ```mermaid
 graph LR
     A[Device Sensor] --> B[Device Controller]
@@ -446,6 +448,8 @@ export class MeatGeekMetrics {
 ## KQL Queries for Analysis
 
 ### **End-to-End Trace Analysis**
+
+> **⚠️ Backend half is not yet live (Bucket C / MG-24-gated).** This query assumes every hop's spans carry a shared `correlation.id` in App Insights. Today only the device-side spans (`device-controller`, `data-pusher`) reach that state; the Functions/`iot-hub`/downstream rows this query expects **do not exist yet**, because the live IoT-Hub receiver Function that would continue the trace on the backend is **not built** (Bucket C, MG-24-gated) and the restore helper (`extractCorrelation`) is unwired. Treat this KQL as authored-against-target, not runnable end-to-end until the receiver ships.
 
 ```kql
 // Trace a single temperature reading through both paths

@@ -88,7 +88,7 @@ provisioning time and write it straight into the pusher's env file (below).
 | `POLL_INTERVAL`                | Polling interval                                                 | `5s`                   |
 | `DEBUG`                        | Enable debug logging                                             | `false`                |
 | `MOCK_IOT`                     | Use mock IoT Hub (development only)                              | `false`                |
-| `APPLICATIONINSIGHTS_CONNECTION_STRING`| Application Insights connection string (used by ticket #6)       | (none)                 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`  | OTLP endpoint of the OTel Collector; when set, spans export via OTLP/HTTP — no-op exporter when unset | (none)                 |
 
 All variables can be overridden as CLI flags (`--device-url`, `--poll-interval`, etc.).
 
