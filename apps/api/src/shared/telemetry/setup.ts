@@ -36,8 +36,16 @@ export function initializeTelemetry(): void {
     azureMonitorExporterOptions: { connectionString },
     // MG-6 AC: sample 50% of Functions telemetry at the SDK level.
     samplingRatio: 0.5,
+    // Only the environment-invariant, process-init-static standard dimensions
+    // belong on the resource: service.name, component, and environment. The
+    // per-request/per-span dimensions (device.id, cook.id, correlation.id,
+    // processing.path) are NOT static — the correlation.ts helper attaches them
+    // per span when a receiver exists. `component` is 'function' to match the
+    // Component taxonomy in correlation.ts and the per-span value the Functions
+    // app already emits (see docs/monitoring/observability.md).
     resource: resourceFromAttributes({
       'service.name': 'meatgeek-api',
+      component: 'function',
       environment,
     }),
   };
@@ -45,6 +53,6 @@ export function initializeTelemetry(): void {
   useAzureMonitor(options);
 
   console.log(
-    `initializeTelemetry: Azure Monitor initialised (service.name=meatgeek-api, environment=${environment}, samplingRatio=0.5)`
+    `initializeTelemetry: Azure Monitor initialised (service.name=meatgeek-api, component=function, environment=${environment}, samplingRatio=0.5)`
   );
 }

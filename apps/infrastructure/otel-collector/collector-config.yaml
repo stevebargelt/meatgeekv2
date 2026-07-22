@@ -1,0 +1,56 @@
+# MeatGeek OTel Collector configuration.
+#
+# Purpose (MG-33 / F2): the Go edge services (device-controller, data-pusher)
+# export OTLP to THIS collector, and the collector forwards to Azure
+# Application Insights via the azuremonitor exporter. An App Insights ingestion
+# endpoint does NOT speak raw OTLP, so pointing OTEL_EXPORTER_OTLP_ENDPOINT at
+# App Insights directly does not work — the collector is the required
+# translation hop (OTLP -> App Insights protocol/auth).
+#
+# The App Insights connection string is read from the environment
+# (APPLICATIONINSIGHTS_CONNECTION_STRING) and is NEVER committed here.
+#
+# See README.md for deployment (central Azure Container App, BLOCKED-on-MG-24).
+
+receivers:
+  # Accept OTLP from the edge services over both transports. gRPC (4317) is the
+  # default the Go OTLP/gRPC exporter uses; http (4318) is what the Go
+  # otlptracehttp exporter in this repo targets via OTEL_EXPORTER_OTLP_ENDPOINT.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Bound memory under bursty edge load; batch to reduce egress calls to App
+  # Insights. Both are safe, standard defaults for a forwarding collector.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  batch:
+    timeout: 5s
+
+exporters:
+  # azuremonitor is the OpenTelemetry-Collector-Contrib exporter that translates
+  # OTLP into the Application Insights ingestion protocol (and handles auth).
+  # With no explicit connection_string set, it reads
+  # APPLICATIONINSIGHTS_CONNECTION_STRING from the environment.
+  azuremonitor: {}
+
+service:
+  pipelines:
+    # Traces are the primary signal: the per-reading W3C trace chain (MG-33 /
+    # F3) flows edge service -> otlp receiver -> azuremonitor -> App Insights.
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [azuremonitor]
+    # The azuremonitor exporter also supports metrics; the edge services can
+    # export OTLP metrics through the same collector without extra wiring.
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [azuremonitor]

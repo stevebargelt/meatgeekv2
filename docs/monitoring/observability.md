@@ -10,7 +10,7 @@ Observability in MeatGeek V2 runs in **three lanes**. Two of the three lanes are
 
 | Lane | Surfaces | Instrumentation | Backend |
 | --- | --- | --- | --- |
-| **1. Server + Device (OTel)** | `data-pusher` (Go), `device-controller` (Go), `api` Azure Functions (TypeScript) | **OpenTelemetry** — OTel Go SDK on the two Go services; `@azure/monitor-opentelemetry` distribution on the Functions app | **Azure Application Insights** (via Azure Monitor OTel exporter) |
+| **1. Server + Device (OTel)** | `data-pusher` (Go), `device-controller` (Go), `api` Azure Functions (TypeScript) | **OpenTelemetry** — OTel Go SDK on the two Go services; `@azure/monitor-opentelemetry` distribution on the Functions app | **Azure Application Insights** — the Functions app exports through the `@azure/monitor-opentelemetry` (Azure Monitor) exporter; the two Go services export **OTLP → OTel Collector (`azuremonitor` exporter) → App Insights** (App Insights does not accept raw OTLP, so the collector is the required translation hop) |
 | **2. React web (exemption #1)** | Web dashboard (React) | **Application Insights JavaScript SDK** (`@microsoft/applicationinsights-web`) — *not* OTel | **Azure Application Insights** |
 | **3. React Native (exemption #2)** | Mobile app (React Native) | **Sentry** (`@sentry/react-native`) — *not* OTel, *not* App Insights | **Sentry** |
 
@@ -25,11 +25,11 @@ Lanes 1 and 2 share one Application Insights resource, so backend and web correl
 
 MG-6 lands observability in three buckets. This section is the authoritative status; the rest of the document describes the target design, some of which is shipped and some of which is still gated.
 
-- **Bucket A — OTel instrumentation (IMPLEMENTED).** The OTel discipline described here is shipped across `data-pusher`, `device-controller`, and the `api` Functions app, plus this document. Both Go services run an OTel `TracerProvider` with `AlwaysSample` and a swappable span exporter (a no-op exporter offline; an OTLP/HTTP exporter aimed at the App Insights ingestion endpoint when a connection string is present), and set W3C Trace Context as the global propagator. The Functions app runs the `@azure/monitor-opentelemetry` distribution with fixed-ratio 50% sampling. A W3C `traceparent` propagates `device-controller → data-pusher → IoT Hub → Functions`.
+- **Bucket A — OTel instrumentation (IMPLEMENTED).** The OTel discipline described here is shipped across `data-pusher`, `device-controller`, and the `api` Functions app, plus this document. Both Go services run an OTel `TracerProvider` with `AlwaysSample` and a swappable span exporter (a no-op exporter offline; an OTLP/HTTP exporter when a connection string is present), and set W3C Trace Context as the global propagator. The Go OTLP exporter's operational target is the **OTel Collector** (`apps/infrastructure/otel-collector/`), reached via `OTEL_EXPORTER_OTLP_ENDPOINT`; the collector's `azuremonitor` exporter is what forwards to App Insights, because App Insights does not accept raw OTLP. The Functions app runs the `@azure/monitor-opentelemetry` distribution with fixed-ratio 50% sampling. **Scaffolding for cross-hop propagation is implemented — not yet operational end-to-end:** both Go services install the W3C propagator and inject a `traceparent` onto outbound IoT Hub messages (a per-reading W3C trace is minted device-side), and a pure, unit-tested restore helper exists on the Functions side (`extractCorrelation` in `apps/api/src/shared/telemetry/correlation.ts`). But the ingest Function that would continue that trace — the live IoT-Hub receiver — is **not built** (Bucket C), so end-to-end `device-controller → data-pusher → IoT Hub → Functions` propagation is not yet exercised in a running system. See Bucket C for the MG-24 gate.
 - **Bucket B — Sentry org / project architecture (PENDING operator decision).** The React Native lane's `traceparent` injection contract is designable now (see [Sentry (React Native lane)](#sentry-react-native-lane)), but the Sentry organization, project structure, and DSN specifics await an operator decision and are not yet wired.
-- **Bucket C — live Azure Monitor alerts + end-to-end trace smoke + live IoT-Hub receiver (BLOCKED).** Standing up live alerts, a real end-to-end trace smoke test, and a live IoT-Hub receiver is **blocked on the MG-24 greenfield bootstrap**. The KQL, dashboard, and alert definitions below are authored against the standard dimensions but are not yet deployed against a live resource.
+- **Bucket C — live Azure Monitor alerts + end-to-end trace smoke + live IoT-Hub receiver + live OTel Collector (BLOCKED).** Standing up live alerts, a real end-to-end trace smoke test, the live IoT-Hub receiver Function, and the OTel Collector itself is **blocked on the MG-24 greenfield bootstrap**. The collector directory (`apps/infrastructure/otel-collector/`) ships the config + deployment doc only — no Terraform there creates it, because the Container Apps environment it runs in does not exist until the bootstrap runs. The KQL, dashboard, and alert definitions below are authored against the standard dimensions but are not yet deployed against a live resource.
 
-> **Connection-string env var is the same across runtimes.** Both the Functions app and the two Go services read the Azure-standard `APPLICATIONINSIGHTS_CONNECTION_STRING` (the Terraform-managed app setting). It is env-var only on every runtime — never hardcoded.
+> **Connection-string env var is the same across runtimes.** The Functions app and the two Go services all read the Azure-standard `APPLICATIONINSIGHTS_CONNECTION_STRING` (the Terraform-managed app setting) from the environment — never hardcoded. Note the operational split once the collector is deployed: the Go services select export-vs-no-op on the presence of this variable but send OTLP to the collector via `OTEL_EXPORTER_OTLP_ENDPOINT`; it is the **collector** (not the edge services) that uses `APPLICATIONINSIGHTS_CONNECTION_STRING` to authenticate to App Insights via its `azuremonitor` exporter.
 
 ## Architecture
 
@@ -126,7 +126,7 @@ export function initializeTelemetry() {
 
 #### **Go services — `data-pusher` and `device-controller`**
 
-Both Go services share one setup pattern. The canonical implementation is the tracing bootstrap at `apps/data-pusher/internal/telemetry/tracing.go`; `device-controller` mirrors it. The snippet below reflects the **shipped implementation** — an OTel `TracerProvider` with `AlwaysSample`, a swappable span exporter (a no-op exporter offline; an OTLP/HTTP exporter aimed at the App Insights ingestion endpoint when a connection string is present), and W3C Trace Context set as the global propagator so the `traceparent` injected onto IoT Hub messages flows downstream.
+Both Go services share one setup pattern. The canonical implementation is the tracing bootstrap at `apps/data-pusher/internal/telemetry/tracing.go`; `device-controller` mirrors it. The snippet below reflects the **shipped implementation** — an OTel `TracerProvider` with `AlwaysSample`, a swappable span exporter (a no-op exporter offline; an OTLP/HTTP exporter when a connection string is present), and W3C Trace Context set as the global propagator so the `traceparent` injected onto IoT Hub messages *can* be continued downstream once the receiver exists. The OTLP exporter's operational target is the **OTel Collector** (set via `OTEL_EXPORTER_OTLP_ENDPOINT`), whose `azuremonitor` exporter forwards to App Insights — App Insights does not accept raw OTLP, so exporting straight at its ingestion endpoint does not deliver telemetry.
 
 ```go
 // apps/data-pusher/internal/telemetry/tracing.go
@@ -159,13 +159,15 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
 
     var exporter trace.SpanExporter
     if appInsightsConnStr != "" {
-        // Real export path: a swappable span exporter — an OTLP/HTTP exporter
-        // aimed at the App Insights ingestion endpoint parsed from the
-        // connection string. The connection string is sourced from
-        // APPLICATIONINSIGHTS_CONNECTION_STRING on the Go services (env var only,
-        // never hardcoded). Swappable by design until the Azure Monitor Go
-        // exporter is GA.
-        exporter, err = otlptracehttp.New(ctx) // → App Insights ingestion endpoint
+        // Real export path: an OTLP/HTTP span exporter. Its operational target
+        // is the OTel Collector, set via OTEL_EXPORTER_OTLP_ENDPOINT; the
+        // collector's azuremonitor exporter forwards to App Insights. (App
+        // Insights does not accept raw OTLP, so pointing this exporter straight
+        // at the ingestion endpoint does not deliver telemetry.) The connection
+        // string is sourced from APPLICATIONINSIGHTS_CONNECTION_STRING (env var
+        // only, never hardcoded) and selects export vs. no-op. Swappable by
+        // design until the Azure Monitor Go exporter is GA.
+        exporter, err = otlptracehttp.New(ctx) // → OTLP endpoint (OTel Collector)
         if err != nil {
             return nil, fmt.Errorf("failed to create exporter: %w", err)
         }
@@ -189,13 +191,17 @@ func SetupTracing(ctx context.Context, appInsightsConnStr string) (func(), error
 }
 ```
 
-> **Status (MG-6, Bucket A — implemented):** the Go services ship an OTel `TracerProvider` with `AlwaysSample`, a swappable span exporter (no-op offline; OTLP/HTTP to the App Insights ingestion endpoint when a connection string is present), and W3C Trace Context propagation across `device-controller → data-pusher → IoT Hub`. Connection strings and endpoints are supplied **via environment variables only** — `APPLICATIONINSIGHTS_CONNECTION_STRING` on both the Go services and the Functions app — with no hardcoded values. Per-span dimensions such as `device.id` are attached on the spans (see [Tracing Strategy](#tracing-strategy)); the environment-invariant dimensions (`component`, `environment`) are also copied onto the resource.
+> **Status (MG-6, Bucket A — implemented):** the Go services ship an OTel `TracerProvider` with `AlwaysSample`, a swappable OTLP/HTTP span exporter (no-op offline; when configured, aimed at the OTel Collector via `OTEL_EXPORTER_OTLP_ENDPOINT`, whose `azuremonitor` exporter forwards to App Insights), and the W3C Trace Context propagator installed so a `traceparent` is injected onto outbound IoT Hub messages. That injection is **scaffolding**: end-to-end continuation into the Functions layer awaits the live IoT-Hub receiver (Bucket C). Connection strings and endpoints are supplied **via environment variables only** — with no hardcoded values. Dimension placement differs by service: the environment-invariant dimensions (`service.name`, `component`, `environment`) are copied onto the OTel **resource** (so they ride every span/metric of that service); `data-pusher` attaches `device.id`/`cook.id`/`correlation.id`/`processing.path` **per span** when values exist, while `device-controller` stamps all six on its resource with `"none"` placeholders for the dimensions that have no device-level value (`cook.id`, `correlation.id`).
 
 ## Custom Dimensions Standard
 
-### **The Six Standard Dimensions (verified contract)**
+### **The Six Standard Dimensions (target contract)**
 
-Every span and metric emitted by the OTel lane (both Go services and the Functions app) carries **exactly these six** standard custom dimensions. This is the enforced contract — MG-6 AC: *"Standard custom dimensions enforced everywhere."* KQL, workbooks, and alerts are written against these keys, so they must be present and named exactly as below.
+These six keys are the **target** standard custom-dimension set that KQL, workbooks, and alerts are written against — MG-6 AC: *"Standard custom dimensions enforced everywhere."* They must be named exactly as below. How much of the set is actually present today varies by service and by dimension — do not assume all six on every span/metric:
+
+- **Resource-level, always present (`service.name`, `component`, `environment`).** These environment-invariant dimensions are set on the OTel *resource*, so they ride every span and metric a service emits.
+- **Per-span/per-reading, present when a live value exists (`device.id`, `cook.id`, `correlation.id`, `processing.path`).** `data-pusher` attaches these on individual spans when it has a value; `device-controller` stamps them on its resource but uses the `"none"` placeholder for `cook.id` and `correlation.id`, which have no device-level value (`processing.path` is fixed to `device`). So a key being *present* does not guarantee a *meaningful* value.
+- **Full downstream coverage awaits the live IoT-Hub receiver.** Restoring `correlation.id`/`traceparent` from the inbound message and re-stamping the standard dimensions on the Functions/ingest side is implemented only as an unused helper (`extractCorrelation` / `getStandardDimensions` in `apps/api/src/shared/telemetry/correlation.ts`); until the receiver Function exists (Bucket C), the standard set is **not** enforced end-to-end across every hop.
 
 ```typescript
 interface StandardDimensions {
@@ -210,7 +216,7 @@ interface StandardDimensions {
 
 Notes on the contract:
 
-- **`correlation.id` is trace-context-derived.** It rides device→backend as the IoT Hub message property `correlation.id` (constant `CorrelationIDPropertyName = "correlation.id"` in `apps/data-pusher/internal/iothub/client.go`) and is restored to the span dimension on the receiving Function. MG-6 tightens this from the interim UUID placeholder to **W3C Trace Context** propagation across `device-controller → data-pusher → IoT Hub → Functions → CosmosDB → SignalR`.
+- **`correlation.id` is trace-context-derived.** It rides device→backend as the IoT Hub message property `correlation.id` (constant `CorrelationIDPropertyName = "correlation.id"` in `apps/data-pusher/internal/iothub/client.go`), alongside the injected `traceparent` (`TraceParentPropertyName = "traceparent"`). Restoring it to the span dimension on the receiving Function is implemented as a pure helper (`extractCorrelation`) but is **not yet wired into a running receiver** (Bucket C). MG-6 defines the target as **W3C Trace Context** propagation across `device-controller → data-pusher → IoT Hub → Functions → CosmosDB → SignalR`; today the device→IoT-Hub half is emitting the trace context, and the Functions-and-downstream half is blocked on the live IoT-Hub receiver + collector (MG-24-gated).
 - **These six are the standard set — not the *only* attributes.** Individual spans still attach span-local detail (`sensor.type`, `temperature.value`, `message.type`, `message.count`, etc.). Those are useful extras but are **not** part of the enforced standard-dimension contract and must not be relied on as universally present. Earlier drafts of this doc also listed `user.id` and `message.type` as "standard" dimensions — they are **not** in the canonical six and have been demoted to optional span-local attributes.
 
 ### **Implementation Example**
