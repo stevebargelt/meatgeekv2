@@ -782,7 +782,7 @@ dev APP-DEPLOYMENT identity — separate SP, publish-only.
 
   2) Set this SP OBJECT ID in environments/dev.tfvars BEFORE the apply so
      Terraform grants '${DEPLOY_APP_ROLE}' scoped to the Function App alone in
-     the SAME apply that creates it (then `func publish` works immediately):
+     the SAME apply that creates it (then \`func publish\` works immediately):
 
        AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID = ${sp_id}
        # → app_deploy_principal_object_id = "${sp_id}"
@@ -806,7 +806,7 @@ SUMMARY
 #    wires into environments/dev.tfvars (functions_auth_*).
 # --------------------------------------------------------------------------
 bootstrap_dev_api_registration() {
-  local tenant_id app_id app_uri scope_id preauth_json api_body
+  local tenant_id app_id app_uri scope_id preauth_json api_body preauth_body
   tenant_id="$(az account show --query tenantId -o tsv)"
 
   log "── dev ENTRA API auth registration ${DEV_API_APP_NAME} (scope ${DEV_API_SCOPE_NAME})"
@@ -849,8 +849,14 @@ bootstrap_dev_api_registration() {
   preauth_json="[ ${preauth_entries} ]"
 
   # Expose the delegated scope + set the App ID URI + v2 access tokens via a
-  # single Microsoft Graph PATCH (idempotent — the stable scope id makes repeat
-  # PATCHes converge). NO client secret / password anywhere.
+  # Microsoft Graph PATCH (idempotent — the stable scope id makes repeat PATCHes
+  # converge). NO client secret / password anywhere. This scope-defining PATCH
+  # MUST be issued BEFORE the preAuthorizedApplications PATCH below: Graph
+  # validates preAuthorizedApplications.delegatedPermissionIds against scopes
+  # that ALREADY EXIST on the app and cannot see a scope defined in the SAME
+  # request, so combining both in one atomic PATCH returns 400
+  # ('Permission Id … cannot be found in the AppPermissions sets') and the
+  # ENTIRE api block fails (no scope, no identifierUris).
   api_body="$(cat <<JSON
 {
   "identifierUris": ["${app_uri}"],
@@ -867,8 +873,7 @@ bootstrap_dev_api_registration() {
         "userConsentDisplayName": "Access MeatGeek V2 dev API",
         "userConsentDescription": "Allow the app to access the MeatGeek V2 dev API on your behalf."
       }
-    ],
-    "preAuthorizedApplications": ${preauth_json}
+    ]
   }
 }
 JSON
@@ -877,8 +882,34 @@ JSON
     --uri "https://graph.microsoft.com/v1.0/applications(appId='${app_id}')" \
     --headers "Content-Type=application/json" \
     --body "$api_body" \
-    -o none
+    -o none \
+    || die "failed to expose the delegated scope '${DEV_API_SCOPE_NAME}' on ${app_uri} (Graph PATCH 1)"
   ok "Delegated scope '${DEV_API_SCOPE_NAME}' exposed on ${app_uri} (no client secret)"
+
+  # SECOND Graph PATCH: now that the scope id is PERSISTED on the app, set
+  # api.preAuthorizedApplications referencing it. Kept separate from the first
+  # PATCH (see above) because delegatedPermissionIds only resolves against
+  # already-existing scopes. Idempotent (the stable scope id converges on
+  # re-run) and fail-loud. Skipped entirely when no calling client ids exist.
+  if [ -n "$preauth_entries" ]; then
+    preauth_body="$(cat <<JSON
+{
+  "api": {
+    "preAuthorizedApplications": ${preauth_json}
+  }
+}
+JSON
+)"
+    az rest --method PATCH \
+      --uri "https://graph.microsoft.com/v1.0/applications(appId='${app_id}')" \
+      --headers "Content-Type=application/json" \
+      --body "$preauth_body" \
+      -o none \
+      || die "failed to pre-authorize calling client(s) [${preauth_ids}] for '${DEV_API_SCOPE_NAME}' (Graph PATCH 2)"
+    ok "Pre-authorized calling client(s) for '${DEV_API_SCOPE_NAME}': ${preauth_ids}"
+  else
+    log "No calling client ids supplied — skipping preAuthorizedApplications PATCH"
+  fi
 
   # Enterprise app (SP) so the API can be granted admin consent in the tenant.
   # Guarded create-if-absent: `sp list --filter` distinguishes absent (empty,
