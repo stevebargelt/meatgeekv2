@@ -6,6 +6,20 @@ title: greenfield V2 infrastructure bootstrap — remote state/identity + create
 created: 2026-07-19
 ---
 
+## RESUME STATE 2026-07-23 — Flex hosting SHIPPED; live re-apply is the only remaining work
+
+The hosting-model revision below is DONE and merged: **Flex Consumption for dev+prod, West US 2, Node 24** shipped in **PR #24 / commit `529ac54`** (full `feature` pipeline: architect → tech-lead → engineer → 3 red fix-rounds → test-engineer → docs; CI green). `azurerm_function_app_flex_consumption` + FC1 plan; **azapi control-plane deployment container** (no shared-key, no `storage_use_azuread`, no first-apply grant chicken-and-egg); Easy Auth + fail-closed precondition preserved; secret gate extended with fail-closed fixtures; ADR `mg-24-flex-consumption-hosting-model.md`; prod data-loss protection tracked in **MG-35**. The "PAUSED / BLOCKS resume" section below is therefore RESOLVED — it is retained only as history.
+
+**The ONLY remaining MG-24 work is the operator-gated live sequence** (deterministic code is complete):
+1. Destroy the stranded NCUS partial: `terraform destroy` against the current dev state, then delete the orphaned Functions storage account `mgv2dev13bd19e9f03d` (exists in Azure, not in state).
+2. Re-`init` (backend-dev) + `plan` the Flex/West US 2/Node 24 stack → operator plan review + secret-inspection gate.
+3. `apply` → 2nd-plan no-op → representative tag change → plan → apply → no-op (the 10-step greenfield + reconcile proof) → capture evidence.
+4. Then MG-21 (publish to the Flex dev FA, 401→2xx auth smoke) and MG-23 (dev workflow split).
+
+GitHub OIDC coordinates (dev+prod env vars) are already wired; `DEV_TF_BACKEND_READY` still unset (flip only after step 3 proves the dev plan/apply).
+
+---
+
 ## PAUSED 2026-07-23 — hosting model under revision (Flex Consumption evaluation)
 
 The live greenfield DEV apply is **PAUSED mid-run**. The apply created ~30 resources (RG, Log Analytics, App Insights, Cosmos account + `meatgeek` DB + 5 containers, IoT Hub + routes/endpoints/consumer groups, Event Hubs ns + hub, SignalR, Functions **service plan**) then **FAILED** on the Functions host storage account: `403 KeyBasedAuthenticationNotPermitted`. Root cause: the azurerm provider's post-create blob-data-plane readiness poll used shared-key auth against an account created with `shared_access_key_enabled=false`, because the provider block lacks `storage_use_azuread=true`. The Function App, its RBAC role assignments, and the monitoring module were NOT created. Remote dev state (`meatgeek-v2/dev.tfstate` in `tfstate-dev`) is intact; **no V1 resource was touched**. An **orphaned** Functions storage account (`mgv2dev13bd19e9f03d`) exists in Azure but not in Terraform state — import or delete it before resuming.

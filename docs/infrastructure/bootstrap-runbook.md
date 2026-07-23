@@ -96,10 +96,11 @@ functionapp publish` / `nx deploy api` (via azure-functions-core-tools) writes
 
 ### Storage identities on the one functions account
 
-The functions storage account **keeps `shared_access_key_enabled = false`** — Flex
-does not need a shared key, so the no-shared-key posture (MG-24 point 5) is
-preserved. Three DISTINCT principals touch the deployment blob container, each
-least-privilege:
+The functions storage account is created via **azapi over the ARM control plane**
+(`Microsoft.Storage/storageAccounts`) and keeps shared key disabled via the azapi
+body's **`allowSharedKeyAccess = false`** — Flex does not need a shared key, so the
+no-shared-key posture (MG-24 point 5) is preserved. Three DISTINCT principals touch
+the deployment blob container, each least-privilege:
 
 - **Function App managed identity** — reads the deployment package at runtime.
   Terraform grants it `Storage Blob Data Owner` + `Storage Queue Data Contributor`
@@ -109,15 +110,19 @@ least-privilege:
 Contributor` role on the `deployment-package` container** (in ADDITION to its
   `Website Contributor` on the Function App), guarded by `count` on the var so a
   bare `validate`/plan with an empty var still validates.
-- **Apply/CI principal** — CREATES the `deployment-package` container over the ARM
-  **control plane** (the module uses `azapi_resource`
-  `Microsoft.Storage/.../blobServices/containers`, not `azurerm_storage_container`).
-  It needs only its existing **resource-management** role (Contributor on the RG) —
-  **NO storage data-plane role and NO pre-apply grant**. The provider does **not**
-  set `storage_use_azuread` (MG-24 reds 2f5154 / b08ced): creating the container on
-  the data plane against a `shared_access_key_enabled = false` account that this
-  same apply creates would be a chicken-and-egg 403; the control-plane create
-  sidesteps it, so the **first Flex apply is executable with no manual pre-grant**.
+- **Apply/CI principal** — CREATES **both** the storage **account**
+  (`Microsoft.Storage/storageAccounts`) **and** the `deployment-package` container
+  (`Microsoft.Storage/.../blobServices/containers`) over the ARM **control plane**
+  (the module uses `azapi_resource` for both, not `azurerm_storage_account` /
+  `azurerm_storage_container`). It needs only its existing **resource-management**
+  role (Contributor on the RG) — **NO storage data-plane role and NO pre-apply
+  grant**. The provider does **not** set `storage_use_azuread` (MG-24 reds 2f5154 /
+  b08ced, then the live-apply 403): the `azurerm_storage_account` resource performs
+  its OWN key-auth storage **data-plane** reads that **403** on a shared-key-disabled
+  account with `storage_use_azuread` unset, and a data-plane container create against
+  an account **this same apply creates** would be a chicken-and-egg 403; creating
+  both the account and the container over the control plane sidesteps every storage
+  data-plane op, so the **first Flex apply is executable with no manual pre-grant**.
 
 ### Cost expectations (Flex billing)
 
@@ -500,11 +505,13 @@ key). It also inspects the **inherent computed key attributes** of the data
 services and accepts a residual only when auth cannot use it: the full AI
 connection string in an `app_setting` **only** when
 `azurerm_application_insights` sets `local_authentication_enabled = false`; the
-inherent key of a Cosmos / SignalR / Storage / Event Hubs namespace resource
+inherent key of a Cosmos / SignalR / Event Hubs namespace resource
 **only** when that resource disables local/key auth
 (`local_authentication_enabled = false` / `local_auth_enabled = false` /
-`shared_access_key_enabled = false` / `local_authentication_enabled = false`) —
-otherwise it is a **VIOLATION** (a live in-state key); and `azurerm_iothub` keys
+`local_authentication_enabled = false`); for the **azapi-managed** Functions storage
+account (`Microsoft.Storage/storageAccounts`) it makes a **positive assertion that
+the azapi body sets `allowSharedKeyAccess = false`** — otherwise it is a
+**VIOLATION** (a live in-state key); and `azurerm_iothub` keys
 as the **acknowledged exception** (accepted with a note — device SAS auth kept).
 It also
 fails closed on any operational failure (no `jq`, unparseable JSON, no input) —
@@ -576,7 +583,8 @@ az role assignment list --scope "$FUNC_ID" \
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 
 # Flex OneDeploy write-path: the same SP on the deployment-package container.
-STORAGE_ID="$(terraform state show module.azure_functions.azurerm_storage_account.functions | awk '/^ *id /{print $3; exit}')"
+# The functions storage account is the azapi control-plane resource, not azurerm.
+STORAGE_ID="$(terraform state show module.azure_functions.azapi_resource.functions_storage | awk '/^ *id /{print $3; exit}')"
 az role assignment list \
   --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package" \
   --query "[?roleDefinitionName=='Storage Blob Data Contributor'].principalId" -o tsv
@@ -616,8 +624,9 @@ az role assignment create --assignee-object-id "$ME" \
 
 # Flex OneDeploy writes the package ZIP to the deployment-package blob container
 # under YOUR identity, so you also need Blob Data write there (Contributor/Owner
-# on the RG does NOT include the storage data plane). Grant it if you lack it:
-STORAGE_ID="$(terraform state show module.azure_functions.azurerm_storage_account.functions | awk '/^ *id /{print $3; exit}')"
+# on the RG does NOT include the storage data plane). Grant it if you lack it
+# (the functions storage account is the azapi control-plane resource, not azurerm):
+STORAGE_ID="$(terraform state show module.azure_functions.azapi_resource.functions_storage | awk '/^ *id /{print $3; exit}')"
 az role assignment create --assignee-object-id "$ME" \
   --assignee-principal-type User \
   --role "Storage Blob Data Contributor" \
@@ -820,8 +829,9 @@ Contributor` on the prod Flex `deployment-package` container (via the guarded
   attribute_ in state — as for any TF-managed resource; the control is to make it
   non-authenticating by disabling local/key auth where safe —
   `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
-  on SignalR, `shared_access_key_enabled = false` on host storage,
-  `local_authentication_enabled = false` on the Event Hubs namespace. **IoT Hub is
+  on SignalR, `allowSharedKeyAccess = false` in the azapi body on the
+  control-plane-managed host storage account, `local_authentication_enabled = false`
+  on the Event Hubs namespace. **IoT Hub is
   the SOLE documented exception:** device/data-pusher/device-controller SAS auth is
   intentionally kept, mitigated by restricted state access. The
   `tf-plan-secret-inspection.sh` gate flags Cosmos/SignalR/Storage/Event Hubs

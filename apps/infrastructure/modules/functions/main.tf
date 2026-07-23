@@ -19,8 +19,12 @@
 #     primary keys are placed in app settings or Terraform state.
 #   * Deployment storage is identity-based: storage_authentication_type =
 #     "SystemAssignedIdentity" against a blobContainer on the functions storage
-#     account, which KEEPS shared_access_key_enabled=false — so no
+#     account, which KEEPS allowSharedKeyAccess=false — so no
 #     storage_account_access_key is written to state and no shared key can leak.
+#     BOTH the storage account AND its deployment container are created via azapi
+#     over the ARM CONTROL PLANE, because the azurerm_storage_account resource
+#     itself performs shared-key storage DATA-PLANE reads that 403 on a shared-key-
+#     disabled account with storage_use_azuread unset (MG-24 operational fix).
 #   * Application Insights ingestion is identity-based (AAD): the managed
 #     identity is granted 'Monitoring Metrics Publisher' on the App Insights
 #     resource (root module) and the host authenticates telemetry via
@@ -42,13 +46,15 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
-    # azapi creates the Flex deployment BLOB container over the ARM CONTROL PLANE
-    # (Microsoft.Storage/storageAccounts/blobServices/containers) — same pattern
-    # the native-otlp module uses for its DCR. Control-plane creation sidesteps the
-    # storage DATA-plane entirely, so the apply principal needs NO Storage Blob
-    # Data role on an account THIS apply creates (the same-apply chicken-and-egg a
-    # data-plane azurerm_storage_container would have hit against a
-    # shared_access_key_enabled=false account). See the MG-24 ADR.
+    # azapi creates BOTH the Functions storage ACCOUNT
+    # (Microsoft.Storage/storageAccounts) and the Flex deployment BLOB container
+    # (Microsoft.Storage/storageAccounts/blobServices/containers) over the ARM
+    # CONTROL PLANE — same pattern the native-otlp module uses for its DCR.
+    # Control-plane creation sidesteps the storage DATA-plane entirely: neither the
+    # account's OWN reads (a data-plane azurerm_storage_account performs
+    # blob-service/queue/share reads that 403 on a shared-key-disabled account) nor
+    # the container create needs a Storage Blob Data role or storage_use_azuread on
+    # the apply principal against an account THIS apply creates. See the MG-24 ADR.
     azapi = {
       source  = "Azure/azapi"
       version = "~> 2.0"
@@ -71,23 +77,53 @@ locals {
   deployment_container_name = "deployment-package"
 }
 
-# Storage account for Azure Functions
-resource "azurerm_storage_account" "functions" {
-  name                     = local.functions_storage_account_name
-  resource_group_name      = var.resource_group_name
-  location                 = var.location
-  account_tier             = "Standard"
-  account_replication_type = "LRS"
+# Storage account for Azure Functions — created via azapi over the ARM CONTROL
+# PLANE (Microsoft.Storage/storageAccounts@2023-05-01), NOT azurerm_storage_account.
+#
+# WHY azapi and not azurerm (MG-24 operational fix — 403'd twice on live Azure):
+# the azurerm_storage_account RESOURCE performs its OWN storage DATA-PLANE reads —
+# a blob-service-availability poll on create, and queue/blob/share property reads
+# on refresh — using SHARED-KEY auth by default. With allowSharedKeyAccess=false
+# and the provider's storage_use_azuread deliberately unset, those reads 403
+# (KeyBasedAuthenticationNotPermitted): the original Y1 apply AND the Flex
+# destroy-refresh both failed here, on the account's OWN reads (not the container).
+# Creating the account over the ARM control plane — the same pattern as the
+# deployment container below and the native-otlp DCR — performs NO storage
+# data-plane operation at plan/apply for ANY terraform principal, so the account
+# can keep shared key disabled with no storage_use_azuread and no pre-apply
+# data-plane grant for the apply or CI identities. See the MG-24 ADR.
+#
+# Identity-based storage: allowSharedKeyAccess=false so no account key can be used
+# (or leak into state). The Function App's managed identity is granted the
+# Blob/Queue data roles below and reads the package ZIP from the blob deployment
+# container at runtime over that identity
+# (storage_authentication_type=SystemAssignedIdentity on the flex resource).
+resource "azapi_resource" "functions_storage" {
+  type      = "Microsoft.Storage/storageAccounts@2023-05-01"
+  name      = local.functions_storage_account_name
+  parent_id = var.resource_group_id
+  location  = var.location
+  tags      = var.tags
 
-  # Identity-based storage: shared key access is disabled so no account key can
-  # be used (or leak into state). The Function App's managed identity is granted
-  # the Blob/Queue data roles below and reads the package ZIP from the blob
-  # deployment container at runtime over that identity
-  # (storage_authentication_type=SystemAssignedIdentity on the flex resource).
-  shared_access_key_enabled = false
-  min_tls_version           = "TLS1_2"
-
-  tags = var.tags
+  body = {
+    # Standard_LRS StorageV2 — carried 1:1 from the former azurerm resource
+    # (account_tier="Standard" + account_replication_type="LRS" => Standard_LRS;
+    # azurerm's default account_kind was StorageV2).
+    sku = {
+      name = "Standard_LRS"
+    }
+    kind = "StorageV2"
+    properties = {
+      # min_tls_version = "TLS1_2" on the former azurerm resource.
+      minimumTlsVersion = "TLS1_2"
+      # shared_access_key_enabled = false — the secrets-out-of-state invariant,
+      # now expressed in the azapi body. No account key can authenticate or leak.
+      allowSharedKeyAccess = false
+      # Private storage — no anonymous blob access; HTTPS only.
+      allowBlobPublicAccess    = false
+      supportsHttpsTrafficOnly = true
+    }
+  }
 }
 
 # Deployment package container (Flex Consumption). Flex reads the deployed
@@ -113,7 +149,7 @@ resource "azurerm_storage_account" "functions" {
 resource "azapi_resource" "deployment_container" {
   type      = "Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01"
   name      = local.deployment_container_name
-  parent_id = "${azurerm_storage_account.functions.id}/blobServices/default"
+  parent_id = "${azapi_resource.functions_storage.id}/blobServices/default"
 
   body = {
     properties = {
@@ -155,8 +191,12 @@ resource "azurerm_function_app_flex_consumption" "main" {
   # shared key. This is what resolves the Y1 MI-storage 403 and lets the account
   # stay shared_access_key_enabled=false. The endpoint is a plain blob-container
   # URL (no SAS / no AccountKey), so it carries no secret into state.
-  storage_container_type      = "blobContainer"
-  storage_container_endpoint  = "${azurerm_storage_account.functions.primary_blob_endpoint}${local.deployment_container_name}"
+  storage_container_type = "blobContainer"
+  # Plain blob-container URL built from the account name (no SAS / no AccountKey),
+  # so it carries no secret into state. The account is created via azapi (control
+  # plane) and exposes no azurerm primary_blob_endpoint attribute, so the endpoint
+  # is composed from the deterministic account name + the deployment container name.
+  storage_container_endpoint  = "https://${local.functions_storage_account_name}.blob.core.windows.net/${local.deployment_container_name}"
   storage_authentication_type = "SystemAssignedIdentity"
 
   # Flex scale knobs (per-env via tfvars). instance_memory_in_mb + maximum
@@ -326,13 +366,13 @@ resource "azurerm_function_app_flex_consumption" "main" {
 # Data Owner covers reading the deployment package from the blob container under
 # the app's managed identity (storage_authentication_type=SystemAssignedIdentity).
 resource "azurerm_role_assignment" "functions_storage_blob" {
-  scope                = azurerm_storage_account.functions.id
+  scope                = azapi_resource.functions_storage.id
   role_definition_name = "Storage Blob Data Owner"
   principal_id         = azurerm_function_app_flex_consumption.main.identity[0].principal_id
 }
 
 resource "azurerm_role_assignment" "functions_storage_queue" {
-  scope                = azurerm_storage_account.functions.id
+  scope                = azapi_resource.functions_storage.id
   role_definition_name = "Storage Queue Data Contributor"
   principal_id         = azurerm_function_app_flex_consumption.main.identity[0].principal_id
 }

@@ -29,17 +29,22 @@ provider "azurerm" {
   # which lets the provider fall back to the ambient Azure CLI / env context).
   subscription_id = var.subscription_id
 
-  # NOTE (MG-24): storage_use_azuread is intentionally NOT set. The functions
-  # storage account keeps shared_access_key_enabled=false, but nothing in this
-  # stack performs a storage DATA-PLANE operation through the azurerm provider —
-  # the one place that used to (the Flex deployment blob container) is now created
-  # by azapi over the ARM CONTROL PLANE (modules/functions/main.tf). Dropping the
-  # provider-global storage_use_azuread switch removes the same-apply chicken-and-
-  # egg it created (it would have required the apply principal to hold a Storage
-  # Blob Data role on an account THIS apply creates, before the account exists) and
-  # avoids the provider-wide data-plane side effects the architect flagged. The
-  # Function App still reads its package over its OWN managed identity at runtime
-  # (that is the app's identity, not the Terraform provider's). See the MG-24 ADR.
+  # NOTE (MG-24): storage_use_azuread is intentionally NOT set, and no terraform
+  # principal performs a storage DATA-PLANE operation through the azurerm provider.
+  # This required creating BOTH the Functions storage ACCOUNT and its deployment
+  # blob container via azapi over the ARM CONTROL PLANE (modules/functions/main.tf).
+  # The account had to move to azapi too — NOT just the container — because the
+  # azurerm_storage_account RESOURCE performs its OWN shared-key data-plane reads
+  # (a blob-service-availability poll on create; queue/blob/share property reads on
+  # refresh). With shared_access_key_enabled=false and storage_use_azuread unset
+  # those reads 403 (KeyBasedAuthenticationNotPermitted) — proven twice on live
+  # Azure (the original Y1 apply and the Flex destroy-refresh). Control-plane
+  # creation for both resources keeps shared_access_key_enabled=false viable with
+  # NO storage_use_azuread and NO pre-apply data-plane grant for the apply or CI
+  # identities, and avoids the provider-wide data-plane side effects the architect
+  # flagged. The Function App still reads its package over its OWN managed identity
+  # at runtime (that is the app's identity, not the Terraform provider's). See the
+  # MG-24 ADR.
 
   features {
     resource_group {
@@ -238,6 +243,7 @@ module "azure_functions" {
   resource_prefix     = local.resource_prefix
   global_suffix       = local.global_name_suffix
   resource_group_name = azurerm_resource_group.main.name
+  resource_group_id   = azurerm_resource_group.main.id
   location            = azurerm_resource_group.main.location
 
   storage_account_name = local.functions_storage_account_name

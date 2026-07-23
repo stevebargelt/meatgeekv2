@@ -20,12 +20,22 @@
           "address": "module.azure_functions",
           "resources": [
             {
-              "address": "module.azure_functions.azurerm_storage_account.functions",
-              "type": "azurerm_storage_account",
-              "name": "functions",
+              "address": "module.azure_functions.azapi_resource.functions_storage",
+              "type": "azapi_resource",
+              "name": "functions_storage",
               "values": {
-                "shared_access_key_enabled": false,
-                "min_tls_version": "TLS1_2"
+                "type": "Microsoft.Storage/storageAccounts@2023-05-01",
+                "name": "mgv2funcabc123def456",
+                "body": {
+                  "sku": { "name": "Standard_LRS" },
+                  "kind": "StorageV2",
+                  "properties": {
+                    "minimumTlsVersion": "TLS1_2",
+                    "allowSharedKeyAccess": false,
+                    "allowBlobPublicAccess": false,
+                    "supportsHttpsTrafficOnly": true
+                  }
+                }
               }
             },
             {

@@ -233,16 +233,21 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # storage_authentication_type = "SystemAssignedIdentity" +
   # storage_container_type = "blobContainer" (a BLOB deployment container, not the
   # Y1 Azure Files content share that required a shared key). We also re-assert here
-  # that the functions storage account KEEPS shared_access_key_enabled = false, so
-  # no account key can be minted into state (MG-24 point 5 — no new key exception).
+  # that the functions storage account KEEPS shared key DISABLED, so no account key
+  # can be minted into state (MG-24 point 5 — no new key exception). The account is
+  # now created via azapi over the ARM CONTROL PLANE
+  # (Microsoft.Storage/storageAccounts) — NOT azurerm_storage_account, whose OWN
+  # shared-key data-plane reads 403 on a shared-key-disabled account — so the
+  # disablement invariant lives in the azapi body's allowSharedKeyAccess = false
+  # rather than the former azurerm shared_access_key_enabled attribute.
   if ! grep -qE 'storage_authentication_type[[:space:]]*=[[:space:]]*"SystemAssignedIdentity"' "${FUNC_MAIN}"; then
     func_posture+="Function App Flex deployment storage is not identity-based (storage_authentication_type = \"SystemAssignedIdentity\" absent — the flex MI-blob replacement for the removed storage_uses_managed_identity)"$'\n'
   fi
   if ! grep -qE 'storage_container_type[[:space:]]*=[[:space:]]*"blobContainer"' "${FUNC_MAIN}"; then
     func_posture+="Function App Flex deployment storage is not a blob container (storage_container_type = \"blobContainer\" absent)"$'\n'
   fi
-  if ! grep -qE 'shared_access_key_enabled[[:space:]]*=[[:space:]]*false' "${FUNC_MAIN}"; then
-    func_posture+="Functions storage account no longer disables shared key (shared_access_key_enabled = false absent — a re-enabled key would mint an account key into state)"$'\n'
+  if ! grep -qE 'allowSharedKeyAccess[[:space:]]*=[[:space:]]*false' "${FUNC_MAIN}"; then
+    func_posture+="Functions storage account no longer disables shared key (azapi body allowSharedKeyAccess = false absent — a re-enabled key would mint an account key into state)"$'\n'
   fi
   # No secret VALUE in app_settings for ANY service — App Insights included, with
   # exactly ONE cross-field-conditional exemption (MG-24 item 2). This targets

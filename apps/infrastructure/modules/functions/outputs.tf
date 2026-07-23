@@ -21,8 +21,8 @@ output "hostname" {
 }
 
 output "storage_account_name" {
-  description = "Name of the storage account"
-  value       = azurerm_storage_account.functions.name
+  description = "Name of the storage account (created via azapi over the ARM control plane)."
+  value       = azapi_resource.functions_storage.name
 }
 
 output "deployment_container_name" {

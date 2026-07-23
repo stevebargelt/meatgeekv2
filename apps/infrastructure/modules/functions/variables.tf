@@ -10,6 +10,11 @@ variable "resource_group_name" {
   type        = string
 }
 
+variable "resource_group_id" {
+  description = "Resource ID of the resource group. Used as the azapi parent_id for the Functions storage account, which is created over the ARM control plane (Microsoft.Storage/storageAccounts) rather than azurerm_storage_account — the azurerm resource performs shared-key storage data-plane reads that 403 on a shared-key-disabled account (MG-24 operational fix)."
+  type        = string
+}
+
 variable "location" {
   description = "Azure region"
   type        = string
