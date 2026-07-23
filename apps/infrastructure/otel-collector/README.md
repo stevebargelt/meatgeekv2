@@ -29,7 +29,7 @@ identity**.
 ```
 device-controller ─┐                       ┌─ OTLP receiver ─ otlphttp ─┐
                    ├─ OTLP (traces) ───────►│  (this collector,          │─ azure_auth (user-assigned MI, AAD) ─► DCE ─► DCR ─► App Insights
-data-pusher ───────┘   [reachable only      │   loopback-only receiver)  │                                              (AppDependencies / AppTraces)
+data-pusher ───────┘   [reachable only      │   loopback-only receiver)  │                                              (OTelSpans / OTelTraces)
                         after MG-34]        └────────────────────────────┘
 ```
 
@@ -86,8 +86,9 @@ Provisioned by the `native-otlp` Terraform module
   (`Microsoft.Insights/dataCollectionRules@2024-03-11`) with
   `references.applicationInsights` + a `directDataSources.otelTraces` data source
   over the built-in `Microsoft-OTel-Traces-*` streams, enriched from the App
-  Insights reference into the workspace-based App Insights tables
-  (`AppDependencies` / `AppTraces`). It targets the **same** Log Analytics
+  Insights reference into the workspace-based OpenTelemetry-schema tables
+  (`OTelSpans` / `OTelTraces`) — native-OTLP ingestion lands there, **not** the
+  classic `AppDependencies` / `AppTraces`. It targets the **same** Log Analytics
   workspace App Insights is bound to. `azurerm`'s
   `azurerm_monitor_data_collection_rule` (v4) cannot express this body, so the
   `azapi` provider authors the DCR; the DCE stays an `azurerm` resource.
@@ -176,9 +177,12 @@ operational (and before MG-33 can close):
    (`directDataSources.otelTraces` over the built-in `Microsoft-OTel-Traces-*`
    streams) is confirmed against live ingestion.
 3. **MG-34** — secure off-VNet edge ingress, the **live**
-   Go-span-to-App-Insights proof (a real edge span appears queryable in
-   `AppDependencies`/`AppTraces` carrying the expected per-reading W3C
-   traceparent), and the **negative RBAC check** (remove the DCR role assignment
+   Go-span-to-App-Insights proof (a real edge span appears queryable by
+   `TraceId` in the OpenTelemetry-schema tables `OTelSpans`/`OTelTraces` —
+   where native-OTLP ingestion lands, **not** the classic
+   `AppDependencies`/`AppTraces` — carrying the expected per-reading W3C
+   traceparent, and surfaces in the corresponding Application Insights
+   experience), and the **negative RBAC check** (remove the DCR role assignment
    → ingestion rejected).
 
 Only after all three is `enable_native_otlp` flipped on and the path considered

@@ -125,7 +125,7 @@ service:
   pipelines:
     # Traces are the primary signal: the per-reading W3C trace chain (MG-33 /
     # F2/F3) flows edge service -> otlp receiver -> otlphttp/azuremonitor ->
-    # DCE/DCR -> App Insights (AppDependencies / AppTraces).
+    # DCE/DCR -> workspace OpenTelemetry-schema tables (OTelSpans / OTelTraces).
     #
     # NOTE: metrics are intentionally NOT wired here. The removed `azuremonitor`
     # exporter carried metrics for free; native OTLP ingestion needs its OWN DCR
