@@ -4,12 +4,19 @@
 # live Azure, NO credentials, NO apply. It EXERCISES the rendered plan (not just
 # static text) to prove the security invariants item 2 (App Insights AAD
 # ingestion), item 3 (dev Easy-Auth validation-only + fail-closed) and item 9
-# (globally-unique Function App name) must hold.
+# (globally-unique Function App name) must hold — now on the Flex Consumption
+# resource (azurerm_function_app_flex_consumption) after the MG-24 hosting
+# revision replaced the Y1/EP1 azurerm_linux_function_app.
 #
 # Run:  terraform -chdir=apps/infrastructure/modules/functions test
 # (init the module dir with `terraform init -backend=false` first).
 
 mock_provider "azurerm" {}
+
+# The module now creates the Flex deployment blob container via azapi over the ARM
+# control plane (Microsoft.Storage/.../blobServices/containers), so the azapi
+# provider is mocked here too — NO live Azure, NO credentials.
+mock_provider "azapi" {}
 
 variables {
   resource_prefix                        = "meatgeek-v2-dev"
@@ -37,26 +44,45 @@ variables {
 run "function_app_name_is_globally_unique" {
   command = plan
   assert {
-    condition     = azurerm_linux_function_app.main.name == "meatgeek-v2-dev-func-abc123def456"
+    condition     = azurerm_function_app_flex_consumption.main.name == "meatgeek-v2-dev-func-abc123def456"
     error_message = "Function App name must append global_suffix for global uniqueness"
   }
 }
 
-# MG-24 data-service local-auth posture — host storage is fully managed-identity:
-# shared-key access is DISABLED (so the account's inherent key attribute cannot
-# authenticate and AzureWebJobsStorage cannot fall back to a key), and the host
-# resolves storage via its managed identity. This is what makes it SAFE to leave
-# shared_access_key_enabled=false without breaking the Functions runtime — the
-# precondition the gate's storage-residual acceptance relies on.
-run "host_storage_is_managed_identity_only" {
+# MG-24 Flex deployment-storage posture — the deployment package is read from a
+# blobContainer authenticated by the Function App's SYSTEM-ASSIGNED managed
+# identity, and the underlying storage account keeps shared-key access DISABLED.
+# There is no Azure Files content share and no shared key, so AzureWebJobsStorage
+# cannot fall back to a key and no key can leak into state — the precondition the
+# gate's storage-residual acceptance relies on.
+run "deployment_storage_is_managed_identity_only" {
   command = plan
   assert {
     condition     = azurerm_storage_account.functions.shared_access_key_enabled == false
-    error_message = "Function host storage must have shared_access_key_enabled=false (no account key can authenticate or leak into state)"
+    error_message = "Function storage must have shared_access_key_enabled=false (no account key can authenticate or leak into state)"
   }
   assert {
-    condition     = azurerm_linux_function_app.main.storage_uses_managed_identity == true
-    error_message = "AzureWebJobsStorage must use the managed identity, not a storage account key"
+    condition     = azurerm_function_app_flex_consumption.main.storage_authentication_type == "SystemAssignedIdentity"
+    error_message = "Flex deployment storage must authenticate with the system-assigned managed identity, not a storage account key"
+  }
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.storage_container_type == "blobContainer"
+    error_message = "Flex deployment storage must use a blobContainer (MI-auth), not an Azure Files content share"
+  }
+  # The deployment container must be PRIVATE — never anonymously readable. The
+  # package ZIP is fetched by the Function App's managed identity, so no public
+  # blob access is ever needed. It is created via azapi over the ARM control plane
+  # (publicAccess = "None"). (The endpoint itself is built by string interpolation
+  # of the blob endpoint + this container name, carrying no SAS / AccountKey; the
+  # plain-URL shape is asserted by the pre-apply secret gate.)
+  assert {
+    condition     = azapi_resource.deployment_container.body.properties.publicAccess == "None"
+    error_message = "Flex deployment container must be private (publicAccess = \"None\", no anonymous blob access)"
+  }
+  # Node 24 runtime (matches the API engines.node and the operator's local Node).
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.runtime_name == "node" && azurerm_function_app_flex_consumption.main.runtime_version == "24"
+    error_message = "Flex runtime must be node / version 24"
   }
 }
 
@@ -68,17 +94,17 @@ run "host_storage_is_managed_identity_only" {
 run "appinsights_full_connection_string_aad" {
   command = plan
   assert {
-    condition     = azurerm_linux_function_app.main.app_settings["APPLICATIONINSIGHTS_CONNECTION_STRING"] == var.application_insights_connection_string
+    condition     = azurerm_function_app_flex_consumption.main.app_settings["APPLICATIONINSIGHTS_CONNECTION_STRING"] == var.application_insights_connection_string
     error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must be the full TF-managed connection string, not an endpoint-only literal"
   }
   assert {
-    condition     = azurerm_linux_function_app.main.app_settings["APPLICATIONINSIGHTS_AUTHENTICATION_STRING"] == "Authorization=AAD"
+    condition     = azurerm_function_app_flex_consumption.main.app_settings["APPLICATIONINSIGHTS_AUTHENTICATION_STRING"] == "Authorization=AAD"
     error_message = "Telemetry ingestion must authenticate via AAD"
   }
   # NEGATIVE: no OTHER service's secret (SAS / account / primary key) may reach
   # app_settings. The AI connection string is the only accepted residual.
   assert {
-    condition     = alltrue([for v in values(azurerm_linux_function_app.main.app_settings) : !can(regex("(?i)(accountkey|sharedaccesskey|primarykey|secondarykey)=", v))])
+    condition     = alltrue([for v in values(azurerm_function_app_flex_consumption.main.app_settings) : !can(regex("(?i)(accountkey|sharedaccesskey|primarykey|secondarykey)=", v))])
     error_message = "No SAS/account/primary key may appear in Function App app_settings"
   }
 }
@@ -88,37 +114,37 @@ run "appinsights_full_connection_string_aad" {
 run "easy_auth_is_validation_only_and_fail_closed" {
   command = plan
   assert {
-    condition     = azurerm_linux_function_app.main.auth_settings_v2[0].require_authentication == true
+    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].require_authentication == true
     error_message = "require_authentication must be true"
   }
   assert {
-    condition     = azurerm_linux_function_app.main.auth_settings_v2[0].unauthenticated_action == "Return401"
+    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].unauthenticated_action == "Return401"
     error_message = "Unauthenticated requests must be rejected with 401"
   }
   # allowed_applications validates the CALLING client (appid/azp), NOT the API
   # registration. It must carry the smoke-test client (Azure CLI public client),
   # and must NOT be bound to the API registration's own client id.
   assert {
-    condition     = contains(azurerm_linux_function_app.main.auth_settings_v2[0].active_directory_v2[0].allowed_applications, "04b07795-8ddb-461a-bbee-02f9e1bf7b46")
+    condition     = contains(azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].allowed_applications, "04b07795-8ddb-461a-bbee-02f9e1bf7b46")
     error_message = "allowed_applications must contain the calling client app id (Azure CLI public client), not the API registration"
   }
   assert {
-    condition     = !contains(azurerm_linux_function_app.main.auth_settings_v2[0].active_directory_v2[0].allowed_applications, "11111111-1111-1111-1111-111111111111")
+    condition     = !contains(azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].allowed_applications, "11111111-1111-1111-1111-111111111111")
     error_message = "allowed_applications must NOT be the API registration client id (that is the callee, never the caller)"
   }
   # client_id + allowed_audiences carry the API registration / App ID URI.
   assert {
-    condition     = azurerm_linux_function_app.main.auth_settings_v2[0].active_directory_v2[0].client_id == "11111111-1111-1111-1111-111111111111"
+    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].client_id == "11111111-1111-1111-1111-111111111111"
     error_message = "client_id must be the API registration client id"
   }
   # NEGATIVE: no client secret is ever configured (bearer validation only).
   assert {
-    condition     = azurerm_linux_function_app.main.auth_settings_v2[0].active_directory_v2[0].client_secret_setting_name == null || azurerm_linux_function_app.main.auth_settings_v2[0].active_directory_v2[0].client_secret_setting_name == ""
+    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].client_secret_setting_name == null || azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].client_secret_setting_name == ""
     error_message = "No client secret may be configured for the Function App auth provider"
   }
   # NEGATIVE: token store disabled (no token-at-rest surface).
   assert {
-    condition     = azurerm_linux_function_app.main.auth_settings_v2[0].login[0].token_store_enabled == false
+    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].login[0].token_store_enabled == false
     error_message = "Easy Auth token store must be disabled"
   }
 }
@@ -135,6 +161,6 @@ run "unconfigured_auth_is_refused_fail_closed" {
     auth_allowed_audiences          = []
   }
   expect_failures = [
-    azurerm_linux_function_app.main,
+    azurerm_function_app_flex_consumption.main,
   ]
 }

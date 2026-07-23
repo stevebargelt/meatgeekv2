@@ -225,9 +225,24 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   if ! grep -qE 'identity[[:space:]]*\{' "${FUNC_MAIN}" || ! grep -qE 'type[[:space:]]*=[[:space:]]*"SystemAssigned"' "${FUNC_MAIN}"; then
     func_posture+="Function App missing SystemAssigned managed identity"$'\n'
   fi
-  # Identity-based host storage (no account key in state).
-  if ! grep -qE 'storage_uses_managed_identity[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then
-    func_posture+="Function App does not use managed-identity host storage (storage_uses_managed_identity)"$'\n'
+  # Identity-based deployment storage, NO account key in state (MG-24 Flex revision).
+  # The hosting model moved from azurerm_linux_function_app (Y1/EP1) to
+  # azurerm_function_app_flex_consumption. The old azurerm_linux_function_app
+  # attribute `storage_uses_managed_identity = true` NO LONGER EXISTS on the flex
+  # resource; MI-authenticated deployment storage is now expressed by the pair
+  # storage_authentication_type = "SystemAssignedIdentity" +
+  # storage_container_type = "blobContainer" (a BLOB deployment container, not the
+  # Y1 Azure Files content share that required a shared key). We also re-assert here
+  # that the functions storage account KEEPS shared_access_key_enabled = false, so
+  # no account key can be minted into state (MG-24 point 5 — no new key exception).
+  if ! grep -qE 'storage_authentication_type[[:space:]]*=[[:space:]]*"SystemAssignedIdentity"' "${FUNC_MAIN}"; then
+    func_posture+="Function App Flex deployment storage is not identity-based (storage_authentication_type = \"SystemAssignedIdentity\" absent — the flex MI-blob replacement for the removed storage_uses_managed_identity)"$'\n'
+  fi
+  if ! grep -qE 'storage_container_type[[:space:]]*=[[:space:]]*"blobContainer"' "${FUNC_MAIN}"; then
+    func_posture+="Function App Flex deployment storage is not a blob container (storage_container_type = \"blobContainer\" absent)"$'\n'
+  fi
+  if ! grep -qE 'shared_access_key_enabled[[:space:]]*=[[:space:]]*false' "${FUNC_MAIN}"; then
+    func_posture+="Functions storage account no longer disables shared key (shared_access_key_enabled = false absent — a re-enabled key would mint an account key into state)"$'\n'
   fi
   # No secret VALUE in app_settings for ANY service — App Insights included, with
   # exactly ONE cross-field-conditional exemption (MG-24 item 2). This targets
@@ -235,8 +250,13 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # (.connection_string / .instrumentation_key / .primary_key / .primary_access_key
   # / .primary_connection_string), a var whose name ends in *connection_string /
   # *instrumentation_key, a literal ingestion/account/SAS key marker
-  # (InstrumentationKey= / AccountKey= / SharedAccessKey=), or a raw
-  # storage_account_access_key.
+  # (InstrumentationKey= / AccountKey= / SharedAccessKey=), a raw
+  # storage_account_access_key, OR the Flex deployment-storage `storage_access_key`
+  # attribute. Under the shipped MI model the flex deployment container authenticates
+  # via storage_authentication_type=SystemAssignedIdentity, so `storage_access_key`
+  # MUST NOT appear at all — any assignment reintroduces the shared-key deployment
+  # path and would mint a key into state (the HCL-level companion to the plan gate's
+  # unconditional storage_access_key rejection, MG-24 red dd7ba9).
   #
   # MG-24 item 2 CORRECTION — the coupled App Insights invariant:
   #   The Function App now passes the FULL TF-managed App Insights connection
@@ -259,7 +279,7 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # attribute/var references AND obfuscated index refs (a resource/module/data/
   # local reference indexed with a dynamically-assembled key or a secret-fragment
   # string literal). Numeric attribute indexing (`.identity[0]`) is not matched.
-  APPSETTING_SECRET_RE='\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING|(azurerm_|module\.|data\.|local\.)[A-Za-z0-9_.]+\[[[:space:]]*(format|join|lookup|element|coalesce|try)\(|\[[[:space:]]*"[^"]*(connection|instrumentation|primary_key|secondary_key|access_key|shared_access|password)[^"]*"[[:space:]]*\]'
+  APPSETTING_SECRET_RE='\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|storage_access_key[[:space:]]*=|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING|(azurerm_|module\.|data\.|local\.)[A-Za-z0-9_.]+\[[[:space:]]*(format|join|lookup|element|coalesce|try)\(|\[[[:space:]]*"[^"]*(connection|instrumentation|primary_key|secondary_key|access_key|shared_access|password)[^"]*"[[:space:]]*\]'
 
   # Is telemetry local auth disabled on the AI resource in the ROOT main.tf? Only
   # then is the full-conn-string exemption unlocked (the coupled invariant). We

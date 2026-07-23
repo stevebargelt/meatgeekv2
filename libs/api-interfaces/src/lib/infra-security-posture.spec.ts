@@ -118,9 +118,18 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       expect(live).toMatch(/type\s*=\s*"SystemAssigned"/);
     });
 
-    it('uses identity-based host storage (no account key in state)', () => {
-      expect(live).toMatch(/storage_uses_managed_identity\s*=\s*true/);
+    it('uses identity-based Flex deployment storage (no account key in state)', () => {
+      // MG-24 Flex revision: the hosting model moved from azurerm_linux_function_app
+      // (whose `storage_uses_managed_identity = true` no longer exists) to
+      // azurerm_function_app_flex_consumption. MI-authenticated deployment storage is
+      // now expressed by the pair below, against a blobContainer on a storage account
+      // that KEEPS shared-key access disabled — so no account key can leak into state.
+      expect(live).toMatch(/storage_authentication_type\s*=\s*"SystemAssignedIdentity"/);
+      expect(live).toMatch(/storage_container_type\s*=\s*"blobContainer"/);
+      expect(live).toMatch(/shared_access_key_enabled\s*=\s*false/);
       expect(live).not.toMatch(/storage_account_access_key/);
+      // No raw deployment-storage key: under MI auth `storage_access_key` must be absent.
+      expect(live).not.toMatch(/storage_access_key\s*=/);
     });
 
     it('app_settings carry NON-SECRET identity endpoints, not connection strings', () => {
@@ -706,8 +715,12 @@ describe('MG-24 S1: the fail-closed plan/state inspection walks real VALUES (tf-
               },
             },
             {
-              address: 'module.functions.azurerm_linux_function_app.main',
-              type: 'azurerm_linux_function_app',
+              // MG-24 Flex revision: the app is now azurerm_function_app_flex_consumption.
+              // The inspection's app_settings sink walk matches it via the
+              // `function_app` type substring, so the accepted-residual / foreign-ikey
+              // behaviour is exercised on the real shipped resource shape.
+              address: 'module.functions.azurerm_function_app_flex_consumption.main',
+              type: 'azurerm_function_app_flex_consumption',
               name: 'main',
               values: {
                 app_settings: { APPLICATIONINSIGHTS_CONNECTION_STRING: connString },
@@ -749,8 +762,8 @@ describe('MG-24 S1: the fail-closed plan/state inspection walks real VALUES (tf-
       format_version: '1.2',
       resource_changes: [
         {
-          type: 'azurerm_linux_function_app',
-          address: 'azurerm_linux_function_app.main',
+          type: 'azurerm_function_app_flex_consumption',
+          address: 'azurerm_function_app_flex_consumption.main',
           change: {
             after: {
               app_settings: { COSMOSDB: 'AccountEndpoint=https://x/;AccountKey=SECRETKEY==' },

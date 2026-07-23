@@ -1,0 +1,66 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_application_insights.main",
+          "type": "azurerm_application_insights",
+          "name": "main",
+          "values": {
+            "local_authentication_enabled": false,
+            "instrumentation_key": "11111111-1111-1111-1111-111111111111",
+            "connection_string": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/"
+          }
+        }
+      ],
+      "child_modules": [
+        {
+          "address": "module.azure_functions",
+          "resources": [
+            {
+              "address": "module.azure_functions.azurerm_storage_account.functions",
+              "type": "azurerm_storage_account",
+              "name": "functions",
+              "values": {
+                "shared_access_key_enabled": false,
+                "min_tls_version": "TLS1_2"
+              }
+            },
+            {
+              "address": "module.azure_functions.azurerm_function_app_flex_consumption.main",
+              "type": "azurerm_function_app_flex_consumption",
+              "name": "main",
+              "values": {
+                "runtime_name": "node",
+                "runtime_version": "24",
+                "storage_authentication_type": "SystemAssignedIdentity",
+                "storage_container_type": "blobContainer",
+                "storage_container_endpoint": "https://mgv2funcabc123def456.blob.core.windows.net/deployment-package?sv=2022-11-02&ss=b&srt=co&sp=rwdlac&sig=Zm9yYmlkZGVuU2FzU2lnbmF0dXJlVmFsdWU9PQ%3D%3D",
+                "app_settings": {
+                  "FUNCTIONS_WORKER_RUNTIME": "node",
+                  "APPLICATIONINSIGHTS_AUTHENTICATION_STRING": "Authorization=AAD",
+                  "APPLICATIONINSIGHTS_CONNECTION_STRING": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/",
+                  "COSMOSDB__accountEndpoint": "https://mgv2-cosmos.documents.azure.com:443/"
+                },
+                "site_config": [
+                  {
+                    "application_insights_connection_string": null,
+                    "application_insights_key": null,
+                    "cors": [
+                      {
+                        "allowed_origins": ["https://app.meatgeek.com"],
+                        "support_credentials": false
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

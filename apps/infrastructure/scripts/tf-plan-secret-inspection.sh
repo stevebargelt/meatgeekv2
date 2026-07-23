@@ -40,9 +40,22 @@
 #      LIMIT: .resource_changes[].change.after_unknown values are unknown until
 #      apply and cannot be inspected pre-apply — hence the required post-apply
 #      STATE run, where they are concrete.
-#   3. Inspects two sinks where a credential VALUE would escape into state and be
+#   3. Inspects the sinks where a credential VALUE would escape into state and be
 #      readable by anyone with state access:
 #         - Function App / Web App / App Service `app_settings` maps
+#         - the Flex Consumption Function App `site_config` block AND its
+#           deployment-storage fields (storage_container_endpoint /
+#           storage_access_key). MG-24 Flex revision: the hosting model moved from
+#           azurerm_linux_function_app to azurerm_function_app_flex_consumption,
+#           and some knobs/sinks (the deployment blob-container URL, the
+#           site_config App Insights fields) live OUTSIDE app_settings — so a
+#           SAS/AccountKey/sig marker there must be caught too. The deployment
+#           container uses MI auth (storage_authentication_type=SystemAssignedIdentity),
+#           so storage_container_endpoint must be a PLAIN blob URL with no SAS, and
+#           storage_access_key must be ABSENT. A raw storage key is opaque base64
+#           with NO lexical marker, so it is rejected UNCONDITIONALLY on presence
+#           (not via the marker classifier, which would let a bare key pass —
+#           MG-24 red dd7ba9).
 #         - root module outputs
 #   4. Classifies each VALUE. A value is a CREDENTIAL if it carries a
 #      connection-string / SAS / account-key / access-key / instrumentation-key
@@ -298,6 +311,54 @@ output_rows="$(printf '%s\n' "${JSON}" | jq -r '
 ' 2>/dev/null)" || die "cannot inspect: failed to collect root/output sink values from ${SRC}"
 output_rows="$(printf '%s\n' "${output_rows}" | sort -u)"
 
+# Flex Consumption additional sinks (MG-24 Flex revision). The app_setting walk
+# above already covers azurerm_function_app_flex_consumption's app_settings (the
+# type matches the "function_app" substring). But the flex resource carries
+# credential-capable VALUES OUTSIDE app_settings that the linux_function_app did
+# not: the site_config block (which has its own application_insights_connection_string
+# / application_insights_key fields) and the deployment-storage fields
+# (storage_container_endpoint — the blob-container URL that MUST be SAS-free under
+# MI auth — and storage_access_key, which must be ABSENT under
+# storage_authentication_type=SystemAssignedIdentity). We recursively collect every
+# STRING leaf under site_config plus the endpoint field and route them through the
+# SAME marker classifier, so a SAS token / AccountKey / sig marker in any of them is
+# a VIOLATION. site_config is NOT the accepted App-Insights-residual sink — that
+# narrow allowance is app_settings-only — so an AI connection string appearing in
+# site_config is flagged (classifier treats a non-"app_setting" kind as never
+# accepted), exactly like the output export surface.
+#
+# storage_access_key is handled DIFFERENTLY and deliberately (MG-24 red dd7ba9): a
+# raw Azure storage account key is an opaque base64 blob with NO lexical
+# credential marker (no "AccountKey=", no "sig=") — so the CRED_MARKER_RE classifier
+# that catches the endpoint/site_config leaks would MISS it and PASS (fail-open, the
+# exact hole dd7ba9 proved). Under the shipped MI model the deployment container
+# authenticates via storage_authentication_type=SystemAssignedIdentity and this
+# field MUST be absent; ANY non-empty value is a shared key persisted into state.
+# So we emit it under the DEDICATED kind "deploy_storage_key", which inspect_rows
+# rejects UNCONDITIONALLY (no marker test) — presence alone is the violation.
+# Same fail-closed discipline: a jq failure dies; an empty result (no flex resource
+# / null site_config / MI auth with no key) proceeds.
+flex_sink_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
+  .[]
+  | select(.type == "azurerm_function_app_flex_consumption")
+  | . as $r
+  | (
+      # Every string leaf anywhere under the site_config block.
+      ( ($r.values.site_config // empty) | [.. | strings] | .[]
+        | ["site_config", ($r.address + " :: site_config"), .] ),
+      # The deployment blob-container endpoint — must be a plain URL, no SAS.
+      ( ($r.values.storage_container_endpoint // empty)
+        | ["site_config", ($r.address + " :: storage_container_endpoint"), .] ),
+      # storage_access_key must be ABSENT under MI auth. A raw key has no lexical
+      # marker, so route it through the dedicated unconditionally-rejected kind
+      # rather than the marker classifier (which would let a bare base64 key pass).
+      ( ($r.values.storage_access_key // empty) | select(. != "")
+        | ["deploy_storage_key", ($r.address + " :: storage_access_key"), .] )
+    )
+  | @tsv
+' 2>/dev/null)" || die "cannot inspect: failed to collect Flex Consumption site_config / deployment-storage sink values from ${SRC}"
+flex_sink_rows="$(printf '%s\n' "${flex_sink_rows}" | sort -u)"
+
 # --- 4. Classify every collected VALUE --------------------------------------
 # CREDENTIAL markers that appear INSIDE a secret VALUE (right-hand side). These
 # are the standard Azure connection-string / SAS / key delimiters. A non-secret
@@ -391,6 +452,17 @@ inspect_rows() {
   while IFS="${TAB}" read -r kind path value; do
     [ -z "${kind}" ] && continue
 
+    # Flex Consumption deployment-storage account key (MG-24 red dd7ba9). This kind
+    # is emitted ONLY for a non-empty storage_access_key on the flex resource, whose
+    # deployment container must authenticate via SystemAssignedIdentity (no key). A
+    # raw storage key is an opaque base64 blob carrying NO credential marker, so the
+    # CRED_MARKER_RE test below would let it PASS (fail-open) — hence it is rejected
+    # UNCONDITIONALLY here on presence alone, before any marker classification.
+    if [ "${kind}" = "deploy_storage_key" ]; then
+      report "${kind}" "${path}" "raw deployment-storage account key VALUE on the Flex Consumption Function App — the deployment container must use storage_authentication_type=SystemAssignedIdentity (no shared key); a key persisted in state is a LIVE credential (MG-24: shared_access_key stays disabled)"
+      continue
+    fi
+
     # Bare instrumentation key (the AI resource's own ikey GUID) copied verbatim
     # into a sink. The ADR permits the ikey ONLY embedded in the full conn string
     # under local-auth-disabled; a bare ikey in a sink is prohibited regardless.
@@ -473,7 +545,7 @@ echo "tf-plan-secret-inspection: inspecting ${SRC} (App Insights resources: ${ai
 # survives. printf keeps empty sets harmless.
 rows_file="$(mktemp)"
 trap 'rm -f "${rows_file}"' EXIT
-{ printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${output_rows}"; } \
+{ printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${flex_sink_rows}"; printf '%s\n' "${output_rows}"; } \
   | grep -v '^[[:space:]]*$' > "${rows_file}" || true
 inspect_rows < "${rows_file}"
 

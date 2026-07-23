@@ -242,7 +242,8 @@ Cost-optimized:
 
 ```hcl
 environment = "dev"
-location    = "North Central US"
+location    = "West US 2"   # Flex-supported region (MG-24). NOTE: location fans out
+                            # to the whole stack — see the Flex ADR relocation caveat.
 
 iot_hub_sku_name     = "S1"   # S1 required for message routing (F1 cannot route)
 iot_hub_sku_capacity = 1
@@ -251,8 +252,12 @@ cosmos_database_throughput     = 400    # V2-owned account
 cosmos_database_max_throughput = 1000
 temperature_data_ttl_days      = 7
 
-functions_app_service_plan_sku = "Y1"   # Consumption plan
-signalr_sku_name               = "Free_F1"
+# Azure Functions: SINGLE Flex Consumption model (FC1) for both envs — the former
+# functions_app_service_plan_sku (Y1/EP1) is REMOVED (MG-24). Tuned by scale knobs:
+instance_memory_in_mb  = 2048
+maximum_instance_count = 100
+always_ready           = 0   # dev: scale-to-zero (~$0 idle). prod sets >= 1.
+signalr_sku_name = "Free_F1"
 ```
 
 ### Production (`environments/prod.tfvars`)

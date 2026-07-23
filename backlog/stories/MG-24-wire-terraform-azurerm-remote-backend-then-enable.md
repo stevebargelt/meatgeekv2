@@ -6,6 +6,25 @@ title: greenfield V2 infrastructure bootstrap — remote state/identity + create
 created: 2026-07-19
 ---
 
+## PAUSED 2026-07-23 — hosting model under revision (Flex Consumption evaluation)
+
+The live greenfield DEV apply is **PAUSED mid-run**. The apply created ~30 resources (RG, Log Analytics, App Insights, Cosmos account + `meatgeek` DB + 5 containers, IoT Hub + routes/endpoints/consumer groups, Event Hubs ns + hub, SignalR, Functions **service plan**) then **FAILED** on the Functions host storage account: `403 KeyBasedAuthenticationNotPermitted`. Root cause: the azurerm provider's post-create blob-data-plane readiness poll used shared-key auth against an account created with `shared_access_key_enabled=false`, because the provider block lacks `storage_use_azuread=true`. The Function App, its RBAC role assignments, and the monitoring module were NOT created. Remote dev state (`meatgeek-v2/dev.tfstate` in `tfstate-dev`) is intact; **no V1 resource was touched**. An **orphaned** Functions storage account (`mgv2dev13bd19e9f03d`) exists in Azure but not in Terraform state — import or delete it before resuming.
+
+### Hosting-model revision (operator-directed 2026-07-23) — BLOCKS resume
+The inherited **Y1-dev / EP1-prod** split is scaffold-default, justified only by generic "cost efficiency" / "better performance" comments; no MeatGeek requirement justifies different hosting models per environment. Before resuming the bootstrap:
+
+1. Evaluate **Flex Consumption** for BOTH dev and prod (one hosting architecture for both envs).
+2. Dev may use scale-to-zero / no always-ready capacity; prod may use always-ready instances + different memory/concurrency settings.
+3. Validate for the **target region** (dev = North Central US): Flex Consumption availability, Node 20 support, deployment tooling, Easy Auth, managed-identity host storage, networking, and Terraform azurerm provider support.
+4. Prefer the **Azure-Files-free managed-identity deployment model**.
+5. Do **NOT** enable storage shared-key access merely to preserve legacy Y1/EP1 assumptions. **This supersedes the earlier "keep keys as a documented exception" fallback for the Functions host storage** (the data-service local-auth posture below still applies to Cosmos/SignalR/Event Hubs/IoT Hub).
+6. Retain Elastic Premium ONLY if a specific documented requirement cannot be satisfied by Flex.
+7. Update the ADR, Terraform tests, runbook, secret gate, and cost expectations accordingly.
+
+**Deliverable before resume:** a Flex-vs-EP/Consumption feature comparison against points 1–4 plus any concrete blocker. The 10-step greenfield proof, the reconcile proof, and the MG-21/MG-23 follow-ons resume only AFTER the hosting model is settled and re-planned.
+
+---
+
 ## LIVE BOOTSTRAP UNBLOCKED — all operational-review corrective items shipped + re-reviewed (2026-07-22)
 
 The 9 blocking corrective items from the 2026-07-20 operational review are **RESOLVED on `main` (HEAD `95142ac`)**, verified item-by-item against the current tree. The live greenfield bootstrap may now proceed. **MG-24 stays OPEN** until the 10-step DEV proof below is completed with captured evidence.

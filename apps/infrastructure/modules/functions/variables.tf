@@ -15,10 +15,51 @@ variable "location" {
   type        = string
 }
 
-variable "functions_app_service_plan_sku" {
-  description = "SKU for the App Service Plan"
+# --- Flex Consumption scale knobs (MG-24) -----------------------------------
+# The former functions_app_service_plan_sku (Y1/EP1) is REMOVED: Flex uses a
+# fixed FC1 plan (set in main.tf) and is tuned by these knobs instead.
+
+variable "instance_memory_in_mb" {
+  description = "Per-instance memory (MB) for the Flex Consumption plan. Allowed Flex tiers: 512, 2048, 4096."
+  type        = number
+  default     = 2048
+  validation {
+    condition     = contains([512, 2048, 4096], var.instance_memory_in_mb)
+    error_message = "instance_memory_in_mb must be one of the Flex-supported tiers: 512, 2048, or 4096."
+  }
+}
+
+variable "maximum_instance_count" {
+  description = "Maximum number of instances the Flex Consumption app may scale out to (horizontal ceiling / cost bound)."
+  type        = number
+  default     = 100
+  validation {
+    condition     = var.maximum_instance_count >= 1 && var.maximum_instance_count <= 1000
+    error_message = "maximum_instance_count must be between 1 and 1000."
+  }
+}
+
+variable "always_ready" {
+  description = "Number of always-ready (pre-warmed) HTTP instances. 0 (dev) => scale-to-zero, ~$0 idle. >=1 (prod) => a warm baseline so the first post-idle request is not cold."
+  type        = number
+  default     = 0
+  validation {
+    condition     = var.always_ready >= 0
+    error_message = "always_ready must be non-negative (0 = scale-to-zero)."
+  }
+}
+
+# App-deployment identity → deployment-container Blob Data write (MG-24 item 4).
+# The SERVICE PRINCIPAL OBJECT ID of the SEPARATE app-deploy identity that Flex
+# OneDeploy (`func publish` / `nx deploy api`) runs as. Flex writes the package
+# ZIP to the blob deployment container, so this principal is granted Storage Blob
+# Data Contributor scoped to that container alone (main.tf). Empty (default)
+# skips the grant and still validates; set it (bootstrap-emitted object id) for
+# any environment you deploy code to.
+variable "app_deploy_principal_object_id" {
+  description = "Service principal OBJECT ID of the app-deployment identity. When non-empty, this module grants it Storage Blob Data Contributor scoped to the Flex deployment container alone so `func publish`/OneDeploy can write the package ZIP. Empty (default) skips the grant and still validates."
   type        = string
-  default     = "Y1"
+  default     = ""
 }
 
 variable "storage_account_name" {
