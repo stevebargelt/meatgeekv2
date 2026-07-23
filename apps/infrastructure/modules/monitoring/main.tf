@@ -130,14 +130,10 @@ resource "azurerm_monitor_diagnostic_setting" "signalr" {
   target_resource_id         = var.signalr_id
   log_analytics_workspace_id = var.log_analytics_workspace_id
 
+  # Free_F1 SignalR exposes only the `allLogs` category GROUP — no individual
+  # ConnectivityLogs/MessagingLogs/HttpRequestLogs categories on this tier.
   enabled_log {
-    category = "ConnectivityLogs"
-  }
-  enabled_log {
-    category = "MessagingLogs"
-  }
-  enabled_log {
-    category = "HttpRequestLogs"
+    category_group = "allLogs"
   }
 
   enabled_metric {
@@ -154,24 +150,18 @@ resource "azurerm_monitor_diagnostic_setting" "signalr" {
 resource "azurerm_monitor_metric_alert" "function_failure_rate" {
   name                = "${var.resource_prefix}-function-failure-rate"
   resource_group_name = var.resource_group_name
-  scopes              = [var.function_app_id]
-  description         = "Function execution failures > 5 over a 5m window"
+  scopes              = [var.application_insights_id]
+  description         = "App Insights failed requests > 5 over a 5m window (Flex Function App has no platform failure metric; failures are detected via telemetry)"
   severity            = 2
   frequency           = "PT1M"
   window_size         = "PT5M"
 
   criteria {
-    metric_namespace = "Microsoft.Web/sites"
-    metric_name      = "FunctionExecutionCount"
-    aggregation      = "Total"
+    metric_namespace = "microsoft.insights/components"
+    metric_name      = "requests/failed"
+    aggregation      = "Count"
     operator         = "GreaterThan"
     threshold        = 5
-
-    dimension {
-      name     = "Status"
-      operator = "Include"
-      values   = ["Failed"]
-    }
   }
 
   action {
