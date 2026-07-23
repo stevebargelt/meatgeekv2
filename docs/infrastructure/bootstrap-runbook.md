@@ -503,8 +503,11 @@ prohibited credential VALUE reached a Function App `app_setting` or an output
 (connection string / SAS / account|access|primary key / a bare instrumentation
 key). It also inspects the **inherent computed key attributes** of the data
 services and accepts a residual only when auth cannot use it: the full AI
-connection string in an `app_setting` **only** when
-`azurerm_application_insights` sets `local_authentication_enabled = false`; the
+connection string in a Function App telemetry sink — its `app_settings` map or
+its Flex `site_config` block (the AI string is wired via the native
+`site_config.application_insights_connection_string` field, not an app setting) —
+**only** when `azurerm_application_insights` sets
+`local_authentication_enabled = false`; the
 inherent key of a Cosmos / SignalR / Event Hubs namespace resource
 **only** when that resource disables local/key auth
 (`local_authentication_enabled = false` / `local_auth_enabled = false` /
@@ -841,7 +844,11 @@ Contributor` on the prod Flex `deployment-package` container (via the guarded
   therefore moot — there are no such runtime secrets to route. Application
   Insights is wired via the **full**
   TF-managed connection string (InstrumentationKey included — Microsoft requires
-  it as the destination-resource identifier even under Entra), but the embedded
+  it as the destination-resource identifier even under Entra) in the Flex
+  resource's native `site_config.application_insights_connection_string` field
+  (not an app setting; Azure surfaces it to the host unchanged as the
+  `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env var, so `apps/api` telemetry
+  is unaffected), but the embedded
   ikey **cannot authenticate**: `local_authentication_enabled = false` on the
   App Insights resource forces AAD-only ingestion (`Monitoring Metrics
 Publisher` + `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`).

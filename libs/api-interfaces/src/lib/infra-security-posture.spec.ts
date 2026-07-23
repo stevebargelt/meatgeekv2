@@ -194,24 +194,43 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       expect(live).not.toMatch(/SIGNALR_CONNECTION_STRING/);
     });
 
-    it('App Insights ingestion is AAD identity-based — full conn string from the module var, no hardcoded ikey', () => {
+    it('does NOT set FUNCTIONS_WORKER_RUNTIME (or other Flex-forbidden classic settings) — runtime is runtime_name/runtime_version', () => {
+      // MG-24 apply defect: a Flex Consumption site REJECTS FUNCTIONS_WORKER_RUNTIME
+      // as an app setting (400 BadRequest ExtendedCode 51021). The worker runtime is
+      // declared via the resource's runtime_name/runtime_version fields, not a
+      // classic-Functions app setting. Guard the leftover cannot creep back.
+      expect(live).not.toMatch(/FUNCTIONS_WORKER_RUNTIME/);
+      expect(live).not.toMatch(/FUNCTIONS_EXTENSION_VERSION/);
+      expect(live).not.toMatch(/AzureWebJobsStorage/);
+      // The runtime is declared the Flex-native way.
+      expect(live).toMatch(/runtime_name\s*=\s*"node"/);
+      expect(live).toMatch(/runtime_version\s*=\s*"24"/);
+    });
+
+    it('App Insights ingestion is AAD identity-based — full conn string via the native site_config field, no hardcoded ikey', () => {
       // Host authenticates telemetry with an AAD token, not an ingestion key.
       expect(live).toMatch(/APPLICATIONINSIGHTS_AUTHENTICATION_STRING"\s*=\s*"Authorization=AAD"/);
-      // MG-24 item 2 CORRECTION: the FULL TF-managed connection string
-      // (InstrumentationKey included — Microsoft's required destination-resource
-      // identifier) is placed in app_settings via the module var. That is the
-      // corrected model; it is safe ONLY because local_authentication_enabled=false
-      // on the AI resource (asserted in the root main.tf test below and enforced
-      // by the tf-static-checks / tf-plan-secret-inspection gate).
+      // MG-24 item 2 + second-plan no-op fix: the FULL TF-managed connection
+      // string (InstrumentationKey included — Microsoft's required
+      // destination-resource identifier) is wired via the Flex resource's NATIVE
+      // site_config.application_insights_connection_string field, NOT an
+      // app_setting. The Flex provider reflects the conn string into that native
+      // field, so binding it as an app_setting produced a perpetual second-plan
+      // diff; the native field is what makes the app plan as a no-op. It is safe
+      // ONLY because local_authentication_enabled=false on the AI resource
+      // (asserted below) and is enforced on this site_config field by the
+      // tf-plan-secret-inspection gate.
       expect(live).toMatch(
-        /APPLICATIONINSIGHTS_CONNECTION_STRING"\s*=\s*var\.application_insights_connection_string/
+        /application_insights_connection_string\s*=\s*var\.application_insights_connection_string/
       );
+      // It must NOT be duplicated back into app_settings (the exact drift removed).
+      expect(live).not.toMatch(/"APPLICATIONINSIGHTS_CONNECTION_STRING"\s*=/);
       // The value flows from the module VAR — never a hardcoded literal
       // InstrumentationKey= / ikey nor any OTHER service's secret attribute.
       expect(live).not.toMatch(/InstrumentationKey=/);
       expect(live).not.toMatch(/\.instrumentation_key/i);
-      // No secret Terraform attribute of ANOTHER service is copied into
-      // app_settings (only the accepted AI conn-string var is permitted).
+      // No secret Terraform attribute of ANOTHER service is copied into a sink
+      // (only the accepted AI conn-string var is permitted).
       expect(live).not.toMatch(/\.connection_string/);
       expect(live).not.toMatch(/COSMOSDB__accountKey|AccountKey=|SharedAccessKey=/);
     });
@@ -994,5 +1013,127 @@ describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DIS
     // The two azapi-account cases are present in the run.
     expect(out).toMatch(/flex-plan-accepted\.json: exit 0 as expected/);
     expect(out).toMatch(/flex-plan-reenabled-shared-key\.json: nonzero \(\d+\) as expected/);
+    // The new site_config AI-residual cases are present too (positive + negatives).
+    expect(out).toMatch(
+      /flex-plan-siteconfig-localauth-enabled\.json: nonzero \(\d+\) as expected/
+    );
+    expect(out).toMatch(/flex-plan-siteconfig-noncred\.json: nonzero \(\d+\) as expected/);
+  });
+});
+
+describe('MG-24 second-plan no-op: the gate accepts the App Insights conn string in the Flex site_config (native field) under the same coupling', () => {
+  // MG-24 item 1 moved the App Insights connection string from a Function App
+  // app_setting to the Flex resource's NATIVE
+  // site_config.application_insights_connection_string field (so the app plans as
+  // a no-op — the Flex provider reflects the conn string into that native field).
+  // The fail-closed gate (item 4) now accepts the AI conn string in site_config
+  // under the SAME coupled invariant it uses for app_settings — and still hard-
+  // fails a foreign ikey, a non-AI credential, or local auth ENABLED.
+  const INSPECT = path.join(INFRA, 'scripts', 'tf-plan-secret-inspection.sh');
+  const FIXTURES = path.join(INFRA, 'scripts', 'fixtures');
+  const fixture = (name: string): string => path.join(FIXTURES, name);
+
+  function run(shell: string, args: string[]): { code: number; out: string } {
+    try {
+      const out = execFileSync(shell, args, { encoding: 'utf8' });
+      return { code: 0, out };
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+    }
+  }
+
+  it('ACCEPTS (exit 0) the managed AI conn string in site_config under local-auth-disabled', () => {
+    const { code, out } = run('bash', [INSPECT, fixture('flex-plan-accepted.json')]);
+    expect(code).toBe(0);
+    // Positively accepted (not merely un-flagged), and specifically on the
+    // site_config path — the app_settings sink no longer carries the conn string.
+    expect(out).toMatch(/accepted App Insights residual/);
+    expect(out).toMatch(/site_config/);
+    expect(out).toMatch(/PASS — no prohibited credential VALUE/);
+  });
+
+  it('the accepted fixture is the real post-apply shape: AI conn string in site_config, NOT app_settings', () => {
+    const doc = fs.readFileSync(fixture('flex-plan-accepted.json'), 'utf8');
+    const flex = JSON.parse(doc).planned_values.root_module.child_modules[0].resources.find(
+      (r: { type: string }) => r.type === 'azurerm_function_app_flex_consumption'
+    );
+    expect(flex.values.site_config[0].application_insights_connection_string).toMatch(
+      /InstrumentationKey=.*IngestionEndpoint=/
+    );
+    expect(Object.keys(flex.values.app_settings)).not.toContain(
+      'APPLICATIONINSIGHTS_CONNECTION_STRING'
+    );
+  });
+
+  it('FAILS CLOSED on the managed AI conn string in site_config when local auth is ENABLED (coupled invariant)', () => {
+    const { code, out } = run('bash', [
+      INSPECT,
+      fixture('flex-plan-siteconfig-localauth-enabled.json'),
+    ]);
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/in site_config WITHOUT local_authentication_enabled=false/);
+  });
+
+  it('FAILS CLOSED on a NON-AI connection string (AccountKey) planted in site_config', () => {
+    const { code, out } = run('bash', [INSPECT, fixture('flex-plan-siteconfig-noncred.json')]);
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/prohibited credential VALUE/);
+  });
+
+  it('FAILS CLOSED on a FOREIGN-ikey lookalike AI conn string in site_config', () => {
+    const { code, out } = run('bash', [INSPECT, fixture('flex-plan-siteconfig-key.json')]);
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/is NOT one of the plan\/state's managed azurerm_application_insights/);
+  });
+
+  it('all four site_config cases behave identically under dash (`sh`) — no fail-open', () => {
+    expect(run('sh', [INSPECT, fixture('flex-plan-accepted.json')]).code).toBe(0);
+    expect(
+      run('sh', [INSPECT, fixture('flex-plan-siteconfig-localauth-enabled.json')]).code
+    ).not.toBe(0);
+    expect(run('sh', [INSPECT, fixture('flex-plan-siteconfig-noncred.json')]).code).not.toBe(0);
+    const foreign = run('sh', [INSPECT, fixture('flex-plan-siteconfig-key.json')]);
+    expect(foreign.code).not.toBe(0);
+    expect(foreign.out).not.toMatch(/bad substitution/i);
+  });
+});
+
+describe('MG-24 second-plan no-op: Cosmos indexing + budget window are reconciled to Azure canonical form', () => {
+  it('no Cosmos container declares the /"_etag"/? excluded_path (Azure returns none — it forced a perpetual diff)', () => {
+    const cosmos = stripComments(read('modules/cosmos-db/main.tf'));
+    // The _etag system exclusion is not persisted by Azure, so declaring it made
+    // every plan re-add it. It must be absent from the config now.
+    expect(cosmos).not.toMatch(/excluded_path/);
+    expect(cosmos).not.toMatch(/_etag/);
+  });
+
+  it('Cosmos diag setting uses concrete metric categories Requests+SLI (Azure expands AllMetrics, forcing a perpetual diff)', () => {
+    const mon = stripComments(read('modules/monitoring/main.tf'));
+    // Isolate the cosmos_db diagnostic-setting resource block so this assertion
+    // does not pick up the AllMetrics blocks on the other (cleanly round-tripping)
+    // diag settings (signalr/iot_hub/function_app).
+    const block = mon.match(
+      /resource\s+"azurerm_monitor_diagnostic_setting"\s+"cosmos_db"\s*\{[\s\S]*?\n\}/
+    )?.[0];
+    expect(block).toBeDefined();
+    // Azure expands AllMetrics for a Cosmos account into Requests + SLI and reports
+    // those back, so ["AllMetrics"] never matches and updates in-place every plan.
+    expect(block).toMatch(/enabled_metric\s*\{\s*category\s*=\s*"Requests"\s*\}/);
+    expect(block).toMatch(/enabled_metric\s*\{\s*category\s*=\s*"SLI"\s*\}/);
+    // NEGATIVE — the AllMetrics pseudo-category (the cause of the drift) is gone.
+    expect(block).not.toMatch(/enabled_metric\s*\{\s*category\s*=\s*"AllMetrics"\s*\}/);
+  });
+
+  it('both consumption budgets set an EXPLICIT end_date (Azure defaults it, forcing a replace when omitted)', () => {
+    const mon = stripComments(read('modules/monitoring/main.tf'));
+    // A time_period that omits end_date lets Azure default it to start+10y and
+    // then a replace (delete+create) fires every plan. Assert an explicit end_date.
+    const endDates = (mon.match(/end_date\s*=/g) ?? []).length;
+    expect(endDates).toBeGreaterThanOrEqual(2); // RG budget + subscription budget
+    // The end_date is derived deterministically from the persisted time_static
+    // anchor (+10y), NOT wall-clock — no timestamp() drift may reappear.
+    expect(mon).toMatch(/budget_end_date\s*=/);
+    expect(mon).not.toMatch(/timestamp\(/);
   });
 });

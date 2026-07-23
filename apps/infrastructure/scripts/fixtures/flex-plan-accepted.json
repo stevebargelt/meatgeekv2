@@ -49,16 +49,15 @@
                 "storage_container_type": "blobContainer",
                 "storage_container_endpoint": "https://mgv2funcabc123def456.blob.core.windows.net/deployment-package",
                 "app_settings": {
-                  "FUNCTIONS_WORKER_RUNTIME": "node",
                   "APPLICATIONINSIGHTS_AUTHENTICATION_STRING": "Authorization=AAD",
-                  "APPLICATIONINSIGHTS_CONNECTION_STRING": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/",
+                  "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE": "50",
                   "COSMOSDB__accountEndpoint": "https://mgv2-cosmos.documents.azure.com:443/",
                   "IOTHUB_EVENTS__fullyQualifiedNamespace": "mgv2-eventhub-ns.servicebus.windows.net",
                   "AzureSignalRConnectionString__serviceUri": "https://mgv2-signalr.service.signalr.net"
                 },
                 "site_config": [
                   {
-                    "application_insights_connection_string": null,
+                    "application_insights_connection_string": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/",
                     "application_insights_key": null,
                     "cors": [
                       {

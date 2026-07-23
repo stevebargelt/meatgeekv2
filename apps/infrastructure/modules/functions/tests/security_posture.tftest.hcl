@@ -98,16 +98,25 @@ run "deployment_storage_is_managed_identity_only" {
   }
 }
 
-# item 2 — the FULL App Insights connection string (InstrumentationKey included)
-# is wired verbatim as APPLICATIONINSIGHTS_CONNECTION_STRING (NOT an
-# endpoint-only literal), alongside Authorization=AAD. The ikey is a
-# non-credential because the root sets local_authentication_enabled=false on the
-# AI resource (that coupling is enforced by the pre-apply inspection gate).
+# item 2 (+ MG-24 second-plan no-op fix) — the FULL App Insights connection string
+# (InstrumentationKey included) is wired verbatim via the Flex resource's NATIVE
+# site_config.application_insights_connection_string field (NOT an app_setting):
+# the Flex provider reflects APPLICATIONINSIGHTS_CONNECTION_STRING into that native
+# field, so setting it as an app_setting produced a perpetual second-plan diff.
+# Authorization=AAD stays a plain app_setting. The ikey is a non-credential because
+# the root sets local_authentication_enabled=false on the AI resource (that coupling
+# is enforced by the pre-apply inspection gate, on the site_config field now).
 run "appinsights_full_connection_string_aad" {
   command = plan
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.app_settings["APPLICATIONINSIGHTS_CONNECTION_STRING"] == var.application_insights_connection_string
-    error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must be the full TF-managed connection string, not an endpoint-only literal"
+    condition     = azurerm_function_app_flex_consumption.main.site_config[0].application_insights_connection_string == var.application_insights_connection_string
+    error_message = "site_config.application_insights_connection_string must be the full TF-managed connection string (native Flex field, not an app_setting — the second-plan no-op fix)"
+  }
+  # The AI conn string must NOT be duplicated back into app_settings (that is the
+  # exact drift the native-field wiring removes).
+  assert {
+    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_CONNECTION_STRING")
+    error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must NOT be an app_setting — it is wired via the native site_config field (second-plan no-op fix)"
   }
   assert {
     condition     = azurerm_function_app_flex_consumption.main.app_settings["APPLICATIONINSIGHTS_AUTHENTICATION_STRING"] == "Authorization=AAD"

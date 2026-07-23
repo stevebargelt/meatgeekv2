@@ -117,12 +117,30 @@ run "prod_always_ready_honours_requested_count" {
   }
 }
 
-# --- Flex-deprecated app settings PRUNED -------------------------------------
+# --- Flex-FORBIDDEN app settings PRUNED --------------------------------------
 # Flex manages the runtime version and the package mount itself; the classic
-# Consumption/Elastic app settings are deprecated and must NOT be set. Assert the
-# concrete keys named in the brief are absent from app_settings.
+# Consumption/Elastic app settings are deprecated-or-rejected and must NOT be set.
+# Assert the concrete keys named in the brief are absent from app_settings.
+#
+# FUNCTIONS_WORKER_RUNTIME is the load-bearing one (MG-24 apply defect): a Flex
+# site REJECTS it with 400 BadRequest ExtendedCode 51021, failing the create —
+# the worker runtime is declared via runtime_name/runtime_version, asserted below.
 run "flex_deprecated_app_settings_are_pruned" {
   command = plan
+  # The apply-breaking key: FUNCTIONS_WORKER_RUNTIME must NOT be an app setting.
+  assert {
+    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "FUNCTIONS_WORKER_RUNTIME")
+    error_message = "FUNCTIONS_WORKER_RUNTIME is REJECTED on Flex (400 BadRequest 51021) — the runtime is runtime_name/runtime_version, not an app setting"
+  }
+  assert {
+    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "FUNCTIONS_EXTENSION_VERSION")
+    error_message = "FUNCTIONS_EXTENSION_VERSION is Flex-managed — must not be in app_settings"
+  }
+  # No classic host-storage setting (Flex configures host storage itself).
+  assert {
+    condition     = length([for k in keys(azurerm_function_app_flex_consumption.main.app_settings) : k if startswith(k, "AzureWebJobsStorage")]) == 0
+    error_message = "No AzureWebJobsStorage* setting may be present on Flex — host storage is Flex-managed (and would carry a key)"
+  }
   assert {
     condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "WEBSITE_NODE_DEFAULT_VERSION")
     error_message = "WEBSITE_NODE_DEFAULT_VERSION is Flex-deprecated (Flex sets runtime_version) — must not be in app_settings"
@@ -147,6 +165,38 @@ run "flex_deprecated_app_settings_are_pruned" {
   assert {
     condition     = azurerm_function_app_flex_consumption.main.runtime_name == "node" && azurerm_function_app_flex_consumption.main.runtime_version == "24"
     error_message = "Flex runtime must be declared node/24 via runtime_name/runtime_version (not a WEBSITE_* app setting)"
+  }
+  # Positive control: pruning the Flex-FORBIDDEN keys must NOT strip the four
+  # identity-based (non-secret endpoint) settings the host needs — an over-eager
+  # "prune everything" edit would silently break Cosmos/IoT/SignalR/App Insights
+  # wiring. Assert each REMAINS present in app_settings.
+  # The AAD App Insights auth setting REMAINS in app_settings. The connection
+  # string itself is NOT an app_setting — it is wired via the native
+  # site_config.application_insights_connection_string field (second-plan no-op
+  # fix), so assert it is present there and absent from app_settings.
+  assert {
+    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_AUTHENTICATION_STRING")
+    error_message = "the AAD-identity App Insights auth setting (APPLICATIONINSIGHTS_AUTHENTICATION_STRING) must REMAIN after pruning the Flex-forbidden keys"
+  }
+  assert {
+    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_CONNECTION_STRING")
+    error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must NOT be an app_setting — it is wired via the native site_config field (second-plan no-op fix)"
+  }
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.site_config[0].application_insights_connection_string == var.application_insights_connection_string
+    error_message = "the App Insights connection string must be wired via the native site_config.application_insights_connection_string field"
+  }
+  assert {
+    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "COSMOSDB__accountEndpoint")
+    error_message = "the identity-based COSMOSDB__accountEndpoint setting must REMAIN after pruning the Flex-forbidden keys"
+  }
+  assert {
+    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "IOTHUB_EVENTS__fullyQualifiedNamespace")
+    error_message = "the identity-based IOTHUB_EVENTS__fullyQualifiedNamespace setting must REMAIN after pruning the Flex-forbidden keys"
+  }
+  assert {
+    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "AzureSignalRConnectionString__serviceUri")
+    error_message = "the identity-based AzureSignalRConnectionString__serviceUri setting must REMAIN after pruning the Flex-forbidden keys"
   }
 }
 

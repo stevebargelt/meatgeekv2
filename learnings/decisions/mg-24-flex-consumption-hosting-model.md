@@ -76,11 +76,15 @@ The Flex resource is configured with:
   empty, so an unconfigured-auth Function App can never plan.
 - The **`function_app_name` output** remains the **single source of truth**
   carrying the global-uniqueness suffix that the deploy path reads.
-- **Identity-based `app_settings` only** — App Insights (full connection string
-  + `Authorization=AAD`), Cosmos endpoint, Event Hub namespace, SignalR
-  serviceUri — no connection-string/key VALUES. Flex-deprecated settings
-  (`WEBSITE_NODE_DEFAULT_VERSION`, `WEBSITE_CONTENT*`, `WEBSITE_TIME_ZONE`) are
-  pruned.
+- **Identity-based `app_settings` only** — App Insights `Authorization=AAD`
+  (the full connection string is wired via the native
+  `site_config.application_insights_connection_string` field, **not** an app
+  setting, to avoid a perpetual second-plan diff — Azure reflects it into that
+  computed field and surfaces it to the host unchanged as the
+  `APPLICATIONINSIGHTS_CONNECTION_STRING` env var), Cosmos endpoint, Event Hub
+  namespace, SignalR serviceUri — no connection-string/key VALUES.
+  Flex-deprecated settings (`WEBSITE_NODE_DEFAULT_VERSION`, `WEBSITE_CONTENT*`,
+  `WEBSITE_TIME_ZONE`) are pruned.
 - **Scale knobs** exposed as variables: `instance_memory_in_mb`,
   `maximum_instance_count`, `always_ready` — **dev `always_ready = 0`**
   (scale-to-zero), **prod `always_ready >= 1`** with per-instance memory /

@@ -279,7 +279,7 @@ narrowly-scoped data-plane RBAC by the root module:
 | Cosmos DB     | `COSMOSDB__accountEndpoint`                                                                                                                                                                                                                                                                                                                                                                                         | Cosmos DB Built-in Data Contributor       |
 | IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`                                                                                                                                                                                                                                                                                                                                                                            | Azure Event Hubs Data Receiver            |
 | SignalR       | `AzureSignalRConnectionString__serviceUri`                                                                                                                                                                                                                                                                                                                                                                          | SignalR Service Owner                     |
-| App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` (the FULL TF-managed connection string, `InstrumentationKey=…;IngestionEndpoint=…` — Microsoft requires the ikey as the destination-resource identifier even under Entra) + `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`. The ikey **cannot authenticate**: `local_authentication_enabled = false` on the App Insights resource forces AAD-only ingestion. | Monitoring Metrics Publisher              |
+| App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` — the FULL TF-managed connection string (`InstrumentationKey=…;IngestionEndpoint=…` — Microsoft requires the ikey as the destination-resource identifier even under Entra) wired via the **native** `site_config.application_insights_connection_string` field, **not** an app setting (Azure surfaces it to the host unchanged as this env var); plus the `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD` app setting. The ikey **cannot authenticate**: `local_authentication_enabled = false` on the App Insights resource forces AAD-only ingestion. | Monitoring Metrics Publisher              |
 
 The IoT Hub's own system-assigned identity likewise writes to Cosmos (Built-in
 Data Contributor) and sends to the Event Hubs routing endpoint (Azure Event Hubs
@@ -303,15 +303,19 @@ Two layers, with clearly different strengths:
 2. **`scripts/tf-plan-secret-inspection.sh` — the AUTHORITATIVE, FAIL-CLOSED,
    REQUIRED pre-apply gate.** It parses `terraform show -json`, walks every
    resource across the root and all child modules plus every root output, and
-   inspects the actual sensitive **VALUES** (distinguishing setting NAMES from
-   VALUES — the app-setting key `APPLICATIONINSIGHTS_CONNECTION_STRING` is never
-   itself a finding; only the string bound to it is). It **rejects** every
+   inspects the actual sensitive **VALUES** (distinguishing field NAMES from
+   VALUES — the field key `APPLICATIONINSIGHTS_CONNECTION_STRING` / the
+   `site_config.application_insights_connection_string` field it is now wired
+   through is never itself a finding; only the string bound to it is). It
+   **rejects** every
    credential VALUE (connection string / SAS / account|access|primary key / a
    bare instrumentation key) reaching `app_settings` or outputs, and additionally
    inspects the **inherent computed key attributes** of the data-service
    resources themselves. It accepts a residual **only** when auth cannot use it:
-   - the full App Insights connection string in a Function App `app_setting`,
-     **only** when the plan's `azurerm_application_insights` sets
+   - the full App Insights connection string in a Function App telemetry sink —
+     its `app_settings` map or its Flex `site_config` block (it is wired via the
+     native `site_config.application_insights_connection_string` field, not an
+     app setting) — **only** when the plan's `azurerm_application_insights` sets
      `local_authentication_enabled = false` (the coupled invariant);
    - the inherent in-state key of an `azurerm_cosmosdb_account` /
      `azurerm_signalr_service` / `azurerm_storage_account` /
@@ -401,17 +405,22 @@ terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
   AAD-authenticated:** the Function App authenticates via its managed identity —
   `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a
   `Monitoring Metrics Publisher` role assignment on the App Insights resource.
-  The **full** TF-managed `APPLICATIONINSIGHTS_CONNECTION_STRING` (with the
-  `InstrumentationKey`) is placed in app settings **because Microsoft requires
+  The **full** TF-managed App Insights connection string (with the
+  `InstrumentationKey`) is wired via the native
+  `site_config.application_insights_connection_string` field — **not** an app
+  setting (moved there to kill a perpetual second-plan diff; Azure surfaces it to
+  the host unchanged as the `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env
+  var, so `apps/api` telemetry is unaffected) — **because Microsoft requires
   the connection string as the destination-resource identifier even under
   Entra** — but the embedded ikey **cannot authenticate**: the App Insights
   resource sets `local_authentication_enabled = false`, which forces AAD-only
   ingestion and disables ikey/local auth. The connection string / instrumentation
-  key is therefore present in app settings and (as a computed attribute of
+  key is therefore present in that `site_config` field and (as a computed attribute of
   `azurerm_application_insights.main`) in Terraform state, but it is a
   **present-but-non-authenticating** residual: **safe ONLY while local auth is
   disabled**. That coupled invariant is machine-enforced — `tf-static-checks.sh`
-  check 9 rejects the full conn string in `app_settings` unless
+  check 9 rejects the full conn string reaching the Function module (now the
+  `site_config` field) unless
   `local_authentication_enabled = false`, and the fail-closed
   `scripts/tf-plan-secret-inspection.sh` gate enforces the same over the real
   plan. See

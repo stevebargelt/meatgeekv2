@@ -55,7 +55,7 @@
                 },
                 "site_config": [
                   {
-                    "application_insights_connection_string": "InstrumentationKey=99999999-9999-9999-9999-999999999999;IngestionEndpoint=https://evil.example.com/",
+                    "application_insights_connection_string": "DefaultEndpointsProtocol=https;AccountName=mgv2leak;AccountKey=Zm9yYmlkZGVuU2VjcmV0S2V5VmFsdWU9PQ==;EndpointSuffix=core.windows.net",
                     "application_insights_key": null,
                     "cors": [
                       {
