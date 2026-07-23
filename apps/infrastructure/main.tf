@@ -29,6 +29,18 @@ provider "azurerm" {
   # which lets the provider fall back to the ambient Azure CLI / env context).
   subscription_id = var.subscription_id
 
+  # NOTE (MG-24): storage_use_azuread is intentionally NOT set. The functions
+  # storage account keeps shared_access_key_enabled=false, but nothing in this
+  # stack performs a storage DATA-PLANE operation through the azurerm provider —
+  # the one place that used to (the Flex deployment blob container) is now created
+  # by azapi over the ARM CONTROL PLANE (modules/functions/main.tf). Dropping the
+  # provider-global storage_use_azuread switch removes the same-apply chicken-and-
+  # egg it created (it would have required the apply principal to hold a Storage
+  # Blob Data role on an account THIS apply creates, before the account exists) and
+  # avoids the provider-wide data-plane side effects the architect flagged. The
+  # Function App still reads its package over its OWN managed identity at runtime
+  # (that is the app's identity, not the Terraform provider's). See the MG-24 ADR.
+
   features {
     resource_group {
       prevent_deletion_if_contains_resources = false
@@ -228,8 +240,20 @@ module "azure_functions" {
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
 
-  functions_app_service_plan_sku = var.functions_app_service_plan_sku
-  storage_account_name           = local.functions_storage_account_name
+  storage_account_name = local.functions_storage_account_name
+
+  # Flex Consumption scale knobs (per-env via tfvars). dev sets always_ready=0
+  # (scale-to-zero); prod sets always_ready>=1 (warm baseline).
+  instance_memory_in_mb  = var.instance_memory_in_mb
+  maximum_instance_count = var.maximum_instance_count
+  always_ready           = var.always_ready
+
+  # App-deploy principal → Flex deployment-container Blob Data write (MG-24
+  # item 4). The module grants Storage Blob Data Contributor scoped to the
+  # deployment container alone so `func publish`/OneDeploy can write the package
+  # ZIP; the root additionally grants Website Contributor on the Function App
+  # (functions_app_deploy_publisher, below). Both count/var-guarded — empty skips.
+  app_deploy_principal_object_id = var.app_deploy_principal_object_id
 
   # App Insights telemetry wiring — identity-based (AAD). The FULL TF-managed
   # connection string (InstrumentationKey included, per Microsoft's requirement)

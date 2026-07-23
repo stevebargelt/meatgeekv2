@@ -66,6 +66,18 @@ resource "azurerm_cosmosdb_account" "main" {
   }
 
   tags = var.tags
+
+  # FORCE-NEW / DATA-LOSS NOTE (MG-24). `location` is ForceNew on a Cosmos
+  # account: the MG-24 hosting revision sets location = "West US 2", so on an
+  # ALREADY-POPULATED environment a region change would destroy+recreate this
+  # account and DROP its stored data (temperature history, cooks, sessions).
+  #
+  # No `prevent_destroy` guard is set here on purpose. V2 is GREENFIELD — there is
+  # no data to protect yet, and prevent_destroy is a LITERAL (Terraform cannot
+  # env-gate it), so it would be ON for dev and BLOCK the intended greenfield
+  # West US 2 recreate that MG-24 requires. Real prod data-loss protection
+  # (prod-specific prevent_destroy / backup policy / approval gate for Cosmos AND
+  # IoT Hub) is deferred to follow-up ticket MG-35 (MG-25 prod-hardening scope).
 }
 
 # Create environment-specific database within the V2-owned account

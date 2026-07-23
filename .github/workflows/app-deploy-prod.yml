@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: '24'
   # Let corepack download the packageManager-pinned npm without an interactive prompt.
   COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
   FUNC_CORE_TOOLS_VERSION: '4.12.1'

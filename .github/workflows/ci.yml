@@ -7,7 +7,7 @@ on:
     branches: [main, develop]
 
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: '24'
   GO_VERSION: '1.21'
   # Let corepack download the packageManager-pinned npm without an interactive prompt.
   COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'

@@ -343,7 +343,7 @@ posture is not "no keys in state," it is **keys that cannot authenticate**:
 local/key auth is **disabled** on the services where doing so is safe —
 `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
 on SignalR, `shared_access_key_enabled = false` on the Functions storage account
-(host storage is `storage_uses_managed_identity`), and
+(Flex deployment storage is `storage_authentication_type = "SystemAssignedIdentity"`), and
 `local_authentication_enabled = false` on the Event Hubs namespace (both its
 producer — the identity-based IoT Hub routing endpoint — and its consumer — the
 Function App via *Azure Event Hubs Data Receiver* — are AAD, so the RootManage key
@@ -371,7 +371,9 @@ These are exactly the settings Terraform configures on the Function App:
 ```bash
 # Runtime
 FUNCTIONS_WORKER_RUNTIME=node
-WEBSITE_NODE_DEFAULT_VERSION=~20
+# Node 24 is declared natively on the Flex resource (runtime_name = "node",
+# runtime_version = "24") — NOT via WEBSITE_NODE_DEFAULT_VERSION, which is
+# Flex-deprecated and intentionally not set (MG-24).
 
 # Application Insights — identity-based (AAD) telemetry ingestion. The managed
 # identity holds "Monitoring Metrics Publisher" on the App Insights resource and
@@ -403,8 +405,9 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > The `__accountEndpoint` / `__fullyQualifiedNamespace` / `__serviceUri` suffixes
 > are the Functions host's convention for identity-based bindings: the host
 > resolves each service using the app's managed identity against the non-secret
-> endpoint, so **no service key is written to app settings**. Host storage is
-> likewise identity-based (`storage_uses_managed_identity`), so no storage account
+> endpoint, so **no service key is written to app settings**. The Flex deployment
+> storage is likewise identity-based (`storage_authentication_type =
+> "SystemAssignedIdentity"`), so no storage account
 > key reaches app settings either. (The services' inherent keys still exist as
 > computed attributes in Terraform state, made non-authenticating by disabling
 > local/key auth — IoT Hub excepted — as described above.)

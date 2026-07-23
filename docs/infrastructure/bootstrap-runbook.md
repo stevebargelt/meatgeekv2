@@ -36,6 +36,101 @@ These are non-negotiable (MG-24 safety constraints):
 
 ---
 
+## Function App hosting — Flex Consumption (MG-24, 2026-07-23)
+
+The Function App runs on **Azure Functions Flex Consumption**, a **single**
+hosting model for **both** dev and prod. This **supersedes** the inherited
+Y1(dev)/EP1(prod) split (operator-directed hosting revision, 2026-07-23). Flex is
+viable on the pinned `azurerm` v4.81.0 — **no** provider upgrade — and resolves
+the Y1 MI-storage apply failure because Flex deploys from an **MI-authenticated
+BLOB container**, not an Azure Files content share that requires a shared key.
+The full decision record is the
+[Flex Consumption ADR](../../learnings/decisions/mg-24-flex-consumption-hosting-model.md).
+
+What this changes for an operator:
+
+- **Region is `West US 2`** (a Flex-supported region), set via `var.location` in
+  both `environments/dev.tfvars` and `environments/prod.tfvars`.
+  > **⚠ `location` relocates the WHOLE stack, not just the Function App.**
+  > `var.location` fans out `var.location → local.location →
+azurerm_resource_group.main.location` and every module reads the RG location,
+  > so changing it destroys **and recreates the entire V2 stack** — Cosmos, IoT
+  > Hub, SignalR, App Insights, Log Analytics, storage — **with Cosmos DATA
+  > LOSS**. On an already-applied environment this is **not** an in-place move:
+  > it is an **operator-gated destroy+recreate that requires a Cosmos-migration
+  > plan** before the live re-apply. The greenfield proof below starts from empty
+  > state, so there is nothing to migrate on first create; the caveat matters for
+  > any environment that already holds data.
+  >
+  > **There is NO destroy guard in the shared modules — by design.** Do not read
+  > the caveat above as "prod is protected." A location change is `ForceNew` on
+  > Cosmos (and IoT Hub), and the modules deliberately set **no**
+  > `prevent_destroy` / destroy guard: `prevent_destroy` is a static literal that
+  > cannot be env-gated (dev must stay freely re-creatable), and MG-24 is
+  > greenfield with no data to protect yet. The only protection at the live
+  > re-apply is the **operator human gate** (plan review + this runbook's
+  > Cosmos-migration step) — not any code guard. **Real prod data-loss protection
+  > (`prevent_destroy` / backup policy / approval gate for the prod Cosmos + IoT
+  > Hub) is tracked in MG-35**, not delivered here.
+- **Runtime is Node 24** (`runtime_name = "node"`, `runtime_version = "24"`) —
+  matches the API's `engines.node` and the CI `NODE_VERSION`.
+- **A service plan is still present — SKU `FC1`, not `Y1`/`EP1`.** Flex requires a
+  plan (`azurerm_function_app_flex_consumption.service_plan_id` is a required
+  argument on the pinned provider), so `azurerm_service_plan.functions` is
+  **retained and repurposed to the Flex `FC1` SKU** — it is **not** removed. There
+  is no standalone `Y1`/`EP1` consumption/premium plan anymore; billing is the
+  per-execution GB-s / always-ready model below.
+- **The plan change forces destroy+recreate of the Function App resources.**
+  There is **no in-place migration** from the old plan/region to Flex — the
+  operator handles the destroy+recreate at the live re-apply (out of scope for
+  the deterministic pipeline that lands this code).
+- **Deployment is Flex OneDeploy to the MI blob container** — `func azure
+functionapp publish` / `nx deploy api` (via azure-functions-core-tools) writes
+  the package ZIP to the **`deployment-package` blob container** on the functions
+  storage account, authenticated by managed identity. There is **NO** Kudu
+  zip-deploy, **NO** `WEBSITE_RUN_FROM_PACKAGE`, and **NO** Azure Files content
+  share (the Flex-deprecated `WEBSITE_NODE_DEFAULT_VERSION` / `WEBSITE_CONTENT*` /
+  `WEBSITE_TIME_ZONE` settings are pruned). `function_app_name` (Terraform
+  output, carrying the global-uniqueness suffix) **stays the single source of
+  truth** the deploy consumes — unchanged by the hosting move.
+
+### Storage identities on the one functions account
+
+The functions storage account **keeps `shared_access_key_enabled = false`** — Flex
+does not need a shared key, so the no-shared-key posture (MG-24 point 5) is
+preserved. Three DISTINCT principals touch the deployment blob container, each
+least-privilege:
+
+- **Function App managed identity** — reads the deployment package at runtime.
+  Terraform grants it `Storage Blob Data Owner` + `Storage Queue Data Contributor`
+  on the functions storage account (same apply that creates the app).
+- **App-deploy principal** (`var.app_deploy_principal_object_id`) — **writes** the
+  package ZIP during Flex OneDeploy. Terraform grants it a **`Storage Blob Data
+Contributor` role on the `deployment-package` container** (in ADDITION to its
+  `Website Contributor` on the Function App), guarded by `count` on the var so a
+  bare `validate`/plan with an empty var still validates.
+- **Apply/CI principal** — CREATES the `deployment-package` container over the ARM
+  **control plane** (the module uses `azapi_resource`
+  `Microsoft.Storage/.../blobServices/containers`, not `azurerm_storage_container`).
+  It needs only its existing **resource-management** role (Contributor on the RG) —
+  **NO storage data-plane role and NO pre-apply grant**. The provider does **not**
+  set `storage_use_azuread` (MG-24 reds 2f5154 / b08ced): creating the container on
+  the data plane against a `shared_access_key_enabled = false` account that this
+  same apply creates would be a chicken-and-egg 403; the control-plane create
+  sidesteps it, so the **first Flex apply is executable with no manual pre-grant**.
+
+### Cost expectations (Flex billing)
+
+- **dev — scale-to-zero.** `always_ready = 0`, so idle cost is **~$0** (no
+  always-ready instances; you pay only per-execution GB-s). Comfortably inside the
+  **$50 dev RG budget**.
+- **prod — always-ready baseline.** `always_ready ≥ 1` keeps a warm HTTP instance
+  so the first request after idle is not cold. The always-ready baseline GB-s is
+  **materially below the EP1 floor** the old split billed 24/7, while still paying
+  per-execution GB-s above the warm baseline.
+
+---
+
 ## Prerequisites
 
 - **Terraform** ≥ 1.9
@@ -129,12 +224,14 @@ What it creates (and nothing else):
      is a _plan/read_ identity — the earlier "deployment identity" label was a
      misnomer; a `Reader` cannot deploy anything.)
    - **APP DEPLOYMENT identity** — a **distinct** SP granted least-privilege
-     publish (`Website Contributor`) scoped to **its Function App only**, plus
-     `Storage Blob Data Reader` on the state container (to read the
-     `function_app_name` output). A `Reader` **cannot** publish a Function App,
-     which is exactly why this is a separate identity. Emitted as
-     `AZURE_APP_DEPLOY_CLIENT_ID`; `app-deploy-prod.yml`'s func-publish
-     `azure/login` uses it, not `AZURE_CLIENT_ID`.
+     publish (`Website Contributor`) scoped to **its Function App only**, plus a
+     **`Storage Blob Data Contributor` on the Flex `deployment-package`
+     container** (Flex OneDeploy writes the package ZIP there — see the Flex
+     hosting-model section), plus `Storage Blob Data Reader` on the state
+     container (to read the `function_app_name` output). A `Reader` **cannot**
+     publish a Function App, which is exactly why this is a separate identity.
+     Emitted as `AZURE_APP_DEPLOY_CLIENT_ID`; `app-deploy-prod.yml`'s
+     func-publish `azure/login` uses it, not `AZURE_CLIENT_ID`.
 
      > **The `Website Contributor` role is created by Terraform, in the same
      > apply that creates the Function App** (MG-24 item 4). The Function App
@@ -145,7 +242,11 @@ What it creates (and nothing else):
      > (`app_deploy_principal_object_id`) **before Step 4/6**, and the single
      > apply provisions the Function App **and** grants it `Website Contributor`
      > scoped to that Function App alone (root `azurerm_role_assignment`
-     > `functions_app_deploy_publisher`, guarded by `count` on the var). That
+     > `functions_app_deploy_publisher`, guarded by `count` on the var) **and** —
+     > for Flex OneDeploy — grants it `Storage Blob Data Contributor` on the
+     > `deployment-package` blob container (module `azurerm_role_assignment`
+     > `deploy_principal_deployment_container`, same `count`/var guard) so it can
+     > write the package ZIP the Flex runtime then reads. That
      > makes the **automated/CI** publish path — `app-deploy-prod.yml` (and, when
      > MG-23 lands, the dev `app-deploy` workflow) authenticating **as this OIDC
      > SP** — work immediately, with **no** separate post-apply grant step and
@@ -231,12 +332,13 @@ app_deploy_principal_object_id = "<AZURE_APP_DEPLOY_PRINCIPAL_OBJECT_ID>"
 ```
 
 This is what lets the **single** greenfield apply create the Function App **and**
-grant that identity `Website Contributor` scoped to the Function App alone, so
-`func publish` works immediately after Step 6 — no post-apply grant, no bootstrap
-re-run. Leaving it empty still validates and plans (the role assignment is
-skipped via `count`), but the resulting Function App has nothing that can publish
-to it, so it is **required** for a deployable dev environment. It is an
-identifier, not a secret.
+grant that identity `Website Contributor` scoped to the Function App alone **and**
+`Storage Blob Data Contributor` on the Flex `deployment-package` blob container
+(the write target for Flex OneDeploy), so `func publish` works immediately after
+Step 6 — no post-apply grant, no bootstrap re-run. Leaving it empty still
+validates and plans (both role assignments are skipped via `count`), but the
+resulting Function App has nothing that can publish to it, so it is **required**
+for a deployable dev environment. It is an identifier, not a secret.
 
 ### Dev app / API authentication registration (item 3)
 
@@ -276,7 +378,7 @@ Easy Auth pins two DIFFERENT things:
 - `client_id` + `allowed_audiences` identify the **API registration** (the
   callee) — the App ID URI a valid token's `aud` must match.
 - `allowed_applications` validates the **CALLING client's** `appid`/`azp` claim —
-  i.e. *which app minted the token*, never the API.
+  i.e. _which app minted the token_, never the API.
 
 For the operator token flow below,
 `az account get-access-token --scope "<App ID URI>/access_as_user"`, the caller
@@ -463,19 +565,28 @@ App. This is the **automated/CI publish path** — the OIDC
 the dev `app-deploy` workflow) uses to `nx deploy api` / `func publish`. That SP
 is **OIDC-only** (no client secret, no local `az login`), so you do **not**
 publish as it from your machine — the manual MG-21 dev proof publishes as your own
-dev identity (Step 6a). Confirm the CI-path assignment exists:
+dev identity (Step 6a). Confirm the CI-path assignments exist — both the
+Function-App `Website Contributor` and the Flex deployment-container `Storage Blob
+Data Contributor`:
 
 ```bash
-FUNC_ID="$(terraform state show module.azure_functions.azurerm_linux_function_app.main | awk '/^ *id /{print $3; exit}')"
+FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex_consumption.main | awk '/^ *id /{print $3; exit}')"
 az role assignment list --scope "$FUNC_ID" \
   --query "[?roleDefinitionName=='Website Contributor'].principalId" -o tsv
+#   → the app-deploy SP object id (== app_deploy_principal_object_id)
+
+# Flex OneDeploy write-path: the same SP on the deployment-package container.
+STORAGE_ID="$(terraform state show module.azure_functions.azurerm_storage_account.functions | awk '/^ *id /{print $3; exit}')"
+az role assignment list \
+  --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package" \
+  --query "[?roleDefinitionName=='Storage Blob Data Contributor'].principalId" -o tsv
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 ```
 
 ### Step 6a — Publish the app, then run the authenticated smoke test (unblocks MG-21)
 
 The MG-21 dev integration proof has two parts, **both run manually by the operator
-using the operator's own authenticated dev session** — *not* the app-deploy OIDC
+using the operator's own authenticated dev session** — _not_ the app-deploy OIDC
 service principal: first **publish** the packaged Functions artifact to the dev
 Function App, then run an **authenticated smoke test** against it.
 
@@ -495,16 +606,28 @@ to the dev Function App:
 
 ```bash
 FUNC="$(terraform output -raw function_app_name)"
-FUNC_ID="$(terraform state show module.azure_functions.azurerm_linux_function_app.main | awk '/^ *id /{print $3; exit}')"
+FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex_consumption.main | awk '/^ *id /{print $3; exit}')"
 
 # Only if you don't already have publish rights on the dev FA:
 ME="$(az ad signed-in-user show --query id -o tsv)"
 az role assignment create --assignee-object-id "$ME" \
   --assignee-principal-type User \
   --role "Website Contributor" --scope "$FUNC_ID"
+
+# Flex OneDeploy writes the package ZIP to the deployment-package blob container
+# under YOUR identity, so you also need Blob Data write there (Contributor/Owner
+# on the RG does NOT include the storage data plane). Grant it if you lack it:
+STORAGE_ID="$(terraform state show module.azure_functions.azurerm_storage_account.functions | awk '/^ *id /{print $3; exit}')"
+az role assignment create --assignee-object-id "$ME" \
+  --assignee-principal-type User \
+  --role "Storage Blob Data Contributor" \
+  --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package"
 ```
 
-Then publish the packaged artifact to the dev Function App **as yourself**:
+Then publish the packaged artifact to the dev Function App **as yourself**. On
+Flex this is **OneDeploy** — Core Tools uploads the package ZIP to the
+`deployment-package` blob container (MI-authenticated); there is no Kudu
+zip-deploy and no `WEBSITE_RUN_FROM_PACKAGE`:
 
 ```bash
 # Build + publish the API package — the Nx target CI runs, invoked locally under
@@ -514,8 +637,8 @@ npx nx deploy api --functionApp="$FUNC"
 #   func azure functionapp publish "$FUNC"
 ```
 
-This proves the packaged artifact deploys to the MG-24-created dev Function App.
-Capture the publish output as evidence.
+This proves the packaged artifact deploys to the MG-24-created dev Function App
+(Flex, Node 24, West US 2). Capture the publish output as evidence.
 
 **Then run the authenticated smoke test.** The Function App is **default-deny**
 with Easy Auth bound to the dev Entra API registration (Step "Dev app / API
@@ -684,15 +807,17 @@ Never add auto-apply to CI. Apply stays an operator action per this runbook.
   deliverable, out of scope for MG-24. The role-assignment **mechanism** is
   already environment-agnostic: once that identity exists, MG-25 sets
   `app_deploy_principal_object_id` in `prod.tfvars` and the prod apply grants it
-  `Website Contributor` scoped to the prod Function App via the same guarded
-  `functions_app_deploy_publisher` assignment — no new Terraform is needed.
+  `Website Contributor` scoped to the prod Function App (via the same guarded
+  `functions_app_deploy_publisher` assignment) **and** `Storage Blob Data
+Contributor` on the prod Flex `deployment-package` container (via the guarded
+  `deploy_principal_deployment_container` assignment) — no new Terraform is needed.
 - **Function-App runtime credentials** — resolved by MG-24: the Functions
   module accesses Cosmos, host Storage, the IoT-telemetry Event Hub, and
   SignalR **identity-based** (system-assigned managed identity + RBAC over
   non-secret endpoints), so **no connection-string or primary-key VALUE is USED,
   placed in `app_settings`, or surfaced as a Terraform output**. (Accurate state
-  posture: each data service's key still exists as an inherent *computed
-  attribute* in state — as for any TF-managed resource; the control is to make it
+  posture: each data service's key still exists as an inherent _computed
+  attribute_ in state — as for any TF-managed resource; the control is to make it
   non-authenticating by disabling local/key auth where safe —
   `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
   on SignalR, `shared_access_key_enabled = false` on host storage,

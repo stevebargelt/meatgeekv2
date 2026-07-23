@@ -63,6 +63,8 @@ local.settings.json
 *.tfstate
 *.tfstate.*
 *.tfplan
+tfplan
+plan.out
 *.tflock.hcl
 .terraform/
 .terraform.lock.hcl

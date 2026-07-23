@@ -53,7 +53,7 @@ flowchart TB
     end
 
     subgraph AzureProcess["Azure - Compute and Data"]
-        Funcs[Azure Functions API<br/>TypeScript / Node 20<br/>Linux consumption]
+        Funcs[Azure Functions API<br/>TypeScript / Node 24<br/>Flex Consumption]
         OTEL_FN["@azure/monitor-opentelemetry<br/>50 pct sampling"]:::proposed
         Cosmos[(CosmosDB<br/>temperatures container<br/>partition /cookId)]
         SignalR[SignalR Service<br/>device-* and cook-* groups]
@@ -107,7 +107,7 @@ flowchart TB
 ## 2. Deployment
 
 **Legend.** What runs where. Pi binaries are cross-compiled to ARM64
-and copied to the device. Functions deploy as a Linux consumption plan
+and copied to the device. Functions deploy as a Flex Consumption
 app. All Azure managed services exist today (provisioned by Terraform
 in `apps/infrastructure/modules/`). Ticket #6 changes **deployment
 artifacts** rather than topology: the Pi binaries gain the Azure
@@ -136,7 +136,7 @@ flowchart LR
     subgraph AzurePaaS["Azure - meatgeek-env-rg"]
         direction TB
 
-        subgraph FnHost["Linux Function App<br/>consumption plan<br/>node 20<br/>system-assigned managed identity"]
+        subgraph FnHost["Flex Consumption Function App<br/>FC1 plan<br/>node 24<br/>system-assigned managed identity"]
             apiBin[apps/api bundle<br/>HTTP triggers: cooks, devices, temperatures/current<br/>EventHub trigger: realtime broadcast]
             otelFn["@azure/monitor-opentelemetry<br/>useAzureMonitor + standalone sampler"]:::proposed
             envFn[/APPLICATIONINSIGHTS_CONNECTION_STRING<br/>APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50<br/>COSMOSDB__accountEndpoint<br/>IOTHUB_EVENTS__fullyQualifiedNamespace<br/>AzureSignalRConnectionString__serviceUri<br/>all identity-based, non-secret endpoints/]
@@ -405,8 +405,9 @@ flowchart TB
   `IOTHUB_EVENTS__fullyQualifiedNamespace`,
   `AzureSignalRConnectionString__serviceUri`) resolved against that
   identity, **never** connection strings or primary keys, and no such
-  secret is emitted as a Terraform output. Host storage uses the same
-  identity (`storage_uses_managed_identity`; shared-key access disabled).
+  secret is emitted as a Terraform output. The Flex deployment storage uses the
+  same identity (`storage_authentication_type = "SystemAssignedIdentity"` on a
+  `blobContainer`; shared-key access disabled).
   The single non-secret exception is Application Insights, wired via its
   telemetry `APPLICATIONINSIGHTS_CONNECTION_STRING`. App Service
   Authentication (Easy Auth) is configured **default-deny**. The diagrams

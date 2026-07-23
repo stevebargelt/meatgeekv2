@@ -168,7 +168,7 @@ greenfield acceptance (MG-24's 10-step dev proof) is in the runbook.
 
 - IoT Hub **S1** (required for message routing; F1 does not support routing)
 - V2-owned Cosmos DB, autoscale 400→1000 RU, 7-day telemetry TTL
-- Azure Functions Consumption (Y1) plan
+- Azure Functions **Flex Consumption** (`FC1` plan), **scale-to-zero** (`always_ready = 0`)
 - SignalR Free (F1) tier
 - Permissive IP ranges, backups off, low budget — cost-optimized
 
@@ -187,7 +187,7 @@ greenfield acceptance (MG-24's 10-step dev proof) is in the runbook.
 | --------------------- | ---------------------------------------------------------- |
 | `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices    |
 | `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs |
-| `modules/functions/`  | Linux Function App (`azurerm_linux_function_app`) on a Linux `azurerm_service_plan` + its own storage account (length-safe names) |
+| `modules/functions/`  | Flex Consumption Function App (`azurerm_function_app_flex_consumption`) on an `FC1` `azurerm_service_plan` + its own storage account (MI blob deployment container, length-safe names) |
 | `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs) |
 | `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                      |
 
@@ -195,12 +195,21 @@ The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it do
 **not** read a shared V1 account via a data source. There is no adoption of a pre-existing shared Cosmos account
 anywhere in the stack.
 
-The Functions module creates an **`azurerm_linux_function_app`** on a **Linux
-`azurerm_service_plan`** (`os_type = "Linux"`) — **not** a Flex Consumption app
-(`azurerm_function_app_flex_consumption`). The plan SKU comes from
-`functions_app_service_plan_sku`, which the root validation admits as only `Y1`,
-`EP1`, `EP2`, or `EP3`: dev uses **`Y1` (Consumption)** and prod uses **`EP1`
-(Elastic Premium)**. The Node runtime is pinned to **20**.
+The Functions module creates an **`azurerm_function_app_flex_consumption`** app
+(MG-24 hosting revision) — a **single Flex Consumption** model for **both** dev
+and prod, replacing the inherited `Y1`(dev)/`EP1`(prod) `azurerm_linux_function_app`
+split. Flex still **requires** a service plan, so the `azurerm_service_plan` is
+**retained** but repurposed to SKU **`FC1`** (the Flex plan) — its id is a required
+argument on the flex resource; it is **not** removed. The deployment package is
+read from an **MI-authenticated blob container** (no Azure Files content share, no
+shared key), which is why the functions storage account keeps
+`shared_access_key_enabled = false`. The Node runtime is **24**, the region is
+**West US 2** (a Flex-supported region; see the ADR for the whole-stack relocation
+caveat), and the scale profile is tuned per-env via `instance_memory_in_mb` /
+`maximum_instance_count` / `always_ready` (dev `always_ready = 0` scale-to-zero,
+prod `always_ready >= 1`). The former `functions_app_service_plan_sku` var is
+**removed**. See
+[ADR: Flex Consumption hosting model](../../learnings/decisions/mg-24-flex-consumption-hosting-model.md).
 
 ## Terraform / Nx Commands
 

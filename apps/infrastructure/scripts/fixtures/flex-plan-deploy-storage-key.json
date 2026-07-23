@@ -1,0 +1,68 @@
+{
+  "_fixture_note": "NEGATIVE (fail-closed) fixture — MG-24 red dd7ba9. Identical to flex-plan-accepted.json EXCEPT the flex resource carries a raw storage_access_key (an opaque base64 storage account key with NO lexical credential marker) on its deployment-storage config. Under the shipped MI model storage_authentication_type=SystemAssignedIdentity and this field MUST be absent; any non-empty value is a shared key persisted into state. The gate must FAIL CLOSED (nonzero) here. This proves the coverage gap is closed: the generic CRED_MARKER_RE classifier would MISS a bare key (it matches AccountKey=/sig= markers, not opaque base64), so the gate rejects storage_access_key UNCONDITIONALLY on presence.",
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_application_insights.main",
+          "type": "azurerm_application_insights",
+          "name": "main",
+          "values": {
+            "local_authentication_enabled": false,
+            "instrumentation_key": "11111111-1111-1111-1111-111111111111",
+            "connection_string": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/"
+          }
+        }
+      ],
+      "child_modules": [
+        {
+          "address": "module.azure_functions",
+          "resources": [
+            {
+              "address": "module.azure_functions.azurerm_storage_account.functions",
+              "type": "azurerm_storage_account",
+              "name": "functions",
+              "values": {
+                "shared_access_key_enabled": false,
+                "min_tls_version": "TLS1_2"
+              }
+            },
+            {
+              "address": "module.azure_functions.azurerm_function_app_flex_consumption.main",
+              "type": "azurerm_function_app_flex_consumption",
+              "name": "main",
+              "values": {
+                "runtime_name": "node",
+                "runtime_version": "24",
+                "storage_authentication_type": "SystemAssignedIdentity",
+                "storage_container_type": "blobContainer",
+                "storage_container_endpoint": "https://mgv2funcabc123def456.blob.core.windows.net/deployment-package",
+                "storage_access_key": "u9F2mNqPZ7wXcV8bL0aRtYkJ3hG6dS1eQ4zC5vB7nM8pL0aRtYkJ3hG6dS1eQ4zC5vB7nM8pL0aRtYkJ3hG6dS1eQ==",
+                "app_settings": {
+                  "FUNCTIONS_WORKER_RUNTIME": "node",
+                  "APPLICATIONINSIGHTS_AUTHENTICATION_STRING": "Authorization=AAD",
+                  "APPLICATIONINSIGHTS_CONNECTION_STRING": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/",
+                  "COSMOSDB__accountEndpoint": "https://mgv2-cosmos.documents.azure.com:443/"
+                },
+                "site_config": [
+                  {
+                    "application_insights_connection_string": null,
+                    "application_insights_key": null,
+                    "cors": [
+                      {
+                        "allowed_origins": ["https://app.meatgeek.com"],
+                        "support_credentials": false
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

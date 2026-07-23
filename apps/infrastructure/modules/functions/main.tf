@@ -1,12 +1,26 @@
-# Azure Functions Module for MeatGeek V2
+# Azure Functions Module for MeatGeek V2 — FLEX CONSUMPTION hosting (MG-24)
 #
-# Security posture (MG-24 S1/S2):
+# Hosting model (MG-24, 2026-07-23): a SINGLE Flex Consumption model runs BOTH
+# dev and prod, replacing the inherited Y1(dev)/EP1(prod) split. Flex is viable
+# on the pinned azurerm v4.81.0 (no provider upgrade) and RESOLVES the Y1
+# MI-storage apply failure: Flex deploys the package from an MI-authenticated
+# BLOB container (not an Azure Files content share that requires a shared key),
+# so the functions storage account can keep shared_access_key_enabled=false.
+#
+# Flex still requires a service plan — but of SKU "FC1" (the Flex Consumption
+# plan), NOT Y1/EP1. `azurerm_function_app_flex_consumption.service_plan_id` is a
+# REQUIRED argument in the pinned provider schema, so the plan resource is kept
+# (repurposed to FC1) rather than removed.
+#
+# Security posture (MG-24 S1/S2 — carried 1:1 from the former linux_function_app):
 #   * The Function App runs under a SYSTEM-ASSIGNED MANAGED IDENTITY. Runtime
 #     access to Cosmos / Storage / Event Hub (IoT telemetry) / SignalR is
 #     identity-based (RBAC + non-secret endpoints) — NO connection strings or
 #     primary keys are placed in app settings or Terraform state.
-#   * Host storage uses the managed identity (storage_uses_managed_identity),
-#     so no storage_account_access_key is written to state.
+#   * Deployment storage is identity-based: storage_authentication_type =
+#     "SystemAssignedIdentity" against a blobContainer on the functions storage
+#     account, which KEEPS shared_access_key_enabled=false — so no
+#     storage_account_access_key is written to state and no shared key can leak.
 #   * Application Insights ingestion is identity-based (AAD): the managed
 #     identity is granted 'Monitoring Metrics Publisher' on the App Insights
 #     resource (root module) and the host authenticates telemetry via
@@ -22,6 +36,26 @@
 #     never be shipped; once configured every request is validated at the
 #     platform layer (Return401 on no/invalid token) before any function runs.
 
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+    # azapi creates the Flex deployment BLOB container over the ARM CONTROL PLANE
+    # (Microsoft.Storage/storageAccounts/blobServices/containers) — same pattern
+    # the native-otlp module uses for its DCR. Control-plane creation sidesteps the
+    # storage DATA-plane entirely, so the apply principal needs NO Storage Blob
+    # Data role on an account THIS apply creates (the same-apply chicken-and-egg a
+    # data-plane azurerm_storage_container would have hit against a
+    # shared_access_key_enabled=false account). See the MG-24 ADR.
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.0"
+    }
+  }
+}
+
 locals {
   # Globally-unique storage account name. Storage account names must be 3-24
   # chars, lowercase alphanumeric only (no hyphens). Like the Cosmos account
@@ -29,6 +63,12 @@ locals {
   # root as var.storage_account_name) so a greenfield apply cannot collide with
   # a pre-existing account anywhere in Azure. The substr() is a defensive cap.
   functions_storage_account_name = substr(var.storage_account_name, 0, 24)
+
+  # Name of the Flex deployment-package blob container (target of the OneDeploy
+  # package ZIP). Held as a local so the container resource, the Function App's
+  # storage_container_endpoint, the app-deploy role-assignment scope, and the
+  # module output all reference ONE source of truth.
+  deployment_container_name = "deployment-package"
 }
 
 # Storage account for Azure Functions
@@ -39,28 +79,65 @@ resource "azurerm_storage_account" "functions" {
   account_tier             = "Standard"
   account_replication_type = "LRS"
 
-  # Identity-based host storage: shared key access is disabled so no account
-  # key can be used (or leak into state). The Function App's managed identity
-  # is granted the Blob/Queue data roles below.
+  # Identity-based storage: shared key access is disabled so no account key can
+  # be used (or leak into state). The Function App's managed identity is granted
+  # the Blob/Queue data roles below and reads the package ZIP from the blob
+  # deployment container at runtime over that identity
+  # (storage_authentication_type=SystemAssignedIdentity on the flex resource).
   shared_access_key_enabled = false
   min_tls_version           = "TLS1_2"
 
   tags = var.tags
 }
 
-# App Service Plan for Azure Functions
+# Deployment package container (Flex Consumption). Flex reads the deployed
+# package ZIP from THIS blob container, authenticated by the Function App's
+# managed identity (storage_authentication_type=SystemAssignedIdentity below).
+#
+# Created via azapi over the ARM CONTROL PLANE
+# (Microsoft.Storage/storageAccounts/blobServices/containers) rather than
+# azurerm_storage_container, which is a storage DATA-PLANE operation. That
+# distinction is load-bearing here (MG-24 red 2f5154 / b08ced): the account sets
+# shared_access_key_enabled=false, and it is CREATED BY THIS APPLY — so a
+# data-plane container create would require the apply principal to already hold a
+# Storage Blob Data role on an account that does not exist until mid-apply (a
+# same-apply chicken-and-egg that 403s, or forces a fragile pre-apply data-plane
+# grant + RBAC-propagation wait). The control-plane create needs only the
+# resource-management permission the apply principal already has (Contributor on
+# the RG), so the FIRST apply is executable with NO manual pre-grant and the
+# provider no longer needs the storage_use_azuread data-plane switch.
+#
+# publicAccess = "None": private container, never anonymously readable — the
+# package ZIP is fetched by the Function App's managed identity, so no public
+# blob access is ever needed.
+resource "azapi_resource" "deployment_container" {
+  type      = "Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01"
+  name      = local.deployment_container_name
+  parent_id = "${azurerm_storage_account.functions.id}/blobServices/default"
+
+  body = {
+    properties = {
+      publicAccess = "None"
+    }
+  }
+}
+
+# App Service Plan for Azure Functions — FLEX CONSUMPTION (SKU FC1). Flex
+# requires a plan (service_plan_id is a required argument on the flex resource),
+# but it is the Flex plan, not Y1/EP1. Billing is per-execution GB-s with
+# scale-to-zero when always_ready=0 (dev) and an always-ready baseline (prod).
 resource "azurerm_service_plan" "functions" {
   name                = "${var.resource_prefix}-func-plan"
   resource_group_name = var.resource_group_name
   location            = var.location
   os_type             = "Linux"
-  sku_name            = var.functions_app_service_plan_sku
+  sku_name            = "FC1"
 
   tags = var.tags
 }
 
-# Azure Function App
-resource "azurerm_linux_function_app" "main" {
+# Azure Function App — Flex Consumption
+resource "azurerm_function_app_flex_consumption" "main" {
   # Globally-unique name: the FDQN <name>.azurewebsites.net must be unique across
   # all of Azure, so the subscription-derived global_suffix is appended (same
   # suffix shared with IoT Hub / Event Hubs / SignalR). "-func-" + 12 hex chars
@@ -68,24 +145,56 @@ resource "azurerm_linux_function_app" "main" {
   name                = "${var.resource_prefix}-func-${var.global_suffix}"
   resource_group_name = var.resource_group_name
   location            = var.location
+  service_plan_id     = azurerm_service_plan.functions.id
 
-  storage_account_name = azurerm_storage_account.functions.name
-  # Identity-based host storage — no storage_account_access_key in state.
-  storage_uses_managed_identity = true
-  service_plan_id               = azurerm_service_plan.functions.id
+  # Node 24 runtime (matches the Flex runtime and the API's engines.node).
+  runtime_name    = "node"
+  runtime_version = "24"
+
+  # MI-authenticated blob deployment storage — NO Azure Files content share, NO
+  # shared key. This is what resolves the Y1 MI-storage 403 and lets the account
+  # stay shared_access_key_enabled=false. The endpoint is a plain blob-container
+  # URL (no SAS / no AccountKey), so it carries no secret into state.
+  storage_container_type      = "blobContainer"
+  storage_container_endpoint  = "${azurerm_storage_account.functions.primary_blob_endpoint}${local.deployment_container_name}"
+  storage_authentication_type = "SystemAssignedIdentity"
+
+  # Flex scale knobs (per-env via tfvars). instance_memory_in_mb + maximum
+  # concurrency bound the per-instance footprint and the horizontal ceiling.
+  instance_memory_in_mb  = var.instance_memory_in_mb
+  maximum_instance_count = var.maximum_instance_count
+
+  # The deployment blob container must exist before the app binds to it. The
+  # endpoint above is a plain URL string (not a reference to the container
+  # resource), so declare the ordering explicitly.
+  depends_on = [azapi_resource.deployment_container]
 
   # System-assigned managed identity — the runtime credential for all
-  # identity-based service access (Cosmos, Storage, Event Hub, SignalR).
+  # identity-based service access (deployment storage, Cosmos, Event Hub, SignalR).
   identity {
     type = "SystemAssigned"
+  }
+
+  # Always-ready instances. dev sets always_ready=0 => NO always_ready block =>
+  # scale-to-zero (~$0 idle). prod sets always_ready>=1 => a warm HTTP baseline
+  # so the first request after idle is not cold. "http" is the built-in group
+  # covering all HTTP-triggered functions.
+  dynamic "always_ready" {
+    for_each = var.always_ready > 0 ? [1] : []
+    content {
+      name           = "http"
+      instance_count = var.always_ready
+    }
   }
 
   # Runtime configuration. Every external service is wired identity-based via a
   # NON-SECRET endpoint (the `__`-suffixed settings the Functions host resolves
   # against the app's managed identity). No connection strings / primary keys.
+  # Flex-deprecated settings (WEBSITE_NODE_DEFAULT_VERSION, WEBSITE_CONTENT*,
+  # WEBSITE_RUN_FROM_PACKAGE, WEBSITE_TIME_ZONE) are intentionally NOT set — Flex
+  # manages the runtime version (runtime_version) and package mount itself.
   app_settings = {
-    "FUNCTIONS_WORKER_RUNTIME"     = "node"
-    "WEBSITE_NODE_DEFAULT_VERSION" = "~20"
+    "FUNCTIONS_WORKER_RUNTIME" = "node"
 
     # Application Insights — identity-based (AAD) telemetry ingestion. The
     # managed identity is granted 'Monitoring Metrics Publisher' on the App
@@ -115,10 +224,6 @@ resource "azurerm_linux_function_app" "main" {
   }
 
   site_config {
-    application_stack {
-      node_version = "20"
-    }
-
     # Explicit per-environment allowed origins (no wildcard). Empty list =>
     # no cross-origin browser access is permitted. support_credentials stays
     # false unless a cookie/credential design requires it.
@@ -215,17 +320,36 @@ resource "azurerm_linux_function_app" "main" {
 }
 
 # --- Identity-based access grants for the Function App managed identity ------
-# Host storage: the Functions runtime needs Blob (deployment/host) and Queue
-# (triggers/scaling) data-plane access on ITS OWN storage account. Scoped to
-# the storage account only — least privilege.
+# Deployment + host storage: the Flex runtime needs Blob (package deployment /
+# host) and Queue (triggers/scaling) data-plane access on ITS OWN storage
+# account. Scoped to the storage account only — least privilege. Storage Blob
+# Data Owner covers reading the deployment package from the blob container under
+# the app's managed identity (storage_authentication_type=SystemAssignedIdentity).
 resource "azurerm_role_assignment" "functions_storage_blob" {
   scope                = azurerm_storage_account.functions.id
   role_definition_name = "Storage Blob Data Owner"
-  principal_id         = azurerm_linux_function_app.main.identity[0].principal_id
+  principal_id         = azurerm_function_app_flex_consumption.main.identity[0].principal_id
 }
 
 resource "azurerm_role_assignment" "functions_storage_queue" {
   scope                = azurerm_storage_account.functions.id
   role_definition_name = "Storage Queue Data Contributor"
-  principal_id         = azurerm_linux_function_app.main.identity[0].principal_id
+  principal_id         = azurerm_function_app_flex_consumption.main.identity[0].principal_id
+}
+
+# App-deployment identity → deployment-container write access (MG-24 item 4).
+# Flex OneDeploy (func publish / `nx deploy api`) writes the package ZIP into the
+# blob deployment container, so the SEPARATE app-deploy principal needs Blob Data
+# write on THAT CONTAINER (in addition to its Website Contributor on the Function
+# App granted in the root module). Scoped to the container alone — least
+# privilege; it cannot touch other blobs on the account. Guarded by count so a
+# bare `terraform validate`/plan with an empty app_deploy_principal_object_id
+# still validates (the grant is skipped). The object id is the SP's OBJECT id,
+# created by the bootstrap BEFORE this apply, so no apply-time principal is
+# referenced and the graph stays acyclic.
+resource "azurerm_role_assignment" "deploy_principal_deployment_container" {
+  count                = var.app_deploy_principal_object_id != "" ? 1 : 0
+  scope                = azapi_resource.deployment_container.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = var.app_deploy_principal_object_id
 }
