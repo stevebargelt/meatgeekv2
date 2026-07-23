@@ -194,6 +194,19 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       expect(live).not.toMatch(/SIGNALR_CONNECTION_STRING/);
     });
 
+    it('does NOT set FUNCTIONS_WORKER_RUNTIME (or other Flex-forbidden classic settings) — runtime is runtime_name/runtime_version', () => {
+      // MG-24 apply defect: a Flex Consumption site REJECTS FUNCTIONS_WORKER_RUNTIME
+      // as an app setting (400 BadRequest ExtendedCode 51021). The worker runtime is
+      // declared via the resource's runtime_name/runtime_version fields, not a
+      // classic-Functions app setting. Guard the leftover cannot creep back.
+      expect(live).not.toMatch(/FUNCTIONS_WORKER_RUNTIME/);
+      expect(live).not.toMatch(/FUNCTIONS_EXTENSION_VERSION/);
+      expect(live).not.toMatch(/AzureWebJobsStorage/);
+      // The runtime is declared the Flex-native way.
+      expect(live).toMatch(/runtime_name\s*=\s*"node"/);
+      expect(live).toMatch(/runtime_version\s*=\s*"24"/);
+    });
+
     it('App Insights ingestion is AAD identity-based — full conn string from the module var, no hardcoded ikey', () => {
       // Host authenticates telemetry with an AAD token, not an ingestion key.
       expect(live).toMatch(/APPLICATIONINSIGHTS_AUTHENTICATION_STRING"\s*=\s*"Authorization=AAD"/);

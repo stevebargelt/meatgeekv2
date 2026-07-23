@@ -369,11 +369,12 @@ exception). See
 These are exactly the settings Terraform configures on the Function App:
 
 ```bash
-# Runtime
-FUNCTIONS_WORKER_RUNTIME=node
-# Node 24 is declared natively on the Flex resource (runtime_name = "node",
-# runtime_version = "24") — NOT via WEBSITE_NODE_DEFAULT_VERSION, which is
-# Flex-deprecated and intentionally not set (MG-24).
+# Runtime — declared natively on the Flex resource, NOT via app settings. Node 24
+# is set through runtime_name = "node" / runtime_version = "24". FUNCTIONS_WORKER_RUNTIME
+# is intentionally NOT present: Flex Consumption REJECTS it as an app setting, failing
+# the create with 400 BadRequest (ExtendedCode 51021, "app setting … is invalid for
+# Flex Consumption sites"). WEBSITE_NODE_DEFAULT_VERSION is likewise Flex-deprecated
+# and not set (MG-24).
 
 # Application Insights — identity-based (AAD) telemetry ingestion. The managed
 # identity holds "Monitoring Metrics Publisher" on the App Insights resource and

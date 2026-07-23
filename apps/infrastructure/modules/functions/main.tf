@@ -230,12 +230,15 @@ resource "azurerm_function_app_flex_consumption" "main" {
   # Runtime configuration. Every external service is wired identity-based via a
   # NON-SECRET endpoint (the `__`-suffixed settings the Functions host resolves
   # against the app's managed identity). No connection strings / primary keys.
-  # Flex-deprecated settings (WEBSITE_NODE_DEFAULT_VERSION, WEBSITE_CONTENT*,
-  # WEBSITE_RUN_FROM_PACKAGE, WEBSITE_TIME_ZONE) are intentionally NOT set — Flex
-  # manages the runtime version (runtime_version) and package mount itself.
+  # Flex-forbidden classic-Functions settings (FUNCTIONS_WORKER_RUNTIME,
+  # FUNCTIONS_EXTENSION_VERSION, WEBSITE_NODE_DEFAULT_VERSION, WEBSITE_CONTENT*,
+  # WEBSITE_RUN_FROM_PACKAGE, WEBSITE_TIME_ZONE, AzureWebJobsStorage*) are
+  # intentionally NOT set — Flex DECLARES the worker runtime via the resource's
+  # runtime_name/runtime_version (node/24) and manages the extension version,
+  # package mount and host storage itself. In particular FUNCTIONS_WORKER_RUNTIME
+  # is REJECTED on a Flex site: setting it fails the create with 400 BadRequest
+  # (ExtendedCode 51021, "app setting … is invalid for Flex Consumption sites").
   app_settings = {
-    "FUNCTIONS_WORKER_RUNTIME" = "node"
-
     # Application Insights — identity-based (AAD) telemetry ingestion. The
     # managed identity is granted 'Monitoring Metrics Publisher' on the App
     # Insights resource (root module); Authorization=AAD makes the host
