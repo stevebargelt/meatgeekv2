@@ -134,9 +134,15 @@ resource "azapi_resource" "otlp_dcr" {
         ]
       }
 
+      # TRACES-ONLY: this DCR declares only the otelTraces data source above (no
+      # otelLogs), so the flow carries the trace streams ONLY. Microsoft's full
+      # ARM template also lists Microsoft-OTel-Logs, but that stream is valid
+      # there solely because that template also declares an otelLogs data source.
+      # Including it here without a backing data source risks Azure-side DCR
+      # validation failure at apply, so it is intentionally omitted.
       dataFlows = [
         {
-          streams      = ["Microsoft-OTel-Logs", "Microsoft-OTel-Traces-Spans", "Microsoft-OTel-Traces-Events", "Microsoft-OTel-Traces-Resources"]
+          streams      = ["Microsoft-OTel-Traces-Spans", "Microsoft-OTel-Traces-Events", "Microsoft-OTel-Traces-Resources"]
           destinations = ["myLAW"]
         }
       ]

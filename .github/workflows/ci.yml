@@ -209,7 +209,7 @@ jobs:
       # config error.
       - name: Validate OTel Collector config (pinned contrib image)
         env:
-          OTELCOL_CONTRIB_IMAGE: otel/opentelemetry-collector-contrib:0.151.0
+          OTELCOL_CONTRIB_IMAGE: otel/opentelemetry-collector-contrib:0.151.0@sha256:d57bfe8eee2378f31cb1193239fbcac521d54a5a071fca2bfc106916a32b892d
           AZURE_OTLP_UAI_CLIENT_ID: 00000000-0000-0000-0000-000000000000
           AZURE_MONITOR_OTLP_TRACES_ENDPOINT: https://example-dce.ingest.monitor.azure.com/dataCollectionRules/dcr-00000000000000000000000000000000/streams/Microsoft-OTLP-Traces/otlp/v1/traces
         run: |
