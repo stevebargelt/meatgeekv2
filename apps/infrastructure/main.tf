@@ -347,8 +347,8 @@ module "signalr" {
 #
 # Authors the OUTBOUND native-OTLP telemetry path: the edge Go services' OTLP
 # lands at a central collector Container App that forwards via otlphttp +
-# azureauth (user-assigned MI) to a DCE/DCR, which transforms it into the
-# workspace-based App Insights tables. This REPLACES the collector's former
+# azure_auth (user-assigned MI) to a DCE + native-OTLP DCR, which routes it into
+# the workspace-based App Insights trace tables. This REPLACES the collector's former
 # `azuremonitor` (Breeze) exporter (see apps/infrastructure/otel-collector).
 #
 # count-guarded by var.enable_native_otlp (default false): with the flag OFF the
@@ -366,11 +366,16 @@ module "native_otlp" {
 
   resource_prefix     = local.resource_prefix
   resource_group_name = azurerm_resource_group.main.name
+  resource_group_id   = azurerm_resource_group.main.id
   location            = azurerm_resource_group.main.location
 
   # The DCR routes OTLP traces into the workspace-based App Insights tables, so
   # it targets the SAME Log Analytics workspace App Insights is bound to.
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+
+  # The native-OTLP DCR references App Insights (references.applicationInsights)
+  # to enrich traces and resolve the destination resource.
+  application_insights_id = azurerm_application_insights.main.id
 
   # MG-24 handles: the Container Apps environment + its Azure File storage
   # association. Empty until then; REQUIRED before the flag can be flipped on.

@@ -19,14 +19,16 @@ OpenTelemetry over **OTLP**. Application Insights does **not** accept raw OTLP,
 so this collector receives the edge OTLP and forwards it to Azure Monitor.
 
 The forwarding leg uses **native Azure Monitor OTLP ingestion**: the collector's
-`otlphttp` exporter posts to a **Data Collection Endpoint (DCE)**, routed by a
-**Data Collection Rule (DCR)** into the workspace-based App Insights tables,
-authenticated by the `azureauth` extension using a **user-assigned managed
+`otlphttp` exporter posts to the full native-OTLP **`traces_endpoint`** URL on a
+**Data Collection Endpoint (DCE)** — routing is carried by the URL **path** (the
+**Data Collection Rule (DCR)** immutable id + the fixed `Microsoft-OTLP-Traces`
+entry stream), which lands in the workspace-based App Insights tables,
+authenticated by the `azure_auth` extension using a **user-assigned managed
 identity**.
 
 ```
 device-controller ─┐                       ┌─ OTLP receiver ─ otlphttp ─┐
-                   ├─ OTLP (traces) ───────►│  (this collector,          │─ azureauth (user-assigned MI, AAD) ─► DCE ─► DCR ─► App Insights
+                   ├─ OTLP (traces) ───────►│  (this collector,          │─ azure_auth (user-assigned MI, AAD) ─► DCE ─► DCR ─► App Insights
 data-pusher ───────┘   [reachable only      │   loopback-only receiver)  │                                              (AppDependencies / AppTraces)
                         after MG-34]        └────────────────────────────┘
 ```
@@ -43,16 +45,23 @@ recorded in
 
 - **Receiver:** OTLP over gRPC (`127.0.0.1:4317`) and HTTP (`127.0.0.1:4318`),
   **loopback only** (fail-closed — see below).
-- **Exporter:** `otlphttp` → the DCE logs-ingestion endpoint, with the
-  `azureauth` extension supplying the AAD bearer token. Requires the **Contrib**
-  distribution.
+- **Exporter:** `otlphttp` → the full native-OTLP `traces_endpoint` URL on the
+  DCE, with the `azure_auth` extension supplying the AAD bearer token for its
+  explicitly-configured `https://monitor.azure.com/.default` scope. Requires the
+  **Contrib** distribution.
 - **Pipeline:** `traces` only (the per-reading W3C trace chain, MG-33 F2/F3).
   Metrics are intentionally not wired — native OTLP needs its own DCR stream +
   transform for metrics, deferred.
 
-Use the pinned Contrib image **`otel/opentelemetry-collector-contrib:0.128.0`**.
-`otlphttp` + `azureauth` + `file_storage` all require the Contrib distribution;
-`azureauth` first ships in Contrib `0.126.0`. The core
+Use the pinned Contrib image **`otel/opentelemetry-collector-contrib:0.151.0`**,
+pinned by **tag AND `@sha256` digest** (Terraform `var.collector_image`;
+re-resolve the digest at deploy). `otlphttp` + `azure_auth` + `file_storage` all
+require the Contrib distribution. The version floor is DOC-VERIFIED (3rd review):
+**`>=0.132.0`** (native OTLP), **`>=0.148.0`** (current `azure_auth` config
+syntax — the extension key was renamed from `azureauth`), and **`>0.150.0`** so
+it is **outside** the `GHSA-pjv4-3c63-699f` `azure_auth` inbound-auth-bypass
+advisory range (`0.124.0–0.150.0`); outbound auth here is unaffected, but the pin
+keeps MG-34's future receiver auth off a vulnerable version. The core
 `otel/opentelemetry-collector` image does **not** include these.
 
 ## Outbound topology (native OTLP)
@@ -65,24 +74,35 @@ Provisioned by the `native-otlp` Terraform module
   **user-assigned managed identity**. User-assigned (not system-assigned) so the
   DCR role assignment can grant against the identity's principal id **before** the
   app exists, avoiding a create-then-grant ordering gap.
-- **`azureauth` extension** — mints an AAD token (audience
-  `https://monitor.azure.com`) from that identity. No ingestion key, no
-  connection string in the collector.
-- **DCE + DCR** — the `otlphttp` exporter targets the DCE logs-ingestion
-  endpoint and routes by the DCR immutable id + stream name; the DCR transforms
-  the OTLP trace stream into the workspace-based App Insights tables
+- **`azure_auth` extension** — mints an AAD token for an **explicitly
+  configured** `scopes:` audience — `https://monitor.azure.com/.default` (pinned
+  from config, **not** derived from the request Host) — from that identity. No
+  ingestion key, no connection string in the collector.
+- **DCE + DCR (native OTLP)** — the `otlphttp` exporter posts to the full
+  native-OTLP `traces_endpoint` URL
+  (`https://<logs-dce-ingestion-host>/dataCollectionRules/<dcr-immutable-id>/streams/Microsoft-OTLP-Traces/otlp/v1/traces`);
+  routing is by URL path, **not** `x-ms-dcr-immutable-id` / `x-ms-stream-name`
+  headers. The DCR is an **`azapi_resource`**
+  (`Microsoft.Insights/dataCollectionRules@2024-03-11`) with
+  `references.applicationInsights` + a `directDataSources.otelTraces` data source
+  over the built-in `Microsoft-OTel-Traces-*` streams, enriched from the App
+  Insights reference into the workspace-based App Insights tables
   (`AppDependencies` / `AppTraces`). It targets the **same** Log Analytics
-  workspace App Insights is bound to.
+  workspace App Insights is bound to. `azurerm`'s
+  `azurerm_monitor_data_collection_rule` (v4) cannot express this body, so the
+  `azapi` provider authors the DCR; the DCE stays an `azurerm` resource.
 - **DCR-scoped RBAC** — the identity holds **`Monitoring Metrics Publisher`
-  scoped to the DCR** (`azurerm_role_assignment.collector_dcr_publisher`), **not**
-  App Insights and **not** the workspace. Ingestion through the DCE/DCR authorizes
-  against the DCR; this is deliberately different from the Function App's Breeze
-  path, whose same-named role is scoped to App Insights. MG-34 AC3 proves the
-  negative: remove this assignment and ingestion is rejected.
+  scoped to the DCR** (`azurerm_role_assignment.collector_dcr_publisher`, scoped
+  to `azapi_resource.otlp_dcr.id`), **not** App Insights and **not** the
+  workspace. Ingestion through the DCE/DCR authorizes against the DCR; this is
+  deliberately different from the Function App's Breeze path, whose same-named
+  role is scoped to App Insights. MG-34 AC3 proves the negative: remove this
+  assignment and ingestion is rejected.
 
-Every Azure-specific value (DCE endpoint, DCR immutable id, stream name, UAI
-client id, storage name) is **Terraform-emitted and injected at runtime via
-env-var substitution** — never hand-copied into `collector-config.yaml`.
+Every Azure-specific value (the full `traces_endpoint` URL — built in Terraform
+from the DCE ingestion host + the DCR immutable id — the UAI client id, and the
+storage name) is **Terraform-emitted and injected at runtime via env-var
+substitution** — never hand-copied into `collector-config.yaml`.
 
 ## Fail-closed posture
 
@@ -126,7 +146,7 @@ endpoint selects the real OTLP exporter that reaches this collector. The edge
 services never read `APPLICATIONINSIGHTS_CONNECTION_STRING` at all.
 
 > Note: under the native-OTLP path the App Insights **connection string is no
-> longer used by the collector** — the `otlphttp` + `azureauth` path
+> longer used by the collector** — the `otlphttp` + `azure_auth` path
 > authenticates via managed identity, not a connection string. The edge services
 > need only `OTEL_EXPORTER_OTLP_ENDPOINT`; neither tier carries the App Insights
 > connection string on this path.
@@ -152,8 +172,9 @@ operational (and before MG-33 can close):
 
 1. **MG-24** — the Container Apps managed environment + storage association exist
    (`container_app_environment_id` / `otlp_collector_storage_name` populated).
-2. **MG-25** — native-OTLP preview acceptance in the target region; the DCR
-   stream columns / `transform_kql` / `output_stream` binding are finalized.
+2. **MG-25** — native-OTLP preview acceptance in the target region; the DCR body
+   (`directDataSources.otelTraces` over the built-in `Microsoft-OTel-Traces-*`
+   streams) is confirmed against live ingestion.
 3. **MG-34** — secure off-VNet edge ingress, the **live**
    Go-span-to-App-Insights proof (a real edge span appears queryable in
    `AppDependencies`/`AppTraces` carrying the expected per-reading W3C
@@ -166,7 +187,7 @@ operational. Nothing here is proven to deliver telemetry today.
 ## Files
 
 - `collector-config.yaml` — the collector configuration (OTLP in →
-  `otlphttp` + `azureauth` out). Mount it at the container's config path and run
+  `otlphttp` + `azure_auth` out). Mount it at the container's config path and run
   the Contrib collector against it.
 - `README.md` — this document.
 

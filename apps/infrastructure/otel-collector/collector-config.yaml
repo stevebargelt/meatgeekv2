@@ -8,58 +8,56 @@
 #
 # Purpose: the Go edge services (device-controller, data-pusher) export OTLP to
 # THIS collector; the collector forwards to Azure Monitor via the OUTBOUND
-# native-OTLP path — otlphttp -> a Data Collection Endpoint (DCE) logs-ingestion
-# URI -> a Data Collection Rule (DCR) whose transform lands traces in the
-# workspace-based App Insights tables (AppDependencies / AppTraces). This
-# REPLACES the previous `azuremonitor` (Breeze) exporter (MG-33: correct native
-# OTLP export, per operator decision 2026-07-22).
+# native-OTLP path — otlphttp -> a full native-OTLP traces ingestion URL on a
+# Data Collection Endpoint (DCE) -> a native-OTLP Data Collection Rule (DCR,
+# Microsoft-OTel-Traces-* streams) -> workspace-based App Insights trace tables.
+# This REPLACES the previous `azuremonitor` (Breeze) exporter (MG-33: correct
+# native OTLP export, per operator decision 2026-07-22).
 #
 # Auth is Entra-only: the collector runs as an Azure Container App with a
 # USER-ASSIGNED managed identity that holds "Monitoring Metrics Publisher" ON
-# THE DCR (see the Terraform in ../ — enable_native_otlp module). The azureauth
-# extension mints an AAD token (audience https://monitor.azure.com, derived from
-# the request Host) — NO ingestion key, NO connection string here.
+# THE DCR (see the Terraform in ../ — enable_native_otlp module). The azure_auth
+# extension mints an AAD token for the EXPLICITLY-CONFIGURED scope
+# https://monitor.azure.com/.default — NO ingestion key, NO connection string.
 #
-# EVERY Azure-specific value (DCE endpoint, DCR immutable id, stream name, UAI
-# client id, file-storage dir) is injected at runtime via env-var substitution
-# from Terraform outputs — NEVER hand-copied into this file. See README.md.
+# EVERY Azure-specific value (the full traces_endpoint URL, UAI client id,
+# file-storage dir) is injected at runtime via env-var substitution from
+# Terraform outputs — NEVER hand-copied into this file. See README.md.
 #
-# PINNED IMAGE (F3): otel/opentelemetry-collector-contrib:0.128.0
-#   otlphttp + azureauth + file_storage all require the CONTRIB distribution;
-#   the azureauth extension first ships in contrib 0.126.0. Pin by tag AND
-#   resolve to a digest at deploy time (see README / Terraform container image).
-#   The core `otel/opentelemetry-collector` image does NOT include these.
+# PINNED IMAGE (F3): otel/opentelemetry-collector-contrib:0.151.0
+#   otlphttp + azure_auth + file_storage all require the CONTRIB distribution.
+#   Version floor (DOC-VERIFIED, 3rd review): >=0.132.0 (native OTLP), >=0.148.0
+#   (current `azure_auth` config syntax), AND >0.150.0 so it is OUTSIDE the
+#   GHSA-pjv4-3c63-699f azure_auth inbound-auth-bypass advisory range
+#   (0.124.0–0.150.0). Outbound (exporter) auth used HERE is unaffected by that
+#   advisory, but MG-34's FUTURE collector RECEIVER (inbound) auth must NOT run on
+#   a version where azure_auth accepts unauthenticated inbound requests — the
+#   0.151.0 pin enforces that. Pin by tag AND @sha256 digest (Terraform variable
+#   collector_image); re-confirm the digest and the advisory `patched` field at
+#   deploy. The core `otel/opentelemetry-collector` image does NOT include these.
 #
-#   !!! UNVERIFIED PREVIEW SEMANTICS — confirm at MG-25 activation (MG-34) !!!
-#   0.126.0 is the floor for the azureauth extension EXISTING, but the MINIMUM
-#   contrib version Azure DOCUMENTS as supported for NATIVE OTLP INGESTION
-#   (PREVIEW) is NOT verified. Confirm 0.128.0 satisfies the Azure preview docs'
-#   minimum (and the azureauth-extension feature level the ingestion path needs)
-#   BEFORE flipping enable_native_otlp on — bump the pin if the docs require a
-#   newer contrib release.
+#   DOC-VERIFIED, OPERATIONALLY UNVERIFIED: shapes below are reconciled against MS
+#   primary sources (MS Learn native-OTLP ingestion doc, AzureMonitorCommunity
+#   OTLP_DCE_DCR ARM template, azureauthextension README, advisory
+#   GHSA-pjv4-3c63-699f), but NO live span has reached App Insights. Do not read a
+#   green `otelcol-contrib validate` as "telemetry flows" (MG-25/MG-34).
 
 extensions:
-  # Entra (AAD) authenticator. Uses the Container App's USER-ASSIGNED managed
-  # identity (client id from env, Terraform-emitted). System-assigned would create
-  # a create-then-grant ordering gap, so the identity is user-assigned.
+  # Entra (AAD) authenticator — extension key `azure_auth` (CURRENT name; the old
+  # `azureauth` key is renamed as of contrib >=0.148.0). Uses the Container App's
+  # USER-ASSIGNED managed identity (client id from env, Terraform-emitted).
+  # System-assigned would create a create-then-grant ordering gap, so the identity
+  # is user-assigned.
   #
-  # !!! UNVERIFIED PREVIEW SEMANTICS — confirm at MG-25 activation (MG-34) !!!
-  # This block sets NO explicit token scope, on the assumption the extension
-  # derives the audience from the request Host. The STANDARD Azure Monitor
-  # ingestion scope IS well-established as `https://monitor.azure.com/.default`
-  # (the DCR Logs Ingestion API audience), BUT two things are NOT verified for
-  # Azure Monitor NATIVE OTLP INGESTION (PREVIEW):
-  #   (1) whether native-OTLP ingestion uses that same monitor.azure.com audience
-  #       or a preview-specific one; and
-  #   (2) whether THIS azureauth extension auto-derives that scope from Host or
-  #       REQUIRES it to be set explicitly (e.g. a `scope:`/`resource:` field)
-  #       plus any `tenant_id`/`managed_identity` specifics.
-  # MUST be reconciled against the current azureauth-extension + Azure native-
-  # OTLP-ingestion preview docs BEFORE the enable_native_otlp flag is flipped on.
-  # Do NOT assume the omitted-scope form authenticates correctly as-is.
-  azureauth:
+  # DOC-VERIFIED (azureauthextension README): the ingestion scope MUST be set
+  # EXPLICITLY via `scopes:` — it is NOT derived from the request Host (the prior
+  # assumption was WRONG; the extension pins the audience from config). The Azure
+  # Monitor ingestion audience is https://monitor.azure.com/.default.
+  azure_auth:
     managed_identity:
       client_id: ${env:AZURE_OTLP_UAI_CLIENT_ID}
+    scopes:
+      - https://monitor.azure.com/.default
 
   # Persistent (WAL) spool so telemetry survives a collector restart instead of
   # being lost from the in-memory queue. MUST be backed by a persistent volume
@@ -94,25 +92,22 @@ processors:
     timeout: 5s
 
 exporters:
-  # Native OTLP/HTTP to Azure Monitor via the DCE logs-ingestion endpoint. The
-  # DCE URI + DCR immutable id + stream name all come from Terraform outputs via
-  # env substitution (never hand-copied). azureauth supplies the AAD bearer
-  # token; the DCR routes/transforms the OTLP stream into AppDependencies /
-  # AppTraces on the workspace-based App Insights.
+  # Native OTLP/HTTP to Azure Monitor. The FULL traces ingestion URL — the DCE
+  # ingestion host, the DCR immutable id, and the fixed `Microsoft-OTLP-Traces`
+  # stream segment — is built in Terraform and injected as a SINGLE env var
+  # (never hand-copied). DOC-VERIFIED (MS native-OTLP ingestion doc): routing is
+  # carried by the URL PATH, NOT by x-ms-dcr-immutable-id / x-ms-stream-name
+  # headers (removed) — so `traces_endpoint` (not a bare `endpoint`) is used and
+  # there is no headers block. azure_auth supplies the AAD bearer token for the
+  # explicitly-configured https://monitor.azure.com/.default scope.
   #
   # Durability (F3): a PERSISTENT sending_queue backed by file_storage spools to
   # disk (survives restart) + retry_on_failure with backoff for transient 5xx /
   # throttling. max_elapsed_time: 0 => retry indefinitely rather than drop.
   otlphttp/azuremonitor:
-    endpoint: ${env:AZURE_MONITOR_OTLP_ENDPOINT}
+    traces_endpoint: ${env:AZURE_MONITOR_OTLP_TRACES_ENDPOINT}
     auth:
-      authenticator: azureauth
-    headers:
-      # DCR routing (Azure Monitor OTLP ingestion). Values are env-substituted
-      # from Terraform outputs; the exact header/route binding is finalized
-      # under the MG-25 native-OTLP preview acceptance.
-      x-ms-dcr-immutable-id: ${env:AZURE_MONITOR_DCR_IMMUTABLE_ID}
-      x-ms-stream-name: ${env:AZURE_MONITOR_STREAM_NAME}
+      authenticator: azure_auth
     sending_queue:
       enabled: true
       storage: file_storage/otlp_queue
@@ -126,7 +121,7 @@ exporters:
 
 service:
   # Both net-new extensions must be listed here or they are not started.
-  extensions: [azureauth, file_storage/otlp_queue]
+  extensions: [azure_auth, file_storage/otlp_queue]
   pipelines:
     # Traces are the primary signal: the per-reading W3C trace chain (MG-33 /
     # F2/F3) flows edge service -> otlp receiver -> otlphttp/azuremonitor ->

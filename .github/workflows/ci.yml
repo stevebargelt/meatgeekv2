@@ -201,24 +201,22 @@ jobs:
 
       # Validate the native-OTLP collector config (MG-33 F1/F3) against the SAME
       # PINNED contrib image the config comments/Terraform pin. otlphttp +
-      # azureauth + file_storage require the contrib distribution; azureauth
-      # first ships in contrib 0.126.0. Dummy env values satisfy the exporter's
-      # non-empty-endpoint check — validate is a static config check, it opens no
-      # network connection and ingests nothing. Exit 1 on any config error.
+      # azure_auth + file_storage require the contrib distribution; the pin is
+      # 0.151.0 (>=0.132.0 native OTLP, >=0.148.0 azure_auth syntax, >0.150.0 so
+      # it is OUTSIDE GHSA-pjv4-3c63-699f). A single dummy traces_endpoint env
+      # satisfies the exporter's non-empty check — validate is a static config
+      # check, it opens no network connection and ingests nothing. Exit 1 on any
+      # config error.
       - name: Validate OTel Collector config (pinned contrib image)
         env:
-          OTELCOL_CONTRIB_IMAGE: otel/opentelemetry-collector-contrib:0.128.0
+          OTELCOL_CONTRIB_IMAGE: otel/opentelemetry-collector-contrib:0.151.0
           AZURE_OTLP_UAI_CLIENT_ID: 00000000-0000-0000-0000-000000000000
-          AZURE_MONITOR_OTLP_ENDPOINT: https://example-dce.ingest.monitor.azure.com
-          AZURE_MONITOR_DCR_IMMUTABLE_ID: dcr-00000000000000000000000000000000
-          AZURE_MONITOR_STREAM_NAME: Custom-OtelTraces
+          AZURE_MONITOR_OTLP_TRACES_ENDPOINT: https://example-dce.ingest.monitor.azure.com/dataCollectionRules/dcr-00000000000000000000000000000000/streams/Microsoft-OTLP-Traces/otlp/v1/traces
         run: |
           docker run --rm \
             -v "$PWD/apps/infrastructure/otel-collector:/cfg:ro" \
             -e AZURE_OTLP_UAI_CLIENT_ID \
-            -e AZURE_MONITOR_OTLP_ENDPOINT \
-            -e AZURE_MONITOR_DCR_IMMUTABLE_ID \
-            -e AZURE_MONITOR_STREAM_NAME \
+            -e AZURE_MONITOR_OTLP_TRACES_ENDPOINT \
             "$OTELCOL_CONTRIB_IMAGE" \
             validate --config=/cfg/collector-config.yaml
 
