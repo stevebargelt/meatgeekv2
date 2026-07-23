@@ -38,7 +38,7 @@ variable "application_insights_id" {
 }
 
 variable "log_analytics_workspace_id" {
-  description = "Resource id of the Log Analytics workspace backing the workspace-based App Insights. The DCR routes OTLP traces into this workspace's App-Insights tables (AppTraces / AppDependencies)."
+  description = "Resource id of the Log Analytics workspace backing the workspace-based App Insights. The native-OTLP DCR routes OTLP traces into this workspace's OpenTelemetry-schema tables (OTelSpans / OTelTraces), NOT the classic AppTraces / AppDependencies tables."
   type        = string
 }
 
