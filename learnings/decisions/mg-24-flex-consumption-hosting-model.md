@@ -63,8 +63,10 @@ The Flex resource is configured with:
   `storage_container_type = "blobContainer"`,
   `storage_authentication_type = "SystemAssignedIdentity"`,
   `storage_container_endpoint` pointing at a blob container on the **same**
-  `azurerm_storage_account.functions` account — which **keeps
-  `shared_access_key_enabled = false`**.
+  azapi-created Functions storage account (`azapi_resource.functions_storage`,
+  `Microsoft.Storage/storageAccounts`) — which **keeps
+  `allowSharedKeyAccess = false`** in its azapi body (see the control-plane
+  storage-account section below).
 - **System-assigned identity** and the **entire `auth_settings_v2` Easy Auth
   block** (active_directory_v2, allowed_audiences, allowed_applications, token
   store disabled, `www_authentication_disabled`) carried **1:1** from the old
@@ -89,10 +91,11 @@ The Flex resource is configured with:
 Flex Consumption does **not** use an Azure Files content share. Its deployment
 artifact (the package zip) lives in a **blob container** reached over **managed
 identity / AAD**, not a shared key. Because the deployment path is MI-blob, the
-functions storage account can **keep `shared_access_key_enabled = false`** and
-Flex still deploys and runs. The hosting model and the secrets-out-of-state
-storage posture are **no longer in conflict** — which is exactly the coupling
-that broke Y1.
+functions storage account can **keep `allowSharedKeyAccess = false`** and Flex
+still deploys and runs. The hosting model and the secrets-out-of-state storage
+posture are **no longer in conflict** — which is exactly the coupling that broke
+Y1. (The account is also created via azapi over the control plane so its own
+key-auth data-plane reads never 403 — see the control-plane section below.)
 
 ### West US 2 — and the whole-stack relocation blast radius
 
@@ -131,27 +134,54 @@ The Flex change **also** forces destroy+recreate of the Function App itself:
 there is **no in-place migration** from a Consumption/Premium plan to Flex
 Consumption, independent of the region move.
 
-### Control-plane deployment container — NO `storage_use_azuread`, NO pre-apply grant
+### Control-plane storage ACCOUNT and deployment container — NO `storage_use_azuread`, NO pre-apply grant
 
-The deployment blob container is created with **azapi over the ARM CONTROL PLANE**
-(`Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01`), the same
-pattern the native-otlp module uses for its DCR — **not** `azurerm_storage_container`,
-which is a storage **DATA-plane** operation.
+**Both** the Functions storage **account**
+(`Microsoft.Storage/storageAccounts@2023-05-01`) **and** its deployment blob
+**container**
+(`Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01`) are created
+with **azapi over the ARM CONTROL PLANE**, the same pattern the native-otlp module
+uses for its DCR — **not** `azurerm_storage_account` / `azurerm_storage_container`,
+which perform storage **DATA-plane** operations.
 
-This was a corrective decision (MG-24 reds 2f5154 / b08ced). A **data-plane**
-container create against an account with `shared_access_key_enabled = false` — an
+> **Correction (operationally proven).** An earlier revision of this ADR moved only
+> the *container* to azapi and claimed "nothing in the stack performs a storage
+> data-plane operation through the `azurerm` provider anymore" while keeping the
+> account as `azurerm_storage_account`. **That claim was false.** The
+> `azurerm_storage_account` **resource itself** performs its OWN key-auth storage
+> **data-plane** reads — a **blob-service-availability poll on create** and
+> **queue/blob/share property reads on refresh** — using shared-key auth by default.
+> Against an account with `allowSharedKeyAccess = false` and the provider's
+> `storage_use_azuread` deliberately unset, those reads **403**
+> (`KeyBasedAuthenticationNotPermitted`). This was **proven twice on live Azure** on
+> `module.azure_functions.azurerm_storage_account.functions`: the original **Y1
+> apply** and the **Flex-config destroy-refresh** both failed here — on the
+> account's own reads, independent of the container. The deterministic pipeline
+> (mock providers) could not catch it; only a real apply does. The fix is to manage
+> the **account** via azapi too, so no `azurerm` storage data-plane op occurs at
+> plan/apply for **any** terraform principal.
+
+This was a corrective decision (MG-24 reds 2f5154 / b08ced, then the live-apply 403
+above). A **data-plane** operation against an account with shared key disabled — an
 account **this apply creates** — needs the apply principal to already hold a
-**Storage Blob Data** role on a storage account that does not exist until mid-apply.
-That is a **same-apply chicken-and-egg** that 403s, otherwise papered over with a
-fragile pre-apply data-plane grant + an RBAC-propagation wait. The **control-plane**
-create needs only the resource-management permission the apply principal already
-holds (Contributor on the resource group), so:
+**Storage Blob Data** role on a storage account that does not exist until mid-apply,
+OR the provider-global `storage_use_azuread` switch. That is a **same-apply
+chicken-and-egg** that 403s, otherwise papered over with a fragile pre-apply
+data-plane grant + an RBAC-propagation wait. The **control-plane** create (for both
+the account and the container) needs only the resource-management permission the
+apply principal already holds (Contributor on the resource group), so:
 
-- The provider block **does NOT set `storage_use_azuread`** — nothing in the stack
-  performs a storage data-plane operation through the `azurerm` provider anymore, so
-  the provider-global switch (and its side effects) is unnecessary and removed.
+- The provider block **does NOT set `storage_use_azuread`** — with both the account
+  and the container on the control plane, no terraform principal performs a storage
+  data-plane operation through the `azurerm` provider, so the provider-global switch
+  (and its side effects) is unnecessary and removed.
 - **No pre-apply Storage-Blob-Data-Owner grant to the apply/CI principal is
   required.** The **first apply is executable with NO manual pre-grant.**
+- The shared-key-disabled invariant moves from the azurerm
+  `shared_access_key_enabled` attribute to the **azapi body's
+  `properties.allowSharedKeyAccess = false`**; the fail-closed gates
+  (`tf-plan-secret-inspection.sh` positive azapi-account assertion, `tf-static-checks.sh`
+  check 9) assert it in that new location.
 
 The Function App still reads the package ZIP from the container at **runtime over its
 OWN system-assigned managed identity** (Storage Blob Data Owner, granted in-module) —
@@ -188,16 +218,20 @@ coupled-invariant model in
 [`mg-24-appinsights-key-in-terraform-state`](mg-24-appinsights-key-in-terraform-state.md).
 That ADR established:
 
-- The **`shared_access_key_enabled = false`** posture on the functions storage
-  account (the Storage row) — which Flex's MI-blob deployment lets us **keep**
-  rather than relax. Flex is what makes that row's "shared-key auth safely off
-  without breaking the Functions runtime" claim continue to hold under the new
-  hosting model.
+- The **shared-key-disabled** posture on the functions storage account (the
+  Storage row) — which Flex's MI-blob deployment lets us **keep** rather than
+  relax. Flex is what makes that row's "shared-key auth safely off without breaking
+  the Functions runtime" claim continue to hold under the new hosting model. The
+  invariant is now expressed as **`allowSharedKeyAccess = false`** in the azapi
+  account body (the account moved to control-plane azapi, per the section above),
+  not the former azurerm `shared_access_key_enabled` attribute.
 - The **fail-closed gate machinery** (`tf-plan-secret-inspection.sh` +
   `tf-static-checks.sh` check 9) that this change re-points at the
-  `azurerm_function_app_flex_consumption` resource shape: the gate still walks
-  `app_settings` (and now `site_config`) for prohibited secret VALUES, still
-  passes on the flex shape, and still **fails closed** if shared-key is
+  `azurerm_function_app_flex_consumption` resource shape AND the azapi storage
+  account: the gate still walks `app_settings` (and now `site_config`) for
+  prohibited secret VALUES, adds a **positive assertion that the azapi
+  `Microsoft.Storage/storageAccounts` body sets `allowSharedKeyAccess = false`**,
+  still passes on the flex shape, and still **fails closed** if shared-key is
   re-enabled. **No new authenticating-key exception is introduced** — the IoT Hub
   exception list is unchanged.
 
@@ -227,11 +261,14 @@ See that ADR for the full inert-key reasoning; it is not repeated here.
 - **The live re-apply is destroy+recreate of the entire stack**, region-driven,
   with **Cosmos data loss** requiring an operator migration decision first. This
   is expected and operator-gated — out of scope for this deterministic pipeline.
-- **The deployment container is created over the ARM control plane (azapi), so the
-  first apply needs NO pre-apply storage data-plane grant** and the provider does
-  **not** set `storage_use_azuread`. This removes the same-apply chicken-and-egg and
-  the provider-global data-plane side effects the architect flagged (MG-24 reds
-  2f5154 / b08ced).
+- **Both the storage ACCOUNT and the deployment container are created over the ARM
+  control plane (azapi), so the first apply needs NO pre-apply storage data-plane
+  grant** and the provider does **not** set `storage_use_azuread`. The account moved
+  to azapi because the `azurerm_storage_account` resource performs its OWN key-auth
+  data-plane reads that 403 on a shared-key-disabled account (proven twice on live
+  Azure). This removes the same-apply chicken-and-egg and the provider-global
+  data-plane side effects the architect flagged (MG-24 reds 2f5154 / b08ced + the
+  live-apply 403).
 - **The deploy flow is Flex OneDeploy** (`func publish` / OneDeploy of the
   package zip to the MI-auth blob container), not Kudu zip-deploy /
   `WEBSITE_RUN_FROM_PACKAGE` / an Azure Files share. `function_app_name` stays the
@@ -240,12 +277,14 @@ See that ADR for the full inert-key reasoning; it is not repeated here.
 - **Node 24** is the runtime; the API's `engines.node` and the CI Node version
   are bumped to match.
 - **The secrets-out-of-state posture is preserved.** Shared-key stays disabled on
-  the functions storage account; the fail-closed gates carry to the flex resource
-  shape and still fail closed on a re-enabled key. The IoT-Hub-only exception set
-  is unchanged.
+  the functions storage account — now via the azapi body's
+  `allowSharedKeyAccess = false` — and the fail-closed gates (with a positive
+  azapi-account assertion added) still fail closed on a re-enabled key. The
+  IoT-Hub-only exception set is unchanged.
 - Related docs: the Flex deploy model, Node 24, and the West US 2 + whole-stack
   relocation caveat are documented in
   [`docs/infrastructure/bootstrap-runbook.md`](../../docs/infrastructure/bootstrap-runbook.md).
-  There is **no** pre-apply Blob-Data-Owner grant to document — the deployment
-  container is created over the ARM control plane (azapi), so the first apply
-  needs no manual data-plane grant and the provider sets no `storage_use_azuread`.
+  There is **no** pre-apply Blob-Data-Owner grant to document — both the storage
+  account and the deployment container are created over the ARM control plane
+  (azapi), so the first apply needs no manual data-plane grant and the provider
+  sets no `storage_use_azuread`.

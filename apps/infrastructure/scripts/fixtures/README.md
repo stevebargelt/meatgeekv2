@@ -16,8 +16,8 @@ scripts/fixtures/run-flex-secret-gate-fixtures.sh
 
 | fixture | expected | proves |
 | --- | --- | --- |
-| `flex-plan-accepted.json` | **exit 0** | the accepted App Insights residual (managed ikey, `local_authentication_enabled=false`) passes on the flex shape; MI blob deployment storage (`storage_authentication_type=SystemAssignedIdentity`, plain SAS-free `storage_container_endpoint`) and `shared_access_key_enabled=false` are accepted |
-| `flex-plan-reenabled-shared-key.json` | **nonzero** | fail-closed when the functions storage account re-enables `shared_access_key_enabled=true` — its in-state account key becomes a live credential (MG-24 point 5) |
+| `flex-plan-accepted.json` | **exit 0** | the accepted App Insights residual (managed ikey, `local_authentication_enabled=false`) passes on the flex shape; MI blob deployment storage (`storage_authentication_type=SystemAssignedIdentity`, plain SAS-free `storage_container_endpoint`) and the azapi `Microsoft.Storage/storageAccounts` account body with `allowSharedKeyAccess=false` are accepted |
+| `flex-plan-reenabled-shared-key.json` | **nonzero** | fail-closed when the azapi functions storage account body sets `allowSharedKeyAccess=true` — its in-state account key becomes a live credential (MG-24 point 5). The shared-key-disabled invariant now lives in the azapi body (the account is created over the ARM control plane), not the former azurerm `shared_access_key_enabled` attribute |
 | `flex-plan-appsetting-key.json` | **nonzero** | a real `AccountKey=` credential VALUE planted in a flex `app_settings` entry is caught (the app_settings sink walk matches the flex type via the `function_app` substring) |
 | `flex-plan-siteconfig-key.json` | **nonzero** | a credential VALUE placed in the flex `site_config` block (a sink that did NOT exist on `azurerm_linux_function_app`) is caught — the extended site_config walk |
 | `flex-plan-sas-endpoint.json` | **nonzero** | a SAS token (`?...&sig=`) on `storage_container_endpoint` is caught — the deployment blob-container URL must be a plain MI-auth URL, never a shared-key SAS |

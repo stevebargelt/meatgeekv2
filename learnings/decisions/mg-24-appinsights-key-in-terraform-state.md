@@ -19,8 +19,11 @@
 > local/key auth is OFF; the security decision and accepted-residual reasoning are
 > unchanged. The secret-inspection gate and the cosmos-db module tests track the
 > new attribute name. SignalR (`local_auth_enabled = false`), Storage
-> (`shared_access_key_enabled = false`), and the Event Hubs namespace
-> (`local_authentication_enabled = false`) were **not** part of this rename.
+> (`shared_access_key_enabled = false` at the time; the Functions storage account
+> has since moved to an azapi control-plane resource expressing the same disable as
+> `allowSharedKeyAccess = false` in its body — see the Storage row below), and the
+> Event Hubs namespace (`local_authentication_enabled = false`) were **not** part of
+> this rename.
 
 ## Context
 
@@ -189,7 +192,7 @@ inherent computed attributes. The operator-approved decision is to apply it
 | --- | --- | --- | --- |
 | **Cosmos DB** (`azurerm_cosmosdb_account.main`) | `primary_key`, `secondary_key`, `connection_strings` | `local_authentication_enabled = false` | Data-plane access is AAD/RBAC: the Function App **and** the IoT Hub identity each hold *Cosmos DB Built-in Data Contributor* (SQL role assignments). Both keep working with key auth off; the in-state key can no longer authenticate. |
 | **SignalR** (`azurerm_signalr_service.main`) | `primary_access_key`, `primary_connection_string` | `local_auth_enabled = false` | The Function App connects identity-based via `AzureSignalRConnectionString__serviceUri` and holds *SignalR Service Owner*. AAD negotiation keeps working with AccessKey auth off. |
-| **Storage** (`azurerm_storage_account.functions`) | account access keys, connection string | `shared_access_key_enabled = false` (already set) | Deployment storage is **fully managed-identity** under the MG-24 Flex hosting model: the Flex app reads its package from a `blobContainer` via `storage_authentication_type = "SystemAssignedIdentity"` (no Azure Files content share, no `storage_account_access_key`, no key-based `AzureWebJobsStorage`), and the identity holds *Storage Blob Data Owner* + *Storage Queue Data Contributor*. Shared-key auth is safely off without breaking the Functions runtime — see [ADR: Flex Consumption hosting model](mg-24-flex-consumption-hosting-model.md). |
+| **Storage** (`azapi_resource.functions_storage`, `Microsoft.Storage/storageAccounts`) | account access keys, connection string | `allowSharedKeyAccess = false` (in the azapi body) | Deployment storage is **fully managed-identity** under the MG-24 Flex hosting model: the Flex app reads its package from a `blobContainer` via `storage_authentication_type = "SystemAssignedIdentity"` (no Azure Files content share, no `storage_account_access_key`, no key-based `AzureWebJobsStorage`), and the identity holds *Storage Blob Data Owner* + *Storage Queue Data Contributor*. The account is created via **azapi over the ARM control plane** — NOT `azurerm_storage_account`, whose OWN key-auth data-plane reads **403** on a shared-key-disabled account with `storage_use_azuread` unset (proven on live Azure) — so the shared-key-disabled invariant now lives in the azapi body's `allowSharedKeyAccess = false`, not the former `shared_access_key_enabled` attribute. Shared-key auth is safely off without breaking the Functions runtime — see [ADR: Flex Consumption hosting model](mg-24-flex-consumption-hosting-model.md). |
 | **Event Hubs namespace** (`azurerm_eventhub_namespace.main`) | auto-created `RootManageSharedAccessKey` primary/secondary keys + connection strings | `local_authentication_enabled = false` | Both access paths are identity-based: the IoT Hub **produces** via `azurerm_iothub_endpoint_eventhub.eventhub_realtime` (`authentication_type = identityBased` + *Azure Event Hubs Data Sender*), and the Function App **consumes** via *Azure Event Hubs Data Receiver* (`IOTHUB_EVENTS__fullyQualifiedNamespace`). Nothing reads the RootManage key, so SAS auth is safely off (round 12). |
 | **IoT Hub** (`azurerm_iothub.main`) | `shared_access_policy[].primary_key` / `secondary_key` (SAS) | **NOT disabled — the SOLE documented exception** | Real BBQ **devices**, the **data-pusher**, and the **device-controller** authenticate to the hub with **SAS keys** (the device SDKs' supported path). Setting `local_authentication_enabled = false` would sever device connectivity. Key auth is deliberately kept enabled; the in-state SAS keys are **live credentials**. This is now the **only** service whose in-state key remains live. |
 
@@ -198,6 +201,9 @@ key cannot authenticate; runtime access is identity-based; restricted state
 access) apply identically to Cosmos, SignalR, Storage, and the Event Hubs
 namespace (round 12). For those four, the in-state key is a
 **present-but-non-authenticating residual**, exactly like the App Insights ikey.
+(For Storage the disable is expressed as `allowSharedKeyAccess = false` in the
+azapi account body — the account moved to control-plane azapi, per the Storage
+row above — not the former `shared_access_key_enabled` attribute.)
 
 **IoT Hub is the accepted exception.** Its SAS keys remain live because device
 connectivity requires them. The mitigation is the same fourth control the App
@@ -214,12 +220,18 @@ The per-service acceptance holds **only while local/key auth stays disabled** on
 Cosmos, SignalR, Storage, and the Event Hubs namespace.
 `apps/infrastructure/scripts/tf-plan-secret-inspection.sh`
 now enforces this over the real plan/state: for each `azurerm_cosmosdb_account` /
-`azurerm_storage_account` / `azurerm_signalr_service` / `azurerm_eventhub_namespace`
+`azurerm_signalr_service` / `azurerm_eventhub_namespace`
 it **accepts** the inherent key residual **only** when that resource's disable-flag
-is set (`local_authentication_enabled = false` / `shared_access_key_enabled = false`
-/ `local_auth_enabled = false` / `local_authentication_enabled = false`), and
-**flags a VIOLATION (exit nonzero)** if local auth is left enabled — because then
-the in-state key is a live credential. `azurerm_iothub` key attributes are the
+is set (`local_authentication_enabled = false` / `local_auth_enabled = false` /
+`local_authentication_enabled = false`); and for the **azapi-managed** Functions
+storage account (`azapi_resource`, `Microsoft.Storage/storageAccounts`) it makes a
+**positive assertion that the azapi body sets `allowSharedKeyAccess = false`** —
+otherwise a shared-key-enabled account could mint a live account key into state.
+Any of these left with auth enabled is **flagged a VIOLATION (exit nonzero)**,
+because then the in-state key is a live credential. (The gate also retains a
+defensive `azurerm_storage_account` → `shared_access_key_enabled = false` branch,
+but the Functions storage account is now the azapi resource above.)
+`azurerm_iothub` key attributes are the
 **acknowledged exception**: accepted with a printed note. A real credential VALUE reaching `app_settings` or an output is
 a violation regardless of service, unchanged.
 

@@ -126,10 +126,61 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       // that KEEPS shared-key access disabled — so no account key can leak into state.
       expect(live).toMatch(/storage_authentication_type\s*=\s*"SystemAssignedIdentity"/);
       expect(live).toMatch(/storage_container_type\s*=\s*"blobContainer"/);
-      expect(live).toMatch(/shared_access_key_enabled\s*=\s*false/);
       expect(live).not.toMatch(/storage_account_access_key/);
       // No raw deployment-storage key: under MI auth `storage_access_key` must be absent.
       expect(live).not.toMatch(/storage_access_key\s*=/);
+    });
+
+    it('creates the storage account via azapi (control plane) with shared key disabled', () => {
+      // MG-24 azapi fix (403'd twice on live Azure): the functions storage account
+      // is NOT an azurerm_storage_account — that resource performs its OWN shared-key
+      // storage DATA-PLANE reads, which 403 on a shared-key-disabled account with
+      // storage_use_azuread unset. It is created via azapi over the ARM CONTROL PLANE
+      // (Microsoft.Storage/storageAccounts), so NO terraform principal performs a
+      // storage data-plane op at apply. The shared-key-disabled invariant therefore
+      // lives in the azapi body (allowSharedKeyAccess=false), not the former azurerm
+      // shared_access_key_enabled attribute.
+      expect(live).toMatch(/resource\s+"azapi_resource"\s+"functions_storage"/);
+      expect(live).toMatch(/"Microsoft\.Storage\/storageAccounts@/);
+      expect(live).toMatch(/allowSharedKeyAccess\s*=\s*false/);
+      expect(live).toMatch(/kind\s*=\s*"StorageV2"/);
+      expect(live).toMatch(/minimumTlsVersion\s*=\s*"TLS1_2"/);
+      // The account is no longer an azurerm_storage_account resource at all.
+      expect(live).not.toMatch(/resource\s+"azurerm_storage_account"/);
+    });
+
+    it('deployment container, MI role scopes and the Flex endpoint all reference the azapi account (MG-24 item 3)', () => {
+      // MG-24 azapi fix: everything that pointed at the former
+      // azurerm_storage_account must now point at the azapi_resource. This is what
+      // proves the conversion is WIRED, not just that a lone azapi account exists.
+      //
+      // The deployment package container is created via azapi as a CHILD of the
+      // azapi account (parent_id = "<account>.id/blobServices/default"), never via a
+      // storage DATA-PLANE azurerm_storage_container.
+      expect(live).toMatch(/resource\s+"azapi_resource"\s+"deployment_container"/);
+      expect(live).toMatch(
+        /parent_id\s*=\s*"\$\{azapi_resource\.functions_storage\.id\}\/blobServices\/default"/
+      );
+      expect(live).not.toMatch(/resource\s+"azurerm_storage_container"/);
+      // The Function App managed-identity Blob + Queue data grants scope to the
+      // azapi account id (least privilege, the account this apply creates).
+      expect(live).toMatch(
+        /azurerm_role_assignment"\s+"functions_storage_blob"[\s\S]*?scope\s*=\s*azapi_resource\.functions_storage\.id/
+      );
+      expect(live).toMatch(
+        /azurerm_role_assignment"\s+"functions_storage_queue"[\s\S]*?scope\s*=\s*azapi_resource\.functions_storage\.id/
+      );
+      // The app-deploy principal grant scopes to the azapi deployment CONTAINER id
+      // (container-scoped write for OneDeploy), not the whole account.
+      expect(live).toMatch(
+        /azurerm_role_assignment"\s+"deploy_principal_deployment_container"[\s\S]*?scope\s*=\s*azapi_resource\.deployment_container\.id/
+      );
+      // The Flex deployment endpoint is composed from the deterministic account-name
+      // local — the control-plane azapi account exposes NO azurerm
+      // primary_blob_endpoint attribute to interpolate, so a plain SAS-free URL is built.
+      expect(live).toMatch(
+        /storage_container_endpoint\s*=\s*"https:\/\/\$\{local\.functions_storage_account_name\}\.blob\.core\.windows\.net\/\$\{local\.deployment_container_name\}"/
+      );
     });
 
     it('app_settings carry NON-SECRET identity endpoints, not connection strings', () => {
@@ -869,5 +920,79 @@ describe('MG-24 S1: the fail-closed plan/state inspection walks real VALUES (tf-
       );
       expect(foreignRun.out).not.toMatch(/bad substitution/i);
     });
+  });
+});
+
+describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DISABLED azapi account and rejects a re-enabled one (item 4)', () => {
+  // The Functions host storage account is now an azapi_resource
+  // (Microsoft.Storage/storageAccounts) created over the ARM control plane, so the
+  // shared-key-disabled invariant lives in the azapi body's
+  // properties.allowSharedKeyAccess — NOT the former azurerm
+  // shared_access_key_enabled attribute. These specs make that gate behaviour
+  // durable in CI (nx test api-interfaces): the committed run-flex-secret-gate
+  // fixtures are otherwise only exercised by a shell harness CI does not invoke.
+  const INSPECT = path.join(INFRA, 'scripts', 'tf-plan-secret-inspection.sh');
+  const FIXTURES = path.join(INFRA, 'scripts', 'fixtures');
+  const RUNNER = path.join(FIXTURES, 'run-flex-secret-gate-fixtures.sh');
+  const fixture = (name: string): string => path.join(FIXTURES, name);
+
+  function run(shell: string, args: string[]): { code: number; out: string } {
+    try {
+      const out = execFileSync(shell, args, { encoding: 'utf8' });
+      return { code: 0, out };
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+    }
+  }
+
+  it('EXITS 0 on the azapi-account-accepted fixture (body.properties.allowSharedKeyAccess=false)', () => {
+    const { code, out } = run('bash', [INSPECT, fixture('flex-plan-accepted.json')]);
+    expect(code).toBe(0);
+    // The azapi Microsoft.Storage/storageAccounts account is POSITIVELY accepted
+    // (not merely un-flagged) because its body disables shared key.
+    expect(out).toMatch(/accepted azapi storage account/);
+    expect(out).toMatch(/allowSharedKeyAccess=false/);
+    expect(out).toMatch(/PASS — no prohibited credential VALUE/);
+  });
+
+  it('FAILS CLOSED (nonzero) on an allowSharedKeyAccess=true azapi account fixture', () => {
+    const { code, out } = run('bash', [INSPECT, fixture('flex-plan-reenabled-shared-key.json')]);
+    expect(code).not.toBe(0);
+    expect(out).toMatch(
+      /azapi Microsoft\.Storage\/storageAccounts body does NOT set allowSharedKeyAccess=false/
+    );
+    expect(out).toMatch(/DO NOT APPLY/);
+  });
+
+  it('the two fixtures encode the MUTATION under test — false (accepted) vs true (rejected) — so the assertion is non-vacuous', () => {
+    // The accepted and re-enabled fixtures carry the SAME azapi
+    // Microsoft.Storage/storageAccounts resource; the load-bearing difference is the
+    // one boolean the gate keys on. Proving both the false and the true body reach
+    // opposite verdicts is the mutation-check that the accept path is not always-green.
+    const accepted = fs.readFileSync(fixture('flex-plan-accepted.json'), 'utf8');
+    const reenabled = fs.readFileSync(fixture('flex-plan-reenabled-shared-key.json'), 'utf8');
+    expect(accepted).toMatch(/"type":\s*"Microsoft\.Storage\/storageAccounts@/);
+    expect(reenabled).toMatch(/"type":\s*"Microsoft\.Storage\/storageAccounts@/);
+    expect(accepted).toMatch(/"allowSharedKeyAccess":\s*false/);
+    expect(reenabled).toMatch(/"allowSharedKeyAccess":\s*true/);
+  });
+
+  it('the re-enabled azapi account also fails closed under dash (`sh`) — no bad-substitution fail-open', () => {
+    const { code, out } = run('sh', [INSPECT, fixture('flex-plan-reenabled-shared-key.json')]);
+    expect(code).not.toBe(0);
+    expect(out).not.toMatch(/bad substitution/i);
+    expect(out).toMatch(
+      /azapi Microsoft\.Storage\/storageAccounts body does NOT set allowSharedKeyAccess=false/
+    );
+  });
+
+  it('the committed fixture runner drives every flex/azapi gate case green (bash + sh)', () => {
+    const { code, out } = run('bash', [RUNNER]);
+    expect(code).toBe(0);
+    expect(out).toMatch(/all fixtures behaved as expected/);
+    // The two azapi-account cases are present in the run.
+    expect(out).toMatch(/flex-plan-accepted\.json: exit 0 as expected/);
+    expect(out).toMatch(/flex-plan-reenabled-shared-key\.json: nonzero \(\d+\) as expected/);
   });
 });

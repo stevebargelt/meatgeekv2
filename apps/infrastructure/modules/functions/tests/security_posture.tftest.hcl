@@ -22,6 +22,7 @@ variables {
   resource_prefix                        = "meatgeek-v2-dev"
   global_suffix                          = "abc123def456"
   resource_group_name                    = "meatgeek-v2-dev-rg"
+  resource_group_id                      = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg"
   location                               = "westus2"
   storage_account_name                   = "mgv2devabc123def456"
   application_insights_connection_string = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://westus2.in.applicationinsights.azure.com/;LiveEndpoint=https://westus2.livediagnostics.monitor.azure.com/"
@@ -54,12 +55,23 @@ run "function_app_name_is_globally_unique" {
 # identity, and the underlying storage account keeps shared-key access DISABLED.
 # There is no Azure Files content share and no shared key, so AzureWebJobsStorage
 # cannot fall back to a key and no key can leak into state — the precondition the
-# gate's storage-residual acceptance relies on.
+# gate's storage-residual acceptance relies on. The account is created via azapi
+# over the ARM control plane (Microsoft.Storage/storageAccounts), so shared-key
+# disablement is asserted on the azapi body (allowSharedKeyAccess=false) rather
+# than the former azurerm shared_access_key_enabled attribute.
 run "deployment_storage_is_managed_identity_only" {
   command = plan
   assert {
-    condition     = azurerm_storage_account.functions.shared_access_key_enabled == false
-    error_message = "Function storage must have shared_access_key_enabled=false (no account key can authenticate or leak into state)"
+    condition     = azapi_resource.functions_storage.body.properties.allowSharedKeyAccess == false
+    error_message = "Function storage must set allowSharedKeyAccess=false (no account key can authenticate or leak into state)"
+  }
+  assert {
+    condition     = azapi_resource.functions_storage.body.kind == "StorageV2"
+    error_message = "Function storage must be StorageV2"
+  }
+  assert {
+    condition     = azapi_resource.functions_storage.body.properties.minimumTlsVersion == "TLS1_2"
+    error_message = "Function storage must enforce minimumTlsVersion=TLS1_2"
   }
   assert {
     condition     = azurerm_function_app_flex_consumption.main.storage_authentication_type == "SystemAssignedIdentity"

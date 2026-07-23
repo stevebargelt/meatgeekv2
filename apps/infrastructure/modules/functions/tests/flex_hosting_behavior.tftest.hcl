@@ -34,6 +34,7 @@ variables {
   resource_prefix                        = "meatgeek-v2-dev"
   global_suffix                          = "abc123def456"
   resource_group_name                    = "meatgeek-v2-dev-rg"
+  resource_group_id                      = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg"
   location                               = "westus2"
   storage_account_name                   = "mgv2devabc123def456"
   application_insights_connection_string = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://westus2.in.applicationinsights.azure.com/"

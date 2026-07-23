@@ -277,6 +277,38 @@ data_service_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
   | @tsv
 ' 2>/dev/null)" || die "cannot inspect: failed to collect the data-service resource universe from ${SRC}"
 
+# --- 2c. Collect the azapi-managed Functions storage account (MG-24 azapi fix)
+# The Functions storage account is no longer an azurerm_storage_account: it is
+# created via azapi over the ARM CONTROL PLANE
+# (Microsoft.Storage/storageAccounts@2023-05-01) because the azurerm resource
+# performs shared-key storage DATA-PLANE reads that 403 on a shared-key-disabled
+# account with storage_use_azuread unset (proven twice on live Azure). The
+# shared-key-disabled invariant therefore moves from the azurerm
+# `shared_access_key_enabled` attribute to the azapi body's
+# `properties.allowSharedKeyAccess`. We collect every azapi_resource whose ARM
+# type is a storage ACCOUNT (NOT the …/blobServices/containers child) and emit a
+# disabled(true|false) flag, exactly like the data-service universe above:
+# allowSharedKeyAccess must be EXACTLY false, else it is a live-key VIOLATION.
+# body is `dynamic`: azapi 2.x renders it as a nested OBJECT in show -json, but we
+# defensively decode a JSON-STRING body too (azapi 1.x shape). A null/absent flag
+# yields disabled=false -> fail-closed VIOLATION (we refuse a residual we cannot
+# PROVE inert). A jq collection error dies (fail-closed), never an empty walk.
+azapi_storage_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
+  [ .[]
+    | select(.type=="azapi_resource")
+    | . as $r
+    | ($r.values.type // "") as $azt
+    | select($azt | test("^Microsoft.Storage/storageAccounts@"))
+    | ($r.values.body
+       | if type=="string" then (try fromjson catch {}) else . end) as $body
+    | { address: $r.address,
+        disabled: ($body.properties.allowSharedKeyAccess == false) }
+  ]
+  | .[]
+  | [ "azapi_storage", .address, (.disabled | tostring) ]
+  | @tsv
+' 2>/dev/null)" || die "cannot inspect: failed to collect azapi Microsoft.Storage/storageAccounts resources from ${SRC}"
+
 # --- 3. Collect the sink VALUES (app_settings + outputs) as TSV --------------
 # Each line: <sink-kind>\t<address/path>\t<value>. We emit the VALUE side only.
 # sort -u dedups identical rows the planned_values/resource_changes union produces.
@@ -537,6 +569,24 @@ inspect_data_services() {
   done
 }
 
+inspect_azapi_storage() {
+  # Read TSV rows on stdin: type \t address \t disabled(true|false). Called with
+  # `< file` redirection (NOT a pipe) so it runs in THIS shell and the shared
+  # `violations` counter that report() bumps survives. POSITIVE assertion of the
+  # shared-key-disabled invariant on the azapi Microsoft.Storage/storageAccounts
+  # body: allowSharedKeyAccess MUST be exactly false, else it is a live-key leak.
+  local rtype raddr rdisabled
+  while IFS="${TAB}" read -r rtype raddr rdisabled; do
+    [ -z "${rtype}" ] && continue
+    rdisabled="$(lc "${rdisabled}")"
+    if [ "${rdisabled}" = "true" ]; then
+      echo "  · accepted azapi storage account (Microsoft.Storage/storageAccounts body sets allowSharedKeyAccess=false — no shared key can authenticate or leak; created over the ARM control plane so no data-plane op at apply): ${raddr}"
+      continue
+    fi
+    report "resource" "${raddr}" "azapi Microsoft.Storage/storageAccounts body does NOT set allowSharedKeyAccess=false — a shared-key-enabled account mints a LIVE account key into state. Set body.properties.allowSharedKeyAccess=false (MG-24 gate: the functions storage account is created over the ARM control plane and keeps shared key disabled)"
+  done
+}
+
 echo "tf-plan-secret-inspection: inspecting ${SRC} (App Insights resources: ${ai_count}, local-auth-disabled(all)=${ai_local_auth_disabled})"
 
 # Feed both sink sets through the classifier. We stage the rows in a temp file and
@@ -553,9 +603,16 @@ inspect_rows < "${rows_file}"
 # Same temp-file + `< file` pattern so the loop runs in THIS shell and the
 # violation counter survives (no pipe / process substitution — dash-portable).
 ds_file="$(mktemp)"
-trap 'rm -f "${rows_file}" "${ds_file}"' EXIT
+azapi_ds_file="$(mktemp)"
+trap 'rm -f "${rows_file}" "${ds_file}" "${azapi_ds_file}"' EXIT
 printf '%s\n' "${data_service_rows}" | grep -v '^[[:space:]]*$' > "${ds_file}" || true
 inspect_data_services < "${ds_file}"
+
+# Inspect the azapi-managed Functions storage account: assert the shared-key-
+# disabled invariant on the Microsoft.Storage/storageAccounts body (MG-24 azapi
+# fix). Same temp-file + `< file` pattern so the loop runs in THIS shell.
+printf '%s\n' "${azapi_storage_rows}" | grep -v '^[[:space:]]*$' > "${azapi_ds_file}" || true
+inspect_azapi_storage < "${azapi_ds_file}"
 
 echo
 if [ "${violations}" -ne 0 ]; then
