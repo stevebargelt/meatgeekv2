@@ -49,8 +49,9 @@ ingestion**:
   `Microsoft-OTLP-Traces` entry stream), **not** by `x-ms-dcr-immutable-id` /
   `x-ms-stream-name` headers (those are removed). The **Data Collection Rule
   (DCR)** ingests the built-in `Microsoft-OTel-Traces-*` streams and enriches
-  them from an App Insights reference into the workspace-based App Insights
-  tables (`AppDependencies` / `AppTraces`).
+  them from an App Insights reference into the workspace-based
+  OpenTelemetry-schema tables (`OTelSpans` / `OTelTraces`) — where native-OTLP
+  ingestion lands, **not** the classic `AppDependencies` / `AppTraces`.
 - Authentication is Entra-only via the **`azure_auth`** collector extension
   (renamed from `azureauth` as of Contrib `>=0.148.0`), backed by a
   **user-assigned** Container App **managed identity**. The extension mints an
