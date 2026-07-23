@@ -62,17 +62,21 @@
 #      marker (see CRED_MARKER_RE). Every credential VALUE is a VIOLATION EXCEPT
 #      the single OPERATOR-ACCEPTED App Insights residual:
 #         the FULL App Insights connection string (InstrumentationKey=...;
-#         IngestionEndpoint=...) in a Function App app_setting — allowed ONLY when
-#         BOTH (a) the plan's azurerm_application_insights resource sets
+#         IngestionEndpoint=...) in a Function App TELEMETRY SINK — its app_settings
+#         map OR its Flex site_config block (since MG-24 item 1 wired App Insights
+#         via the NATIVE site_config.application_insights_connection_string field
+#         instead of an app_setting, so the Flex app plans as a no-op) — allowed
+#         ONLY when BOTH (a) the plan's azurerm_application_insights resource sets
 #         local_authentication_enabled = false (forcing AAD-only ingestion so the
 #         embedded instrumentation key CANNOT authenticate) AND (b) the embedded
 #         InstrumentationKey is one of THIS plan/state's OWN managed App Insights
 #         ikeys (ai_ikeys). The exception is bound to the managed resource: a
 #         lookalike conn string that carries a FOREIGN ikey is a VIOLATION, not the
-#         residual (MG-24 item 2 / the ADR). The AI connection string as an OUTPUT is never accepted (an output
-#         is an export surface, not the telemetry sink), and the AI conn string in
-#         app_settings WITHOUT local auth disabled is a VIOLATION — that is the
-#         coupled invariant this gate enforces.
+#         residual (MG-24 item 2 / the ADR). The AI connection string as an OUTPUT
+#         is never accepted (an output is an export surface, not the telemetry
+#         sink), and the AI conn string in app_settings OR site_config WITHOUT
+#         local auth disabled is a VIOLATION — that is the coupled invariant this
+#         gate enforces on BOTH sinks identically.
 #   5. Exits 1 on ANY violation (printing every offending path + why), or on ANY
 #      operational failure (no jq, unparseable JSON, no input, an inconclusive or
 #      errored managed-ikey comparison) — fail-closed: an inspection that cannot
@@ -354,10 +358,16 @@ output_rows="$(printf '%s\n' "${output_rows}" | sort -u)"
 # storage_authentication_type=SystemAssignedIdentity). We recursively collect every
 # STRING leaf under site_config plus the endpoint field and route them through the
 # SAME marker classifier, so a SAS token / AccountKey / sig marker in any of them is
-# a VIOLATION. site_config is NOT the accepted App-Insights-residual sink — that
-# narrow allowance is app_settings-only — so an AI connection string appearing in
-# site_config is flagged (classifier treats a non-"app_setting" kind as never
-# accepted), exactly like the output export surface.
+# a VIOLATION. site_config IS an accepted App-Insights-residual sink (MG-24 item 1):
+# the AI connection string moved from app_settings to the NATIVE
+# site_config.application_insights_connection_string field so the Flex app plans as
+# a no-op, so an AI conn string here is accepted UNDER THE SAME coupling as
+# app_settings (local_authentication_enabled=false + managed ikey). ANY OTHER
+# credential in site_config (a foreign-ikey lookalike, a storage/Cosmos/SAS
+# connection string, a bare key) is still a VIOLATION, and the AI conn string here
+# WITHOUT local auth disabled is still a VIOLATION — the classifier applies the
+# app_setting acceptance rules to the "site_config" kind identically. (An OUTPUT
+# remains an export surface, never accepted.)
 #
 # storage_access_key is handled DIFFERENTLY and deliberately (MG-24 red dd7ba9): a
 # raw Azure storage account key is an opaque base64 blob with NO lexical
@@ -513,11 +523,20 @@ inspect_rows() {
     fi
 
     # It is a credential value. The ONLY accepted credential is the full App
-    # Insights connection string in an app_setting, under local-auth-disabled.
-    # Case-insensitive here too so a mixed-case AI conn string still routes to the
-    # managed-ikey binding below rather than the generic-credential reject.
+    # Insights connection string in one of the Function App's OWN telemetry sinks
+    # — its app_settings map OR (since MG-24 item 1 wired App Insights via the
+    # Flex resource's NATIVE site_config.application_insights_connection_string
+    # field instead of an app_setting) its site_config block — under
+    # local-auth-disabled. The acceptance is IDENTICAL and equally COUPLED for both
+    # sinks: the AI conn string moved from app_settings to site_config to make the
+    # Flex app plan as a no-op (Azure reflects it into the native site_config
+    # field), and the same "ikey cannot authenticate under local_authentication_
+    # enabled=false" safety basis applies. An OUTPUT (or any OTHER kind) is an
+    # export surface and is NEVER accepted. Case-insensitive here too so a
+    # mixed-case AI conn string still routes to the managed-ikey binding below
+    # rather than the generic-credential reject.
     if printf '%s\n' "${value}" | grep -qiE "${AI_CONNSTR_RE}"; then
-      if [ "${kind}" = "app_setting" ] && [ "${ai_local_auth_disabled}" = "true" ]; then
+      if { [ "${kind}" = "app_setting" ] || [ "${kind}" = "site_config" ]; } && [ "${ai_local_auth_disabled}" = "true" ]; then
         # The exception is bound to the MANAGED resource: the embedded
         # InstrumentationKey MUST be one of this plan/state's own App Insights
         # ikeys. FAIL CLOSED here — a foreign/attacker conn string that merely
@@ -533,12 +552,12 @@ inspect_rows() {
         report "${kind}" "${path}" "App Insights connection string carries an InstrumentationKey (${embedded_ikey:-<none>}) that is NOT one of the plan/state's managed azurerm_application_insights instrumentation_key values — a foreign/lookalike connection string is not the accepted residual (ai_count=${ai_count})"
         continue
       fi
-      if [ "${kind}" != "app_setting" ]; then
+      if [ "${kind}" != "app_setting" ] && [ "${kind}" != "site_config" ]; then
         report "${kind}" "${path}" "App Insights connection string exported as an ${kind} (export surface — never accepted, even under local-auth-disabled)"
         continue
       fi
-      # app_setting but local auth NOT disabled → the coupled invariant is broken.
-      report "${kind}" "${path}" "full App Insights connection string (InstrumentationKey present) in app_settings WITHOUT local_authentication_enabled=false on azurerm_application_insights — the embedded ikey could authenticate ingestion (MG-24 item 2 invariant violated; ai_count=${ai_count})"
+      # app_setting/site_config but local auth NOT disabled → coupled invariant broken.
+      report "${kind}" "${path}" "full App Insights connection string (InstrumentationKey present) in ${kind} WITHOUT local_authentication_enabled=false on azurerm_application_insights — the embedded ikey could authenticate ingestion (MG-24 item 2 invariant violated; ai_count=${ai_count})"
       continue
     fi
 

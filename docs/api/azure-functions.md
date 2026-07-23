@@ -353,9 +353,11 @@ documented exception:** its SAS keys stay **live** because real devices, the
 data-pusher, and the device-controller authenticate with them (the device SDKs'
 supported path), so disabling local auth would sever device connectivity; that
 residual is mitigated by **restricted, container-scoped RBAC state access** and
-SAS-key rotation. `APPLICATIONINSIGHTS_CONNECTION_STRING` is the same class of
+SAS-key rotation. The App Insights connection string is the same class of
 residual: the full App Insights value **including its `InstrumentationKey`** is
-present in `app_settings` and state, but that ikey is a **non-authenticating
+present in the Flex `site_config.application_insights_connection_string` field
+(surfaced to the host, unchanged, as the `APPLICATIONINSIGHTS_CONNECTION_STRING`
+runtime env var) and state, but that ikey is a **non-authenticating
 destination identifier**, not a credential —
 `local_authentication_enabled = false` on the App Insights resource forces
 AAD-only ingestion, so the ikey cannot authenticate anything (see the detailed
@@ -378,12 +380,16 @@ These are exactly the settings Terraform configures on the Function App:
 
 # Application Insights — identity-based (AAD) telemetry ingestion. The managed
 # identity holds "Monitoring Metrics Publisher" on the App Insights resource and
-# the host authenticates with an AAD token (APPLICATIONINSIGHTS_AUTHENTICATION_STRING).
-# APPLICATIONINSIGHTS_CONNECTION_STRING is the FULL connection string —
-# InstrumentationKey included, because Microsoft requires the ikey as the
-# destination-resource identifier even under Entra-only ingestion — but that ikey
-# CANNOT authenticate: local_authentication_enabled=false on the App Insights
-# resource forces AAD-only ingestion, so the ikey is an inert, non-credential
+# the host authenticates with an AAD token (APPLICATIONINSIGHTS_AUTHENTICATION_STRING,
+# an app setting). The connection string itself is NOT an app setting: it is wired
+# via the Flex resource's NATIVE site_config.application_insights_connection_string
+# field (moved there to kill a perpetual second-plan diff — Azure reflects the value
+# into that computed field), and Azure surfaces it to the host UNCHANGED as the
+# APPLICATIONINSIGHTS_CONNECTION_STRING runtime env var shown below. It is the FULL
+# connection string — InstrumentationKey included, because Microsoft requires the
+# ikey as the destination-resource identifier even under Entra-only ingestion — but
+# that ikey CANNOT authenticate: local_authentication_enabled=false on the App
+# Insights resource forces AAD-only ingestion, so the ikey is an inert, non-credential
 # identifier, not a secret to protect.
 APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD
 APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=<ikey>;IngestionEndpoint=<insights-ingestion-endpoint>;LiveEndpoint=<insights-live-endpoint>
@@ -422,8 +428,11 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > under Entra-only ingestion, so the endpoint-only value is not used. That ikey
 > **cannot authenticate ingestion**: the App Insights resource sets
 > **`local_authentication_enabled = false`**, so only an AAD token (Monitoring
-> Metrics Publisher) is accepted and an ikey-only client is rejected. The ikey
-> therefore lands in this app setting and in Terraform state as an **inert,
+> Metrics Publisher) is accepted and an ikey-only client is rejected. It is
+> wired via the Flex `site_config.application_insights_connection_string` field
+> (not an app setting) and Azure surfaces it to the host unchanged as the
+> `APPLICATIONINSIGHTS_CONNECTION_STRING` env var. The ikey
+> therefore lands in that `site_config` field and in Terraform state as an **inert,
 > non-credential** telemetry-destination identifier — an accepted residual that
 > is safe **only while local auth stays disabled**, a coupling enforced by the
 > pre-apply secret-inspection gate. See

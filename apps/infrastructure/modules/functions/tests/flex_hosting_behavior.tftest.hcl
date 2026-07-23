@@ -170,9 +170,21 @@ run "flex_deprecated_app_settings_are_pruned" {
   # identity-based (non-secret endpoint) settings the host needs — an over-eager
   # "prune everything" edit would silently break Cosmos/IoT/SignalR/App Insights
   # wiring. Assert each REMAINS present in app_settings.
+  # The AAD App Insights auth setting REMAINS in app_settings. The connection
+  # string itself is NOT an app_setting — it is wired via the native
+  # site_config.application_insights_connection_string field (second-plan no-op
+  # fix), so assert it is present there and absent from app_settings.
   assert {
-    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_CONNECTION_STRING") && contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_AUTHENTICATION_STRING")
-    error_message = "the AAD-identity App Insights settings (APPLICATIONINSIGHTS_*) must REMAIN after pruning the Flex-forbidden keys"
+    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_AUTHENTICATION_STRING")
+    error_message = "the AAD-identity App Insights auth setting (APPLICATIONINSIGHTS_AUTHENTICATION_STRING) must REMAIN after pruning the Flex-forbidden keys"
+  }
+  assert {
+    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_CONNECTION_STRING")
+    error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must NOT be an app_setting — it is wired via the native site_config field (second-plan no-op fix)"
+  }
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.site_config[0].application_insights_connection_string == var.application_insights_connection_string
+    error_message = "the App Insights connection string must be wired via the native site_config.application_insights_connection_string field"
   }
   assert {
     condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "COSMOSDB__accountEndpoint")

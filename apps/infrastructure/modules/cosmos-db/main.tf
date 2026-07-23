@@ -101,16 +101,20 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
   partition_key_version = 1
   # No throughput - will share from temperatures container
 
-  # Indexing policy optimized for device queries
+  # Indexing policy optimized for device queries.
+  #
+  # No `excluded_path` for `/"_etag"/?` is declared here (nor on the other four
+  # containers): Cosmos does not persist that system exclusion in the readable
+  # indexing policy, so the azurerm provider reads it back as excluded_path=[].
+  # Declaring it in config therefore produced a perpetual second-plan diff
+  # (config had the _etag path; Azure returned none), re-adding it every plan.
+  # Omitting it makes config == Azure's canonical form and the container plans as
+  # a no-op (MG-24 second-plan no-op fix).
   indexing_policy {
     indexing_mode = "consistent"
 
     included_path {
       path = "/*"
-    }
-
-    excluded_path {
-      path = "/\"_etag\"/?"
     }
 
     # Composite index for user device queries
@@ -155,10 +159,6 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
       path = "/*"
     }
 
-    excluded_path {
-      path = "/\"_etag\"/?"
-    }
-
     # Composite indexes for common temperature queries
     composite_index {
       index {
@@ -201,10 +201,6 @@ resource "azurerm_cosmosdb_sql_container" "cooks" {
 
     included_path {
       path = "/*"
-    }
-
-    excluded_path {
-      path = "/\"_etag\"/?"
     }
 
     # Composite indexes for cook filtering and sorting
@@ -254,10 +250,6 @@ resource "azurerm_cosmosdb_sql_container" "users" {
     included_path {
       path = "/*"
     }
-
-    excluded_path {
-      path = "/\"_etag\"/?"
-    }
   }
 
   # Unique constraint on email addresses
@@ -283,10 +275,6 @@ resource "azurerm_cosmosdb_sql_container" "recipes" {
 
     included_path {
       path = "/*"
-    }
-
-    excluded_path {
-      path = "/\"_etag\"/?"
     }
 
     # Composite indexes for recipe filtering

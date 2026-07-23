@@ -242,14 +242,16 @@ resource "azurerm_function_app_flex_consumption" "main" {
     # Application Insights — identity-based (AAD) telemetry ingestion. The
     # managed identity is granted 'Monitoring Metrics Publisher' on the App
     # Insights resource (root module); Authorization=AAD makes the host
-    # authenticate with an AAD token. The FULL connection string (InstrumentationKey
-    # included) is required by Microsoft as the destination-resource identifier
-    # even under Entra-only ingestion — but the ikey CANNOT authenticate because
-    # local_authentication_enabled=false on the AI resource. This ikey-in-state
-    # residual is safe ONLY while local auth stays disabled; the pre-apply
-    # secret-inspection gate enforces that coupling.
+    # authenticate with an AAD token. The FULL connection string itself is NOT an
+    # app_setting: the Flex provider REFLECTS APPLICATIONINSIGHTS_CONNECTION_STRING
+    # into the NATIVE computed site_config.application_insights_connection_string
+    # field, so setting it as an app_setting produced a perpetual second-plan diff
+    # (config carried it in app_settings only; Azure returned it in the native
+    # site_config field) on BOTH app_settings and site_config. It is now wired via
+    # the native site_config field below (MG-24 second-plan no-op fix). The
+    # authentication string and sampling percentage have NO native site_config
+    # field, so they stay plain app_settings and do not drift.
     "APPLICATIONINSIGHTS_AUTHENTICATION_STRING" = "Authorization=AAD"
-    "APPLICATIONINSIGHTS_CONNECTION_STRING"     = var.application_insights_connection_string
     "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE"   = "50"
 
     # Cosmos DB — identity-based. Endpoint is non-secret; data-plane access is
@@ -267,6 +269,19 @@ resource "azurerm_function_app_flex_consumption" "main" {
   }
 
   site_config {
+    # Application Insights connection string — wired via the Flex resource's
+    # NATIVE site_config field (NOT an app_setting). The Flex provider populates
+    # this computed field from Azure on every read, so declaring it here (rather
+    # than as an APPLICATIONINSIGHTS_CONNECTION_STRING app_setting) is what makes
+    # config match Azure and the app plan as a no-op. The FULL connection string
+    # (InstrumentationKey included) is required by Microsoft as the
+    # destination-resource identifier even under Entra-only ingestion; the ikey
+    # CANNOT authenticate because local_authentication_enabled=false on the AI
+    # resource. This ikey-in-state residual is safe ONLY while local auth stays
+    # disabled — the pre-apply secret-inspection gate enforces that coupling on
+    # this site_config field exactly as it did on the former app_setting.
+    application_insights_connection_string = var.application_insights_connection_string
+
     # Explicit per-environment allowed origins (no wildcard). Empty list =>
     # no cross-origin browser access is permitted. support_credentials stays
     # false unless a cookie/credential design requires it.

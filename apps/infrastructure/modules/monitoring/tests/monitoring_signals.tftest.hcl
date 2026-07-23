@@ -63,6 +63,52 @@ run "signalr_diag_uses_alllogs_category_group" {
   }
 }
 
+# MG-24 second-plan no-op — the two consumption budgets declare an EXPLICIT
+# anchor-derived end_date (start + 10 years). Azure defaults an omitted end_date
+# to that horizon and reports it back, so a config that omits it forces a
+# delete+create (REPLACE) on every plan; declaring it makes config == Azure so the
+# budget plans as a no-op (verified: start "…-07-01T00:00:00Z" / end
+# "…+10-07-01T00:00:00Z"). The date VALUE cannot be asserted here: a mock_provider
+# reads a mocked azurerm_consumption_budget_resource_group's time_period back as
+# unknown-until-apply, and `command = apply` fails on the metric-alert action-id
+# validation with mock ids. The explicit-end_date + no-timestamp() regression is
+# asserted statically in libs/api-interfaces .../infra-security-posture.spec.ts
+# ("both consumption budgets set an EXPLICIT end_date"), which reads the sources.
+
+# MG-24 second-plan no-op — the Cosmos DB diagnostic setting must declare the
+# CONCRETE metric categories (Requests + SLI) rather than "AllMetrics". Azure
+# expands AllMetrics for a Cosmos account into those two concrete categories and
+# reports them back in state, so a config of ["AllMetrics"] never matches
+# ["Requests","SLI"] and updates in-place on every plan. Declaring the concrete
+# categories makes config == Azure so the diag setting plans as a no-op. The
+# enabled_log blocks (DataPlaneRequests, QueryRuntimeStatistics) round-trip
+# cleanly and are unchanged.
+run "cosmos_diag_uses_concrete_metric_categories_not_allmetrics" {
+  command = plan
+
+  # Exactly two enabled_metric blocks — the concrete categories Azure returns.
+  # (mutation-check: reverting to a single AllMetrics block flips length to 1.)
+  assert {
+    condition     = length(azurerm_monitor_diagnostic_setting.cosmos_db.enabled_metric) == 2
+    error_message = "Cosmos diag must declare exactly two enabled_metric blocks (Requests + SLI)"
+  }
+  assert {
+    condition     = toset([for m in azurerm_monitor_diagnostic_setting.cosmos_db.enabled_metric : m.category]) == toset(["Requests", "SLI"])
+    error_message = "Cosmos diag enabled_metric categories must be exactly {Requests, SLI}"
+  }
+  # NEGATIVE — the expanded-by-Azure "AllMetrics" pseudo-category must be gone
+  # (its presence is what caused the perpetual in-place update).
+  assert {
+    condition     = alltrue([for m in azurerm_monitor_diagnostic_setting.cosmos_db.enabled_metric : m.category != "AllMetrics"])
+    error_message = "Cosmos diag must NOT use AllMetrics (Azure expands it, forcing a perpetual diff)"
+  }
+  # The enabled_log blocks are untouched — they do not drift.
+  assert {
+    condition     = toset([for l in azurerm_monitor_diagnostic_setting.cosmos_db.enabled_log : l.category]) == toset(["DataPlaneRequests", "QueryRuntimeStatistics"])
+    error_message = "Cosmos diag enabled_log categories must remain DataPlaneRequests + QueryRuntimeStatistics"
+  }
+}
+
 # Defect 2 — the function-failure alert targets App Insights (not the Function
 # App) and uses the AI requests/failed metric (not the non-existent Flex platform
 # metric FunctionExecutionCount), with no Status dimension.

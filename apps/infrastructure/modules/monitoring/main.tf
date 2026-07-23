@@ -15,6 +15,25 @@
 # start date fixed and guarantees a 2nd-plan no-op even across a month boundary.
 resource "time_static" "budget_anchor" {}
 
+locals {
+  # First-of-month budget start, derived from the persisted anchor (stable across
+  # plans — see the time_static note above).
+  budget_start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", time_static.budget_anchor.rfc3339)
+
+  # Explicit budget END date. Azure defaults an OMITTED end_date to start + 10
+  # years and then reports that concrete date back in state — so a config that
+  # omits end_date never matches Azure and forces a delete+create (REPLACE) on
+  # every plan. Declaring it explicitly at the same 10-year horizon makes config
+  # == Azure so the budget plans as a no-op. formatdate cannot add years, so the
+  # end year is the anchor year + 10 at the same month-01; derived from the
+  # persisted time_static anchor (never wall-clock), so it does not drift.
+  budget_end_date = format(
+    "%04d-%s-01T00:00:00Z",
+    tonumber(formatdate("YYYY", time_static.budget_anchor.rfc3339)) + 10,
+    formatdate("MM", time_static.budget_anchor.rfc3339),
+  )
+}
+
 # Action Group for alerts
 resource "azurerm_monitor_action_group" "main" {
   name                = "${var.resource_prefix}-alerts"
@@ -38,7 +57,8 @@ resource "azurerm_consumption_budget_resource_group" "main" {
   time_grain = "Monthly"
 
   time_period {
-    start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", time_static.budget_anchor.rfc3339)
+    start_date = local.budget_start_date
+    end_date   = local.budget_end_date
   }
 
   notification {
@@ -106,8 +126,17 @@ resource "azurerm_monitor_diagnostic_setting" "cosmos_db" {
     category = "QueryRuntimeStatistics"
   }
 
+  # Azure EXPANDS AllMetrics for a Cosmos DB account into its concrete metric
+  # categories (Requests, SLI) and reports those back in state — so a config of
+  # ["AllMetrics"] never matches ["Requests","SLI"] and drifts in-place every
+  # plan. Declaring the concrete categories makes config == Azure (2nd-plan
+  # no-op). Cosmos is the only diag setting where AllMetrics does not round-trip
+  # cleanly; the others (signalr/iot_hub/function_app) keep AllMetrics.
   enabled_metric {
-    category = "AllMetrics"
+    category = "Requests"
+  }
+  enabled_metric {
+    category = "SLI"
   }
 }
 
@@ -266,7 +295,8 @@ resource "azurerm_consumption_budget_subscription" "credit_budget" {
   time_grain = "Monthly"
 
   time_period {
-    start_date = formatdate("YYYY-MM-01'T'00:00:00'Z'", time_static.budget_anchor.rfc3339)
+    start_date = local.budget_start_date
+    end_date   = local.budget_end_date
   }
 
   notification {

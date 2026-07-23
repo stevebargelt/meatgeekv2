@@ -108,17 +108,40 @@ wiring must pass the **full TF-managed connection string** (with the
 `InstrumentationKey`) to the Function App.
 
 That reopens the question the endpoint-only hack was meant to close: the
-`InstrumentationKey` is now present in `app_settings` **and** state. The
-corrected control is to make the key **inert for authentication** rather than to
-hide it.
+`InstrumentationKey` is now present in the Function App's telemetry sink **and**
+state (as an `app_setting` at the time; since moved to the native Flex
+`site_config` field — see the wiring note below). The corrected control is to
+make the key **inert for authentication** rather than to hide it.
+
+### Wiring update (MG-24 land pass): the connection string is now the NATIVE Flex `site_config` field, not an `app_setting`
+
+The Function App is `azurerm_function_app_flex_consumption`. The Flex provider
+**reflects** `APPLICATIONINSIGHTS_CONNECTION_STRING` into the computed **native**
+`site_config.application_insights_connection_string` field, so declaring it as an
+`app_setting` produced a **perpetual second-plan diff** (config carried it in
+`app_settings`; Azure returned it in the native `site_config` field). It is now
+wired via `site_config.application_insights_connection_string =
+var.application_insights_connection_string` in the Functions module — no longer
+an `app_setting`. This is a **wiring-location change only**: Azure surfaces the
+native field to the Functions host as the `APPLICATIONINSIGHTS_CONNECTION_STRING`
+**runtime environment variable** exactly as before, so the host's Azure Monitor
+exporter and `apps/api` telemetry are **unaffected**. The security posture is
+likewise unchanged — the ikey residual now lives in the `site_config` field (and
+state) instead of `app_settings`, still non-authenticating under
+`local_authentication_enabled = false`, and the pre-apply gate enforces the same
+coupled invariant on the `site_config` field exactly as it did on the former
+`app_setting`. Below, where this ADR reasons about the string being "in
+`app_settings`", the identical reasoning now applies to the `site_config` field.
 
 ## Decision
 
 **Accept** the Application Insights **full connection string** (with its
-`InstrumentationKey`) being present in `app_settings` and Terraform state, on the
-condition that **`local_authentication_enabled = false`** is set on
-`azurerm_application_insights.main`. Do not move the resource out of the primary
-stack to suppress the key.
+`InstrumentationKey`) being present in the Function App's Flex
+`site_config.application_insights_connection_string` field (surfaced to the host
+unchanged as the `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env var) and
+Terraform state, on the condition that **`local_authentication_enabled = false`**
+is set on `azurerm_application_insights.main`. Do not move the resource out of
+the primary stack to suppress the key.
 
 The acceptance rests on the following facts, all verifiable in
 `apps/infrastructure`:
@@ -127,7 +150,7 @@ The acceptance rests on the following facts, all verifiable in
    **`local_authentication_enabled = false`** on
    `azurerm_application_insights.main` forces **Entra (AAD)-only ingestion**: the
    platform rejects any telemetry submitted with only the instrumentation key.
-   The key that sits in `app_settings`/state is therefore a **destination
+   The key that sits in the `site_config` field / state is therefore a **destination
    identifier, not a credential** — even in full disclosure it cannot be used to
    write telemetry, because key-based (local) auth is turned off at the
    component. This is the load-bearing control that replaces the old
@@ -139,10 +162,10 @@ The acceptance rests on the following facts, all verifiable in
    (`azurerm_role_assignment.functions_appinsights_publisher` in `main.tf`), and
    the host is configured with
    **`APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"`**. The
-   full connection string in
-   `APPLICATIONINSIGHTS_CONNECTION_STRING = "<full TF-managed connection string>"`
-   supplies the destination coordinates; the AAD credential (not the key)
-   authorizes the write.
+   full connection string, wired via
+   `site_config.application_insights_connection_string` (and surfaced to the host
+   as the `APPLICATIONINSIGHTS_CONNECTION_STRING` env var), supplies the
+   destination coordinates; the AAD credential (not the key) authorizes the write.
 
 3. **Telemetry-write-only blast radius.** Even if local auth were ever
    re-enabled, the instrumentation/ingestion key grants only **telemetry
@@ -157,7 +180,7 @@ The acceptance rests on the following facts, all verifiable in
 
 ### Coupled invariant (enforced by the step-8 gate)
 
-The connection string is safe in `app_settings`/state **only while
+The connection string is safe in the `site_config` field / state **only while
 `local_authentication_enabled = false` remains set**. If that flag is ever
 removed, the instrumentation key becomes a live ingestion credential again and
 this acceptance no longer holds.
@@ -167,18 +190,21 @@ enforced** by the pre-apply security gate:
 
 - **`apps/infrastructure/scripts/tf-plan-secret-inspection.sh`** parses
   `terraform show -json`, distinguishes field **names** from **values**, and
-  **allows the full App Insights connection string in the Function App
-  `app_settings` ONLY when `azurerm_application_insights.main` has
-  `local_authentication_enabled = false`**. Any other connection string /
-  primary|access|SAS key / instrumentation key in `app_settings` or outputs — or
-  the AI connection string **without** the local-auth-disabled flag — makes the
-  script **exit nonzero**. It is the **required pre-apply gate** and is invoked
-  before `terraform apply` in the runbook.
+  **allows the full App Insights connection string in the Function App's
+  telemetry sink — its `app_settings` map OR its Flex
+  `site_config` block — ONLY when `azurerm_application_insights.main` has
+  `local_authentication_enabled = false`**. It applies the same acceptance rule
+  to both sinks identically (the string now lands in `site_config`). Any other
+  connection string / primary|access|SAS key / instrumentation key in
+  `app_settings`, `site_config`, or outputs — or the AI connection string
+  **without** the local-auth-disabled flag — makes the script **exit nonzero**.
+  It is the **required pre-apply gate** and is invoked before `terraform apply`
+  in the runbook.
 - **`apps/infrastructure/scripts/tf-static-checks.sh`** (check 9) statically
   asserts the same cross-field condition on the Terraform source: the full
-  `var.application_insights_connection_string` may reach the FA `app_settings`
-  **only** when `main.tf` sets `local_authentication_enabled = false` on the AI
-  resource.
+  `var.application_insights_connection_string` may reach the FA's Function-module
+  source (now the `site_config` field) **only** when `main.tf` sets
+  `local_authentication_enabled = false` on the AI resource.
 
 ## Extending the control to the data services (MG-24 round 11)
 
@@ -256,9 +282,12 @@ a violation regardless of service, unchanged.
 ## Consequences
 
 - The Application Insights **full connection string** (with its
-  `InstrumentationKey`) is present in `app_settings` and the primary stack's
-  Terraform state; this is expected and accepted, **conditioned on**
-  `local_authentication_enabled = false` making the key inert for auth.
+  `InstrumentationKey`) is present in the Function App's Flex
+  `site_config.application_insights_connection_string` field (surfaced to the
+  host unchanged as the `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env var)
+  and the primary stack's Terraform state; this is expected and accepted,
+  **conditioned on** `local_authentication_enabled = false` making the key inert
+  for auth.
 - The runtime authentication path stays identity-based (AAD + `Monitoring
   Metrics Publisher`); the key is a destination identifier, not a credential. Any
   future change must preserve `local_authentication_enabled = false`, not replace

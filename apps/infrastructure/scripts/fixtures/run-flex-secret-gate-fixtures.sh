@@ -27,6 +27,8 @@ flex-plan-accepted.json pass
 flex-plan-reenabled-shared-key.json fail
 flex-plan-appsetting-key.json fail
 flex-plan-siteconfig-key.json fail
+flex-plan-siteconfig-localauth-enabled.json fail
+flex-plan-siteconfig-noncred.json fail
 flex-plan-sas-endpoint.json fail
 flex-plan-deploy-storage-key.json fail
 "
