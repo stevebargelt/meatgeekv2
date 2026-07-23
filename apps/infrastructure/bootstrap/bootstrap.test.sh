@@ -676,6 +676,145 @@ if ( operator_state_grant_oid >/dev/null 2>&1 ); then
 else ok "principal-type query error -> operator_state_grant_oid dies loudly (via az_discover)"; fi
 unset -f az
 
+# ===========================================================================
+# BUG A (MG-24): the deploy-identity summary heredoc renders the LITERAL text
+# `func publish` and NEVER executes command substitution.
+# ===========================================================================
+# The runbook line inside bootstrap_deploy_identity's SUMMARY heredoc must show
+# the operator the literal string `func publish`. The backticks around it MUST be
+# escaped (\`func publish\`) so the (unquoted) heredoc renders them verbatim
+# instead of treating them as a command substitution that would try to RUN the
+# Azure Functions Core Tools (`func publish`) at emit time — a bug that both
+# corrupts the emitted guidance AND fires an unintended local command.
+#
+# We EXERCISE the real function with a stubbed `az` (no Azure) and a stubbed
+# `func` that, IF it were ever invoked (i.e. if the backticks were live), would
+# print unmistakable Functions Core Tools signatures. A correct (escaped) heredoc
+# never calls `func`, so those signatures must be ABSENT and the literal present.
+#
+# Mocks are defined at TOP LEVEL (not inside the `$(...)` capture) for the Bash
+# 3.2 parser-bug reason documented above; only the function is CALLED inside the
+# substitution.
+az() {
+  case "$*" in
+    "account show --query id -o tsv")        echo "11111111-1111-1111-1111-111111111111" ;;
+    "account show --query tenantId -o tsv")  echo "22222222-2222-2222-2222-222222222222" ;;
+    *"ad app list"*) echo "33333333-3333-3333-3333-333333333333" ;;
+    *"ad sp list"*)  echo "44444444-4444-4444-4444-444444444444" ;;
+    *) return 0 ;;
+  esac
+}
+# If the heredoc backticks were live, this stub's output would replace the
+# literal `func publish` with these Core Tools signatures.
+func() {
+  echo "Azure Functions Core Tools"
+  echo "Core Tools Version 4.0.0"
+  echo "unknown argument publish"
+  return 0
+}
+deploy_summary="$( bootstrap_deploy_identity 2>/dev/null || true )"
+unset -f az func
+
+case "$deploy_summary" in
+  *"func publish"*) ok "deploy summary renders the LITERAL 'func publish' (heredoc backticks are escaped)" ;;
+  *) bad "deploy summary must contain the literal 'func publish' (escaped backticks); command substitution ate it" ;;
+esac
+# No Functions Core Tools signature may appear — that would prove `func` actually
+# ran (live backticks / command substitution in the heredoc).
+for sig in "unknown argument publish" "Core Tools Version" "Azure Functions Core Tools"; do
+  case "$deploy_summary" in
+    *"$sig"*) bad "deploy summary contains Core Tools signature '$sig' — the heredoc executed \`func publish\` (unescaped backticks)" ;;
+    *) ok "deploy summary has no Core Tools signature '$sig' (no command substitution in the heredoc)" ;;
+  esac
+done
+
+# ===========================================================================
+# BUG B (MG-24): dev API registration issues the scope + preauth as TWO SEPARATE
+# sequential Graph PATCHes; oauth2PermissionScopes and preAuthorizedApplications
+# are NEVER in the same PATCH body, and the preauth PATCH is SKIPPED when empty.
+# ===========================================================================
+# Graph validates preAuthorizedApplications.delegatedPermissionIds against scopes
+# that ALREADY EXIST on the app, so combining scope creation and preauth in one
+# atomic PATCH returns 400 and the whole api block fails. The fix issues the
+# oauth2PermissionScopes-defining PATCH FIRST, then a distinct second PATCH that
+# sets preAuthorizedApplications referencing the now-persisted scope id — and
+# skips the second PATCH entirely when there are no calling client ids.
+#
+# We capture every `az rest --method PATCH` --body via a stubbed `az` (bodies
+# written to disk, in order) and assert the two-PATCH split + empty-skip.
+PATCH_DIR="$(mktemp -d)"
+# az mock: record each PATCH --body to patch-<n>.json in call order; serve the
+# reads the function makes so it reaches BOTH PATCHes.
+az() {
+  if [ "${1:-}" = "rest" ]; then
+    local a prev="" body="" n=0
+    for a in "$@"; do
+      [ "$prev" = "--body" ] && body="$a"
+      prev="$a"
+    done
+    [ -f "$PATCH_DIR/count" ] && n="$(cat "$PATCH_DIR/count")"
+    n=$((n+1))
+    printf '%s' "$n" > "$PATCH_DIR/count"
+    printf '%s' "$body" > "$PATCH_DIR/patch-$n.json"
+    return 0
+  fi
+  case "$*" in
+    "account show --query tenantId -o tsv") echo "22222222-2222-2222-2222-222222222222" ;;
+    *"ad app list"*) echo "55555555-5555-5555-5555-555555555555" ;;
+    *"ad sp list"*)  echo "66666666-6666-6666-6666-666666666666" ;;
+    *) return 0 ;;
+  esac
+}
+
+# --- Scenario 1: one calling client id -> exactly TWO PATCHes, split correctly.
+( SMOKE_TEST_CLIENT_IDS="04b07795-8ddb-461a-bbee-02f9e1bf7b46"; bootstrap_dev_api_registration ) >/dev/null 2>&1 || true
+patch_n="$(ls "$PATCH_DIR"/patch-*.json 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${patch_n:-0}" -eq 2 ]; then
+  ok "dev API registration issues exactly TWO sequential Graph PATCHes (scope, then preauth)"
+else bad "dev API registration must issue exactly two PATCHes (scope + preauth); got ${patch_n:-0}"; fi
+
+# First PATCH = scope definition: has oauth2PermissionScopes, NOT preAuthorizedApplications.
+if [ -f "$PATCH_DIR/patch-1.json" ] \
+   && grep -q 'oauth2PermissionScopes' "$PATCH_DIR/patch-1.json" \
+   && ! grep -q 'preAuthorizedApplications' "$PATCH_DIR/patch-1.json"; then
+  ok "PATCH 1 defines oauth2PermissionScopes and carries NO preAuthorizedApplications (scope-first)"
+else bad "PATCH 1 must define oauth2PermissionScopes without preAuthorizedApplications"; fi
+
+# Second PATCH = preauth: has preAuthorizedApplications, NOT oauth2PermissionScopes.
+if [ -f "$PATCH_DIR/patch-2.json" ] \
+   && grep -q 'preAuthorizedApplications' "$PATCH_DIR/patch-2.json" \
+   && ! grep -q 'oauth2PermissionScopes' "$PATCH_DIR/patch-2.json"; then
+  ok "PATCH 2 sets preAuthorizedApplications and carries NO oauth2PermissionScopes (preauth-second)"
+else bad "PATCH 2 must set preAuthorizedApplications without oauth2PermissionScopes"; fi
+
+# The core invariant: no single PATCH body ever contains BOTH keys (the 400 bug).
+both_in_one=0
+for f in "$PATCH_DIR"/patch-*.json; do
+  [ -f "$f" ] || continue
+  if grep -q 'oauth2PermissionScopes' "$f" && grep -q 'preAuthorizedApplications' "$f"; then
+    both_in_one=1
+  fi
+done
+if [ "$both_in_one" -eq 0 ]; then
+  ok "no Graph PATCH body ever combines oauth2PermissionScopes with preAuthorizedApplications"
+else bad "a Graph PATCH body combined oauth2PermissionScopes AND preAuthorizedApplications (atomic-400 regression)"; fi
+
+# --- Scenario 2: EMPTY calling-client list -> preauth PATCH SKIPPED (only scope).
+rm -f "$PATCH_DIR"/patch-*.json "$PATCH_DIR"/count 2>/dev/null
+( SMOKE_TEST_CLIENT_IDS=""; bootstrap_dev_api_registration ) >/dev/null 2>&1 || true
+patch_n_empty="$(ls "$PATCH_DIR"/patch-*.json 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${patch_n_empty:-0}" -eq 1 ]; then
+  ok "empty SMOKE_TEST_CLIENT_IDS -> only the scope PATCH is issued (preauth PATCH skipped)"
+else bad "empty SMOKE_TEST_CLIENT_IDS must skip the preauth PATCH (expect 1 PATCH); got ${patch_n_empty:-0}"; fi
+if [ -f "$PATCH_DIR/patch-1.json" ] \
+   && grep -q 'oauth2PermissionScopes' "$PATCH_DIR/patch-1.json" \
+   && ! grep -q 'preAuthorizedApplications' "$PATCH_DIR/patch-1.json"; then
+  ok "empty-list scope PATCH still defines oauth2PermissionScopes and no preAuthorizedApplications"
+else bad "empty-list run must still issue the scope PATCH (oauth2PermissionScopes, no preauth)"; fi
+
+unset -f az
+rm -rf "$PATCH_DIR" 2>/dev/null
+
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
