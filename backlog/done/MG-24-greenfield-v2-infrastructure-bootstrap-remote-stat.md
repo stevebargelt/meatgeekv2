@@ -1,9 +1,11 @@
 ---
 id: MG-24
 type: story
-status: active
+status: done
 title: greenfield V2 infrastructure bootstrap — remote state/identity + create V2 stack from empty state
 created: 2026-07-19
+closed: 2026-07-23
+closed_commit: 6fb7df9
 ---
 
 ## RESUME STATE 2026-07-23 — Flex hosting SHIPPED; live re-apply is the only remaining work

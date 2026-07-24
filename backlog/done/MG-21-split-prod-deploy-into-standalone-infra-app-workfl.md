@@ -1,9 +1,11 @@
 ---
 id: MG-21
 type: story
-status: active
+status: done
 title: split prod deploy into standalone infra + app workflows (path-triggered)
 created: 2026-07-18
+closed: 2026-07-24
+closed_commit: 6fb7df9
 ---
 
 ## Status
