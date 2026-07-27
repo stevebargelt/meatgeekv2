@@ -1,0 +1,43 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — the AUTHORIZED destroy. Two destructive changes (`delete:module.native_otlp.azurerm_container_app.collector` and `delete:module.native_otlp.azapi_resource.otlp_dcr`) amongst benign ones: a deliberate teardown of two retired resources, reviewed by the operator, who then re-runs the branch-restricted workflow_dispatch RECOVERY path with TF_DESTROY_GUARD_AUTHORIZED_CHANGES naming exactly those two tokens. THE OVERRIDE IS AN EXACT SET OF ACTION-QUALIFIED CHANGE TOKENS (`<action>:<address>[#deposed=<key>]`) — NOT a count and NOT a bare address. The count form TF_DESTROY_GUARD_EXPECTED_DESTROYS and the action-unqualified form TF_DESTROY_GUARD_AUTHORIZED_DESTROYS are BOTH RETIRED, and the gate now fails loudly if either is set rather than ignoring it. A count was retired because it authorizes an ARITY: this document is paired with destroy-guard-override-setdiff.json, which has the SAME two-destroy arity over the Cosmos account and the IoT Hub, so a count of 2 issued for two disposable collector resources would equally have cleared total data loss. The runner exercises this ONE document many ways: no override must FAIL (an unattended apply never destroys); the exact two tokens must PASS; the same tokens REORDERED and duplicated must PASS (the comparison is set equality, not string equality); the OTHER document's arity-matching token set must FAIL; a SUBSET must FAIL (an unapproved destroy remains); a SUPERSET must FAIL (this is not the plan that was reviewed); the same addresses qualified `forget:` instead of `delete:` must FAIL (orphaning a live resource out of Terraform management and destroying it are different decisions); the bare unqualified addresses must FAIL; and `2`, `all`, `true`, `-1` and `*` must all FAIL — there is no numeric, boolean or wildcard escape hatch.",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_resource_group.main",
+          "type": "azurerm_resource_group",
+          "name": "main",
+          "values": { "name": "meatgeek-v2-dev-rg", "location": "westus2" }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "module.native_otlp.azurerm_container_app.collector",
+      "type": "azurerm_container_app",
+      "name": "collector",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "module.native_otlp.azapi_resource.otlp_dcr",
+      "type": "azapi_resource",
+      "name": "otlp_dcr",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "module.monitoring.azurerm_monitor_metric_alert.function_failure_rate",
+      "type": "azurerm_monitor_metric_alert",
+      "name": "function_failure_rate",
+      "change": { "actions": ["update"] }
+    },
+    {
+      "address": "azurerm_resource_group.main",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}

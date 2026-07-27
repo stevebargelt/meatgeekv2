@@ -2815,17 +2815,17 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Terraform Init
-        run: nx init infrastructure
+        run: nx run infrastructure:init --args="--env=dev"
 
       - name: Terraform Validate
         run: nx validate infrastructure
 
       - name: Terraform Plan
-        run: nx plan infrastructure --env=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+        run: nx plan infrastructure --args="--env=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main'
-        run: nx apply infrastructure --env=prod
+        run: nx apply infrastructure
 ```
 
 ### Module Examples
@@ -3622,10 +3622,10 @@ nx build device-controller --configuration=arm
 nx build data-pusher --configuration=arm
 
 # Infrastructure management
-nx init infrastructure         # Initialize Terraform
-nx plan infrastructure --env=dev   # Plan infrastructure changes
-nx apply infrastructure --env=dev  # Apply infrastructure changes
-nx destroy infrastructure --env=dev # Destroy infrastructure
+nx run infrastructure:init --args="--env=dev"         # Initialize Terraform
+nx plan infrastructure --args="--env=dev"   # Plan infrastructure changes
+nx apply infrastructure  # Apply infrastructure changes
+nx destroy infrastructure --args="--env=dev" # Destroy infrastructure
 nx validate infrastructure     # Validate Terraform configuration
 
 # Run tests
@@ -3718,7 +3718,7 @@ jobs:
 
 **Deployment Workflow:**
 
-> **Historical design note — superseded.** The single `deploy.yml` example below (one workflow, every push to `main`, conditionally building/deploying the web app) reflects the original plan and is **not** what shipped. The shipped model splits prod deploy into two standalone workflows: `infra-deploy-prod.yml` (Terraform infrastructure, `workflow_dispatch`-only and **plan-only** — `terraform init` binding the per-env `azurerm` remote backend + `terraform plan`, no `apply`; the per-env remote backend (`backend-dev.hcl`/`backend-prod.hcl` with a derived state account) has since **shipped** under MG-24, but auto-apply-on-merge and the apply step stay deferred **by design** — a live greenfield apply is the operator's out-of-band acceptance step, not blocked on the backend) and `app-deploy-prod.yml` (Functions **API only** via `nx deploy api --functionApp=<prod Function App name>` — the deploy target runs `func azure functionapp publish {args.functionApp}` and takes no `--env` flag). The app deploy is **CI-gated**: it triggers on `workflow_run` *after* the CI/CD Pipeline completes green on a push to `main`, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'` — there is **no** push trigger and **no** `workflow_dispatch` (retry via GitHub re-run). It builds its own artifact, verifies the Functions package, pins Azure Functions Core Tools, and authenticates via **per-environment OIDC** — `azure/login@v2` with a GitHub-Environment-scoped federated credential (subject `environment:production`) and the `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` `production` Environment variables — **not** the retired long-lived `AZURE_CREDENTIALS_PROD` service-principal secret. A stale-SHA guard skips (green) if `main` has advanced past the CI'd commit. There is **no** prod web / Static Web Apps deploy — the web app is deployed to dev only. Dev deployment (`deploy-dev`) still lives in `ci.yml`. See [CI/CD Pipeline](development/ci-cd.md) for the current, authoritative description. The YAML below is retained only as a record of the original intent.
+> **Historical design note — superseded.** The single `deploy.yml` example below (one workflow, every push to `main`, conditionally building/deploying the web app) reflects the original plan and is **not** what shipped. The shipped model splits prod deploy into two standalone workflows: `infra-deploy-prod.yml` (Terraform infrastructure, `workflow_dispatch`-only and **plan-only** — `terraform init` binding the per-env `azurerm` remote backend + `terraform plan`, no `apply`; the per-env remote backend (`backend-dev.hcl`/`backend-prod.hcl` with a derived state account) shipped under MG-24, and the **prod** apply step stays deferred until **MG-25** activates CI-run prod reconciliation — prod state is still greenfield, so an unattended apply would create the whole prod stack on its first run) and `app-deploy-prod.yml` (Functions **API only** via `nx deploy api --functionApp=<prod Function App name>` — the deploy target runs `func azure functionapp publish {args.functionApp}` and takes no `--env` flag). The app deploy is **CI-gated**: it triggers on `workflow_run` *after* the CI/CD Pipeline completes green on a push to `main`, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'` — there is **no** push trigger and **no** `workflow_dispatch` (retry via GitHub re-run). It builds its own artifact, verifies the Functions package, pins Azure Functions Core Tools, and authenticates via **per-environment OIDC** — `azure/login@v2` with a GitHub-Environment-scoped federated credential (subject `environment:production`) and the `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` `production` Environment variables — **not** the retired long-lived `AZURE_CREDENTIALS_PROD` service-principal secret. A stale-SHA guard skips (green) if `main` has advanced past the CI'd commit. There is **no** web / Static Web Apps deploy **workflow** in any environment — though the `web` project does define a working `deploy` target (`nx deploy web --args="--env=<env>"`, an operator-run `az staticwebapp deploy` against a locally built `dist/apps/web`), so the frontend ships by hand rather than not at all. MG-23 removed the plan-only `deploy-dev` job and the unconsumed CI upload of the web bundle; nothing in the repo downloads a CI artifact, so that command never depended on it. Automating a web deploy is out of MG-23's scope (`nx build web` still runs in CI, so the web app keeps its compile-time signal). Dev **infrastructure** reconciles automatically through CI under **MG-23** (*automated dev GitOps reconciliation*): `ci.yml`'s `validate-infrastructure` job validates every infrastructure change **credentiallessly** — `permissions: contents: read` only, no `id-token: write`, no GitHub Environment, no `azure/login`, and a backend-less `terraform init -backend=false`, so nothing reachable from a pull request can authenticate to Azure or read `tfstate-dev` — and `.github/workflows/infra-apply-dev.yml` applies on merge to `main`, running the fail-closed secret gate and destroy circuit-breaker on the saved plan and ending with a drift plan that fails the run. There is deliberately **no** PR-time `terraform plan` and **no** PR-reachable Azure identity. The old plan-only `deploy-dev` job and the `develop` branch it ran on are **gone** — this repo is trunk-based on `main`. See [CI/CD Pipeline](development/ci-cd.md) for the current, authoritative description. The YAML below is retained only as a record of the original intent.
 
 ```yaml
 # .github/workflows/deploy.yml

@@ -1,6 +1,21 @@
 name: Deploy Prod App
 
-# Prod is API-only — no web/Static-Web-Apps deploy (that's dev-only).
+# Prod is API-only — this workflow deploys the Function App and nothing else.
+#
+# There is no web/Static-Web-Apps deploy here, and no WORKFLOW anywhere in this
+# repo deploys the web frontend. That is a statement about automation, not about
+# capability: apps/web/project.json defines a working `deploy` target, and
+# `nx deploy web --args="--env=<env>"` (an operator-run `az staticwebapp deploy`
+# against a locally built dist/apps/web) is how the frontend ships today.
+#
+# An earlier revision of this note claimed the web frontend had NO deploy path
+# at all. That was wrong, and it is corrected here rather than quietly dropped.
+# What MG-23 removed was the plan-only dev deploy job in ci.yml and the CI upload
+# of the web bundle; nothing in this repo downloads a CI artifact, so that upload
+# had no consumer and the `nx deploy web` command never depended on it.
+# Automating a web deploy is out of MG-23's scope (a security ticket); the
+# matching note is on the build step in .github/workflows/ci.yml, and the two
+# files must stay consistent.
 #
 # Trigger model (MG-21, Option A): this workflow runs ONLY after the "CI/CD
 # Pipeline" workflow completes. There is no push trigger and no workflow_dispatch

@@ -383,16 +383,24 @@ resource "azurerm_function_app_flex_consumption" "main" {
 # account. Scoped to the storage account only — least privilege. Storage Blob
 # Data Owner covers reading the deployment package from the blob container under
 # the app's managed identity (storage_authentication_type=SystemAssignedIdentity).
+#
+# principal_type is declared EXPLICITLY on every azurerm_role_assignment in this
+# stack — the MG-23 apply identity's ABAC condition matches on PrincipalType, and
+# an attribute the request never sends does not match, so an omitted principal_type
+# fails the condition SHUT. Full rationale in the root main.tf block above
+# functions_eventhub_receiver.
 resource "azurerm_role_assignment" "functions_storage_blob" {
   scope                = azapi_resource.functions_storage.id
   role_definition_name = "Storage Blob Data Owner"
   principal_id         = azurerm_function_app_flex_consumption.main.identity[0].principal_id
+  principal_type       = "ServicePrincipal"
 }
 
 resource "azurerm_role_assignment" "functions_storage_queue" {
   scope                = azapi_resource.functions_storage.id
   role_definition_name = "Storage Queue Data Contributor"
   principal_id         = azurerm_function_app_flex_consumption.main.identity[0].principal_id
+  principal_type       = "ServicePrincipal"
 }
 
 # App-deployment identity → deployment-container write access (MG-24 item 4).
@@ -410,4 +418,5 @@ resource "azurerm_role_assignment" "deploy_principal_deployment_container" {
   scope                = azapi_resource.deployment_container.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = var.app_deploy_principal_object_id
+  principal_type       = "ServicePrincipal"
 }

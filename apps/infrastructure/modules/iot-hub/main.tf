@@ -78,6 +78,11 @@ resource "azurerm_role_assignment" "iothub_eventhub_sender" {
   scope                = azurerm_eventhub.temperature_data.id
   role_definition_name = "Azure Event Hubs Data Sender"
   principal_id         = azurerm_iothub.main.identity[0].principal_id
+  # principal_type is declared EXPLICITLY on every azurerm_role_assignment in this
+  # stack — the MG-23 apply identity's ABAC condition matches on PrincipalType, and
+  # an omitted attribute does not match, so leaving it off fails the condition SHUT.
+  # Rationale in the root main.tf block above functions_eventhub_receiver.
+  principal_type = "ServicePrincipal"
 }
 
 # Dependency handle for the Cosmos data-plane role assignment. It carries the

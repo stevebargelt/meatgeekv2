@@ -11,8 +11,11 @@ output "budget_id" {
 }
 
 output "secondary_budget_id" {
-  description = "ID of the secondary subscription-scope (credit) budget"
-  value       = azurerm_consumption_budget_subscription.credit_budget.id
+  # MG-23: credit_budget is count-guarded (default OFF — a subscription-scoped
+  # resource is outside the resource-group boundary the CI apply identity is
+  # confined to), so this output is null unless manage_subscription_budget is true.
+  description = "ID of the secondary subscription-scope (credit) budget, or null when manage_subscription_budget is false (MG-23 default)"
+  value       = one(azurerm_consumption_budget_subscription.credit_budget[*].id)
 }
 
 output "diagnostic_setting_ids" {

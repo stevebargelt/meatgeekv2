@@ -10,6 +10,11 @@ variable "resource_group_name" {
   type        = string
 }
 
+variable "resource_group_id" {
+  description = "Resource id of the workload resource group. Used as the SCOPE of the MG-23 out-of-band-persistence Activity Log alerts — an alert scope is a resource id, not a name, and scoping them to the RG (not the subscription) keeps the detective controls inside the same boundary the CI apply identity is confined to."
+  type        = string
+}
+
 variable "location" {
   description = "Azure region"
   type        = string
@@ -71,6 +76,12 @@ variable "secondary_budget_limit" {
   description = "Monthly subscription-scope secondary budget limit in USD (warning before Azure credit exhausted)"
   type        = number
   default     = 150
+}
+
+variable "manage_subscription_budget" {
+  description = "Create the SUBSCRIPTION-scoped secondary budget. Default false (MG-23): a subscription-scoped resource cannot be applied by an identity scoped only to the workload resource group, so it is not in the CI-applied graph. Subscription-scoped spend control is an operator/bootstrap concern. See the root variables.tf block comment."
+  type        = bool
+  default     = false
 }
 
 variable "ingestion_cap_gb" {

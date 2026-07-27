@@ -64,10 +64,59 @@ local.settings.json
 *.tfstate.*
 *.tfplan
 tfplan
+# `tfplan.bin` is the saved-plan filename the MG-23 automated dev GitOps
+# reconciliation uses end to end — ci.yml's PR plan job, infra-apply-dev.yml, and
+# the operator repro steps in docs/infrastructure/mg23-live-acceptance.md all
+# write it into apps/infrastructure/. The bare `tfplan` rule above does NOT match
+# it. A saved plan carries the same live IoT Hub SAS material that
+# scripts/tf-plan-secret-inspection.sh exists to keep out of job logs and that
+# infra-apply-dev.yml deliberately never uploads as an artifact; git is the third
+# way it could escape, so close it here too. Fixtures under
+# apps/infrastructure/scripts/fixtures/ are named `destroy-guard-*.json` /
+# `plan-*.json` and are intentionally NOT matched by these rules.
+tfplan.*
 plan.out
 *.tflock.hcl
 .terraform/
-.terraform.lock.hcl
+# MG-23 (automated dev GitOps reconciliation): the ROOT infrastructure provider
+# lock file `apps/infrastructure/.terraform.lock.hcl` is deliberately TRACKED and
+# is therefore NOT listed here. infra-apply-dev.yml runs `terraform init` with
+# `-lockfile=readonly` — and without `-upgrade` — then applies with Contributor +
+# Role Based Access Control Administrator on meatgeek-v2-dev-rg. `readonly` is the
+# flag that makes THIS file authoritative there: init FAILS rather than amending
+# it, so a provider the lock never bound cannot silently execute at that
+# privilege. Omitting `-upgrade` is necessary but not sufficient on its own — it
+# only declines to ask for newer versions. The version constraints alone
+# (azurerm ~> 4.0, azapi ~> 2.0) bind nothing: without the committed lock a fresh
+# runner would download whatever currently satisfies the range and execute it at
+# that privilege. The lock's h1:/zh: hashes are what make that supply chain
+# reproducible, so it must be reviewable in a PR diff, not regenerated per run.
+# Regenerate deterministically from apps/infrastructure/:
+#   terraform init -backend=false
+#   terraform providers lock -platform=linux_amd64 -platform=linux_arm64 \
+#     -platform=darwin_arm64 -platform=darwin_amd64
+# ALL FOUR platforms are required, because `init` only trusts a provider whose
+# hash for the CURRENT platform is already recorded: it appends the missing one
+# otherwise, which both dirties the tree and means the run resolved a provider the
+# lock never bound. The platforms that actually init this config are GitHub's
+# ubuntu-latest runners (linux_amd64), the operator workstation (darwin_arm64,
+# Apple silicon), an Intel Mac fallback (darwin_amd64), and the arm64 Linux
+# build/review containers (linux_arm64). Dropping any one of them hands that
+# platform an unpinned provider resolution and a spurious lock diff.
+#
+# Verify a regeneration two ways before committing it: `terraform providers lock`
+# must report "All checksums for this platform were already tracked" for every
+# platform (it re-fetches each from the registry and compares), and a following
+# `terraform init -backend=false` must leave the file byte-identical.
+#
+# Per-MODULE lock files stay ignored. They are throwaway artifacts of standalone
+# `terraform init -backend=false` / `terraform test` working directories, which
+# hold no Azure credentials and never apply. They are also NOT safe to pin here:
+# modules/monitoring/versions.tf constrains only `time`, so a standalone init
+# resolves azurerm with NO version constraint at all — committing that resolution
+# would pin a module-test provider the module never declared. Constrain providers
+# in each module's versions.tf if that ever needs to change.
+apps/infrastructure/modules/*/.terraform.lock.hcl
 
 # Go
 *.exe

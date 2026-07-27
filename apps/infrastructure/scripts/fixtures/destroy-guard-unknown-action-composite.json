@@ -1,0 +1,20 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — A COMPOSITE ACTION LIST MIXING A MODELED VERB WITH AN UNMODELED ONE. The entry's actions are [\"delete\",\"obliterate\"]. Verb precedence (delete > forget > unrecognized) would emit the token `delete:module.native_otlp.azurerm_container_app.collector`, so an operator reviewing the gate's paste-ready set would authorize a plain destroy in good faith — while the gate silently carried a second verb it has no model of into an unattended apply. This is why the unmodeled-verb screen inspects EVERY action string on EVERY entry rather than only the verb that won precedence: a composite carrying an unmodeled verb must not be authorizable under the modeled verb the gate would otherwise emit. Expected: exit 1 with NO override, exit 1 under `delete:<addr>`, and exit 1 under `obliterate:<addr>` — a verdict about a readable plan, never an exit-2 uninspectable-document claim.",
+  "planned_values": { "root_module": { "resources": [] } },
+  "resource_changes": [
+    {
+      "address": "module.native_otlp.azurerm_container_app.collector",
+      "type": "azurerm_container_app",
+      "name": "collector",
+      "change": { "actions": ["delete", "obliterate"] }
+    },
+    {
+      "address": "azurerm_resource_group.main",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}

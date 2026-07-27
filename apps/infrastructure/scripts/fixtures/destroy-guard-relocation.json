@@ -1,0 +1,85 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — the WHOLE-STACK RELOCATION plan (see the warning block in environments/dev.tfvars). A single-token `location` edit is ForceNew on Cosmos DB and IoT Hub, so it plans as a destroy-and-recreate across the stack, including data-bearing resources and the IoT Hub whose device registrations cannot be recreated by Terraform. Under MG-24 the operator read this plan before typing `apply`; under MG-23 the apply is unattended, so this guard is that reviewer. It must FAIL. Note the mixed action orderings: `[delete,create]` (destroy-then-create) and `[create,delete]` (create_before_destroy) are BOTH destructive and both counted.",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_resource_group.main",
+          "type": "azurerm_resource_group",
+          "name": "main",
+          "values": { "name": "meatgeek-v2-dev-rg", "location": "centralus" }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_account.main",
+      "type": "azurerm_cosmosdb_account",
+      "name": "main",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_sql_database.meatgeek",
+      "type": "azurerm_cosmosdb_sql_database",
+      "name": "meatgeek",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_sql_container.cooks",
+      "type": "azurerm_cosmosdb_sql_container",
+      "name": "cooks",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_sql_container.temperatures",
+      "type": "azurerm_cosmosdb_sql_container",
+      "name": "temperatures",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_sql_container.devices",
+      "type": "azurerm_cosmosdb_sql_container",
+      "name": "devices",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.iot_hub.azurerm_iothub.main",
+      "type": "azurerm_iothub",
+      "name": "main",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.iot_hub.azurerm_iothub_route.cosmos",
+      "type": "azurerm_iothub_route",
+      "name": "cosmos",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.signalr.azurerm_signalr_service.main",
+      "type": "azurerm_signalr_service",
+      "name": "main",
+      "change": { "actions": ["create", "delete"] }
+    },
+    {
+      "address": "module.azure_functions.azurerm_function_app_flex_consumption.main",
+      "type": "azurerm_function_app_flex_consumption",
+      "name": "main",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.azure_functions.azapi_resource.functions_storage",
+      "type": "azapi_resource",
+      "name": "functions_storage",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "azurerm_resource_group.main",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "change": { "actions": ["update"] }
+    }
+  ]
+}

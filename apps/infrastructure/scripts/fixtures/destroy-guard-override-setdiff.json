@@ -1,0 +1,38 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "resource_changes": [
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_account.main",
+      "mode": "managed",
+      "type": "azurerm_cosmosdb_account",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.iot_hub.azurerm_iothub.main",
+      "mode": "managed",
+      "type": "azurerm_iothub",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "module.monitoring.azurerm_monitor_metric_alert.function_failure_rate",
+      "mode": "managed",
+      "type": "azurerm_monitor_metric_alert",
+      "name": "function_failure_rate",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": { "actions": ["update"] }
+    },
+    {
+      "address": "azurerm_resource_group.main",
+      "mode": "managed",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}

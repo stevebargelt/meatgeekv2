@@ -1,0 +1,14 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — A resource_changes ENTRY THE GATE CANNOT CLASSIFY (no `actions` list). This is the one class that legitimately earns exit 2: the document is not readable as a plan, so the gate has no basis for any verdict at all and must not speak for the entry. Contrast destroy-guard-deposed.json and destroy-guard-unknown-action.json, which are perfectly readable and must therefore reach a VERDICT (exit 1) that the reviewer-approved override can act on.",
+  "planned_values": { "root_module": { "resources": [] } },
+  "resource_changes": [
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_account.main",
+      "type": "azurerm_cosmosdb_account",
+      "name": "main",
+      "change": {}
+    }
+  ]
+}

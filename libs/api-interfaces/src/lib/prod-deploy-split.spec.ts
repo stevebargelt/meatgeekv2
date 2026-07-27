@@ -37,10 +37,25 @@
  *     - a credential guard derives has_creds from the OIDC identity vars
  *       (AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID), NOT the
  *       retired long-lived AZURE_CREDENTIALS_PROD service-principal secret.
- *   ci.yml — the deploy-prod job is gone, while deploy-dev stays. The
- *     build-typescript artifact upload is RETAINED, and its workflow name is
- *     `CI/CD Pipeline` so the app-deploy-prod `workflow_run` trigger actually
- *     resolves. deploy-dev is plan-only (no live `terraform apply`).
+ *   ci.yml — the deploy-prod job is gone, and its workflow name is `CI/CD
+ *     Pipeline` so the `workflow_run` triggers actually resolve.
+ *
+ * MG-23 (automated dev GitOps reconciliation, CI-run) changes the ci.yml half of
+ * this file, and the changes are security-bearing rather than cosmetic:
+ *   - the dev deploy job is RETIRED. It was gated on a branch this trunk-based
+ *     repo does not have, so it never ran.
+ *   - the PR path is CREDENTIALLESS VALIDATION, not a live plan. As re-scoped on
+ *     2026-07-27 there is no PR-reachable Azure identity at all: the single
+ *     infrastructure job in this workflow binds no environment, is granted no
+ *     OIDC token permission, and calls no azure/login. The earlier design ran a
+ *     real plan against live dev state from a pull request and contained the
+ *     resulting disclosure risk with a required-reviewer gate; deleting the
+ *     identity closes it by construction instead.
+ *   - the build-typescript artifact upload is REMOVED, not retained: it fed only
+ *     the retired job, and nothing in the repo runs `download-artifact`.
+ *   - the post-merge APPLY is not in this file at all. It lives in
+ *     infra-apply-dev.yml under a different identity, in a different
+ *     environment, and ci.yml must never bind that environment.
  *
  * MG-24 (OIDC + remote backend): the prod workflows authenticate to Azure via
  * a GitHub-Environment-scoped federated (OIDC) credential — `id-token: write`
@@ -455,12 +470,15 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
     });
   });
 
-  describe('ci.yml (deploy-prod removed, deploy-dev retained)', () => {
+  describe('ci.yml (deploy-prod split out by MG-21; the PR path made credentialless by MG-23)', () => {
     const wf = readWorkflow('ci.yml');
+    const raw = rawWorkflow('ci.yml');
     const jobs = wf.jobs ?? {};
 
-    it('is named "CI/CD Pipeline" so app-deploy-prod\'s workflow_run trigger resolves', () => {
-      // The app-deploy-prod trigger keys off this exact workflow name.
+    it('is named "CI/CD Pipeline" so the workflow_run triggers resolve', () => {
+      // BOTH app-deploy-prod.yml and MG-23's infra-apply-dev.yml key their
+      // `workflow_run` trigger off this exact name. Renaming this workflow
+      // silently stops the automatic dev apply from ever firing.
       expect(wf.name).toBe('CI/CD Pipeline');
     });
 
@@ -468,77 +486,92 @@ describe('MG-21: prod deploy split (corrective / Option A)', () => {
       expect(jobs).not.toHaveProperty('deploy-prod');
     });
 
-    it('still contains the deploy-dev job (only prod was split out)', () => {
-      expect(jobs).toHaveProperty('deploy-dev');
-    });
-
-    it('retains the build-artifact upload (build-typescript matrix job)', () => {
-      // The upload lives on the build-typescript matrix job, so its `name` is the
-      // templated `${{ matrix.app }}-build`, never a literal `api-build`; scan for
-      // the upload step itself, not a resolved artifact name.
-      const uploadsBuild = Object.values(jobs).some(job =>
-        (job.steps ?? []).some(
-          s =>
-            typeof s.uses === 'string' &&
-            s.uses.startsWith('actions/upload-artifact') &&
-            /(\{\{\s*matrix\.app\s*\}\}|api|web)-build/.test(String((s.with ?? {})['name'] ?? ''))
-        )
-      );
-      expect(uploadsBuild).toBe(true);
-    });
-
-    it('deploy-dev is plan-only in CI: no live `terraform apply`, no `nx deploy`', () => {
-      // MG-24 keeps CI plan-only — the state-bound apply is the operator's
-      // out-of-band step. The dev CI job runs a speculative plan, never an apply
-      // or an app publish.
-      const devSteps = jobs['deploy-dev']?.steps ?? [];
-      const runText = devSteps.map(s => String(s.run ?? '')).join('\n');
-      expect(runText).not.toMatch(/terraform\s+apply\b/);
-      expect(runText).not.toMatch(/nx\s+deploy\b/);
-      // It does exercise a plan (the gate it exists for).
-      expect(runText).toMatch(/terraform\s+plan\b/);
-    });
-
-    it('deploy-dev authenticates via per-env OIDC, not the legacy AZURE_CREDENTIALS secret (MG-24)', () => {
-      const raw = rawWorkflow('ci.yml');
-      const dev = jobs['deploy-dev'];
-      expect(dev).toBeDefined();
-
-      // (1) The retired long-lived SP secret must NOT appear anywhere in ci.yml —
-      //     no dev path may fall back to whole-subscription creds.
-      expect(raw).not.toMatch(/secrets\.AZURE_CREDENTIALS\b/);
-
-      // (2) The job carries id-token: write so azure/login can mint the OIDC token
-      //     (job-scoped so the other CI jobs keep the default token permissions).
-      expect(String((dev?.permissions ?? {})['id-token'] ?? '')).toBe('write');
-
-      // (3) Every azure/login step uses the OIDC identity (client-id + tenant-id +
-      //     subscription-id from per-env vars), never a `creds:` secret.
-      const loginSteps = (dev?.steps ?? []).filter(
-        s => typeof s.uses === 'string' && s.uses.startsWith('azure/login')
-      );
-      expect(loginSteps.length).toBeGreaterThan(0);
-      for (const s of loginSteps) {
-        const w = s.with ?? {};
-        expect(String(w['client-id'] ?? '')).toMatch(/vars\.AZURE_CLIENT_ID/);
-        expect(String(w['tenant-id'] ?? '')).toMatch(/vars\.AZURE_TENANT_ID/);
-        expect(String(w['subscription-id'] ?? '')).toMatch(/vars\.AZURE_SUBSCRIPTION_ID/);
-        expect(w).not.toHaveProperty('creds'); // no long-lived SP secret
+    it('contains none of the retired dev infrastructure jobs', () => {
+      // `deploy-dev` was gated on a branch this trunk-based repo does not have.
+      // `infra-plan-dev` (the live PR plan) and `detect_infra_changes` (which
+      // existed only to decide whether that plan ran) were both removed by the
+      // 2026-07-27 re-scope along with the identity they depended on.
+      // `validate-infrastructure` is the single, credentialless replacement.
+      for (const retired of ['deploy-dev', 'infra-plan-dev', 'detect_infra_changes']) {
+        expect(jobs).not.toHaveProperty(retired);
       }
+      expect(Object.keys(jobs)).toContain('validate-infrastructure');
     });
 
-    it('dev and prod bind SEPARATE GitHub Environments (distinct federated subjects)', () => {
-      // The per-env OIDC identity is selected by the GitHub Environment the job
-      // binds. dev must be `development` and prod (in its own workflow) is
-      // `production`, so the two resolve to distinct federated subjects — no
-      // shared service principal, no whole-state access from dev.
-      expect(jobs['deploy-dev']?.environment).toBe('development');
+    // The SHA-pin invariant that used to live here targeted `infra-plan-dev` and
+    // `detect_infra_changes`; both jobs are gone. It is NOT dropped — it now
+    // lives where the credentials actually are, in infra-apply-dev.spec.ts
+    // ("SHA-pins every `uses:` (40-hex)"), which guards the one workflow that
+    // holds an Azure identity. The credentialless validation job is deliberately
+    // NOT newly pinned here: pinning a job that can mint no token is
+    // supply-chain hardening of a different scope (MG-39), not this ticket.
+    it('is trunk-based: both branch lists name main only', () => {
+      const on = triggers(wf);
+      const push = (on['push'] ?? {}) as { branches?: string[] };
+      const pr = (on['pull_request'] ?? {}) as { branches?: string[] };
+      // The `push` list is load-bearing under MG-23: a green run on a listed
+      // branch is what triggers the automatic dev infrastructure apply.
+      expect(push.branches).toEqual(['main']);
+      expect(pr.branches).toEqual(['main']);
+    });
+
+    it('no longer uploads the TypeScript build artifact (it fed only the retired dev deploy job)', () => {
+      // Verified before removal: nothing in the repo runs `download-artifact`.
+      // build-go's upload is deliberately retained (MG-36 territory), so assert
+      // specifically that the build-typescript job has no upload step rather than
+      // that the file has none.
+      const tsUploads = (jobs['build-typescript']?.steps ?? []).filter(
+        s => typeof s.uses === 'string' && s.uses.startsWith('actions/upload-artifact')
+      );
+      expect(tsUploads).toEqual([]);
+      expect(raw).not.toMatch(/download-artifact/);
+    });
+
+    it('ci.yml binds NO GitHub Environment while prod still binds production', () => {
+      // REPLACES "dev and prod bind SEPARATE environments". Separation is no
+      // longer the invariant — ABSENCE is. ci.yml is the PR-reachable workflow
+      // and it binds nothing at all, so there is no environment whose protection
+      // rules could be misconfigured and no identity it could assume.
+      const ciEnvs = Object.values(jobs)
+        .map(j => j.environment)
+        .filter(Boolean);
+      expect(ciEnvs).toEqual([]);
+
       const prodInfra = readWorkflow('infra-deploy-prod.yml');
       const prodEnvs = Object.values(prodInfra.jobs ?? {})
         .map(j => j.environment)
         .filter(Boolean);
       expect(prodEnvs).toContain('production');
       expect(prodEnvs).not.toContain('development');
+    });
+
+    it('the PR infrastructure job is CREDENTIALLESS and proves it at runtime', () => {
+      // The positive counterpart to all the deleted plan-job assertions. Each
+      // clause below independently prevents an Azure token from existing in this
+      // workflow; together they mean restoring the credential path takes a
+      // visible, multi-line change rather than a one-line edit.
+      expect(raw).not.toMatch(/azure\/login/);
+      expect(raw).not.toMatch(/secrets\.AZURE_/);
+      expect(raw).not.toMatch(/id-token/);
+      expect((wf.permissions ?? {})['id-token']).toBeUndefined();
+
+      const infraJob = jobs['validate-infrastructure'];
+      expect(infraJob).toBeDefined();
+      expect((infraJob?.permissions ?? {})['id-token']).toBeUndefined();
+      // Least privilege, declared explicitly rather than inherited from a repo
+      // setting that is invisible in this diff.
+      expect(infraJob?.permissions).toEqual({ contents: 'read' });
+
+      // assert-credentialless.sh runs BEFORE any terraform step, so a credential
+      // is caught before anything exists that could use one.
+      const steps = infraJob?.steps ?? [];
+      const guardIdx = steps.findIndex(st =>
+        /assert-credentialless\.sh/.test(String(st.run ?? ''))
+      );
+      const firstTfIdx = steps.findIndex(st => /\bterraform\s/.test(String(st.run ?? '')));
+      expect(guardIdx).toBeGreaterThan(-1);
+      expect(firstTfIdx).toBeGreaterThan(-1);
+      expect(guardIdx).toBeLessThan(firstTfIdx);
     });
   });
 });

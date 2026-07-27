@@ -10,13 +10,30 @@
 This is the authoritative procedure for two operator-run activities that live
 **outside** the CI pipeline:
 
-1. The **run-once bootstrap** — stand up remote state + the OIDC deployment
-   identity that everything else depends on.
+1. The **run-once bootstrap** — stand up remote state + the OIDC identities that
+   everything else depends on.
 2. The **greenfield DEV plan/apply proof** (MG-24's 10-step acceptance) — create
    the complete V2 dev stack from empty state and capture the evidence.
 
-CI never runs `terraform apply`. Apply is an operator action, run locally with
-the operator's own elevated credentials, against the durable **remote** backend.
+> **Where the steady-state apply lives (read this before applying by hand).**
+> This runbook is the **first-creation and recovery** path, not the day-to-day
+> one. Once the dev stack exists, **dev infrastructure reconciles through CI**:
+> **MG-23** (*automated dev GitOps reconciliation*, CI-run) validates every
+> infrastructure PR **credentiallessly** in `ci.yml`'s `validate-infrastructure`
+> job — no Azure identity, no GitHub Environment, no remote state — and applies
+> automatically on merge to `main` via
+> `.github/workflows/infra-apply-dev.yml`. Do **not** run
+> a steady-state dev apply from a workstation — you would be racing CI, and the
+> next CI run's drift plan will fail on whatever you left behind. **MG-24**
+> (*Terraform reconciliation*, operator-run) is what this runbook proves, and it
+> remains the path for the greenfield creation below, for prod (until **MG-25**
+> activates CI-run prod reconciliation), and for recovery.
+>
+> Bootstrap, creation of `meatgeek-v2-dev-rg` itself, subscription-scoped
+> configuration and disaster recovery stay **operator** actions in every
+> environment. Activation of the dev GitOps loop — including its blocking
+> pre-activation checks and the live acceptance tests — is in
+> **[MG-23 live acceptance & activation](./mg23-live-acceptance.md)**.
 
 ---
 
@@ -142,9 +159,40 @@ Contributor` role on the `deployment-package` container** (in ADDITION to its
 - **Azure CLI** (`az`), authenticated as a subscription **Owner** /
   **User Access Administrator** for the bootstrap (it creates an AAD app,
   a role assignment, and storage). Day-to-day plan/apply needs less.
+- **GitHub CLI** (`gh`), installed **and** authenticated — run `gh auth login`
+  *before* `./bootstrap.sh`. See the note on an unauthenticated `gh` below.
+- **`jq`**, and a **sha1** tool: `sha1sum` on Linux, `shasum` on macOS.
+  Bootstrap accepts **either** and derives the **same** scope id from both, so a
+  Linux and a macOS operator re-running bootstrap do not mint duplicate
+  delegated-permission scopes.
+- **`mktemp`** and the coreutils bootstrap uses: `awk`, `sed`, `sort`, `tr`,
+  `cut`, `grep`, `wc`, `paste`, `rm`.
 - The V2 Azure **subscription id** (obtained from `az account show`, never
   hardcoded in Terraform).
 - Repo checked out; `apps/infrastructure` is the Terraform root.
+
+> **Bootstrap fails fast on a missing tool, before mutating anything.**
+> `require_tools` is the first statement in `main()` and checks **every** command
+> above in one pass, reporting **all** missing tools together rather than one
+> re-run at a time. This matters because the tools are not all used up front: the
+> sha1 tool, for example, is first needed by the dev API registration, which runs
+> *after* every RBAC grant and *before* the deployment environments are created.
+> Discovering it missing there would abort the run exactly mid-mutation — every
+> grant live, zero protected environments. macOS is the case that actually bites,
+> since it ships `shasum` but **not** `sha1sum`.
+
+> **Bootstrap now EXITS NON-ZERO unless both deployment environments verify as
+> `PROTECTED`.** `development-infra-apply` and
+> `development-infra-apply-recovery` are checked at the end of the run, and the
+> `Bootstrap complete` line is printed **only after** that check passes — so a
+> **green bootstrap is the signal that activation is safe**, rather than
+> something a reader has to notice the absence of. Consequence worth planning
+> for: if `gh` is installed but **not authenticated**, the Azure-side work still
+> completes and bootstrap exits **non-zero** with the manual `gh api` procedure
+> printed. That is not a half-finished run — the Azure side is idempotent, so
+> run `gh auth login` and re-run `./bootstrap.sh` freely. **Do not set
+> `DEV_TF_BACKEND_READY` true until bootstrap exits zero.** See
+> [MG-23 live acceptance](mg23-live-acceptance.md).
 
 > **Export `ARM_SUBSCRIPTION_ID` before any Terraform command.** AzureRM
 > **provider v4 requires an explicit subscription id** — selecting it with
@@ -222,12 +270,15 @@ What it creates (and nothing else):
    _publish_ — into **two least-privilege identities**, because they need
    different, non-overlapping permissions:
 
-   - **Terraform PLAN / read identity** — `Reader` at subscription scope +
-     `Storage Blob Data` on its **own state container only** (`tfstate-dev` /
-     `tfstate-prod`). It can read every resource and read/lock its tfstate blob,
-     but has **no** write/apply role. This is emitted as `AZURE_CLIENT_ID`. (It
-     is a _plan/read_ identity — the earlier "deployment identity" label was a
-     misnomer; a `Reader` cannot deploy anything.)
+   - **Terraform PLAN / read identity — PROD ONLY under MG-23** — `Reader` at
+     subscription scope + **`Storage Blob Data Reader`** on its **own state
+     container only** (`tfstate-prod`). It can read every resource and read its
+     tfstate blob, but has **no** write/apply role. This is emitted as
+     `AZURE_CLIENT_ID`, scoped to the `production` GitHub Environment. (It is a
+     _plan/read_ identity — the earlier "deployment identity" label was a
+     misnomer; a `Reader` cannot deploy anything.) **The dev half of this
+     identity is gone**: MG-23 made dev PR validation credentialless, so nothing
+     reachable from a pull request reads `tfstate-dev`.
    - **APP DEPLOYMENT identity** — a **distinct** SP granted least-privilege
      publish (`Website Contributor`) scoped to **its Function App only**, plus a
      **`Storage Blob Data Contributor` on the Flex `deployment-package`
@@ -274,29 +325,105 @@ What it creates (and nothing else):
    subject = repo:<owner>/<repo>:environment:<github-env>
    ```
 
-   `<github-env>` is the EXACT `environment:` value the deploy job declares, so
-   the credential the bootstrap creates equals the OIDC subject GitHub presents.
-   The two environments and their (short) Terraform/state names:
+   `<github-env>` is the EXACT `environment:` value the job declares, so the
+   credential the bootstrap creates equals the OIDC subject GitHub presents.
+   The environments, their identities, and their (short) Terraform/state names:
 
-   | GitHub Environment (workflow `environment:` + OIDC subject) | Federated subject                                      | tf env / state container |
-   | ----------------------------------------------------------- | ------------------------------------------------------ | ------------------------ |
-   | `development` (ci.yml `deploy-dev`)                         | `repo:stevebargelt/meatgeekv2:environment:development` | `dev` / `tfstate-dev`    |
-   | `production` (infra-deploy-prod / app-deploy-prod)          | `repo:stevebargelt/meatgeekv2:environment:production`  | `prod` / `tfstate-prod`  |
+   | GitHub Environment (workflow `environment:` + OIDC subject) | Identity it federates | Federated subject                                                 | tf env / state container |
+   | ----------------------------------------------------------- | --------------------- | ----------------------------------------------------------------- | ------------------------ |
+   | `development-infra-apply` (infra-apply-dev.yml `apply`)      | dev **infra-apply**   | `repo:stevebargelt/meatgeekv2:environment:development-infra-apply` | `dev` / `tfstate-dev`    |
+   | `development` (app publish)                                  | dev **app-deploy**    | `repo:stevebargelt/meatgeekv2:environment:development`             | `dev` / `tfstate-dev`    |
+   | `production` (infra-deploy-prod / app-deploy-prod)           | prod plan/read        | `repo:stevebargelt/meatgeekv2:environment:production`              | `prod` / `tfstate-prod`  |
 
-   The full-word GitHub-Environment names (`development`, `production`) are what
-   the workflows declare — a deploy job with `environment: development` presents
-   the subject `…:environment:development`, so the bootstrap federates that exact
+   **The count, stated both ways so the two numbers never read as a
+   contradiction: there are FOUR GitHub Environments — the THREE FEDERATED ones
+   in the table above, PLUS one APPROVAL-ONLY, deliberately unfederated recovery
+   environment (`development-infra-apply-recovery`, below). Three federated +
+   one approval-only recovery = four total.** The table is the complete set of
+   *federated* environments — every environment an identity can log into Azure
+   under — and is deliberately not the complete set of environments.
+
+   There is no PR-reachable environment and no PR-reachable identity: under MG-23 the
+   pull-request infrastructure job (`ci.yml` → `validate-infrastructure`) binds
+   **no** environment at all, so nothing in the table above is reachable from a
+   pull request.
+
+   The full-word GitHub-Environment names are what the workflows declare — a job
+   with `environment: development-infra-apply` presents the subject
+   `…:environment:development-infra-apply`, so the bootstrap federates that exact
    subject (never a bare `…:environment:dev`, which would silently never match).
    A jest guard (`oidc-subject-consistency.spec.ts`, in CI) and the bootstrap
    tests (`bootstrap.test.sh`) assert this alignment so it cannot drift.
 
-   The CI **plan/read** identity is granted least-privilege **`Reader`** at
-   subscription scope plus a **`Storage Blob Data` role on its own state
-   container only** (`tfstate-dev` / `tfstate-prod`) — **container-scoped, not
-   account-scoped** (so a dev plan identity cannot read prod state, and neither
-   can read anything else in the account). It has **no** write or apply role — an
-   accidental CI apply fails closed. Publishing is the separate
-   `AZURE_APP_DEPLOY_CLIENT_ID` identity's job (above).
+   **Why the dev environments split (MG-23 F8).** Before MG-23, every dev
+   identity federated the *identical* `…:environment:development` subject and
+   was selected only by which client id a job happened to pass — so a one-line
+   client-id edit merged to `main` would have silently upgraded a low-privilege
+   job to full apply. Now the **environment**, not the client id, selects
+   the identity: an edited client id simply stops matching the subject and the
+   login fails closed. The state **containers** deliberately do *not* follow this
+   split — they are derived from a separate list, so there is exactly one
+   container per Terraform environment (`tfstate-dev` / `tfstate-prod`) no matter
+   how many GitHub Environments exist.
+
+   **The fourth environment** — the approval-only one already counted above —
+   is `development-infra-apply-recovery`, which gates the recovery
+   `workflow_dispatch` path in `infra-apply-dev.yml`. It is deliberately **not
+   federated**: it appears in no subject table because no identity is bound to
+   it and nothing logs into Azure under it. The `recovery_approval` job binds it
+   purely to pick up its protection rules — it is a human gate, not a
+   credential.
+
+   **The bootstrap explicitly creates and verifies TWO of those four
+   environments** — the dev apply pair — do not let GitHub create either for
+   you. (`development` and `production` predate MG-23 and already exist.) GitHub auto-creates an environment on a
+   workflow's first reference to it, and an auto-created environment has **no
+   protection rules at all**:
+
+   | Environment | Protection the bootstrap creates and verifies | What an unprotected one would mean |
+   | --- | --- | --- |
+   | `development-infra-apply` | deployment branch policy: **`main` only**. **NO required reviewer** — the automatic path must not park on a human | any ref reaching the workflow could mint a token for an identity holding Contributor + conditioned RBAC Administrator on `meatgeek-v2-dev-rg` |
+   | `development-infra-apply-recovery` | deployment branch policy: **`main` only**, **PLUS required reviewers** (`prevent_self_review: false`, so a solo maintainer can approve their own recovery run) | a recovery dispatch would sail straight through the "approval" gate guarding a *destructive*, `authorized_changes`-bearing apply |
+
+   > For each, the bootstrap PUTs the configuration and then **reads the
+   > protection rules back** to decide `PROTECTED` / `UNPROTECTED` — a successful
+   > PUT is not evidence. This is create-or-update, so it also **repairs** an
+   > environment GitHub already auto-created unprotected. If `gh` is unavailable
+   > or unauthenticated the status is recorded `UNVERIFIED` (never silently
+   > passed) and the run's final summary prints the exact commands to run.
+   >
+   > This is a **blocking pre-activation check**: do **not** set
+   > `DEV_TF_BACKEND_READY=true` until **BOTH** environments verify as
+   > `PROTECTED` — `development-infra-apply` with its `main`-only branch policy
+   > and no reviewer, `development-infra-apply-recovery` with its `main`-only
+   > policy and a non-empty `required_reviewers` rule. See
+   > [MG-23 live acceptance & activation](./mg23-live-acceptance.md).
+
+   The **prod** plan/read identity is granted least-privilege **`Reader`** at
+   subscription scope plus **`Storage Blob Data Reader` on its own state
+   container only** (`tfstate-prod`) — **container-scoped, not account-scoped**,
+   so it cannot read `tfstate-dev` or anything else in the account. It has **no**
+   apply role — an accidental apply under that identity fails closed. It is
+   reached only from `infra-deploy-prod.yml`, which is `workflow_dispatch`-only
+   behind the `production` environment and is **not** pull-request-reachable.
+
+   > **There is no dev plan/read identity (MG-23).** The earlier design ran a
+   > PR-time `terraform plan` against live dev state, which forced a
+   > pull-request-reachable principal to hold read on `tfstate-dev` — and dev
+   > state carries live IoT Hub SAS keys. MG-23 deleted that identity and its
+   > environment outright: PR validation is credentialless, so the disclosure
+   > path is closed **by construction** rather than by a reviewer gate. Retiring
+   > the *live* Azure and GitHub objects is a separate operator action —
+   > **re-running this bootstrap does not remove them** — see the DECOMMISSION
+   > section of
+   > [MG-23 live acceptance & activation](./mg23-live-acceptance.md).
+
+   Applying dev infrastructure is the separate, dedicated **infra-apply**
+   identity's job (Contributor and a conditioned Role Based Access Control
+   Administrator scoped **only** to `meatgeek-v2-dev-rg`, plus Storage Blob Data
+   Contributor on `tfstate-dev`); publishing the app is the separate
+   `AZURE_APP_DEPLOY_CLIENT_ID` identity's job (above). Three identities, three
+   environments, three privilege levels.
 
 A **V1-safety guard** (`assert_v2_name`) refuses to operate on any name that is
 not unambiguously `meatgeek-v2` / `meatgeekv2`, and explicitly rejects the known
@@ -310,8 +437,9 @@ Environment** variables/secrets (one set per environment — the GitHub
 Environments named `development` and `production`):
 
 ```
-AZURE_CLIENT_ID             = <plan/read appId>
+AZURE_CLIENT_ID             = <plan/read appId>        # `production` environment ONLY (MG-23)
 AZURE_APP_DEPLOY_CLIENT_ID  = <app-deployment appId>   # distinct SP; CI/OIDC func-publish only
+AZURE_INFRA_APPLY_CLIENT_ID = <infra-apply appId>      # `development-infra-apply` ONLY (MG-23)
 AZURE_TENANT_ID             = <tenantId>
 AZURE_SUBSCRIPTION_ID       = <subscriptionId>
 ```
@@ -456,7 +584,7 @@ terraform init -reconfigure \
   cached one.
 - The injected `storage_account_name` matches the account the bootstrap created
   from the **same** derivation, so init can never bind a divergent account name.
-- **Do not substitute `nx init infrastructure --env=dev` here.** The Nx `init`
+- **Do not substitute `nx run infrastructure:init --args="--env=dev"` here.** The Nx `init`
   wrapper runs `terraform init -reconfigure -backend-config=environments/backend-dev.hcl`
   **without** the derived `storage_account_name`, so it cannot bind the remote
   backend on its own — run the `terraform init` above (both `-backend-config`
@@ -547,11 +675,33 @@ Both runs **must exit 0**. This **replaces** the old always-green README one-lin
 (a `terraform show -json` result fed into `grep` and neutralized with a trailing
 `or-echo` — which swallowed its own failure and could never block an apply). If
 either inspection reports a violation, **stop**: a runtime credential is
-materializing into state. The same gate runs in CI via `tf-static-checks.sh`
-check 12, which fails the build if this runbook/README stops documenting it as the
-required pre-apply step.
+materializing into state. `tf-static-checks.sh` check 12 fails the build if this
+runbook/README stops documenting it as the required pre-apply step, and under
+MG-23 the script itself is an **executed** CI gate rather than a documented
+intention, in **both** workflows and in two different ways:
 
-### Step 6 — Apply (operator-run, never CI)
+- **`infra-apply-dev.yml`** runs the real gate **twice** on the real apply — on
+  the **saved plan** before the apply, and on the resulting **state** after it.
+  This is the load-bearing execution: it is the only place the script sees an
+  actual dev plan, because there is no PR-time plan any more.
+- **`ci.yml` (`lint-and-test`, the `api-interfaces` leg)** runs it only as
+  **fixture regressions** — the credentialless PR path has no plan and no state
+  to inspect, so what it proves is that the gate still fails **closed** on the
+  crafted fixtures (missing tools, invalid JSON, unexpected schema, temp-file
+  failure) and still **passes** a valid empty `resource_changes` array. A gate
+  that silently started exiting 0 would be caught here, pre-merge, without any
+  credential. Note the job: the Jest suite shells out to
+  `scripts/fixtures/run-flex-secret-gate-fixtures.sh` (bash *and* dash), so the
+  secret-gate regression lives in `lint-and-test`, **not** in
+  `validate-infrastructure` — that job runs the *destroy-guard* fixtures
+  (`run-destroy-guard-fixtures.sh`). Both jobs are required checks.
+
+### Step 6 — Apply (greenfield creation — operator-run)
+
+> This step creates the dev stack for the first time, which is an operator
+> action by design. **Steady-state** dev applies are CI-run under MG-23; once
+> the stack exists, changes go through a PR and merge to `main`, not through
+> this command. See [MG-23 live acceptance & activation](./mg23-live-acceptance.md).
 
 ```bash
 terraform apply tfplan | tee /tmp/mg24-evidence/dev-apply.txt
@@ -796,16 +946,51 @@ gated activation.
 
 ## What CI does (and does not) do
 
-- `.github/workflows/ci.yml` (`validate-infrastructure`) runs
-  `terraform validate`, `terraform fmt -check`, and
-  `scripts/tf-static-checks.sh`. The `deploy-dev` job is **plan-only**.
+- `.github/workflows/ci.yml` (`validate-infrastructure`) is the **only**
+  infrastructure job reachable from a pull request, and it is **credentialless**:
+  `permissions: contents: read` only (no `id-token: write`), no `environment:`,
+  no `azure/login`, and an `env:` block pinning `ARM_USE_OIDC` / `ARM_USE_CLI` /
+  `ARM_USE_MSI` / `ARM_USE_AKS_WORKLOAD_IDENTITY` to `'false'`. On every push and
+  pull request it runs, in order: `scripts/assert-credentialless.sh` →
+  `terraform fmt -check -recursive` →
+  `terraform init -backend=false -input=false -lockfile=readonly` →
+  `terraform validate` → `terraform test` (root) → `scripts/tf-static-checks.sh`
+  → `bootstrap/bootstrap.test.sh` → the destroy-guard fixtures → per-module
+  `terraform test` (`modules/functions`, `modules/iot-hub`, `modules/monitoring`)
+  → the pinned OTel collector config validate. It takes **no** `terraform plan`,
+  binds **no** backend, and never touches `meatgeek-v2/dev.tfstate`. PR jobs
+  **never** apply, and now never authenticate either.
+- `.github/workflows/infra-apply-dev.yml` **applies dev automatically** after CI
+  goes green on a push to `main` — this is MG-23, automated dev GitOps
+  reconciliation. It checks out the exact CI'd SHA, plans to a file, runs the
+  pre-apply secret gate and the destructive-change circuit-breaker on that file
+  (which blocks destroys **and** `forget`/state-orphaning changes), applies
+  **that saved plan**, runs the post-apply state gate, and ends with a final
+  plan that **fails the run on drift**. Every job skips cleanly unless
+  `DEV_TF_BACKEND_READY == 'true'`.
 - `.github/workflows/infra-deploy-prod.yml` authenticates via **OIDC**, binds
   the prod remote state (`terraform init -reconfigure -backend-config=environments/backend-prod.hcl`
   plus `-backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"`),
   runs under the `production` GitHub Environment gate, and **ends at
-  `terraform plan`** — there is **no** `apply` in CI.
+  `terraform plan`** — prod has **no** CI apply yet.
 
-Never add auto-apply to CI. Apply stays an operator action per this runbook.
+**CI-run reconciliation is the intended steady state.** Dev is active under
+MG-23; prod activates under **MG-25**, and until then the prod apply is an
+operator action per this runbook. What stays operator-run in **every**
+environment, permanently: this bootstrap, creation of the resource groups
+themselves, subscription-scoped configuration, and disaster recovery. The dev
+apply identity is scoped to `meatgeek-v2-dev-rg`, so Terraform can only *adopt*
+that resource group — if dev state or the RG is lost, the GitOps loop cannot
+rebuild it and you come back here.
+
+Activating the dev loop has prerequisites — a least-privilege apply identity,
+the four GitHub Environments and their protection rules (three federated —
+`development-infra-apply`, `development`, `production` — plus the approval-only,
+deliberately unfederated `development-infra-apply-recovery`), three empirical checks
+against Azure's ABAC behaviour, the T1–T7 live acceptance tests, and tightened
+branch protection on `main` — all in
+**[MG-23 live acceptance & activation](./mg23-live-acceptance.md)**. Do not set
+`DEV_TF_BACKEND_READY` before working through it.
 
 ---
 

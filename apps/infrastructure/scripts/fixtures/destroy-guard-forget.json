@@ -1,0 +1,37 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — STATE ORPHANING via a `removed { destroy = false }` block, which Terraform plans as the `forget` action. Nothing is destroyed, so this is NOT caught by a destroy-only guard — and that is exactly why it is dangerous under MG-23: every downstream control stays GREEN. The post-apply state gate inspects a SMALLER state and finds no secrets; the final drift plan compares a SMALLER configuration and reports CONVERGED. A live, data-bearing Cosmos account is dropped out of the GitOps loop — still holding data, still costing money, now managed by nobody and watched by nothing — on a fully green run. The guard must FAIL, and an authorization issued for `delete:` of the same address must NOT clear it.",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_resource_group.main",
+          "type": "azurerm_resource_group",
+          "name": "main",
+          "values": { "name": "meatgeek-v2-dev-rg", "location": "westus2" }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_account.main",
+      "type": "azurerm_cosmosdb_account",
+      "name": "main",
+      "change": { "actions": ["forget"] }
+    },
+    {
+      "address": "module.monitoring.azurerm_monitor_metric_alert.function_failure_rate",
+      "type": "azurerm_monitor_metric_alert",
+      "name": "function_failure_rate",
+      "change": { "actions": ["update"] }
+    },
+    {
+      "address": "azurerm_resource_group.main",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}
