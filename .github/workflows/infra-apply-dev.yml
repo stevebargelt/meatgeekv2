@@ -352,6 +352,14 @@ jobs:
       # variable), never a hardcoded literal. The azurerm backend and provider
       # both read it from the environment.
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      # OIDC auth for terraform's azurerm backend AND provider. Without these the
+      # backend falls back to the az-CLI session (a service principal via
+      # azure/login), which the azurerm backend refuses ("Azure CLI is only
+      # supported as a User"). ARM_USE_OIDC makes terraform consume the GitHub
+      # OIDC token directly as the infra-apply SP.
+      ARM_USE_OIDC: 'true'
+      ARM_CLIENT_ID: ${{ vars.AZURE_INFRA_APPLY_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       TF_IN_AUTOMATION: 'true'
       TF_INPUT: '0'
       # DESTRUCTIVE-CHANGE AUTHORIZATION comes ONLY from the branch-restricted,
