@@ -50,8 +50,14 @@ resource "azurerm_monitor_action_group" "main" {
 
 # Budget alert for cost monitoring (resource-group scope, primary)
 resource "azurerm_consumption_budget_resource_group" "main" {
-  name              = "${var.resource_prefix}-budget"
-  resource_group_id = "/subscriptions/${data.azurerm_client_config.current.subscription_id}/resourceGroups/${var.resource_group_name}"
+  name = "${var.resource_prefix}-budget"
+  # Use the RG id the module already receives (azurerm_resource_group.main.id),
+  # NOT a string rebuilt from data.azurerm_client_config.current. Under the
+  # OIDC/SP automatic-apply context that data source is read DURING APPLY, so its
+  # subscription_id is unknown at plan time, which makes this (ForceNew)
+  # resource_group_id "(known after apply)" and forces a spurious budget REPLACE
+  # on any RG-touching change — which the destroy circuit-breaker then blocks.
+  resource_group_id = var.resource_group_id
 
   amount     = var.budget_limit
   time_grain = "Monthly"
