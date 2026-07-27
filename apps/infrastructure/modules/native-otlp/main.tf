@@ -187,6 +187,14 @@ resource "azurerm_role_assignment" "collector_dcr_publisher" {
   scope                = azapi_resource.otlp_dcr.id
   role_definition_name = "Monitoring Metrics Publisher"
   principal_id         = azurerm_user_assigned_identity.collector.principal_id
+  # principal_type is declared EXPLICITLY on every azurerm_role_assignment in this
+  # stack (this module is count-disabled by default but IS in the graph and IS in
+  # the MG-23 role allowlist) — the apply identity's ABAC condition matches on
+  # PrincipalType, and an omitted attribute does not match, so leaving it off fails
+  # the condition SHUT. Rationale in the root main.tf block above
+  # functions_eventhub_receiver. A user-assigned managed identity IS a service
+  # principal in Entra, so ServicePrincipal is the correct value here.
+  principal_type = "ServicePrincipal"
 }
 
 # --- Collector Container App -------------------------------------------------

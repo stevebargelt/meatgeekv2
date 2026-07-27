@@ -1,0 +1,952 @@
+name: Apply Dev Infrastructure
+
+# MG-23 — AUTOMATED DEV GITOPS RECONCILIATION (CI-run).
+#
+# Terminology, used precisely throughout this file:
+#   MG-24 = Terraform reconciliation, OPERATOR-run. A human ran `terraform apply`
+#           from a workstation against the persistent dev backend.
+#   MG-23 = automated dev GitOps reconciliation, CI-run. Infrastructure changes
+#           flow through CI: CREDENTIALLESS validation on the PR (ci.yml's
+#           validate-infrastructure job — fmt, `init -backend=false`, validate,
+#           the static checks and the gate fixture runners, with
+#           scripts/assert-credentialless.sh proving at runtime that the job has
+#           no Azure identity, no environment and no OIDC subject), then an
+#           AUTOMATIC apply once the change is merged to `main` — this workflow.
+#           There is no operator-workstation apply in the steady state.
+#
+#           NOTE WHAT THE PR DOES *NOT* DO: it does not plan against real dev
+#           state. An earlier revision of MG-23 ran a remote-state PR plan as a
+#           dedicated read-only identity; that identity and that job are GONE.
+#           The authoritative plan against meatgeek-v2/dev.tfstate is the one
+#           THIS workflow runs post-merge, and it is the only plan in the system
+#           that touches live state. The PR therefore trades plan fidelity for a
+#           strictly stronger property: no pull request can reach dev state, so
+#           the live IoT Hub SAS material in that state is unreachable from a PR
+#           by construction rather than by gate.
+#
+# Prod is deliberately NOT in scope here: .github/workflows/infra-deploy-prod.yml
+# stays plan-only and workflow_dispatch-only. Moving prod to a CI-run apply is
+# MG-25's activation, not this ticket's.
+#
+# ACTIVATION IS SEPARATE FROM THIS FILE. Merging this workflow does not turn
+# anything on. Every job is gated on `vars.DEV_TF_BACKEND_READY == 'true'` and
+# skips cleanly until an operator sets it, and the full activation procedure —
+# creating the apply service principal, resolving the role-definition GUIDs,
+# creating the GitHub Environments, the blocking empirical condition checks, the
+# T1-T7 live acceptance tests, and tightening branch protection on `main` — is
+# docs/infrastructure/mg23-live-acceptance.md. Read it BEFORE setting the flag.
+#
+# ------------------------------------------------------------------------------
+# F18 — LOAD-BEARING PRECONDITIONS OF THIS DESIGN'S THREAT MODEL.
+#
+# The apply identity holds Contributor and a CONDITIONED Role Based Access
+# Control Administrator on `meatgeek-v2-dev-rg`. That is only a bounded blast
+# radius because three escalation paths are CLOSED:
+#
+#   1. NO Microsoft Graph permissions.  The identity cannot create or modify
+#      directory objects, so it cannot mint itself a new principal to grant.
+#   2. NO subscription-scoped role assignments.  Contributor and RBAC
+#      Administrator stop at the resource-group boundary; nothing the apply can
+#      do reaches another resource group or the subscription.
+#   3. The Terraform STATE ACCOUNT LIVES IN A SEPARATE RESOURCE GROUP
+#      (`meatgeek-v2-tfstate-rg`).  The apply identity holds only a
+#      container-scoped Storage Blob Data Contributor role on `tfstate-dev` — it
+#      is not Contributor over the state account and cannot rewrite state's
+#      access control to hide its tracks.
+#
+# ANY FUTURE CHANGE THAT ADDS MICROSOFT GRAPH PERMISSIONS, ADDS SUBSCRIPTION
+# SCOPE, OR MOVES THE STATE ACCOUNT INTO THE DEV RESOURCE GROUP INVALIDATES THIS
+# THREAT MODEL AND REQUIRES A FRESH ONE. This is not advisory; the reasoning that
+# makes an unattended apply with RBAC-write rights acceptable rests on all three.
+# ------------------------------------------------------------------------------
+
+on:
+  # WHY workflow_run RATHER THAN `push: branches: [main]`.
+  #
+  # BENEFIT: with `workflow_run`, the workflow FILE that executes is always the
+  # one on the DEFAULT BRANCH. A pull request cannot rewrite the apply steps in
+  # its own branch and have its rewritten version run — which matters a great
+  # deal for a job holding Contributor + RBAC Administrator.
+  #
+  # COST, accepted deliberately: `workflow_run` supports NO `paths:` filter, so
+  # this runs on EVERY green CI run of a push to main, not only ones that touched
+  # apps/infrastructure/**. That is a DECISION, not an oversight. An apply of an
+  # unchanged configuration is a no-op, and the FINAL DRIFT PLAN at the end still
+  # proves convergence on every push instead of only on infrastructure pushes —
+  # which is strictly more reconciliation, not less.
+  workflow_run:
+    workflows: ['CI/CD Pipeline']
+    types: [completed]
+
+  # RECOVERY ONLY — see the `recovery_approval` job. This is not the normal path
+  # and takes no shortcut: it enters the SAME single apply job, and therefore the
+  # same plan -> pre-gate -> destroy-breaker -> apply-saved-plan -> post-gate ->
+  # final-plan sequence, as the automatic path.
+  workflow_dispatch:
+    inputs:
+      authorized_changes:
+        description: >-
+          EXACT comma-separated list of ACTION-QUALIFIED change TOKENS authorized
+          on this run, each of the form <action>:<address>[#deposed=<key>] (e.g.
+          delete:module.native_otlp.azurerm_container_app.collector,forget:module.cosmos_db.azurerm_cosmosdb_account.main).
+          Leave empty for the normal case (any destructive change then fails the
+          run). Run the gate once with this empty and paste the token list it
+          prints, after reviewing every token. THE ACTION IS PART OF THE
+          AUTHORIZATION: `delete:X` destroys X, `forget:X` drops X out of
+          Terraform management and leaves it running, and neither authorizes the
+          other. THE DEPOSED KEY IS TOO: a failed create-before-destroy leaves
+          deposed objects sharing one address, and each is separately authorized.
+          It is a token SET, never a count: a count is satisfied by a DIFFERENT
+          set of the same size, so an authorization issued for two disposable
+          resources would also clear the Cosmos account and the IoT Hub. There is
+          no wildcard or boolean form by design — see
+          scripts/tf-plan-destroy-guard.sh.
+        required: false
+        default: ''
+
+# LEAST PRIVILEGE. The workflow-level grant is read-only; `id-token: write` is
+# granted on the apply job ALONE (below). infra-deploy-prod.yml's workflow-level
+# `id-token: write` is the anti-pattern this file deliberately does NOT copy:
+# there, every job in the workflow can mint an Azure OIDC token whether it needs
+# one or not.
+permissions:
+  contents: read
+
+# THERE IS DELIBERATELY NO WORKFLOW-LEVEL `concurrency:` BLOCK. The mutual
+# exclusion lives on the APPLY JOB (see `jobs.apply.concurrency`), and the
+# difference is not cosmetic.
+#
+# A workflow-level group is acquired when the RUN starts — which, for the
+# recovery path, is while `recovery_approval` sits PARKED waiting on a human
+# reviewer. A recovery dispatch left unapproved over a weekend would therefore
+# hold the infrastructure-apply group the whole time, and every automatic
+# post-merge reconciliation behind it would queue against an approval nobody is
+# looking at. Worse, because GitHub keeps at most ONE pending run per group, that
+# queue silently discards all but the newest — so a parked approval does not just
+# delay reconciliation, it makes it stop, with no red job anywhere to say so.
+#
+# Scoping the group to the apply job means it is acquired only AFTER approval, at
+# the moment the job actually starts touching state. A waiting approval blocks
+# nothing. Both entry paths use the SAME group and the SAME single apply job, so
+# once approved, a recovery apply and an automatic apply still serialize against
+# each other exactly as before — and Terraform's own blob lease on
+# meatgeek-v2/dev.tfstate (with `-lock-timeout`, below) is the second, external
+# layer of that same guarantee.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # RECOVERY APPROVAL — the manual gate, and it is on the RECOVERY PATH ONLY.
+  #
+  # The NORMAL automatic apply carries NO required reviewer. It is governed by
+  # protected `main` (the change was reviewed before it merged), the green CI run
+  # this workflow triggers on, and the destroy circuit-breaker below. Adding a
+  # reviewer to the automatic path would just re-approve a change that was
+  # already approved at merge, and would convert GitOps reconciliation back into
+  # a manual deploy.
+  #
+  # The workflow_dispatch RECOVERY path is different: it applies whatever is on
+  # `main` at an operator-chosen moment, optionally with a destroy authorization.
+  # That is a human-initiated privileged action, so it gets a human approval.
+  #
+  # WHY THIS IS A SEPARATE JOB WITH ITS OWN ENVIRONMENT, and not a reviewer rule
+  # on `development-infra-apply`: GitHub deployment protection rules are
+  # per-ENVIRONMENT, not per-trigger. An environment either always requires a
+  # reviewer or never does. Putting the required reviewer on
+  # `development-infra-apply` would therefore gate the AUTOMATIC apply too, which
+  # is exactly what the operator correction rules out. So the approval lives on
+  # its OWN environment, carried by this job.
+  #
+  # `development-infra-apply-recovery` is an APPROVAL-ONLY GitHub Environment:
+  # required reviewer + a main-only deployment branch policy, and deliberately NO
+  # federated credential and NO Azure identity of any kind. This job has no
+  # `id-token` permission and never calls azure/login — it cannot touch Azure. It
+  # can only be approved or not. (Note for the bootstrap environment/subject map:
+  # this environment is intentionally NOT federated; it is a gate, not an
+  # identity.)
+  #
+  # (`recovery_approval` uses an UNDERSCORE, not a hyphen: `needs.recovery-approval`
+  # would be parsed as a subtraction in a GitHub expression.)
+  # ---------------------------------------------------------------------------
+  recovery_approval:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      vars.DEV_TF_BACKEND_READY == 'true'
+    runs-on: ubuntu-latest
+    environment: development-infra-apply-recovery
+    permissions:
+      contents: read
+    steps:
+      - name: Record the recovery approval
+        # THE `env:` BINDING IS A SECURITY CONTROL, NOT STYLE. `authorized_changes`
+        # is an OPERATOR-SUPPLIED workflow_dispatch input. A `${{ ... }}` expression
+        # inside a `run:` block is expanded into the script TEXT before the shell
+        # parses it, so an input like `'; <command>; echo '` breaks out of the
+        # quotes and executes arbitrary commands in this job. Binding it to an
+        # environment variable and dereferencing `"$AUTHORIZED_CHANGES"` passes it
+        # as DATA, which the shell never re-parses as source.
+        #
+        # NEVER interpolate `${{ github.event.* }}`, `${{ inputs.* }}` or
+        # `${{ github.head_ref }}` directly into a `run:` script anywhere in this
+        # workflow. The same rule is why the apply job binds this input at the job
+        # level (TF_DESTROY_GUARD_AUTHORIZED_CHANGES) rather than inlining it.
+        env:
+          AUTHORIZED_CHANGES: ${{ github.event.inputs.authorized_changes }}
+        run: |
+          echo "Recovery apply approved by a reviewer on the development-infra-apply-recovery environment."
+          echo "Requested authorization (exact action-qualified token set): '${AUTHORIZED_CHANGES}' (empty = none)."
+
+  # ---------------------------------------------------------------------------
+  # THE APPLY. Exactly ONE apply job exists, and BOTH entry paths enter it, so
+  # the recovery path provably cannot take a shortcut around any gate — there is
+  # no second copy of the sequence to drift.
+  # ---------------------------------------------------------------------------
+  apply:
+    needs: [recovery_approval]
+    # THE TRIPLE GATE IS A SECURITY CONTROL, NOT BOILERPLATE.
+    #
+    # `workflow_run` fires for PR-triggered CI runs too, and for CI runs on any
+    # branch and from forks. Without ALL THREE of conclusion/event/head_branch, a
+    # green CI run on an unmerged branch or fork PR would AUTO-APPLY UNREVIEWED
+    # TERRAFORM with Contributor + Role Based Access Control Administrator on the
+    # dev resource group. Each clause closes one of those:
+    #   conclusion == 'success'   -> never apply a tree CI rejected
+    #   event      == 'push'      -> never apply from a pull_request-triggered run
+    #   head_branch== 'main'      -> never apply a branch that was not merged
+    # Deleting any one of them re-opens that path. Do not "simplify" this.
+    #
+    # THE DEPENDENCY-RESULT CLAUSE IS WHAT KEEPS THE AUTOMATIC PATH ALIVE, AND IT
+    # IS SPELLED OUT RATHER THAN INFERRED (MG-23 red, corrected).
+    #
+    # `recovery_approval` is SKIPPED on every automatic run — its own `if` is
+    # false unless the trigger is workflow_dispatch. GitHub's default rule for a
+    # job with `needs:` is that a SKIPPED dependency SKIPS the dependent job, and
+    # an earlier revision of this file relied on `!cancelled()` alone to override
+    # that. It must not be relied on: the override behaviour of `!cancelled()`
+    # over a skipped dependency is not something this repository can test, and if
+    # it does not hold then `apply` is skipped on EVERY green push to main —
+    # before checkout, before login, before plan — and the automatic reconciler is
+    # silently dead while every run still shows green. That failure mode is
+    # invisible precisely because a skipped job is not a red one.
+    #
+    # So the dependency result is asserted EXPLICITLY, and the expression is
+    # correct under either reading of GitHub's rule:
+    #   always()                 -> unambiguously overrides the implicit
+    #                               needs-succeeded check, so the decision is made
+    #                               by the expression below and nothing else.
+    #   !cancelled()             -> re-imposes the one thing `always()` gives away:
+    #                               a REJECTED recovery deployment cancels the run,
+    #                               and a rejection must never apply.
+    #   result == 'success'      -> the recovery path was approved.
+    #   result == 'skipped'      -> the automatic path, where the approval job
+    #                               correctly never ran.
+    # Anything else — 'failure', 'cancelled' — matches neither and does not apply.
+    # The dispatch branch below then re-requires 'success' on its own, so the
+    # top-level 'skipped' allowance can never clear a recovery run: a dispatch
+    # whose approval was skipped, failed or rejected still does not apply.
+    #
+    # DO NOT COPY THIS CONDITION ONTO A STEP INSIDE THE JOB. Once the job is
+    # running, the approval question is settled and the meaning of `!cancelled()`
+    # inverts: the dominant cancellation source is then `timeout-minutes: 90`
+    # firing on a WEDGED apply, so `!cancelled()` on a step reads as "skip in the
+    # partial-apply case", which is the one case that most needs handling. That
+    # is why the post-apply state secret gate below is `always()`, not
+    # `!cancelled()` — see the long note on that step.
+    #
+    # DEV_TF_BACKEND_READY gates BOTH paths (and `recovery_approval` above), so an
+    # unactivated repo SKIPS CLEANLY — a skipped job, never a red one.
+    if: >-
+      always() &&
+      !cancelled() &&
+      (
+        needs.recovery_approval.result == 'success' ||
+        needs.recovery_approval.result == 'skipped'
+      ) &&
+      vars.DEV_TF_BACKEND_READY == 'true' &&
+      (
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          needs.recovery_approval.result == 'success'
+        )
+      )
+    runs-on: ubuntu-latest
+    # MUTUAL EXCLUSION, SCOPED TO THE JOB RATHER THAN THE WORKFLOW (see the note
+    # above `jobs:`). Two applies must never race a mutation of
+    # `meatgeek-v2/dev.tfstate`. `cancel-in-progress: false` guarantees an
+    # in-flight apply is never killed part-way through, which would leave state
+    # and reality disagreeing. Acquiring the group HERE — after
+    # `recovery_approval`, not at run start — means a recovery run parked on a
+    # human reviewer holds nothing and cannot stall automatic reconciliation.
+    #
+    # THIS DEPENDS ON `development-infra-apply` HAVING NO REQUIRED REVIEWER, and
+    # that is not incidental. A job waiting on a deployment protection rule has
+    # already acquired its concurrency group. Adding a required reviewer to this
+    # environment would therefore re-create exactly the stall this scoping fixes,
+    # just one job later — and it would also gate the AUTOMATIC apply, which
+    # MG-23 rules out. The reviewer belongs on `development-infra-apply-recovery`
+    # and nowhere else. (There is no PR-time reviewer gate to pair it with: PR
+    # validation is credentialless, so tfstate-dev and its live IoT Hub SAS
+    # material are never reachable from a pull request at all.) See the
+    # environment protection matrix in
+    # docs/infrastructure/mg23-live-acceptance.md.
+    #
+    # THE REAL SEMANTICS, stated honestly: GitHub keeps at most ONE PENDING entry
+    # per concurrency group. A burst of merges therefore SILENTLY DROPS the
+    # intermediate SHAs — only the newest queued run survives to execute.
+    # CONVERGENCE holds WHEN THE SURVIVING RUN EXECUTES: it applies the newest
+    # tree, which is what `main` says the world should look like, and the final
+    # drift plan proves it — whatever sequence of runs was dropped, the run that
+    # does execute ends by asserting that reality matches the tree. That
+    # qualifier is load-bearing and is NOT a formality: a run only ever fires off
+    # a CI run that concluded `success`, so if the newest commit's CI is RED
+    # there is no surviving run at all, and the queue-dropped SHAs stay
+    # unreconciled with nothing red anywhere in the repo. That is the MG-38
+    # residual — same gap as the superseded-skip case in step 1 below; see
+    # docs/infrastructure/mg23-live-acceptance.md §10.
+    # PER-COMMIT AUDITABILITY DOES NOT HOLD either way — you cannot conclude
+    # "an apply ran for commit X" from the fact that X reached main. Check the
+    # infra-apply-dev run list, not the commit list.
+    concurrency:
+      group: infra-apply-dev-development-infra-apply
+      cancel-in-progress: false
+
+    # A REALISTIC CEILING, NOT A HOPEFUL ONE. The full sequence is plan + apply +
+    # a second plan against Cosmos, IoT Hub, Functions and SignalR; a cold Flex
+    # Consumption or Cosmos change is slow, and the runner default of 360 minutes
+    # would let a wedged apply sit holding both this concurrency group and the
+    # Azure blob lease on meatgeek-v2/dev.tfstate for six hours.
+    #
+    # ON TIMEOUT, NOTHING IS AUTO-UNLOCKED — DELIBERATELY. A cancelled job can
+    # leave the state lease held, and `terraform force-unlock` run by automation
+    # is a state-corruption primitive: it would release a lease whose holder may
+    # still be mid-write, letting the next run interleave against it. Recovery is
+    # an OPERATOR action — inspect what the run actually did, confirm no apply is
+    # still in flight, then unlock by hand. The procedure (and how to tell a
+    # genuinely stuck lease from a live one) is in
+    # docs/infrastructure/mg23-live-acceptance.md.
+    timeout-minutes: 90
+
+    # The apply identity's OWN GitHub Environment. This is what makes its OIDC
+    # subject (`repo:stevebargelt/meatgeekv2:environment:development-infra-apply`)
+    # genuinely DIFFERENT from the app-deploy identity's
+    # (`...:environment:development`). Before MG-23 every dev identity federated
+    # the identical `environment:development` subject and was selected only by
+    # which client-id a job passed — so a one-line client-id edit merged to main
+    # silently upgraded a read-only job to full apply. It no longer can: this is
+    # the only environment federated to the apply identity, and the PR path
+    # holds no identity to upgrade in the first place.
+    environment: development-infra-apply
+    permissions:
+      # The ONLY job in this workflow with `id-token: write`.
+      id-token: write
+      contents: read
+    env:
+      # From the authenticated OIDC context (a per-environment GitHub Environment
+      # variable), never a hardcoded literal. The azurerm backend and provider
+      # both read it from the environment.
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: '0'
+      # DESTRUCTIVE-CHANGE AUTHORIZATION comes ONLY from the branch-restricted,
+      # reviewer-approved workflow_dispatch RECOVERY input. It is deliberately NOT
+      # sourced from a repository/environment variable: a variable is sticky, and
+      # an authorization left switched on after the merge it was written for would
+      # wave through a later plan nobody reviewed. On the automatic path this
+      # resolves to the empty string, so an unattended apply can never destroy
+      # anything and can never drop a resource out of Terraform management.
+      #
+      # The value is the EXACT SET of ACTION-QUALIFIED change tokens the reviewer
+      # approved. Not a count — a count authorizes an arity, and the same arity is
+      # met by a different, possibly data-bearing, set. And not a bare address —
+      # `delete:X` (destroy X) and `forget:X` (orphan X out of Terraform
+      # management, leaving it running and unmanaged) are different decisions, and
+      # an approval for one must not clear the other.
+      TF_DESTROY_GUARD_AUTHORIZED_CHANGES: ${{ github.event.inputs.authorized_changes }}
+    steps:
+      # 1. STALE-SHA GUARD — NEVER APPLY SUPERSEDED TRUNK, AND DECIDE IT BEFORE
+      #    AUTHENTICATING TO AZURE.
+      #
+      #    This job applies the exact SHA CI went green on, which is correct but
+      #    not sufficient: that SHA can stop being `main` while the run waits. The
+      #    apply job queues behind the concurrency group, a burst of merges leaves
+      #    several runs contending, and a recovery dispatch can sit on a human
+      #    reviewer for hours. Applying then would push a tree that `main` has
+      #    already moved past — a silent ROLLBACK of whatever merged in between,
+      #    executed unattended with Contributor + RBAC Administrator. The final
+      #    drift plan would not catch it: it compares reality against the STALE
+      #    tree this run checked out, so a successful rollback reports CONVERGED.
+      #
+      #    THE TWO PATHS DIVERGE ON PURPOSE:
+      #      workflow_run (automatic)     -> a superseded run SKIPS CLEANLY. It is
+      #        not a failure, and a red job here would be noise that trains people
+      #        to ignore this workflow. The next reconcile that runs off a
+      #        GREEN-required-CI SHA converges the tree.
+      #        DO NOT read that as "a newer run will always reconcile this".
+      #        MG-38 RESIDUAL: this workflow only ever fires off a CI run that
+      #        concluded `success`. If the SUPERSEDING commit's CI is RED, no
+      #        apply happens for EITHER commit — the superseded one skipped, the
+      #        superseding one never triggered — and nothing in this repo goes
+      #        red to say so. Reconciliation resumes only once some later main
+      #        SHA goes green. MG-38 adds the missed-reconciliation detector;
+      #        until it lands, that gap is unmonitored. See the accepted-residual
+      #        entry in docs/infrastructure/mg23-live-acceptance.md §10.
+      #      workflow_dispatch (recovery) -> a superseded run FAILS. The operator
+      #        chose a specific moment and reviewed a specific plan, possibly with
+      #        a destroy authorization attached to it. Silently skipping would
+      #        leave them believing a recovery ran. They must see it refuse and
+      #        start a NEW recovery run against current `main`.
+      #
+      #    Placed before `azure/login` so a superseded run never mints an OIDC
+      #    token at all. `gh api` needs only the workflow's own read-scoped
+      #    GITHUB_TOKEN.
+      #
+      #    THE TIP LOOKUP RETRIES WITH BACKOFF. Under `set -eu` a single
+      #    unretried API call makes every transient api.github.com blip — a 502,
+      #    a secondary rate limit, a dropped connection — turn a reconcile red.
+      #    That is a false negative in the noisiest possible place: this gate is
+      #    on the critical path of every push to main. Only a DEFINITIVE answer
+      #    may decide the gate, so a transient failure is retried rather than
+      #    resolved either way. Exhausting the retries is NOT treated as "fresh":
+      #    the run still fails closed, because a gate that cannot see main's tip
+      #    cannot rule out applying superseded trunk.
+      - name: Stale-SHA guard (never apply superseded trunk)
+        id: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          # The SHA CI went green on (automatic path). Empty on dispatch.
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+          # `main`'s tip as of the dispatch (recovery path) — the startup pin.
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            PINNED="$CI_SHA"
+          else
+            PINNED="$DISPATCH_SHA"
+          fi
+
+          # Fail closed on an unusable pin rather than comparing empty strings —
+          # "" = "" would read as fresh and wave the run straight through.
+          printf '%s' "$PINNED" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "Could not resolve the commit this run is pinned to — refusing to apply." >&2
+            exit 1
+          }
+
+          # BOUNDED RETRY WITH BACKOFF — 5 attempts, ~37s of waiting at worst.
+          # A malformed answer is handled exactly like a failed call: both mean
+          # "no definitive answer yet", and neither may decide this gate. The
+          # loop exits early the moment one attempt returns a well-formed SHA.
+          TIP=''
+          for delay in 0 2 5 10 20; do
+            [ "$delay" -eq 0 ] || {
+              echo "main-tip lookup was inconclusive; retrying in ${delay}s." >&2
+              sleep "$delay"
+            }
+            if TIP="$(gh api "repos/${REPO_SLUG}/commits/main" --jq .sha 2>/dev/null)" &&
+               printf '%s' "$TIP" | grep -Eq '^[0-9a-f]{40}$'; then
+              break
+            fi
+            TIP=''
+          done
+          # FAIL CLOSED on exhaustion. Not "assume fresh": a gate that cannot see
+          # main's tip cannot rule out applying superseded trunk.
+          [ -n "$TIP" ] || {
+            echo "Could not resolve the current main tip after 5 attempts — refusing to apply." >&2
+            exit 1
+          }
+
+          echo "pinned to:    $PINNED"
+          echo "current main: $TIP"
+
+          if [ "$PINNED" = "$TIP" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Pinned commit IS the current main tip — proceeding."
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "main has advanced past the commit this recovery run pinned at startup." >&2
+            echo "Applying now would roll main back to a superseded tree. Start a NEW" >&2
+            echo "recovery run so the plan and any destroy authorization are reviewed" >&2
+            echo "against current main." >&2
+            exit 1
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "main advanced past the CI'd commit — this run is SUPERSEDED."
+            echo "Skipping cleanly. The next reconcile off a GREEN-required-CI main SHA converges."
+            echo "MG-38 residual: if the superseding commit's CI is RED, NEITHER commit is applied"
+            echo "and nothing goes red to say so. Reconciliation resumes at the next green main SHA."
+          fi
+
+      # 2. THE EXACT CI'd COMMIT — never a floating ref. `main` can advance while
+      #    this run is queued behind the concurrency group; applying `main`'s tip
+      #    instead of the SHA CI actually went green on would apply a tree that
+      #    was never tested. On the recovery path there is no workflow_run event,
+      #    so it falls back to the dispatched ref — which the `if` above has
+      #    already constrained to `refs/heads/main`, and which step 1 has just
+      #    confirmed is still the tip.
+      - name: Checkout the exact CI'd commit
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      # 2. Toolchain BEFORE the Azure login, so the window between minting the
+      #    OIDC token and the last Azure call stays as small as possible.
+      #    `terraform_wrapper: false` disables setup-terraform's stdout-capturing
+      #    wrapper: it would copy every terraform invocation's output into step
+      #    outputs, giving plan/state content a second life outside the log we
+      #    are careful about below.
+      - name: Setup Terraform
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: '~1.9'
+          terraform_wrapper: false
+
+      # 3. THE APPLY IDENTITY. A dedicated, OIDC-only, least-privilege service
+      #    principal provisioned by apps/infrastructure/bootstrap/bootstrap.sh:
+      #    Contributor scoped ONLY to meatgeek-v2-dev-rg, a CONDITIONED Role Based
+      #    Access Control Administrator scoped ONLY to the same resource group
+      #    (the condition allowlists the 8 Terraform-managed role definitions and
+      #    constrains assignments to service principals), and Storage Blob Data
+      #    Contributor scoped ONLY to the tfstate-dev container. It is DISTINCT
+      #    from vars.AZURE_APP_DEPLOY_CLIENT_ID (the dev app-publish identity,
+      #    which federates the `development` environment) and from
+      #    vars.AZURE_CLIENT_ID (the PROD plan/read identity, which federates
+      #    `production` and is used only by the workflow_dispatch-only
+      #    infra-deploy-prod.yml). It has no client secret — ever.
+      #
+      #    STATE ACCESS, STATED ACCURATELY. This is the only identity that can
+      #    WRITE dev state: it holds Storage Blob Data CONTRIBUTOR on tfstate-dev
+      #    because an apply must write state and take the blob lease, and no
+      #    other identity holds a write-capable role there.
+      #
+      #    IT IS NOT THE ONLY IDENTITY THAT CAN READ DEV STATE, and this file
+      #    must not claim otherwise. bootstrap.sh also grants the dev APP-DEPLOY
+      #    identity Storage Blob Data READER on the same tfstate-dev container so
+      #    that publishing can resolve Terraform outputs. That identity federates
+      #    the `development` environment and cannot write, delete or lease state
+      #    — but it CAN read it, and dev state holds the IoT Hub SAS keys.
+      #    Narrowing that grant, and the protection rules on the `development`
+      #    environment that reaches it, is MG-36's territory: OUT OF MG-23 SCOPE
+      #    and deliberately unchanged here. MG-23 neither widens that access nor
+      #    depends on it being absent.
+      #
+      #    WHAT MG-23 DID CHANGE is the PULL-REQUEST surface. MG-23 DELETED the
+      #    read-only dev plan identity along with the remote-state PR plan job it
+      #    existed for, because PR validation is now credentialless (see the file
+      #    header and scripts/assert-credentialless.sh). dev state holds the IoT
+      #    Hub SAS keys — the one remaining live credential in an otherwise
+      #    key-free stack — and no pull request can now reach them, because no
+      #    pull request assumes any Azure identity at all. That is the property
+      #    this design rests on: NO PR-REACHABLE IDENTITY HOLDS ANY ROLE ON
+      #    tfstate-dev. Re-introducing one would re-open that exposure and
+      #    invalidates this reasoning.
+      - name: Azure login (OIDC — dev infra-apply identity)
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_INFRA_APPLY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # 4. INIT the PERSISTENT dev backend, NON-INTERACTIVELY.
+      #    `-input=false` so a prompt can never hang the run waiting on a human
+      #    who is not there. The state-account name is derived ONCE from the
+      #    subscription id by the shared helper and injected as an extra
+      #    -backend-config, so there is exactly one derivation and no literal in
+      #    the hcl to drift from it.
+      #
+      #    `-lockfile=readonly` IS THE FLAG THAT ENFORCES THE COMMITTED LOCK, and
+      #    it is what binds provider hashes in this job. Without it `init` will
+      #    silently REWRITE .terraform.lock.hcl when what it resolves does not
+      #    match what is recorded — and it would be doing that here, in the
+      #    highest-privilege job in the repo, on a runner nobody is watching, with
+      #    the rewrite discarded at the end of the run. `readonly` turns that
+      #    silent rewrite into a FAILED init: the run stops instead of proceeding
+      #    to execute providers whose hashes were never reviewed.
+      #
+      #    THE ABSENCE OF `-upgrade` IS NECESSARY BUT NOT SUFFICIENT — do not read
+      #    it as the protection on its own. `-upgrade` would ask terraform to
+      #    resolve whatever currently satisfies `azurerm ~> 4.0` and re-record it;
+      #    omitting it merely declines to ASK for new versions, and init would
+      #    still amend the lock (new platform hashes, a provider absent from it)
+      #    without complaint. Keep both: no `-upgrade`, and `-lockfile=readonly`
+      #    to make the committed lock authoritative. Provider bumps belong in a
+      #    reviewed PR that updates apps/infrastructure/.terraform.lock.hcl —
+      #    which is committed, multi-platform, and carries `h1:`/`zh:` hashes for
+      #    both azurerm and azapi, so `readonly` has a complete lock to enforce.
+      - name: Terraform init (persistent dev backend — meatgeek-v2/dev.tfstate)
+        if: steps.freshness.outputs.fresh == 'true'
+        run: |
+          cd apps/infrastructure
+          STATE_ACCOUNT="$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
+          terraform init -input=false -reconfigure -lockfile=readonly \
+            -backend-config=environments/backend-dev.hcl \
+            -backend-config="storage_account_name=$STATE_ACCOUNT"
+
+      # 5. PLAN TO A SAVED FILE. Everything downstream — both gates and the apply
+      #    itself — operates on THIS file. That is what makes the gates
+      #    meaningful: a bare `terraform apply` would re-plan at apply time and
+      #    could execute a change set neither gate ever inspected.
+      #    `-lock-timeout=5m` — WAIT for the state lock instead of failing on
+      #    contention. `plan` and `apply` both take the Azure blob lease on
+      #    meatgeek-v2/dev.tfstate (`init` does not).
+      #
+      #    WHO CAN ACTUALLY CONTEND FOR THIS LEASE. Not a pull request: PR
+      #    validation is CREDENTIALLESS and runs `terraform init -backend=false`,
+      #    so it never authenticates to Azure, never binds this backend, and
+      #    never touches the lease. PR-versus-apply lock contention does not
+      #    exist in this design — the credentialless simplification removed the
+      #    contender rather than merely making it harmless.
+      #
+      #    Two contenders remain. APPLY-VERSUS-APPLY is handled in-band by the
+      #    environment-scoped concurrency group above, which serializes every run
+      #    of this workflow (automatic and recovery alike). The lease is the
+      #    second, EXTERNAL layer of that same guarantee, and it is the only one
+      #    that covers the contender no concurrency group can see: an OPERATOR
+      #    running plan, apply, import or a state migration from a workstation
+      #    (see docs/infrastructure/mg23-live-acceptance.md). The tail of a
+      #    just-finished run whose lease has not yet been released falls in the
+      #    same bucket. Terraform's default is to fail immediately on a held
+      #    lock, which would turn either into a spuriously red reconcile; a
+      #    5-minute wait rides them out.
+      #
+      #    Do NOT add `-lock=false` to this path. On the authoritative apply it
+      #    is not a convenience, it is state corruption: it would let this run
+      #    write state concurrently with an operator's workstation apply.
+      - name: Terraform plan (save the exact plan that will be applied)
+        if: steps.freshness.outputs.fresh == 'true'
+        run: |
+          cd apps/infrastructure
+          terraform plan -input=false -lock-timeout=5m -var-file=environments/dev.tfvars -out=tfplan.bin
+
+      # 6. PRE-APPLY SECRET GATE, on THAT saved plan. Fail-closed: it exits
+      #    nonzero on any prohibited credential VALUE reaching app_settings,
+      #    site_config, deployment storage, or an output — and also on any
+      #    inspection it could not complete. Until MG-23 this script was
+      #    referenced by no workflow at all; MG-23 requires it as an EXECUTED
+      #    gate, not a documented intention.
+      - name: Pre-apply secret gate (fail-closed, on the saved plan)
+        if: steps.freshness.outputs.fresh == 'true'
+        run: |
+          cd apps/infrastructure
+          scripts/tf-plan-secret-inspection.sh tfplan.bin
+
+      # 7. DESTRUCTIVE-CHANGE CIRCUIT-BREAKER, on that SAME saved plan. Under
+      #    MG-24 a human read every plan before applying it; under MG-23 nobody
+      #    does, so this is that reviewer. It fails on ANY destroy — including
+      #    replacements, and including each DEPOSED object individually — and on
+      #    any `forget` (a `removed { destroy = false }` block, which orphans a
+      #    live resource out of Terraform management while every downstream
+      #    control here stays green). It clears only when
+      #    TF_DESTROY_GUARD_AUTHORIZED_CHANGES names the exact SET of
+      #    ACTION-QUALIFIED tokens a reviewer approved: not a count (a different
+      #    set of the same size satisfies a count) and not a bare address
+      #    (`delete:X` and `forget:X` are different decisions). The two gates
+      #    compose and neither substitutes for the other: the secret gate inspects
+      #    VALUES, this one inspects the CHANGE SET.
+      - name: Destroy circuit-breaker (fail-closed, on the saved plan)
+        if: steps.freshness.outputs.fresh == 'true'
+        run: |
+          cd apps/infrastructure
+          scripts/tf-plan-destroy-guard.sh tfplan.bin
+
+      # 8. RE-VERIFY THE MAIN TIP — the authoritative freshness gate, at the last
+      #    possible moment. Step 1 checked at startup, but init + plan + two gates
+      #    take minutes and `main` can advance during any of them. That TOCTOU
+      #    window is exactly wide enough to merge a change and have this run apply
+      #    a tree that predates it, rolling it back unattended. Re-checking here
+      #    shrinks the window to the apply's own runtime, which no check can
+      #    close — Terraform is mid-write by then, and stopping would be worse.
+      #
+      #    Same split as step 1: an automatic run that has been superseded stops
+      #    cleanly (the next reconcile off a GREEN-required-CI SHA converges —
+      #    subject to the same MG-38 residual documented on step 1: if the
+      #    superseding commit's CI is red, no apply happens for either commit
+      #    until a later green SHA reconciles), a recovery run FAILS so the
+      #    operator knows their reviewed plan — and any destroy authorization
+      #    attached to it — was never applied.
+      #
+      #    THE SAME BOUNDED RETRY AS STEP 1, and it matters MORE here. By this
+      #    point the plan has been taken and the Azure blob lease on
+      #    meatgeek-v2/dev.tfstate is held, so a transient api.github.com failure
+      #    would not merely turn a reconcile red — it would turn it red while
+      #    holding the state lease, with the lease release then depending on
+      #    runner teardown. Retrying a transient blip is strictly safer than
+      #    failing on one. Exhaustion still fails closed.
+      - name: Re-verify main tip (final freshness gate before apply)
+        id: freshness_final
+        if: steps.freshness.outputs.fresh == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            PINNED="$CI_SHA"
+          else
+            PINNED="$DISPATCH_SHA"
+          fi
+
+          printf '%s' "$PINNED" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "Could not resolve the commit this run is pinned to — refusing to apply." >&2
+            exit 1
+          }
+
+          # BOUNDED RETRY WITH BACKOFF — 5 attempts, ~37s of waiting at worst.
+          # A malformed answer is handled exactly like a failed call: both mean
+          # "no definitive answer yet", and neither may decide this gate. The
+          # loop exits early the moment one attempt returns a well-formed SHA.
+          TIP=''
+          for delay in 0 2 5 10 20; do
+            [ "$delay" -eq 0 ] || {
+              echo "main-tip lookup was inconclusive; retrying in ${delay}s." >&2
+              sleep "$delay"
+            }
+            if TIP="$(gh api "repos/${REPO_SLUG}/commits/main" --jq .sha 2>/dev/null)" &&
+               printf '%s' "$TIP" | grep -Eq '^[0-9a-f]{40}$'; then
+              break
+            fi
+            TIP=''
+          done
+          # FAIL CLOSED on exhaustion. Not "assume fresh": a gate that cannot see
+          # main's tip cannot rule out applying superseded trunk.
+          [ -n "$TIP" ] || {
+            echo "Could not resolve the current main tip after 5 attempts — refusing to apply." >&2
+            exit 1
+          }
+
+          echo "pinned to:    $PINNED"
+          echo "current main: $TIP"
+
+          if [ "$PINNED" = "$TIP" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Still the current main tip — applying."
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "main advanced while this recovery run was planning. NOTHING WAS APPLIED." >&2
+            echo "Start a NEW recovery run so the plan and any destroy authorization are" >&2
+            echo "reviewed against current main." >&2
+            exit 1
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "main advanced while this run was planning — SUPERSEDED, nothing applied."
+            echo "Skipping cleanly. The next reconcile off a GREEN-required-CI main SHA converges."
+            echo "MG-38 residual: if the superseding commit's CI is RED, NEITHER commit is applied"
+            echo "and nothing goes red to say so. Reconciliation resumes at the next green main SHA."
+          fi
+
+      # 9. APPLY THAT EXACT SAVED PLAN. `tfplan.bin` — never a bare
+      #    `terraform apply`, which would discard the reviewed change set and
+      #    compute a new one after both gates had already passed.
+      - name: Terraform apply (the exact saved, gated plan)
+        if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
+        run: |
+          cd apps/infrastructure
+          terraform apply -input=false -lock-timeout=5m -auto-approve tfplan.bin
+
+      # 10. POST-APPLY STATE GATE. The pre-apply run cannot inspect values that
+      #    were `after_unknown` at plan time — computed attributes only become
+      #    concrete once the apply has run. This second pass reads the resulting
+      #    STATE, where they are.
+      #
+      #    THIS STEP IS `always()`, NOT SUCCESS-GATED AND NOT `!cancelled()`, AND
+      #    THAT IS THE POINT. A `terraform apply` that fails part-way through has
+      #    STILL MUTATED STATE: every resource it created before the failure is
+      #    written to meatgeek-v2/dev.tfstate along with its computed attributes.
+      #    A partial apply is therefore exactly the case where a credential can
+      #    land in state — and a success-gated inspection would be the one run
+      #    that never looks. Inspecting only clean applies inspects only the runs
+      #    least likely to have a problem.
+      #
+      #    WHY `always()` AND NOT `!cancelled()` (MG-23 red, corrected). This step
+      #    ran on `!cancelled()` in an earlier revision, on the reasoning that a
+      #    rejected recovery deployment cancels the run and should stop everything.
+      #    That reasoning is the JOB's, and it stays on the job's `if:` where it
+      #    belongs — by the time execution reaches THIS step the apply has already
+      #    been authorized and attempted, so there is no approval left to honour.
+      #    What `!cancelled()` actually did here was SKIP THE GATE ON CANCELLATION,
+      #    and the dominant source of cancellation at this point in the job is
+      #    `timeout-minutes: 90` firing. A timeout kill is not a clean stop: it is
+      #    the WEDGED-MID-WRITE case — a terraform apply still holding the state
+      #    lease with a partly-written state blob behind it — which is precisely
+      #    the case the timeout exists to bound and precisely the state most likely
+      #    to hold a freshly-computed credential. `!cancelled()` skipped the
+      #    inspection exactly there. `always()` is the only condition that covers
+      #    it.
+      #
+      #    THE RUN STILL ENDS RED WHEN THE APPLY FAILED. This step does not mask
+      #    that: the apply step's own failure already reddens the job, there is no
+      #    `continue-on-error` here, and this gate failing adds a second failure
+      #    rather than replacing the first. Always-run means "always INSPECT",
+      #    never "always PASS".
+      #
+      #    THE EMPTY-STATE NO-OP IS NOT A BYPASS. If the apply failed before
+      #    writing anything, `terraform show -json` emits a bare document with no
+      #    resource container, which the fail-closed gate correctly refuses to
+      #    call inspected — a red step for a run in which nothing was written and
+      #    nothing could have leaked. So distinguish the two cases explicitly:
+      #    state holds no resources (clean no-op) versus state could not be read
+      #    at all (inconclusive, fail closed). "Cannot tell" is never "nothing to
+      #    see".
+      #
+      #    AND WHEN IT CANNOT BE READ, SAY WHY. Failing closed is right; failing
+      #    closed with nothing but "could not read state" is not. That branch is
+      #    an INCIDENT path — expired credentials, a deleted or re-keyed state
+      #    account, a corrupt state document, a backend that moved — and the
+      #    operator hitting it at 2am needs terraform's own error, which is the
+      #    only thing that distinguishes those causes. So the command's STDERR is
+      #    captured and printed on failure. STDOUT is NOT: it stays captured in
+      #    STATE_ADDRS and is never echoed, because stdout is the state read (see
+      #    the hygiene note below). Stderr carries terraform's diagnostic text —
+      #    an error message and a backend address — not state contents and not
+      #    resource values.
+      #
+      #    SECRET HYGIENE, deliberate: `terraform show -json` is piped STRAIGHT
+      #    into the gate and never lands in a file, an artifact, or the log. Dev
+      #    state contains live IoT Hub SAS keys — the one remaining live
+      #    credential in an otherwise key-free stack — so state JSON must never be
+      #    printed. `terraform state list` output is captured into a variable and
+      #    never echoed for the same reason (addresses are not secrets, but the
+      #    habit is what keeps values out of logs). The gate itself prints only
+      #    resource paths and reasons, never values, so its own output is safe.
+      - name: Post-apply state secret gate (fail-closed, on live state)
+        # UNCONDITIONALLY always(). Deliberately NOT gated on `steps.freshness*`
+        # either: a timeout kill can land before `freshness_final` ever records an
+        # output, and a step conditioned on an output that was never written does
+        # not run. Conditioning the inspection on the very steps a timeout may
+        # have pre-empted would reintroduce the same hole one level down.
+        #
+        # The "did this run touch state at all?" question is answered INSIDE the
+        # step instead, where it can be answered from the runner's actual state
+        # rather than from a step output that may be missing. `.terraform/` exists
+        # only once `terraform init` has bound the backend, so its ABSENCE is
+        # positive proof that this run never reached a backend and therefore
+        # cannot have mutated state — a clean no-op. Its PRESENCE means state was
+        # reachable, so the state gets inspected, whatever else the run did.
+        #
+        # The three outcomes are kept distinct on purpose: nothing bound (clean
+        # exit 0), state unreadable (RED, fail-closed — "cannot tell" is never
+        # "nothing to see"), state readable (inspect it).
+        #
+        # WHAT THIS STEP DOES NOT DO: it does NOT detect a held state lease.
+        # `terraform state list` is a LOCK-FREE READ — it does not acquire the
+        # Azure blob lease on meatgeek-v2/dev.tfstate, so a wedged apply still
+        # holding that lease will NOT trip this step. The middle branch catches an
+        # unreadable state blob (backend gone, credentials expired, corrupt
+        # document), not a locked one. This step's job is exactly one thing:
+        # inspect post-apply state for secrets. Lease detection is deliberately
+        # out of scope here — and no lease is ever auto-unlocked, because
+        # `terraform force-unlock` from automation would release a lease whose
+        # holder may still be mid-write. Diagnosing and clearing a stuck lease
+        # stays an operator action (see the job timeout comment above and the
+        # lease-inspection procedure in
+        # docs/infrastructure/mg23-live-acceptance.md).
+        if: always()
+        run: |
+          set -eu
+          if [ ! -d apps/infrastructure/.terraform ]; then
+            echo "No initialized backend in the workspace — this run never bound state, so it cannot have mutated it. Nothing to inspect."
+            exit 0
+          fi
+          cd apps/infrastructure
+          # STDERR to a file so the diagnostic survives; STDOUT stays captured in
+          # STATE_ADDRS and is never printed — it is the state read.
+          STATE_ERR="$(mktemp)"
+          if ! STATE_ADDRS="$(terraform state list 2>"$STATE_ERR")"; then
+            echo "Could not read state to inspect it — failing closed." >&2
+            echo "terraform state list reported:" >&2
+            # The error text ONLY. No state contents, no resource values — those
+            # went to stdout, which was captured and discarded with the shell.
+            cat "$STATE_ERR" >&2
+            rm -f "$STATE_ERR"
+            exit 1
+          fi
+          rm -f "$STATE_ERR"
+          if [ -z "$STATE_ADDRS" ]; then
+            echo "State holds no resources — nothing was written, so there is nothing to inspect."
+            exit 0
+          fi
+          terraform show -json | scripts/tf-plan-secret-inspection.sh -
+
+      # 11. FINAL DRIFT PLAN — the convergence proof, and it FAILS THE RUN on any
+      #     unexpected drift. `-detailed-exitcode` returns 0 for "no changes", 2
+      #     for "changes present"; after a successful apply of the whole plan,
+      #     anything other than 0 means reality and the tree still disagree.
+      #
+      #     WHAT THIS PROVES: convergence of Terraform-MANAGED CONTROL-PLANE
+      #     resources. That is all.
+      #     WHAT IT CANNOT PROVE — do not read more into a green run than this:
+      #       * OUT-OF-BAND ROLE ASSIGNMENTS. A role assignment created outside
+      #         Terraform is not in state, so no drift plan will ever mention it.
+      #       * COSMOS DATA-PLANE `sqlRoleAssignments` (F6). These are granted by
+      #         Contributor, are invisible to a Microsoft.Authorization ABAC
+      #         condition, and accept USER principals — the clearest gap versus
+      #         the "service principals only" story the condition tells. Accepted
+      #         for dev, whose data is 7-day-TTL test data.
+      #       * MANAGED IDENTITIES created out of band.
+      #     THE COMPENSATING CONTROL for all three is detective, not preventive:
+      #     the Azure Activity Log alerts in modules/monitoring/ on
+      #     roleAssignments/write, userAssignedIdentities/write and
+      #     sqlRoleAssignments/write. If those alerts are ever removed, this
+      #     workflow's residual risk changes and the threat model needs revisiting.
+      #
+      #     ON EXIT 2 AFTER A COMMITTED APPLY. By the time this runs, the apply
+      #     has already executed — so a red run here is a REPORT, not a rollback,
+      #     and there is nothing for the workflow itself to undo. That is still
+      #     the right behaviour: drift after a full apply means reality and the
+      #     tree disagree, which is precisely the signal MG-23 exists to surface,
+      #     and a reconcile that converged is the only reconcile worth calling
+      #     green. Note the failure mode it implies, though: a BENIGN PERPETUAL
+      #     PROVIDER DIFF — a resource the provider re-plans on every run even
+      #     when nothing changed — would turn EVERY merge red with nothing to fix
+      #     downstream. If that ever happens, FIX IT AT THE RESOURCE (pin the
+      #     attribute, add the `ignore_changes` the provider actually needs, or
+      #     upgrade the provider); do NOT weaken this step into tolerating exit 2,
+      #     which would silently retire the convergence proof for every future
+      #     run in order to quiet one resource. No such perpetual diff is known in
+      #     this stack today — MG-24's operator-run applies converged clean — so
+      #     this is a note for whoever hits the first one, not a live exception.
+      - name: Final drift plan (FAILS the run on any drift)
+        if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
+        run: |
+          cd apps/infrastructure
+          set +e
+          terraform plan -input=false -lock-timeout=5m -detailed-exitcode -var-file=environments/dev.tfvars
+          code=$?
+          set -e
+          case "$code" in
+            0)
+              echo "CONVERGED — post-apply plan reports no changes."
+              ;;
+            2)
+              echo "DRIFT — the post-apply plan still reports changes." >&2
+              echo "The apply did not converge. Reality and meatgeek-v2/dev.tfstate disagree;" >&2
+              echo "investigate before merging anything else. See" >&2
+              echo "docs/infrastructure/mg23-live-acceptance.md." >&2
+              exit 1
+              ;;
+            *)
+              echo "Final drift plan errored (exit $code) — treating as a failure." >&2
+              exit 1
+              ;;
+          esac
+
+      # 12. The saved plan is a sensitive artifact (it embeds planned values). It
+      #     is NEVER uploaded — there is no upload-artifact step anywhere in this
+      #     workflow, by design — but remove it explicitly rather than relying on
+      #     runner teardown.
+      - name: Shred the saved plan
+        if: always()
+        run: rm -f apps/infrastructure/tfplan.bin

@@ -1,10 +1,18 @@
 name: CI/CD Pipeline
 
+# TRUNK-BASED. Both branch lists name `main` and nothing else. The long-lived
+# integration branch they used to also name does not exist in this repo and will
+# not be created, so that entry was dead configuration — it made the retired dev
+# deploy job look reachable when it never was. `main` is the trunk, and — as of
+# MG-23 (automated dev GitOps
+# reconciliation) — a merge to `main` that goes green here is what triggers the
+# automatic dev infrastructure apply in infra-apply-dev.yml. Adding a branch to
+# the `push` list therefore widens what can reach that apply; do it deliberately.
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
 
 env:
   NODE_VERSION: '24'
@@ -107,13 +115,47 @@ jobs:
 
       - name: Build ${{ matrix.app }}
         run: npx nx build ${{ matrix.app }}
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.app }}-build
-          path: dist/apps/${{ matrix.app }}
-          retention-days: 7
+      # MG-23: the `Upload build artifacts` step that used to live here is GONE.
+      # It uploaded dist/apps/<app> for BOTH matrix apps (api and web).
+      #
+      # Verified before removal, per app, because the two halves are not the same
+      # story and an over-broad justification would have hidden that:
+      #   * NOTHING in this repo DOWNLOADS a CI artifact — no workflow has such a
+      #     step, at HEAD or now. (The literal action name is spelled out nowhere
+      #     in this file on purpose: prod-deploy-split.spec.ts asserts ci.yml
+      #     contains no artifact-download reference at all, and a mention inside
+      #     a comment would weaken that guard into a substring it has to
+      #     special-case.) So the upload fed no job even before this change; the
+      #     dev deploy job it was originally written for had already been reduced
+      #     to plan-only and consumed no artifact.
+      #   * api  — app-deploy-prod.yml does not want it anyway: it rebuilds from
+      #     source at the CI'd SHA (`npx nx build api`), which is the stronger
+      #     property (the deployed bytes are reproducible from the commit).
+      #   * web  — the web frontend DOES have a deploy path, and it is unaffected
+      #     by this removal. apps/web/project.json defines a `deploy` target
+      #     (`nx deploy web --args="--env=<env>"` -> `az staticwebapp deploy
+      #     --source-location ./dist/apps/web`). It is OPERATOR-RUN from a
+      #     workstation against a LOCAL build: the target has no `dependsOn`, so
+      #     it publishes whatever is already in dist/apps/web, and since nothing
+      #     in this repo downloads a CI artifact it never consumed this upload.
+      #     Removing the upload therefore does not touch its input chain.
+      #
+      #     STATED PRECISELY, because an earlier revision of this comment got it
+      #     wrong: what the repo lacks is a web deploy WORKFLOW, not a web deploy
+      #     PATH. There is no Static Web Apps workflow and app-deploy-prod.yml is
+      #     API-only by design, so the frontend ships by an operator running the
+      #     command above — but it does ship, and claiming otherwise sent a reader
+      #     looking for a capability that was there all along. AUTOMATING a web
+      #     deploy is out of scope for MG-23 (a security ticket); that scope call
+      #     is recorded here so it stays a decision rather than an oversight
+      #     rediscovered later. app-deploy-prod.yml's header and
+      #     docs/development/nx-commands.md carry the matching statement, and the
+      #     three must stay consistent.
+      # `nx build web` still RUNS above, so web keeps its compile-time CI signal.
+      #
+      # build-go's upload is deliberately LEFT ALONE — it is equally unconsumed
+      # today, but the Go device binaries are MG-36 territory and removing them
+      # here would be an unrelated change smuggled into a security ticket.
 
   build-go:
     runs-on: ubuntu-latest
@@ -160,12 +202,71 @@ jobs:
           path: apps/${{ matrix.app }}/dist/
           retention-days: 7
 
+  # MG-23 — the CREDENTIALLESS pull-request infrastructure gate.
+  #
+  # This is the ONLY infrastructure job reachable from a pull request, and it
+  # holds NO Azure identity of any kind: no Azure login action, no protected
+  # GitHub Environment binding, no OIDC token-write permission, no client id and
+  # no subscription id anywhere in this workflow — every one of those strings is
+  # absent from this file on purpose, and a repo-wide grep is what enforces it.
+  # That absence IS the design. MG-23 originally ran a PR-time plan
+  # against the persistent dev backend, which forced a PR-reachable job to hold
+  # READ on tfstate-dev — and dev state carries live IoT Hub SAS keys, the one
+  # remaining credential in an otherwise key-free stack. A required-reviewer
+  # gate was the mitigation for that exposure. Deleting the identity removes the
+  # exposure BY CONSTRUCTION, which is strictly stronger than gating it behind a
+  # human who has to notice.
+  #
+  # What that costs, stated plainly rather than glossed: a pull request no
+  # longer gets a remote-state plan, so a reviewer cannot see the concrete
+  # resource diff before merge. The authoritative plan is the one
+  # infra-apply-dev.yml takes POST-merge against real state, under the apply
+  # identity, screened by the pre-apply secret gate and the destroy
+  # circuit-breaker, and proven convergent by the final drift plan.
+  #
+  # Everything below runs against the checked-out tree alone — Terraform fmt, a
+  # backend-less init/validate, Terraform's `test` framework against mock
+  # providers, the static invariant checks, the bootstrap safety suite and the
+  # two gate fixture harnesses. No network path to Azure is required, and the
+  # first step proves none is available.
   validate-infrastructure:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      # Declared EXPLICITLY rather than inherited. Without this block the job
+      # takes the repository's default token permissions, so "this job cannot
+      # mint an Azure OIDC token" would be a property of a repo setting someone
+      # can change in the UI — not a property of this file. `contents: read` is
+      # the entire set: no OIDC token permission, no write of any kind.
+      contents: read
+    env:
+      # ACTIVELY DISARM ambient Azure auth. The azurerm provider is configured
+      # at the top of every command below and will reach for OIDC, az-CLI or
+      # MSI credentials if it finds any. Pinning these to false means that even
+      # if a future edit — or a self-hosted runner — leaves credential material
+      # lying around, the provider REFUSES to use it rather than silently
+      # authenticating from a pull-request-reachable job. This is the belt to
+      # assert-credentialless.sh's braces: the script fails the job when
+      # credentials are present, these vars make them unusable regardless.
+      ARM_USE_OIDC: 'false'
+      ARM_USE_CLI: 'false'
+      ARM_USE_MSI: 'false'
+      ARM_USE_AKS_WORKLOAD_IDENTITY: 'false'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Assert credentialless (no Azure reach)
+        # FIRST, ahead of anything Terraform-shaped. Proves at RUNTIME what the
+        # job declaration above claims statically: no ARM_*/AZURE_* credential
+        # material in the environment, no cached `az login`, and — the
+        # load-bearing one — no ACTIONS_ID_TOKEN_REQUEST_URL /
+        # ACTIONS_ID_TOKEN_REQUEST_TOKEN, which GitHub injects ONLY into jobs
+        # holding the OIDC token-write permission. That pair is direct proof this job
+        # cannot mint an OIDC token, independent of whether a reader parsed the
+        # permissions block correctly. The script also fails if it discovers
+        # zero test files, so it cannot certify an empty gate.
+        run: apps/infrastructure/scripts/assert-credentialless.sh
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -181,15 +282,37 @@ jobs:
           cd apps/infrastructure
           terraform fmt -check -recursive
 
-      - name: Terraform Init
+      - name: Terraform Init (root — backend-less, lock file enforced)
+        # -backend=false is an INIT flag (`validate` and `test` do not accept
+        # it) and is the reason this job needs no state credential at all: no
+        # backend is configured, so nothing reaches tfstate-dev.
+        # -input=false: never prompt. A missing value fails fast instead of
+        # hanging until the runner times out, which reads as a broken job.
+        # -lockfile=readonly: FAIL rather than silently rewrite
+        # apps/infrastructure/.terraform.lock.hcl. Valid here and ONLY here —
+        # the root module is the one with a committed multi-platform lock file,
+        # so provider versions are bound to hashes the repo actually reviewed
+        # instead of to whatever currently satisfies `~> 4.0`. The per-module
+        # inits further down deliberately omit it; see the comment there.
         run: |
           cd apps/infrastructure
-          terraform init -backend=false
+          terraform init -backend=false -input=false -lockfile=readonly
 
       - name: Terraform Validate
         run: |
           cd apps/infrastructure
           terraform validate
+
+      - name: Terraform tests (root module)
+        # Root-level `*.tftest.hcl` files are discovered automatically. There
+        # are none today — Terraform reports "0 passed, 0 failed" and exits 0 —
+        # so this step is here to make a root test enforced the day it is
+        # written rather than sitting unexecuted for a release. The per-module
+        # loop below is what covers the tests that exist today, and it FAILS on
+        # an empty discovery rather than reporting a vacuous pass.
+        run: |
+          cd apps/infrastructure
+          terraform test
 
       - name: Static checks (V2 invariants)
         run: apps/infrastructure/scripts/tf-static-checks.sh
@@ -198,6 +321,62 @@ jobs:
         # `< /dev/null` so nothing in the suite can block on the runner's stdin;
         # `timeout` bounds any future hang instead of wedging the job.
         run: timeout 180 bash apps/infrastructure/bootstrap/bootstrap.test.sh < /dev/null
+
+      - name: Destroy circuit-breaker fixtures (MG-23)
+        # The apply workflow's destroy guard is only worth having if it is proven
+        # to REJECT the destructive plans and ACCEPT the benign ones. The runner
+        # asserts exit codes under both bash and dash — a gate that errors on the
+        # operator's shell while still reaching a PASS is fail-open.
+        run: bash apps/infrastructure/scripts/fixtures/run-destroy-guard-fixtures.sh
+
+      - name: Terraform module tests (every test-bearing module)
+        # `terraform test` was not wired into CI at all before MG-23, and when
+        # it first was, only modules/monitoring ran. modules/functions (14
+        # assertions) and modules/iot-hub (1) had therefore NEVER been executed
+        # by this pipeline despite being committed. Discovery is find-driven so
+        # a module's tests start being enforced the moment they land, rather
+        # than waiting for someone to remember to extend a hardcoded list.
+        # Today that resolves to modules/functions, modules/iot-hub and
+        # modules/monitoring.
+        #
+        # An empty discovery FAILS. A test loop that silently iterates zero
+        # modules is indistinguishable from a passing one in the log, and this
+        # is the step that enforces, among others, the monitoring Activity Log
+        # alerts on the out-of-band persistence paths (roleAssignments/write,
+        # userAssignedIdentities/write, Cosmos sqlRoleAssignments/write) that
+        # the apply workflow's final drift plan structurally cannot see.
+        #
+        # `-backend=false`: these are plan-time assertions against mock
+        # providers, so there is no state and no credential. The module inits
+        # deliberately OMIT `-lockfile=readonly` — unlike the root module these
+        # have no committed .terraform.lock.hcl, so readonly would fail
+        # outright. Committing per-module locks is MG-39, not this ticket.
+        run: |
+          set -euo pipefail
+          modules="$(
+            find apps/infrastructure -name '*.tftest.hcl' \
+              -not -path '*/.terraform/*' -not -path '*/.nx/*' -print \
+            | while IFS= read -r f; do
+                d="$(dirname "$f")"
+                case "$d" in
+                  */tests) d="${d%/tests}" ;;
+                esac
+                printf '%s\n' "$d"
+              done \
+            | sort -u
+          )"
+          if [ -z "$modules" ]; then
+            echo "no *.tftest.hcl discovered under apps/infrastructure —" >&2
+            echo "refusing to report a vacuous pass" >&2
+            exit 1
+          fi
+          echo "discovered test-bearing modules:"
+          printf '%s\n' "$modules"
+          while IFS= read -r m; do
+            echo "== module tests: $m =="
+            terraform -chdir="$m" init -backend=false -input=false
+            terraform -chdir="$m" test
+          done <<< "$modules"
 
       # Validate the native-OTLP collector config (MG-33 F1/F3) against the SAME
       # PINNED contrib image the config comments/Terraform pin. otlphttp +
@@ -249,73 +428,3 @@ jobs:
         with:
           args: --severity-threshold=high
         continue-on-error: true
-
-  # PLAN-ONLY gate on the develop branch.
-  #
-  # This job used to unconditionally deploy infrastructure and then push the
-  # app + web bundles. Against the V2 GREENFIELD stack that is a landmine: the
-  # deploy runs against empty, ephemeral local state and would try to CREATE
-  # all dev infrastructure inside CI, and the app/web deploy steps would target
-  # infrastructure that does not exist. Per the MG-24 hard safety rule
-  # (never apply against ephemeral local state; never create Azure resources
-  # from CI) the job is now plan-only and ends at `terraform plan`, consistent
-  # with the prod infra workflow. The live greenfield dev plan/apply is the
-  # operator's out-of-pipeline acceptance step (see the bootstrap runbook);
-  # app/web deploys are owned by the dedicated deploy workflows.
-  #
-  # MG-24 corrective: the plan is now bound to the PERSISTENT dev remote-state
-  # backend (not `-backend=false`), so it is a meaningful drift/plan gate against
-  # real state POST-BOOTSTRAP. Until the operator has stood up that backend and
-  # flipped the DEV_TF_BACKEND_READY switch, the job is SKIPPED (skip-clean, not
-  # expected-red): a backend-bound init against a non-existent state container
-  # would fail with "Backend initialization required" — the exact failure the
-  # first pass shipped. The gate makes the transition operator-controlled.
-  deploy-dev:
-    if: github.ref == 'refs/heads/develop' && vars.DEV_TF_BACKEND_READY == 'true'
-    runs-on: ubuntu-latest
-    needs: [lint-and-test, build-typescript, build-go, validate-infrastructure]
-    environment: development
-    # OIDC: authenticate to Azure via the GitHub-Environment-scoped federated
-    # credential (subject `environment:development`), NOT the retired long-lived
-    # AZURE_CREDENTIALS service-principal secret. Because these are GitHub
-    # Environment variables bound to `development`, they resolve to a SEPARATE
-    # federated identity from prod's `environment:production` — no shared SP, no
-    # whole-state access. `id-token: write` lets azure/login mint the short-lived
-    # OIDC token; `contents: read` is for checkout.
-    permissions:
-      id-token: write
-      contents: read
-    env:
-      # From the authenticated OIDC context (a per-env GitHub Environment
-      # variable), never a hardcoded literal.
-      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: '~1.9'
-
-      - name: Plan Infrastructure (plan-only — no apply)
-        run: |
-          cd apps/infrastructure
-          # Bind the PERSISTENT dev remote-state backend (MG-24 corrective). The
-          # state-account name is derived ONCE from the subscription id by the
-          # shared helper and injected as an extra -backend-config, so this init
-          # can never drift from the hcl's literal (there is none). ARM_SUBSCRIPTION_ID
-          # is already exported (job env) — the azurerm backend reads it, and
-          # `az account set` alone would NOT satisfy AzureRM v4.
-          STATE_ACCOUNT="$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
-          terraform init -reconfigure \
-            -backend-config=environments/backend-dev.hcl \
-            -backend-config="storage_account_name=$STATE_ACCOUNT"
-          terraform plan -var-file=environments/dev.tfvars

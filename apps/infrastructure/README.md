@@ -154,13 +154,36 @@ terraform init -reconfigure \
 ### 3. Plan / apply the dev environment
 
 ```bash
-nx plan infrastructure --env=dev      # terraform plan -var-file=environments/dev.tfvars
-nx apply infrastructure --env=dev     # OPERATOR-run only, never CI
+nx plan infrastructure --args="--env=dev"      # terraform plan -var-file=environments/dev.tfvars
+nx apply infrastructure     # bootstrap/recovery only — see below
 nx output infrastructure
 ```
 
-Apply is an **operator** action run locally — CI is plan-only. The full
-greenfield acceptance (MG-24's 10-step dev proof) is in the runbook.
+**Steady-state dev infrastructure reconciles through CI**, not from a
+workstation. Under **MG-23** (*automated dev GitOps reconciliation*, CI-run) a
+change goes: PR → `ci.yml`'s `validate-infrastructure` job runs the
+**credentialless** sequence (`assert-credentialless.sh` → `fmt -check` →
+`terraform init -backend=false -input=false -lockfile=readonly` → `validate` →
+`terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard
+fixtures → per-module `terraform test`) → review → merge to `main` →
+`.github/workflows/infra-apply-dev.yml` runs the fail-closed pre-apply secret
+gate and destroy circuit-breaker, applies the exact saved plan, and then fails
+the run on any drift. Applying dev by hand races that loop.
+
+There is deliberately **no PR-time `terraform plan` and no PR-reachable Azure
+identity**: the PR job holds `permissions: contents: read` only, binds no GitHub
+Environment, and opens no backend, so nothing reachable from a pull request can
+read `tfstate-dev` or the live IoT Hub SAS material in it. The authoritative plan
+is the post-merge one.
+
+A local apply is for the cases CI does not own: the **greenfield creation**
+(MG-24's 10-step dev proof, in the runbook), the bootstrap, resource-group
+creation, subscription-scoped configuration, and recovery. **Prod** is still
+operator-applied — `infra-deploy-prod.yml` is plan-only until **MG-25** activates
+CI-run prod reconciliation.
+
+Activation of the dev loop is operator-gated: see
+[MG-23 live acceptance & activation](../../docs/infrastructure/mg23-live-acceptance.md).
 
 ## Environment Configuration
 
@@ -214,16 +237,33 @@ prod `always_ready >= 1`). The former `functions_app_service_plan_sku` var is
 ## Terraform / Nx Commands
 
 ```bash
-nx init     infrastructure --env=dev   # terraform init -reconfigure -backend-config=environments/backend-dev.hcl
-                                       #   NOTE: hcl-only — does NOT inject storage_account_name, so it cannot
-                                       #   bind the remote backend alone. Init directly (see the Bootstrap block above).
-nx validate infrastructure             # terraform validate
-nx format   infrastructure             # terraform fmt -recursive
-nx plan     infrastructure --env=dev   # terraform plan -var-file=environments/dev.tfvars -out=tfplan
-nx apply    infrastructure --env=dev   # terraform apply tfplan   (operator-run only)
-nx output   infrastructure             # terraform output
-nx destroy  infrastructure --env=dev   # terraform destroy (careful!)
+nx run infrastructure:init --args="--env=dev"  # terraform init -reconfigure -backend-config=environments/backend-dev.hcl
+                                               #   NOTE: hcl-only — does NOT inject storage_account_name, so it cannot
+                                               #   bind the remote backend alone. Init directly (see the Bootstrap block above).
+nx validate infrastructure                     # terraform validate
+nx run infrastructure:format                   # terraform fmt -recursive
+nx plan infrastructure --args="--env=dev"      # terraform plan -var-file=environments/dev.tfvars -out=tfplan
+nx apply infrastructure                        # terraform apply tfplan   (bootstrap/recovery — dev steady state is CI-run)
+nx output infrastructure                       # terraform output
+nx destroy infrastructure --args="--env=dev"   # terraform destroy (careful!)
 ```
+
+Three invocation rules, each of which fails in a different and non-obvious way
+if ignored:
+
+- **Pass the environment as `--args="--env=<env>"`, never as a bare `--env=<env>`.**
+  `env` is a reserved `nx:run-commands` option typed as an *object*, so passing
+  it bare is rejected before Terraform runs with
+  `Property 'env' does not match the schema. 'dev' should be a 'object'.`
+- **`init` and `format` must use the `nx run <project>:<target>` form.** Bare
+  `nx init …` and `nx format …` collide with Nx's **built-in** `init` and
+  `format` commands — they launch the workspace initializer / Prettier and the
+  Terraform target never runs at all.
+- **`apply` takes no environment argument.** Its command is `terraform apply
+  tfplan`, which has no `{args.*}` placeholder, so a trailing `--args="--env=dev"`
+  is forwarded verbatim as `terraform apply tfplan --env=dev` and Terraform
+  rejects it. The environment is already baked into `tfplan` by the preceding
+  `nx plan`.
 
 Static validation (no Azure, no credentials, no state produced):
 
@@ -352,23 +392,39 @@ terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
 ## Security Notes
 
 - **OIDC, no long-lived secrets.** CI authenticates via GitHub Actions OIDC with
-  federated credentials scoped **per GitHub Environment** (`development`,
-  `production`) — the presented OIDC subject is
-  `repo:<owner>/<repo>:environment:development | production`, and the bootstrap
+  federated credentials scoped **per GitHub Environment** — the presented OIDC
+  subject is `repo:<owner>/<repo>:environment:<github-env>`, and the bootstrap
   creates a federated credential whose subject matches each environment name
-  **exactly** (the workflow declares `environment: development`, so bare `dev`
-  would never match). The development CI identity can never authenticate to prod.
-- **Two separate identities (MG-24 item 4).** The CI **Terraform PLAN** identity
-  is **plan/read-only** — `Reader` at subscription scope + a `Storage Blob Data`
-  role scoped to **its own per-environment state container only**
-  (`tfstate-dev` / `tfstate-prod`), never account-scoped. It has no write/apply
-  role, so an accidental CI apply fails closed. A `Reader` **cannot publish** a
-  Function App, so app deployment uses a **distinct APP-DEPLOYMENT identity**
-  granted least-privilege publish (`Website Contributor`) scoped to **its
-  Function App only** — surfaced as the `AZURE_APP_DEPLOY_CLIENT_ID` GitHub
-  variable. The plan identity is labeled a _plan/read_ identity, not a
-  _deployment_ identity. (The **prod** deploy identity + role assignment is an
-  **MG-25** deliverable, out of scope here.)
+  **exactly** (a job declares `environment: development-infra-apply`, so a bare
+  `dev` would never match). No dev identity can authenticate to prod.
+- **Two separate dev identities, two privilege levels (MG-24 item 4, split
+  further by MG-23).** The **environment**, not the client id a job passes, is
+  what selects the identity — before MG-23 the dev identities federated the
+  identical `environment:development` subject, so a one-line client-id edit could
+  silently upgrade a low-privilege job to full apply. **Neither is reachable from
+  a pull request**: MG-23 removed the PR-time plan identity and its environment
+  outright, and the PR job now holds no Azure identity at all.
+  - `development-infra-apply` → the **dev INFRA-APPLY** identity (MG-23),
+    OIDC-only with no client secret ever: `Contributor` and a **conditioned**
+    `Role Based Access Control Administrator` scoped **only** to
+    `meatgeek-v2-dev-rg`, plus `Storage Blob Data Contributor` on the
+    `tfstate-dev` container. **No** subscription-wide permissions and **no**
+    Microsoft Graph. Surfaced as `AZURE_INFRA_APPLY_CLIENT_ID`.
+  - `development` → the **APP-DEPLOYMENT** identity: a `Reader` cannot publish a
+    Function App, so publishing uses this distinct identity granted
+    least-privilege publish (`Website Contributor`) scoped to **its Function App
+    only** — surfaced as `AZURE_APP_DEPLOY_CLIENT_ID`.
+
+  (The **prod** deploy identity and a prod infra-apply identity are **MG-25**
+  deliverables, out of scope here.)
+- **The resource-group boundary is load-bearing.** No identity inside
+  `meatgeek-v2-dev-rg` holds a role outside it; the state account lives in a
+  **separate** resource group (`meatgeek-v2-tfstate-rg`); there is no Microsoft
+  Graph permission and no subscription-scoped write anywhere. Those are closed
+  escalation paths the dev GitOps threat model depends on — a change that adds
+  Graph or subscription scope, or moves the state account into the dev RG,
+  **invalidates** that model and needs a fresh one. See
+  [MG-23 live acceptance & activation](../../docs/infrastructure/mg23-live-acceptance.md).
 - **No hardcoded subscription id** — resolved from the authenticated environment.
 - **State store hardened** — TLS 1.2 floor, no public blob access, HTTPS-only,
   blob versioning + soft delete.

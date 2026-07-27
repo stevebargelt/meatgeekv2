@@ -1,0 +1,51 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — DEPOSED OBJECTS. When a create_before_destroy replacement fails part-way, Terraform keeps the old object in state as a DEPOSED object; the next plan then carries a change for the CURRENT object AND a separate change for each deposed one, ALL SHARING ONE ADDRESS. Deposed objects are real, live infrastructure holding real data. Two properties are pinned by this fixture. (1) INDIVIDUAL VISIBILITY AND AUTHORIZATION: three distinct destructive changes must produce three distinct tokens (the deposed key is part of the identity), so approving the current object's destroy cannot silently authorize the two deposed destroys. (2) EXIT 1, NOT EXIT 2: keyed on address alone these three collapse to one, the row-count/token-count self-consistency invariant trips, and the gate dies at exit 2 — BEFORE the verdict section, where no override can reach it. That wedges the GitOps loop with no in-band recovery. This document must reach a VERDICT.",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_resource_group.main",
+          "type": "azurerm_resource_group",
+          "name": "main",
+          "values": { "name": "meatgeek-v2-dev-rg", "location": "westus2" }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "module.functions.azurerm_linux_function_app.main",
+      "type": "azurerm_linux_function_app",
+      "name": "main",
+      "change": { "actions": ["create", "delete"] }
+    },
+    {
+      "address": "module.functions.azurerm_linux_function_app.main",
+      "type": "azurerm_linux_function_app",
+      "name": "main",
+      "deposed": "a1b2c3d4",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "module.functions.azurerm_linux_function_app.main",
+      "type": "azurerm_linux_function_app",
+      "name": "main",
+      "deposed": "e5f6a7b8",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "module.monitoring.azurerm_monitor_metric_alert.function_failure_rate",
+      "type": "azurerm_monitor_metric_alert",
+      "name": "function_failure_rate",
+      "change": { "actions": ["update"] }
+    },
+    {
+      "address": "azurerm_resource_group.main",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}

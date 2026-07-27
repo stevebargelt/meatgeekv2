@@ -29,6 +29,26 @@ provider "azurerm" {
   # which lets the provider fall back to the ambient Azure CLI / env context).
   subscription_id = var.subscription_id
 
+  # MG-23 (automated dev GitOps reconciliation, CI-run) — RG-BOUNDARY PRECONDITION.
+  # The azurerm ~>4.0 DEFAULT ("legacy") registers resource providers at
+  # SUBSCRIPTION scope while the provider is being CONFIGURED — before a single
+  # resource is planned. The MG-23 dev apply identity is Contributor scoped ONLY to
+  # meatgeek-v2-dev-rg and holds NO subscription-wide permission (that closure is
+  # load-bearing for the threat model — see docs/infrastructure/mg23-live-acceptance.md),
+  # so provider registration would 403 and every CI apply would fail at configure
+  # time. This failure has never been observed because MG-24 (Terraform
+  # reconciliation) applied as the OPERATOR, who is subscription-scoped.
+  #
+  # "none" makes RP registration an EXPLICIT bootstrap/operator PRECONDITION: the
+  # required providers (Microsoft.Devices, Microsoft.DocumentDB, Microsoft.Web,
+  # Microsoft.SignalRService, Microsoft.Storage, Microsoft.Insights,
+  # Microsoft.OperationalInsights, Microsoft.EventHub, Microsoft.App,
+  # Microsoft.Consumption) must already be Registered on the subscription before
+  # the CI apply runs. Do NOT "fix" a missing-RP apply failure by widening the
+  # apply identity to subscription scope — that breaks the closed-escalation-path
+  # precondition the MG-23 threat model rests on.
+  resource_provider_registrations = "none"
+
   # NOTE (MG-24): storage_use_azuread is intentionally NOT set, and no terraform
   # principal performs a storage DATA-PLANE operation through the azurerm provider.
   # This required creating BOTH the Functions storage ACCOUNT and its deployment
@@ -128,6 +148,18 @@ locals {
 data "azurerm_client_config" "current" {}
 
 # Resource Group
+#
+# MG-23 RECOVERY LIMIT — READ BEFORE ASSUMING CI CAN REBUILD DEV.
+# The MG-23 apply identity is Contributor scoped ONLY to this resource group, so
+# from CI Terraform can only ADOPT an ALREADY-EXISTING meatgeek-v2-<env>-rg (a
+# refresh/no-op). It CANNOT create it, and it cannot recreate it after a delete —
+# both need a subscription-scoped writer. Creating (or recreating) the resource
+# group is an OPERATOR action, per the bootstrap runbook.
+#
+# Consequence, stated plainly: "CI reconciles dev infrastructure" does NOT imply a
+# rebuild capability. If the dev RG or the dev remote state is lost, the GitOps
+# loop cannot restore it — recovery is operator-run. See
+# docs/infrastructure/mg23-live-acceptance.md.
 resource "azurerm_resource_group" "main" {
   name     = "${local.resource_prefix}-rg"
   location = local.location
@@ -304,12 +336,33 @@ resource "azurerm_cosmosdb_sql_role_assignment" "functions_cosmos" {
   scope               = module.cosmos_db.cosmos_account_id
 }
 
+# MG-23 (automated dev GitOps reconciliation, CI-run) — WHY EVERY
+# azurerm_role_assignment IN THIS STACK DECLARES principal_type EXPLICITLY.
+#
+# The MG-23 dev apply identity holds Role Based Access Control Administrator on
+# meatgeek-v2-dev-rg under an ABAC condition (condition-version 2.0) whose WRITE
+# clause requires, alongside the allowlisted role-definition GUIDs:
+#   PrincipalType ForAnyOfAnyValues:StringEqualsIgnoreCase {'ServicePrincipal'}
+# An ABAC clause over an attribute the request never SENDS does not match, so if
+# the azurerm provider omits `principalType` from the roleAssignments PUT body the
+# condition fails SHUT and EVERY apply that touches a role assignment is denied.
+#
+# Declaring principal_type on the resource is the correct fix: it puts the
+# attribute in the request deterministically instead of relying on the provider to
+# infer it. NEVER "fix" a denied apply by loosening the condition with an
+# `!(Exists ...) OR ...` tolerance — that is a one-field bypass: any caller that
+# simply omits principalType would then satisfy the clause unconditionally.
+# Every principal below is a managed identity or a service principal, which is what
+# ServicePrincipal denotes (a managed identity IS a service principal in Entra).
+# See docs/infrastructure/mg23-live-acceptance.md (blocking checks B1-B3, T1/T3).
+
 # Azure Event Hubs Data Receiver on the IoT telemetry namespace so the Function
 # App consumes the real-time device stream identity-based (no SAS key).
 resource "azurerm_role_assignment" "functions_eventhub_receiver" {
   scope                = module.iot_hub.eventhub_namespace_id
   role_definition_name = "Azure Event Hubs Data Receiver"
   principal_id         = module.azure_functions.identity_principal_id
+  principal_type       = "ServicePrincipal"
 }
 
 # SignalR Service Owner so the Function App negotiates/broadcasts identity-based.
@@ -317,6 +370,7 @@ resource "azurerm_role_assignment" "functions_signalr" {
   scope                = module.signalr.signalr_service_id
   role_definition_name = "SignalR Service Owner"
   principal_id         = module.azure_functions.identity_principal_id
+  principal_type       = "ServicePrincipal"
 }
 
 # Monitoring Metrics Publisher on the App Insights resource so the Function App
@@ -334,6 +388,7 @@ resource "azurerm_role_assignment" "functions_appinsights_publisher" {
   scope                = azurerm_application_insights.main.id
   role_definition_name = "Monitoring Metrics Publisher"
   principal_id         = module.azure_functions.identity_principal_id
+  principal_type       = "ServicePrincipal"
 }
 
 # App-deployment identity → Function App publish RBAC (MG-24 item 4).
@@ -353,6 +408,7 @@ resource "azurerm_role_assignment" "functions_app_deploy_publisher" {
   scope                = module.azure_functions.function_app_id
   role_definition_name = "Website Contributor"
   principal_id         = var.app_deploy_principal_object_id
+  principal_type       = "ServicePrincipal"
 }
 
 # SignalR Module
@@ -421,7 +477,16 @@ module "monitoring" {
 
   resource_prefix     = local.resource_prefix
   resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
+  # MG-23 F5 detective controls: the Activity Log alerts scope to the RESOURCE
+  # GROUP id (an alert scope is a resource id, not a name), so the module needs the
+  # id as well as the name.
+  resource_group_id = azurerm_resource_group.main.id
+  location          = azurerm_resource_group.main.location
+
+  # MG-23 RG boundary: default false, so the subscription-scoped budget is NOT in
+  # the graph a resource-group-scoped CI apply identity has to apply. See the
+  # variable's block comment in variables.tf.
+  manage_subscription_budget = var.manage_subscription_budget
 
   log_analytics_workspace_id   = azurerm_log_analytics_workspace.main.id
   log_analytics_workspace_name = azurerm_log_analytics_workspace.main.name

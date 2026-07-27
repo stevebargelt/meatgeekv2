@@ -1137,3 +1137,223 @@ describe('MG-24 second-plan no-op: Cosmos indexing + budget window are reconcile
     expect(mon).not.toMatch(/timestamp\(/);
   });
 });
+
+/**
+ * MG-23 — automated dev GitOps reconciliation (CI-run).
+ *
+ * Terminology, used precisely throughout: MG-24 = Terraform reconciliation
+ * (operator-run); MG-23 = automated dev GitOps reconciliation (CI-run).
+ *
+ * MG-23 hands a CI job an apply identity that is Contributor scoped ONLY to
+ * meatgeek-v2-<env>-rg plus CONDITIONED Role Based Access Control Administrator on
+ * that same resource group. Three properties of the Terraform GRAPH have to hold
+ * for that to be both APPLIABLE and SAFE, and none of them are visible in a
+ * `terraform validate`:
+ *
+ *   1. Every azurerm_role_assignment declares principal_type = "ServicePrincipal".
+ *      The apply identity's ABAC condition matches on PrincipalType; an ABAC clause
+ *      over an attribute the request never SENDS does not match, so an omitted
+ *      principal_type fails the condition SHUT and denies every apply that touches
+ *      a role assignment. The remedy is to send the attribute — NEVER to loosen the
+ *      condition with an `!(Exists ...) OR ...` tolerance, which is a one-field
+ *      bypass any caller could take by simply omitting the field.
+ *   2. No role assignment is scoped to a SUBSCRIPTION. "No identity inside
+ *      meatgeek-v2-<env>-rg holds a role outside it" is the load-bearing invariant
+ *      the whole resource-group boundary depends on.
+ *   3. The subscription-scoped budget is count-guarded. It is the one resource in
+ *      the stack scoped outside the resource group, and unguarded it makes the
+ *      entire configuration unappliable by a resource-group-scoped identity.
+ *
+ * These are GRAPH regression guards. The genuinely out-of-resource-group grants
+ * (the bootstrap-managed identities) are invisible to an HCL scan and are asserted
+ * separately in apps/infrastructure/bootstrap/bootstrap.test.sh.
+ */
+describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI identity', () => {
+  /** Every .tf file under the infra tree, excluding vendored/generated dirs. */
+  function tfFiles(): string[] {
+    const found: string[] = [];
+    const skip = new Set(['.terraform', 'node_modules', '.nx']);
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          if (!skip.has(entry.name)) walk(path.join(dir, entry.name));
+        } else if (entry.name.endsWith('.tf')) {
+          found.push(path.join(dir, entry.name));
+        }
+      }
+    };
+    walk(INFRA);
+    return found;
+  }
+
+  interface RoleAssignment {
+    file: string;
+    name: string;
+    body: string;
+  }
+
+  /**
+   * Every `resource "azurerm_role_assignment" "<name>" { ... }` block in the tree,
+   * COUNT-DISABLED ONES INCLUDED. Count-disabled resources are still part of the
+   * graph — the native-otlp and app-deploy guards flip — so a scan that skipped
+   * them would under-enumerate exactly the way deriving the set from a
+   * `terraform plan` does.
+   */
+  function roleAssignments(): RoleAssignment[] {
+    const out: RoleAssignment[] = [];
+    for (const file of tfFiles()) {
+      const live = stripComments(fs.readFileSync(file, 'utf8'));
+      const re = /resource\s+"azurerm_role_assignment"\s+"([^"]+)"\s*\{([\s\S]*?)\n\}/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(live)) !== null) {
+        out.push({ file: path.relative(INFRA, file), name: m[1], body: m[2] });
+      }
+    }
+    return out;
+  }
+
+  it('finds every role assignment in the graph (9 blocks over 8 distinct roles)', () => {
+    // Premise guard: if this scan silently matched nothing, the two assertions
+    // below would be vacuously green. Pin the shape the MG-23 allowlist is derived
+    // from — 9 azurerm_role_assignment blocks over 8 DISTINCT role definition
+    // names (Monitoring Metrics Publisher is granted twice, at different scopes:
+    // App Insights for the Function App, the DCR for the OTLP collector).
+    const found = roleAssignments();
+    expect(found.length).toBe(9);
+
+    const roles = found.map(r => r.body.match(/role_definition_name\s*=\s*"([^"]+)"/)?.[1] ?? '');
+    expect(roles).not.toContain('');
+    expect([...new Set(roles)].sort()).toEqual(
+      [
+        'Azure Event Hubs Data Receiver',
+        'Azure Event Hubs Data Sender',
+        'Monitoring Metrics Publisher',
+        'SignalR Service Owner',
+        'Storage Blob Data Contributor',
+        'Storage Blob Data Owner',
+        'Storage Queue Data Contributor',
+        'Website Contributor',
+      ].sort()
+    );
+  });
+
+  it('EVERY azurerm_role_assignment declares principal_type = "ServicePrincipal" (the ABAC condition fails SHUT without it)', () => {
+    const offenders = roleAssignments()
+      .filter(r => !/principal_type\s*=\s*"ServicePrincipal"/.test(r.body))
+      .map(r => `${r.file}:${r.name}`);
+    expect(offenders).toEqual([]);
+  });
+
+  it('NO azurerm_role_assignment is scoped to a subscription (the resource-group boundary depends on it)', () => {
+    // A subscription-scoped grant is both unappliable by the resource-group-scoped
+    // apply identity AND a breach of the invariant that no identity inside the
+    // workload resource group holds a role outside it. Catch a literal
+    // /subscriptions/... scope that never narrows to a resource group, and the
+    // data-source forms that resolve to the subscription itself.
+    const offenders: string[] = [];
+    for (const r of roleAssignments()) {
+      const scope = r.body.match(/scope\s*=\s*(.+)/)?.[1]?.trim() ?? '';
+      const literalSubscriptionScope =
+        /^"\/subscriptions\//.test(scope) && !/\/resourceGroups\//i.test(scope);
+      const subscriptionDataSource =
+        /data\.azurerm_subscription[\w.]*\.(id|subscription_id)\b/.test(scope) ||
+        /data\.azurerm_client_config\.[\w]+\.subscription_id/.test(scope);
+      if (literalSubscriptionScope || subscriptionDataSource) {
+        offenders.push(`${r.file}:${r.name} -> ${scope}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the SUBSCRIPTION-scoped budget is count-guarded and defaults OFF', () => {
+    // The one resource scoped outside the workload resource group. Unguarded, an
+    // identity that is Contributor on meatgeek-v2-dev-rg alone cannot apply this
+    // configuration AT ALL — it fails partway with AuthorizationFailed, leaving
+    // partial state. Resolved in the GRAPH, never by widening the identity
+    // (widening breaks the closed-escalation-path precondition).
+    const mon = stripComments(read('modules/monitoring/main.tf'));
+    const block = mon.match(
+      /resource\s+"azurerm_consumption_budget_subscription"\s+"credit_budget"\s*\{[\s\S]*?\n\}/
+    )?.[0];
+    expect(block).toBeDefined();
+    expect(block).toMatch(/count\s*=\s*var\.manage_subscription_budget\s*\?\s*1\s*:\s*0/);
+
+    // The flag defaults OFF in BOTH the module and the root, so the default graph
+    // — which is what CI applies — carries no subscription-scoped resource.
+    const monVars = stripComments(read('modules/monitoring/variables.tf'));
+    expect(monVars).toMatch(
+      /variable\s+"manage_subscription_budget"\s*\{[\s\S]*?type\s*=\s*bool[\s\S]*?default\s*=\s*false/
+    );
+    const rootVars = stripComments(read('variables.tf'));
+    expect(rootVars).toMatch(
+      /variable\s+"manage_subscription_budget"\s*\{[\s\S]*?type\s*=\s*bool[\s\S]*?default\s*=\s*false/
+    );
+
+    // Both environments opt OUT explicitly rather than leaning on the default, so
+    // the boundary is visible where an operator edits it.
+    expect(read('environments/dev.tfvars')).toMatch(/^manage_subscription_budget\s*=\s*false/m);
+    expect(read('environments/prod.tfvars')).toMatch(/^manage_subscription_budget\s*=\s*false/m);
+
+    // The RESOURCE-GROUP budget is untouched — it stays the primary spend control.
+    expect(mon).toMatch(/resource\s+"azurerm_consumption_budget_resource_group"\s+"main"/);
+  });
+
+  it('the azurerm provider does NOT register resource providers (a subscription-scope write at configure time)', () => {
+    // The azurerm ~>4.0 default registers RPs at SUBSCRIPTION scope while the
+    // provider is being configured — before any resource is planned — which a
+    // resource-group-scoped identity cannot do. MG-24 never hit this because it
+    // applied as the operator. RP registration becomes an explicit bootstrap /
+    // operator precondition instead.
+    const live = stripComments(read('main.tf'));
+    expect(live).toMatch(/resource_provider_registrations\s*=\s*"none"/);
+  });
+
+  it('the three out-of-band-persistence Activity Log alerts are wired to the action group and scoped to the RG', () => {
+    // The MG-23 final drift plan proves convergence of Terraform-MANAGED
+    // CONTROL-PLANE resources ONLY. These three writes are the persistence paths it
+    // structurally cannot see, so they get detective controls. The action-group
+    // wiring is asserted HERE rather than in the module's terraform test because
+    // the action group's id is unknown-at-plan under a mock provider — the tftest
+    // can only prove an action block exists, not what it points at.
+    const mon = stripComments(read('modules/monitoring/main.tf'));
+    const expected: Array<[string, string]> = [
+      ['role_assignment_write', 'Microsoft.Authorization/roleAssignments/write'],
+      ['user_assigned_identity_write', 'Microsoft.ManagedIdentity/userAssignedIdentities/write'],
+      [
+        'cosmos_sql_role_assignment_write',
+        'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments/write',
+      ],
+    ];
+    for (const [name, operation] of expected) {
+      const block = mon.match(
+        new RegExp(
+          `resource\\s+"azurerm_monitor_activity_log_alert"\\s+"${name}"\\s*\\{[\\s\\S]*?\\n\\}`
+        )
+      )?.[0];
+      expect(block).toBeDefined();
+      expect(block).toContain(`operation_name = "${operation}"`);
+      expect(block).toMatch(/category\s*=\s*"Administrative"/);
+      // Scoped to the workload RESOURCE GROUP id — never the subscription.
+      expect(block).toMatch(/scopes\s*=\s*\[var\.resource_group_id\]/);
+      // Wired to the action group: an alert nobody receives is not a control.
+      expect(block).toMatch(/action_group_id\s*=\s*azurerm_monitor_action_group\.main\.id/);
+    }
+
+    // The root threads the resource-group ID (an alert scope is a resource id, not
+    // a name), and the module declares the input.
+    expect(stripComments(read('main.tf'))).toMatch(
+      /resource_group_id\s*=\s*azurerm_resource_group\.main\.id/
+    );
+    expect(stripComments(read('modules/monitoring/variables.tf'))).toMatch(
+      /variable\s+"resource_group_id"/
+    );
+  });
+
+  // NOTE — the "no `!(Exists ...)` ABAC tolerance" guard deliberately does NOT
+  // live here. An ABAC condition is emitted by
+  // apps/infrastructure/bootstrap/bootstrap.sh, never by Terraform, so a scan of
+  // the .tf sources for that shape can only ever be vacuously green (and, run over
+  // raw text, it false-positives on the prose in root main.tf that documents WHY
+  // the tolerance is forbidden). The real assertion belongs on the emitted
+  // condition, in bootstrap.test.sh.
+});

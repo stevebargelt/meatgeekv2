@@ -1,0 +1,82 @@
+# tf-managed-role-allowlist.tsv — the SINGLE SOURCE OF TRUTH for the Azure
+# built-in role definitions the MG-23 dev infra-apply identity is permitted to
+# grant and revoke inside meatgeek-v2-dev-rg.
+# ===========================================================================
+#
+# WHY THIS FILE AND NOT THE HCL (single-derivation discipline)
+# -----------------------------------------------------------
+# Two artifacts need this list and they MUST agree:
+#
+#   1. apps/infrastructure/bootstrap/bootstrap.sh — builds the ABAC condition on
+#      the apply identity's "Role Based Access Control Administrator" grant FROM
+#      THIS FILE. The condition allowlists these role-definition GUIDs on both the
+#      roleAssignments WRITE and DELETE actions.
+#   2. apps/infrastructure/scripts/tf-static-checks.sh (CHECK 13) — diffs this
+#      file against every `role_definition_name` in the Terraform graph, so adding
+#      a role to the graph FAILS AT PR TIME with a clear message instead of
+#      mid-apply with AuthorizationFailed and a partially-applied stack.
+#
+# Deriving the condition directly from the .tf files would mean bootstrap.sh had
+# to parse HCL, and deriving the CI check from bootstrap.sh would mean CI had to
+# execute it. One committed file that both READ is the same single-derivation
+# discipline as scripts/state-account-name.sh (one derivation of the state-account
+# name) and environments/backend-dev.hcl (one backend definition).
+#
+# HOW THE ROLE SET WAS ENUMERATED — FROM THE GRAPH, NEVER FROM A PLAN
+# -------------------------------------------------------------------
+#   grep -rn 'role_definition_name' apps/infrastructure --include='*.tf'
+#
+# This deliberately includes COUNT-DISABLED resources. A `terraform plan`
+# UNDER-ENUMERATES: `azurerm_role_assignment.functions_app_deploy_publisher` and
+# `modules/functions` `deploy_principal_deployment_container` are guarded by
+# `var.app_deploy_principal_object_id != ""`, and the whole native_otlp module is
+# count-guarded, so a plan taken while those guards are OFF omits roles that a
+# later plan WILL require. An allowlist built from such a plan fails closed
+# mid-apply the first time a guard flips. Re-run the grep above (not a plan)
+# whenever the graph changes.
+#
+# GUID COLUMN — RESOLVED LIVE, COMMITTED AFTERWARDS
+# -------------------------------------------------
+# An ABAC condition matches on the role-definition GUID, not the display name.
+# The GUID column ships as PENDING. bootstrap.sh resolves each GUID LIVE:
+#
+#   az role definition list --name "<role>" --query "[0].name" -o tsv
+#
+# and FAILS CLOSED if a committed (non-PENDING) GUID disagrees with the live one
+# — a disagreement means either the tenant resolves a different definition or the
+# committed value is wrong, and silently preferring either would author a
+# condition that does not mean what it reads. After a bootstrap run, commit the
+# paste-ready resolved file bootstrap.sh emits.
+#
+# NEVER hardcode a remembered GUID here or in bootstrap.sh. Remembered Azure role
+# GUIDs are a well-known source of silent, invisible authorization errors.
+#
+# HONEST SCOPE OF THE CI GUARD
+# ----------------------------
+# tf-static-checks.sh CHECK 13 guards role NAMES only. GUID correctness is a LIVE
+# bootstrap-time property: a credential-less CI job cannot call Azure and so
+# cannot re-verify it. The live verification lives in bootstrap.sh (fail-closed
+# comparison) and in the operator acceptance tests T1/T2/T4 documented in
+# docs/infrastructure/mg23-live-acceptance.md.
+#
+# WHAT THE CONDITION DOES AND DOES NOT CONSTRAIN
+# ----------------------------------------------
+# The condition constrains WHICH role definition and WHICH principal type may be
+# granted. It CANNOT constrain SCOPE: an allowlisted role can still be re-granted
+# resource-group-wide inside meatgeek-v2-dev-rg (accepted residual F4), and Cosmos
+# data-plane `sqlRoleAssignments` are Contributor-granted and invisible to a
+# Microsoft.Authorization condition entirely (accepted residual F6). Both are
+# recorded in docs/infrastructure/mg23-live-acceptance.md; do NOT read this file
+# as claiming otherwise.
+#
+# FORMAT: <role_definition_name>\t<role_definition_guid|PENDING>
+# Tab-separated. Lines beginning with # and blank lines are ignored.
+#
+Azure Event Hubs Data Receiver	PENDING
+SignalR Service Owner	PENDING
+Monitoring Metrics Publisher	PENDING
+Website Contributor	PENDING
+Storage Blob Data Owner	PENDING
+Storage Queue Data Contributor	PENDING
+Storage Blob Data Contributor	PENDING
+Azure Event Hubs Data Sender	PENDING

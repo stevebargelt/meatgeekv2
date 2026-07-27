@@ -1,0 +1,20 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — AN ACTION VERB THIS GATE DOES NOT KNOW. Stands in for a future Terraform release introducing a new action. The gate classifies only `no-op`, `create`, `read` and `update` as benign; everything else is PROTECTED under its own verb. Fail-closed means an unrecognized verb BLOCKS the apply (exit 1, a verdict) — it does not mean the change falls through unclassified into a green run, and it does not mean an unreadable-plan exit 2 that no override can clear. It is ALSO NOT OVERRIDABLE: a verb outside the modeled set (no-op, create, read, update, delete, forget) cannot be classified, so the gate cannot describe what applying it would do and will not present it for review — TF_DESTROY_GUARD_AUTHORIZED_CHANGES cannot clear it, and an override naming `obliterate:<addr>` must still exit 1.",
+  "planned_values": { "root_module": { "resources": [] } },
+  "resource_changes": [
+    {
+      "address": "module.iot_hub.azurerm_iothub.main",
+      "type": "azurerm_iothub",
+      "name": "main",
+      "change": { "actions": ["obliterate"] }
+    },
+    {
+      "address": "azurerm_resource_group.main",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}

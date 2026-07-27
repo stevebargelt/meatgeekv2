@@ -104,6 +104,13 @@ TAB="$(printf '\t')"
 die() { echo "tf-plan-secret-inspection: FATAL: $*" >&2; exit 1; }   # fail-closed
 
 command -v jq >/dev/null 2>&1 || die "jq is required but not on PATH"
+# mktemp is as load-bearing as jq: sections 5-7 stage every collected row into a
+# temp file and read it back with `< file` (the dash-portable alternative to a
+# pipe, which would run the counter loop in a subshell). If mktemp is MISSING the
+# staging path silently degrades to writing/reading the empty path "" — the gate
+# then walks ZERO rows and still reaches its PASS line. Require it up front rather
+# than discovering it three sections later.
+command -v mktemp >/dev/null 2>&1 || die "mktemp is required but not on PATH"
 
 # Portable lowercase (bash-4's ${v,,} is unavailable on bash 3.2 / dash).
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
@@ -162,6 +169,52 @@ printf '%s\n' "${JSON}" | jq -e . >/dev/null 2>&1 || die "input is not valid JSO
 top_type="$(printf '%s\n' "${JSON}" | jq -r 'type' 2>/dev/null || true)"
 [ "${top_type}" = "object" ] || \
   die "cannot inspect: unrecognized/empty terraform JSON (${SRC}) — top-level is '${top_type:-unknown}', expected a 'terraform show -json' object"
+# Shape is not enough either: the container keys must have the RIGHT TYPE. The
+# probe below is a PRESENCE test, and presence alone is fail-OPEN because every
+# downstream collector reaches into these keys with jq's error-suppressing `?` /
+# `// empty` operators. Concretely, `{"format_version":"1.2","resource_changes":
+# "nope"}` satisfies a presence test (`.resource_changes? != null` is true for a
+# STRING), then `.resource_changes[]?` suppresses the "cannot iterate over
+# string" error and yields NOTHING — so the gate walks zero resources and PASSes.
+# That is the same vacuous-PASS class as an empty document, just wearing a
+# plausible key. So assert the TYPE of every key we later index into, and FAIL
+# CLOSED on a mismatch or on a probe that itself errors.
+#
+# `null` is accepted as equivalent to ABSENT throughout (jq's `// empty` and `?`
+# already treat it that way, and a real `terraform show -json` STATE document
+# simply omits resource_changes). Only a WRONG concrete type — a string or object
+# where an array belongs, a scalar where an object belongs — is the malformed
+# case. Being strict about a genuinely valid shape would wedge the GitOps loop on
+# a legitimate no-op plan, which is why the empty ARRAY stays a PASS.
+shape_type_errors="$(printf '%s\n' "${JSON}" | jq -r '
+  def wrong($path; $v; $want):
+    if ($v | type) == "null" then empty
+    elif ($v | type) != $want then $path + " must be " + $want + ", got " + ($v | type)
+    else empty end;
+  [
+    wrong("resource_changes"; .resource_changes; "array"),
+    wrong("planned_values";   .planned_values;   "object"),
+    wrong("values";           .values;           "object"),
+    wrong("output_changes";   .output_changes;   "object"),
+    (if (.planned_values | type) == "object"
+       then wrong("planned_values.root_module"; .planned_values.root_module; "object")
+       else empty end),
+    (if (.values | type) == "object"
+       then wrong("values.root_module"; .values.root_module; "object")
+       else empty end),
+    (if (.planned_values | type) == "object"
+       then wrong("planned_values.outputs"; .planned_values.outputs; "object")
+       else empty end),
+    (if (.values | type) == "object"
+       then wrong("values.outputs"; .values.outputs; "object")
+       else empty end)
+  ] | join("; ")
+' 2>/dev/null || echo "__PROBE_ERROR__")"
+[ "${shape_type_errors}" = "__PROBE_ERROR__" ] && \
+  die "cannot inspect: the schema TYPE probe itself failed on ${SRC} — refusing to report PASS on a document whose structure could not be validated"
+[ -z "${shape_type_errors}" ] || \
+  die "cannot inspect: ${SRC} carries a recognized terraform key with an UNEXPECTED TYPE — ${shape_type_errors}. A key of the wrong type is silently skipped by the error-suppressing collectors below, which would walk nothing and report a vacuous PASS; refusing to inspect a malformed document"
+
 has_shape="$(printf '%s\n' "${JSON}" | jq -r '
   (has("format_version"))
   and (
@@ -431,8 +484,30 @@ CRED_MARKER_RE='(InstrumentationKey|AccountKey|SharedAccessKeyName|SharedAccessK
 AI_CONNSTR_RE='InstrumentationKey=.*IngestionEndpoint=|IngestionEndpoint=.*InstrumentationKey='
 
 violations=0
+# report <sink-kind> <path> <reason>
+#
+# OUTPUT CONTRACT — THE REASON MUST NEVER CARRY A CREDENTIAL VALUE (MG-23 red).
+# This gate exists to stop secrets reaching a place they can be read, and its own
+# stdout/stderr is such a place: it runs in a CI job whose log is retained and
+# broadly readable. A gate that PRINTS the secret it just rejected leaks exactly
+# what it was deployed to protect, and it does so on the REJECT path — the one
+# that only fires when a live credential is genuinely present.
+#
+# So every argument here is an IDENTIFIER, never a value:
+#   $1 sink kind        — a fixed enum ("app_setting", "site_config", "output", …)
+#   $2 resource path    — <address> :: <attribute/key NAME>. A KEY name is not a
+#                         secret; the VALUE bound to it is (that name-vs-value
+#                         distinction is the whole design of this gate).
+#   $3 reason           — prose + non-secret scalars (counts, resource types,
+#                         booleans). NEVER interpolate ${value} or anything
+#                         extracted from it; print `[REDACTED]` instead.
+# The operator has the resource address and the attribute name, which is all they
+# need to go look at the plan themselves in a place that is not a CI log.
+#
+# Pinned by the secret-gate-foreign-ikey-sentinel.json fixture, which drives every
+# reject path with a sentinel-bearing value and asserts the sentinel appears in
+# NEITHER stdout NOR stderr. Add a reject path, add it to that fixture.
 report() {
-  # report <sink-kind> <path> <reason>
   echo "  ✗ VIOLATION [$1] $2" >&2
   echo "        reason: $3" >&2
   violations=$((violations + 1))
@@ -490,7 +565,7 @@ inspect_rows() {
   # Read TSV rows on stdin: kind \t path \t value. Called with `< file`
   # redirection (NOT a pipe / process substitution), so it runs in THIS shell and
   # the `violations` counter that report() bumps survives.
-  local kind path value embedded_ikey
+  local kind path value embedded_ikey ikey_state
   while IFS="${TAB}" read -r kind path value; do
     [ -z "${kind}" ] && continue
 
@@ -549,7 +624,25 @@ inspect_rows() {
           echo "  · accepted App Insights residual (managed ikey non-authenticating; local_authentication_enabled=false): ${path}"
           continue
         fi
-        report "${kind}" "${path}" "App Insights connection string carries an InstrumentationKey (${embedded_ikey:-<none>}) that is NOT one of the plan/state's managed azurerm_application_insights instrumentation_key values — a foreign/lookalike connection string is not the accepted residual (ai_count=${ai_count})"
+        # THE VALUE IS WITHHELD, DELIBERATELY (MG-23 red). An earlier revision
+        # interpolated ${embedded_ikey} into this message — so the one path that
+        # fires ONLY when a foreign, live-looking instrumentation key is present
+        # printed that key into the CI log. Whether the key belongs to the
+        # attacker or to a real third-party workspace, echoing it is the leak this
+        # gate exists to prevent, performed by the gate itself.
+        #
+        # Report PRESENCE, not value: "was an ikey extractable at all?" is the
+        # only bit an operator needs from here to tell a lookalike connection
+        # string (ikey present, not ours) from a malformed one (nothing
+        # extractable). Both are violations either way; the distinction only
+        # directs where to look. The resource address and attribute name in
+        # ${path} are how they find the actual value — in the plan, not in a log.
+        if [ -n "${embedded_ikey}" ]; then
+          ikey_state="an InstrumentationKey [REDACTED] that is NOT one of"
+        else
+          ikey_state="NO extractable InstrumentationKey, so it cannot be matched against"
+        fi
+        report "${kind}" "${path}" "App Insights connection string carries ${ikey_state} the plan/state's managed azurerm_application_insights instrumentation_key values — a foreign/lookalike connection string is not the accepted residual (ai_count=${ai_count}). The offending VALUE is withheld from this log on purpose; inspect it in the plan at the address above"
         continue
       fi
       if [ "${kind}" != "app_setting" ] && [ "${kind}" != "site_config" ]; then
@@ -612,8 +705,40 @@ echo "tf-plan-secret-inspection: inspecting ${SRC} (App Insights resources: ${ai
 # read inspect_rows with `< file` (not a pipe / process substitution — neither is
 # portable to dash) so the loop runs in THIS shell and its violation counter
 # survives. printf keeps empty sets harmless.
-rows_file="$(mktemp)"
-trap 'rm -f "${rows_file}"' EXIT
+#
+# TEMP-FILE CREATION IS FAIL-CLOSED (MG-23 blocker 1). An UNCHECKED `rows_file=
+# "$(mktemp)"` is a vacuous-PASS hole with a live reproduction: run this gate with
+# TMPDIR pointing at a read-only or nonexistent directory and mktemp fails, the
+# assignment yields the EMPTY STRING, every `> "${rows_file}"` and
+# `< "${rows_file}"` below then redirects to/from "" (which the shell reports as
+# "No such file or directory" on stderr and otherwise ignores), all three
+# inspection loops read ZERO rows, and the gate prints
+# "PASS — no prohibited credential VALUE reached app_settings or outputs" and
+# exits 0 on a plan it never looked at. A CI job whose runner has a full or
+# read-only /tmp would green-light an apply carrying live credentials.
+#
+# So: mktemp must SUCCEED and must return a NON-EMPTY path, or this is an
+# inspection that could not run — which is a FATAL, never a PASS. The status test
+# is reliable here because `mktemp` is itself the command being substituted, so
+# `$(...)` carries its exit status directly (unlike read_input above, whose die()
+# runs inside the subshell and needs the separate guard at section 1).
+#
+# All three paths are declared and trapped BEFORE the first creation so the
+# cleanup handler can never reference an unset variable under `set -u`, and so a
+# die() on the second or third mktemp still removes the ones already created.
+rows_file=""
+ds_file=""
+azapi_ds_file=""
+cleanup_tempfiles() {
+  for _tmpf in "${rows_file}" "${ds_file}" "${azapi_ds_file}"; do
+    [ -n "${_tmpf}" ] && rm -f "${_tmpf}"
+  done
+  return 0
+}
+trap cleanup_tempfiles EXIT
+
+rows_file="$(mktemp)" || die "cannot create a temp file to stage the sink rows (mktemp failed; TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
+[ -n "${rows_file}" ] || die "mktemp returned an EMPTY path for the sink rows (TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
 { printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${flex_sink_rows}"; printf '%s\n' "${output_rows}"; } \
   | grep -v '^[[:space:]]*$' > "${rows_file}" || true
 inspect_rows < "${rows_file}"
@@ -621,9 +746,10 @@ inspect_rows < "${rows_file}"
 # Inspect the inherent-key data-service resources (Cosmos/Storage/SignalR/IoT).
 # Same temp-file + `< file` pattern so the loop runs in THIS shell and the
 # violation counter survives (no pipe / process substitution — dash-portable).
-ds_file="$(mktemp)"
-azapi_ds_file="$(mktemp)"
-trap 'rm -f "${rows_file}" "${ds_file}" "${azapi_ds_file}"' EXIT
+ds_file="$(mktemp)" || die "cannot create a temp file to stage the data-service rows (mktemp failed; TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
+[ -n "${ds_file}" ] || die "mktemp returned an EMPTY path for the data-service rows (TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
+azapi_ds_file="$(mktemp)" || die "cannot create a temp file to stage the azapi storage rows (mktemp failed; TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
+[ -n "${azapi_ds_file}" ] || die "mktemp returned an EMPTY path for the azapi storage rows (TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
 printf '%s\n' "${data_service_rows}" | grep -v '^[[:space:]]*$' > "${ds_file}" || true
 inspect_data_services < "${ds_file}"
 

@@ -17,12 +17,29 @@ environment = "dev"
 # is an operator-gated re-apply that MUST carry a Cosmos-migration decision. See the
 # ADR (learnings/decisions/mg-24-flex-consumption-hosting-model.md) and the runbook.
 #
-# NO DESTROY GUARD EXISTS: a location change is ForceNew on the Cosmos account (and
-# on IoT Hub), and there is deliberately NO prevent_destroy / destroy guard in the
+# NO IN-GRAPH DESTROY GUARD EXISTS: a location change is ForceNew on the Cosmos
+# account (and on IoT Hub), and there is deliberately NO prevent_destroy in the
 # shared modules. Terraform's prevent_destroy is a static literal that cannot be
-# env-gated (dev vs prod), and MG-24 is greenfield, so no guard was added. Nothing in
-# this code protects data at re-apply — the operator is the control. Real prod
-# data-loss protection is tracked separately in MG-35.
+# env-gated (dev vs prod), and MG-24 is greenfield, so no in-graph guard was added.
+# Real prod data-loss protection is tracked separately in MG-35.
+#
+# WHAT THE CONTROL IS NOW (MG-23, automated dev GitOps reconciliation, CI-run).
+# Under MG-24 (Terraform reconciliation, operator-run) the operator's own judgement
+# at apply time was the only control. MG-23 removes the operator from the STEADY-
+# STATE dev path — applies happen automatically on merge to main — so that framing
+# is obsolete for dev and the control is now a PIPELINE control, in two parts:
+#   1. The destroy circuit-breaker in .github/workflows/infra-apply-dev.yml, which
+#      inspects the SAVED plan and FAILS the run on ANY destroy unless the merge
+#      explicitly opts in with the exact expected destroy count. A whole-stack
+#      relocation is a high-count destroy plan and is exactly what it stops.
+#   2. Protected `main`: the plan a human reviews on the PR is the plan that
+#      applies, from the same commit.
+# So a `location` edit here does NOT silently auto-apply — it fails the apply job
+# and demands a deliberate opt-in. That is a REFUSAL, not data protection: the
+# opt-in still destroys and recreates Cosmos with temperature-history loss, and
+# nothing in the code restores it. A region cutover still requires a Cosmos
+# migration/restore decision first. Prod is unaffected (still operator-run,
+# plan-only in CI; prod's CI-run apply is MG-25).
 #
 # DEV is GREENFIELD: no temperature history to preserve, so the whole-stack recreate
 # (including Cosmos) is intended and carries no data-loss concern here.
@@ -127,6 +144,23 @@ auto_shutdown_enabled  = true                # Enable auto-shutdown for dev reso
 budget_limit           = 50                  # Lower budget limit for development (RG scope)
 secondary_budget_limit = 150                 # Subscription-level warning before $200 Azure credit exhausted
 admin_email            = "steve@bargelt.com" # Update with your email for alerts
+
+# MG-23 (automated dev GitOps reconciliation, CI-run) — subscription-scoped budget
+# is NOT managed from this stack. dev is the CI-APPLIED environment, and its apply
+# identity is Contributor scoped ONLY to meatgeek-v2-dev-rg; a /subscriptions/<id>
+# resource needs a subscription-scoped writer, so leaving it in the graph would make
+# the whole configuration unappliable from CI. Resolved in the graph, never by
+# widening the identity. The RG-scope budget above (budget_limit) is unaffected and
+# remains the primary spend control; the subscription-level credit warning becomes
+# a bootstrap/operator concern.
+#
+# ⚠️  dev APPLIED this resource under MG-24, so it IS in dev state: setting this
+# false plans a DESTROY. Before activating the MG-23 loop, drop it from state
+# WITHOUT touching Azure (keeps the live spend alert, moves ownership out of CI):
+#   terraform state rm 'module.monitoring.azurerm_consumption_budget_subscription.credit_budget'
+# Skipping that step means the first CI apply plans a delete and the destroy
+# circuit-breaker correctly FAILS the run. See docs/infrastructure/mg23-live-acceptance.md.
+manage_subscription_budget = false
 
 # Observability cost control
 ingestion_cap_gb = 2 # Hard daily ingestion cap on Log Analytics workspace

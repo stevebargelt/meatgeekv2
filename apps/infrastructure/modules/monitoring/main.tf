@@ -287,7 +287,21 @@ resource "azurerm_monitor_metric_alert" "ingestion_cap_reached" {
 # Secondary subscription-scope budget — warning before the $200 Azure credit
 # is exhausted. Resource-group budget (above) is the primary; this one catches
 # any spend that lands outside the meatgeek-{env}-rg group.
+#
+# MG-23 (automated dev GitOps reconciliation, CI-run) — COUNT-GUARDED, DEFAULT OFF.
+# This is the ONE resource in the stack scoped OUTSIDE the workload resource group
+# (/subscriptions/<id>), so writing it requires a subscription-scoped writer. The
+# MG-23 CI apply identity is Contributor on meatgeek-v2-<env>-rg ONLY; leaving this
+# unguarded made the whole configuration unappliable from CI. The boundary is
+# resolved in the GRAPH rather than by widening the identity — widening would break
+# the closed-escalation-path precondition the MG-23 threat model rests on.
+# Subscription-scoped spend control is an operator/bootstrap concern; the
+# RESOURCE-GROUP budget above is unaffected and remains the primary control.
+# See the root apps/infrastructure/variables.tf comment on manage_subscription_budget
+# (including the `terraform state rm` note for dev, which already applied it).
 resource "azurerm_consumption_budget_subscription" "credit_budget" {
+  count = var.manage_subscription_budget ? 1 : 0
+
   name            = "${var.resource_prefix}-credit-budget"
   subscription_id = "/subscriptions/${var.subscription_id}"
 
@@ -318,6 +332,93 @@ resource "azurerm_consumption_budget_subscription" "credit_budget" {
       var.admin_email
     ]
   }
+}
+
+# -----------------------------------------------------------------------------
+# MG-23 F5 — OUT-OF-BAND PERSISTENCE DETECTIVE CONTROLS
+#
+# MG-23 is automated dev GitOps reconciliation (CI-run). Its final `terraform plan
+# -detailed-exitcode` proves CONVERGENCE, but only of Terraform-MANAGED control-
+# plane resources. It is blind to exactly the changes an attacker who reached the
+# apply identity would make, because they are not in the Terraform graph:
+#
+#   1. Microsoft.Authorization/roleAssignments/write — a NEW role assignment inside
+#      meatgeek-v2-<env>-rg. The apply identity holds CONDITIONED Role Based Access
+#      Control Administrator here; the ABAC condition constrains WHICH role and
+#      WHICH principal type, but it CANNOT constrain SCOPE (residual F4), so an
+#      allowlisted data role can legitimately be re-granted RG-wide. That is
+#      persistence/stealth rather than a boundary break — it does not exceed the
+#      SP's own Contributor — and THIS ALERT is its compensating control.
+#   2. Microsoft.ManagedIdentity/userAssignedIdentities/write — a new user-assigned
+#      identity is a durable, Terraform-invisible foothold.
+#   3. Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments/write — Cosmos
+#      DATA-PLANE role assignments (residual F6). These are granted by plain
+#      Contributor, are invisible to a Microsoft.Authorization ABAC condition, and
+#      accept USER principals — the clearest gap versus the condition's
+#      "service-principals only" intent. Accepted for dev (7-day-TTL test data);
+#      detection is the control, not prevention.
+#
+# Scoped to the workload RESOURCE GROUP (never the subscription) so these controls
+# live inside the same boundary the CI apply identity is confined to. Wired to the
+# existing action group, so they reach the same operator as every other alert.
+# These are DETECTIVE, not preventive: they fire AFTER the write succeeds.
+# -----------------------------------------------------------------------------
+
+resource "azurerm_monitor_activity_log_alert" "role_assignment_write" {
+  name                = "${var.resource_prefix}-role-assignment-write"
+  resource_group_name = var.resource_group_name
+  location            = "global"
+  scopes              = [var.resource_group_id]
+  description         = "A role assignment was written inside ${var.resource_group_name}. Expected only from the Terraform-managed graph; anything else is out-of-band RBAC persistence the final drift plan cannot see (MG-23 F4/F5)."
+
+  criteria {
+    category       = "Administrative"
+    operation_name = "Microsoft.Authorization/roleAssignments/write"
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.main.id
+  }
+
+  tags = var.tags
+}
+
+resource "azurerm_monitor_activity_log_alert" "user_assigned_identity_write" {
+  name                = "${var.resource_prefix}-user-assigned-identity-write"
+  resource_group_name = var.resource_group_name
+  location            = "global"
+  scopes              = [var.resource_group_id]
+  description         = "A user-assigned managed identity was written inside ${var.resource_group_name} — a durable foothold that is invisible to the MG-23 final drift plan unless it is in the Terraform graph (MG-23 F5)."
+
+  criteria {
+    category       = "Administrative"
+    operation_name = "Microsoft.ManagedIdentity/userAssignedIdentities/write"
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.main.id
+  }
+
+  tags = var.tags
+}
+
+resource "azurerm_monitor_activity_log_alert" "cosmos_sql_role_assignment_write" {
+  name                = "${var.resource_prefix}-cosmos-sql-role-assignment-write"
+  resource_group_name = var.resource_group_name
+  location            = "global"
+  scopes              = [var.resource_group_id]
+  description         = "A Cosmos DB DATA-PLANE (sqlRoleAssignments) role assignment was written inside ${var.resource_group_name}. Granted by plain Contributor, invisible to a Microsoft.Authorization ABAC condition, and accepts USER principals — the accepted MG-23 residual F6. Detection is the control."
+
+  criteria {
+    category       = "Administrative"
+    operation_name = "Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments/write"
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.main.id
+  }
+
+  tags = var.tags
 }
 
 # -----------------------------------------------------------------------------

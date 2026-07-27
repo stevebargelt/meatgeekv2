@@ -253,22 +253,27 @@ nx run mobile:deploy --platform=android --device=emulator
 #   cd apps/infrastructure && terraform init -reconfigure \
 #     -backend-config=environments/backend-dev.hcl \
 #     -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
-nx init infrastructure   # hcl-only; insufficient for the remote backend on its own
+nx run infrastructure:init --args="--env=dev"   # hcl-only; insufficient for the remote backend on its own
 
 # Plan infrastructure changes
-nx plan infrastructure --env=dev
-nx plan infrastructure --env=staging
-nx plan infrastructure --env=prod
+nx plan infrastructure --args="--env=dev"
+nx plan infrastructure --args="--env=staging"
+nx plan infrastructure --args="--env=prod"
 
-# Apply infrastructure changes
-nx apply infrastructure --env=dev
-nx apply infrastructure --env=prod
+# Apply infrastructure changes.
+#   dev  — bootstrap/recovery ONLY. Steady-state dev infrastructure reconciles
+#          through CI (MG-23): open a PR, let the credentialless
+#          `validate-infrastructure` job check it, merge, and
+#          `infra-apply-dev.yml` applies it. Applying by hand races CI.
+#   prod — operator-run today; CI-run prod reconciliation activates under MG-25.
+nx apply infrastructure
+nx apply infrastructure
 
 # Validate Terraform configuration
 nx validate infrastructure
 
 # Destroy infrastructure (careful!)
-nx destroy infrastructure --env=dev
+nx destroy infrastructure --args="--env=dev"
 ```
 
 ### Azure Deployment
@@ -279,11 +284,30 @@ nx destroy infrastructure --env=dev
 # Get the name from Terraform, then publish:
 nx deploy api --functionApp=$(terraform output -raw function_app_name)
 
-# Deploy web app to Azure Static Web Apps (dev only)
-nx deploy web --env=dev
+# Deploy the web frontend to Azure Static Web Apps.
+# The `web` project DOES define a `deploy` target (apps/web/project.json), which
+# runs `az staticwebapp deploy --name meatgeek-web-<env>
+# --source-location ./dist/apps/web`, so it takes --args="--env=<env>."
+#
+# It has NO `dependsOn`, so it deploys whatever is already sitting in
+# ./dist/apps/web — BUILD FIRST or you will publish a stale (or empty) bundle:
+nx build web --configuration=production
+nx deploy web --args="--env=dev"
 ```
 
-> **Prod is API-only, and prod app deploys are CI-gated — not run by hand.** The `app-deploy-prod.yml` workflow runs `nx deploy api --functionApp=<prod Function App name>` for you; in normal operation you don't invoke it yourself. That workflow is triggered by `workflow_run` **after the CI/CD Pipeline completes green on a push to `main`**, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'`. It has **no `workflow_dispatch`** — retry a failed deploy via GitHub's **re-run**, not a manual command. Prod **infra** deploy (`infra-deploy-prod.yml`) is `workflow_dispatch`-only and **plan-only** (no `terraform apply`) pending MG-24. There is no production web/Static Web Apps deploy — `nx deploy web --env=prod` is not implemented; do not run it. See [CI/CD Pipeline → Prod](ci-cd.md#prod) for the full gating model.
+> **The web frontend has a deploy path; what it does not have is a deploy
+> *workflow*.** `nx deploy web` is an **operator-run** command against a local
+> `dist/apps/web`. No workflow in this repo invokes it, and nothing in the repo
+> downloads a CI build artifact (there is no `download-artifact` step anywhere),
+> so the web bundle has always been built locally at deploy time. MG-23 removed
+> the CI **upload** of that bundle; because no consumer ever downloaded it, that
+> removal did not break this command's input chain. `nx build web` still runs in
+> CI, so the web app keeps its compile-time signal. Automating a web deploy is
+> out of MG-23's scope (a security ticket) — but "not automated" is not "not
+> possible", and an earlier revision of this file wrongly documented the target
+> as nonexistent.
+
+> **Prod is API-only, and prod app deploys are CI-gated — not run by hand.** The `app-deploy-prod.yml` workflow runs `nx deploy api --functionApp=<prod Function App name>` for you; in normal operation you don't invoke it yourself. That workflow is triggered by `workflow_run` **after the CI/CD Pipeline completes green on a push to `main`**, and only when the repository variable `PROD_DEPLOY_ENABLED == 'true'`. It has **no `workflow_dispatch`** — retry a failed deploy via GitHub's **re-run**, not a manual command. Prod **infra** deploy (`infra-deploy-prod.yml`) is `workflow_dispatch`-only and **plan-only** (no `terraform apply`) pending **MG-25**, which activates CI-run prod reconciliation. **Dev infra is different**: it reconciles automatically through CI under MG-23 — `ci.yml`'s `validate-infrastructure` job validates every infrastructure change **credentiallessly** (no Azure identity, no environment, no remote state — there is no PR-time plan) and `infra-apply-dev.yml` applies on merge to `main`, so `nx apply infrastructure` is for bootstrap and recovery, not for steady-state changes. There is **no web/Static Web Apps deploy *workflow* in any environment** — but the `web` project **does** define a `deploy` target (`nx deploy web --args="--env=<env>"`, an operator-run `az staticwebapp deploy` against a locally built `dist/apps/web`). What MG-23 removed was the plan-only `deploy-dev` job and the unconsumed CI upload of the web bundle, neither of which that command depended on; automating a web deploy is out of MG-23's scope. See [CI/CD Pipeline → Prod](ci-cd.md#prod) for the full gating model.
 
 ## Library Development
 
@@ -333,7 +357,7 @@ nx affected:graph
 nx affected:graph --base=main
 
 # Show affected projects between branches
-nx affected:graph --base=develop --head=feature-branch
+nx affected:graph --base=main --head=feature-branch
 ```
 
 ### Build Optimization
@@ -443,7 +467,7 @@ nx affected:test --base=main
 nx run-many --target=build --configuration=production --all
 
 # 2. Deploy infrastructure changes first
-nx apply infrastructure --env=prod
+nx apply infrastructure
 
 # 3. Deploy applications (prod is API-only — no prod web deploy yet).
 #    CI-gated: the app-deploy-prod.yml workflow runs this, not an operator.

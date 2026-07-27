@@ -509,8 +509,8 @@ nx lint api                         # Lint specific project
 nx affected:lint                    # Lint affected projects
 
 # Infrastructure and deployment
-nx plan infrastructure --env=dev    # Plan Terraform changes
-nx apply infrastructure --env=dev   # Apply infrastructure
+nx plan infrastructure --args="--env=dev"    # Plan Terraform changes
+nx apply infrastructure   # Apply infrastructure
 nx deploy api --functionApp=<name>  # Deploy Azure Functions (func publish; no --env)
 ```
 

@@ -105,10 +105,15 @@ describe('MG-20: npm toolchain pin', () => {
       );
     });
 
-    it('leaves the deploy jobs free of npm ci (nothing to pin there)', () => {
-      // deploy-prod was split out of ci.yml into app-deploy-prod.yml (MG-21);
-      // deploy-dev is the only deploy job that remains here.
-      for (const jobName of ['deploy-dev']) {
+    it('leaves the infrastructure jobs free of npm ci (nothing to pin there)', () => {
+      // deploy-prod was split out into app-deploy-prod.yml (MG-21), and MG-23
+      // replaced the dev deploy job with a single CREDENTIALLESS validation job,
+      // `validate-infrastructure` — the only infrastructure job in this
+      // workflow. The post-merge apply lives in its own workflow,
+      // infra-apply-dev.yml. Neither installs npm packages, so neither needs the
+      // corepack pin — but if one ever grows an `npm ci` it must gain
+      // `corepack enable` too, and this guard is what surfaces that.
+      for (const jobName of ['validate-infrastructure']) {
         const job = jobs[jobName];
         expect(job).toBeDefined();
         expect(firstRunStepIndex(job.steps ?? [], 'npm ci')).toBe(-1);

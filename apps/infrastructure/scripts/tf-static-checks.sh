@@ -46,6 +46,41 @@
 #      is best-effort; the `terraform show -json` inspection is what actually
 #      guarantees no sensitive VALUE materializes — so it must be a documented,
 #      required pre-apply step, not an optional footnote (MG-24 red-fix).
+#  13. ALLOWLIST DRIFT (MG-23 F9/F10). Every `role_definition_name` in the
+#      Terraform graph must appear in bootstrap/tf-managed-role-allowlist.tsv,
+#      and every allowlisted role must appear in the graph. That file is the
+#      single source the bootstrap builds the apply identity's ABAC condition
+#      from, so a role added to the graph but not to the allowlist would be
+#      DENIED at apply time — mid-run, with AuthorizationFailed and a partially
+#      applied stack. This check moves that failure to PR time with a message
+#      naming the fix. HONEST SCOPE: it guards role NAMES only. GUID correctness
+#      is a LIVE bootstrap-time property (bootstrap.sh resolves each GUID from
+#      the tenant and fails closed on disagreement); a credential-less CI job
+#      cannot re-verify it.
+#  14. GRAPH SCOPE REGRESSION GUARD (MG-23 F14). No `azurerm_role_assignment` in
+#      the graph may be scoped to a subscription, or to a resource group other
+#      than the workload RG. The MG-23 dev apply identity is Contributor on
+#      meatgeek-v2-dev-rg and NOTHING else, so a subscription-scoped assignment
+#      in the graph is not merely over-broad — it is unappliable by CI, and the
+#      tempting "fix" (widening the identity) would demolish the RG boundary the
+#      whole threat model rests on. HONEST SCOPE: this is a regression guard on
+#      the TERRAFORM GRAPH. The genuinely out-of-RG grants in this system are
+#      BOOTSTRAP-managed (subscription Reader for the plan identity, the
+#      container-scoped state roles) and are invisible to an HCL scan; they are
+#      asserted separately, by name, in bootstrap/bootstrap.test.sh.
+#  15. TERRAFORM TESTS ARE MOCK-PROVIDER / NON-APPLYING (MG-23). Every
+#      `*.tftest.hcl` must run against MOCKED providers and must never apply.
+#      This is what makes the credentialless PR gate credentialless: as of MG-23
+#      a pull request touching apps/infrastructure/** runs `terraform test` with
+#      NO Azure identity, NO `id-token: write` and NO protected environment (see
+#      scripts/assert-credentialless.sh, which proves the same property at
+#      RUNTIME). A test file that declares a REAL provider block, or that runs
+#      `command = apply`, would attempt live Azure authentication or live
+#      provisioning from a PR — turning the one job an untrusted contributor can
+#      reach into an Azure-reaching job. So: no top-level `provider "..."` block,
+#      no `command = apply`, and any file referencing an azurerm_/azapi_ resource
+#      must declare the matching `mock_provider`. Finding ZERO test files is also
+#      a failure — a gate that certifies an empty test set is fail-open.
 #
 # OPERATOR-ACCEPTED RESIDUAL (MG-24 — operator decision, steve@bargelt.com):
 #   The azurerm_application_insights.main resource STAYS Terraform-managed. Every
@@ -331,7 +366,7 @@ else
 fi
 check "Function App: managed identity + default-deny auth + no secret settings" "${func_posture%$'\n'}"
 
-# --- 10. Globally-unique Functions storage account name (MG-24 red-fix) ------
+# --- CHECK 10. Globally-unique Functions storage account name (MG-24 red-fix) ------
 # Must be subscription-derived (same approach as the Cosmos account name) so a
 # greenfield apply cannot collide with a pre-existing global storage name.
 if grep -qE 'functions_storage_account_name[[:space:]]*=.*sha1\(' "${INFRA_DIR}/main.tf" 2>/dev/null && \
@@ -342,7 +377,7 @@ else
     "functions_storage_account_name must derive from sha1(subscription_id ...) in main.tf"
 fi
 
-# --- 11. IoT Hub Event Hubs routing endpoint is identity-based (MG-24 S1) ----
+# --- CHECK 11. IoT Hub Event Hubs routing endpoint is identity-based (MG-24 S1) ----
 # The custom Event Hubs routing endpoint must authenticate with the IoT Hub's
 # managed identity — NOT a SAS connection string (which would materialize a
 # key/connection string into Terraform state). Assert the endpoint declares
@@ -367,7 +402,7 @@ else
 fi
 check "IoT Hub routing endpoint: identity-based, no SAS connection string" "${iot_routing%$'\n'}"
 
-# --- 12. Authoritative FAIL-CLOSED plan/state secret inspection is a REQUIRED --
+# --- CHECK 12. Authoritative FAIL-CLOSED plan/state secret inspection is a REQUIRED --
 # pre-apply gate in the README (MG-24 item 6). The static output scan (check 7)
 # is best-effort and cannot semantically prove no sensitive VALUE materializes.
 # The OLD authoritative gate was a README one-liner
@@ -403,6 +438,144 @@ else
   runbook="README.md not found"
 fi
 check "fail-closed plan/state secret inspection is a required pre-apply gate (README)" "${runbook%$'\n'}"
+
+# --- CHECK 13. Terraform-managed role allowlist drift (MG-23 F9/F10) ---------------
+# bootstrap/tf-managed-role-allowlist.tsv is the SINGLE source of truth for the
+# role definitions the dev infra-apply identity's ABAC condition permits. Two
+# artifacts read it — bootstrap.sh (to BUILD the condition) and this check (to
+# diff it against the graph) — so it can never drift from what is enforced.
+#
+# The graph side is grepped from the .tf sources, which deliberately INCLUDES
+# count-disabled resources. A `terraform plan` under-enumerates: the app-deploy
+# publisher assignments are guarded on `app_deploy_principal_object_id != ""` and
+# the native-otlp module is count-guarded, so a plan taken while those guards are
+# off omits roles a later plan will require — and an allowlist built from it
+# fails closed mid-apply the first time a guard flips.
+ALLOWLIST="${INFRA_DIR}/bootstrap/tf-managed-role-allowlist.tsv"
+allowlist_drift=""
+if [[ -f "${ALLOWLIST}" ]]; then
+  graph_roles="$(grep -rhoE 'role_definition_name[[:space:]]*=[[:space:]]*"[^"]+"' \
+      --include='*.tf' --exclude-dir='.terraform' --exclude-dir='node_modules' --exclude-dir='.nx' \
+      "${INFRA_DIR}" 2>/dev/null \
+    | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/' | sort -u)"
+  allow_roles="$(awk -F'\t' '$0 !~ /^#/ && NF >= 2 && $1 != "" { print $1 }' "${ALLOWLIST}" | sort -u)"
+
+  if [[ -z "${graph_roles}" ]]; then
+    # Zero matches means the grep broke, not that the graph has no role
+    # assignments — treat a silent zero as a failure, never as a pass.
+    allowlist_drift+="no role_definition_name found anywhere in the Terraform graph — this check has stopped working (it must never pass by finding nothing)"$'\n'
+  fi
+  if [[ -z "${allow_roles}" ]]; then
+    allowlist_drift+="the allowlist ${ALLOWLIST} parsed to ZERO roles (expected tab-separated '<role>\\t<guid|PENDING>' rows)"$'\n'
+  fi
+
+  missing_from_allowlist="$(comm -23 <(printf '%s\n' "${graph_roles}") <(printf '%s\n' "${allow_roles}") || true)"
+  missing_from_graph="$(comm -13 <(printf '%s\n' "${graph_roles}") <(printf '%s\n' "${allow_roles}") || true)"
+  if [[ -n "${missing_from_allowlist}" ]]; then
+    allowlist_drift+="role(s) in the Terraform graph but NOT in ${ALLOWLIST} — the dev CI apply would be DENIED mid-run (AuthorizationFailed, partial state). Add them to the allowlist and RE-RUN apps/infrastructure/bootstrap/bootstrap.sh so the live ABAC condition is reconciled:"$'\n'"${missing_from_allowlist}"$'\n'
+  fi
+  if [[ -n "${missing_from_graph}" ]]; then
+    allowlist_drift+="role(s) in ${ALLOWLIST} but NOT in the Terraform graph — the apply identity is permitted to grant a role nothing needs. Remove them and re-run bootstrap.sh:"$'\n'"${missing_from_graph}"$'\n'
+  fi
+else
+  allowlist_drift="role allowlist not found: ${ALLOWLIST} (bootstrap.sh builds the apply identity's ABAC condition from it; without the file there is nothing to enforce)"
+fi
+check "Terraform-managed role allowlist matches the graph (names only — GUIDs are verified live by bootstrap.sh)" "${allowlist_drift%$'\n'}"
+
+# --- CHECK 14. Role-assignment scope regression guard (MG-23 F14) ------------------
+# The load-bearing invariant: no identity inside meatgeek-v2-dev-rg holds a role
+# OUTSIDE it. The dev infra-apply identity is Contributor on that RG and nothing
+# else, so a subscription-scoped (or foreign-RG-scoped) azurerm_role_assignment
+# is not just over-broad — CI literally cannot apply it, and the tempting fix
+# (widen the identity) would dissolve the boundary the MG-23 threat model rests
+# on. Fail here instead, at PR time.
+ra_scope_lines="$(
+  find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' \) -prune -o \
+    -type f -name '*.tf' -print 2>/dev/null |
+  while IFS= read -r tf_file; do
+    awk -v f="${tf_file}" '
+      /^[[:space:]]*resource[[:space:]]+"azurerm_role_assignment"/ { inblk = 1 }
+      inblk && /^[[:space:]]*scope[[:space:]]*=/ { printf "%s:%d:%s\n", f, NR, $0 }
+      inblk && /^}/ { inblk = 0 }
+    ' "${tf_file}"
+  done
+)"
+ra_scope_hits=""
+if [[ -z "${ra_scope_lines}" ]]; then
+  # As in check 13: finding nothing means the extractor broke. The graph has role
+  # assignments; a scan that silently matches zero of them must not report pass.
+  ra_scope_hits+="no azurerm_role_assignment scope lines found — this check has stopped working (it must never pass by finding nothing)"$'\n'
+fi
+# a) A subscription scope: /subscriptions/... with no /resourceGroups/ segment,
+#    or a bare data.azurerm_subscription reference.
+sub_scoped="$(printf '%s\n' "${ra_scope_lines}" \
+  | grep -E '/subscriptions/|data\.azurerm_subscription' | grep -vE '/resourceGroups/' || true)"
+[[ -n "${sub_scoped}" ]] && ra_scope_hits+="SUBSCRIPTION-scoped role assignment (the CI apply identity has no subscription-level permission, by design — F18):"$'\n'"${sub_scoped}"$'\n'
+# b) A literal resource-group scope that is not the workload RG. An interpolated
+#    name (${...}) is the env-derived workload RG and is allowed; the state RG
+#    (meatgeek-v2-tfstate-rg) is deliberately NOT — it lives outside the boundary.
+foreign_rg_literal="$(printf '%s\n' "${ra_scope_lines}" \
+  | grep -E '/resourceGroups/' \
+  | grep -vE '/resourceGroups/(\$\{|meatgeek-v2-(dev|prod)-rg)' || true)"
+[[ -n "${foreign_rg_literal}" ]] && ra_scope_hits+="role assignment scoped to a resource group OTHER than the workload RG:"$'\n'"${foreign_rg_literal}"$'\n'
+# c) A reference to a resource group resource other than azurerm_resource_group.main
+#    (the workload RG this stack owns).
+foreign_rg_ref="$(printf '%s\n' "${ra_scope_lines}" \
+  | grep -E 'azurerm_resource_group\.[A-Za-z0-9_]+' \
+  | grep -vE 'azurerm_resource_group\.main\b' || true)"
+[[ -n "${foreign_rg_ref}" ]] && ra_scope_hits+="role assignment scoped to a resource group other than azurerm_resource_group.main:"$'\n'"${foreign_rg_ref}"$'\n'
+check "no azurerm_role_assignment escapes the workload resource group (graph regression guard)" "${ra_scope_hits%$'\n'}"
+
+# --- CHECK 15. Terraform tests are mock-provider / non-applying (MG-23) -------------
+# The PR gate is credentialless (no identity, no id-token, no environment), and
+# `terraform test` is the ONE thing it runs that could conceivably reach Azure.
+# A real `provider` block would make the test authenticate; `command = apply`
+# would make it PROVISION. Either turns the only PR-reachable infrastructure job
+# into an Azure-reaching one. assert-credentialless.sh proves the job holds no
+# credential at runtime; this proves the tests would not use one even if it did.
+tftest_files="$(
+  find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' -o -name '.git' \) -prune -o \
+    -type f -name '*.tftest.hcl' -print 2>/dev/null | sort
+)"
+tftest_hits=""
+if [[ -z "${tftest_files}" ]]; then
+  # Same fail-open logic as checks 13/14: matching nothing must never pass.
+  tftest_hits+="no *.tftest.hcl files found under ${INFRA_DIR} — the credentialless PR gate would certify an EMPTY test set (this check must never pass by finding nothing)"$'\n'
+else
+  while IFS= read -r tf_test; do
+    [[ -n "${tf_test}" ]] || continue
+    # Strip comments before matching. monitoring_signals.tftest.hcl legitimately
+    # DISCUSSES `command = apply` in a comment explaining why it is not used, and
+    # a lexical guard that cannot tell code from prose would fail the committed
+    # tree. Full-line and trailing `#`/`//` comments are removed; a `#` inside a
+    # string literal is over-stripped, which is safe here (it can only mask a
+    # violation in prose, never invent one).
+    code="$(sed -e 's|^[[:space:]]*#.*$||' -e 's|[[:space:]]#.*$||' \
+                -e 's|^[[:space:]]*//.*$||' -e 's|[[:space:]]//.*$||' "${tf_test}")"
+
+    # a) A REAL top-level provider block. `mock_provider "..."` does not match
+    #    (it starts with `mock_`), and a nested `providers = {` does not match
+    #    (this requires whitespace then a quote after `provider`).
+    real_provider="$(printf '%s\n' "${code}" | grep -nE '^[[:space:]]*provider[[:space:]]+"' || true)"
+    [[ -n "${real_provider}" ]] && tftest_hits+="${tf_test}: declares a REAL provider block (tests must use mock_provider — a real provider authenticates to Azure):"$'\n'"${real_provider}"$'\n'
+
+    # b) An APPLYING run block.
+    applying="$(printf '%s\n' "${code}" | grep -nE 'command[[:space:]]*=[[:space:]]*apply' || true)"
+    [[ -n "${applying}" ]] && tftest_hits+="${tf_test}: uses \`command = apply\` (tests must be non-applying — a PR must never provision):"$'\n'"${applying}"$'\n'
+
+    # c) References an azurerm_/azapi_ resource without the matching mock_provider.
+    #    One-directional on purpose: declaring a mock for a provider the file does
+    #    not reference is harmless, referencing one with no mock is not.
+    for prov in azurerm azapi; do
+      if printf '%s\n' "${code}" | grep -qE "\b${prov}_[a-z0-9_]+" ; then
+        if ! printf '%s\n' "${code}" | grep -qE "^[[:space:]]*mock_provider[[:space:]]+\"${prov}\"" ; then
+          tftest_hits+="${tf_test}: references ${prov}_* resources but declares no \`mock_provider \"${prov}\"\` — the test would use a REAL ${prov} provider"$'\n'
+        fi
+      fi
+    done
+  done <<< "${tftest_files}"
+fi
+check "terraform tests are mock-provider and non-applying (credentialless PR gate)" "${tftest_hits%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then

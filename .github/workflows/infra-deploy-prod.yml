@@ -1,18 +1,36 @@
 name: Deploy Prod Infrastructure
 
-# Manual/recovery only. Auto-apply-on-merge (push + paths: apps/infrastructure/**)
-# stays deferred: this workflow is PLAN-ONLY. Even with a remote state backend,
-# an auto-apply against greenfield V2 state would try to create all prod infra
-# in CI — the live greenfield dev/prod plan+apply is the operator's out-of-band
-# acceptance step (MG-24), not a CI action.
+# PROD infrastructure: manual/recovery only, and PLAN-ONLY. Unchanged by MG-23.
+#
+# CI-run reconciliation is the INTENDED STEADY STATE for this repo — it is not
+# forbidden on principle, it is simply not activated for prod yet. Where things
+# stand today:
+#   dev  — ACTIVE under MG-23 (automated dev GitOps reconciliation, CI-run):
+#          a PR is validated CREDENTIALLESSLY by ci.yml's validate-infrastructure
+#          job — no terraform plan, no Azure identity, no remote state — and the
+#          merge to main drives infra-apply-dev.yml, which takes the
+#          authoritative plan against real state, applies that exact saved plan,
+#          and then fails the run on drift.
+#   prod — NOT YET. Activating the CI-run prod apply is MG-25's deliverable and
+#          is explicitly out of scope for MG-23. Until then this workflow is
+#          dispatched by hand and stops at `plan`: prod state is still
+#          greenfield, so an unattended apply here would create the entire prod
+#          stack in CI on its first run.
+# MG-24 = Terraform reconciliation (operator-run). MG-23 = automated dev GitOps
+# reconciliation (CI-run). Activation procedure for dev:
+# docs/infrastructure/mg23-live-acceptance.md
+#
+# Bootstrap, resource-group creation, subscription-scoped configuration and
+# disaster recovery stay OPERATOR actions in every environment, including dev.
 on:
   workflow_dispatch:
 
 # OIDC: this workflow authenticates to Azure via a GitHub-Environment-scoped
 # federated credential (subject `repo:<owner>/<repo>:environment:production`),
-# NOT a long-lived service-principal secret. The dev CI identity is scoped to
-# `environment:development` (a SEPARATE identity/subject) and can never
-# authenticate here. `id-token: write` lets azure/login mint the short-lived
+# NOT a long-lived service-principal secret. The dev identities are scoped to
+# their own environments (`development-infra-apply`, `development`) — SEPARATE
+# identities and subjects — and none can authenticate
+# here. `id-token: write` lets azure/login mint the short-lived
 # OIDC token; `contents: read` is for checkout.
 permissions:
   id-token: write
@@ -72,8 +90,10 @@ jobs:
           terraform_version: '~1.9'
 
       - name: Plan Infrastructure (plan-only)
-        # PLAN-ONLY by design — no `terraform apply` in this workflow. The live
-        # greenfield prod apply is the operator's out-of-band acceptance step.
+        # PLAN-ONLY — no apply step in this workflow, and MG-23 did not change
+        # that. Dev now reconciles through CI (infra-apply-dev.yml); prod's
+        # equivalent activation is MG-25. Until then the live greenfield prod
+        # apply is the operator's out-of-band step, run after reviewing this plan.
         # Bind the per-env remote backend at init so prod uses its ISOLATED state
         # key (meatgeek-v2/prod.tfstate); -reconfigure handles env switches. The
         # state-account name is derived ONCE from the subscription id by the shared

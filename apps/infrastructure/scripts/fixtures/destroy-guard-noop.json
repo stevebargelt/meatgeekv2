@@ -1,0 +1,43 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "_fixture_note": "MG-23 destroy circuit-breaker fixture — the CONVERGED steady state. Every change is a no-op, so the plan destroys nothing and the guard must PASS. This is what an automatic apply-on-merge sees on a push to main that did not touch apps/infrastructure/**, and what the FINAL drift plan must produce after every apply.",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_resource_group.main",
+          "type": "azurerm_resource_group",
+          "name": "main",
+          "values": { "name": "meatgeek-v2-dev-rg", "location": "westus2" }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "azurerm_resource_group.main",
+      "type": "azurerm_resource_group",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    },
+    {
+      "address": "module.cosmos_db.azurerm_cosmosdb_account.main",
+      "type": "azurerm_cosmosdb_account",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    },
+    {
+      "address": "module.iot_hub.azurerm_iothub.main",
+      "type": "azurerm_iothub",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    },
+    {
+      "address": "module.azure_functions.azurerm_function_app_flex_consumption.main",
+      "type": "azurerm_function_app_flex_consumption",
+      "name": "main",
+      "change": { "actions": ["no-op"] }
+    }
+  ]
+}

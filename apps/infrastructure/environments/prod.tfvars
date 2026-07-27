@@ -87,3 +87,21 @@ enable_backup         = true
 backup_retention_days = 30
 auto_shutdown_enabled = false # Never auto-shutdown production
 budget_limit          = 200   # Reduced budget with cost-optimized throughput
+
+# MG-23 (automated dev GitOps reconciliation, CI-run) — subscription-scoped budget
+# is NOT managed from this stack, in prod either. Prod infra CI stays PLAN-ONLY and
+# operator-applied today (prod's CI-run apply is MG-25), so prod could technically
+# still manage a /subscriptions/<id> resource. It is set false anyway, deliberately:
+#   - one graph, one boundary. "The Terraform stack is authoritative for resources
+#     INSIDE meatgeek-v2-<env>-rg and nothing else" is a far easier invariant to
+#     keep true than an env-conditional one, and the static checks enforce it
+#     uniformly rather than per-environment.
+#   - MG-25 activates prod on the same RG-scoped apply identity and would hit this
+#     exact wall; discovering it then, mid-apply, is strictly worse than now.
+# The RG-scope budget above remains the primary prod spend control. The
+# subscription-level credit warning is an operator/bootstrap concern.
+#
+# If a prod apply has ALREADY created this resource, flipping to false plans a
+# DESTROY — drop it from state instead, keeping the live alert:
+#   terraform state rm 'module.monitoring.azurerm_consumption_budget_subscription.credit_budget'
+manage_subscription_budget = false

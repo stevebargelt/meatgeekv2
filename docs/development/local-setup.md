@@ -81,8 +81,8 @@ terraform init -reconfigure \
   -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
 
 # Plan and apply development infrastructure
-nx plan infrastructure --env=dev
-nx apply infrastructure --env=dev
+nx plan infrastructure --args="--env=dev"
+nx apply infrastructure
 ```
 
 ### 4. Start Development Services

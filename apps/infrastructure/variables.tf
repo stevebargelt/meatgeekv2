@@ -252,6 +252,43 @@ variable "secondary_budget_limit" {
   default     = 150
 }
 
+# MG-23 (automated dev GitOps reconciliation, CI-run) — THE RG BOUNDARY, MADE REAL.
+#
+# azurerm_consumption_budget_subscription.credit_budget (modules/monitoring) is
+# scoped to /subscriptions/<id>. Writing it needs a SUBSCRIPTION-scoped writer. The
+# MG-23 dev apply identity is Contributor scoped ONLY to meatgeek-v2-dev-rg, so
+# with this budget unguarded the CI apply could not apply this configuration AT
+# ALL — it would fail with AuthorizationFailed partway through, leaving partial
+# state.
+#
+# The fix belongs in the GRAPH, not in the identity. Widening the apply SP to
+# subscription scope would break the closed-escalation-path precondition the whole
+# MG-23 threat model rests on (NO Microsoft Graph, NO subscription scope, state
+# account in the SEPARATE meatgeek-v2-tfstate-rg). So the subscription budget is
+# count-guarded OFF by default and subscription-scoped spend control becomes a
+# BOOTSTRAP/OPERATOR concern, exactly like resource-group creation and resource-
+# provider registration.
+#
+# THE BOUNDARY, STATED ONCE: the CI apply is authoritative for resources INSIDE
+# meatgeek-v2-<env>-rg and NOTHING ELSE. Anything subscription-scoped is operator
+# territory. Adding another subscription-scoped resource to this graph re-breaks
+# the CI apply — count-guard it the same way.
+#
+# ⚠️  FLIPPING THIS OFF FOR AN ENVIRONMENT THAT ALREADY APPLIED IT PLANS A DESTROY.
+# dev applied under MG-24, so credit_budget IS in dev state. Before activating the
+# MG-23 loop the operator must EITHER let one operator-run apply destroy it, OR —
+# preferred, because it keeps the spend alert alive while moving ownership out of
+# CI's authority — drop it from state without touching Azure:
+#   terraform state rm 'module.monitoring.azurerm_consumption_budget_subscription.credit_budget'
+# Doing neither means the first CI apply plans a delete and the destroy circuit-
+# breaker in .github/workflows/infra-apply-dev.yml correctly FAILS the run. See
+# docs/infrastructure/mg23-live-acceptance.md.
+variable "manage_subscription_budget" {
+  description = "Manage the SUBSCRIPTION-scoped secondary budget in this Terraform stack. Default false: the resource is not created, keeping the whole graph applicable by an identity scoped only to the workload resource group (MG-23). Subscription-scoped spend control is an operator/bootstrap concern. Flipping this on requires a subscription-scoped apply identity, which MG-23's threat model forbids for CI."
+  type        = bool
+  default     = false
+}
+
 # Observability / Azure Monitor cost control
 variable "ingestion_cap_gb" {
   description = "Daily ingestion cap (GB/day) on the Log Analytics workspace. Hard guardrail against runaway Azure Monitor cost."

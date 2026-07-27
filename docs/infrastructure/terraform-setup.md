@@ -10,11 +10,25 @@ Cosmos DB account) and has **no** dependency on the legacy V1 system.
 > **Hard safety (MG-24).** Never import, adopt, modify, rename, or delete a V1
 > Azure resource from this project. V2 always uses the `azurerm` **remote**
 > backend with a per-environment state key — there is no supported local-state
-> path. Apply is an **operator** action; CI is plan-only.
+> path.
+
+> **Who applies (MG-23).** **Dev infrastructure reconciles through CI.** An
+> infrastructure change is written in a PR, **validated credentiallessly** by
+> `ci.yml`'s `validate-infrastructure` job (no Azure identity, no GitHub
+> Environment, no remote state — see below), reviewed, merged, and applied
+> automatically by
+> `.github/workflows/infra-apply-dev.yml`. **Prod** is still operator-applied —
+> `infra-deploy-prod.yml` is plan-only until **MG-25** activates CI-run prod
+> reconciliation. Bootstrap, resource-group creation, subscription-scoped
+> configuration and disaster recovery are **operator** actions everywhere.
+> MG-24 = Terraform reconciliation (operator-run); MG-23 = automated dev GitOps
+> reconciliation (CI-run).
 
 For the end-to-end operator procedure (bootstrap + the greenfield dev
 plan/apply acceptance with evidence capture) see the
-**[bootstrap runbook](./bootstrap-runbook.md)**.
+**[bootstrap runbook](./bootstrap-runbook.md)**. For activating and proving the
+dev GitOps loop, see
+**[MG-23 live acceptance & activation](./mg23-live-acceptance.md)**.
 
 ## Directory Structure
 
@@ -218,14 +232,25 @@ the remote backend by itself (see the caveat under Common Nx commands below):
 ### Common Nx commands
 
 ```bash
-nx init     infrastructure --env=dev     # binds the hcl only — see caveat below
-nx plan     infrastructure --env=dev
-nx apply    infrastructure --env=dev     # operator-run only, never CI
+nx run infrastructure:init --args="--env=dev"  # binds the hcl only — see caveat below
+nx plan infrastructure --args="--env=dev"
+nx apply infrastructure                        # bootstrap/recovery only — steady-state dev applies run in CI
 nx validate infrastructure
-nx destroy  infrastructure --env=dev
+nx destroy infrastructure --args="--env=dev"
 ```
 
-> **`nx init` does not bind the remote backend on its own.** The `init` wrapper
+> **Invocation form matters.** The environment must be passed as
+> `--args="--env=<env>"`: `env` is a reserved `nx:run-commands` option typed as
+> an *object*, so a bare `--env=dev` is rejected before Terraform runs. `init`
+> additionally requires the `nx run <project>:<target>` form, because a bare
+> `nx init` collides with Nx's **built-in** workspace initializer and the
+> Terraform target never runs. `apply` takes **no** environment argument — its
+> command has no `{args.*}` placeholder, so a trailing flag would be forwarded
+> verbatim to Terraform; the environment is already baked into `tfplan` by the
+> preceding `nx plan`.
+
+> **`nx run infrastructure:init` does not bind the remote backend on its own.**
+> The `init` wrapper
 > runs `terraform init -reconfigure -backend-config=environments/backend-{env}.hcl`
 > **without** the derived `storage_account_name`, which the `backend-*.hcl` files
 > deliberately omit — so on a clean checkout it cannot resolve the state account.
@@ -268,19 +293,61 @@ separately under MG-25** (the `production` GitHub Environment secret +
 
 ## CI/CD Integration
 
-CI **never** runs `terraform apply`. The authoritative model:
+CI reconciles **dev** infrastructure and plans **prod**. The authoritative model:
 
-- **`.github/workflows/ci.yml`** — the `validate-infrastructure` job runs
-  `terraform validate`, `terraform fmt -check`, and `scripts/tf-static-checks.sh`.
-  The `deploy-dev` job is **plan-only**.
+- **`.github/workflows/ci.yml`** — the `validate-infrastructure` job is the
+  **only** infrastructure job reachable from a pull request, and it is
+  **CREDENTIALLESS**: `permissions: contents: read` only (**no**
+  `id-token: write`), **no** `environment:`, **no** `azure/login`, no client or
+  subscription id, and an `env:` block pinning `ARM_USE_OIDC`, `ARM_USE_CLI`,
+  `ARM_USE_MSI` and `ARM_USE_AKS_WORKLOAD_IDENTITY` all to `'false'` so the
+  provider refuses ambient credentials even if some future edit leaves them
+  lying around. On every PR and push it runs, in order:
+
+  1. `scripts/assert-credentialless.sh` — fails the job at runtime if any
+     `ARM_*`/`AZURE_*` credential material, cached `az login`, or
+     `ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN` pair is present;
+  2. `terraform fmt -check -recursive`;
+  3. `terraform init -backend=false -input=false -lockfile=readonly`;
+  4. `terraform validate`;
+  5. `terraform test` (root module);
+  6. `scripts/tf-static-checks.sh`;
+  7. `bootstrap/bootstrap.test.sh`;
+  8. the destroy-guard fixture harness (bash **and** dash);
+  9. `terraform test` per test-bearing module — `modules/functions`,
+     `modules/iot-hub`, `modules/monitoring`;
+  10. the pinned OTel collector config validate.
+
+  > **`-backend=false` is an `init` flag, not a `validate` or `test` flag.**
+  > `terraform validate` and `terraform test` do **not** accept it; passing it
+  > there is an error, not a no-op. It belongs on `init` alone, and it is
+  > precisely why this job needs no state credential: with no backend
+  > configured, nothing reaches `meatgeek-v2/dev.tfstate`. `-input=false` makes a
+  > missing value fail fast instead of hanging; `-lockfile=readonly` fails rather
+  > than silently rewriting the committed root `.terraform.lock.hcl` (valid only
+  > for the root module — the per-module inits omit it because those modules have
+  > no committed lock file yet).
+
+  There is **no PR-time `terraform plan`** and no PR-reachable Azure identity of
+  any kind. The authoritative plan is the one taken post-merge by
+  `infra-apply-dev.yml`, against real state, behind the secret gate and the
+  destroy circuit-breaker. PR jobs never apply, and now never authenticate
+  either.
+- **`.github/workflows/infra-apply-dev.yml`** — **applies dev automatically**
+  after CI goes green on a push to `main` (MG-23). It checks out the exact CI'd
+  SHA, plans to a file, gates that file (secret inspection + a circuit-breaker
+  that blocks both destroys and `forget`/state-orphaning changes), applies
+  **that saved plan**, re-gates the resulting state,
+  and ends with a final plan that **fails the run on drift**. Every job skips
+  cleanly unless `DEV_TF_BACKEND_READY == 'true'`.
 - **`.github/workflows/infra-deploy-prod.yml`** — authenticates via **OIDC**
   (`id-token: write`, `azure/login` with the per-environment federated
   credential; no long-lived service-principal secret), binds prod remote state
   (`terraform init -reconfigure -backend-config=environments/backend-prod.hcl`
   plus `-backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"`),
   runs under the `production`
-  GitHub Environment gate, and **ends at `terraform plan`**. There is **no**
-  `apply`.
+  GitHub Environment gate, and **ends at `terraform plan`**. Prod has **no** CI
+  apply yet — that is **MG-25**.
 - **`.github/workflows/app-deploy-prod.yml`** — reads
   `terraform output -raw function_app_name` and passes it to the `nx deploy api`
   step so the publish target can never desync from the Terraform name.
@@ -289,17 +356,33 @@ See **[CI/CD Pipeline](../development/ci-cd.md)** for the full model.
 
 ### OIDC deployment identity
 
-The GitHub Actions identity uses **federated credentials scoped per GitHub
+GitHub Actions identities use **federated credentials scoped per GitHub
 Environment** — the canonical subject scheme
 `repo:<owner>/<repo>:environment:<github-env>` where `<github-env>` is the exact
-`environment:` the deploy job declares (`repo:stevebargelt/meatgeekv2:environment:development`
-for dev and `:environment:production` for prod), not per branch — so the dev CI
-identity can never authenticate to prod. dev and prod are SEPARATE identities
-(no shared SP). It holds a **plan/read-only** role (`Reader` +
-`Storage Blob Data Contributor` on that env's state container only). Apply is
-never granted to CI. The identities are created by the bootstrap (see the
-runbook), and the workflow↔bootstrap subject alignment is asserted in CI by
-`oidc-subject-consistency.spec.ts`.
+`environment:` the job declares, not per branch. Under MG-23 the **environment**,
+not the client id a job passes, is what selects the identity:
+
+| GitHub Environment        | Identity        | Privilege                                                                                                                       |
+| ------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `development-infra-apply` | dev infra-apply | `Contributor` + a **conditioned** Role Based Access Control Administrator scoped **only** to `meatgeek-v2-dev-rg`, + `tfstate-dev` |
+| `development`             | dev app-deploy  | `Website Contributor` on its Function App only                                                                                    |
+| `production`              | prod plan/read  | `Reader` + `Storage Blob Data Contributor` on `tfstate-prod` only                                                                 |
+
+**There are FOUR GitHub Environments; the three above are the FEDERATED ones.**
+The fourth, `development-infra-apply-recovery`, is an **approval-only** gate for
+the recovery `workflow_dispatch` path and is deliberately **not federated** — no
+identity is bound to it and nothing logs into Azure under it, which is why it
+carries no row in the privilege table. Stated as one sentence so the two counts
+never read as a contradiction: **three federated + one approval-only recovery =
+four environments total.**
+
+**No pull-request-reachable job appears in this table**, because none holds an
+identity: `validate-infrastructure` binds no environment at all. Dev and prod are
+SEPARATE identities (no shared SP), so a dev identity can never authenticate to
+prod. Apply privilege is granted to exactly one identity, in exactly one
+environment, scoped to exactly one resource group. The identities are created by
+the bootstrap (see the runbook), and the workflow↔bootstrap subject alignment is
+asserted in CI by `oidc-subject-consistency.spec.ts`.
 
 ## Getting Started
 
@@ -339,12 +422,17 @@ runbook), and the workflow↔bootstrap subject alignment is asserted in CI by
    terraform init -reconfigure \
      -backend-config=environments/backend-dev.hcl \
      -backend-config="storage_account_name=$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
-   nx plan infrastructure --env=dev
-   # apply is operator-run per the runbook, after human plan review
+   nx plan infrastructure --args="--env=dev"
+   # For a steady-state dev change, stop here. This plan is for YOUR review only.
+   # Open a PR: CI validates it credentiallessly (no plan pre-merge), and the
+   # merge to main is what makes CI take the authoritative plan against real
+   # state and apply it (MG-23). Applying locally races the GitOps loop.
    ```
 
 The full greenfield acceptance (MG-24's 10-step dev proof with evidence capture)
-is in the **[bootstrap runbook](./bootstrap-runbook.md)**.
+is in the **[bootstrap runbook](./bootstrap-runbook.md)**; activating and proving
+the dev GitOps loop is in
+**[MG-23 live acceptance & activation](./mg23-live-acceptance.md)**.
 
 ## Authentication Integration
 
