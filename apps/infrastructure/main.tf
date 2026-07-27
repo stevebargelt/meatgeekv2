@@ -99,6 +99,7 @@ locals {
     Environment = var.environment
     ManagedBy   = "Terraform"
     Repository  = "stevebargelt/meatgeekv2"
+    GitOps      = "MG-23" # AC7 loop proof — reverted in the follow-up revert PR
   }
 
   # Location mapping for different environments
