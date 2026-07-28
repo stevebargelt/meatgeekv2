@@ -824,16 +824,25 @@ must nonetheless run _as that principal_, because the whole point is to exercise
 its ABAC condition. Two supported paths:
 
 **Path A (recommended) — a temporary, ref-scoped federated credential + a
-scratch workflow.**
+scratch workflow.** It needs the repository's live sub-claim prefix, so paste the
+`oidc_subject_prefix` helper from
+[B10](#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents)
+into the shell first — the same fail-closed read, for the same reason.
 
 ```bash
 # 1. Add a TEMPORARY federated credential for an acceptance branch.
 #    The `repo:…` head is the repository's LIVE sub-claim prefix, not a literal
 #    repo:<owner>/<repo> (MG-42) — read it rather than typing it, or the
 #    credential matches no token and azure/login fails AADSTS700213.
-PREFIX="$(gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub \
-  --jq '.sub_claim_prefix // "repo:stevebargelt/meatgeekv2"')"
-echo "$PREFIX"   # observed 2026-07-28: repo:stevebargelt@4857343/meatgeekv2@1304558512
+#    Resolve it with the fail-closed helper defined in B10 (paste that function
+#    first); do NOT default the prefix when the read fails. A prefix guessed
+#    during a GitHub API failure produces a credential that matches nothing, and
+#    you would spend the outage debugging the acceptance run instead.
+PREFIX="$(oidc_subject_prefix stevebargelt/meatgeekv2)" \
+  || echo "STOP: prefix unresolved — do not create the credential."
+[ -n "$PREFIX" ] && echo "$PREFIX"   # observed 2026-07-28: repo:stevebargelt@4857343/meatgeekv2@1304558512
+
+[ -n "$PREFIX" ] || { echo "PREFIX unresolved — do not run the create below."; }
 
 az ad app federated-credential create --id <APPLY_APP_ID> --parameters "$(cat <<JSON
 {
@@ -1234,10 +1243,92 @@ gh api "repos/$REPO/actions/oidc/customization/sub"
 # observed 2026-07-28:
 # {"use_default":true,"use_immutable_subject":false,
 #  "sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}
+```
 
-PREFIX="$(gh api "repos/$REPO/actions/oidc/customization/sub" \
-  --jq '.sub_claim_prefix // ""')"
-[ -n "$PREFIX" ] || PREFIX="repo:$REPO"   # only when the API returns none / 404
+**Resolve the prefix the way `bootstrap.sh` does — fail-closed.** A one-liner
+that defaults to `repo:$REPO` whenever the read does not produce a prefix is
+**wrong in the unsafe direction**: it defaults on a 403, a rate limit, an expired
+token, a proxy error page — every case that says *nothing* about this
+repository's configuration — and then reports MISMATCH against a subject the
+repo never presents, which is an invitation to "correct" three healthy live
+credentials into the MG-42 outage. `resolve_oidc_subject_prefix()` treats
+**exactly one** non-200 answer as a fact (an anchored `404` status line, behind a
+proven `gh` session) and aborts on all the rest. So does this:
+
+```bash
+# Mirrors resolve_oidc_subject_prefix() in apps/infrastructure/bootstrap/bootstrap.sh.
+# A function, so a refusal returns instead of killing an interactive shell.
+oidc_subject_prefix() { # <owner/repo>
+  local repo="$1" raw status=0 status_line http_code body prefix use_default
+
+  # 1. Prove the SESSION, not just the binary. An unauthenticated gh 404s on a
+  #    private repo's endpoints exactly like a repo with no customization, so a
+  #    404 is only readable as a fact behind this gate.
+  gh auth status >/dev/null 2>&1 || {
+    echo "ABORT: gh is not authenticated. Run 'gh auth login', then re-check." >&2
+    return 1
+  }
+
+  # 2. `-i` prints the response STATUS LINE ahead of the body, and that line is
+  #    the only authoritative statement of what THIS request returned. gh's exit
+  #    status is one bit and its stderr is a human diagnostic: a proxy error page
+  #    or an unrelated nested 404 both CONTAIN the text "HTTP 404" while saying
+  #    nothing about this endpoint. Match the status ANCHORED, first line only.
+  raw="$(gh api -i "repos/${repo}/actions/oidc/customization/sub" 2>/dev/null)" || status=$?
+  status_line="$(printf '%s\n' "$raw" | sed -n '1p' | tr -d '\r')"
+  http_code="$(printf '%s' "$status_line" | sed -n \
+    -e 's|^HTTP/[0-9][0-9.]* \([0-9][0-9][0-9]\)$|\1|p' \
+    -e 's|^HTTP/[0-9][0-9.]* \([0-9][0-9][0-9]\) .*$|\1|p')"
+  [ -n "$http_code" ] || {
+    echo "ABORT: no HTTP status line for this request (gh exited ${status}; first line was '${status_line}') — this request has NO authoritative status, so it cannot be read as 'no customization configured'." >&2
+    return 1
+  }
+
+  if [ "$http_code" = "404" ]; then
+    # The ONE response read as a fact rather than an outage: GitHub's "no
+    # sub-claim customization is configured".
+    printf 'repo:%s\n' "$repo"
+    return 0
+  fi
+  [ "$http_code" = "200" ] && [ "$status" -eq 0 ] || {
+    echo "ABORT: HTTP ${http_code} (gh exited ${status}) — a REAL GitHub error (auth / permission / throttling / network), NOT 'no customization configured'; only an exact 404 means that. Retry or check GitHub status; do not assume a prefix." >&2
+    return 1
+  }
+
+  # 3. The body is everything after the first blank line the headers ended with.
+  #    An empty body is an UNREADABLE prefix, not an absent customization.
+  body="$(printf '%s\n' "$raw" | tr -d '\r' | awk 'seen { print; next } /^$/ { seen = 1 }')"
+  [ -n "$body" ] || {
+    echo "ABORT: HTTP ${http_code} with an EMPTY body — the prefix is unreadable, which is not 'no customization configured'." >&2
+    return 1
+  }
+  use_default="$(printf '%s' "$body" | jq -r '(.use_default // false) | tostring')" \
+    && prefix="$(printf '%s' "$body" | jq -r '.sub_claim_prefix // ""')" || {
+    echo "ABORT: the response is not parseable JSON, so it cannot be read as 'no customization configured' either. Body: ${body}" >&2
+    return 1
+  }
+
+  # 4. THE AUTHORITY: a present, non-empty sub_claim_prefix decides the subject
+  #    whatever use_default says — on this repo use_default is `true` alongside
+  #    the custom prefix, and letting it win here is the MG-42 outage.
+  if [ -n "$prefix" ] && [ "$prefix" != "null" ]; then
+    printf '%s\n' "$prefix"
+    return 0
+  fi
+  # No prefix AND use_default=true is the only "default" the 200 path accepts —
+  # both halves required. use_default=false with no readable prefix is GitHub
+  # positively stating a customization exists whose prefix cannot be read; that
+  # says exactly as much about the subject as a 403 does, and aborts for the
+  # same reason.
+  [ "$use_default" = "true" ] || {
+    echo "ABORT: use_default=false with NO readable sub_claim_prefix — a customization GitHub says exists but whose prefix is unreadable. Falling back here would rewrite all three credentials to a subject no token carries (AADSTS700213). Body: ${body}" >&2
+    return 1
+  }
+  printf 'repo:%s\n' "$repo"
+}
+
+PREFIX="$(oidc_subject_prefix "$REPO")" \
+  || echo "STOP: the prefix did not resolve. B10 CANNOT be evaluated — do not compare, do not edit any credential, do not set DEV_TF_BACKEND_READY. See branch C below."
 echo "$PREFIX"
 ```
 
@@ -1246,6 +1337,11 @@ credential actually carries against `$PREFIX:environment:<env>`:
 
 ```bash
 check() { # <app-display-name> <cred-name> <github-env>
+  # An unresolved PREFIX would compare against ':environment:<env>' and report
+  # three spurious MISMATCHes — the same refusal federated_environment_subject()
+  # makes rather than composing a subject from an empty prefix.
+  [ -n "$PREFIX" ] \
+    || { echo "PREFIX unresolved — refusing to compare (see branch C)"; return 1; }
   # ALL matches, never [0]: Entra display names are NOT unique, and silently
   # picking one of two same-named apps is the ambiguity bootstrap dies on.
   APP_ID="$(az ad app list --display-name "$1" --query '[].appId' -o tsv)"
@@ -1278,6 +1374,15 @@ check meatgeek-v2-github-oidc        github-production                         p
   (see [the runbook's precondition table](bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned));
   a GitHub API outage is **not** an auth problem and `gh auth login` will not
   fix it.
+- **Branch C — `oidc_subject_prefix` printed `ABORT`.** The check is
+  **not evaluated** — neither passed nor failed — because the subject the
+  repository presents is unknown. **Change nothing**: do not compare, do not
+  hand-edit a credential, do not re-run `./bootstrap.sh` expecting a repair (it
+  reads the same endpoint and aborts in the same class, before provisioning
+  anything). Remediate by the class the message names — they map one-to-one onto
+  [the runbook's precondition table](bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned)
+  — then re-run the resolver. `DEV_TF_BACKEND_READY` stays unset until B10 has
+  actually produced three `MATCH`es.
 
 > **The trap this check exists to close.** A live credential whose subject does
 > **not** look like `repo:stevebargelt/meatgeekv2:environment:<env>` is almost

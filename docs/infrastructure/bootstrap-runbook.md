@@ -207,15 +207,22 @@ hand-"corrected" into the broken form.
 | Abort | What bootstrap saw | Remediation |
 | ----- | ------------------ | ----------- |
 | **`gh` not authenticated** | `gh auth status` fails. Previously only the *binary* had to exist; an unauthenticated `gh` 404s on a private repo's endpoints exactly like a repo with no customization, so it would have been read as "use the default prefix" and rewritten every credential. | `gh auth login`, then re-run. |
-| **GitHub API failure** — 403, 429/rate limit, 5xx, DNS, proxy | `gh api` exited non-zero with something **other** than `HTTP 404`. The response says nothing about the repo's configuration, so guessing the default prefix would be a guess that rewrites live trust. | **Retry / check GitHub status.** This is *not* an auth problem — `gh auth login` will not fix it, and running it here wastes the outage window. |
-| **Customization unreadable** — `use_default: false` with no readable prefix, or an unparseable response body | GitHub returned 200 but the answer cannot be used: either it positively states a customization exists (`use_default: false`) while carrying no usable `sub_claim_prefix`, or the body is not parseable JSON. Epistemically identical to a 403/5xx — unreadable, not absent. | Same class as above — re-read the customization (`gh api …/oidc/customization/sub`) and resolve why the prefix is missing or malformed. Do **not** fall back to the default. |
+| **GitHub API failure** — 403, 429/rate limit, 5xx, DNS, proxy | The response status line was something **other** than an exact `404` — or there was no parseable status line at all (a proxy that swallowed the response, a DNS failure), which is no authoritative status for the request and is read the same way. The response says nothing about the repo's configuration, so falling back to the default prefix would be a guess that rewrites live trust. | **Retry / check GitHub status.** This is *not* an auth problem — `gh auth login` will not fix it, and running it here wastes the outage window. |
+| **Customization unreadable** — `use_default: false` with no readable prefix, an empty body, or an unparseable one | GitHub returned 200 but the answer cannot be used: it positively states a customization exists (`use_default: false`) while carrying no usable `sub_claim_prefix`, or the body is empty, or it is not parseable JSON. Epistemically identical to a 403/5xx — unreadable, not absent. | Same class as above — re-read the customization (`gh api …/oidc/customization/sub`) and resolve why the prefix is missing or malformed. Do **not** fall back to the default. |
 | **Trust-root mismatch** | The resolved prefix does not name `stevebargelt/meatgeekv2` (after stripping GitHub's optional `@<digits>` owner-id/repo-id). Every identity — including the dev infra-apply one holding `Contributor` on the dev RG — would be federated to another repository's workflows. | A **reviewed edit to `GITHUB_REPO`** in `bootstrap.sh`, in a commit. If you forked the repo, that is the change to make; there is no environment-variable override and there is deliberately no workaround. |
 
-Only one non-zero `gh api` result is read as a *fact* rather than an outage:
-**`HTTP 404`**, which is GitHub's "no sub-claim customization is configured".
-Bootstrap then warns and federates the default `repo:<owner>/<repo>` prefix. The
-auth gate above is what makes that safe to trust — it rules out the other common
-meaning of a 404 on a private repo.
+Only one non-200 answer is read as a *fact* rather than an outage: **an exact
+`404`**, which is GitHub's "no sub-claim customization is configured". Bootstrap
+then warns and federates the default `repo:<owner>/<repo>` prefix. Two things
+make that safe to trust. The auth gate above rules out the other common meaning
+of a 404 on a private repo. And the status is taken from the **response status
+line** — bootstrap calls `gh api -i` and matches the first line anchored — not
+from `gh`'s exit code or a substring of its stderr: a proxy error page or an
+unrelated nested 404 can both *contain* the text `HTTP 404` while saying nothing
+about this endpoint, and reading one as the fallback signal is what deletes and
+recreates three live credentials on a subject no token carries. **If you check
+the customization by hand, discriminate the 404 the same way** — the procedure
+is [B10](mg23-live-acceptance.md#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents).
 
 > **An unauthenticated `gh` no longer gets as far as the Azure work.** Earlier
 > revisions of this runbook said the Azure side still completed and only the
