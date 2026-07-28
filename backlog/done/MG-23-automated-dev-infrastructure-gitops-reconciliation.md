@@ -1,9 +1,11 @@
 ---
 id: MG-23
 type: story
-status: active
+status: done
 title: automated dev infrastructure GitOps reconciliation (trunk-based main)
 created: 2026-07-19
+closed: 2026-07-27
+closed_commit: 4b0cc75
 ---
 
 ### MG-23 — automated dev infrastructure GitOps reconciliation (trunk-based main)
@@ -66,3 +68,21 @@ DEPENDS ON MG-24 (done). App-deployment is MG-36. Supply-chain (snyk pin, module
 
 ## Context
 Re-scoped 2026-07-27 (simplified, credentialless PR validation; PR plan identity removed). Supersedes the prior PR-plan-identity design. DEPENDS ON MG-24 (done). Do NOT create a develop branch; do NOT touch V1.
+
+## Acceptance Evidence (closed 2026-07-27)
+
+Activation ran live against VSE02 (sub c7e800cb) / dev RG `meatgeek-v2-dev-rg`. Three latent defects were found and fixed during activation (see follow-ups). Runbook: `docs/infrastructure/mg23-live-acceptance.md`.
+
+| AC | Evidence | Verdict |
+| --- | --- | --- |
+| Credentialless `validate-infrastructure` (assert-credentialless→…→OTel), no id-token/secrets/env, ARM_USE_* disarmed, mock-only; PR plan identity/live-plan/plan-env removed from code | Merged PR #27 (`aa13f0f`); AC7 PRs #29/#32 ran `validate-infrastructure` GREEN with no environment/approval; `assert-credentialless.sh` enforced live (acceptance run 30280819466) | met |
+| infra-apply-dev auto-reconciles current main SHA post-CI via infra-apply OIDC identity, full gated sequence, gated on DEV_TF_BACKEND_READY, skips when unset, concurrency + 90m timeout, no manual approval | Forward apply run 30285370992 + reverse 30286607215: stale-SHA guard → OIDC login → init → plan → secret gate → destroy-guard(0) → re-verify tip → apply → post-gate → CONVERGED; pre-activation runs skipped cleanly (783694e) | met |
+| Recovery = separate branch-restricted workflow_dispatch, verified protected env, never blocks normal reconciliation | `recovery_approval` job skipped on the normal path in both AC7 applies; `development-infra-apply-recovery` verified PROTECTED (B9). Live destroy-authorization recovery run not exercised (no destroy arose) | met |
+| Dedicated least-privilege infra-apply OIDC identity, distinct from app-deploy, no subscription scope, no Graph | SP `meatgeek-v2-github-infra-apply-dev` (8d7d37cb); live condition = RG-scoped 8-GUID allowlist + SP-only; scratch T2 rejected Owner/Contributor/UAA/RBAC-Admin, T7 RG-scope documented; bootstrap.test asserts no Graph | met |
+| Both environments explicitly created + verified PROTECTED, no GitHub auto-creation; flag stays false until verified | B9: development-infra-apply (main-only, 0 reviewers), development-infra-apply-recovery (main-only, 1 reviewer, prevent_self_review=false); DEV_TF_BACKEND_READY set true only after | met |
+| deploy-dev + orphaned upload removed; dead develop config removed; infra-deploy-prod prose corrected; committed root lock; CI green | PR #27; post-merge main CI green through `4b0cc75` | met |
+| Pre-merge blockers: secret-gate fail-closed; no blind identity selection; exact roles/envs asserted; bash+dash regression tests | PR #27 code + CI; live scratch harness B1–B5 + T1–T7 all pass (run 30280819466) | met |
+| Live GitOps loop AC7 (forward + reverse) | FORWARD 30285370992: apply 0 added/19 changed/0 destroyed, CONVERGED, `GitOps=MG-23` present on dev RG. REVERSE 30286607215: CONVERGED, tag removed. Both destroy-guard 0-destroys, both secret gates PASS | met |
+| Retired dev plan identity decommissioned across 5 objects + fed-cred sweep | §3/B8: app `63432b04` gone, SP `cc58ece1` gone, subscription Reader gone, tfstate-dev blob role gone, stale AZURE_CLIENT_ID var removed. DIVERGENCE (documented): the identity was federated to `development`, NOT `development-infra-plan` — that env never existed live (404); sweep confirms no cred names it | met |
+
+**Consciously-accepted residuals / follow-ups (not unmet AC):** B7 branch-protection SKIPPED (not an MG-23 AC; solo repo + apply-path gates are the control). T6 reconcile-regression live test DEFERRED to MG-42 (re-runs bootstrap, which reverts the manual OIDC-cred fix until MG-42 lands). **MG-42** = durable bootstrap fix for this repo's custom OIDC `sub_claim_prefix` (found+fixed the apply cred manually; app-deploy/prod creds still standard-prefix). Activation-fix commits: OIDC backend auth `094d0ce` (#30), budget resource_group_id `b9c922f` (#31).
