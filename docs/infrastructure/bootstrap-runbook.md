@@ -224,6 +224,16 @@ recreates three live credentials on a subject no token carries. **If you check
 the customization by hand, discriminate the 404 the same way** — the procedure
 is [B10](mg23-live-acceptance.md#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents).
 
+**Classifying the response is only the first half.** Whichever branch produced a
+prefix — the API's `sub_claim_prefix` or the default the `404`/`use_default=true`
+paths fall back to — `assert_oidc_subject_prefix()` then proves it structurally
+names `stevebargelt/meatgeekv2` before it is allowed to become
+`OIDC_SUBJECT_PREFIX`; that is the trust-root row below, and it is the check a
+hand-rolled one-liner most often omits. A perfectly well-formed 200 from a
+misrouted or proxied request can carry another repository's prefix, and a read
+that *succeeded* is not the same fact as an answer that is *about this
+repository*. B10's helper mirrors both halves for exactly that reason.
+
 > **An unauthenticated `gh` no longer gets as far as the Azure work.** Earlier
 > revisions of this runbook said the Azure side still completed and only the
 > environment protection was left `UNVERIFIED`; that is no longer true, because
@@ -397,6 +407,12 @@ What it creates (and nothing else):
    | `development-infra-apply` (infra-apply-dev.yml `apply`)      | dev **infra-apply**   | `<prefix>:environment:development-infra-apply` | `dev` / `tfstate-dev`    |
    | `development` (app publish)                                  | dev **app-deploy**    | `<prefix>:environment:development`             | `dev` / `tfstate-dev`    |
    | `production` (infra-deploy-prod / app-deploy-prod)           | prod plan/read        | `<prefix>:environment:production`              | `prod` / `tfstate-prod`  |
+
+   The bare `gh api` above is for **reading** the current value. If you are
+   about to *act* on a prefix — compare a live credential, or create one —
+   resolve it through B10's `oidc_subject_prefix` helper instead: it discriminates
+   the abort classes above and proves the answer names this repository, which a
+   raw read does not.
 
    `<prefix>` is whatever the `gh api` call above returns **today**. With the
    value observed on this account, the three live subjects resolve to:
