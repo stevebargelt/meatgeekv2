@@ -18,7 +18,22 @@
  * the CI `lint-and-test` matrix) so it runs on every push, not just locally.
  *
  * Canonical subject scheme (do not drift):
- *   subject = repo:<owner>/<repo>:environment:<github-env>
+ *   subject = <sub_claim_prefix>:environment:<github-env>
+ *
+ * MG-42 MADE THE PREFIX A RUNTIME FACT, NOT A CONSTANT. GitHub lets a repo/org
+ * customize the OIDC `sub` claim, and this one does: the live customization
+ * injects the numeric owner-id and repo-id, so the prefix an Actions token
+ * actually carries is `repo:<owner>@<owner-id>/<repo>@<repo-id>`, not
+ * `repo:<owner>/<repo>`. bootstrap.sh hardcoded the latter, so Entra matched no
+ * federated identity record and every azure/login failed AADSTS700213. It now
+ * READS the prefix from `repos/<repo>/actions/oidc/customization/sub` and PROVES
+ * the answer names the committed GITHUB_REPO before using it.
+ *
+ * What that means for THIS suite: the prefix is no longer knowable from source,
+ * so the invariant it owns — "the environment a job declares is one the
+ * bootstrap federates" — is asserted under BOTH prefix shapes below. The env
+ * suffix is the part this file can and does pin; the prefix half is proven
+ * behaviourally by running bootstrap.sh's own resolver against a stubbed `gh`.
  *
  * MG-23 REWORKS THE ENVIRONMENT MAP, and that rework is the point of this file
  * now. Before MG-23 every dev identity — plan, app-deploy, and (had it existed)
@@ -55,6 +70,7 @@
  * so they are outside this suite's scope by construction — it keys off
  * azure/login steps.
  */
+import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
@@ -128,9 +144,29 @@ const infraApplyEnv = bashConstant(bootstrapSrc, 'INFRA_APPLY_ENVIRONMENT');
 const federatedEnvs = Array.from(
   new Set([...planIdentityEnvs, appDeployEnv, infraApplyEnv].filter(Boolean))
 ).sort();
-const bootstrapSubjects = new Set(
-  federatedEnvs.map(env => `repo:${githubRepo}:environment:${env}`)
-);
+
+/**
+ * The two prefix shapes a federated subject can legitimately carry (MG-42).
+ *
+ * DEFAULT is what GitHub mints for a repo with no `sub` customization. CUSTOM is
+ * the shape THIS repo presents — owner-id and repo-id injected — captured live
+ * on 2026-07-27 as `repo:stevebargelt@4857343/meatgeekv2@1304558512`.
+ *
+ * Every cross-check below runs under BOTH. Pinning only the default form would
+ * re-assert the exact assumption MG-42 disproved; pinning only the custom form
+ * would hardcode two account-specific ids into an anti-drift suite. What this
+ * file actually owns is the ENVIRONMENT half of the subject, and that half must
+ * hold whichever prefix the live repo turns out to have.
+ */
+const [repoOwner, repoName] = githubRepo.split('/');
+const DEFAULT_PREFIX = `repo:${githubRepo}`;
+const CUSTOM_PREFIX = `repo:${repoOwner}@4857343/${repoName}@1304558512`;
+const PROBE_PREFIXES = [DEFAULT_PREFIX, CUSTOM_PREFIX];
+
+const subjectFor = (prefix: string, env: string) => `${prefix}:environment:${env}`;
+/** The set of subjects bootstrap federates, under a given prefix. */
+const subjectsUnder = (prefix: string) =>
+  new Set(federatedEnvs.map(env => subjectFor(prefix, env)));
 
 /** Every job (name, env) across a workflow that has an azure/login step. */
 function azureAuthedJobs(file: string): Array<{ job: string; environment?: string }> {
@@ -229,11 +265,13 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
     expect(planIdentityEnvs).not.toContain('development'); // NOT the app-deploy env
     expect(planIdentityEnvs).not.toContain(infraApplyEnv); // NOT the apply env
 
-    const devSubjects = new Set(
-      [infraApplyEnv, appDeployEnv].map(e => `repo:${githubRepo}:environment:${e}`)
-    );
-    expect(devSubjects.size).toBe(2);
-    for (const s of devSubjects) expect(bootstrapSubjects).toContain(s);
+    // Distinctness is a property of the environment suffix, so it must hold
+    // under either prefix shape (MG-42).
+    for (const prefix of PROBE_PREFIXES) {
+      const devSubjects = new Set([infraApplyEnv, appDeployEnv].map(e => subjectFor(prefix, e)));
+      expect(devSubjects.size).toBe(2);
+      for (const s of devSubjects) expect(subjectsUnder(prefix)).toContain(s);
+    }
   });
 
   it('GITHUB_REPO is a committed constant, not env-overridable (F16)', () => {
@@ -243,8 +281,59 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
     expect(bootstrapSrc).not.toMatch(/GITHUB_REPO="\$\{GITHUB_REPO:-/);
   });
 
-  it('bootstrap builds the subject as repo:<repo>:environment:<env> (the OIDC-presented scheme)', () => {
-    expect(bootstrapSrc).toMatch(/subject="repo:\$\{GITHUB_REPO\}:environment:\$\{env\}"/);
+  it('bootstrap builds every subject from the DERIVED prefix, never a hardcoded literal (MG-42)', () => {
+    // The hardcoded `repo:${GITHUB_REPO}:environment:${env}` was the MG-42 bug:
+    // on a repo that customizes the `sub` claim it names a subject no token
+    // carries, and because ensure_federated_credential reconciles on SUBJECT,
+    // every bootstrap re-run rewrote the hand-corrected credential back to it.
+    expect(bootstrapSrc).not.toMatch(/subject="repo:\$\{GITHUB_REPO\}:environment:/);
+
+    // All THREE identities — prod plan/read, dev app-deploy, dev infra-apply —
+    // compose through the single helper. Counted, not merely present: a call
+    // site left behind is a credential that still federates the wrong subject.
+    const composed = bootstrapSrc.match(
+      /^\s*subject="\$\(federated_environment_subject "\$env"\)" \|\| exit 1$/gm
+    );
+    expect(composed).toHaveLength(3);
+
+    // The composer appends the environment scope and nothing else, so trust
+    // stays gated by GitHub Environment protection rules rather than by a ref.
+    expect(bootstrapSrc).toMatch(/^federated_environment_subject\(\) \{/m);
+    expect(bootstrapSrc).toMatch(/printf '%s:environment:%s'/);
+    expect(bootstrapSrc).not.toMatch(/subject.*:ref:refs\/heads/);
+  });
+
+  it('the derived prefix is VALIDATED against the committed trust root and resolved before any identity (MG-42/F16)', () => {
+    // Reading half the OIDC trust binding from a remote API is a real weakening
+    // of F16 — whatever answers that API gets a say in which repository's
+    // workflows may assume identities holding Contributor on the dev RG. The
+    // validation is what pays for it, so its existence is pinned here.
+    expect(bootstrapSrc).toMatch(/^assert_oidc_subject_prefix\(\) \{/m);
+    expect(bootstrapSrc).toMatch(/^resolve_oidc_subject_prefix\(\) \{/m);
+    // The resolver must go through the validator — a resolve that assigned the
+    // global directly would make the check decorative.
+    const resolver = bootstrapSrc.match(/^resolve_oidc_subject_prefix\(\) \{[\s\S]*?\n\}/m)?.[0] ?? '';
+    expect(resolver).toContain('assert_oidc_subject_prefix');
+    expect(resolver.indexOf('assert_oidc_subject_prefix')).toBeLessThan(
+      resolver.indexOf('OIDC_SUBJECT_PREFIX="$prefix"')
+    );
+
+    // The prefix global inherits F16 verbatim: no env-override form, ever.
+    expect(bootstrapSrc).toMatch(/^OIDC_SUBJECT_PREFIX=""$/m);
+    expect(bootstrapSrc).not.toMatch(/OIDC_SUBJECT_PREFIX="\$\{OIDC_SUBJECT_PREFIX:-/);
+
+    // main() resolves BEFORE the first identity, so an unprovable prefix aborts
+    // while nothing has been provisioned.
+    const mainBody = bootstrapSrc.match(/^main\(\) \{[\s\S]*?\n\}/m)?.[0] ?? '';
+    const code = mainBody
+      .split('\n')
+      .filter(l => !/^\s*#/.test(l))
+      .join('\n');
+    const resolveAt = code.indexOf('resolve_oidc_subject_prefix');
+    const firstIdentityAt = code.search(/bootstrap_[a-z_]*identity/);
+    expect(resolveAt).toBeGreaterThanOrEqual(0);
+    expect(firstIdentityAt).toBeGreaterThanOrEqual(0);
+    expect(resolveAt).toBeLessThan(firstIdentityAt);
   });
 
   it('every Azure-authenticating job binds a GitHub Environment (so its OIDC subject is deterministic)', () => {
@@ -265,12 +354,18 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
   });
 
   it('every Azure-authenticating job presents an OIDC subject the bootstrap federates', () => {
-    for (const file of AZURE_WORKFLOWS) {
-      for (const { environment } of azureAuthedJobs(file)) {
-        const subject = `repo:${githubRepo}:environment:${environment}`;
-        // The core cross-check: the presented subject MUST be a bootstrap-created
-        // federated subject, per environment.
-        expect(bootstrapSubjects).toContain(subject);
+    // Run under BOTH prefix shapes (MG-42): the presented subject and the
+    // federated subject share whatever prefix the live repo has, so the
+    // cross-check is about the environment half agreeing — and it must agree
+    // regardless of which prefix that is.
+    for (const prefix of PROBE_PREFIXES) {
+      for (const file of AZURE_WORKFLOWS) {
+        for (const { environment } of azureAuthedJobs(file)) {
+          const subject = subjectFor(prefix, environment as string);
+          // The core cross-check: the presented subject MUST be a bootstrap-created
+          // federated subject, per environment.
+          expect(subjectsUnder(prefix)).toContain(subject);
+        }
       }
     }
   });
@@ -317,14 +412,18 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
       Object.values(readWorkflow(file).jobs ?? {}).some(j => j.environment === infraApplyEnv)
     );
     expect(bindingFiles).toEqual(['infra-apply-dev.yml']);
-    expect(bootstrapSubjects).toContain(`repo:${githubRepo}:environment:${infraApplyEnv}`);
+    for (const prefix of PROBE_PREFIXES) {
+      expect(subjectsUnder(prefix)).toContain(subjectFor(prefix, infraApplyEnv));
+    }
   });
 
   it('dev and prod resolve to SEPARATE bootstrap subjects (no shared SP across environments)', () => {
-    const prodSubject = `repo:${githubRepo}:environment:production`;
-    expect(bootstrapSubjects).toContain(prodSubject);
-    for (const devEnv of [infraApplyEnv, appDeployEnv]) {
-      expect(`repo:${githubRepo}:environment:${devEnv}`).not.toBe(prodSubject);
+    for (const prefix of PROBE_PREFIXES) {
+      const prodSubject = subjectFor(prefix, 'production');
+      expect(subjectsUnder(prefix)).toContain(prodSubject);
+      for (const devEnv of [infraApplyEnv, appDeployEnv]) {
+        expect(subjectFor(prefix, devEnv)).not.toBe(prodSubject);
+      }
     }
 
     // Both prod workflows authenticate under `production`, never a dev env.
@@ -343,12 +442,150 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
     // binding, which would leave the login with a non-bootstrap-federated subject.
     const authedJobs = azureAuthedJobs('app-deploy-prod.yml');
     expect(authedJobs.length).toBeGreaterThan(0);
-    const prodSubject = `repo:${githubRepo}:environment:production`;
-    for (const { environment } of authedJobs) {
-      expect(environment).toBe('production');
-      expect(bootstrapSubjects).toContain(`repo:${githubRepo}:environment:${environment}`);
+    for (const prefix of PROBE_PREFIXES) {
+      const prodSubject = subjectFor(prefix, 'production');
+      for (const { environment } of authedJobs) {
+        expect(environment).toBe('production');
+        expect(subjectsUnder(prefix)).toContain(subjectFor(prefix, environment as string));
+      }
+      expect(subjectsUnder(prefix)).toContain(prodSubject);
     }
-    expect(bootstrapSubjects).toContain(prodSubject);
+  });
+
+  /**
+   * MG-42 — the prefix half of the subject, proven BEHAVIOURALLY.
+   *
+   * The assertions above pin the ENVIRONMENT half by reading source. The prefix
+   * half cannot be read from source any more: it is whatever
+   * `repos/<repo>/actions/oidc/customization/sub` says. So these tests run
+   * bootstrap.sh's OWN resolver, with `gh` replaced by a shell function, and
+   * assert on the value it produces.
+   *
+   * NO NETWORK AND NO CREDENTIALS ARE USED OR WANTED. `gh` is stubbed (a shell
+   * function, which `command -v` also resolves), `az` is never reached, and
+   * main() is guarded by BASH_SOURCE so sourcing provisions nothing. A test
+   * suite must never be able to touch the live tenant.
+   *
+   * The negative cases carry the weight. Honouring a custom prefix fixes an
+   * outage; refusing an unprovable one is what keeps F16 intact once the value
+   * comes from off-box.
+   */
+  describe('MG-42: resolve_oidc_subject_prefix (bootstrap.sh, with `gh` stubbed)', () => {
+    /**
+     * Source bootstrap.sh, install a `gh` stub, resolve, and echo the result.
+     *
+     * `set +e` AFTER the source, because bootstrap.sh sets errexit for its own
+     * run and we need to observe a non-zero exit rather than be killed by it.
+     * stdout of the source and the resolver is discarded so the only thing on
+     * stdout is the value under test.
+     */
+    function resolvePrefix(ghStub: string): { status: number; prefix: string } {
+      const script = `
+        . "${BOOTSTRAP}" >/dev/null 2>&1
+        set +e
+        ${ghStub}
+        resolve_oidc_subject_prefix >/dev/null 2>&1 || exit 1
+        printf '%s' "$OIDC_SUBJECT_PREFIX"
+      `;
+      const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+      return { status: r.status ?? 1, prefix: (r.stdout ?? '').trim() };
+    }
+
+    /** A stub whose `gh api` succeeds with the given JSON body. */
+    const apiOk = (body: string) => `
+      gh() { case "\${1:-}" in
+        auth) return 0 ;;
+        api)  printf '%s' '${body}' ;;
+      esac; return 0; }`;
+    /** A stub whose `gh api` fails, writing the given text to stderr. */
+    const apiFail = (err: string) => `
+      gh() { case "\${1:-}" in
+        auth) return 0 ;;
+        api)  printf '%s' '${err}' >&2; return 1 ;;
+      esac; return 0; }`;
+
+    it('HONOURS a custom sub_claim_prefix — the live 2026-07-27 shape', () => {
+      // This is the fix: the id-injected prefix is what the token actually
+      // carries, so it is what the federated credential must be created for.
+      const { status, prefix } = resolvePrefix(
+        apiOk(`{"use_default": false, "include_claim_keys": ["repo"], "sub_claim_prefix": "${CUSTOM_PREFIX}"}`)
+      );
+      expect(status).toBe(0);
+      expect(prefix).toBe(CUSTOM_PREFIX);
+      // ...and the composed subject is exactly what an environment-scoped job
+      // presents, so azure/login stops failing AADSTS700213.
+      expect(subjectFor(prefix, infraApplyEnv)).toBe(
+        `repo:${repoOwner}@4857343/${repoName}@1304558512:environment:development-infra-apply`
+      );
+    });
+
+    it('FALLS BACK to the default prefix when the repo has no customization', () => {
+      // Two spellings of the same fact: an explicit use_default, and the 404 the
+      // endpoint returns when nothing is configured.
+      for (const stub of [apiOk('{"use_default": true}'), apiFail('gh: Not Found (HTTP 404)')]) {
+        const { status, prefix } = resolvePrefix(stub);
+        expect(status).toBe(0);
+        expect(prefix).toBe(DEFAULT_PREFIX);
+      }
+    });
+
+    it('REFUSES a prefix naming another repository (the F16 trust root holds)', () => {
+      // The attack the validation exists for: a poisoned/redirected answer that
+      // re-points every identity — the dev apply identity included — at another
+      // repo's workflows. Near-miss shapes are covered too, since a
+      // contains-check would wave `meatgeekv2-fork` straight through.
+      for (const evil of [
+        'repo:attacker/meatgeekv2',
+        `repo:${repoOwner}/${repoName}-fork`,
+        `repo:${repoOwner}-evil/${repoName}`,
+        'repo:attacker@1/meatgeekv2@2',
+        `repo:${repoOwner}/${repoName}:ref:refs/heads/main`,
+      ]) {
+        const { status } = resolvePrefix(apiOk(`{"sub_claim_prefix": "${evil}"}`));
+        expect(`${evil} -> exit ${status}`).toBe(`${evil} -> exit 1`);
+      }
+    });
+
+    it('REFUSES a gh failure that is not an unambiguous "no customization configured"', () => {
+      // A 5xx/403/network error says NOTHING about the repo's configuration.
+      // Falling back to the default prefix on one would rewrite the live
+      // credentials to a subject no token matches — the MG-42 outage, re-caused
+      // by the fix. Fail closed instead.
+      for (const err of [
+        'gh: Server Error (HTTP 500)',
+        'gh: Forbidden (HTTP 403)',
+        'error connecting to api.github.com',
+      ]) {
+        const { status } = resolvePrefix(apiFail(err));
+        expect(`${err} -> exit ${status}`).toBe(`${err} -> exit 1`);
+      }
+      // Unparseable JSON is not "no customization" either.
+      expect(resolvePrefix(apiOk('not json at all')).status).toBe(1);
+      // Nor is an unauthenticated gh — whose 404s would otherwise be
+      // indistinguishable from "nothing is configured".
+      const unauthed = `gh() { case "\${1:-}" in auth) return 1 ;; esac; return 0; }`;
+      expect(resolvePrefix(unauthed).status).toBe(1);
+    });
+
+    it('never composes a subject from an unresolved prefix or an empty environment', () => {
+      // Either would federate a subject matching nothing — or something
+      // unintended — and do it while reporting success.
+      const compose = (prefix: string, env: string) =>
+        spawnSync(
+          'bash',
+          [
+            '-c',
+            `. "${BOOTSTRAP}" >/dev/null 2>&1; set +e; OIDC_SUBJECT_PREFIX='${prefix}' federated_environment_subject '${env}'`,
+          ],
+          { encoding: 'utf8' }
+        );
+      expect(compose('', 'development').status).not.toBe(0);
+      expect(compose(DEFAULT_PREFIX, '').status).not.toBe(0);
+      // ...and the working case still works, so the guards are not vacuous.
+      const good = compose(CUSTOM_PREFIX, infraApplyEnv);
+      expect(good.status).toBe(0);
+      expect(good.stdout).toBe(subjectFor(CUSTOM_PREFIX, infraApplyEnv));
+    });
   });
 
   /**

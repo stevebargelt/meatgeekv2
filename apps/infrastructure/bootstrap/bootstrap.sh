@@ -122,19 +122,53 @@ STATE_LOCATION="${STATE_LOCATION:-eastus}"
 # F16 (MG-23): this is a COMMITTED, NON-OVERRIDABLE constant, exactly like
 # STATE_ACCOUNT_PREFIX in scripts/state-account-name.sh and STATE_STORAGE_ACCOUNT
 # above. It used to read `${GITHUB_REPO:-…}`. This value is the OIDC TRUST ROOT:
-# every federated subject is `repo:${GITHUB_REPO}:environment:<env>`, so an
-# inherited/poisoned GITHUB_REPO in the operator's shell would silently re-point
-# the trust of EVERY identity — the dev apply identity included — at an
-# attacker-controlled repository, announced by nothing but a log line. There is
-# no legitimate reason to bootstrap this stack against a different repo; forking
-# the repo means editing this constant in a commit that is reviewed.
+# every federated subject names this repository, so an inherited/poisoned
+# GITHUB_REPO in the operator's shell would silently re-point the trust of EVERY
+# identity — the dev apply identity included — at an attacker-controlled
+# repository, announced by nothing but a log line. There is no legitimate reason
+# to bootstrap this stack against a different repo; forking the repo means
+# editing this constant in a commit that is reviewed.
+#
+# MG-42 DID NOT MOVE THAT ROOT, it added a check around it. The `repo:…` head of
+# the subject is now READ from GitHub (see OIDC_SUBJECT_PREFIX below), because
+# this org customizes the OIDC `sub` claim — but the value read is admitted only
+# if it resolves to THIS owner/repo, and dies otherwise. The constant is still
+# what decides; the API only gets to say which of the two accepted spellings of
+# it the tokens actually carry.
 GITHUB_REPO="stevebargelt/meatgeekv2"
+
+# The `repo:…` head of every federated subject, RESOLVED AT RUN TIME from
+# GitHub's live sub-claim customization (MG-42). Empty until
+# resolve_oidc_subject_prefix() has run and PROVEN the value against
+# GITHUB_REPO; federated_environment_subject() refuses to compose a subject
+# while it is empty, so an unresolved prefix can never silently produce
+# `:environment:<env>`.
+#
+# WHY THIS IS NOT JUST `repo:${GITHUB_REPO}` ANY MORE. This account's GitHub org
+# customizes the OIDC `sub` claim to inject the numeric owner-id and repo-id, so
+# a job scoped to an environment actually presents
+# `repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:<env>`. The hardcoded
+# form matched nothing and every azure/login failed AADSTS700213 — see MG-42.
+#
+# WHY IT IS NOT ENV-OVERRIDABLE EITHER. It is the same trust binding GITHUB_REPO
+# is, so it inherits F16's rule verbatim: no `${OIDC_SUBJECT_PREFIX:-…}` form,
+# ever. The ONLY writer is resolve_oidc_subject_prefix(), and the only value it
+# will write is one that assert_oidc_subject_prefix() has proven names exactly
+# ${GITHUB_REPO}. Deriving from a remote API is a real weakening of F16 — the
+# validation is what pays for it, and it fails closed rather than falling back.
+OIDC_SUBJECT_PREFIX=""
 
 # ---------------------------------------------------------------------------
 # GitHub Environment / OIDC-subject map (MG-23). Read this before changing it.
 # ---------------------------------------------------------------------------
 # CANONICAL SUBJECT SCHEME (MG-24 red-fix — must not drift):
-#   subject = repo:<owner>/<repo>:environment:<github-env>
+#   subject = <live sub_claim_prefix>:environment:<github-env>
+# where the prefix is `repo:<owner>/<repo>` on a repo using GitHub's DEFAULT sub
+# claim, and `repo:<owner>@<owner-id>/<repo>@<repo-id>` on this one, which
+# customizes it (MG-42). The prefix is READ FROM GITHUB, never assumed — see
+# resolve_oidc_subject_prefix(). Compose subjects ONLY through
+# federated_environment_subject(); a literal `repo:${GITHUB_REPO}:…` is the
+# MG-42 bug.
 # The <github-env> tokens MUST be the EXACT `environment:` values the workflow
 # jobs declare. A job with `environment: development-infra-apply` presents the
 # OIDC subject `repo:<owner>/<repo>:environment:development-infra-apply`, so the
@@ -745,6 +779,189 @@ operator_state_grant_oid() {
     die "'az ad signed-in-user show' returned an EMPTY object id for a USER session (Graph/auth anomaly). Refusing to silently skip the operator's 'Storage Blob Data Contributor' grant on ${STATE_STORAGE_ACCOUNT}."
   fi
   printf '%s' "$oid"
+}
+
+# ===========================================================================
+# The OIDC SUBJECT PREFIX: read from GitHub, then PROVEN against GITHUB_REPO.
+# ===========================================================================
+# MG-42. GitHub lets a repo/org CUSTOMIZE the `sub` claim its Actions OIDC
+# tokens carry. This account does: the live customization injects the numeric
+# owner-id and repo-id, so the real presented subject is
+#   repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:<env>
+# while this script built `repo:stevebargelt/meatgeekv2:environment:<env>`.
+# Those are different strings, so Entra matched no federated identity record and
+# EVERY azure/login failed AADSTS700213 — the dev apply loop (MG-23), the dev
+# app-deploy identity (MG-36) and the prod plan identity (MG-25) alike. The
+# prefix is therefore a FACT ABOUT THE REPO, not a constant this file may assume.
+#
+# BUT DERIVING IT WEAKENS F16, AND THAT HAS TO BE PAID FOR. F16 (see GITHUB_REPO)
+# makes the trust root a committed, non-overridable constant precisely because
+# the federated subject IS the OIDC trust binding: whatever repo it names is the
+# repo whose workflows may assume these identities. Reading part of that binding
+# from a remote API hands a say in it to whatever answers the API — a
+# compromised/typo'd token pointed at another repo, a proxy, a mis-scoped host.
+# So the derived value is NOT trusted on arrival. It is admitted only if it
+# resolves to the SAME owner/repo the committed constant names, and anything
+# else — another repository, a shape we do not recognise, a `gh` failure that is
+# not an unambiguous "no customization configured" — DIES. A fallback that
+# guessed here would either revert the (currently correct) live credentials or
+# quietly re-point trust; both are worse than refusing to run.
+
+# Prove a candidate prefix names EXACTLY ${GITHUB_REPO}, or die.
+#
+# Split out from the derivation on purpose: this is a PURE function of its
+# argument, so the trust decision can be exercised without a network and lives in
+# exactly one place instead of being spread through the fetch's branches.
+#
+# THE ONLY ACCEPTED SHAPES:
+#   repo:<owner>/<repo>                        (GitHub's default sub claim)
+#   repo:<owner>@<digits>/<repo>@<digits>      (this account's id injection)
+# with either @<digits> independently optional, and <owner>/<repo> equal to the
+# committed constant's two halves.
+#
+# The parse is STRUCTURAL rather than a regex over the whole string, for two
+# reasons. (1) GITHUB_REPO may legitimately contain `.`, which is a regex
+# metacharacter — building a pattern from it would make `meatgeek.v2` match
+# `meatgeekXv2`. (2) A substring/contains test would accept
+# `repo:attacker/meatgeekv2-fork`, which CONTAINS the committed repo name and is
+# a different repository. Splitting on the separators and comparing the halves
+# with `=` cannot be fooled by either.
+#
+# Extra claim segments (`repo:o/r:ref:refs/heads/main`, `repo:o/r:job_workflow_ref:…`)
+# fall out as a mismatch and die, which is correct and deliberate: this script
+# appends `:environment:<env>` itself, so a prefix that already carries claims
+# would compose a subject nobody designed. If the repo's customization ever
+# legitimately changes shape, that is a REVIEWED edit here — not something to
+# absorb silently.
+#   usage: assert_oidc_subject_prefix "<prefix>" "<where it came from>"
+assert_oidc_subject_prefix() {
+  local prefix="$1" origin="$2"
+  local want_owner="${GITHUB_REPO%%/*}" want_repo="${GITHUB_REPO##*/}"
+  local rest got_owner got_repo id
+
+  [ -n "$prefix" ] \
+    || die "the OIDC subject prefix resolved EMPTY (${origin}). Refusing to compose a federated subject from it — the result would be ':environment:<env>', which matches no token GitHub can mint (or, worse, something unintended)."
+
+  case "$prefix" in
+    repo:*/*) ;;
+    *) die "the OIDC subject prefix '${prefix}' (${origin}) is not of the form 'repo:<owner>/<repo>'. The subject IS the OIDC trust binding, so an unrecognised shape is refused rather than guessed at. Expected a prefix naming ${GITHUB_REPO}." ;;
+  esac
+
+  rest="${prefix#repo:}"
+  got_owner="${rest%%/*}"
+  got_repo="${rest#*/}"
+
+  # Strip the OPTIONAL numeric id GitHub appends to either half. `@` followed by
+  # anything that is not all digits is not an id injection — it is a shape we do
+  # not recognise, and an unrecognised shape is not something to guess at when
+  # the answer becomes a trust binding.
+  case "$got_owner" in
+    *@*) id="${got_owner##*@}"; got_owner="${got_owner%@*}"
+         case "$id" in ''|*[!0-9]*)
+           die "the OIDC subject prefix '${prefix}' (${origin}) has a non-numeric owner id ('@${id}'). Only GitHub's '@<digits>' owner-id/repo-id injection is recognised; refusing to bind OIDC trust to a prefix shape this script does not understand." ;;
+         esac ;;
+  esac
+  case "$got_repo" in
+    *@*) id="${got_repo##*@}"; got_repo="${got_repo%@*}"
+         case "$id" in ''|*[!0-9]*)
+           die "the OIDC subject prefix '${prefix}' (${origin}) has a non-numeric repo id ('@${id}'). Only GitHub's '@<digits>' owner-id/repo-id injection is recognised; refusing to bind OIDC trust to a prefix shape this script does not understand." ;;
+         esac ;;
+  esac
+
+  if [ "$got_owner" != "$want_owner" ] || [ "$got_repo" != "$want_repo" ]; then
+    die "OIDC TRUST-ROOT MISMATCH: the subject prefix '${prefix}' (${origin}) names '${got_owner}/${got_repo}', but this bootstrap's committed trust root is '${GITHUB_REPO}' (F16). Every identity it provisions — including the dev infra-apply identity that holds Contributor on ${DEV_WORKLOAD_RG} — would be federated to that other repository's workflows. Aborting before anything is provisioned. If the repository genuinely moved, that is a reviewed edit to GITHUB_REPO in a commit, not a value this script accepts from an API."
+  fi
+}
+
+# Resolve OIDC_SUBJECT_PREFIX from the repo's LIVE sub-claim customization.
+#
+# Fail-closed in the az_discover spirit: a clean answer is used, an unambiguous
+# "there is no customization" falls back to GitHub's default prefix, and
+# everything else DIES. The distinction matters because the two failure
+# directions are not symmetric — falling back when a custom prefix IS configured
+# rewrites the (currently correct) live credentials to a subject no token
+# matches, which is exactly the MG-42 outage; and accepting an unvalidated
+# prefix re-points trust. Neither is a thing to do on a guess.
+#
+# Sets the global, so it MUST be called unsubshelled from main().
+resolve_oidc_subject_prefix() {
+  local body err errfile prefix use_default status=0 origin
+
+  # gh must be AUTHENTICATED before we read anything. The 404 branch below reads
+  # "not found" as the FACT "no customization is configured" — but an expired or
+  # mis-scoped token 404s/401s on a private repo's endpoints too, and an
+  # unauthenticated gh would therefore look exactly like a repo on the default
+  # prefix. We would then write the DEFAULT subject over the custom one and
+  # break every login. require_tools already proves the binary exists; this
+  # proves the session, and it runs before any mutation.
+  command -v gh >/dev/null 2>&1 \
+    || die "the GitHub CLI is required to read this repository's OIDC sub-claim customization, which decides every federated subject (MG-42). Install 'gh' and re-run — nothing has been provisioned."
+  gh auth status >/dev/null 2>&1 \
+    || die "the GitHub CLI is not authenticated, so this repository's OIDC sub-claim customization cannot be read (MG-42). This is NOT skippable: an unauthenticated gh is indistinguishable from 'no customization configured', and assuming the default prefix would rewrite every federated credential to a subject no GitHub token matches (AADSTS700213). Run 'gh auth login' and re-run — nothing has been provisioned."
+
+  # stderr goes to a file rather than being merged into stdout: the 404
+  # classification below has to read gh's error text, and the success path has to
+  # parse stdout as JSON. Merging them would corrupt both.
+  errfile="$(mktemp)" || die "could not create a temp file to capture the 'gh api' error output."
+  body="$(gh api "repos/${GITHUB_REPO}/actions/oidc/customization/sub" 2>"$errfile")" || status=$?
+  err="$(cat "$errfile")"
+  rm -f "$errfile"
+
+  if [ "$status" -ne 0 ]; then
+    # HTTP 404 on THIS endpoint is GitHub's "no sub-claim customization is
+    # configured" answer, and it is the ONLY failure we read as a fact rather
+    # than an outage — and only because the auth gate above has already ruled out
+    # the other thing a 404 commonly means. Every other non-zero exit (403, 5xx,
+    # rate limit, DNS, proxy) is an OUTAGE: it says nothing about the repo's
+    # configuration, so proceeding on the default prefix would be a guess that
+    # rewrites live trust.
+    if printf '%s' "$err" | grep -q 'HTTP 404'; then
+      prefix="repo:${GITHUB_REPO}"
+      origin="GitHub reports no sub-claim customization (HTTP 404) — using the default prefix"
+      warn "No OIDC sub-claim customization is configured on ${GITHUB_REPO} (HTTP 404); federating GitHub's DEFAULT subject prefix '${prefix}'. If a workflow later fails azure/login with AADSTS700213, the customization was added after this run — re-run the bootstrap."
+    else
+      die "could not read the OIDC sub-claim customization for ${GITHUB_REPO} (gh exited ${status}) — this is a REAL GitHub error (auth / permission / throttling / network), NOT 'no customization configured'. The response decides every federated subject, so guessing the default prefix here could rewrite the live credentials to a subject no token matches (AADSTS700213). Aborting before anything is provisioned. gh said: ${err}"
+    fi
+  else
+    # jq, not `--jq`: use_default has to be inspected as well as the prefix, and
+    # a malformed body must be a DEATH rather than an empty string that the
+    # default-fallback branch would then read as "no customization".
+    use_default="$(printf '%s' "$body" | jq -r '(.use_default // false) | tostring')" \
+      || die "the OIDC sub-claim customization response for ${GITHUB_REPO} is not parseable JSON, so it cannot be read as 'no customization configured' either. Aborting rather than guess the subject prefix. Response: ${body}"
+    prefix="$(printf '%s' "$body" | jq -r '.sub_claim_prefix // ""')" \
+      || die "the OIDC sub-claim customization response for ${GITHUB_REPO} is not parseable JSON, so it cannot be read as 'no customization configured' either. Aborting rather than guess the subject prefix. Response: ${body}"
+    origin="read from repos/${GITHUB_REPO}/actions/oidc/customization/sub"
+    if [ "$use_default" = "true" ] || [ -z "$prefix" ] || [ "$prefix" = "null" ]; then
+      prefix="repo:${GITHUB_REPO}"
+      origin="GitHub reports the DEFAULT sub claim (use_default=${use_default}) — using the default prefix"
+      log "Repository ${GITHUB_REPO} uses GitHub's DEFAULT OIDC sub claim; federated subjects use the default prefix '${prefix}'."
+    fi
+  fi
+
+  # THE GATE. Nothing above is trusted until this returns; the value only
+  # reaches the global on the other side of it.
+  assert_oidc_subject_prefix "$prefix" "$origin"
+  OIDC_SUBJECT_PREFIX="$prefix"
+  log "OIDC subject prefix: ${OIDC_SUBJECT_PREFIX} (${origin}); every federated subject is composed from this and verified to name ${GITHUB_REPO}"
+}
+
+# Compose the federated subject for one GitHub Environment — the ONE place a
+# subject string is built, so the derived prefix cannot be bypassed by a call
+# site that goes on interpolating `repo:${GITHUB_REPO}` (which is the MG-42 bug
+# itself). ENVIRONMENT-scoped by construction: there is no ref-scoped variant
+# because trust here is gated by GitHub Environment protection rules, never by
+# which branch happened to run (see the map above).
+#
+# Dies rather than returns on an unresolved prefix or an empty environment: both
+# would compose a subject that matches nothing, or something unintended.
+#   usage: subject="$(federated_environment_subject "$env")" || exit 1
+federated_environment_subject() {
+  local env="$1"
+  [ -n "$OIDC_SUBJECT_PREFIX" ] \
+    || die "a federated subject was requested before resolve_oidc_subject_prefix() ran (environment '${env}'). main() must resolve the prefix before any identity is provisioned; composing a subject from an empty prefix would federate ':environment:${env}'."
+  [ -n "$env" ] \
+    || die "a federated subject was requested for an EMPTY GitHub Environment name; the result would be '${OIDC_SUBJECT_PREFIX}:environment:' and would match nothing (or, worse, something unintended)."
+  printf '%s:environment:%s' "$OIDC_SUBJECT_PREFIX" "$env"
 }
 
 # --------------------------------------------------------------------------
@@ -1739,11 +1956,15 @@ bootstrap_oidc_identity() {
     fi
 
     # ONE federated credential per environment. SUBJECT is
-    # `repo:<org/repo>:environment:<env>`, so trust is bound to the GitHub
+    # `<derived-prefix>:environment:<env>`, so trust is bound to the GitHub
     # Environment (and its protection rules), NOT to a branch ref, and each
-    # env's identity trusts ONLY its own environment.
+    # env's identity trusts ONLY its own environment. The prefix comes from the
+    # repo's LIVE sub-claim customization (MG-42), never from a literal — see
+    # federated_environment_subject. `|| exit 1` because that helper reports an
+    # unresolved prefix / empty environment by DYING, and a bare assignment would
+    # swallow the subshell's exit and go on to federate a bogus subject.
     cred_name="github-${env}"
-    subject="repo:${GITHUB_REPO}:environment:${env}"
+    subject="$(federated_environment_subject "$env")" || exit 1
     # Reconcile on SUBJECT, not just name (see ensure_federated_credential): the
     # subject IS the OIDC trust binding, so a credential with the right name but
     # a stale subject (prior repo/env or subject-format change) would bind
@@ -1890,7 +2111,9 @@ bootstrap_deploy_identity() {
   # environment it declares (and that environment's protection rules) rather
   # than by which client-id string the job happens to pass.
   cred_name="github-appdeploy-${env}"
-  subject="repo:${GITHUB_REPO}:environment:${env}"
+  # Subject built from the LIVE sub-claim prefix (MG-42), not a literal; `|| exit 1`
+  # so a die inside the command substitution cannot be swallowed.
+  subject="$(federated_environment_subject "$env")" || exit 1
   # Reconcile on SUBJECT, not just name (see ensure_federated_credential): a
   # credential with the right name but a stale/wrong subject would bind
   # deployment federation to the WRONG trust.
@@ -2050,7 +2273,13 @@ bootstrap_infra_apply_identity() {
   # policy (main) that decides which refs may ever mint a token for this identity;
   # an extra credential here would be a trust path outside that policy.
   cred_name="github-infra-apply-${env}"
-  subject="repo:${GITHUB_REPO}:environment:${env}"
+  # Subject built from the LIVE sub-claim prefix (MG-42), not a literal. THIS is
+  # the credential the hardcoded form broke hardest: it was corrected by hand on
+  # the live tenant so the dev auto-apply loop could authenticate at all, and a
+  # bootstrap re-run on the old literal reverted it every time — because
+  # ensure_federated_credential reconciles on SUBJECT and would "fix" the correct
+  # value back to the wrong one. `|| exit 1` so a die here cannot be swallowed.
+  subject="$(federated_environment_subject "$env")" || exit 1
   ensure_federated_credential "$app_id" "$cred_name" "$subject" \
     "GitHub Actions OIDC (dev infra apply, MG-23) for the '${env}' environment of ${GITHUB_REPO}"
   prune_unexpected_federated_credentials "$app_id" "$cred_name"
@@ -2317,7 +2546,7 @@ assert_federated_environment_map() {
   # because duplicates are precisely what this check is looking for.
   # shellcheck disable=SC2086
   for env in $PLAN_IDENTITY_ENVIRONMENTS "$APP_DEPLOY_ENVIRONMENT" "$INFRA_APPLY_ENVIRONMENT"; do
-    [ -n "$env" ] || die "an identity is configured to federate an EMPTY GitHub Environment name; the resulting subject would be 'repo:${GITHUB_REPO}:environment:' and would match nothing (or, worse, something unintended)."
+    [ -n "$env" ] || die "an identity is configured to federate an EMPTY GitHub Environment name; the resulting subject would end ':environment:' and would match nothing (or, worse, something unintended)."
     case " $seen " in
       *" $env "*) dupes="${dupes} ${env}" ;;
       *) seen="${seen} ${env}" ;;
@@ -2342,6 +2571,12 @@ main() {
   require_tools
   # BEFORE anything is provisioned: refuse to build a map that reintroduces F8.
   assert_federated_environment_map
+  # ...and resolve the OIDC subject prefix from the repo's LIVE sub-claim
+  # customization, PROVING it names ${GITHUB_REPO} (MG-42). Here, not lazily at
+  # the first federation call, for the same reason require_tools is here: a repo
+  # whose prefix cannot be resolved or cannot be trusted must abort while nothing
+  # has been provisioned, not half way through minting identities.
+  resolve_oidc_subject_prefix
   bootstrap_state_backend
   bootstrap_oidc_identity        # per-env PLAN/READ identities (Reader)
   bootstrap_deploy_identity      # dev APP-DEPLOYMENT identity (publish-only)
