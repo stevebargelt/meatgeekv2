@@ -69,7 +69,7 @@ infrastructure with no human in the loop.
 | 3   | **DECOMMISSION the retired dev plan identity and its GitHub Environment** — code removal does not remove live objects                                                                                                                                                                                                        | Operator workstation (`az` + `gh`)                                           | §3           |
 | 3b  | Settle the remaining **GitHub Environments** and their protection rules, and set the environment variables bootstrap emitted                                                                                                                                                                                                 | GitHub UI / `gh`                                                             | §2           |
 | 4   | **State migration — reconcile dev state with the MG-23 graph:** `terraform state rm` the de-scoped resource (Class 1), and settle whether the newly-declared ForceNew `principal_type` replaces the nine role assignments (Class 2). Unsettled, the first plan carries DESTROYS and the circuit-breaker deadlocks activation | Operator workstation, against live dev state                                 | Step 4 below |
-| 5   | Run the **blocking pre-activation checks B1–B9**                                                                                                                                                                                                                                                                             | Live tenant + GitHub                                                         | §5           |
+| 5   | Run the **blocking pre-activation checks B1–B10**                                                                                                                                                                                                                                                                             | Live tenant + GitHub                                                         | §5           |
 | 6   | Run the **live acceptance tests T1–T7** as the apply SP                                                                                                                                                                                                                                                                      | Live tenant, via GitHub Actions (§6)                                         | §7           |
 | 7   | **Tighten branch protection on `main`** (B7)                                                                                                                                                                                                                                                                                 | GitHub                                                                       | §5           |
 | 8   | Set **`DEV_TF_BACKEND_READY=true`** as a **repository** variable                                                                                                                                                                                                                                                             | GitHub                                                                       | §8           |
@@ -90,13 +90,26 @@ infrastructure with no human in the loop.
 > references one. Run `gh auth login` before `./bootstrap.sh` — this is a
 > prerequisite, not a nicety.
 >
+> **An AUTHENTICATED `gh` is now a hard precondition (MG-42).** Bootstrap reads
+> the repository's live OIDC sub-claim customization to derive every federated
+> subject, and it does so **before** the state backend or any identity is
+> created. An unauthenticated `gh` therefore **aborts the run with nothing
+> provisioned** rather than completing the Azure side — an unauthenticated `gh`
+> is indistinguishable from "this repo has no customization", and assuming the
+> default prefix would rewrite all three credentials to a subject no token
+> matches. Remediation: `gh auth login`, then re-run. Other abort classes —
+> a transient GitHub API failure, an unreadable customization, a prefix naming
+> another repository — have **different** remediations; see
+> [the runbook's precondition table](bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned)
+> before assuming any `gh`-shaped failure is a login problem.
+>
 > **Bootstrap EXITS NON-ZERO when either environment is not verifiably
 > `PROTECTED`, and prints no success summary in that case.** A green bootstrap
 > is therefore the signal that activation is safe; you are not required to
-> notice a missing line. If `gh` is installed but **unauthenticated**, the
-> Azure-side work still completes and bootstrap exits non-zero with the manual
-> `gh api` procedure printed — the Azure side is idempotent, so run
-> `gh auth login` and re-run `./bootstrap.sh` freely.
+> notice a missing line. If `gh` stops working part-way through a run, the
+> environments report `UNVERIFIED`, bootstrap exits non-zero and prints the
+> manual `gh api` procedure — that is not a half-finished run, since the Azure
+> side is idempotent and safe to re-run.
 > **`DEV_TF_BACKEND_READY` may not be set true until bootstrap exits zero and
 > BOTH environments report `PROTECTED`** (B9).
 
@@ -113,7 +126,8 @@ infrastructure with no human in the loop.
 ```bash
 az login                                  # a subscription Owner / User Access Administrator
 az account set --subscription <V2-SUBSCRIPTION-ID>
-gh auth login                             # needed for the recovery environment (B9)
+gh auth login                             # REQUIRED — bootstrap aborts without it
+                                          # (OIDC sub-claim read, MG-42; also B9)
 cd apps/infrastructure/bootstrap
 
 # Optional: install someone OTHER than the authenticated gh user as the
@@ -572,7 +586,10 @@ Full detail:
 
 **Why the environment (not the client id) selects the identity (F8).** Before
 MG-23, _every_ dev identity federated the identical subject
-`repo:stevebargelt/meatgeekv2:environment:development` and was selected only by
+`<prefix>:environment:development` — where `<prefix>` is the repository's live
+sub-claim prefix, **not** a literal `repo:<owner>/<repo>` (MG-42; see
+[B10](#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents)) —
+and was selected only by
 which client-id a job passed — so a one-line client-id edit merged to `main`
 silently upgraded a low-privilege job to full apply. Now the **environment**
 selects the identity: the app-deploy identity cannot authenticate to the apply
@@ -763,8 +780,12 @@ gh api "repos/$REPO/environments" --jq '.environments[].name' | sort
 ### 3.6 Final assertion — no federated credential names the retired environment
 
 The load-bearing check. **No** application in the tenant may retain a federated
-credential whose subject is
-`repo:<owner>/<repo>:environment:development-infra-plan`. If one does, an actor
+credential whose subject **ends in** `:environment:development-infra-plan` —
+whatever `repo:…` head it carries. The head is the repository's live sub-claim
+prefix, which on this account is id-injected rather than a bare
+`repo:<owner>/<repo>` (MG-42, and [B10](#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents)),
+so match on the environment suffix — as the sweep below does — and never on a
+hardcoded full subject. If one does survive, an actor
 who can re-create that GitHub Environment (a repository admin, or anyone who can
 merge a workflow referencing it — GitHub auto-creates it unprotected) can mint a
 token for whatever that credential's app still holds.
@@ -807,12 +828,22 @@ scratch workflow.**
 
 ```bash
 # 1. Add a TEMPORARY federated credential for an acceptance branch.
-az ad app federated-credential create --id <APPLY_APP_ID> --parameters '{
+#    The `repo:…` head is the repository's LIVE sub-claim prefix, not a literal
+#    repo:<owner>/<repo> (MG-42) — read it rather than typing it, or the
+#    credential matches no token and azure/login fails AADSTS700213.
+PREFIX="$(gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub \
+  --jq '.sub_claim_prefix // "repo:stevebargelt/meatgeekv2"')"
+echo "$PREFIX"   # observed 2026-07-28: repo:stevebargelt@4857343/meatgeekv2@1304558512
+
+az ad app federated-credential create --id <APPLY_APP_ID> --parameters "$(cat <<JSON
+{
   "name": "tmp-mg23-acceptance",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:stevebargelt/meatgeekv2:ref:refs/heads/mg23-acceptance",
+  "subject": "${PREFIX}:ref:refs/heads/mg23-acceptance",
   "audiences": ["api://AzureADTokenExchange"]
-}'
+}
+JSON
+)"
 # 2. Push the scratch acceptance workflow to branch `mg23-acceptance` and run it.
 # 3. CLEANUP — re-run bootstrap.sh. prune_unexpected_federated_credentials()
 #    DELETES any credential outside the expected set, so the cleanup is enforced
@@ -844,7 +875,7 @@ apply SP.
 
 ---
 
-## 5. Blocking pre-activation checks (B1–B9)
+## 5. Blocking pre-activation checks (B1–B10)
 
 **None of these may be assumed.** Each states what to run and **both** branches
 of the outcome. Do not set `DEV_TF_BACKEND_READY` until every one is resolved.
@@ -1165,10 +1196,12 @@ gh api "repos/$REPO/environments/development-infra-apply-recovery/deployment-bra
   sets `prevent_self_review: false` deliberately on the recovery environment, so
   a solo maintainer can approve their own recovery run; the gate is "a human
   deliberately clicked", not "a second person exists".
-- **Branch B — either reported `UNVERIFIED` or `UNPROTECTED`** (no `gh`, not
-  authenticated, or a PUT failed): bootstrap prints a blocking banner with the
-  exact `gh api` commands. Run them, then re-run the verification above.
-  `UNVERIFIED` is **not** a pass — it means nobody has looked.
+- **Branch B — either reported `UNVERIFIED` or `UNPROTECTED`** (`gh` stopped
+  working part-way through the run, or a PUT failed — a `gh` that was
+  unauthenticated at the *start* aborts the run before this point, see step 1):
+  bootstrap prints a blocking banner with the exact `gh api` commands. Run them,
+  then re-run the verification above. `UNVERIFIED` is **not** a pass — it means
+  nobody has looked.
 
 > **`DEV_TF_BACKEND_READY` must not be set true until BOTH environments pass.**
 > This is the only pre-activation check whose subject is a GitHub protection rule
@@ -1177,6 +1210,83 @@ gh api "repos/$REPO/environments/development-infra-apply-recovery/deployment-bra
 > auto-creation.** Re-verify after any change to repository or environment
 > settings — an environment deleted in the UI comes back **unprotected** on the
 > next run that references it.
+
+### B10 — Do the live federated subjects match the prefix the repo actually presents?
+
+**This is the check whose absence let a subject mismatch reach a live
+`azure/login` failure (MG-42).** A federated credential can be present, correctly
+named, attached to the right app, and bound to a subject **no GitHub token will
+ever carry** — nothing in Azure or GitHub reports that as an error until a
+workflow tries to log in and fails `AADSTS700213`. B1–B9 do not look at it.
+
+The `repo:…` head of every subject is the repository's **live sub-claim
+prefix**, not `repo:<owner>/<repo>`. This account's org customizes the OIDC `sub`
+claim to inject the numeric owner-id and repo-id, so the prefix must be **read**,
+never assumed:
+
+```bash
+REPO='stevebargelt/meatgeekv2'
+
+# The authority. `sub_claim_prefix` decides the subject where it is present and
+# non-empty — `use_default` describes the claim-KEY list and does NOT override
+# it. Both may be set at once; on this repo they are.
+gh api "repos/$REPO/actions/oidc/customization/sub"
+# observed 2026-07-28:
+# {"use_default":true,"use_immutable_subject":false,
+#  "sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}
+
+PREFIX="$(gh api "repos/$REPO/actions/oidc/customization/sub" \
+  --jq '.sub_claim_prefix // ""')"
+[ -n "$PREFIX" ] || PREFIX="repo:$REPO"   # only when the API returns none / 404
+echo "$PREFIX"
+```
+
+Then compare, **for all three federated identities**, the subject each
+credential actually carries against `$PREFIX:environment:<env>`:
+
+```bash
+check() { # <app-display-name> <cred-name> <github-env>
+  # ALL matches, never [0]: Entra display names are NOT unique, and silently
+  # picking one of two same-named apps is the ambiguity bootstrap dies on.
+  APP_ID="$(az ad app list --display-name "$1" --query '[].appId' -o tsv)"
+  [ "$(printf '%s\n' "$APP_ID" | grep -c .)" = 1 ] \
+    || { echo "AMBIGUOUS/ABSENT $1: [$APP_ID] — resolve before continuing"; return 1; }
+  GOT="$(az ad app federated-credential list --id "$APP_ID" \
+    --query "[?name=='$2'].subject | [0]" -o tsv)"
+  WANT="${PREFIX}:environment:$3"
+  [ "$GOT" = "$WANT" ] && echo "MATCH   $2" \
+    || echo "MISMATCH $2: live='$GOT' expected='$WANT'"
+}
+
+# Display names are bootstrap's defaults; if you overrode AAD_APP_NAME /
+# AAD_DEPLOY_APP_NAME / AAD_INFRA_APPLY_APP_NAME, substitute yours.
+check meatgeek-v2-github-infra-apply github-infra-apply-development-infra-apply development-infra-apply
+check meatgeek-v2-github-appdeploy   github-appdeploy-development              development
+check meatgeek-v2-github-oidc        github-production                         production
+# -> all three must print MATCH. Any MISMATCH — or AMBIGUOUS/ABSENT — is a
+#    FAILED check.
+```
+
+- **Branch A — all three `MATCH`.** Check passes. The subjects the credentials
+  carry are the subjects GitHub will present.
+- **Branch B — any `MISMATCH`.** **Do not hand-edit the credential, and do not
+  set `DEV_TF_BACKEND_READY`.** Re-run `./bootstrap.sh`: it resolves the prefix
+  from this same endpoint and reconciles each credential **on subject** —
+  no-op if the subject matches, delete-and-recreate if it has drifted — so the
+  re-run is the repair. Then re-run the comparison. If bootstrap
+  aborts instead, read which abort class it reports — the remediations differ
+  (see [the runbook's precondition table](bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned));
+  a GitHub API outage is **not** an auth problem and `gh auth login` will not
+  fix it.
+
+> **The trap this check exists to close.** A live credential whose subject does
+> **not** look like `repo:stevebargelt/meatgeekv2:environment:<env>` is almost
+> certainly **correct** on this account. Older revisions of this document and the
+> runbook published that un-prefixed form as the expected value; an operator
+> comparing the live tenant against it concludes the credentials are
+> misconfigured and "corrects" them back — which is precisely the outage. The
+> expected value is `$PREFIX:environment:<env>` computed from the API **at the
+> time you check**, never a string copied out of a document.
 
 ---
 
@@ -1445,9 +1555,9 @@ actually verified.
 
 ## 8. Activation
 
-Only after **every** B-check (B1–B9) is resolved and T1–T7 pass (with T3/T7
-outcomes recorded either way). Three of them are easy to leave un-run because
-nothing fails while they are outstanding — confirm all three explicitly here:
+Only after **every** B-check (B1–B10) is resolved and T1–T7 pass (with T3/T7
+outcomes recorded either way). Four of them are easy to leave un-run because
+nothing fails while they are outstanding — confirm all four explicitly here:
 
 - **B7** — branch protection on `main` is tightened. Without it, a direct push to
   `main` is an unreviewed apply.
@@ -1463,6 +1573,13 @@ nothing fails while they are outstanding — confirm all three explicitly here:
   auto-creation**, and `DEV_TF_BACKEND_READY` may not be set true until both
   verify. Without this the recovery approval passes everything and the apply
   environment's branch restriction does not exist.
+- **B10** — all three federated credentials carry the subject the repository
+  **actually presents**, compared against
+  `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` rather than
+  against any string in this document. Without it, a credential can be present
+  and correctly named while binding a subject no token matches; nothing turns
+  red until the first `azure/login` fails `AADSTS700213` — with
+  `DEV_TF_BACKEND_READY` already true and the apply loop live.
 
 ```bash
 gh variable set DEV_TF_BACKEND_READY --body true    # REPOSITORY scope — see §2

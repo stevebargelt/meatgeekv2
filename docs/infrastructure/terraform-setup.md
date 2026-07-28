@@ -370,15 +370,27 @@ See **[CI/CD Pipeline](../development/ci-cd.md)** for the full model.
 
 GitHub Actions identities use **federated credentials scoped per GitHub
 Environment** — the canonical subject scheme
-`repo:<owner>/<repo>:environment:<github-env>` where `<github-env>` is the exact
-`environment:` the job declares, not per branch. Under MG-23 the **environment**,
-not the client id a job passes, is what selects the identity:
+`<live sub-claim prefix>:environment:<github-env>` where `<github-env>` is the
+exact `environment:` the job declares, not per branch. Under MG-23 the
+**environment**, not the client id a job passes, is what selects the identity:
 
 | GitHub Environment        | Identity        | Privilege                                                                                                                       |
 | ------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `development-infra-apply` | dev infra-apply | `Contributor` + a **conditioned** Role Based Access Control Administrator scoped **only** to `meatgeek-v2-dev-rg`, + `tfstate-dev` |
 | `development`             | dev app-deploy  | `Website Contributor` on its Function App only                                                                                    |
 | `production`              | prod plan/read  | `Reader` + `Storage Blob Data Contributor` on `tfstate-prod` only                                                                 |
+
+The prefix is **not** `repo:<owner>/<repo>` on this account: the org customizes
+the OIDC `sub` claim to inject numeric ids, so bootstrap reads the prefix from
+the repository at run time and composes every subject from it (MG-42). Read the
+current value with
+`gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub`; as
+observed on 2026-07-28 it is `repo:stevebargelt@4857343/meatgeekv2@1304558512`,
+making the production subject
+`repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:production`. Treat
+that as an observation to re-check, never as a constant to hardcode — see the
+[bootstrap runbook](bootstrap-runbook.md#part-1--run-once-bootstrap-per-subscription)
+for the full scheme and the abort classes around it.
 
 **There are FOUR GitHub Environments; the three above are the FEDERATED ones.**
 The fourth, `development-infra-apply-recovery`, is an **approval-only** gate for
