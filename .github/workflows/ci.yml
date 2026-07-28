@@ -321,6 +321,22 @@ jobs:
         # `timeout` bounds any future hang instead of wedging the job.
         run: timeout 180 bash apps/infrastructure/bootstrap/bootstrap.test.sh < /dev/null
 
+      - name: Bootstrap OIDC-subject integration tests (MG-42)
+        # A SEPARATE step from the suite above because it is a separate KIND of
+        # test, and the distinction is what the suite is for. bootstrap.test.sh
+        # asserts the MG-42 pieces one at a time — the validator admits/rejects
+        # the right prefixes, the resolver classifies gh's outcomes, the
+        # reconciler reconciles toward a subject it is handed. This one runs the
+        # real chain: a stubbed `gh` answer flows through resolve → assert →
+        # compose → ensure_federated_credential, and the assertions read the
+        # subject off the `az` command line. MG-42 was itself a wiring bug, so
+        # the seam is the part that needed covering.
+        #
+        # No credentials are used or reachable: `gh` and `az` are shell
+        # functions, and main() is BASH_SOURCE-guarded so sourcing provisions
+        # nothing.
+        run: timeout 180 bash apps/infrastructure/bootstrap/bootstrap.oidc-subject.integration.test.sh < /dev/null
+
       - name: Destroy circuit-breaker fixtures (MG-23)
         # The apply workflow's destroy guard is only worth having if it is proven
         # to REJECT the destructive plans and ACCEPT the benign ones. The runner
