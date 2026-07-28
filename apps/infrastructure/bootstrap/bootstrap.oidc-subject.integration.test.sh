@@ -86,6 +86,9 @@ t_bad() { t_fail=$((t_fail+1)); printf 'FAIL - %s\n' "$1"; }
 #   MG42_GH_BODY      body `gh api` prints (stdout on success, stderr on failure)
 #   MG42_GH_STATUS    exit status of `gh api`                       (default 0)
 #   MG42_GH_AUTH      exit status of `gh auth status`               (default 0)
+#   MG42_GH_LINE      the HTTP STATUS LINE `gh api -i` prints ahead of the body
+#                     ("" = gh never got a response at all)  (default 200)
+#   MG42_GH_FAIL_BODY response body on stdout when `gh api` FAILS  (default "")
 #   MG42_EXISTING     subject already on the app's credential, "" = absent
 #   MG42_EXISTING_NAMES  credential names already on the app (prune input)
 #   MG42_POSE_PREFIX  set → skip resolution and pose this OIDC_SUBJECT_PREFIX
@@ -96,6 +99,7 @@ t_bad() { t_fail=$((t_fail+1)); printf 'FAIL - %s\n' "$1"; }
 # variable the function under test had just blanked.
 mg42_reset() {
   MG42_GH_BODY=""; MG42_GH_STATUS=0; MG42_GH_AUTH=0
+  MG42_GH_LINE="HTTP/2.0 200 OK"; MG42_GH_FAIL_BODY=""
   MG42_EXISTING=""; MG42_EXISTING_NAMES=""
   unset MG42_POSE_PREFIX 2>/dev/null || true
 }
@@ -104,11 +108,24 @@ mg42_run() {
   local mg42_muts mg42_log mg42_status=0
   mg42_muts="$(mktemp)"; mg42_log="$(mktemp)"
   (
+    # The resolver runs `gh api -i`, which prints the RESPONSE STATUS LINE and
+    # headers on stdout ahead of the body — on success AND on an HTTP error —
+    # while the human-readable diagnostic goes to stderr. The stub reproduces
+    # that shape because the status line is now what decides the destructive
+    # default-prefix fallback; gh's stderr text decides nothing. Inputs are
+    # MG42_-prefixed GLOBALS, never locals: bash locals are dynamically scoped,
+    # and a bare `status_line` here would be shadowed by
+    # resolve_oidc_subject_prefix's own local of that name.
     gh() {
       case "${1:-}" in
         auth) return "$MG42_GH_AUTH" ;;
-        api)  if [ "$MG42_GH_STATUS" -eq 0 ]; then printf '%s' "$MG42_GH_BODY"
-              else printf '%s' "$MG42_GH_BODY" >&2; fi
+        api)  if [ -n "$MG42_GH_LINE" ]; then
+                printf '%s\r\n' "$MG42_GH_LINE"
+                printf 'content-type: application/json; charset=utf-8\r\n'
+                printf '\r\n'
+              fi
+              if [ "$MG42_GH_STATUS" -eq 0 ]; then printf '%s' "$MG42_GH_BODY"
+              else printf '%s' "$MG42_GH_BODY" >&2; printf '%s' "$MG42_GH_FAIL_BODY"; fi
               return "$MG42_GH_STATUS" ;;
       esac
       return 0
@@ -236,6 +253,7 @@ for mg42_row in $MG42_IDENTITIES; do
   # the gh response rather than being a constant that happens to match above.
   mg42_reset
   MG42_GH_BODY="gh: Not Found (HTTP 404)"; MG42_GH_STATUS=1
+  MG42_GH_LINE="HTTP/2.0 404 Not Found"
   mg42_run "$mg42_fn"
   mg42_want_default="${DEFAULT_PREFIX}:environment:${mg42_env}"
   mg42_got_default="$(mg42_created_subjects)"
@@ -377,10 +395,14 @@ done
 # unauthenticated CLI whose 404s are indistinguishable from an unconfigured
 # repo, and a body that is not JSON at all.
 mg42_case() {
-  # usage: mg42_case "<label>" <body> <api-status> <auth-status>
+  # usage: mg42_case "<label>" <body> <api-status> <auth-status> \
+  #                  [<status-line>] [<stdout-body-on-failure>]
+  # <status-line> defaults to a 200 and may be "" to model the no-response case
+  # (DNS/proxy), where `gh api -i` prints no headers at all.
   local mg42_label="$1"
   mg42_reset
   MG42_GH_BODY="$2"; MG42_GH_STATUS="$3"; MG42_GH_AUTH="$4"
+  MG42_GH_LINE="${5-HTTP/2.0 200 OK}"; MG42_GH_FAIL_BODY="${6-}"
   mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_infra_apply_identity
   if [ "$MG42_STATUS" -ne 0 ] && [ -z "$MG42_MUTATIONS" ]; then
     t_ok "unprovable prefix provisions NOTHING: ${mg42_label}"
@@ -392,11 +414,66 @@ mg42_case "a prefix naming ANOTHER repository"        '{"sub_claim_prefix": "rep
 mg42_case "a look-alike fork of this repository"      '{"sub_claim_prefix": "repo:'"${MG42_OWNER}"'/'"${MG42_REPO}"'-fork"}' 0 0
 mg42_case "a prefix carrying an extra claim segment"  '{"sub_claim_prefix": "repo:'"${GITHUB_REPO}"':ref:refs/heads/main"}' 0 0
 mg42_case "a non-numeric owner id"                    '{"sub_claim_prefix": "repo:'"${MG42_OWNER}"'@abc/'"${MG42_REPO}"'"}' 0 0
-mg42_case "HTTP 500 (an outage, not a configuration fact)" 'gh: Server Error (HTTP 500)' 1 0
-mg42_case "HTTP 403 (a permission error, not a fact)"      'gh: Forbidden (HTTP 403)' 1 0
-mg42_case "a network failure"                              'error connecting to api.github.com' 1 0
+mg42_case "HTTP 500 (an outage, not a configuration fact)" 'gh: Server Error (HTTP 500)' 1 0 'HTTP/2.0 500 Internal Server Error'
+mg42_case "HTTP 403 (a permission error, not a fact)"      'gh: Forbidden (HTTP 403)' 1 0 'HTTP/2.0 403 Forbidden'
+mg42_case "a network failure"                              'error connecting to api.github.com' 1 0 ''
 mg42_case "an UNAUTHENTICATED gh (its 404s are ambiguous)" "$CUSTOM_BODY" 0 1
 mg42_case "an unparseable response body"                   'not json at all' 0 0
+
+# --- GROUP 4b: THE ROUND-2 REGRESSION (red-wide, HIGH) ---------------------
+# The default-prefix fallback used to be decided by an UNANCHORED substring grep
+# over gh's stderr — `grep -q 'HTTP 404'`. Any failure whose human-readable
+# diagnostic merely CONTAINED that text took the DESTRUCTIVE branch, though the
+# endpoint's configuration was never established: a captive-portal or proxy error
+# page, a reworded gh diagnostic, an unrelated nested 404 in a multi-part
+# message. On this repository the fallback resolves 'repo:stevebargelt/meatgeekv2',
+# and ensure_federated_credential reconciles ON SUBJECT — so it would DELETE and
+# recreate all three live credentials on a subject no token carries
+# (AADSTS700213), the hand-corrected development-infra-apply one included. A
+# self-inflicted outage, no attacker needed.
+#
+# The resolver now takes an AUTHORITATIVE status from the `gh api -i` status line
+# and matches it ANCHORED. These cases go through mg42_case deliberately: the
+# property asserted is the az MUTATION LOG — zero CREATE, zero DELETE — not a
+# message, because a message assertion would pass against a resolver that
+# announced the right thing and then federated the wrong subject anyway.
+mg42_case "a 502 proxy page whose TEXT contains 'HTTP 404'" \
+  '<html><title>Proxy Error</title>upstream said: HTTP 404</html>' 1 0 'HTTP/2.0 502 Bad Gateway'
+mg42_case "a 500 whose diagnostic mentions a nested HTTP 404" \
+  'gh: Server Error (HTTP 500); a dependent call returned HTTP 404' 1 0 'HTTP/2.0 500 Internal Server Error'
+mg42_case "a 403 whose diagnostic mentions HTTP 404" \
+  'gh: Forbidden (HTTP 403) — see HTTP 404 handling in the docs' 1 0 'HTTP/2.0 403 Forbidden'
+mg42_case "a network failure whose text contains 'HTTP 404' (no status line at all)" \
+  'error connecting to api.github.com (captive portal returned HTTP 404)' 1 0 ''
+# ...and the BODY cannot spoof the status line either: only the FIRST line of the
+# response is ever read as one.
+mg42_case "a 500 whose BODY carries a verbatim '404 Not Found' status line" \
+  'gh: Server Error (HTTP 500)' 1 0 'HTTP/2.0 500 Internal Server Error' \
+  'HTTP/2.0 404 Not Found
+{"message":"Not Found"}'
+# ...and a near-miss status line is not an exact 404: the code is delimited.
+mg42_case "a '4045' status code (not an exact 404)" \
+  'gh: failed' 1 0 'HTTP/2.0 4045 Nonsense'
+mg42_case "a 500 status line that MENTIONS a 404 mid-line" \
+  'gh: failed' 1 0 'HTTP/2.0 500 upstream HTTP/2.0 404 Not Found'
+
+# THE ANTI-OVER-BROADNESS CONTROL for the group above, on the same three-identity
+# chain: a GENUINE 404 — an exact 404 on the status line — still falls back and
+# still provisions all three identities on the default prefix. Without this, every
+# case above would also pass against a resolver that had simply stopped falling
+# back at all.
+mg42_reset
+MG42_GH_BODY='gh: Not Found (HTTP 404)'; MG42_GH_STATUS=1
+MG42_GH_LINE='HTTP/2.0 404 Not Found'
+MG42_GH_FAIL_BODY='{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}'
+mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_infra_apply_identity
+if [ "$MG42_STATUS" -eq 0 ] \
+   && [ "$(mg42_created_subjects | grep -c . || true)" -eq 3 ] \
+   && [ "$(mg42_created_subjects | grep -cv "^${DEFAULT_PREFIX}:environment:" || true)" -eq 0 ]; then
+  t_ok "a GENUINE exact-404 status still falls back and provisions all three identities on '${DEFAULT_PREFIX}' (the anchored check is not over-broad)"
+else
+  t_bad "an exact 404 status must still fall back to '${DEFAULT_PREFIX}' for all three identities (exit ${MG42_STATUS}, subjects: $(mg42_created_subjects | tr '\n' ' '))"
+fi
 
 # ...and the POSITIVE control for the whole group: the same three-identity chain
 # under a provable prefix DOES provision. Without it, every case above would

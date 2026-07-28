@@ -904,8 +904,8 @@ assert_oidc_subject_prefix() {
 #   prefix present & non-empty (200)          -> USE IT, whatever use_default says
 #   prefix absent/empty + use_default = true  -> genuine default, fall back
 #   prefix absent/empty + use_default = false -> DIE (see below)
-#   HTTP 404 behind the auth gate             -> no customization, fall back
-#   any other gh failure / unparseable body   -> DIE
+#   an EXACT 404 status behind the auth gate  -> no customization, fall back
+#   any other status / gh failure / bad body  -> DIE
 #
 # WHY THE THIRD ROW DIES. `use_default: false` with no readable prefix is GitHub
 # POSITIVELY STATING that a customization exists while its prefix is unreadable.
@@ -919,7 +919,7 @@ assert_oidc_subject_prefix() {
 #
 # Sets the global, so it MUST be called unsubshelled from main().
 resolve_oidc_subject_prefix() {
-  local body err errfile prefix use_default status=0 origin
+  local raw body err errfile status_line http_code prefix use_default status=0 origin
 
   # gh must be AUTHENTICATED before we read anything. The 404 branch below reads
   # "not found" as the FACT "no customization is configured" — but an expired or
@@ -933,30 +933,71 @@ resolve_oidc_subject_prefix() {
   gh auth status >/dev/null 2>&1 \
     || die "the GitHub CLI is not authenticated, so this repository's OIDC sub-claim customization cannot be read (MG-42). This is NOT skippable: an unauthenticated gh is indistinguishable from 'no customization configured', and assuming the default prefix would rewrite every federated credential to a subject no GitHub token matches (AADSTS700213). Run 'gh auth login' and re-run — nothing has been provisioned."
 
-  # stderr goes to a file rather than being merged into stdout: the 404
-  # classification below has to read gh's error text, and the success path has to
-  # parse stdout as JSON. Merging them would corrupt both.
+  # `-i` IS THE POINT OF THIS CALL, and it replaced a substring grep over gh's
+  # stderr (`grep -q 'HTTP 404'`) that decided the DESTRUCTIVE branch below.
+  # gh's exit status is one bit and its stderr is a human-readable DIAGNOSTIC,
+  # not a protocol fact: a captive-portal or proxy error page, a reworded gh
+  # diagnostic, or an unrelated nested 404 inside a multi-part message all
+  # CONTAIN the text "HTTP 404" while saying nothing about this endpoint. The
+  # substring match took the fallback on every one of them, and on this
+  # repository the fallback resolves `repo:stevebargelt/meatgeekv2` — a subject
+  # no token carries. Because ensure_federated_credential reconciles ON SUBJECT,
+  # that deletes and recreates all three live credentials dead (AADSTS700213),
+  # the hand-corrected development-infra-apply one included: a self-inflicted
+  # outage, no attacker required. `--include` makes gh print the RESPONSE STATUS
+  # LINE ahead of the body, which is the only authoritative statement of what
+  # THIS request returned, and it is matched anchored below.
+  #
+  # stderr still goes to a file rather than being merged into stdout — it is
+  # quoted in the abort message — but nothing DECIDES on it any more. Merging
+  # would also corrupt the status-line/body split.
   errfile="$(mktemp)" || die "could not create a temp file to capture the 'gh api' error output."
-  body="$(gh api "repos/${GITHUB_REPO}/actions/oidc/customization/sub" 2>"$errfile")" || status=$?
+  raw="$(gh api -i "repos/${GITHUB_REPO}/actions/oidc/customization/sub" 2>"$errfile")" || status=$?
   err="$(cat "$errfile")"
   rm -f "$errfile"
 
-  if [ "$status" -ne 0 ]; then
-    # HTTP 404 on THIS endpoint is GitHub's "no sub-claim customization is
-    # configured" answer, and it is the ONLY failure we read as a fact rather
-    # than an outage — and only because the auth gate above has already ruled out
-    # the other thing a 404 commonly means. Every other non-zero exit (403, 5xx,
-    # rate limit, DNS, proxy) is an OUTAGE: it says nothing about the repo's
-    # configuration, so proceeding on the default prefix would be a guess that
-    # rewrites live trust.
-    if printf '%s' "$err" | grep -q 'HTTP 404'; then
-      prefix="repo:${GITHUB_REPO}"
-      origin="GitHub reports no sub-claim customization (HTTP 404) — using the default prefix"
-      warn "No OIDC sub-claim customization is configured on ${GITHUB_REPO} (HTTP 404); federating GitHub's DEFAULT subject prefix '${prefix}'. If a workflow later fails azure/login with AADSTS700213, the customization was added after this run — re-run the bootstrap."
-    else
-      die "could not read the OIDC sub-claim customization for ${GITHUB_REPO} (gh exited ${status}) — this is a REAL GitHub error (auth / permission / throttling / network), NOT 'no customization configured'. The response decides every federated subject, so guessing the default prefix here could rewrite the live credentials to a subject no token matches (AADSTS700213). Aborting before anything is provisioned. gh said: ${err}"
-    fi
+  # ONLY the FIRST line is ever considered a status line (`sed -n '1p'`), and it
+  # must match ANCHORED at the start with the code delimited by end-of-line or a
+  # space. Both halves matter: a JSON body that happens to contain the text
+  # "HTTP/2.0 404 Not Found" is never on line 1, so it cannot spoof the real
+  # status; and the anchor stops "HTTP/2.0 500 …(HTTP 404 upstream)" from being
+  # read as a 404. `tr -d '\r'` rather than a sed \r class — BSD sed does not
+  # understand \r, and this script runs on operators' macOS boxes.
+  status_line="$(printf '%s\n' "$raw" | sed -n '1p' | tr -d '\r')"
+  http_code="$(printf '%s' "$status_line" | sed -n \
+    -e 's|^HTTP/[0-9][0-9.]* \([0-9][0-9][0-9]\)$|\1|p' \
+    -e 's|^HTTP/[0-9][0-9.]* \([0-9][0-9][0-9]\) .*$|\1|p')"
+
+  # No parseable status line means NO AUTHORITATIVE STATUS FOR THIS REQUEST —
+  # DNS failure, a proxy that swallowed the response, a future gh that stops
+  # honouring -i. That is epistemically identical to a 403 or a 5xx and dies for
+  # the same reason: it says nothing about the repository's configuration.
+  [ -n "$http_code" ] \
+    || die "could not read an HTTP status line from 'gh api -i repos/${GITHUB_REPO}/actions/oidc/customization/sub' (gh exited ${status}), so this request has NO authoritative status — it cannot be read as 'no customization configured'. Only an exact 404 means that, and this is not one. Guessing the default prefix here would rewrite all three live federated credentials to a subject no GitHub token matches (AADSTS700213). Aborting before anything is provisioned. First line of the response was '${status_line}'; gh said: ${err}"
+
+  if [ "$http_code" = "404" ]; then
+    # An EXACT 404 on THIS endpoint is GitHub's "no sub-claim customization is
+    # configured" answer, and it is the ONLY response read as a fact rather than
+    # an outage — and only because the auth gate above has already ruled out the
+    # other thing a 404 commonly means. It is now taken from the status line, so
+    # it is a fact about this request rather than a phrase spotted in prose.
+    prefix="repo:${GITHUB_REPO}"
+    origin="GitHub reports no sub-claim customization (HTTP 404) — using the default prefix"
+    warn "No OIDC sub-claim customization is configured on ${GITHUB_REPO} (HTTP 404); federating GitHub's DEFAULT subject prefix '${prefix}'. If a workflow later fails azure/login with AADSTS700213, the customization was added after this run — re-run the bootstrap."
+  elif [ "$http_code" != "200" ] || [ "$status" -ne 0 ]; then
+    # Every other status (403, 5xx, rate limit, redirect) and every gh failure
+    # is an OUTAGE: it says nothing about the repo's configuration, so
+    # proceeding on the default prefix would be a guess that rewrites live trust.
+    die "could not read the OIDC sub-claim customization for ${GITHUB_REPO} (HTTP ${http_code}, gh exited ${status}) — this is a REAL GitHub error (auth / permission / throttling / network), NOT 'no customization configured'; only an exact 404 means that. The response decides every federated subject, so guessing the default prefix here could rewrite the live credentials to a subject no token matches (AADSTS700213). Aborting before anything is provisioned. gh said: ${err}"
   else
+    # THE BODY, separated from the headers `-i` prepended: skip everything up to
+    # and including the first blank line. CRs are stripped first so the awk test
+    # is a plain /^$/ (portable across gawk/mawk/BWK awk). A response with no
+    # header/body separator yields an EMPTY body and dies just below — it is not
+    # silently read as "no customization".
+    body="$(printf '%s\n' "$raw" | tr -d '\r' | awk 'seen { print; next } /^$/ { seen = 1 }')"
+    [ -n "$body" ] \
+      || die "the OIDC sub-claim customization endpoint for ${GITHUB_REPO} returned HTTP ${http_code} with an EMPTY body, so the subject prefix cannot be read from it — and an unreadable prefix is not 'no customization configured' (that answer is an exact 404). Aborting rather than guess. Response was: ${raw}"
     # jq, not `--jq`: use_default has to be inspected as well as the prefix, and
     # a malformed body must be a DEATH rather than an empty string that the
     # default-fallback branch would then read as "no customization".

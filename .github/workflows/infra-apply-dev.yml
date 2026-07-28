@@ -334,9 +334,14 @@ jobs:
     timeout-minutes: 90
 
     # The apply identity's OWN GitHub Environment. This is what makes its OIDC
-    # subject (`repo:stevebargelt/meatgeekv2:environment:development-infra-apply`)
+    # subject (`<the repo's live sub-claim prefix>:environment:development-infra-apply`)
     # genuinely DIFFERENT from the app-deploy identity's
-    # (`...:environment:development`). Before MG-23 every dev identity federated
+    # (`...:environment:development`). The prefix is NOT the literal
+    # `repo:stevebargelt/meatgeekv2`: this repository's sub-claim customization
+    # injects owner/repo ids, and a credential federated on the literal matches
+    # no token this job presents (MG-42, AADSTS700213). Bootstrap DERIVES it at
+    # run time — see resolve_oidc_subject_prefix in
+    # apps/infrastructure/bootstrap/bootstrap.sh. Before MG-23 every dev identity federated
     # the identical `environment:development` subject and was selected only by
     # which client-id a job passed — so a one-line client-id edit merged to main
     # silently upgraded a read-only job to full apply. It no longer can: this is

@@ -625,18 +625,40 @@ done
 # never be run from a test). `gh` is stubbed as a shell function, which
 # `command -v gh` also finds, so the auth gate and the api read both hit it.
 #
-#   usage: mg42_resolve <api-stdout-or-stderr> <api-exit> [<auth-exit>]
+#   usage: mg42_resolve <api-stdout-or-stderr> <api-exit> [<auth-exit>] \
+#                       [<status-line>] [<extra-stdout-on-failure>]
 # Echoes the RESOLVED prefix; exits non-zero and echoes nothing when the
 # resolution DIES — which is what most of these cases assert.
+#
+# The stub emits a REALISTIC STATUS LINE because the resolver reads one: it runs
+# `gh api -i`, which prints the response status line and headers on stdout ahead
+# of the body — on success AND on an HTTP error — while the human-readable
+# diagnostic goes to stderr. <status-line> defaults to a 200 and may be set to
+# the empty string to model the no-response case (DNS/proxy), where gh prints no
+# headers at all. <extra-stdout-on-failure> is the response BODY on an error
+# status, which exists so a case can put a fake status line inside the body and
+# prove it cannot spoof the real one.
+#
+# EVERY local here is mg42_-prefixed on purpose: bash locals are dynamically
+# scoped, so a bare `status_line` in this helper would be SHADOWED by
+# resolve_oidc_subject_prefix's own local of that name — the stub would read the
+# variable the function under test had just declared empty, emit no status line,
+# and every case would "pass" by dying.
 mg42_resolve() {
-  local api_out="$1" api_status="$2" auth_status="${3:-0}"
+  local mg42_api_out="$1" mg42_api_status="$2" mg42_auth_status="${3:-0}"
+  local mg42_status_line="${4-HTTP/2.0 200 OK}" mg42_fail_body="${5-}"
   (
     gh() {
       case "${1:-}" in
-        auth) return "$auth_status" ;;
-        api)  if [ "$api_status" -eq 0 ]; then printf '%s' "$api_out"
-              else printf '%s' "$api_out" >&2; fi
-              return "$api_status" ;;
+        auth) return "$mg42_auth_status" ;;
+        api)  if [ -n "$mg42_status_line" ]; then
+                printf '%s\r\n' "$mg42_status_line"
+                printf 'content-type: application/json; charset=utf-8\r\n'
+                printf '\r\n'
+              fi
+              if [ "$mg42_api_status" -eq 0 ]; then printf '%s' "$mg42_api_out"
+              else printf '%s' "$mg42_api_out" >&2; printf '%s' "$mg42_fail_body"; fi
+              return "$mg42_api_status" ;;
       esac
       return 0
     }
@@ -704,24 +726,70 @@ for mg42_unreadable in \
     && ok "MG-42: use_default=false with an UNREADABLE sub_claim_prefix fails closed: ${mg42_unreadable}" \
     || bad "MG-42: '${mg42_unreadable}' must abort (a customization exists, its prefix is unreadable), not resolve to '${got}'"
 done
-# 4. HTTP 404 is GitHub's "no customization configured" — the one failure read
-#    as a fact rather than an outage (the auth gate has ruled out the other
-#    common cause of a 404).
-got="$(mg42_resolve 'gh: Not Found (HTTP 404)' 1)" || got="DIED"
+# 4. An EXACT 404 STATUS is GitHub's "no customization configured" — the one
+#    failure read as a fact rather than an outage (the auth gate has ruled out
+#    the other common cause of a 404). Kept passing so the anti-spoof tightening
+#    below cannot be over-broad: the genuine fallback must still work.
+got="$(mg42_resolve 'gh: Not Found (HTTP 404)' 1 0 'HTTP/2.0 404 Not Found')" || got="DIED"
 [ "$got" = "repo:${GITHUB_REPO}" ] \
-  && ok "MG-42: HTTP 404 (no customization configured) falls back to the DEFAULT prefix" \
-  || bad "MG-42: a 404 must fall back to 'repo:${GITHUB_REPO}' (got '${got}')"
+  && ok "MG-42: an exact 404 STATUS (no customization configured) falls back to the DEFAULT prefix" \
+  || bad "MG-42: a 404 status must fall back to 'repo:${GITHUB_REPO}' (got '${got}')"
 # 5. ANY OTHER gh failure is an OUTAGE, not a fact. Falling back here would
-#    rewrite live credentials to a subject no token matches.
-for failure in \
-  'gh: Server Error (HTTP 500)' \
-  'gh: Forbidden (HTTP 403)' \
-  'error connecting to api.github.com' \
-  'gh: API rate limit exceeded (HTTP 429)'; do
-  got="$(mg42_resolve "$failure" 1)" || got="DIED"
+#    rewrite live credentials to a subject no token matches. Rows are
+#    <status-line>|<stderr diagnostic>; an EMPTY status line is the no-response
+#    case, where gh never got far enough to have a status at all.
+while IFS='|' read -r mg42_line mg42_err; do
+  [ -n "$mg42_err" ] || continue
+  got="$(mg42_resolve "$mg42_err" 1 0 "$mg42_line")" || got="DIED"
   [ "$got" = "DIED" ] \
-    && ok "MG-42: a non-404 gh failure FAILS CLOSED, never falls back: ${failure}" \
-    || bad "MG-42: '${failure}' must abort, not resolve to '${got}'"
+    && ok "MG-42: a non-404 gh failure FAILS CLOSED, never falls back: ${mg42_err}" \
+    || bad "MG-42: '${mg42_err}' must abort, not resolve to '${got}'"
+done <<'MG42_FAILURES'
+HTTP/2.0 500 Internal Server Error|gh: Server Error (HTTP 500)
+HTTP/2.0 403 Forbidden|gh: Forbidden (HTTP 403)
+|error connecting to api.github.com
+HTTP/2.0 429 Too Many Requests|gh: API rate limit exceeded (HTTP 429)
+MG42_FAILURES
+# 5b. THE ROUND-2 REGRESSION (red-wide, HIGH). The fallback used to be decided by
+#     an UNANCHORED substring grep over gh's stderr — `grep -q 'HTTP 404'`. Any
+#     failure whose human-readable diagnostic merely CONTAINS that text took the
+#     DESTRUCTIVE branch: a captive-portal/proxy error page, a reworded gh
+#     diagnostic, an unrelated nested 404 in a multi-part message. On this
+#     repository the fallback resolves 'repo:stevebargelt/meatgeekv2', and
+#     ensure_federated_credential reconciles ON SUBJECT, so it would delete and
+#     recreate all three live credentials on a subject no token carries
+#     (AADSTS700213) — the hand-corrected development-infra-apply one included.
+#     The status line is the authority now, and it is matched ANCHORED.
+#
+#     Rows: <status-line>|<stderr containing the literal text "HTTP 404">
+while IFS='|' read -r mg42_line mg42_err; do
+  [ -n "$mg42_err" ] || continue
+  got="$(mg42_resolve "$mg42_err" 1 0 "$mg42_line")" || got="DIED"
+  [ "$got" = "DIED" ] \
+    && ok "MG-42-R2: a non-404 failure whose TEXT contains 'HTTP 404' fails closed: ${mg42_err}" \
+    || bad "MG-42-R2: '${mg42_err}' is not a 404 — it must abort, not resolve to '${got}' (unanchored substring match on gh's diagnostic)"
+done <<'MG42_SUBSTRING_404'
+HTTP/2.0 502 Bad Gateway|<html><title>Proxy Error</title>upstream said: HTTP 404</html>
+HTTP/2.0 500 Internal Server Error|gh: Server Error (HTTP 500); a dependent call returned HTTP 404
+HTTP/2.0 403 Forbidden|gh: Forbidden (HTTP 403) — see HTTP 404 handling in the docs
+|error connecting to api.github.com (captive portal returned HTTP 404)
+MG42_SUBSTRING_404
+# 5c. ...and the BODY cannot spoof the status either. Only the FIRST line of the
+#     response is ever read as a status line, so a 5xx whose body contains a
+#     verbatim '404 Not Found' status line must still abort.
+got="$(mg42_resolve 'gh: Server Error (HTTP 500)' 1 0 'HTTP/2.0 500 Internal Server Error' \
+  'HTTP/2.0 404 Not Found
+{"message":"Not Found"}')" || got="DIED"
+[ "$got" = "DIED" ] \
+  && ok "MG-42-R2: a status line inside the response BODY cannot spoof the real status" \
+  || bad "MG-42-R2: a body-embedded '404 Not Found' status line must not be read as the response status (got '${got}')"
+# 5d. A near-miss status line is not a 404 either: the code is delimited, so
+#     '4045' and a 404 mentioned mid-line both fail closed.
+for mg42_line in 'HTTP/2.0 4045 Nonsense' 'HTTP/2.0 500 upstream HTTP/2.0 404 Not Found' 'not a status line at all'; do
+  got="$(mg42_resolve 'gh: failed' 1 0 "$mg42_line")" || got="DIED"
+  [ "$got" = "DIED" ] \
+    && ok "MG-42-R2: a near-miss status line fails closed: '${mg42_line}'" \
+    || bad "MG-42-R2: '${mg42_line}' is not an exact 404 status — must abort, not resolve to '${got}'"
 done
 # 6. An UNAUTHENTICATED gh aborts BEFORE the api read — otherwise its 404s are
 #    indistinguishable from "no customization configured".

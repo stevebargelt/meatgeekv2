@@ -491,17 +491,36 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
       return { status: r.status ?? 1, prefix: (r.stdout ?? '').trim() };
     }
 
-    /** A stub whose `gh api` succeeds with the given JSON body. */
+    /**
+     * The stubs emit a REALISTIC STATUS LINE because the resolver reads one.
+     *
+     * It runs `gh api -i`, which prints the response status line and headers on
+     * stdout ahead of the body — on success AND on an HTTP error — while the
+     * human-readable diagnostic goes to stderr. That status line is the only
+     * authoritative statement of what THIS request returned, and it replaced an
+     * unanchored `grep -q 'HTTP 404'` over gh's stderr that decided the
+     * DESTRUCTIVE default-prefix fallback (see the regression test below).
+     */
+    const headers = (statusLine: string) =>
+      statusLine
+        ? `printf '%s\\r\\n' '${statusLine}'; printf 'content-type: application/json\\r\\n'; printf '\\r\\n';`
+        : '';
+    /** A stub whose `gh api` succeeds (HTTP 200) with the given JSON body. */
     const apiOk = (body: string) => `
       gh() { case "\${1:-}" in
         auth) return 0 ;;
-        api)  printf '%s' '${body}' ;;
+        api)  ${headers('HTTP/2.0 200 OK')} printf '%s' '${body}' ;;
       esac; return 0; }`;
-    /** A stub whose `gh api` fails, writing the given text to stderr. */
-    const apiFail = (err: string) => `
+    /**
+     * A stub whose `gh api` fails, writing `err` to stderr under `statusLine`.
+     * An empty `statusLine` models the no-response case (DNS/proxy), where gh
+     * never got a status at all. `failBody` is the response body on stdout —
+     * used to prove a body cannot spoof the real status line.
+     */
+    const apiFail = (err: string, statusLine: string, failBody = '') => `
       gh() { case "\${1:-}" in
         auth) return 0 ;;
-        api)  printf '%s' '${err}' >&2; return 1 ;;
+        api)  ${headers(statusLine)} printf '%s' '${err}' >&2; printf '%s' '${failBody}'; return 1 ;;
       esac; return 0; }`;
 
     it('HONOURS a custom sub_claim_prefix — the live 2026-07-27 shape', () => {
@@ -558,7 +577,10 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
       // it, and the 404 the endpoint returns when nothing is configured. BOTH
       // halves matter in the first case — a body carrying a prefix alongside
       // use_default=true resolves the other way (see the live fixture above).
-      for (const stub of [apiOk('{"use_default": true}'), apiFail('gh: Not Found (HTTP 404)')]) {
+      for (const stub of [
+        apiOk('{"use_default": true}'),
+        apiFail('gh: Not Found (HTTP 404)', 'HTTP/2.0 404 Not Found'),
+      ]) {
         const { status, prefix } = resolvePrefix(stub);
         expect(status).toBe(0);
         expect(prefix).toBe(DEFAULT_PREFIX);
@@ -606,12 +628,12 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
       // Falling back to the default prefix on one would rewrite the live
       // credentials to a subject no token matches — the MG-42 outage, re-caused
       // by the fix. Fail closed instead.
-      for (const err of [
-        'gh: Server Error (HTTP 500)',
-        'gh: Forbidden (HTTP 403)',
-        'error connecting to api.github.com',
+      for (const [err, line] of [
+        ['gh: Server Error (HTTP 500)', 'HTTP/2.0 500 Internal Server Error'],
+        ['gh: Forbidden (HTTP 403)', 'HTTP/2.0 403 Forbidden'],
+        ['error connecting to api.github.com', ''],
       ]) {
-        const { status } = resolvePrefix(apiFail(err));
+        const { status } = resolvePrefix(apiFail(err, line));
         expect(`${err} -> exit ${status}`).toBe(`${err} -> exit 1`);
       }
       // Unparseable JSON is not "no customization" either.
@@ -620,6 +642,71 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
       // indistinguishable from "nothing is configured".
       const unauthed = `gh() { case "\${1:-}" in auth) return 1 ;; esac; return 0; }`;
       expect(resolvePrefix(unauthed).status).toBe(1);
+    });
+
+    /**
+     * THE ROUND-2 REGRESSION (red-wide, HIGH).
+     *
+     * The destructive default-prefix fallback used to be decided by an
+     * UNANCHORED substring grep over gh's stderr — `grep -q 'HTTP 404'`. Any gh
+     * failure whose human-readable diagnostic merely CONTAINED that text took
+     * the fallback, though the endpoint's configuration was never established: a
+     * captive-portal or proxy error page, a reworded gh diagnostic, an unrelated
+     * nested 404 in a multi-part message. On this repository the fallback
+     * resolves `repo:stevebargelt/meatgeekv2`, and ensure_federated_credential
+     * reconciles ON SUBJECT — so it would delete and recreate all three live
+     * credentials on a subject no token carries (AADSTS700213), the
+     * hand-corrected development-infra-apply one included. A self-inflicted
+     * outage, no attacker required.
+     *
+     * The resolver now takes an authoritative status from the `gh api -i` status
+     * line and matches it ANCHORED. Same class of defect as the round-1
+     * precedence bug: a plausible read of an ambiguous signal, on the one code
+     * path whose failure mode is destructive.
+     */
+    it('REFUSES a non-404 failure whose diagnostic merely CONTAINS "HTTP 404" (MG-42 round 2)', () => {
+      for (const [err, line] of [
+        // A proxy/captive-portal error page that mentions a 404 upstream.
+        ['<html>Proxy Error</html> upstream said: HTTP 404', 'HTTP/2.0 502 Bad Gateway'],
+        // A multi-part diagnostic with an unrelated nested 404.
+        ['gh: Server Error (HTTP 500); a dependent call returned HTTP 404', 'HTTP/2.0 500 Internal Server Error'],
+        ['gh: Forbidden (HTTP 403) - see HTTP 404 handling in the docs', 'HTTP/2.0 403 Forbidden'],
+        // No response at all: there is no status, so there is no fact to read.
+        ['error connecting to api.github.com (captive portal returned HTTP 404)', ''],
+      ]) {
+        const { status, prefix } = resolvePrefix(apiFail(err, line));
+        expect(`${line || '<no status>'} -> exit ${status} prefix '${prefix}'`).toBe(
+          `${line || '<no status>'} -> exit 1 prefix ''`
+        );
+      }
+      // Only the FIRST line of the response is ever read as a status line, so a
+      // body carrying a verbatim 404 status line cannot spoof the real one.
+      const spoof = resolvePrefix(
+        apiFail(
+          'gh: Server Error (HTTP 500)',
+          'HTTP/2.0 500 Internal Server Error',
+          'HTTP/2.0 404 Not Found\\n{"message":"Not Found"}'
+        )
+      );
+      expect(`spoofed-body -> exit ${spoof.status} prefix '${spoof.prefix}'`).toBe(
+        "spoofed-body -> exit 1 prefix ''"
+      );
+      // A near-miss status line is not an exact 404 either: the code is delimited.
+      for (const line of [
+        'HTTP/2.0 4045 Nonsense',
+        'HTTP/2.0 500 upstream HTTP/2.0 404 Not Found',
+        'not a status line at all',
+      ]) {
+        const { status, prefix } = resolvePrefix(apiFail('gh: failed', line));
+        expect(`${line} -> exit ${status} prefix '${prefix}'`).toBe(`${line} -> exit 1 prefix ''`);
+      }
+      // ...and the ANTI-OVER-BROADNESS control: a genuine exact 404 still falls
+      // back, so the tightening did not simply disable the fallback.
+      const genuine = resolvePrefix(
+        apiFail('gh: Not Found (HTTP 404)', 'HTTP/2.0 404 Not Found', '{"message":"Not Found"}')
+      );
+      expect(genuine.status).toBe(0);
+      expect(genuine.prefix).toBe(DEFAULT_PREFIX);
     });
 
     it('never composes a subject from an unresolved prefix or an empty environment', () => {
