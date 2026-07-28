@@ -825,17 +825,28 @@ Function-App `Website Contributor` and the Flex deployment-container `Storage Bl
 Data Contributor`:
 
 ```bash
+# These two are read-only, but an EMPTY id here still buys a false green: the
+# listing falls back to a broader scope and can print the same SP object id from
+# an unrelated assignment, which reads exactly like the grant you were checking
+# for. Assert the id, then look.
 FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex_consumption.main | awk '/^ *id /{print $3; exit}')"
-az role assignment list --scope "$FUNC_ID" \
-  --query "[?roleDefinitionName=='Website Contributor'].principalId" -o tsv
+[ -n "$FUNC_ID" ] || echo "UNVERIFIED: FUNC_ID unresolved — the listing below would not be scoped to the Function App." >&2
+if [ -n "$FUNC_ID" ]; then
+  az role assignment list --scope "$FUNC_ID" \
+    --query "[?roleDefinitionName=='Website Contributor'].principalId" -o tsv
+fi
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 
 # Flex OneDeploy write-path: the same SP on the deployment-package container.
 # The functions storage account is the azapi control-plane resource, not azurerm.
 STORAGE_ID="$(terraform state show module.azure_functions.azapi_resource.functions_storage | awk '/^ *id /{print $3; exit}')"
-az role assignment list \
-  --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package" \
-  --query "[?roleDefinitionName=='Storage Blob Data Contributor'].principalId" -o tsv
+if [ -n "$STORAGE_ID" ]; then
+  az role assignment list \
+    --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package" \
+    --query "[?roleDefinitionName=='Storage Blob Data Contributor'].principalId" -o tsv
+else
+  echo "UNVERIFIED: STORAGE_ID unresolved — this check did not run." >&2
+fi
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 ```
 
@@ -866,19 +877,38 @@ FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex
 
 # Only if you don't already have publish rights on the dev FA:
 ME="$(az ad signed-in-user show --query id -o tsv)"
-az role assignment create --assignee-object-id "$ME" \
-  --assignee-principal-type User \
-  --role "Website Contributor" --scope "$FUNC_ID"
+
+# NEVER let an empty id reach `--scope`. `terraform state show` fails — wrong
+# directory, backend not initialised, resource not yet applied — and `awk` still
+# exits 0, so $FUNC_ID is silently empty. An empty `--scope` is not "no scope" to
+# the CLI: it is absent, and the scope then falls back to a broader default. At
+# best the command errors; at worst you have granted yourself Website
+# Contributor across the whole subscription instead of one Function App. The
+# check is the branch, not a warning above it.
+if [ -n "$ME" ] && [ -n "$FUNC_ID" ]; then
+  az role assignment create --assignee-object-id "$ME" \
+    --assignee-principal-type User \
+    --role "Website Contributor" --scope "$FUNC_ID"
+else
+  echo "REFUSING: ME='$ME' FUNC_ID='$FUNC_ID' — resolve both before granting anything." >&2
+fi
 
 # Flex OneDeploy writes the package ZIP to the deployment-package blob container
 # under YOUR identity, so you also need Blob Data write there (Contributor/Owner
 # on the RG does NOT include the storage data plane). Grant it if you lack it
 # (the functions storage account is the azapi control-plane resource, not azurerm):
 STORAGE_ID="$(terraform state show module.azure_functions.azapi_resource.functions_storage | awk '/^ *id /{print $3; exit}')"
-az role assignment create --assignee-object-id "$ME" \
-  --assignee-principal-type User \
-  --role "Storage Blob Data Contributor" \
-  --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package"
+# Same rule, and the interpolation hides it better: an empty $STORAGE_ID still
+# produces a NON-empty scope string ("/blobServices/default/containers/…") that
+# names no account at all.
+if [ -n "$ME" ] && [ -n "$STORAGE_ID" ]; then
+  az role assignment create --assignee-object-id "$ME" \
+    --assignee-principal-type User \
+    --role "Storage Blob Data Contributor" \
+    --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package"
+else
+  echo "REFUSING: ME='$ME' STORAGE_ID='$STORAGE_ID' — resolve both before granting anything." >&2
+fi
 ```
 
 Then publish the packaged artifact to the dev Function App **as yourself**. On

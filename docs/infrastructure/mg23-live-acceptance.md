@@ -201,8 +201,18 @@ while IFS=$'\t' read -r role _guid; do
   printf '%s\t%s\n' "$role" "$guid" >> "$OUT"
 done < <(grep -v '^#' "$SRC" | grep -v '^[[:space:]]*$')
 
-diff "$SRC" "$OUT" || true                      # review every line before overwriting
-cp "$OUT" "$SRC"
+diff "$SRC" "$OUT" || true                      # `|| true`: differing files are the expected outcome
+```
+
+**Read that diff before overwriting anything.** Every changed line must be a
+`PENDING` → GUID substitution and nothing else; a changed *role name* means the
+loop above matched something you did not intend, and this file is what authors
+the ABAC condition. The overwrite is a **separate** command for that reason —
+"review every line before overwriting" is not a control-flow construct, and a
+`cp` sitting in the same pasted block runs whether you read the diff or not:
+
+```bash
+cp "$OUT" "$SRC"                                # only after you have read the diff
 ```
 
 Then open a PR with the resolved file, and **re-run `bootstrap.sh`** after it
@@ -264,13 +274,23 @@ terraform init -input=false -reconfigure \
   -backend-config=environments/backend-dev.hcl \
   -backend-config="storage_account_name=$STATE_ACCOUNT"
 
-# Confirm it really is in state before removing anything.
-terraform state list | grep consumption_budget_subscription || \
-  echo "already absent — nothing to migrate"
+# Confirm it really is in state before removing anything — and let that
+# confirmation DECIDE, rather than print. A `grep … || echo "already absent"`
+# ahead of an unconditional `state rm` is a comment: it reports, then removes
+# either way. This is live dev state; the check has to be the branch.
+#
+# Capture first rather than piping into `grep -q`: with `set -o pipefail` above,
+# `grep -q` exiting early can SIGPIPE `terraform state list` and fail the
+# pipeline even on a match, which would silently skip a migration that IS needed.
+STATE_ENTRY="$(terraform state list | grep consumption_budget_subscription || true)"
 
-# NOTE the module-qualified address: the resource lives INSIDE the monitoring
-# module, and it was applied WITHOUT a count, so there is no [0] index in state.
-terraform state rm 'module.monitoring.azurerm_consumption_budget_subscription.credit_budget'
+if [ -n "$STATE_ENTRY" ]; then
+  # NOTE the module-qualified address: the resource lives INSIDE the monitoring
+  # module, and it was applied WITHOUT a count, so there is no [0] index in state.
+  terraform state rm 'module.monitoring.azurerm_consumption_budget_subscription.credit_budget'
+else
+  echo "already absent — nothing to migrate"
+fi
 ```
 
 **Verify the migration worked** — the whole point is that the budget destroy is
@@ -654,18 +674,46 @@ every `<placeholder>` — no live identifier belongs in this document.
 
 ```bash
 PLAN_APP_NAME='<dev-plan-app-display-name>'      # e.g. the display name bootstrap used
-PLAN_APP_ID="$(az ad app list --display-name "$PLAN_APP_NAME" --query '[0].appId' -o tsv)"
-PLAN_SP_ID="$(az ad sp list --filter "appId eq '$PLAN_APP_ID'" --query '[0].id' -o tsv)"
 SUB_ID='<subscription-id>'
 REPO='<owner>/<repo>'
+PLAN_APP_ID=''; PLAN_SP_ID=''
 
-# Refuse to proceed on an ambiguous match — deleting the WRONG principal here is
-# a self-inflicted outage.
-test -n "$PLAN_APP_ID" && test -n "$PLAN_SP_ID" || { echo 'resolve failed'; exit 1; }
+# ALL matches, never [0] — the same rule B10's check() states, and for a sharper
+# reason: everything in §3 DELETES. Entra display names are NOT unique, and [0]
+# silently picks one of two same-named apps; a later `test -n` then sees a
+# perfectly resolved value, because [0] already collapsed the very ambiguity the
+# test was meant to catch. Deleting the WRONG principal here is a self-inflicted
+# outage, so the count is checked where the ambiguity is still visible.
+APP_MATCHES="$(az ad app list --display-name "$PLAN_APP_NAME" --query '[].appId' -o tsv)"
+if [ "$(printf '%s\n' "$APP_MATCHES" | grep -c .)" = 1 ]; then
+  PLAN_APP_ID="$APP_MATCHES"
+  SP_MATCHES="$(az ad sp list --filter "appId eq '$PLAN_APP_ID'" --query '[].id' -o tsv)"
+  [ "$(printf '%s\n' "$SP_MATCHES" | grep -c .)" = 1 ] && PLAN_SP_ID="$SP_MATCHES"
+fi
+
+# The gate EVERY mutating block in §3 calls. It is a function, and a refusal
+# RETURNS rather than exits: `exit 1` pasted into an interactive shell kills the
+# shell and takes $SUB_ID, $REPO and the ids you just resolved with it, which is
+# how an operator ends up re-resolving by hand, mid-retirement, against a
+# half-deleted object.
+plan_retire_ready() {
+  [ -n "$PLAN_APP_ID" ] && [ -n "$PLAN_SP_ID" ] && [ -n "$SUB_ID" ] && [ -n "$REPO" ] && return 0
+  echo "REFUSING: unresolved or ambiguous retirement target (app='$PLAN_APP_ID' sp='$PLAN_SP_ID' sub='$SUB_ID' repo='$REPO'). Re-run this resolve block; delete NOTHING until it comes back clean." >&2
+  return 1
+}
+plan_retire_ready && echo "resolved: app=$PLAN_APP_ID sp=$PLAN_SP_ID"
 ```
 
 Capture `$PLAN_SP_ID` **before** step 1 — once the app registration is gone the
 service principal object id is much harder to recover, and steps 3 and 4 need it.
+
+**Every deleting block below re-calls `plan_retire_ready` and does nothing if it
+refuses.** The gate is deliberately repeated rather than stated once here:
+operators paste sections individually, and a precondition that only ran in a
+block you scrolled past is not a precondition. The read-only verification
+commands are left ungated on purpose — a listing against an unresolved id prints
+nothing and mutates nothing, and gating them would only hide that the resolve is
+what needs fixing.
 
 ### 3.1 Delete the subscription-scoped `Reader` role assignment
 
@@ -674,8 +722,10 @@ principal no longer exists shows as an orphaned GUID in the portal and is
 awkward to find later.
 
 ```bash
-az role assignment delete --assignee "$PLAN_SP_ID" \
-  --role Reader --scope "/subscriptions/$SUB_ID"
+if plan_retire_ready; then
+  az role assignment delete --assignee "$PLAN_SP_ID" \
+    --role Reader --scope "/subscriptions/$SUB_ID"
+fi
 ```
 
 **Verify — must print nothing:**
@@ -691,10 +741,18 @@ This is the one that actually reads state. The scope is the **container**, not
 the account:
 
 ```bash
-STATE_ACCOUNT="$(apps/infrastructure/scripts/state-account-name.sh "$SUB_ID")"
+# state-account-name.sh returns non-zero and prints nothing when it cannot
+# derive a name; an empty $STATE_ACCOUNT would splice a scope naming an account
+# that does not exist, and a delete against a scope you did not mean to name is
+# not something to discover afterwards.
+STATE_ACCOUNT="$(apps/infrastructure/scripts/state-account-name.sh "$SUB_ID")" || STATE_ACCOUNT=''
 CONTAINER_SCOPE="/subscriptions/$SUB_ID/resourceGroups/meatgeek-v2-tfstate-rg/providers/Microsoft.Storage/storageAccounts/$STATE_ACCOUNT/blobServices/default/containers/tfstate-dev"
 
-az role assignment delete --assignee "$PLAN_SP_ID" --scope "$CONTAINER_SCOPE"
+if plan_retire_ready && [ -n "$STATE_ACCOUNT" ]; then
+  az role assignment delete --assignee "$PLAN_SP_ID" --scope "$CONTAINER_SCOPE"
+else
+  echo "REFUSING: state account unresolved — not deleting at a scope naming an empty account." >&2
+fi
 ```
 
 **Verify — must print nothing.** Use `--all`, because a scoped listing hides
@@ -715,7 +773,9 @@ az role assignment list --assignee "$PLAN_SP_ID" --all -o tsv    # must print no
 ### 3.3 Delete the service principal
 
 ```bash
-az ad sp delete --id "$PLAN_SP_ID"
+if plan_retire_ready; then
+  az ad sp delete --id "$PLAN_SP_ID"
+fi
 ```
 
 **Verify — must print an empty list (`[]`):**
@@ -731,9 +791,11 @@ it. Confirm the federated credential set first, so you know exactly what you are
 removing:
 
 ```bash
-az ad app federated-credential list --id "$PLAN_APP_ID" \
-  --query "[].{name:name, subject:subject}" -o table
-az ad app delete --id "$PLAN_APP_ID"
+if plan_retire_ready; then
+  az ad app federated-credential list --id "$PLAN_APP_ID" \
+    --query "[].{name:name, subject:subject}" -o table
+  az ad app delete --id "$PLAN_APP_ID"
+fi
 ```
 
 **Verify — must print an empty list (`[]`):**
@@ -756,8 +818,12 @@ delete the variable explicitly first so the intent is recorded and so a partiall
 failed environment delete cannot leave a dangling client id behind:
 
 ```bash
-gh variable delete AZURE_CLIENT_ID --env development-infra-plan --repo "$REPO" || true
-gh api --method DELETE "repos/$REPO/environments/development-infra-plan"
+if plan_retire_ready; then
+  # `|| true` is deliberate HERE and only here: the variable may already be gone,
+  # and that must not stop the environment delete that follows it.
+  gh variable delete AZURE_CLIENT_ID --env development-infra-plan --repo "$REPO" || true
+  gh api --method DELETE "repos/$REPO/environments/development-infra-plan"
+fi
 ```
 
 **Verify — must return HTTP 404:**
@@ -844,13 +910,22 @@ repository's workflows, so the value must come back proven, not just read.
 #    names THIS repository. A prefix guessed during a GitHub API failure produces
 #    a credential that matches nothing, and you would spend the outage debugging
 #    the acceptance run instead.
-PREFIX="$(oidc_subject_prefix stevebargelt/meatgeekv2)" \
-  || echo "STOP: prefix unresolved — do not create the credential."
-[ -n "$PREFIX" ] && echo "$PREFIX"   # observed 2026-07-28: repo:stevebargelt@4857343/meatgeekv2@1304558512
+#    Keep the helper's exit STATUS as well as its output: the status is how a
+#    refusal is reported, and `$(...)` on its own throws it away.
+PREFIX="$(oidc_subject_prefix stevebargelt/meatgeekv2)"; PREFIX_RC=$?
+[ "$PREFIX_RC" -eq 0 ] && [ -n "$PREFIX" ] \
+  && echo "$PREFIX"   # observed 2026-07-28: repo:stevebargelt@4857343/meatgeekv2@1304558512
 
-[ -n "$PREFIX" ] || { echo "PREFIX unresolved — do not run the create below."; }
-
-az ad app federated-credential create --id <APPLY_APP_ID> --parameters "$(cat <<JSON
+# THE GATE IS THE `if`, NOT THE MESSAGE. A warning that does not stop execution
+# is a comment, and these blocks get pasted whole: `[ -n "$PREFIX" ] || { echo
+# …; }` neither returns nor exits, so a refused resolve — unauthenticated gh, a
+# GitHub outage, an unparseable body, a TRUST-ROOT MISMATCH — would fall straight
+# through into the create and federate the apply identity (Contributor on the dev
+# RG) to `:ref:refs/heads/mg23-acceptance`, where it persists until cleanup. The
+# create must be UNREACHABLE without a proven prefix, so it lives inside the
+# conditional rather than after an advisory.
+if [ "$PREFIX_RC" -eq 0 ] && [ -n "$PREFIX" ]; then
+  az ad app federated-credential create --id <APPLY_APP_ID> --parameters "$(cat <<JSON
 {
   "name": "tmp-mg23-acceptance",
   "issuer": "https://token.actions.githubusercontent.com",
@@ -859,6 +934,9 @@ az ad app federated-credential create --id <APPLY_APP_ID> --parameters "$(cat <<
 }
 JSON
 )"
+else
+  echo "STOP: prefix unresolved (oidc_subject_prefix exited ${PREFIX_RC}) — NO credential was created, and none may be created by hand. Remediate by the abort class the helper named (B10 branch C), then re-run this block." >&2
+fi
 # 2. Push the scratch acceptance workflow to branch `mg23-acceptance` and run it.
 # 3. CLEANUP — re-run bootstrap.sh. prune_unexpected_federated_credentials()
 #    DELETES any credential outside the expected set, so the cleanup is enforced
@@ -1510,6 +1588,29 @@ principal you control for the grantee — the simplest safe choice is the apply
 SP's **own object id** (a self-grant of a data role is harmless and is deleted
 in T4).
 
+**Preflight: resolve `$SUB` and `$APPLY_SP_OBJECT_ID` here, and assert them.**
+Every test below splices both into a scope or an assignee. Unset, they do not
+make the tests fail — they make the tests **pass wrongly**. A scope of
+`/subscriptions//resourceGroups/meatgeek-v2-dev-rg` is malformed, Azure rejects
+it, and T2, T4a and T5 print `rejected (expected)` on that rejection exactly as
+they would on a real condition denial. The core escalation test would report
+success having probed nothing at all — the one false green this section cannot
+afford, because its outcome is what unblocks activation.
+
+```bash
+SUB="$(az account show --query id -o tsv)"
+APPLY_SP_OBJECT_ID='<apply-sp-object-id>'   # az ad sp list --filter "appId eq '<APPLY-APP-ID>'" --query '[].id' -o tsv
+
+# The gate each mutating T-block calls. A function, so a refusal returns instead
+# of killing the scratch-job shell mid-suite.
+t_ready() {
+  [ -n "$SUB" ] && [ -n "$APPLY_SP_OBJECT_ID" ] && return 0
+  echo "REFUSING: \$SUB / \$APPLY_SP_OBJECT_ID unresolved — a T-test run now probes a malformed scope and reports 'rejected (expected)' for the wrong reason. Re-run this preflight; do not record the result of an ungated run." >&2
+  return 1
+}
+t_ready && echo "preflight OK: sub=$SUB sp=$APPLY_SP_OBJECT_ID"
+```
+
 ---
 
 ## 7. Live acceptance tests T1–T7
@@ -1561,9 +1662,11 @@ resource "azurerm_role_assignment" "allowlisted" {
 ```bash
 cd /tmp/mg23-acceptance
 terraform init -backend=false     # LOCAL state only — never the dev backend
-terraform apply -auto-approve \
-  -var="rg_id=/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
-  -var="principal_id=$APPLY_SP_OBJECT_ID"
+if t_ready; then
+  terraform apply -auto-approve \
+    -var="rg_id=/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
+    -var="principal_id=$APPLY_SP_OBJECT_ID"
+fi
 ```
 
 - **Expected:** all 8 assignments created.
@@ -1580,13 +1683,15 @@ Keep the 8 assignments in place — T4 consumes them.
 
 ```bash
 RG="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
-for ROLE in "Owner" "Contributor" "User Access Administrator" "Role Based Access Control Administrator"; do
-  echo "== $ROLE"
-  az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-    --assignee-principal-type ServicePrincipal \
-    --role "$ROLE" --scope "$RG" \
-    && echo "!!! PERMITTED — THIS IS A FAILURE" || echo "rejected (expected)"
-done
+if t_ready; then
+  for ROLE in "Owner" "Contributor" "User Access Administrator" "Role Based Access Control Administrator"; do
+    echo "== $ROLE"
+    az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role "$ROLE" --scope "$RG" \
+      && echo "!!! PERMITTED — THIS IS A FAILURE" || echo "rejected (expected)"
+  done
+fi
 ```
 
 - **Expected:** all four **rejected** (`AuthorizationFailed`, or an explicit
@@ -1602,10 +1707,14 @@ done
 
 ```bash
 USER_OBJ="$(az ad user show --id <a-real-user-upn> --query id -o tsv)"
-az role assignment create --assignee-object-id "$USER_OBJ" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Owner" \
-  --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+if t_ready && [ -n "$USER_OBJ" ]; then
+  az role assignment create --assignee-object-id "$USER_OBJ" \
+    --assignee-principal-type ServicePrincipal \
+    --role "Storage Blob Data Owner" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+else
+  echo "REFUSING: user object id unresolved — an empty assignee proves nothing about the PrincipalType clause." >&2
+fi
 ```
 
 - **Expected (Branch A of B2):** rejected — Azure cross-checks the declared
@@ -1617,8 +1726,18 @@ az role assignment create --assignee-object-id "$USER_OBJ" \
 - **False green:** using a _service principal's_ object id here. It must be a
   **user** object id, or the test asserts nothing.
 
-Clean up if it succeeded:
-`az role assignment delete --assignee-object-id "$USER_OBJ" --role "Storage Blob Data Owner" --scope "$RG"`
+Clean up if it succeeded — with the scope written out, **not** `"$RG"`. `$RG` is
+set in T2's block; if you ran T3 on its own it is empty, and an empty `--scope`
+does not mean "no scope" to the CLI — it falls back to a broader default, so a
+tidy-up delete can act somewhere you never named:
+
+```bash
+if t_ready && [ -n "$USER_OBJ" ]; then
+  az role assignment delete --assignee-object-id "$USER_OBJ" \
+    --role "Storage Blob Data Owner" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+fi
+```
 
 ### T4 — DELETE is constrained too
 
@@ -1634,9 +1753,11 @@ az role assignment delete --ids "<NON_ALLOWLISTED_ASSIGNMENT_ID>" \
   && echo "!!! PERMITTED — THIS IS A FAILURE" || echo "rejected (expected)"
 
 # 4b — PERMIT deleting an allowlisted assignment (one of T1's).
-az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-  --role "Azure Event Hubs Data Sender" \
-  --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+if t_ready; then
+  az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+    --role "Azure Event Hubs Data Sender" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+fi
 ```
 
 - **Expected:** 4a rejected, 4b permitted.
@@ -1653,11 +1774,13 @@ az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
 ### T5 — REJECT deleting the SP's own privileged grants
 
 ```bash
-for ROLE in "Contributor" "Role Based Access Control Administrator"; do
-  az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-    --role "$ROLE" --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
-    && echo "!!! PERMITTED — THIS IS A FAILURE ($ROLE)" || echo "rejected (expected)"
-done
+if t_ready; then
+  for ROLE in "Contributor" "Role Based Access Control Administrator"; do
+    az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+      --role "$ROLE" --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
+      && echo "!!! PERMITTED — THIS IS A FAILURE ($ROLE)" || echo "rejected (expected)"
+  done
+fi
 ```
 
 - **Expected:** both rejected — neither role is in the allowlist, so the delete
@@ -1680,6 +1803,8 @@ the live condition stays frozen at its first-ever value.
 ```bash
 RG="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
 RBAC_ADMIN="Role Based Access Control Administrator"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+ALLOWLIST="$REPO_ROOT/apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv"
 
 # Capture BOTH the condition and the assignment ID. The id is what proves the
 # reconcile was IN PLACE rather than a delete+recreate.
@@ -1688,9 +1813,20 @@ BEFORE="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG"
 BEFORE_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
   --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
 
-# Add a 9th role to the allowlist TEMPORARILY (do not commit this):
-printf 'Monitoring Reader\tPENDING\n' >> apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv
-cd apps/infrastructure/bootstrap && ./bootstrap.sh     # as the operator, not the SP
+# AN EMPTY CAPTURE IS NOT A BASELINE, and the comparison below cannot tell the
+# difference: `[ "" != "$AFTER" ]` is TRUE, so an unauthenticated or mis-scoped
+# read prints "PASS — condition reconciled" having compared nothing — and prints
+# it only after bootstrap has already rewritten the live condition. Nothing is
+# mutated until the baseline exists.
+if t_ready && [ -n "$BEFORE" ] && [ -n "$BEFORE_ID" ]; then
+  # Add a 9th role to the allowlist TEMPORARILY (do not commit this):
+  printf 'Monitoring Reader\tPENDING\n' >> "$ALLOWLIST"
+  # Subshell: the re-run and the revert below both resolve paths from the repo
+  # root, so this must not leave you sitting in the bootstrap directory.
+  (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)   # as the operator, not the SP
+else
+  echo "REFUSING: no baseline condition/id captured — T6 would report PASS against an empty BEFORE. Fix the read first; the allowlist is untouched." >&2
+fi
 
 AFTER="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
   --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
@@ -1702,8 +1838,18 @@ AFTER_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$R
                               || echo "FAIL — assignment was delete+recreated (no-grant window)"
 
 # Revert the allowlist and re-run bootstrap to restore the 8-role condition.
-git checkout -- apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv
-./bootstrap.sh
+# The path is ABSOLUTE via $REPO_ROOT because `git checkout -- <pathspec>`
+# resolves against your CWD: the repo-relative form run from inside the bootstrap
+# directory fails with "did not match any file(s) known to git", exits non-zero,
+# and reverts NOTHING — after which an unconditional re-run would re-apply the
+# NINE-role condition you just finished proving, leaving the apply identity's
+# allowlist permanently widened while the log reads as a clean revert. So the
+# revert has to succeed before the restore re-runs.
+if git checkout -- "$ALLOWLIST"; then
+  (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)
+else
+  echo "STOP: allowlist revert FAILED — do NOT re-run bootstrap; it would re-apply the 9-role condition. Restore $ALLOWLIST by hand, confirm with 'git diff --exit-code', then re-run bootstrap." >&2
+fi
 ```
 
 - **Expected:** the live condition **changes**, then changes back — and the
@@ -1729,10 +1875,12 @@ git checkout -- apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv
 ### T7 — Scope reality check (documented, accepted behaviour)
 
 ```bash
-az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Owner" \
-  --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+if t_ready; then
+  az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+    --assignee-principal-type ServicePrincipal \
+    --role "Storage Blob Data Owner" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+fi
 ```
 
 - **Expected: this SUCCEEDS**, and that is **accepted, documented behaviour**,
