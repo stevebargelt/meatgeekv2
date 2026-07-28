@@ -48,6 +48,9 @@
 #      "the caller stops" are different claims and only the second one matters.
 #   4. A prefix that cannot be proven provisions NOTHING — asserted on the az
 #      call log, not on a message.
+#   5. `use_default` vs `sub_claim_prefix` PRECEDENCE — the verbatim live
+#      response (which carries both) end to end, and the ambiguous
+#      `use_default=false` + unreadable-prefix branch, now fail-closed.
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -416,69 +419,149 @@ fi
   || t_bad "the three identities must federate distinct subjects (got: ${mg42_all_subjects})"
 
 # ===========================================================================
-# GROUP 5 — CHARACTERIZATION: the one branch that is NOT fail-closed.
+# GROUP 5 — `use_default` vs `sub_claim_prefix`: PRECEDENCE, and the ambiguous
+#           branch that is now fail-closed.
 # ===========================================================================
-# READ THIS BEFORE CHANGING THE ASSERTIONS BELOW. They pin behaviour that this
-# suite considers a RISK, not behaviour it endorses. They are here so that a
-# deliberate change to it is noticed, and so the risk is written down next to
-# the code rather than in a review comment nobody re-reads.
-#
-# resolve_oidc_subject_prefix treats these three as the same fact:
+# THIS GROUP USED TO BE A CHARACTERIZATION GROUP. It pinned — explicitly as a
+# risk, explicitly "not endorsed" — that resolve_oidc_subject_prefix treated
+# these three as the same fact:
 #     use_default = true                       "this repo uses the default claim"
 #     sub_claim_prefix absent, on a 200        "…"
 #     sub_claim_prefix empty/null, on a 200    "…"
-# and falls back to `repo:<owner>/<repo>`.
+# and fell back to `repo:<owner>/<repo>` for all of them, on a routine cyan `log`
+# line. The note here said: if bootstrap.sh is changed to die on `use_default=false`
+# with an unreadable prefix, these assertions are what will notice — update them
+# in that same commit. That change has now been made, and this is that update.
+# The group is kept, not deleted: the cases it named are exactly the ones the new
+# semantics have to get right, so they stay as ASSERTIONS OF THE FIX rather than
+# as a record of the risk.
 #
-# The middle two are NOT that fact when `use_default` is FALSE. `use_default:
-# false` is GitHub positively stating that this repository DOES customize its sub
-# claim; a missing or empty prefix alongside it means "a customization exists and
-# we could not read its prefix" — which is the same epistemic position as the
-# 403/5xx/network cases directly above, and every one of those DIES. Here it
-# proceeds, on a `log` line (routine cyan) rather than the `warn` the 404 branch
-# gets, and writes the DEFAULT subject over all three credentials. On this
-# repository that is the MG-42 outage re-caused by the MG-42 fix: the
-# hand-corrected development-infra-apply credential is deleted and recreated on a
-# subject no token carries (AADSTS700213).
+# TWO THINGS WERE WRONG, not one.
 #
-# It is also the branch most likely to be entered by accident. GitHub's
-# documented response for GET /repos/{owner}/{repo}/actions/oidc/customization/sub
-# is `{"use_default": <bool>, "include_claim_keys": [<string>]}` — the
-# `sub_claim_prefix` key this resolver depends on is not part of that documented
-# schema. Any response that omits it lands here.
+# (1) THE PRECEDENCE WAS INVERTED. `use_default: true` short-circuited to the
+#     default prefix even when the response CARRIED a custom one. The verbatim
+#     live response from this repository (recorded below) is precisely that
+#     shape, so the "fix" resolved to `repo:stevebargelt/meatgeekv2` — the exact
+#     broken subject MG-42 exists to eliminate. And because
+#     ensure_federated_credential reconciles ON SUBJECT, a bootstrap run would
+#     have DELETED the hand-corrected development-infra-apply credential and
+#     recreated it on a subject no token carries (AADSTS700213), taking the live
+#     dev auto-apply loop down. `use_default` describes the claim-KEY list
+#     (`include_claim_keys`); the enterprise policy injects the owner-id/repo-id
+#     prefix independently of it. They are NOT mutually exclusive.
 #
-# If bootstrap.sh is changed to die (or at minimum warn) on `use_default=false`
-# with an unreadable prefix, these two assertions are what will notice; update
-# them in that same commit.
-mg42_characterize() {
+# (2) THE AMBIGUOUS BRANCH FELL BACK. `use_default: false` with a missing or
+#     empty prefix is GitHub positively stating that a customization EXISTS whose
+#     prefix could not be read — the same epistemic position as the 403/5xx/network
+#     cases in GROUP 4, every one of which dies. It now dies too.
+#
+# The accident-proneness that made (2) worth pinning is unchanged and is why the
+# cases stay: GitHub's documented response for
+# GET /repos/{owner}/{repo}/actions/oidc/customization/sub is
+# `{"use_default": <bool>, "include_claim_keys": [<string>]}` — the
+# `sub_claim_prefix` key this resolver depends on is not in that documented
+# schema, so any response omitting it lands here.
+
+# --- THE CANONICAL LIVE FIXTURE, end to end -------------------------------
+# VERBATIM output of
+#   gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub
+# run against the real repository on the host, 2026-07-27, re-confirmed
+# 2026-07-28. Recorded fact, not an invention — do not tidy the field order, the
+# `use_default: true`, or the `use_immutable_subject` key, all of which are part
+# of what was observed. This is the case every fixture in this repo previously
+# got wrong, and it is asserted here through the WHOLE chain (resolve → validate
+# → compose → reconcile) so a regression shows up as the wrong string on the az
+# command line, not merely as a wrong return value.
+MG42_LIVE_BODY='{"use_default":true,"use_immutable_subject":false,"sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}'
+MG42_LIVE_PREFIX='repo:stevebargelt@4857343/meatgeekv2@1304558512'
+mg42_reset
+MG42_GH_BODY="$MG42_LIVE_BODY"
+mg42_run bootstrap_infra_apply_identity
+if [ "$MG42_STATUS" -eq 0 ] \
+   && [ "$(mg42_created_subjects)" = "${MG42_LIVE_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT}" ]; then
+  t_ok "the VERBATIM live 2026-07-27 response federates ${MG42_LIVE_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT} (use_default=true does NOT veto a present sub_claim_prefix)"
+else
+  t_bad "the live response must federate '${MG42_LIVE_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT}' (exit ${MG42_STATUS}, subject '$(mg42_created_subjects)')"
+fi
+# The specific regression, stated as its own assertion so the failure message
+# names it: the default prefix must NEVER reach az for this body.
+if printf '%s\n' "$MG42_MUTATIONS" | grep -q "${DEFAULT_PREFIX}:environment:"; then
+  t_bad "the live response resolved to the DEFAULT prefix — this is the MG-42 outage re-caused by the MG-42 fix (mutations: ${MG42_MUTATIONS})"
+else
+  t_ok "the live response never federates the default prefix '${DEFAULT_PREFIX}' (the hand-corrected dev apply credential survives a re-run)"
+fi
+# ...and the idempotence that protects the live credential: a re-run against the
+# credential already on the live subject must touch NOTHING.
+mg42_reset
+MG42_GH_BODY="$MG42_LIVE_BODY"
+MG42_EXISTING="${MG42_LIVE_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT}"
+MG42_EXISTING_NAMES="github-infra-apply-${INFRA_APPLY_ENVIRONMENT}"
+mg42_run bootstrap_infra_apply_identity
+if [ "$MG42_STATUS" -eq 0 ] && ! printf '%s\n' "$MG42_MUTATIONS" | grep -qE '^(CREATE|DELETE) '; then
+  t_ok "a re-run under the LIVE response leaves the hand-corrected credential untouched (no CREATE, no DELETE)"
+else
+  t_bad "a re-run under the live response must not touch the credential (exit ${MG42_STATUS}, mutations: '${MG42_MUTATIONS}')"
+fi
+
+# --- the ambiguous branch: now FAIL-CLOSED ---------------------------------
+# Same two bodies the characterization used, asserting the new semantics. As in
+# GROUP 4, the property asserted is "it created NOTHING" — not "it printed an
+# error".
+mg42_ambiguous() {
   local mg42_label="$1" mg42_body="$2"
   mg42_reset
   MG42_GH_BODY="$mg42_body"
   mg42_run bootstrap_infra_apply_identity
-  if [ "$MG42_STATUS" -eq 0 ] \
-     && [ "$(mg42_created_subjects)" = "${DEFAULT_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT}" ]; then
-    t_ok "CHARACTERIZED (not endorsed): ${mg42_label} → falls back to the DEFAULT prefix and federates it"
+  if [ "$MG42_STATUS" -ne 0 ] && [ -z "$MG42_MUTATIONS" ]; then
+    t_ok "use_default=false with an unreadable prefix aborts with NOTHING provisioned: ${mg42_label}"
   else
-    t_bad "characterization drifted for ${mg42_label} — bootstrap.sh's fallback behaviour changed; re-read GROUP 5 and update it deliberately (exit ${MG42_STATUS}, subject '$(mg42_created_subjects)')"
+    t_bad "use_default=false with an unreadable prefix must abort before provisioning: ${mg42_label} (exit ${MG42_STATUS}, mutations: '${MG42_MUTATIONS}')"
   fi
 }
-mg42_characterize "use_default=false with NO sub_claim_prefix key (GitHub's documented response shape)" \
+mg42_ambiguous "NO sub_claim_prefix key (GitHub's documented response shape)" \
   '{"use_default": false, "include_claim_keys": ["repo","context"]}'
-mg42_characterize "use_default=false with an EMPTY sub_claim_prefix" \
+mg42_ambiguous "an EMPTY sub_claim_prefix" \
   '{"use_default": false, "sub_claim_prefix": ""}'
+mg42_ambiguous "a NULL sub_claim_prefix" \
+  '{"use_default": false, "sub_claim_prefix": null}'
 
-# ...and the operator-visible signal on that path is the QUIETER one. The 404
-# branch — the case the code considers unambiguous — warns. This branch, which is
-# ambiguous, only logs, and the line it logs contradicts the response it just
-# read ("uses GitHub's DEFAULT OIDC sub claim" for a body that said
-# use_default=false).
+# The genuine default — use_default=true AND nothing to contradict it — still
+# falls back. Without this, the three cases above would also pass against a
+# resolver that simply died on every 200.
+mg42_reset
+MG42_GH_BODY='{"use_default": true, "include_claim_keys": ["repo","context"]}'
+mg42_run bootstrap_infra_apply_identity
+if [ "$MG42_STATUS" -eq 0 ] \
+   && [ "$(mg42_created_subjects)" = "${DEFAULT_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT}" ]; then
+  t_ok "use_default=true with NO sub_claim_prefix still federates the DEFAULT prefix (the fail-closed branch is not over-broad)"
+else
+  t_bad "a genuine default response must federate '${DEFAULT_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT}' (exit ${MG42_STATUS}, subject '$(mg42_created_subjects)')"
+fi
+
+# --- the operator-visible signal ------------------------------------------
+# The old message asserted "Repository … uses GitHub's DEFAULT OIDC sub claim" on
+# a body that had just said use_default=false — a log line contradicting the
+# response it read. That wording is gone; the ambiguous case is now a `die` whose
+# text names what was actually seen.
 mg42_reset
 MG42_GH_BODY='{"use_default": false, "include_claim_keys": ["repo","context"]}'
 mg42_run bootstrap_infra_apply_identity
-if printf '%s' "$MG42_LOG" | grep -q "uses GitHub's DEFAULT OIDC sub claim" \
-   && printf '%s' "$MG42_LOG" | grep -q 'use_default=false'; then
-  t_ok "CHARACTERIZED (not endorsed): the ambiguous fallback announces 'uses GitHub's DEFAULT OIDC sub claim' for a use_default=false response"
+if printf '%s' "$MG42_LOG" | grep -q 'use_default=false' \
+   && printf '%s' "$MG42_LOG" | grep -qi 'NO readable sub_claim_prefix' \
+   && ! printf '%s' "$MG42_LOG" | grep -q "uses GitHub's DEFAULT OIDC sub claim"; then
+  t_ok "the ambiguous case dies naming what was read (use_default=false, no readable prefix) and no longer claims the repo uses the default sub claim"
 else
-  t_bad "the ambiguous-fallback message changed — re-read GROUP 5 (log: $(printf '%s' "$MG42_LOG" | head -2))"
+  t_bad "the ambiguous-case message must name use_default=false and the unreadable prefix, and must not announce the default sub claim (log: $(printf '%s' "$MG42_LOG" | tail -3))"
+fi
+# ...and the genuine-default log line no longer overstates either: it reports the
+# absent prefix as well as the flag.
+mg42_reset
+MG42_GH_BODY='{"use_default": true}'
+mg42_run bootstrap_infra_apply_identity
+if printf '%s' "$MG42_LOG" | grep -q 'no OIDC sub_claim_prefix'; then
+  t_ok "the genuine-default log line reports BOTH halves of the fact (use_default=true AND no prefix returned)"
+else
+  t_bad "the genuine-default log line must state that no sub_claim_prefix was returned (log: $(printf '%s' "$MG42_LOG" | head -3))"
 fi
 
 printf -- '-----------------------------------------\n'

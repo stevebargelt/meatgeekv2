@@ -519,13 +519,68 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
       );
     });
 
-    it('FALLS BACK to the default prefix when the repo has no customization', () => {
-      // Two spellings of the same fact: an explicit use_default, and the 404 the
-      // endpoint returns when nothing is configured.
+    /**
+     * THE CANONICAL LIVE FIXTURE — and the case every earlier fixture in this
+     * repo got wrong.
+     *
+     * The string below is the VERBATIM body returned by
+     *   gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub
+     * run against the real repository on the host, 2026-07-27, re-confirmed
+     * 2026-07-28. Recorded fact, not an invention: the field order, the
+     * `use_default: true`, and the `use_immutable_subject` key are all part of
+     * what was observed. Do not tidy it.
+     *
+     * `use_default` is TRUE **and** a custom prefix is present. These are not
+     * mutually exclusive on this account — `use_default` describes the claim-KEY
+     * list (`include_claim_keys`), while the enterprise policy injects the
+     * owner-id/repo-id prefix independently of it. A resolver that lets
+     * `use_default` veto the prefix resolves this body to
+     * `repo:stevebargelt/meatgeekv2`, the exact broken subject MG-42 exists to
+     * eliminate; and since ensure_federated_credential reconciles ON SUBJECT, a
+     * run would delete the hand-corrected development-infra-apply credential and
+     * recreate it dead (AADSTS700213).
+     */
+    const LIVE_BODY =
+      '{"use_default":true,"use_immutable_subject":false,"sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}';
+
+    it('HONOURS sub_claim_prefix over use_default — the VERBATIM live 2026-07-27 response', () => {
+      const { status, prefix } = resolvePrefix(apiOk(LIVE_BODY));
+      expect(status).toBe(0);
+      expect(prefix).toBe('repo:stevebargelt@4857343/meatgeekv2@1304558512');
+      expect(prefix).not.toBe(DEFAULT_PREFIX);
+      expect(subjectFor(prefix, infraApplyEnv)).toBe(
+        'repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:development-infra-apply'
+      );
+    });
+
+    it('FALLS BACK to the default prefix only when NOTHING contradicts use_default', () => {
+      // Two spellings of the same fact: use_default with no prefix to contradict
+      // it, and the 404 the endpoint returns when nothing is configured. BOTH
+      // halves matter in the first case — a body carrying a prefix alongside
+      // use_default=true resolves the other way (see the live fixture above).
       for (const stub of [apiOk('{"use_default": true}'), apiFail('gh: Not Found (HTTP 404)')]) {
         const { status, prefix } = resolvePrefix(stub);
         expect(status).toBe(0);
         expect(prefix).toBe(DEFAULT_PREFIX);
+      }
+    });
+
+    it('ABORTS on use_default=false with an unreadable sub_claim_prefix (MG-42-F1)', () => {
+      // `use_default: false` is GitHub positively stating that this repository
+      // DOES customize its sub claim. A missing/empty prefix alongside it means
+      // "a customization exists and its prefix could not be read" — the same
+      // epistemic position as the 403/5xx/network cases below, every one of
+      // which dies. Falling back here writes the default subject over three live
+      // credentials on a guess. Note the first shape is GitHub's *documented*
+      // response body, so this branch is easy to enter by accident.
+      for (const body of [
+        '{"use_default": false, "include_claim_keys": ["repo","context"]}',
+        '{"use_default": false, "include_claim_keys": []}',
+        '{"use_default": false, "sub_claim_prefix": ""}',
+        '{"use_default": false, "sub_claim_prefix": null}',
+      ]) {
+        const { status, prefix } = resolvePrefix(apiOk(body));
+        expect(`${body} -> exit ${status} prefix '${prefix}'`).toBe(`${body} -> exit 1 prefix ''`);
       }
     });
 

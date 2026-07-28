@@ -657,16 +657,53 @@ got_subject="$( ( OIDC_SUBJECT_PREFIX="$mg42_custom"; federated_environment_subj
 [ "$got_subject" = "${mg42_custom}:environment:${INFRA_APPLY_ENVIRONMENT}" ] \
   && ok "MG-42: the apply subject composes to ${got_subject} (matches the presented token)" \
   || bad "MG-42: apply subject must be '${mg42_custom}:environment:${INFRA_APPLY_ENVIRONMENT}' (got '${got_subject}')"
-# 2. use_default=true FALLS BACK to GitHub's default prefix.
+# 1b. THE CANONICAL LIVE FIXTURE. Recorded fact, not an invention: this is the
+#     VERBATIM body returned by
+#       gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub
+#     run against the real repository on the host, 2026-07-27 and re-confirmed
+#     2026-07-28. Do not "tidy" it — the field order, the `use_default: true`,
+#     and the `use_immutable_subject` key are all part of what was observed.
+#
+#     THIS IS THE CASE EVERY EARLIER FIXTURE GOT WRONG. `use_default` is TRUE and
+#     a custom prefix is present, together — they are not mutually exclusive on
+#     this account, because `use_default` describes the claim-KEY list while the
+#     enterprise policy injects the id prefix independently. A resolver that lets
+#     use_default veto the prefix resolves this body to 'repo:stevebargelt/meatgeekv2',
+#     the exact broken subject MG-42 exists to eliminate, and (because
+#     ensure_federated_credential reconciles ON SUBJECT) would delete and recreate
+#     the hand-corrected development-infra-apply credential dead.
+mg42_live_body='{"use_default":true,"use_immutable_subject":false,"sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}'
+mg42_live_prefix="repo:stevebargelt@4857343/meatgeekv2@1304558512"
+got="$(mg42_resolve "$mg42_live_body" 0)" || got="DIED"
+[ "$got" = "$mg42_live_prefix" ] \
+  && ok "MG-42: the VERBATIM live 2026-07-27 response resolves to ${mg42_live_prefix} (use_default=true does NOT veto the prefix)" \
+  || bad "MG-42: the live response must resolve to '${mg42_live_prefix}' (got '${got}') — use_default must not override a present sub_claim_prefix"
+got_subject="$( ( OIDC_SUBJECT_PREFIX="$mg42_live_prefix"; federated_environment_subject "$INFRA_APPLY_ENVIRONMENT" ) 2>/dev/null )"
+[ "$got_subject" = "repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:development-infra-apply" ] \
+  && ok "MG-42: the live prefix composes the apply subject ${got_subject} (the string the token actually carries)" \
+  || bad "MG-42: the live prefix must compose 'repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:development-infra-apply' (got '${got_subject}')"
+# 2. use_default=true with NO sub_claim_prefix to contradict it IS the default.
+#    BOTH halves are required — this case says nothing about a body that carries
+#    a prefix (see 1b, which is exactly that body and resolves the other way).
 got="$(mg42_resolve '{"use_default": true}' 0)" || got="DIED"
 [ "$got" = "repo:${GITHUB_REPO}" ] \
-  && ok "MG-42: use_default=true falls back to the DEFAULT prefix (repo:${GITHUB_REPO})" \
-  || bad "MG-42: use_default=true must fall back to 'repo:${GITHUB_REPO}' (got '${got}')"
-# 3. An EMPTY/absent sub_claim_prefix on a successful response is the default too.
-got="$(mg42_resolve '{"use_default": false, "include_claim_keys": []}' 0)" || got="DIED"
-[ "$got" = "repo:${GITHUB_REPO}" ] \
-  && ok "MG-42: an absent sub_claim_prefix falls back to the DEFAULT prefix" \
-  || bad "MG-42: an absent sub_claim_prefix must fall back to 'repo:${GITHUB_REPO}' (got '${got}')"
+  && ok "MG-42: use_default=true AND no sub_claim_prefix falls back to the DEFAULT prefix (repo:${GITHUB_REPO})" \
+  || bad "MG-42: use_default=true with no prefix must fall back to 'repo:${GITHUB_REPO}' (got '${got}')"
+# 3. An absent/empty sub_claim_prefix alongside use_default=FALSE is NOT the
+#    default — it is GitHub positively stating a customization exists whose
+#    prefix we could not read. That is the same epistemic position as a 403 or a
+#    5xx, and those die. Falling back here would write the default subject over
+#    three live credentials on a guess (MG-42-F1).
+for mg42_unreadable in \
+  '{"use_default": false, "include_claim_keys": []}' \
+  '{"use_default": false, "include_claim_keys": ["repo","context"]}' \
+  '{"use_default": false, "sub_claim_prefix": ""}' \
+  '{"use_default": false, "sub_claim_prefix": null}'; do
+  got="$(mg42_resolve "$mg42_unreadable" 0)" || got="DIED"
+  [ "$got" = "DIED" ] \
+    && ok "MG-42: use_default=false with an UNREADABLE sub_claim_prefix fails closed: ${mg42_unreadable}" \
+    || bad "MG-42: '${mg42_unreadable}' must abort (a customization exists, its prefix is unreadable), not resolve to '${got}'"
+done
 # 4. HTTP 404 is GitHub's "no customization configured" — the one failure read
 #    as a fact rather than an outage (the auth gate has ruled out the other
 #    common cause of a 404).

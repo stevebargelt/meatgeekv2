@@ -883,6 +883,40 @@ assert_oidc_subject_prefix() {
 # matches, which is exactly the MG-42 outage; and accepting an unvalidated
 # prefix re-points trust. Neither is a thing to do on a guess.
 #
+# PRECEDENCE — `sub_claim_prefix` IS THE AUTHORITY, `use_default` DOES NOT VETO IT.
+# Read that twice, because the obvious reading of the field names is wrong on this
+# account and cost an outage. The live response from this repository, observed on
+# the host 2026-07-27 (re-confirmed 2026-07-28), is verbatim:
+#
+#   {"use_default":true,"use_immutable_subject":false,
+#    "sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}
+#
+# `use_default: true` AND a custom prefix, together. They are not mutually
+# exclusive: `use_default` describes the CLAIM-KEY LIST (`include_claim_keys`) —
+# "this repo has not customized WHICH claims appear" — while the enterprise policy
+# injects the owner-id/repo-id prefix independently of it. A resolver that lets
+# `use_default: true` short-circuit to `repo:<owner>/<repo>` resolves, on this
+# repository, to the exact broken subject MG-42 exists to eliminate, and
+# ensure_federated_credential reconciles ON SUBJECT — so it would DELETE the
+# hand-corrected development-infra-apply credential and recreate it dead
+# (AADSTS700213), taking the live dev auto-apply loop down. Hence:
+#
+#   prefix present & non-empty (200)          -> USE IT, whatever use_default says
+#   prefix absent/empty + use_default = true  -> genuine default, fall back
+#   prefix absent/empty + use_default = false -> DIE (see below)
+#   HTTP 404 behind the auth gate             -> no customization, fall back
+#   any other gh failure / unparseable body   -> DIE
+#
+# WHY THE THIRD ROW DIES. `use_default: false` with no readable prefix is GitHub
+# POSITIVELY STATING that a customization exists while its prefix is unreadable.
+# That is epistemically identical to the 403/5xx/network cases — the response
+# says nothing usable about the subject — and every one of those aborts. Falling
+# back there writes the default subject over three live credentials on a guess.
+#
+# `use_immutable_subject` also appears in the live body. NOTHING here keys on it
+# deliberately; it is named only so a future reader knows it was seen and skipped
+# rather than missed. Unknown fields must never derail the parse.
+#
 # Sets the global, so it MUST be called unsubshelled from main().
 resolve_oidc_subject_prefix() {
   local body err errfile prefix use_default status=0 origin
@@ -931,10 +965,21 @@ resolve_oidc_subject_prefix() {
     prefix="$(printf '%s' "$body" | jq -r '.sub_claim_prefix // ""')" \
       || die "the OIDC sub-claim customization response for ${GITHUB_REPO} is not parseable JSON, so it cannot be read as 'no customization configured' either. Aborting rather than guess the subject prefix. Response: ${body}"
     origin="read from repos/${GITHUB_REPO}/actions/oidc/customization/sub"
-    if [ "$use_default" = "true" ] || [ -z "$prefix" ] || [ "$prefix" = "null" ]; then
+    # `// ""` already turns a JSON null into the empty string; the literal "null"
+    # test catches the other spelling, a STRING "null" someone configured by hand.
+    if [ -n "$prefix" ] && [ "$prefix" != "null" ]; then
+      # THE AUTHORITY. use_default is NOT consulted — see the precedence block
+      # above; on this repository it is `true` alongside this very prefix, and
+      # letting it win here is the MG-42 outage re-caused by the MG-42 fix.
+      origin="sub_claim_prefix read from repos/${GITHUB_REPO}/actions/oidc/customization/sub (use_default=${use_default}, which describes the claim-KEY list and does not override this prefix)"
+    elif [ "$use_default" = "true" ]; then
+      # The only "no customization" the 200 path recognises: GitHub says default
+      # AND hands back no prefix to contradict it. Both halves are required.
       prefix="repo:${GITHUB_REPO}"
-      origin="GitHub reports the DEFAULT sub claim (use_default=${use_default}) — using the default prefix"
-      log "Repository ${GITHUB_REPO} uses GitHub's DEFAULT OIDC sub claim; federated subjects use the default prefix '${prefix}'."
+      origin="GitHub reports the default sub claim and returned NO sub_claim_prefix — using the default prefix"
+      log "Repository ${GITHUB_REPO} returned no OIDC sub_claim_prefix and reports use_default=true; federated subjects use the default prefix '${prefix}'."
+    else
+      die "the OIDC sub-claim customization for ${GITHUB_REPO} reports use_default=false — GitHub is stating that this repository DOES customize its sub claim — but the response carries NO readable sub_claim_prefix. That is not 'no customization configured'; it is a customization whose prefix could not be read, which says exactly as much about the subject as a 403 or a 5xx does, and those abort. Falling back to 'repo:${GITHUB_REPO}' here would rewrite all three federated credentials — the development-infra-apply one included — to a subject no GitHub token carries (AADSTS700213), which is the MG-42 outage. Aborting before anything is provisioned. If this repository genuinely uses the default sub claim, the endpoint says so with use_default=true and no prefix, or with an HTTP 404. Response: ${body}"
     fi
   fi
 
