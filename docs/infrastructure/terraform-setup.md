@@ -154,6 +154,17 @@ provider "azurerm" {
 }
 ```
 
+**Every module declares the same constraint, and every module commits its own
+lock.** Each module under `modules/` carries `azurerm ~> 4.0` in its own
+`required_providers` block and a tracked, four-platform `.terraform.lock.hcl`
+beside the root's, resolving the same builds the root does (azurerm 4.81.0,
+azapi 2.11.0, time 0.14.0).
+The stack is on **azurerm 4.x by decision**: v5 is a breaking major and migrating
+is separate work, so no `terraform init` may drift onto it. `tf-static-checks.sh`
+check 16 fails the build if a CI-invoked module loses either half. The rules for
+regenerating a lock (all four platforms, always) are in
+[Provider pinning & lock files](../../apps/infrastructure/README.md#provider-pinning--lock-files).
+
 ### Naming & tags (single source of truth, no drift)
 
 ```hcl
@@ -324,9 +335,10 @@ CI reconciles **dev** infrastructure and plans **prod**. The authoritative model
   > precisely why this job needs no state credential: with no backend
   > configured, nothing reaches `meatgeek-v2/dev.tfstate`. `-input=false` makes a
   > missing value fail fast instead of hanging; `-lockfile=readonly` fails rather
-  > than silently rewriting the committed root `.terraform.lock.hcl` (valid only
-  > for the root module — the per-module inits omit it because those modules have
-  > no committed lock file yet).
+  > than silently rewriting the committed `.terraform.lock.hcl`. Since **MG-39**
+  > the per-module inits in step 9 pass it too, against each module's own
+  > committed lock — see
+  > [Provider pinning & lock files](../../apps/infrastructure/README.md#provider-pinning--lock-files).
 
   There is **no PR-time `terraform plan`** and no PR-reachable Azure identity of
   any kind. The authoritative plan is the one taken post-merge by
@@ -509,7 +521,10 @@ scripts/tf-static-checks.sh
 
 `tf-static-checks.sh` fails on: a hardcoded subscription id, `timestamp()` tag
 drift, any leftover V1 shared-Cosmos adoption reference, missing per-env state
-keys, a stray local `*.tfstate`, or a missing `meatgeek-v2-` prefix.
+keys, a stray local `*.tfstate`, a missing `meatgeek-v2-` prefix, or (check 16) a
+CI-invoked module that floats its providers — one carrying a `*.tftest.hcl`
+without both a committed `.terraform.lock.hcl` and an explicit version constraint
+for every provider it uses.
 
 ## Benefits of This Setup
 

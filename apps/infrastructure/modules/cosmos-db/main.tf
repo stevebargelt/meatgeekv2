@@ -3,6 +3,18 @@
 # V2 is greenfield: this module CREATES its own Cosmos account inside the V2
 # resource group. It never reads, imports, or adopts the V1 shared account.
 
+# Provider requirements (MG-39). An unconstrained module resolves the LATEST
+# azurerm on a standalone init — v5.0.1 as of 2026-08-03, a breaking major. This
+# codebase targets azurerm 4.x; v5 is a separate, deliberate migration.
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 locals {
   # Azure Cosmos DB account naming rule: 3-44 chars, lowercase letters,
   # numbers and hyphens only. Sanitize the caller-supplied name so the

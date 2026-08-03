@@ -289,11 +289,10 @@ jobs:
         # -input=false: never prompt. A missing value fails fast instead of
         # hanging until the runner times out, which reads as a broken job.
         # -lockfile=readonly: FAIL rather than silently rewrite
-        # apps/infrastructure/.terraform.lock.hcl. Valid here and ONLY here —
-        # the root module is the one with a committed multi-platform lock file,
-        # so provider versions are bound to hashes the repo actually reviewed
-        # instead of to whatever currently satisfies `~> 4.0`. The per-module
-        # inits further down deliberately omit it; see the comment there.
+        # apps/infrastructure/.terraform.lock.hcl, so provider versions are bound
+        # to hashes the repo actually reviewed instead of to whatever currently
+        # satisfies `~> 4.0`. As of MG-39 the per-module inits further down do
+        # the same, against their own committed locks.
         run: |
           cd apps/infrastructure
           terraform init -backend=false -input=false -lockfile=readonly
@@ -347,10 +346,20 @@ jobs:
         # the apply workflow's final drift plan structurally cannot see.
         #
         # `-backend=false`: these are plan-time assertions against mock
-        # providers, so there is no state and no credential. The module inits
-        # deliberately OMIT `-lockfile=readonly` — unlike the root module these
-        # have no committed .terraform.lock.hcl, so readonly would fail
-        # outright. Committing per-module locks is MG-39, not this ticket.
+        # providers, so there is no state and no credential.
+        #
+        # `-lockfile=readonly` (MG-39): every test-bearing module now HAS a
+        # committed multi-platform .terraform.lock.hcl, so the module inits
+        # enforce it exactly as the root init does. Without it these inits
+        # floated: modules/iot-hub declared no azurerm constraint at all, so
+        # `init` resolved LATEST and silently picked up the breaking azurerm
+        # v5.0.1 the day it shipped, reddening every PR with nothing in the repo
+        # having changed. readonly makes future provider drift fail loudly and
+        # locally — init refuses rather than amending the lock — instead of
+        # arriving as an unexplained test failure. tf-static-checks.sh check 16
+        # guarantees a module cannot reach this loop without both halves (a
+        # committed lock AND an explicit constraint), so readonly can never fail
+        # here for a module that simply forgot to commit one.
         run: |
           set -euo pipefail
           modules="$(
@@ -374,7 +383,7 @@ jobs:
           printf '%s\n' "$modules"
           while IFS= read -r m; do
             echo "== module tests: $m =="
-            terraform -chdir="$m" init -backend=false -input=false
+            terraform -chdir="$m" init -backend=false -input=false -lockfile=readonly
             terraform -chdir="$m" test
           done <<< "$modules"
 

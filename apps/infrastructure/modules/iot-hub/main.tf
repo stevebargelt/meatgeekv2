@@ -1,5 +1,21 @@
 # IoT Hub Module for MeatGeek V2
 
+# Provider requirements (MG-39). Without an explicit azurerm constraint a
+# standalone `terraform init` in this module resolves the LATEST azurerm — which
+# on 2026-08-03 became v5.0.1, whose breaking azurerm_eventhub schema
+# (namespace_id replacing namespace_name/resource_group_name) failed every
+# `terraform test` run in CI with nothing in this repo having changed. This
+# codebase is written against azurerm 4.x; v5 is a deliberate, separate
+# migration.
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 # IoT Hub
 #
 # DOCUMENTED EXCEPTION (MG-24 ADR) — key/SAS auth is INTENTIONALLY kept enabled.
