@@ -1547,20 +1547,21 @@ deploy_summary="$( OIDC_SUBJECT_PREFIX="repo:${GITHUB_REPO}" bootstrap_deploy_id
 # would die EARLIER for an unrelated reason and a status-only check would pass
 # vacuously. The stub below is complete enough to reach the subject step, and the
 # assertion names the die we mean.
+#
+# The stub is defined at TOP LEVEL for the Bash 3.2 parser-bug reason documented
+# above; only the call goes inside the `$(...)` capture.
+az() {
+  case "$*" in
+    "account show --query id -o tsv")       echo "11111111-1111-1111-1111-111111111111" ;;
+    "account show --query tenantId -o tsv") echo "22222222-2222-2222-2222-222222222222" ;;
+    *"storage account show"*)  echo "/subscriptions/1/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/sa" ;;
+    *"ad app list"*)           echo "33333333-3333-3333-3333-333333333333" ;;
+    *"ad sp list"*)            echo "44444444-4444-4444-4444-444444444444" ;;
+    *) return 0 ;;
+  esac
+}
 mg42_unresolved_err="$(
-  (
-    az() {
-      case "$*" in
-        "account show --query id -o tsv")       echo "11111111-1111-1111-1111-111111111111" ;;
-        "account show --query tenantId -o tsv") echo "22222222-2222-2222-2222-222222222222" ;;
-        *"storage account show"*)  echo "/subscriptions/1/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/sa" ;;
-        *"ad app list"*)           echo "33333333-3333-3333-3333-333333333333" ;;
-        *"ad sp list"*)            echo "44444444-4444-4444-4444-444444444444" ;;
-        *) return 0 ;;
-      esac
-    }
-    OIDC_SUBJECT_PREFIX="" bootstrap_deploy_identity 2>&1 >/dev/null
-  )
+  ( OIDC_SUBJECT_PREFIX="" bootstrap_deploy_identity 2>&1 >/dev/null )
 )" || true
 # The `|| true` sits OUTSIDE the substitution on purpose. The call site's
 # `|| exit 1` terminates the subshell outright — that is the point of it, and an
