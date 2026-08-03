@@ -317,9 +317,20 @@ jobs:
         run: apps/infrastructure/scripts/tf-static-checks.sh
 
       - name: Bootstrap safety + emitted-HCL tests
+        # Invoked THROUGH assert-suite-completion.sh, which runs the suite and
+        # then asserts it actually finished: a `passed=N failed=0` summary was
+        # printed, and N is at or above the count pinned in that script. A shell
+        # suite that dies partway through — parse error, set -e trip, stray
+        # exit, unbound variable under `set -u` — otherwise looks exactly like a
+        # pass: fewer assertions run, no summary, and nobody counting. That is
+        # MG-42 finding F5, where the suite silently truncated at 229/321 on
+        # macOS Bash 3.2 while this step stayed green on Ubuntu Bash 5.x for
+        # months. Running the suite bare here would leave that undetectable
+        # again the next time it happens.
+        #
         # `< /dev/null` so nothing in the suite can block on the runner's stdin;
         # `timeout` bounds any future hang instead of wedging the job.
-        run: timeout 180 bash apps/infrastructure/bootstrap/bootstrap.test.sh < /dev/null
+        run: timeout 180 bash apps/infrastructure/bootstrap/assert-suite-completion.sh bootstrap.test.sh < /dev/null
 
       - name: Bootstrap OIDC-subject integration tests (MG-42)
         # A SEPARATE step from the suite above because it is a separate KIND of
@@ -335,7 +346,11 @@ jobs:
         # No credentials are used or reachable: `gh` and `az` are shell
         # functions, and main() is BASH_SOURCE-guarded so sourcing provisions
         # nothing.
-        run: timeout 180 bash apps/infrastructure/bootstrap/bootstrap.oidc-subject.integration.test.sh < /dev/null
+        #
+        # Same completion guard as the step above — see it for why the suite is
+        # not invoked directly. This suite runs under the same `set -u` and is
+        # truncatable in exactly the same way.
+        run: timeout 180 bash apps/infrastructure/bootstrap/assert-suite-completion.sh bootstrap.oidc-subject.integration.test.sh < /dev/null
 
       - name: Destroy circuit-breaker fixtures (MG-23)
         # The apply workflow's destroy guard is only worth having if it is proven
