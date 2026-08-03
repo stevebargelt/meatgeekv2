@@ -81,6 +81,16 @@
 #      no `command = apply`, and any file referencing an azurerm_/azapi_ resource
 #      must declare the matching `mock_provider`. Finding ZERO test files is also
 #      a failure — a gate that certifies an empty test set is fail-open.
+#  16. A CI-INVOKED MODULE FLOATS ITS PROVIDERS (MG-39). Every module the CI
+#      module-test loop inits must declare an explicit version constraint for
+#      every provider it uses AND carry a committed .terraform.lock.hcl. Missing
+#      either half means `terraform init` on a fresh runner resolves whatever the
+#      registry serves that minute: modules/iot-hub declared no azurerm
+#      constraint, so on 2026-08-03 it silently took the breaking azurerm v5.0.1
+#      and reddened every PR with nothing in this repo having changed. A gate
+#      whose result depends on the registry clock is not a gate. Discovery here is
+#      find-driven on *.tftest.hcl — the SAME rule ci.yml uses to pick modules —
+#      so a module cannot start being CI-invoked without also being covered.
 #
 # OPERATOR-ACCEPTED RESIDUAL (MG-24 — operator decision, steve@bargelt.com):
 #   The azurerm_application_insights.main resource STAYS Terraform-managed. Every
@@ -576,6 +586,108 @@ else
   done <<< "${tftest_files}"
 fi
 check "terraform tests are mock-provider and non-applying (credentialless PR gate)" "${tftest_hits%$'\n'}"
+
+# --- CHECK 16. CI-invoked modules pin their providers (MG-39) ----------------------
+# ci.yml's "Terraform module tests" step inits every module containing a
+# *.tftest.hcl on a fresh runner. Two things make that init reproducible, and it
+# needs BOTH: an explicit version constraint (so the resolver has a range) and a
+# committed .terraform.lock.hcl (so it has the exact version + hashes inside that
+# range). With neither, modules/iot-hub resolved azurerm to LATEST and picked up
+# the breaking v5.0.1 the day it shipped — a red CI on an unchanged tree.
+#
+# The module list is derived from ${tftest_files} above, i.e. the SAME find on
+# *.tftest.hcl that ci.yml uses, with the same `*/tests` -> parent folding. That
+# coupling is the point: a module that starts carrying tests starts being gated
+# here automatically, rather than waiting for someone to extend a hardcoded list.
+#
+# The folding lives in a top-level function rather than inline in the pipeline
+# because bash 3.2 — /bin/bash on macOS, where this script is run by hand —
+# mis-parses a `case` nested inside `$( … )`. Inlining it back reintroduces
+# MG-42 finding F5: the substitution dies at parse time and `set -u` then aborts
+# the script on the unbound variable, so this check never runs. ci.yml keeps the
+# inline form legitimately; that file only ever runs on the runner's bash 5.
+tftest_module_dir() {
+  case "$1" in
+    */tests) printf '%s\n' "${1%/tests}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+tftest_modules="$(
+  printf '%s\n' "${tftest_files}" | grep -v '^$' | while IFS= read -r f; do
+    tftest_module_dir "$(dirname "${f}")"
+  done | sort -u
+)"
+
+# Providers a module actually uses, by local name — the prefix of every
+# `resource "<prefix>_..."` / `data "<prefix>_..."` block. That prefix IS the
+# provider local name Terraform resolves, so this needs no allowlist of provider
+# names to stay current. The `terraform` builtin (data.terraform_remote_state) is
+# excluded: it has no registry source and takes no version constraint.
+module_providers_used() {
+  grep -hoE '^[[:space:]]*(resource|data)[[:space:]]+"[a-z0-9]+_' "$1"/*.tf 2>/dev/null \
+    | sed -E 's/.*"([a-z0-9]+)_$/\1/' | sort -u | grep -v '^terraform$' || true
+}
+
+# Providers the module CONSTRAINS: every required_providers entry that carries a
+# `version =` line. A brace-depth-free state machine is enough because this repo's
+# HCL is `terraform fmt`-checked earlier in the same job, so entries are always
+# `name = {` ... `}` on their own lines. Written for POSIX awk (CI runners ship
+# mawk, which has no 3-argument match()).
+module_providers_constrained() {
+  cat "$1"/*.tf 2>/dev/null | awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    { line = $0; sub(/#.*$/, "", line) }
+    inrp == 0 { if (line ~ /required_providers[[:space:]]*\{/) inrp = 1; next }
+    inentry == 0 {
+      if (line ~ /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=[[:space:]]*\{/) {
+        name = line; sub(/[[:space:]]*=.*$/, "", name); name = trim(name)
+        inentry = 1; hasver = 0; next
+      }
+      if (line ~ /\}/) inrp = 0
+      next
+    }
+    {
+      if (line ~ /version[[:space:]]*=/) hasver = 1
+      if (line ~ /^[[:space:]]*\}/) { if (hasver) print name; inentry = 0 }
+    }
+  ' | sort -u
+}
+
+# `git ls-files` is what distinguishes a COMMITTED lock from one a local
+# `terraform init` just dropped in an ignored path — the exact regression a
+# re-added .gitignore rule would cause. CI fails either way (an ignored file is
+# not in the checkout at all), but tracking-awareness moves that failure to the
+# author's machine. Skipped when INFRA_DIR is not inside a work tree (fixtures).
+git_tracked=0
+if command -v git >/dev/null 2>&1 && git -C "${INFRA_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git_tracked=1
+fi
+
+pin_hits=""
+if [[ -z "${tftest_modules}" ]]; then
+  # Same fail-open logic as checks 13/14/15: matching nothing must never pass.
+  pin_hits+="no test-bearing module directories derived from *.tftest.hcl — this check has stopped working (it must never pass by finding nothing)"$'\n'
+else
+  while IFS= read -r mod; do
+    [[ -n "${mod}" ]] || continue
+    lock="${mod}/.terraform.lock.hcl"
+    if [[ ! -f "${lock}" ]]; then
+      pin_hits+="${mod}: CI-invoked (has *.tftest.hcl) but has NO committed .terraform.lock.hcl — ci.yml's \`terraform init -lockfile=readonly\` will fail, and without the lock a fresh runner resolves whatever the registry serves. Generate it from ${mod}: terraform init -backend=false && terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64 -platform=darwin_amd64"$'\n'
+    elif [[ "${git_tracked}" -eq 1 ]] && ! git -C "${INFRA_DIR}" ls-files --error-unmatch -- "${lock}" >/dev/null 2>&1; then
+      pin_hits+="${lock}: present on disk but NOT tracked by git — it will not exist in the CI checkout, so the module still floats. \`git add\` it, and check .gitignore is not re-ignoring apps/infrastructure/modules/*/.terraform.lock.hcl"$'\n'
+    fi
+
+    constrained="$(module_providers_constrained "${mod}")"
+    while IFS= read -r prov; do
+      [[ -n "${prov}" ]] || continue
+      if ! printf '%s\n' "${constrained}" | grep -qx "${prov}"; then
+        pin_hits+="${mod}: uses ${prov}_* resources but declares no explicit \`${prov}\` version constraint in a required_providers block — a standalone init resolves it UNCONSTRAINED (this is how azurerm v5.0.1 landed). Add ${prov} with a version to the module's required_providers."$'\n'
+      fi
+    done <<< "$(module_providers_used "${mod}")"
+  done <<< "${tftest_modules}"
+fi
+check "CI-invoked modules pin their providers (explicit constraint + committed lock)" "${pin_hits%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then

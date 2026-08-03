@@ -109,14 +109,29 @@ plan.out
 # platform (it re-fetches each from the registry and compares), and a following
 # `terraform init -backend=false` must leave the file byte-identical.
 #
-# Per-MODULE lock files stay ignored. They are throwaway artifacts of standalone
-# `terraform init -backend=false` / `terraform test` working directories, which
-# hold no Azure credentials and never apply. They are also NOT safe to pin here:
-# modules/monitoring/versions.tf constrains only `time`, so a standalone init
-# resolves azurerm with NO version constraint at all — committing that resolution
-# would pin a module-test provider the module never declared. Constrain providers
-# in each module's versions.tf if that ever needs to change.
-apps/infrastructure/modules/*/.terraform.lock.hcl
+# Per-MODULE lock files are TRACKED TOO as of MG-39, and are therefore NOT listed
+# here either. The reasoning above extends to them, with one correction: the old
+# rule dismissed them as throwaway artifacts of credential-less `terraform test`
+# working directories. That is true of their PRIVILEGE and false of their
+# STABILITY. ci.yml's validate-infrastructure job inits every test-bearing module
+# on a fresh runner, so an unpinned module resolved whatever the registry served
+# THAT MINUTE — and on 2026-08-03 that became azurerm v5.0.1, whose breaking
+# azurerm_eventhub schema turned every PR red with nothing in this repo having
+# changed. A gate whose result depends on the registry clock is not a gate.
+#
+# The old objection — that modules/monitoring constrained only `time`, so pinning
+# would record a resolution the module never declared — is fixed at the source
+# rather than worked around: every module using azurerm_* now declares
+# `azurerm ~> 4.0` (monitoring/versions.tf, iot-hub, cosmos-db and signalr
+# main.tf), matching the root. The lock records a resolution the module DID
+# declare. tf-static-checks.sh check 16 fails the build if a CI-invoked module
+# ever loses either half.
+#
+# Regenerate a module lock exactly as the root one, from the module directory,
+# with the SAME four platforms and the same two-way verification:
+#   terraform init -backend=false
+#   terraform providers lock -platform=linux_amd64 -platform=linux_arm64 \
+#     -platform=darwin_arm64 -platform=darwin_amd64
 
 # Go
 *.exe

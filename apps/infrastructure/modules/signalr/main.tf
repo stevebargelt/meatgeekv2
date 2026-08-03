@@ -1,5 +1,17 @@
 # SignalR Service Module for MeatGeek V2
 
+# Provider requirements (MG-39). An unconstrained module resolves the LATEST
+# azurerm on a standalone init — v5.0.1 as of 2026-08-03, a breaking major. This
+# codebase targets azurerm 4.x; v5 is a separate, deliberate migration.
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 # SignalR Service
 resource "azurerm_signalr_service" "main" {
   name                = "${var.resource_prefix}-signalr-${var.global_suffix}"
