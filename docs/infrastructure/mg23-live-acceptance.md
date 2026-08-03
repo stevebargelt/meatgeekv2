@@ -1620,6 +1620,13 @@ Only the first is evidence. What you should see:
   prints `STOP: … rejected, but NOT by the ABAC condition`, echoes the raw
   output, and **fails the test**. The condition was never exercised; fix the
   input and re-run. Do not record it either way.
+- **Permitted — the failure, and a live mutation.** `az` exits 0: the condition
+  did not block a privilege escalation, and for a `create` probe that escalated
+  assignment now exists on the dev RG. The block prints `!!! PERMITTED`, then
+  **revokes it and reads it back to prove it is gone** (`CONTAINED`). If it
+  cannot, it prints `!!! STOP` with the exact `az role assignment delete`
+  command: the escalation is still live and clearing it comes before recording
+  anything.
 
 ```bash
 SUB="$(az account show --query id -o tsv)"
@@ -1635,6 +1642,69 @@ APPLY_SP_OBJECT_ID=''
 # reach an --assignee-object-id. Rejects any leftover angle bracket by shape.
 t_is_guid() { # <value>
   printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+# Does this id name a role assignment AT OR UNDER <scope>? Shape is not enough —
+# a well-formed id at a scope the SP has no authority over is denied for that
+# reason alone, and t_expect_deny cannot tell that denial apart from the
+# condition's. See T4a for the full argument. Lowercased both sides because
+# Azure preserves whatever casing the scope was created with.
+t_id_in_scope() { # <assignment-id> <scope>
+  local id_lc scope_lc
+  case "$1" in *'<'*|*'>'*) return 1 ;; esac   # a leftover placeholder, anywhere in it
+  id_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  scope_lc="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  case "$id_lc" in
+    "$scope_lc"/providers/microsoft.authorization/roleassignments/*) return 0 ;;
+    "$scope_lc"/*/providers/microsoft.authorization/roleassignments/*) return 0 ;;
+  esac
+  return 1
+}
+
+# The id of a role assignment named anywhere in an az response. Used to contain a
+# PERMITTED create — you cannot revoke what you cannot name.
+t_created_id() { # <az output>
+  printf '%s' "$1" \
+    | grep -Eio '/subscriptions/[^"[:space:],]+/providers/microsoft\.authorization/roleassignments/[0-9a-f-]{36}' \
+    | head -n 1
+}
+
+# Does this probe CREATE? Decides whether a PERMITTED outcome leaves a new grant
+# standing. Matched on the az verb in the argv, not on the label.
+t_probe_creates() { # <command...>
+  local a
+  for a in "$@"; do
+    [ "$a" = create ] && return 0
+  done
+  return 1
+}
+
+# Containment for the worst outcome this suite can produce. `!!! PERMITTED` on a
+# create means the ABAC condition FAILED to block a privilege escalation — and
+# that escalated grant is LIVE on the dev RG from the moment az exits 0. A loud
+# message is not containment, so it is revoked here.
+#
+# The revoke is then PROVEN by reading the assignment back, because
+# `az role assignment delete` exits 0 having matched nothing, and an unverified
+# revoke is the same fall-through class as recording a rejected REQUEST as a
+# denial. A read that itself fails is NOT proof of removal and takes the STOP
+# path — this must never conclude "contained" without evidence.
+t_revoke_now() { # <label> <az output>
+  local id scope del_rc read_rc still
+  id="$(t_created_id "$2")"
+  if [ -z "$id" ]; then
+    printf '!!! STOP — %s CREATED a role assignment and no id could be read back from the response, so NOTHING was revoked. The escalation is LIVE. Do not continue the suite; find it and delete it now:\n    az role assignment list --assignee-object-id "$APPLY_SP_OBJECT_ID" --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" -o table\n    az role assignment delete --ids <the id from that list>\n' "$1" >&2
+    return 1
+  fi
+  scope="${id%/providers/*}"
+  az role assignment delete --ids "$id" >/dev/null 2>&1; del_rc=$?
+  still="$(az role assignment list --scope "$scope" --query "[?id=='$id'].id" -o tsv 2>/dev/null)"; read_rc=$?
+  if [ "$del_rc" -eq 0 ] && [ "$read_rc" -eq 0 ] && [ -z "$still" ]; then
+    printf 'CONTAINED — the escalated assignment was revoked and verified gone: %s (%s)\n' "$id" "$1"
+    return 0
+  fi
+  printf '!!! STOP — THE ESCALATED ASSIGNMENT MAY STILL BE LIVE (%s): delete exited %s, the read-back exited %s and returned %s. Do NOT continue the suite. Remove it by hand and confirm it is gone:\n    az role assignment delete --ids %s\n    az role assignment list --scope %s -o table\n' "$1" "$del_rc" "$read_rc" "${still:-nothing}" "$id" "$scope" >&2
+  return 1
 }
 
 # ALL matches, never [0] — the same rule §3 and B10's check() state. [0] would
@@ -1665,12 +1735,22 @@ t_ready() {
 # assignee, an unsubstituted placeholder, a CLI argument error, an expired login
 # — is recorded as the condition denying. Only the authorization outcomes Azure
 # names count as evidence; everything else STOPS the test for a human to read.
+#
+# A PERMITTED outcome is not just a failed assertion — it is a mutation that
+# SUCCEEDED. For a create probe that mutation is an escalated role assignment now
+# live on the dev RG, so this contains it rather than printing and moving on.
 t_expect_deny() { # <label> <command...>
-  local label="$1" out rc
+  local label="$1" out rc creates=0
   shift
+  t_probe_creates "$@" && creates=1
   out="$("$@" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
     printf '!!! PERMITTED — THIS IS A FAILURE (%s)\n' "$label"
+    if [ "$creates" = 1 ]; then
+      t_revoke_now "$label" "$out"
+    else
+      printf "!!! STOP — a PERMITTED delete has already REMOVED a live assignment (%s). Nothing can be revoked; restore it with T1's Terraform before continuing.\n" "$label" >&2
+    fi
     return 1
   fi
   case "$out" in
@@ -1782,7 +1862,11 @@ fi
   **not** failed. Fix the input and re-run.
 - **This is the core escalation test.** A PERMIT on any of the four means the
   condition is not constraining the write action at all — most likely it was
-  authored with an empty or malformed GUID list. **Stop activation.**
+  authored with an empty or malformed GUID list. **Stop activation.** The grant
+  is live the instant it succeeds, so `t_expect_deny` revokes it and reads it
+  back to prove it is gone; if it prints `!!! STOP`, the escalated assignment is
+  still standing on the dev RG and removing it by hand comes before anything
+  else.
 - **False green:** running these as _yourself_ rather than as the SP. You are an
   Owner; they will all succeed and prove nothing. Confirm the identity first:
   `az account show --query user`.
@@ -1844,26 +1928,35 @@ without ever escalating — an **outage primitive**.
 
 ```bash
 # 4a — REJECT deleting a NON-allowlisted assignment.
-# Pick any pre-existing assignment in the RG whose role is not in the allowlist
-# (e.g. a Reader or Monitoring Reader grant made by the operator) and paste its
-# FULL id. Unreplaced, the placeholder is non-empty and Azure rejects it as a
-# malformed id with the same non-zero exit a condition denial produces — which
-# is why the id is shape-checked and the outcome is classified, not assumed.
+# Pick a pre-existing assignment INSIDE THE DEV RG whose role is not in the
+# allowlist (e.g. a Reader or Monitoring Reader grant made by the operator) and
+# paste its FULL id. Unreplaced, the placeholder is non-empty and Azure rejects
+# it as a malformed id with the same non-zero exit a condition denial produces —
+# which is why the id is checked and the outcome classified, not assumed:
 #   az role assignment list --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
 #     --query "[?roleDefinitionName=='Reader'].id" -o tsv
 NON_ALLOWLISTED_ID='<non-allowlisted-assignment-id>'
 
-t4a_id_ok=0
-case "$NON_ALLOWLISTED_ID" in
-  /subscriptions/*/providers/Microsoft.Authorization/roleAssignments/*) t4a_id_ok=1 ;;
-esac
-case "$NON_ALLOWLISTED_ID" in *'<'*|*'>'*) t4a_id_ok=0 ;; esac
+# THE SCOPE OF THAT ID IS PART OF THE TEST, not a detail. A well-formed
+# role-assignment id at the WRONG scope produces a perfect-looking pass that
+# proves nothing: t_expect_deny accepts a bare AuthorizationFailed as evidence
+# the condition denied the delete, and AuthorizationFailed is Azure's GENERIC
+# 403. The apply SP holds Contributor and RBAC Administrator at the dev RG and
+# Storage Blob Data Contributor on the tfstate container — and NOTHING at
+# subscription scope. So a subscription-scoped (or other-RG) id is refused for
+# want of any authority at that scope at all, the ABAC condition is never
+# consulted, and 4a prints `DENIED BY THE CONDITION — expected` having exercised
+# no condition. Only at or under the dev RG, where the SP demonstrably IS an RBAC
+# administrator, is the condition the one thing left that can deny the delete.
+T4A_SCOPE="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
 
-if t_ready && [ "$t4a_id_ok" = 1 ]; then
+if ! t_ready; then
+  :   # t_ready has already said why, and nothing here has run.
+elif ! t_id_in_scope "$NON_ALLOWLISTED_ID" "$T4A_SCOPE" || ! t_is_guid "${NON_ALLOWLISTED_ID##*/}"; then
+  echo "REFUSING: \$NON_ALLOWLISTED_ID ('$NON_ALLOWLISTED_ID') does not name a role assignment at or under $T4A_SCOPE. An out-of-scope id does not merely fail 4a — it INVALIDATES it: the apply SP has no authority outside the dev RG, so Azure refuses the delete on that ground, never evaluates the ABAC condition, and returns the same generic AuthorizationFailed a condition denial returns. 4a would then record 'DENIED BY THE CONDITION' having proved nothing about the delete clause. Re-list inside the dev RG and paste an id from there." >&2
+else
   t_expect_deny "4a delete non-allowlisted" \
     az role assignment delete --ids "$NON_ALLOWLISTED_ID"
-else
-  echo "REFUSING: \$NON_ALLOWLISTED_ID ('$NON_ALLOWLISTED_ID') is not a full role-assignment id — Azure would reject the request itself, and 4a would record that as the condition refusing the delete." >&2
 fi
 
 # 4b — PERMIT deleting an allowlisted assignment (one of T1's).
@@ -1876,7 +1969,10 @@ fi
 
 - **Expected:** 4a `DENIED BY THE CONDITION — expected`, 4b permitted. A 4a
   rejection that carries no authorization code prints `STOP:` instead and does
-  not count: the delete clause is unproven, not proven.
+  not count: the delete clause is unproven, not proven. Same for an id from
+  outside the dev RG — the block refuses it rather than running, because a
+  denial for want of authority at that scope is indistinguishable from a
+  condition denial and would be recorded as one.
 - **If 4a is PERMITTED:** the delete clause is missing or matched nothing —
   check that `build_rbac_admin_condition` emitted **both** clauses and that the
   live condition (`az role assignment list --query "[0].condition"`) contains a
@@ -1910,7 +2006,9 @@ fi
   `STOP:` and leaves T5 unproven rather than passed.
 - **If PERMITTED:** the identity can disarm itself (and, combined with T2's
   failure mode, re-arm differently). Worse, it can lock itself out and leave dev
-  unreconcilable until an operator restores the grants with `bootstrap.sh`.
+  unreconcilable until an operator restores the grants with `bootstrap.sh`. A
+  permitted delete has already destroyed the grant — there is nothing to revoke,
+  so `t_expect_deny` says so and the restore is yours to run before continuing.
   **Stop activation.**
 
 Then run T1's Terraform again to restore the `Azure Event Hubs Data Sender`
@@ -1945,8 +2043,14 @@ elif ! t_ready; then
   :   # t_ready has already said why, and nothing here has run.
 elif [ -z "$REPO_ROOT" ] || [ ! -f "$ALLOWLIST" ]; then
   echo "REFUSING: not in the repository (root='$REPO_ROOT') or the allowlist is missing at '$ALLOWLIST' — T6 cannot revert what it cannot find, so it does not change it." >&2
-elif ! git diff --quiet -- "$ALLOWLIST"; then
-  echo "REFUSING: $ALLOWLIST already has uncommitted changes. T6 reverts with 'git checkout --', which would discard them, and the 8-role baseline it restores would not be the committed one. Commit or stash first." >&2
+# Compared against HEAD, not the index. `git diff --quiet -- <path>` compares the
+# WORKING TREE TO THE INDEX, so a STAGED edit to the allowlist reads as clean and
+# walks straight through this guard — after which the revert below restores the
+# file from that index, i.e. to the operator's staged content, and the restoring
+# bootstrap run reconciles the live condition to it. The log reads as a clean
+# revert while the apply identity is left permanently widened.
+elif ! git diff --quiet HEAD -- "$ALLOWLIST"; then
+  echo "REFUSING: $ALLOWLIST differs from HEAD — staged, unstaged, or both. T6 reverts it to the COMMITTED content with 'git checkout HEAD --', which would discard those changes, and it can only claim to restore the 8-role baseline if the baseline IS what is committed. Commit or stash first." >&2
 else
   # Capture BOTH the condition and the assignment ID. The id is what proves the
   # reconcile was IN PLACE rather than a delete+recreate.
@@ -1996,18 +2100,25 @@ else
     # Reachable ONLY because $t6_mutated is set — i.e. only on the path that
     # actually widened the allowlist.
     #
-    # The path is ABSOLUTE via $REPO_ROOT because `git checkout -- <pathspec>`
-    # resolves against your CWD: the repo-relative form run from inside the
+    # HEAD is named EXPLICITLY. `git checkout -- <pathspec>` restores from the
+    # INDEX, which is whatever was last staged — not necessarily what is
+    # committed. Naming HEAD restores the committed content and resets the index
+    # entry with it, so what the restoring bootstrap run reconciles the live
+    # condition to is the committed 8-role baseline, which is the only thing this
+    # block is entitled to claim it restored.
+    #
+    # The path is ABSOLUTE via $REPO_ROOT because `git checkout` resolves a
+    # pathspec against your CWD: the repo-relative form run from inside the
     # bootstrap directory fails with "did not match any file(s) known to git",
     # exits non-zero, and reverts NOTHING — after which an unconditional re-run
     # would re-apply the NINE-role condition you just finished proving, leaving
     # the apply identity's allowlist permanently widened while the log reads as a
     # clean revert. So the revert has to succeed before the restore re-runs.
     if [ "$t6_mutated" = 1 ]; then
-      if git checkout -- "$ALLOWLIST"; then
+      if git checkout HEAD -- "$ALLOWLIST"; then
         (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)
       else
-        echo "STOP: allowlist revert FAILED — do NOT re-run bootstrap; it would re-apply the 9-role condition. Restore $ALLOWLIST by hand, confirm with 'git diff --exit-code', then re-run bootstrap." >&2
+        echo "STOP: allowlist revert FAILED — do NOT re-run bootstrap; it would re-apply the 9-role condition. Restore $ALLOWLIST by hand, confirm with 'git diff --exit-code HEAD -- \"$ALLOWLIST\"', then re-run bootstrap." >&2
       fi
     fi
   fi
@@ -2018,10 +2129,14 @@ fi
   **assignment id is identical throughout**. Both assertions must pass.
 - **If the block refuses, nothing ran.** T6 is the only test here that runs
   `bootstrap.sh`, so every precondition — the preflight actually being loaded in
-  this shell, a clean allowlist, a real baseline — is checked before the file is
-  touched, and the restoring re-run is reachable only from the path that widened
-  it. Paste T6 on its own without §6's preflight and it refuses; it does not
-  half-run.
+  this shell, an allowlist identical to HEAD, a real baseline — is checked before
+  the file is touched, and the restoring re-run is reachable only from the path
+  that widened it. Paste T6 on its own without §6's preflight and it refuses; it
+  does not half-run.
+- **The allowlist check is against HEAD, and so is the revert.** Both halves
+  matter: a working-tree-only check cannot see a staged edit, and a revert that
+  restores from the index would reinstate that staged edit as the "baseline" the
+  restoring bootstrap run then writes into the live condition.
 - **Why the id check matters:** the reconcile must be an in-place
   `az role assignment update`, never a delete+recreate. A changed id means the
   grant was momentarily **absent**, which is the window that can strip the apply
