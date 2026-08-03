@@ -160,7 +160,10 @@ Contributor` role on the `deployment-package` container** (in ADDITION to its
   **User Access Administrator** for the bootstrap (it creates an AAD app,
   a role assignment, and storage). Day-to-day plan/apply needs less.
 - **GitHub CLI** (`gh`), installed **and** authenticated — run `gh auth login`
-  *before* `./bootstrap.sh`. See the note on an unauthenticated `gh` below.
+  *before* `./bootstrap.sh`. Authentication is now a **hard precondition**, not
+  a nicety: bootstrap reads the repository's live OIDC sub-claim customization
+  before it provisions anything, and aborts if it cannot. See
+  [Preconditions that abort before anything is provisioned](#preconditions-that-abort-before-anything-is-provisioned).
 - **`jq`**, and a **sha1** tool: `sha1sum` on Linux, `shasum` on macOS.
   Bootstrap accepts **either** and derives the **same** scope id from both, so a
   Linux and a macOS operator re-running bootstrap do not mint duplicate
@@ -186,13 +189,58 @@ Contributor` role on the `deployment-package` container** (in ADDITION to its
 > `development-infra-apply-recovery` are checked at the end of the run, and the
 > `Bootstrap complete` line is printed **only after** that check passes — so a
 > **green bootstrap is the signal that activation is safe**, rather than
-> something a reader has to notice the absence of. Consequence worth planning
-> for: if `gh` is installed but **not authenticated**, the Azure-side work still
-> completes and bootstrap exits **non-zero** with the manual `gh api` procedure
-> printed. That is not a half-finished run — the Azure side is idempotent, so
-> run `gh auth login` and re-run `./bootstrap.sh` freely. **Do not set
+> something a reader has to notice the absence of. **Do not set
 > `DEV_TF_BACKEND_READY` true until bootstrap exits zero.** See
 > [MG-23 live acceptance](mg23-live-acceptance.md).
+
+### Preconditions that abort before anything is provisioned
+
+Every federated subject is composed from the repository's **live** sub-claim
+prefix (MG-42), and `resolve_oidc_subject_prefix()` runs in `main()` **before**
+the state backend or any identity is created. So each failure below aborts with
+**nothing provisioned and nothing rewritten** — a re-run after remediation is a
+clean first run, not a resumption. The four abort classes are distinct and their
+remediations are *different*; matching the message to the right one matters,
+because chasing the wrong cause here is how the credentials end up
+hand-"corrected" into the broken form.
+
+| Abort | What bootstrap saw | Remediation |
+| ----- | ------------------ | ----------- |
+| **`gh` not authenticated** | `gh auth status` fails. Previously only the *binary* had to exist; an unauthenticated `gh` 404s on a private repo's endpoints exactly like a repo with no customization, so it would have been read as "use the default prefix" and rewritten every credential. | `gh auth login`, then re-run. |
+| **GitHub API failure** — 403, 429/rate limit, 5xx, DNS, proxy | The response status line was something **other** than an exact `404` — or there was no parseable status line at all (a proxy that swallowed the response, a DNS failure), which is no authoritative status for the request and is read the same way. The response says nothing about the repo's configuration, so falling back to the default prefix would be a guess that rewrites live trust. | **Retry / check GitHub status.** This is *not* an auth problem — `gh auth login` will not fix it, and running it here wastes the outage window. |
+| **Customization unreadable** — `use_default: false` with no readable prefix, an empty body, or an unparseable one | GitHub returned 200 but the answer cannot be used: it positively states a customization exists (`use_default: false`) while carrying no usable `sub_claim_prefix`, or the body is empty, or it is not parseable JSON. Epistemically identical to a 403/5xx — unreadable, not absent. | Same class as above — re-read the customization (`gh api …/oidc/customization/sub`) and resolve why the prefix is missing or malformed. Do **not** fall back to the default. |
+| **Trust-root mismatch** | The resolved prefix does not name `stevebargelt/meatgeekv2` (after stripping GitHub's optional `@<digits>` owner-id/repo-id). Every identity — including the dev infra-apply one holding `Contributor` on the dev RG — would be federated to another repository's workflows. | A **reviewed edit to `GITHUB_REPO`** in `bootstrap.sh`, in a commit. If you forked the repo, that is the change to make; there is no environment-variable override and there is deliberately no workaround. |
+
+Only one non-200 answer is read as a *fact* rather than an outage: **an exact
+`404`**, which is GitHub's "no sub-claim customization is configured". Bootstrap
+then warns and federates the default `repo:<owner>/<repo>` prefix. Two things
+make that safe to trust. The auth gate above rules out the other common meaning
+of a 404 on a private repo. And the status is taken from the **response status
+line** — bootstrap calls `gh api -i` and matches the first line anchored — not
+from `gh`'s exit code or a substring of its stderr: a proxy error page or an
+unrelated nested 404 can both *contain* the text `HTTP 404` while saying nothing
+about this endpoint, and reading one as the fallback signal is what deletes and
+recreates three live credentials on a subject no token carries. **If you check
+the customization by hand, discriminate the 404 the same way** — the procedure
+is [B10](mg23-live-acceptance.md#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents).
+
+**Classifying the response is only the first half.** Whichever branch produced a
+prefix — the API's `sub_claim_prefix` or the default the `404`/`use_default=true`
+paths fall back to — `assert_oidc_subject_prefix()` then proves it structurally
+names `stevebargelt/meatgeekv2` before it is allowed to become
+`OIDC_SUBJECT_PREFIX`; that is the trust-root row below, and it is the check a
+hand-rolled one-liner most often omits. A perfectly well-formed 200 from a
+misrouted or proxied request can carry another repository's prefix, and a read
+that *succeeded* is not the same fact as an answer that is *about this
+repository*. B10's helper mirrors both halves for exactly that reason.
+
+> **An unauthenticated `gh` no longer gets as far as the Azure work.** Earlier
+> revisions of this runbook said the Azure side still completed and only the
+> environment protection was left `UNVERIFIED`; that is no longer true, because
+> the sub-claim read happens first. The environments' `UNVERIFIED` path still
+> exists for a `gh` that stops working part-way through a run, and bootstrap
+> then prints the manual `gh api` procedure — but the ordinary
+> "forgot to log in" case now aborts up front with nothing changed.
 
 > **Export `ARM_SUBSCRIPTION_ID` before any Terraform command.** AzureRM
 > **provider v4 requires an explicit subscription id** — selecting it with
@@ -322,18 +370,65 @@ What it creates (and nothing else):
    **Canonical subject scheme (must not drift):**
 
    ```
-   subject = repo:<owner>/<repo>:environment:<github-env>
+   subject = <the repository's live sub-claim prefix>:environment:<github-env>
    ```
+
+   **The `repo:…` head is not a constant (MG-42).** This account's GitHub org
+   customizes the OIDC `sub` claim to inject the numeric owner-id and repo-id,
+   so the prefix is a **fact about the repository, read at run time** —
+   `resolve_oidc_subject_prefix()` fetches it before anything is provisioned and
+   `federated_environment_subject()` composes every subject from it. Read the
+   current value the same way the script does:
+
+   ```bash
+   gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub
+   ```
+
+   Observed on this account (2026-07-28):
+
+   ```json
+   { "use_default": true, "use_immutable_subject": false, "sub_claim_prefix": "repo:stevebargelt@4857343/meatgeekv2@1304558512" }
+   ```
+
+   **`use_default: true` coexists with a custom prefix — they are not mutually
+   exclusive.** `use_default` describes the claim-KEY list (`include_claim_keys`)
+   — "this repo has not customized WHICH claims appear" — while the enterprise
+   policy injects the id-bearing prefix independently of it. `sub_claim_prefix`
+   is the authority: where it is present and non-empty it decides the subject
+   whatever `use_default` says. Reading those two as mutually exclusive is the
+   defect that produced the MG-42 outage; do not "simplify" this back.
 
    `<github-env>` is the EXACT `environment:` value the job declares, so the
    credential the bootstrap creates equals the OIDC subject GitHub presents.
    The environments, their identities, and their (short) Terraform/state names:
 
-   | GitHub Environment (workflow `environment:` + OIDC subject) | Identity it federates | Federated subject                                                 | tf env / state container |
-   | ----------------------------------------------------------- | --------------------- | ----------------------------------------------------------------- | ------------------------ |
-   | `development-infra-apply` (infra-apply-dev.yml `apply`)      | dev **infra-apply**   | `repo:stevebargelt/meatgeekv2:environment:development-infra-apply` | `dev` / `tfstate-dev`    |
-   | `development` (app publish)                                  | dev **app-deploy**    | `repo:stevebargelt/meatgeekv2:environment:development`             | `dev` / `tfstate-dev`    |
-   | `production` (infra-deploy-prod / app-deploy-prod)           | prod plan/read        | `repo:stevebargelt/meatgeekv2:environment:production`              | `prod` / `tfstate-prod`  |
+   | GitHub Environment (workflow `environment:` + OIDC subject) | Identity it federates | Federated subject                          | tf env / state container |
+   | ----------------------------------------------------------- | --------------------- | ------------------------------------------ | ------------------------ |
+   | `development-infra-apply` (infra-apply-dev.yml `apply`)      | dev **infra-apply**   | `<prefix>:environment:development-infra-apply` | `dev` / `tfstate-dev`    |
+   | `development` (app publish)                                  | dev **app-deploy**    | `<prefix>:environment:development`             | `dev` / `tfstate-dev`    |
+   | `production` (infra-deploy-prod / app-deploy-prod)           | prod plan/read        | `<prefix>:environment:production`              | `prod` / `tfstate-prod`  |
+
+   The bare `gh api` above is for **reading** the current value. If you are
+   about to *act* on a prefix — compare a live credential, or create one —
+   resolve it through B10's `oidc_subject_prefix` helper instead: it discriminates
+   the abort classes above and proves the answer names this repository, which a
+   raw read does not.
+
+   `<prefix>` is whatever the `gh api` call above returns **today**. With the
+   value observed on this account, the three live subjects resolve to:
+
+   ```
+   repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:development-infra-apply
+   repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:development
+   repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:production
+   ```
+
+   Those strings are **an observation, not a constant**. Verify against the API
+   before treating a live credential as wrong — a credential that does not match
+   the *hardcoded old form* `repo:stevebargelt/meatgeekv2:environment:<env>` is
+   almost certainly correct, and "correcting" it back to that form is the
+   outage (`AADSTS700213` on every `azure/login`). Bootstrap composes subjects
+   in exactly one place and never interpolates the repo name directly.
 
    **The count, stated both ways so the two numbers never read as a
    contradiction: there are FOUR GitHub Environments — the THREE FEDERATED ones
@@ -730,17 +825,28 @@ Function-App `Website Contributor` and the Flex deployment-container `Storage Bl
 Data Contributor`:
 
 ```bash
+# These two are read-only, but an EMPTY id here still buys a false green: the
+# listing falls back to a broader scope and can print the same SP object id from
+# an unrelated assignment, which reads exactly like the grant you were checking
+# for. Assert the id, then look.
 FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex_consumption.main | awk '/^ *id /{print $3; exit}')"
-az role assignment list --scope "$FUNC_ID" \
-  --query "[?roleDefinitionName=='Website Contributor'].principalId" -o tsv
+[ -n "$FUNC_ID" ] || echo "UNVERIFIED: FUNC_ID unresolved — the listing below would not be scoped to the Function App." >&2
+if [ -n "$FUNC_ID" ]; then
+  az role assignment list --scope "$FUNC_ID" \
+    --query "[?roleDefinitionName=='Website Contributor'].principalId" -o tsv
+fi
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 
 # Flex OneDeploy write-path: the same SP on the deployment-package container.
 # The functions storage account is the azapi control-plane resource, not azurerm.
 STORAGE_ID="$(terraform state show module.azure_functions.azapi_resource.functions_storage | awk '/^ *id /{print $3; exit}')"
-az role assignment list \
-  --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package" \
-  --query "[?roleDefinitionName=='Storage Blob Data Contributor'].principalId" -o tsv
+if [ -n "$STORAGE_ID" ]; then
+  az role assignment list \
+    --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package" \
+    --query "[?roleDefinitionName=='Storage Blob Data Contributor'].principalId" -o tsv
+else
+  echo "UNVERIFIED: STORAGE_ID unresolved — this check did not run." >&2
+fi
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 ```
 
@@ -771,19 +877,38 @@ FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex
 
 # Only if you don't already have publish rights on the dev FA:
 ME="$(az ad signed-in-user show --query id -o tsv)"
-az role assignment create --assignee-object-id "$ME" \
-  --assignee-principal-type User \
-  --role "Website Contributor" --scope "$FUNC_ID"
+
+# NEVER let an empty id reach `--scope`. `terraform state show` fails — wrong
+# directory, backend not initialised, resource not yet applied — and `awk` still
+# exits 0, so $FUNC_ID is silently empty. An empty `--scope` is not "no scope" to
+# the CLI: it is absent, and the scope then falls back to a broader default. At
+# best the command errors; at worst you have granted yourself Website
+# Contributor across the whole subscription instead of one Function App. The
+# check is the branch, not a warning above it.
+if [ -n "$ME" ] && [ -n "$FUNC_ID" ]; then
+  az role assignment create --assignee-object-id "$ME" \
+    --assignee-principal-type User \
+    --role "Website Contributor" --scope "$FUNC_ID"
+else
+  echo "REFUSING: ME='$ME' FUNC_ID='$FUNC_ID' — resolve both before granting anything." >&2
+fi
 
 # Flex OneDeploy writes the package ZIP to the deployment-package blob container
 # under YOUR identity, so you also need Blob Data write there (Contributor/Owner
 # on the RG does NOT include the storage data plane). Grant it if you lack it
 # (the functions storage account is the azapi control-plane resource, not azurerm):
 STORAGE_ID="$(terraform state show module.azure_functions.azapi_resource.functions_storage | awk '/^ *id /{print $3; exit}')"
-az role assignment create --assignee-object-id "$ME" \
-  --assignee-principal-type User \
-  --role "Storage Blob Data Contributor" \
-  --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package"
+# Same rule, and the interpolation hides it better: an empty $STORAGE_ID still
+# produces a NON-empty scope string ("/blobServices/default/containers/…") that
+# names no account at all.
+if [ -n "$ME" ] && [ -n "$STORAGE_ID" ]; then
+  az role assignment create --assignee-object-id "$ME" \
+    --assignee-principal-type User \
+    --role "Storage Blob Data Contributor" \
+    --scope "${STORAGE_ID}/blobServices/default/containers/deployment-package"
+else
+  echo "REFUSING: ME='$ME' STORAGE_ID='$STORAGE_ID' — resolve both before granting anything." >&2
+fi
 ```
 
 Then publish the packaged artifact to the dev Function App **as yourself**. On

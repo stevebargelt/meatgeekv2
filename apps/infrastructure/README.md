@@ -448,10 +448,23 @@ terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
 
 - **OIDC, no long-lived secrets.** CI authenticates via GitHub Actions OIDC with
   federated credentials scoped **per GitHub Environment** — the presented OIDC
-  subject is `repo:<owner>/<repo>:environment:<github-env>`, and the bootstrap
-  creates a federated credential whose subject matches each environment name
-  **exactly** (a job declares `environment: development-infra-apply`, so a bare
-  `dev` would never match). No dev identity can authenticate to prod.
+  subject is `<the repository's live sub-claim prefix>:environment:<github-env>`,
+  and the bootstrap creates a federated credential whose subject matches each
+  environment name **exactly** (a job declares
+  `environment: development-infra-apply`, so a bare `dev` would never match). No
+  dev identity can authenticate to prod.
+  - **The `repo:…` head is not a constant (MG-42).** This account's GitHub org
+    customizes the OIDC `sub` claim to inject numeric owner/repo ids, so the
+    prefix is a fact about the repository that `resolve_oidc_subject_prefix()`
+    **reads at run time** — before anything is provisioned — and
+    `federated_environment_subject()` composes every subject from it. A literal
+    `repo:<owner>/<repo>` is the pre-MG-42 form and matches no token here.
+    Never compare a live credential against a subject copied out of a document,
+    and never hand-"correct" one to a string a document published: read the
+    prefix, then compare. The procedure is
+    [B10](../../docs/infrastructure/mg23-live-acceptance.md#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents),
+    and the abort classes around the read are in the
+    [bootstrap runbook](../../docs/infrastructure/bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned).
 - **Two separate dev identities, two privilege levels (MG-24 item 4, split
   further by MG-23).** The **environment**, not the client id a job passes, is
   what selects the identity — before MG-23 the dev identities federated the

@@ -69,7 +69,7 @@ infrastructure with no human in the loop.
 | 3   | **DECOMMISSION the retired dev plan identity and its GitHub Environment** — code removal does not remove live objects                                                                                                                                                                                                        | Operator workstation (`az` + `gh`)                                           | §3           |
 | 3b  | Settle the remaining **GitHub Environments** and their protection rules, and set the environment variables bootstrap emitted                                                                                                                                                                                                 | GitHub UI / `gh`                                                             | §2           |
 | 4   | **State migration — reconcile dev state with the MG-23 graph:** `terraform state rm` the de-scoped resource (Class 1), and settle whether the newly-declared ForceNew `principal_type` replaces the nine role assignments (Class 2). Unsettled, the first plan carries DESTROYS and the circuit-breaker deadlocks activation | Operator workstation, against live dev state                                 | Step 4 below |
-| 5   | Run the **blocking pre-activation checks B1–B9**                                                                                                                                                                                                                                                                             | Live tenant + GitHub                                                         | §5           |
+| 5   | Run the **blocking pre-activation checks B1–B10**                                                                                                                                                                                                                                                                             | Live tenant + GitHub                                                         | §5           |
 | 6   | Run the **live acceptance tests T1–T7** as the apply SP                                                                                                                                                                                                                                                                      | Live tenant, via GitHub Actions (§6)                                         | §7           |
 | 7   | **Tighten branch protection on `main`** (B7)                                                                                                                                                                                                                                                                                 | GitHub                                                                       | §5           |
 | 8   | Set **`DEV_TF_BACKEND_READY=true`** as a **repository** variable                                                                                                                                                                                                                                                             | GitHub                                                                       | §8           |
@@ -90,13 +90,26 @@ infrastructure with no human in the loop.
 > references one. Run `gh auth login` before `./bootstrap.sh` — this is a
 > prerequisite, not a nicety.
 >
+> **An AUTHENTICATED `gh` is now a hard precondition (MG-42).** Bootstrap reads
+> the repository's live OIDC sub-claim customization to derive every federated
+> subject, and it does so **before** the state backend or any identity is
+> created. An unauthenticated `gh` therefore **aborts the run with nothing
+> provisioned** rather than completing the Azure side — an unauthenticated `gh`
+> is indistinguishable from "this repo has no customization", and assuming the
+> default prefix would rewrite all three credentials to a subject no token
+> matches. Remediation: `gh auth login`, then re-run. Other abort classes —
+> a transient GitHub API failure, an unreadable customization, a prefix naming
+> another repository — have **different** remediations; see
+> [the runbook's precondition table](bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned)
+> before assuming any `gh`-shaped failure is a login problem.
+>
 > **Bootstrap EXITS NON-ZERO when either environment is not verifiably
 > `PROTECTED`, and prints no success summary in that case.** A green bootstrap
 > is therefore the signal that activation is safe; you are not required to
-> notice a missing line. If `gh` is installed but **unauthenticated**, the
-> Azure-side work still completes and bootstrap exits non-zero with the manual
-> `gh api` procedure printed — the Azure side is idempotent, so run
-> `gh auth login` and re-run `./bootstrap.sh` freely.
+> notice a missing line. If `gh` stops working part-way through a run, the
+> environments report `UNVERIFIED`, bootstrap exits non-zero and prints the
+> manual `gh api` procedure — that is not a half-finished run, since the Azure
+> side is idempotent and safe to re-run.
 > **`DEV_TF_BACKEND_READY` may not be set true until bootstrap exits zero and
 > BOTH environments report `PROTECTED`** (B9).
 
@@ -113,7 +126,8 @@ infrastructure with no human in the loop.
 ```bash
 az login                                  # a subscription Owner / User Access Administrator
 az account set --subscription <V2-SUBSCRIPTION-ID>
-gh auth login                             # needed for the recovery environment (B9)
+gh auth login                             # REQUIRED — bootstrap aborts without it
+                                          # (OIDC sub-claim read, MG-42; also B9)
 cd apps/infrastructure/bootstrap
 
 # Optional: install someone OTHER than the authenticated gh user as the
@@ -187,8 +201,18 @@ while IFS=$'\t' read -r role _guid; do
   printf '%s\t%s\n' "$role" "$guid" >> "$OUT"
 done < <(grep -v '^#' "$SRC" | grep -v '^[[:space:]]*$')
 
-diff "$SRC" "$OUT" || true                      # review every line before overwriting
-cp "$OUT" "$SRC"
+diff "$SRC" "$OUT" || true                      # `|| true`: differing files are the expected outcome
+```
+
+**Read that diff before overwriting anything.** Every changed line must be a
+`PENDING` → GUID substitution and nothing else; a changed *role name* means the
+loop above matched something you did not intend, and this file is what authors
+the ABAC condition. The overwrite is a **separate** command for that reason —
+"review every line before overwriting" is not a control-flow construct, and a
+`cp` sitting in the same pasted block runs whether you read the diff or not:
+
+```bash
+cp "$OUT" "$SRC"                                # only after you have read the diff
 ```
 
 Then open a PR with the resolved file, and **re-run `bootstrap.sh`** after it
@@ -250,13 +274,23 @@ terraform init -input=false -reconfigure \
   -backend-config=environments/backend-dev.hcl \
   -backend-config="storage_account_name=$STATE_ACCOUNT"
 
-# Confirm it really is in state before removing anything.
-terraform state list | grep consumption_budget_subscription || \
-  echo "already absent — nothing to migrate"
+# Confirm it really is in state before removing anything — and let that
+# confirmation DECIDE, rather than print. A `grep … || echo "already absent"`
+# ahead of an unconditional `state rm` is a comment: it reports, then removes
+# either way. This is live dev state; the check has to be the branch.
+#
+# Capture first rather than piping into `grep -q`: with `set -o pipefail` above,
+# `grep -q` exiting early can SIGPIPE `terraform state list` and fail the
+# pipeline even on a match, which would silently skip a migration that IS needed.
+STATE_ENTRY="$(terraform state list | grep consumption_budget_subscription || true)"
 
-# NOTE the module-qualified address: the resource lives INSIDE the monitoring
-# module, and it was applied WITHOUT a count, so there is no [0] index in state.
-terraform state rm 'module.monitoring.azurerm_consumption_budget_subscription.credit_budget'
+if [ -n "$STATE_ENTRY" ]; then
+  # NOTE the module-qualified address: the resource lives INSIDE the monitoring
+  # module, and it was applied WITHOUT a count, so there is no [0] index in state.
+  terraform state rm 'module.monitoring.azurerm_consumption_budget_subscription.credit_budget'
+else
+  echo "already absent — nothing to migrate"
+fi
 ```
 
 **Verify the migration worked** — the whole point is that the budget destroy is
@@ -572,7 +606,10 @@ Full detail:
 
 **Why the environment (not the client id) selects the identity (F8).** Before
 MG-23, _every_ dev identity federated the identical subject
-`repo:stevebargelt/meatgeekv2:environment:development` and was selected only by
+`<prefix>:environment:development` — where `<prefix>` is the repository's live
+sub-claim prefix, **not** a literal `repo:<owner>/<repo>` (MG-42; see
+[B10](#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents)) —
+and was selected only by
 which client-id a job passed — so a one-line client-id edit merged to `main`
 silently upgraded a low-privilege job to full apply. Now the **environment**
 selects the identity: the app-deploy identity cannot authenticate to the apply
@@ -637,18 +674,46 @@ every `<placeholder>` — no live identifier belongs in this document.
 
 ```bash
 PLAN_APP_NAME='<dev-plan-app-display-name>'      # e.g. the display name bootstrap used
-PLAN_APP_ID="$(az ad app list --display-name "$PLAN_APP_NAME" --query '[0].appId' -o tsv)"
-PLAN_SP_ID="$(az ad sp list --filter "appId eq '$PLAN_APP_ID'" --query '[0].id' -o tsv)"
 SUB_ID='<subscription-id>'
 REPO='<owner>/<repo>'
+PLAN_APP_ID=''; PLAN_SP_ID=''
 
-# Refuse to proceed on an ambiguous match — deleting the WRONG principal here is
-# a self-inflicted outage.
-test -n "$PLAN_APP_ID" && test -n "$PLAN_SP_ID" || { echo 'resolve failed'; exit 1; }
+# ALL matches, never [0] — the same rule B10's check() states, and for a sharper
+# reason: everything in §3 DELETES. Entra display names are NOT unique, and [0]
+# silently picks one of two same-named apps; a later `test -n` then sees a
+# perfectly resolved value, because [0] already collapsed the very ambiguity the
+# test was meant to catch. Deleting the WRONG principal here is a self-inflicted
+# outage, so the count is checked where the ambiguity is still visible.
+APP_MATCHES="$(az ad app list --display-name "$PLAN_APP_NAME" --query '[].appId' -o tsv)"
+if [ "$(printf '%s\n' "$APP_MATCHES" | grep -c .)" = 1 ]; then
+  PLAN_APP_ID="$APP_MATCHES"
+  SP_MATCHES="$(az ad sp list --filter "appId eq '$PLAN_APP_ID'" --query '[].id' -o tsv)"
+  [ "$(printf '%s\n' "$SP_MATCHES" | grep -c .)" = 1 ] && PLAN_SP_ID="$SP_MATCHES"
+fi
+
+# The gate EVERY mutating block in §3 calls. It is a function, and a refusal
+# RETURNS rather than exits: `exit 1` pasted into an interactive shell kills the
+# shell and takes $SUB_ID, $REPO and the ids you just resolved with it, which is
+# how an operator ends up re-resolving by hand, mid-retirement, against a
+# half-deleted object.
+plan_retire_ready() {
+  [ -n "$PLAN_APP_ID" ] && [ -n "$PLAN_SP_ID" ] && [ -n "$SUB_ID" ] && [ -n "$REPO" ] && return 0
+  echo "REFUSING: unresolved or ambiguous retirement target (app='$PLAN_APP_ID' sp='$PLAN_SP_ID' sub='$SUB_ID' repo='$REPO'). Re-run this resolve block; delete NOTHING until it comes back clean." >&2
+  return 1
+}
+plan_retire_ready && echo "resolved: app=$PLAN_APP_ID sp=$PLAN_SP_ID"
 ```
 
 Capture `$PLAN_SP_ID` **before** step 1 — once the app registration is gone the
 service principal object id is much harder to recover, and steps 3 and 4 need it.
+
+**Every deleting block below re-calls `plan_retire_ready` and does nothing if it
+refuses.** The gate is deliberately repeated rather than stated once here:
+operators paste sections individually, and a precondition that only ran in a
+block you scrolled past is not a precondition. The read-only verification
+commands are left ungated on purpose — a listing against an unresolved id prints
+nothing and mutates nothing, and gating them would only hide that the resolve is
+what needs fixing.
 
 ### 3.1 Delete the subscription-scoped `Reader` role assignment
 
@@ -657,8 +722,10 @@ principal no longer exists shows as an orphaned GUID in the portal and is
 awkward to find later.
 
 ```bash
-az role assignment delete --assignee "$PLAN_SP_ID" \
-  --role Reader --scope "/subscriptions/$SUB_ID"
+if plan_retire_ready; then
+  az role assignment delete --assignee "$PLAN_SP_ID" \
+    --role Reader --scope "/subscriptions/$SUB_ID"
+fi
 ```
 
 **Verify — must print nothing:**
@@ -674,10 +741,18 @@ This is the one that actually reads state. The scope is the **container**, not
 the account:
 
 ```bash
-STATE_ACCOUNT="$(apps/infrastructure/scripts/state-account-name.sh "$SUB_ID")"
+# state-account-name.sh returns non-zero and prints nothing when it cannot
+# derive a name; an empty $STATE_ACCOUNT would splice a scope naming an account
+# that does not exist, and a delete against a scope you did not mean to name is
+# not something to discover afterwards.
+STATE_ACCOUNT="$(apps/infrastructure/scripts/state-account-name.sh "$SUB_ID")" || STATE_ACCOUNT=''
 CONTAINER_SCOPE="/subscriptions/$SUB_ID/resourceGroups/meatgeek-v2-tfstate-rg/providers/Microsoft.Storage/storageAccounts/$STATE_ACCOUNT/blobServices/default/containers/tfstate-dev"
 
-az role assignment delete --assignee "$PLAN_SP_ID" --scope "$CONTAINER_SCOPE"
+if plan_retire_ready && [ -n "$STATE_ACCOUNT" ]; then
+  az role assignment delete --assignee "$PLAN_SP_ID" --scope "$CONTAINER_SCOPE"
+else
+  echo "REFUSING: state account unresolved — not deleting at a scope naming an empty account." >&2
+fi
 ```
 
 **Verify — must print nothing.** Use `--all`, because a scoped listing hides
@@ -698,7 +773,9 @@ az role assignment list --assignee "$PLAN_SP_ID" --all -o tsv    # must print no
 ### 3.3 Delete the service principal
 
 ```bash
-az ad sp delete --id "$PLAN_SP_ID"
+if plan_retire_ready; then
+  az ad sp delete --id "$PLAN_SP_ID"
+fi
 ```
 
 **Verify — must print an empty list (`[]`):**
@@ -714,9 +791,11 @@ it. Confirm the federated credential set first, so you know exactly what you are
 removing:
 
 ```bash
-az ad app federated-credential list --id "$PLAN_APP_ID" \
-  --query "[].{name:name, subject:subject}" -o table
-az ad app delete --id "$PLAN_APP_ID"
+if plan_retire_ready; then
+  az ad app federated-credential list --id "$PLAN_APP_ID" \
+    --query "[].{name:name, subject:subject}" -o table
+  az ad app delete --id "$PLAN_APP_ID"
+fi
 ```
 
 **Verify — must print an empty list (`[]`):**
@@ -739,8 +818,12 @@ delete the variable explicitly first so the intent is recorded and so a partiall
 failed environment delete cannot leave a dangling client id behind:
 
 ```bash
-gh variable delete AZURE_CLIENT_ID --env development-infra-plan --repo "$REPO" || true
-gh api --method DELETE "repos/$REPO/environments/development-infra-plan"
+if plan_retire_ready; then
+  # `|| true` is deliberate HERE and only here: the variable may already be gone,
+  # and that must not stop the environment delete that follows it.
+  gh variable delete AZURE_CLIENT_ID --env development-infra-plan --repo "$REPO" || true
+  gh api --method DELETE "repos/$REPO/environments/development-infra-plan"
+fi
 ```
 
 **Verify — must return HTTP 404:**
@@ -763,8 +846,12 @@ gh api "repos/$REPO/environments" --jq '.environments[].name' | sort
 ### 3.6 Final assertion — no federated credential names the retired environment
 
 The load-bearing check. **No** application in the tenant may retain a federated
-credential whose subject is
-`repo:<owner>/<repo>:environment:development-infra-plan`. If one does, an actor
+credential whose subject **ends in** `:environment:development-infra-plan` —
+whatever `repo:…` head it carries. The head is the repository's live sub-claim
+prefix, which on this account is id-injected rather than a bare
+`repo:<owner>/<repo>` (MG-42, and [B10](#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents)),
+so match on the environment suffix — as the sweep below does — and never on a
+hardcoded full subject. If one does survive, an actor
 who can re-create that GitHub Environment (a repository admin, or anyone who can
 merge a workflow referencing it — GitHub auto-creates it unprotected) can mint a
 token for whatever that credential's app still holds.
@@ -803,16 +890,53 @@ must nonetheless run _as that principal_, because the whole point is to exercise
 its ABAC condition. Two supported paths:
 
 **Path A (recommended) — a temporary, ref-scoped federated credential + a
-scratch workflow.**
+scratch workflow.** It needs the repository's live sub-claim prefix, so paste
+**both** helpers — `oidc_assert_subject_prefix` and `oidc_subject_prefix` — from
+[B10](#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents)
+into the shell first. The same fail-closed read, for a sharper version of the
+same reason: this path does not merely *compare* against the prefix, it
+**creates a credential from it**. A prefix that named another repository would
+federate the apply identity — `Contributor` on the dev RG — to that
+repository's workflows, so the value must come back proven, not just read.
 
 ```bash
 # 1. Add a TEMPORARY federated credential for an acceptance branch.
-az ad app federated-credential create --id <APPLY_APP_ID> --parameters '{
+#    The `repo:…` head is the repository's LIVE sub-claim prefix, not a literal
+#    repo:<owner>/<repo> (MG-42) — read it rather than typing it, or the
+#    credential matches no token and azure/login fails AADSTS700213.
+#    Resolve it with the fail-closed helpers defined in B10 (paste both
+#    functions first); do NOT default the prefix when the read fails, and do not
+#    substitute a bare `gh api` read — that returns a string nothing has proven
+#    names THIS repository. A prefix guessed during a GitHub API failure produces
+#    a credential that matches nothing, and you would spend the outage debugging
+#    the acceptance run instead.
+#    Keep the helper's exit STATUS as well as its output: the status is how a
+#    refusal is reported, and `$(...)` on its own throws it away.
+PREFIX="$(oidc_subject_prefix stevebargelt/meatgeekv2)"; PREFIX_RC=$?
+[ "$PREFIX_RC" -eq 0 ] && [ -n "$PREFIX" ] \
+  && echo "$PREFIX"   # observed 2026-07-28: repo:stevebargelt@4857343/meatgeekv2@1304558512
+
+# THE GATE IS THE `if`, NOT THE MESSAGE. A warning that does not stop execution
+# is a comment, and these blocks get pasted whole: `[ -n "$PREFIX" ] || { echo
+# …; }` neither returns nor exits, so a refused resolve — unauthenticated gh, a
+# GitHub outage, an unparseable body, a TRUST-ROOT MISMATCH — would fall straight
+# through into the create and federate the apply identity (Contributor on the dev
+# RG) to `:ref:refs/heads/mg23-acceptance`, where it persists until cleanup. The
+# create must be UNREACHABLE without a proven prefix, so it lives inside the
+# conditional rather than after an advisory.
+if [ "$PREFIX_RC" -eq 0 ] && [ -n "$PREFIX" ]; then
+  az ad app federated-credential create --id <APPLY_APP_ID> --parameters "$(cat <<JSON
+{
   "name": "tmp-mg23-acceptance",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:stevebargelt/meatgeekv2:ref:refs/heads/mg23-acceptance",
+  "subject": "${PREFIX}:ref:refs/heads/mg23-acceptance",
   "audiences": ["api://AzureADTokenExchange"]
-}'
+}
+JSON
+)"
+else
+  echo "STOP: prefix unresolved (oidc_subject_prefix exited ${PREFIX_RC}) — NO credential was created, and none may be created by hand. Remediate by the abort class the helper named (B10 branch C), then re-run this block." >&2
+fi
 # 2. Push the scratch acceptance workflow to branch `mg23-acceptance` and run it.
 # 3. CLEANUP — re-run bootstrap.sh. prune_unexpected_federated_credentials()
 #    DELETES any credential outside the expected set, so the cleanup is enforced
@@ -844,7 +968,7 @@ apply SP.
 
 ---
 
-## 5. Blocking pre-activation checks (B1–B9)
+## 5. Blocking pre-activation checks (B1–B10)
 
 **None of these may be assumed.** Each states what to run and **both** branches
 of the outcome. Do not set `DEV_TF_BACKEND_READY` until every one is resolved.
@@ -1165,10 +1289,12 @@ gh api "repos/$REPO/environments/development-infra-apply-recovery/deployment-bra
   sets `prevent_self_review: false` deliberately on the recovery environment, so
   a solo maintainer can approve their own recovery run; the gate is "a human
   deliberately clicked", not "a second person exists".
-- **Branch B — either reported `UNVERIFIED` or `UNPROTECTED`** (no `gh`, not
-  authenticated, or a PUT failed): bootstrap prints a blocking banner with the
-  exact `gh api` commands. Run them, then re-run the verification above.
-  `UNVERIFIED` is **not** a pass — it means nobody has looked.
+- **Branch B — either reported `UNVERIFIED` or `UNPROTECTED`** (`gh` stopped
+  working part-way through the run, or a PUT failed — a `gh` that was
+  unauthenticated at the *start* aborts the run before this point, see step 1):
+  bootstrap prints a blocking banner with the exact `gh api` commands. Run them,
+  then re-run the verification above. `UNVERIFIED` is **not** a pass — it means
+  nobody has looked.
 
 > **`DEV_TF_BACKEND_READY` must not be set true until BOTH environments pass.**
 > This is the only pre-activation check whose subject is a GitHub protection rule
@@ -1177,6 +1303,267 @@ gh api "repos/$REPO/environments/development-infra-apply-recovery/deployment-bra
 > auto-creation.** Re-verify after any change to repository or environment
 > settings — an environment deleted in the UI comes back **unprotected** on the
 > next run that references it.
+
+### B10 — Do the live federated subjects match the prefix the repo actually presents?
+
+**This is the check whose absence let a subject mismatch reach a live
+`azure/login` failure (MG-42).** A federated credential can be present, correctly
+named, attached to the right app, and bound to a subject **no GitHub token will
+ever carry** — nothing in Azure or GitHub reports that as an error until a
+workflow tries to log in and fails `AADSTS700213`. B1–B9 do not look at it.
+
+The `repo:…` head of every subject is the repository's **live sub-claim
+prefix**, not `repo:<owner>/<repo>`. This account's org customizes the OIDC `sub`
+claim to inject the numeric owner-id and repo-id, so the prefix must be **read**,
+never assumed:
+
+```bash
+REPO='stevebargelt/meatgeekv2'
+
+# The authority. `sub_claim_prefix` decides the subject where it is present and
+# non-empty — `use_default` describes the claim-KEY list and does NOT override
+# it. Both may be set at once; on this repo they are.
+gh api "repos/$REPO/actions/oidc/customization/sub"
+# observed 2026-07-28:
+# {"use_default":true,"use_immutable_subject":false,
+#  "sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}
+```
+
+**Resolve the prefix the way `bootstrap.sh` does — fail-closed.** A one-liner
+that defaults to `repo:$REPO` whenever the read does not produce a prefix is
+**wrong in the unsafe direction**: it defaults on a 403, a rate limit, an expired
+token, a proxy error page — every case that says *nothing* about this
+repository's configuration — and then reports MISMATCH against a subject the
+repo never presents, which is an invitation to "correct" three healthy live
+credentials into the MG-42 outage. `resolve_oidc_subject_prefix()` treats
+**exactly one** non-200 answer as a fact (an anchored `404` status line, behind a
+proven `gh` session) and aborts on all the rest.
+
+**Reading the response is only half of it.** Bootstrap never assigns
+`OIDC_SUBJECT_PREFIX` from a value it has merely *classified*: every candidate —
+the API's `sub_claim_prefix` **and** the default it falls back to — goes through
+`assert_oidc_subject_prefix()`, which proves the string structurally names the
+committed `GITHUB_REPO` before it can become a trust binding. An authenticated
+but misrouted or proxied response carrying `repo:attacker/meatgeekv2` is a
+perfectly well-formed 200; without that gate the check below would compare three
+live credentials against **another repository's** subject and print MATCH or
+MISMATCH about the wrong trust root, where bootstrap aborts. The helper mirrors
+both halves — fetch/classify, then prove:
+
+```bash
+# Mirrors assert_oidc_subject_prefix() in apps/infrastructure/bootstrap/bootstrap.sh.
+# THE GATE: everything the fetch does is CLASSIFY the response; this is the half
+# that PROVES the answer names the repository you asked about. Refuses by return,
+# never exit, so a bad answer does not kill an interactive shell.
+#
+# `$REPO` plays the role bootstrap's committed GITHUB_REPO constant plays: it is
+# the trust root, and its authority comes from YOU having typed it at the top of
+# this section. Never re-derive it from the response — a gate whose expectation
+# comes from the thing it is checking proves nothing.
+oidc_assert_subject_prefix() { # <prefix> <owner/repo> <origin>
+  local prefix="$1" repo="$2" origin="$3"
+  local want_owner="${repo%%/*}" want_repo="${repo##*/}"
+  local rest got_owner got_repo id
+
+  [ -n "$prefix" ] || {
+    echo "ABORT: the subject prefix resolved EMPTY (${origin}). A subject composed from it would be ':environment:<env>', which matches no token GitHub can mint." >&2
+    return 1
+  }
+  case "$prefix" in
+    repo:*/*) ;;
+    *) echo "ABORT: the subject prefix '${prefix}' (${origin}) is not of the form 'repo:<owner>/<repo>'. The subject IS the OIDC trust binding, so an unrecognised shape is refused rather than guessed at. Expected a prefix naming ${repo}." >&2
+       return 1 ;;
+  esac
+
+  rest="${prefix#repo:}"
+  got_owner="${rest%%/*}"
+  got_repo="${rest#*/}"
+
+  # Strip the OPTIONAL numeric id GitHub injects into either half, each one
+  # independently optional. `@` followed by anything that is not all digits is
+  # not an id — it is a shape this check does not recognise, and an unrecognised
+  # shape is not something to guess at when the answer becomes a trust binding.
+  case "$got_owner" in
+    *@*) id="${got_owner##*@}"; got_owner="${got_owner%@*}"
+         case "$id" in ''|*[!0-9]*)
+           echo "ABORT: the subject prefix '${prefix}' (${origin}) has a non-numeric owner id ('@${id}'). Only GitHub's '@<digits>' owner-id/repo-id injection is recognised." >&2
+           return 1 ;;
+         esac ;;
+  esac
+  case "$got_repo" in
+    *@*) id="${got_repo##*@}"; got_repo="${got_repo%@*}"
+         case "$id" in ''|*[!0-9]*)
+           echo "ABORT: the subject prefix '${prefix}' (${origin}) has a non-numeric repo id ('@${id}'). Only GitHub's '@<digits>' owner-id/repo-id injection is recognised." >&2
+           return 1 ;;
+         esac ;;
+  esac
+
+  # EQUALITY on the split halves. NOT a regex built from the repo name (the name
+  # may contain `.`, a metacharacter, so `meatgeek.v2` would match `meatgeekXv2`)
+  # and NOT a contains test (that accepts `repo:attacker/meatgeekv2-fork`, a
+  # different repository that CONTAINS the right name). Extra claim segments —
+  # `repo:o/r:ref:refs/heads/main`, `:job_workflow_ref:…` — survive into
+  # `got_repo` and fail here, which is deliberate and matches bootstrap: the
+  # comparison below appends `:environment:<env>` itself, so a prefix already
+  # carrying claims would compose a subject nobody designed.
+  [ "$got_owner" = "$want_owner" ] && [ "$got_repo" = "$want_repo" ] || {
+    echo "ABORT: OIDC TRUST-ROOT MISMATCH — the subject prefix '${prefix}' (${origin}) names '${got_owner}/${got_repo}', not '${repo}'. Comparing the live credentials against another repository's subject would report MATCH or MISMATCH about the wrong trust root; bootstrap dies here rather than provision anything (F16). Do not compare, do not edit a credential." >&2
+    return 1
+  }
+}
+
+# Mirrors resolve_oidc_subject_prefix() in apps/infrastructure/bootstrap/bootstrap.sh.
+# A function, so a refusal returns instead of killing an interactive shell.
+oidc_subject_prefix() { # <owner/repo>
+  local repo="$1" raw status=0 status_line http_code body prefix use_default origin
+
+  # 1. Prove the SESSION, not just the binary. An unauthenticated gh 404s on a
+  #    private repo's endpoints exactly like a repo with no customization, so a
+  #    404 is only readable as a fact behind this gate.
+  gh auth status >/dev/null 2>&1 || {
+    echo "ABORT: gh is not authenticated. Run 'gh auth login', then re-check." >&2
+    return 1
+  }
+
+  # 2. `-i` prints the response STATUS LINE ahead of the body, and that line is
+  #    the only authoritative statement of what THIS request returned. gh's exit
+  #    status is one bit and its stderr is a human diagnostic: a proxy error page
+  #    or an unrelated nested 404 both CONTAIN the text "HTTP 404" while saying
+  #    nothing about this endpoint. Match the status ANCHORED, first line only.
+  raw="$(gh api -i "repos/${repo}/actions/oidc/customization/sub" 2>/dev/null)" || status=$?
+  status_line="$(printf '%s\n' "$raw" | sed -n '1p' | tr -d '\r')"
+  http_code="$(printf '%s' "$status_line" | sed -n \
+    -e 's|^HTTP/[0-9][0-9.]* \([0-9][0-9][0-9]\)$|\1|p' \
+    -e 's|^HTTP/[0-9][0-9.]* \([0-9][0-9][0-9]\) .*$|\1|p')"
+  [ -n "$http_code" ] || {
+    echo "ABORT: no HTTP status line for this request (gh exited ${status}; first line was '${status_line}') — this request has NO authoritative status, so it cannot be read as 'no customization configured'." >&2
+    return 1
+  }
+
+  if [ "$http_code" = "404" ]; then
+    # The ONE response read as a fact rather than an outage: GitHub's "no
+    # sub-claim customization is configured".
+    prefix="repo:${repo}"
+    origin="HTTP 404 — GitHub reports no sub-claim customization; default prefix"
+  elif [ "$http_code" != "200" ] || [ "$status" -ne 0 ]; then
+    echo "ABORT: HTTP ${http_code} (gh exited ${status}) — a REAL GitHub error (auth / permission / throttling / network), NOT 'no customization configured'; only an exact 404 means that. Retry or check GitHub status; do not assume a prefix." >&2
+    return 1
+  else
+    # 3. The body is everything after the first blank line the headers ended
+    #    with. An empty body is an UNREADABLE prefix, not an absent customization.
+    body="$(printf '%s\n' "$raw" | tr -d '\r' | awk 'seen { print; next } /^$/ { seen = 1 }')"
+    [ -n "$body" ] || {
+      echo "ABORT: HTTP ${http_code} with an EMPTY body — the prefix is unreadable, which is not 'no customization configured'." >&2
+      return 1
+    }
+    use_default="$(printf '%s' "$body" | jq -r '(.use_default // false) | tostring')" \
+      && prefix="$(printf '%s' "$body" | jq -r '.sub_claim_prefix // ""')" || {
+      echo "ABORT: the response is not parseable JSON, so it cannot be read as 'no customization configured' either. Body: ${body}" >&2
+      return 1
+    }
+
+    # 4. THE AUTHORITY: a present, non-empty sub_claim_prefix decides the subject
+    #    whatever use_default says — on this repo use_default is `true` alongside
+    #    the custom prefix, and letting it win here is the MG-42 outage. `// ""`
+    #    already turns a JSON null into the empty string; the literal "null" test
+    #    catches the other spelling, a STRING "null" configured by hand.
+    if [ -n "$prefix" ] && [ "$prefix" != "null" ]; then
+      origin="sub_claim_prefix read from repos/${repo}/actions/oidc/customization/sub (use_default=${use_default}, which describes the claim-KEY list and does not override it)"
+    elif [ "$use_default" = "true" ]; then
+      # No prefix AND use_default=true is the only "default" the 200 path
+      # accepts — both halves required.
+      prefix="repo:${repo}"
+      origin="use_default=true with no sub_claim_prefix; default prefix"
+    else
+      # use_default=false with no readable prefix is GitHub positively stating a
+      # customization exists whose prefix cannot be read; that says exactly as
+      # much about the subject as a 403 does, and aborts for the same reason.
+      echo "ABORT: use_default=false with NO readable sub_claim_prefix — a customization GitHub says exists but whose prefix is unreadable. Falling back here would rewrite all three credentials to a subject no token carries (AADSTS700213). Body: ${body}" >&2
+      return 1
+    fi
+  fi
+
+  # 5. THE GATE, on EVERY path — the API's answer and the default alike, exactly
+  #    as bootstrap gates both before assigning OIDC_SUBJECT_PREFIX. Classifying
+  #    the response says the read succeeded; it says nothing about WHICH
+  #    repository the string names.
+  oidc_assert_subject_prefix "$prefix" "$repo" "$origin" || return 1
+  printf '%s\n' "$prefix"
+}
+
+PREFIX="$(oidc_subject_prefix "$REPO")" \
+  || echo "STOP: the prefix did not resolve. B10 CANNOT be evaluated — do not compare, do not edit any credential, do not set DEV_TF_BACKEND_READY. See branch C below."
+echo "$PREFIX"
+```
+
+Then compare, **for all three federated identities**, the subject each
+credential actually carries against `$PREFIX:environment:<env>`:
+
+```bash
+check() { # <app-display-name> <cred-name> <github-env>
+  # An unresolved PREFIX would compare against ':environment:<env>' and report
+  # three spurious MISMATCHes — the same refusal federated_environment_subject()
+  # makes rather than composing a subject from an empty prefix.
+  [ -n "$PREFIX" ] \
+    || { echo "PREFIX unresolved — refusing to compare (see branch C)"; return 1; }
+  # ALL matches, never [0]: Entra display names are NOT unique, and silently
+  # picking one of two same-named apps is the ambiguity bootstrap dies on.
+  APP_ID="$(az ad app list --display-name "$1" --query '[].appId' -o tsv)"
+  [ "$(printf '%s\n' "$APP_ID" | grep -c .)" = 1 ] \
+    || { echo "AMBIGUOUS/ABSENT $1: [$APP_ID] — resolve before continuing"; return 1; }
+  GOT="$(az ad app federated-credential list --id "$APP_ID" \
+    --query "[?name=='$2'].subject | [0]" -o tsv)"
+  WANT="${PREFIX}:environment:$3"
+  [ "$GOT" = "$WANT" ] && echo "MATCH   $2" \
+    || echo "MISMATCH $2: live='$GOT' expected='$WANT'"
+}
+
+# Display names are bootstrap's defaults; if you overrode AAD_APP_NAME /
+# AAD_DEPLOY_APP_NAME / AAD_INFRA_APPLY_APP_NAME, substitute yours.
+check meatgeek-v2-github-infra-apply github-infra-apply-development-infra-apply development-infra-apply
+check meatgeek-v2-github-appdeploy   github-appdeploy-development              development
+check meatgeek-v2-github-oidc        github-production                         production
+# -> all three must print MATCH. Any MISMATCH — or AMBIGUOUS/ABSENT — is a
+#    FAILED check.
+```
+
+- **Branch A — all three `MATCH`.** Check passes. The subjects the credentials
+  carry are the subjects GitHub will present.
+- **Branch B — any `MISMATCH`.** **Do not hand-edit the credential, and do not
+  set `DEV_TF_BACKEND_READY`.** Re-run `./bootstrap.sh`: it resolves the prefix
+  from this same endpoint and reconciles each credential **on subject** —
+  no-op if the subject matches, delete-and-recreate if it has drifted — so the
+  re-run is the repair. Then re-run the comparison. If bootstrap
+  aborts instead, read which abort class it reports — the remediations differ
+  (see [the runbook's precondition table](bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned));
+  a GitHub API outage is **not** an auth problem and `gh auth login` will not
+  fix it.
+- **Branch C — `oidc_subject_prefix` printed `ABORT`.** The check is
+  **not evaluated** — neither passed nor failed — because the subject the
+  repository presents is unknown. **Change nothing**: do not compare, do not
+  hand-edit a credential, do not re-run `./bootstrap.sh` expecting a repair (it
+  reads the same endpoint and aborts in the same class, before provisioning
+  anything). Remediate by the class the message names — they map one-to-one onto
+  [the runbook's precondition table](bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned)
+  — then re-run the resolver. `DEV_TF_BACKEND_READY` stays unset until B10 has
+  actually produced three `MATCH`es.
+  - **`OIDC TRUST-ROOT MISMATCH` is the one abort in this set that is not a
+    retry.** The read *succeeded*; the answer named a **different repository**
+    (or a shape that is not a plain `repo:<owner>/<repo>` with GitHub's optional
+    `@<digits>` ids). Retrying and re-authenticating change nothing. Bootstrap
+    refuses the same value for the same reason, so the remediation is the
+    runbook's trust-root row — a **reviewed edit to `GITHUB_REPO`** in a commit
+    if the repository genuinely moved or you forked it, and otherwise an
+    investigation of why this endpoint answered for another repository at all.
+
+> **The trap this check exists to close.** A live credential whose subject does
+> **not** look like `repo:stevebargelt/meatgeekv2:environment:<env>` is almost
+> certainly **correct** on this account. Older revisions of this document and the
+> runbook published that un-prefixed form as the expected value; an operator
+> comparing the live tenant against it concludes the credentials are
+> misconfigured and "corrects" them back — which is precisely the outage. The
+> expected value is `$PREFIX:environment:<env>` computed from the API **at the
+> time you check**, never a string copied out of a document.
 
 ---
 
@@ -1200,6 +1587,184 @@ for T1 so nothing touches `meatgeek-v2/dev.tfstate`. Target a throwaway
 principal you control for the grantee — the simplest safe choice is the apply
 SP's **own object id** (a self-grant of a data role is harmless and is deleted
 in T4).
+
+**Preflight: resolve `$SUB` and `$APPLY_SP_OBJECT_ID` here, and assert them.**
+Every test below splices both into a scope or an assignee. Unset, they do not
+make the tests fail — they make the tests **pass wrongly**. A scope of
+`/subscriptions//resourceGroups/meatgeek-v2-dev-rg` is malformed, Azure rejects
+it, and T2, T4a and T5 print `rejected (expected)` on that rejection exactly as
+they would on a real condition denial. The core escalation test would report
+success having probed nothing at all — the one false green this section cannot
+afford, because its outcome is what unblocks activation.
+
+**An unreplaced placeholder is the same false green, and `[ -n ... ]` cannot see
+it.** `<apply-sp-object-id>` is a non-empty string; a test for non-emptiness
+passes it straight into `--assignee-object-id`, Azure rejects the malformed
+assignee, and the block records `rejected (expected)`. So the object id is
+**resolved here from the app id** with an exactly-one-match check, and whatever
+ends up in the variable must have **GUID shape** — the test that a placeholder
+fails and a real id passes.
+
+**Distinguish the two rejections.** Every expected-rejection test (T2, T3, T4a,
+T5) is asking one question — *did Azure evaluate the ABAC condition and deny?* —
+and `az` exits non-zero for that **and** for a request it never evaluated at all.
+Only the first is evidence. What you should see:
+
+- **Denied by the condition — the expected result.** `az` exits non-zero and the
+  error names `AuthorizationFailed` or `RoleAssignmentUpdateNotPermitted` (a
+  condition-not-satisfied error). The block prints
+  `DENIED BY THE CONDITION — expected`. **This is the outcome you record.**
+- **Rejected as a request — NOT a result.** `az` exits non-zero on a malformed
+  assignee or scope, an unsubstituted placeholder, a CLI argument error, an
+  expired login, a network failure. No authorization code appears. The block
+  prints `STOP: … rejected, but NOT by the ABAC condition`, echoes the raw
+  output, and **fails the test**. The condition was never exercised; fix the
+  input and re-run. Do not record it either way.
+- **Permitted — the failure, and a live mutation.** `az` exits 0: the condition
+  did not block a privilege escalation, and for a `create` probe that escalated
+  assignment now exists on the dev RG. The block prints `!!! PERMITTED`, then
+  **revokes it and reads it back to prove it is gone** (`CONTAINED`). If it
+  cannot, it prints `!!! STOP` with the exact `az role assignment delete`
+  command: the escalation is still live and clearing it comes before recording
+  anything.
+
+```bash
+SUB="$(az account show --query id -o tsv)"
+
+# The apply SP's APP id — the client id committed in step 1. The OBJECT id is
+# RESOLVED below, never pasted: a hand-pasted one is the placeholder failure this
+# preflight exists to stop.
+APPLY_APP_ID='<apply-app-id>'
+APPLY_SP_OBJECT_ID=''
+
+# A GUID, and nothing else. This is the test `[ -n ... ]` was standing in for:
+# '<apply-sp-object-id>' is non-empty but has no GUID shape, so it can never
+# reach an --assignee-object-id. Rejects any leftover angle bracket by shape.
+t_is_guid() { # <value>
+  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+# Does this id name a role assignment AT OR UNDER <scope>? Shape is not enough —
+# a well-formed id at a scope the SP has no authority over is denied for that
+# reason alone, and t_expect_deny cannot tell that denial apart from the
+# condition's. See T4a for the full argument. Lowercased both sides because
+# Azure preserves whatever casing the scope was created with.
+t_id_in_scope() { # <assignment-id> <scope>
+  local id_lc scope_lc
+  case "$1" in *'<'*|*'>'*) return 1 ;; esac   # a leftover placeholder, anywhere in it
+  id_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  scope_lc="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  case "$id_lc" in
+    "$scope_lc"/providers/microsoft.authorization/roleassignments/*) return 0 ;;
+    "$scope_lc"/*/providers/microsoft.authorization/roleassignments/*) return 0 ;;
+  esac
+  return 1
+}
+
+# The id of a role assignment named anywhere in an az response. Used to contain a
+# PERMITTED create — you cannot revoke what you cannot name.
+t_created_id() { # <az output>
+  printf '%s' "$1" \
+    | grep -Eio '/subscriptions/[^"[:space:],]+/providers/microsoft\.authorization/roleassignments/[0-9a-f-]{36}' \
+    | head -n 1
+}
+
+# Does this probe CREATE? Decides whether a PERMITTED outcome leaves a new grant
+# standing. Matched on the az verb in the argv, not on the label.
+t_probe_creates() { # <command...>
+  local a
+  for a in "$@"; do
+    [ "$a" = create ] && return 0
+  done
+  return 1
+}
+
+# Containment for the worst outcome this suite can produce. `!!! PERMITTED` on a
+# create means the ABAC condition FAILED to block a privilege escalation — and
+# that escalated grant is LIVE on the dev RG from the moment az exits 0. A loud
+# message is not containment, so it is revoked here.
+#
+# The revoke is then PROVEN by reading the assignment back, because
+# `az role assignment delete` exits 0 having matched nothing, and an unverified
+# revoke is the same fall-through class as recording a rejected REQUEST as a
+# denial. A read that itself fails is NOT proof of removal and takes the STOP
+# path — this must never conclude "contained" without evidence.
+t_revoke_now() { # <label> <az output>
+  local id scope del_rc read_rc still
+  id="$(t_created_id "$2")"
+  if [ -z "$id" ]; then
+    printf '!!! STOP — %s CREATED a role assignment and no id could be read back from the response, so NOTHING was revoked. The escalation is LIVE. Do not continue the suite; find it and delete it now:\n    az role assignment list --assignee-object-id "$APPLY_SP_OBJECT_ID" --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" -o table\n    az role assignment delete --ids <the id from that list>\n' "$1" >&2
+    return 1
+  fi
+  scope="${id%/providers/*}"
+  az role assignment delete --ids "$id" >/dev/null 2>&1; del_rc=$?
+  still="$(az role assignment list --scope "$scope" --query "[?id=='$id'].id" -o tsv 2>/dev/null)"; read_rc=$?
+  if [ "$del_rc" -eq 0 ] && [ "$read_rc" -eq 0 ] && [ -z "$still" ]; then
+    printf 'CONTAINED — the escalated assignment was revoked and verified gone: %s (%s)\n' "$id" "$1"
+    return 0
+  fi
+  printf '!!! STOP — THE ESCALATED ASSIGNMENT MAY STILL BE LIVE (%s): delete exited %s, the read-back exited %s and returned %s. Do NOT continue the suite. Remove it by hand and confirm it is gone:\n    az role assignment delete --ids %s\n    az role assignment list --scope %s -o table\n' "$1" "$del_rc" "$read_rc" "${still:-nothing}" "$id" "$scope" >&2
+  return 1
+}
+
+# ALL matches, never [0] — the same rule §3 and B10's check() state. [0] would
+# collapse an ambiguous answer into a perfectly resolved-looking id, and the
+# shape test would then be vouching for the wrong object.
+if t_is_guid "$APPLY_APP_ID"; then
+  SP_MATCHES="$(az ad sp list --filter "appId eq '$APPLY_APP_ID'" --query '[].id' -o tsv)"
+  if [ "$(printf '%s\n' "$SP_MATCHES" | grep -c .)" = 1 ]; then
+    APPLY_SP_OBJECT_ID="$SP_MATCHES"
+  else
+    echo "REFUSING: appId '$APPLY_APP_ID' resolved $(printf '%s\n' "$SP_MATCHES" | grep -c .) service principals, not exactly 1 — resolve the ambiguity before any T-test runs." >&2
+  fi
+else
+  echo "REFUSING: \$APPLY_APP_ID ('$APPLY_APP_ID') is not a GUID — substitute the apply app's real client id." >&2
+fi
+
+# The gate each mutating T-block calls. A function, so a refusal returns instead
+# of killing the scratch-job shell mid-suite.
+t_ready() {
+  t_is_guid "$SUB" && t_is_guid "$APPLY_SP_OBJECT_ID" && return 0
+  echo "REFUSING: \$SUB / \$APPLY_SP_OBJECT_ID are not both resolved GUIDs (sub='$SUB' sp='$APPLY_SP_OBJECT_ID') — a T-test run now probes a malformed scope or assignee and reports 'rejected (expected)' for the wrong reason. Re-run this preflight; do not record the result of an ungated run." >&2
+  return 1
+}
+
+# Every expected-rejection test goes through THIS, never through
+# `... && echo FAILURE || echo "rejected (expected)"`. ANY non-zero az exit
+# satisfies that pattern, so a request Azure never evaluated — a malformed
+# assignee, an unsubstituted placeholder, a CLI argument error, an expired login
+# — is recorded as the condition denying. Only the authorization outcomes Azure
+# names count as evidence; everything else STOPS the test for a human to read.
+#
+# A PERMITTED outcome is not just a failed assertion — it is a mutation that
+# SUCCEEDED. For a create probe that mutation is an escalated role assignment now
+# live on the dev RG, so this contains it rather than printing and moving on.
+t_expect_deny() { # <label> <command...>
+  local label="$1" out rc creates=0
+  shift
+  t_probe_creates "$@" && creates=1
+  out="$("$@" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '!!! PERMITTED — THIS IS A FAILURE (%s)\n' "$label"
+    if [ "$creates" = 1 ]; then
+      t_revoke_now "$label" "$out"
+    else
+      printf "!!! STOP — a PERMITTED delete has already REMOVED a live assignment (%s). Nothing can be revoked; restore it with T1's Terraform before continuing.\n" "$label" >&2
+    fi
+    return 1
+  fi
+  case "$out" in
+    *AuthorizationFailed*|*RoleAssignmentUpdateNotPermitted*)
+      printf 'DENIED BY THE CONDITION — expected (%s)\n' "$label"
+      return 0 ;;
+  esac
+  printf 'STOP: %s was rejected, but NOT by the ABAC condition — az exited %s with no AuthorizationFailed / RoleAssignmentUpdateNotPermitted. That is a rejected REQUEST, and it proves nothing about the condition. Do not record it as the expected rejection. Raw output:\n' "$label" "$rc" >&2
+  printf '%s\n' "$out" >&2
+  return 1
+}
+
+t_ready && echo "preflight OK: sub=$SUB sp=$APPLY_SP_OBJECT_ID"
+```
 
 ---
 
@@ -1252,9 +1817,11 @@ resource "azurerm_role_assignment" "allowlisted" {
 ```bash
 cd /tmp/mg23-acceptance
 terraform init -backend=false     # LOCAL state only — never the dev backend
-terraform apply -auto-approve \
-  -var="rg_id=/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
-  -var="principal_id=$APPLY_SP_OBJECT_ID"
+if t_ready; then
+  terraform apply -auto-approve \
+    -var="rg_id=/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
+    -var="principal_id=$APPLY_SP_OBJECT_ID"
+fi
 ```
 
 - **Expected:** all 8 assignments created.
@@ -1271,20 +1838,35 @@ Keep the 8 assignments in place — T4 consumes them.
 
 ```bash
 RG="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
-for ROLE in "Owner" "Contributor" "User Access Administrator" "Role Based Access Control Administrator"; do
-  echo "== $ROLE"
-  az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-    --assignee-principal-type ServicePrincipal \
-    --role "$ROLE" --scope "$RG" \
-    && echo "!!! PERMITTED — THIS IS A FAILURE" || echo "rejected (expected)"
-done
+if t_ready; then
+  t2_denied=0; t2_total=0
+  for ROLE in "Owner" "Contributor" "User Access Administrator" "Role Based Access Control Administrator"; do
+    echo "== $ROLE"
+    t2_total=$((t2_total + 1))
+    t_expect_deny "$ROLE" az role assignment create \
+      --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role "$ROLE" --scope "$RG" && t2_denied=$((t2_denied + 1))
+  done
+  [ "$t2_denied" = "$t2_total" ] \
+    && echo "T2 PASS — all $t2_total denied BY THE CONDITION" \
+    || echo "T2 NOT PASSED — only $t2_denied of $t2_total were denied by the condition; do NOT record T2 as passing" >&2
+fi
 ```
 
-- **Expected:** all four **rejected** (`AuthorizationFailed`, or an explicit
-  condition-not-satisfied error).
+- **Expected:** all four **rejected**, each one carrying `AuthorizationFailed` or
+  an explicit condition-not-satisfied error (`RoleAssignmentUpdateNotPermitted`)
+  — `DENIED BY THE CONDITION — expected` four times, then `T2 PASS`. A
+  non-zero exit without one of those codes prints `STOP:` and the raw error
+  instead: the request never reached the condition, so T2 is **not** passed and
+  **not** failed. Fix the input and re-run.
 - **This is the core escalation test.** A PERMIT on any of the four means the
   condition is not constraining the write action at all — most likely it was
-  authored with an empty or malformed GUID list. **Stop activation.**
+  authored with an empty or malformed GUID list. **Stop activation.** The grant
+  is live the instant it succeeds, so `t_expect_deny` revokes it and reads it
+  back to prove it is gone; if it prints `!!! STOP`, the escalated assignment is
+  still standing on the dev RG and removing it by hand comes before anything
+  else.
 - **False green:** running these as _yourself_ rather than as the SP. You are an
   Owner; they will all succeed and prove nothing. Confirm the identity first:
   `az account show --query user`.
@@ -1292,15 +1874,32 @@ done
 ### T3 — REJECT an allowlisted role granted to a real USER, declared as a service principal
 
 ```bash
-USER_OBJ="$(az ad user show --id <a-real-user-upn> --query id -o tsv)"
-az role assignment create --assignee-object-id "$USER_OBJ" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Owner" \
-  --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+USER_OBJ="$(az ad user show --id '<a-real-user-upn>' --query id -o tsv)"
+if t_ready && t_is_guid "$USER_OBJ"; then
+  T3_OUT="$(az role assignment create --assignee-object-id "$USER_OBJ" \
+    --assignee-principal-type ServicePrincipal \
+    --role "Storage Blob Data Owner" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" 2>&1)"; T3_RC=$?
+  printf '%s\n' "$T3_OUT"
+  if [ "$T3_RC" -eq 0 ]; then
+    echo "T3 = Branch B — PERMITTED. Delete it now (below) and record the residual."
+  else
+    case "$T3_OUT" in
+      *AuthorizationFailed*|*RoleAssignmentUpdateNotPermitted*)
+        echo "T3 = Branch A — DENIED BY THE CONDITION." ;;
+      *)
+        echo "STOP: T3 was rejected, but NOT by the condition (az exited $T3_RC, no authorization code above) — a rejected REQUEST decides NEITHER branch of B2. Fix it and re-run; record nothing." >&2 ;;
+    esac
+  fi
+else
+  echo "REFUSING: user object id unresolved or not a GUID ('$USER_OBJ') — an empty or placeholder assignee proves nothing about the PrincipalType clause." >&2
+fi
 ```
 
-- **Expected (Branch A of B2):** rejected — Azure cross-checks the declared
-  principal type against the directory.
+- **Expected (Branch A of B2):** rejected **with an authorization code** — Azure
+  cross-checks the declared principal type against the directory. A rejection
+  without one is the `STOP:` line above: the UPN did not resolve to a real user,
+  or the request was malformed, and B2 stays unanswered.
 - **If PERMITTED (Branch B of B2):** the PrincipalType clause is **advisory,
   not enforced**. Delete the assignment immediately, record it in the residuals
   (§10), and note that the RoleDefinitionId allowlist is the only real
@@ -1308,8 +1907,18 @@ az role assignment create --assignee-object-id "$USER_OBJ" \
 - **False green:** using a _service principal's_ object id here. It must be a
   **user** object id, or the test asserts nothing.
 
-Clean up if it succeeded:
-`az role assignment delete --assignee-object-id "$USER_OBJ" --role "Storage Blob Data Owner" --scope "$RG"`
+Clean up if it succeeded — with the scope written out, **not** `"$RG"`. `$RG` is
+set in T2's block; if you ran T3 on its own it is empty, and an empty `--scope`
+does not mean "no scope" to the CLI — it falls back to a broader default, so a
+tidy-up delete can act somewhere you never named:
+
+```bash
+if t_ready && t_is_guid "$USER_OBJ"; then
+  az role assignment delete --assignee-object-id "$USER_OBJ" \
+    --role "Storage Blob Data Owner" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+fi
+```
 
 ### T4 — DELETE is constrained too
 
@@ -1319,18 +1928,51 @@ without ever escalating — an **outage primitive**.
 
 ```bash
 # 4a — REJECT deleting a NON-allowlisted assignment.
-# Pick any pre-existing assignment in the RG whose role is not in the allowlist
-# (e.g. a Reader or Monitoring Reader grant made by the operator).
-az role assignment delete --ids "<NON_ALLOWLISTED_ASSIGNMENT_ID>" \
-  && echo "!!! PERMITTED — THIS IS A FAILURE" || echo "rejected (expected)"
+# Pick a pre-existing assignment INSIDE THE DEV RG whose role is not in the
+# allowlist (e.g. a Reader or Monitoring Reader grant made by the operator) and
+# paste its FULL id. Unreplaced, the placeholder is non-empty and Azure rejects
+# it as a malformed id with the same non-zero exit a condition denial produces —
+# which is why the id is checked and the outcome classified, not assumed:
+#   az role assignment list --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
+#     --query "[?roleDefinitionName=='Reader'].id" -o tsv
+NON_ALLOWLISTED_ID='<non-allowlisted-assignment-id>'
+
+# THE SCOPE OF THAT ID IS PART OF THE TEST, not a detail. A well-formed
+# role-assignment id at the WRONG scope produces a perfect-looking pass that
+# proves nothing: t_expect_deny accepts a bare AuthorizationFailed as evidence
+# the condition denied the delete, and AuthorizationFailed is Azure's GENERIC
+# 403. The apply SP holds Contributor and RBAC Administrator at the dev RG and
+# Storage Blob Data Contributor on the tfstate container — and NOTHING at
+# subscription scope. So a subscription-scoped (or other-RG) id is refused for
+# want of any authority at that scope at all, the ABAC condition is never
+# consulted, and 4a prints `DENIED BY THE CONDITION — expected` having exercised
+# no condition. Only at or under the dev RG, where the SP demonstrably IS an RBAC
+# administrator, is the condition the one thing left that can deny the delete.
+T4A_SCOPE="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+
+if ! t_ready; then
+  :   # t_ready has already said why, and nothing here has run.
+elif ! t_id_in_scope "$NON_ALLOWLISTED_ID" "$T4A_SCOPE" || ! t_is_guid "${NON_ALLOWLISTED_ID##*/}"; then
+  echo "REFUSING: \$NON_ALLOWLISTED_ID ('$NON_ALLOWLISTED_ID') does not name a role assignment at or under $T4A_SCOPE. An out-of-scope id does not merely fail 4a — it INVALIDATES it: the apply SP has no authority outside the dev RG, so Azure refuses the delete on that ground, never evaluates the ABAC condition, and returns the same generic AuthorizationFailed a condition denial returns. 4a would then record 'DENIED BY THE CONDITION' having proved nothing about the delete clause. Re-list inside the dev RG and paste an id from there." >&2
+else
+  t_expect_deny "4a delete non-allowlisted" \
+    az role assignment delete --ids "$NON_ALLOWLISTED_ID"
+fi
 
 # 4b — PERMIT deleting an allowlisted assignment (one of T1's).
-az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-  --role "Azure Event Hubs Data Sender" \
-  --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+if t_ready; then
+  az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+    --role "Azure Event Hubs Data Sender" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+fi
 ```
 
-- **Expected:** 4a rejected, 4b permitted.
+- **Expected:** 4a `DENIED BY THE CONDITION — expected`, 4b permitted. A 4a
+  rejection that carries no authorization code prints `STOP:` instead and does
+  not count: the delete clause is unproven, not proven. Same for an id from
+  outside the dev RG — the block refuses it rather than running, because a
+  denial for want of authority at that scope is indistinguishable from a
+  condition denial and would be recorded as one.
 - **If 4a is PERMITTED:** the delete clause is missing or matched nothing —
   check that `build_rbac_admin_condition` emitted **both** clauses and that the
   live condition (`az role assignment list --query "[0].condition"`) contains a
@@ -1344,18 +1986,29 @@ az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
 ### T5 — REJECT deleting the SP's own privileged grants
 
 ```bash
-for ROLE in "Contributor" "Role Based Access Control Administrator"; do
-  az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-    --role "$ROLE" --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
-    && echo "!!! PERMITTED — THIS IS A FAILURE ($ROLE)" || echo "rejected (expected)"
-done
+if t_ready; then
+  t5_denied=0; t5_total=0
+  for ROLE in "Contributor" "Role Based Access Control Administrator"; do
+    t5_total=$((t5_total + 1))
+    t_expect_deny "$ROLE" az role assignment delete \
+      --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+      --role "$ROLE" --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
+      && t5_denied=$((t5_denied + 1))
+  done
+  [ "$t5_denied" = "$t5_total" ] \
+    && echo "T5 PASS — both denied BY THE CONDITION" \
+    || echo "T5 NOT PASSED — only $t5_denied of $t5_total were denied by the condition; do NOT record T5 as passing" >&2
+fi
 ```
 
-- **Expected:** both rejected — neither role is in the allowlist, so the delete
-  clause refuses.
+- **Expected:** both rejected **with an authorization code** — neither role is in
+  the allowlist, so the delete clause refuses. A rejection without one prints
+  `STOP:` and leaves T5 unproven rather than passed.
 - **If PERMITTED:** the identity can disarm itself (and, combined with T2's
   failure mode, re-arm differently). Worse, it can lock itself out and leave dev
-  unreconcilable until an operator restores the grants with `bootstrap.sh`.
+  unreconcilable until an operator restores the grants with `bootstrap.sh`. A
+  permitted delete has already destroyed the grant — there is nothing to revoke,
+  so `t_expect_deny` says so and the restore is yours to run before continuing.
   **Stop activation.**
 
 Then run T1's Terraform again to restore the `Azure Event Hubs Data Sender`
@@ -1371,34 +2024,119 @@ the live condition stays frozen at its first-ever value.
 ```bash
 RG="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
 RBAC_ADMIN="Role Based Access Control Administrator"
+REPO_ROOT="$(git rev-parse --show-toplevel)" || REPO_ROOT=''
+ALLOWLIST="$REPO_ROOT/apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv"
 
-# Capture BOTH the condition and the assignment ID. The id is what proves the
-# reconcile was IN PLACE rather than a delete+recreate.
-BEFORE="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
-BEFORE_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
+# T6 IS ONE BLOCK — setup, assertions, revert and restore all inside the same
+# `if`. Split across guards, a refusal only skips the setup and execution falls
+# through to the restore, and THE RESTORE RUNS BOOTSTRAP: an unintended
+# bootstrap.sh against the live tenant is the exact hazard the rest of this
+# runbook exists to prevent.
+#
+# Pasted on its own, `t_ready` is not defined in this shell at all — and an
+# undefined command in an `if` is just a false condition, which is how a T6 with
+# NO preflight quietly proceeds. `command -v` turns that into a refusal.
+t6_mutated=0
+if ! command -v t_ready >/dev/null 2>&1; then
+  echo "REFUSING: t_ready is not defined in this shell — T6 runs bootstrap.sh against the LIVE tenant and will not run on unvalidated ids. Paste §6's preflight block first, then re-run T6." >&2
+elif ! t_ready; then
+  :   # t_ready has already said why, and nothing here has run.
+elif [ -z "$REPO_ROOT" ] || [ ! -f "$ALLOWLIST" ]; then
+  echo "REFUSING: not in the repository (root='$REPO_ROOT') or the allowlist is missing at '$ALLOWLIST' — T6 cannot revert what it cannot find, so it does not change it." >&2
+# Compared against HEAD, not the index. `git diff --quiet -- <path>` compares the
+# WORKING TREE TO THE INDEX, so a STAGED edit to the allowlist reads as clean and
+# walks straight through this guard — after which the revert below restores the
+# file from that index, i.e. to the operator's staged content, and the restoring
+# bootstrap run reconciles the live condition to it. The log reads as a clean
+# revert while the apply identity is left permanently widened.
+elif ! git diff --quiet HEAD -- "$ALLOWLIST"; then
+  echo "REFUSING: $ALLOWLIST differs from HEAD — staged, unstaged, or both. T6 reverts it to the COMMITTED content with 'git checkout HEAD --', which would discard those changes, and it can only claim to restore the 8-role baseline if the baseline IS what is committed. Commit or stash first." >&2
+else
+  # Capture BOTH the condition and the assignment ID. The id is what proves the
+  # reconcile was IN PLACE rather than a delete+recreate.
+  BEFORE="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+    --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
+  BEFORE_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+    --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
 
-# Add a 9th role to the allowlist TEMPORARILY (do not commit this):
-printf 'Monitoring Reader\tPENDING\n' >> apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv
-cd apps/infrastructure/bootstrap && ./bootstrap.sh     # as the operator, not the SP
+  # AN EMPTY CAPTURE IS NOT A BASELINE, and the comparison below cannot tell the
+  # difference: `[ "" != "$AFTER" ]` is TRUE, so an unauthenticated or mis-scoped
+  # read prints "PASS — condition reconciled" having compared nothing — and prints
+  # it only after bootstrap has already rewritten the live condition. Nothing is
+  # mutated until the baseline exists.
+  if [ -z "$BEFORE" ] || [ -z "$BEFORE_ID" ]; then
+    echo "REFUSING: no baseline condition/id captured — T6 would report PASS against an empty BEFORE. Fix the read first; the allowlist is untouched." >&2
+  elif ! printf 'Monitoring Reader\tPENDING\n' >> "$ALLOWLIST"; then
+    echo "REFUSING: could not append the temporary 9th role to $ALLOWLIST — nothing was changed and no bootstrap ran." >&2
+  else
+    # THE FLAG IS SET HERE, before the run and not after it: from the moment the
+    # file changed, the revert below is mandatory whatever bootstrap does. It is
+    # what makes the restore reachable, so nothing that skipped the append can
+    # reach a bootstrap re-run.
+    t6_mutated=1
+    # Subshell: the re-run and the revert both resolve paths from the repo root,
+    # so this must not leave you sitting in the bootstrap directory.
+    (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)   # as the operator, not the SP
+    t6_boot_rc=$?
 
-AFTER="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
-AFTER_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
+    if [ "$t6_boot_rc" -ne 0 ]; then
+      echo "STOP: bootstrap exited $t6_boot_rc with the 9th role in the allowlist — T6 is NOT evaluated (the condition may be partly written). The revert below still runs, because the file was changed." >&2
+    else
+      AFTER="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+        --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
+      AFTER_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+        --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
 
-[ "$BEFORE" != "$AFTER" ] && echo "PASS — condition reconciled" || echo "FAIL — condition frozen"
-[ "$BEFORE_ID" = "$AFTER_ID" ] && echo "PASS — same assignment, updated IN PLACE" \
-                              || echo "FAIL — assignment was delete+recreated (no-grant window)"
+      if [ -z "$AFTER" ] || [ -z "$AFTER_ID" ]; then
+        echo "STOP: the post-run read came back empty — an empty AFTER differs from any BEFORE, so the comparison below would print PASS having read nothing. T6 is not evaluated." >&2
+      else
+        [ "$BEFORE" != "$AFTER" ] && echo "PASS — condition reconciled" || echo "FAIL — condition frozen"
+        [ "$BEFORE_ID" = "$AFTER_ID" ] && echo "PASS — same assignment, updated IN PLACE" \
+                                      || echo "FAIL — assignment was delete+recreated (no-grant window)"
+      fi
+    fi
 
-# Revert the allowlist and re-run bootstrap to restore the 8-role condition.
-git checkout -- apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv
-./bootstrap.sh
+    # Revert the allowlist and re-run bootstrap to restore the 8-role condition.
+    # Reachable ONLY because $t6_mutated is set — i.e. only on the path that
+    # actually widened the allowlist.
+    #
+    # HEAD is named EXPLICITLY. `git checkout -- <pathspec>` restores from the
+    # INDEX, which is whatever was last staged — not necessarily what is
+    # committed. Naming HEAD restores the committed content and resets the index
+    # entry with it, so what the restoring bootstrap run reconciles the live
+    # condition to is the committed 8-role baseline, which is the only thing this
+    # block is entitled to claim it restored.
+    #
+    # The path is ABSOLUTE via $REPO_ROOT because `git checkout` resolves a
+    # pathspec against your CWD: the repo-relative form run from inside the
+    # bootstrap directory fails with "did not match any file(s) known to git",
+    # exits non-zero, and reverts NOTHING — after which an unconditional re-run
+    # would re-apply the NINE-role condition you just finished proving, leaving
+    # the apply identity's allowlist permanently widened while the log reads as a
+    # clean revert. So the revert has to succeed before the restore re-runs.
+    if [ "$t6_mutated" = 1 ]; then
+      if git checkout HEAD -- "$ALLOWLIST"; then
+        (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)
+      else
+        echo "STOP: allowlist revert FAILED — do NOT re-run bootstrap; it would re-apply the 9-role condition. Restore $ALLOWLIST by hand, confirm with 'git diff --exit-code HEAD -- \"$ALLOWLIST\"', then re-run bootstrap." >&2
+      fi
+    fi
+  fi
+fi
 ```
 
 - **Expected:** the live condition **changes**, then changes back — and the
   **assignment id is identical throughout**. Both assertions must pass.
+- **If the block refuses, nothing ran.** T6 is the only test here that runs
+  `bootstrap.sh`, so every precondition — the preflight actually being loaded in
+  this shell, an allowlist identical to HEAD, a real baseline — is checked before
+  the file is touched, and the restoring re-run is reachable only from the path
+  that widened it. Paste T6 on its own without §6's preflight and it refuses; it
+  does not half-run.
+- **The allowlist check is against HEAD, and so is the revert.** Both halves
+  matter: a working-tree-only check cannot see a staged edit, and a revert that
+  restores from the index would reinstate that staged edit as the "baseline" the
+  restoring bootstrap run then writes into the live condition.
 - **Why the id check matters:** the reconcile must be an in-place
   `az role assignment update`, never a delete+recreate. A changed id means the
   grant was momentarily **absent**, which is the window that can strip the apply
@@ -1420,10 +2158,12 @@ git checkout -- apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv
 ### T7 — Scope reality check (documented, accepted behaviour)
 
 ```bash
-az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Owner" \
-  --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+if t_ready; then
+  az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+    --assignee-principal-type ServicePrincipal \
+    --role "Storage Blob Data Owner" \
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+fi
 ```
 
 - **Expected: this SUCCEEDS**, and that is **accepted, documented behaviour**,
@@ -1445,9 +2185,9 @@ actually verified.
 
 ## 8. Activation
 
-Only after **every** B-check (B1–B9) is resolved and T1–T7 pass (with T3/T7
-outcomes recorded either way). Three of them are easy to leave un-run because
-nothing fails while they are outstanding — confirm all three explicitly here:
+Only after **every** B-check (B1–B10) is resolved and T1–T7 pass (with T3/T7
+outcomes recorded either way). Four of them are easy to leave un-run because
+nothing fails while they are outstanding — confirm all four explicitly here:
 
 - **B7** — branch protection on `main` is tightened. Without it, a direct push to
   `main` is an unreviewed apply.
@@ -1463,12 +2203,58 @@ nothing fails while they are outstanding — confirm all three explicitly here:
   auto-creation**, and `DEV_TF_BACKEND_READY` may not be set true until both
   verify. Without this the recovery approval passes everything and the apply
   environment's branch restriction does not exist.
+- **B10** — all three federated credentials carry the subject the repository
+  **actually presents**, compared against
+  `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` rather than
+  against any string in this document. Without it, a credential can be present
+  and correctly named while binding a subject no token matches; nothing turns
+  red until the first `azure/login` fails `AADSTS700213` — with
+  `DEV_TF_BACKEND_READY` already true and the apply loop live.
+
+This is the command that arms the live post-merge apply loop, so it takes an
+**explicit target** and an **explicit acknowledgement**. A bare `gh variable set`
+resolves against whatever repository your current directory's git remote happens
+to name — from the wrong checkout, or a directory you forgot you were in, it arms
+a repository you never meant to name. A shell cannot prove you judged B1–B10 and
+T1–T7, but it can refuse to be pasted absent-mindedly, and it can refuse to write
+to a target you did not type. Fill in both lines; leave either unset and the
+block refuses and mutates nothing.
 
 ```bash
-gh variable set DEV_TF_BACKEND_READY --body true    # REPOSITORY scope — see §2
+ACTIVATION_REPO='<owner>/<repo>'   # the repository this runbook has been verifying
+ACTIVATION_ACK=''                  # set to exactly: B1-B10 AND T1-T7 VERIFIED
+
+# Resolve the target rather than trusting the string: gh must be able to see it,
+# and the name it answers with must be the name you typed. A rename or a typo
+# that lands on a different repository answers with a different nameWithOwner,
+# and that mismatch refuses instead of arming the wrong loop.
+RESOLVED_REPO="$(gh repo view "$ACTIVATION_REPO" --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || RESOLVED_REPO=''
+
+if [ "$ACTIVATION_ACK" != 'B1-B10 AND T1-T7 VERIFIED' ]; then
+  echo "REFUSING: no activation acknowledgement. Set ACTIVATION_ACK='B1-B10 AND T1-T7 VERIFIED' only once every B-check and T-test above is resolved and recorded. DEV_TF_BACKEND_READY is unchanged." >&2
+elif [ -z "$RESOLVED_REPO" ]; then
+  echo "REFUSING: '$ACTIVATION_REPO' did not resolve through gh — an unresolved target means the write would have fallen back to ambient repository context. DEV_TF_BACKEND_READY is unchanged." >&2
+elif [ "$RESOLVED_REPO" != "$ACTIVATION_REPO" ]; then
+  echo "REFUSING: '$ACTIVATION_REPO' resolves to '$RESOLVED_REPO' — arming the apply loop on a repository other than the one you named is exactly what this check is for. Confirm which is correct, then re-run. DEV_TF_BACKEND_READY is unchanged." >&2
+else
+  # --repo is what makes the target the one above and not the ambient one.
+  # No --env: REPOSITORY scope, see §2.
+  gh variable set DEV_TF_BACKEND_READY --body true --repo "$RESOLVED_REPO"
+  gh variable list --repo "$RESOLVED_REPO" | grep '^DEV_TF_BACKEND_READY'   # must show: true
+fi
 ```
 
-To **deactivate** (any time, no code change): set it to `false` or delete it.
+To **deactivate** (any time, no code change): set it to `false` or delete it —
+pinned to the same explicit target, and with **no acknowledgement gate**. The
+gate exists to slow down arming the loop; disarming it is the safe direction and
+stays one command:
+
+```bash
+gh variable set DEV_TF_BACKEND_READY --body false --repo '<owner>/<repo>'
+# or, equivalently:
+gh variable delete DEV_TF_BACKEND_READY --repo '<owner>/<repo>'
+```
+
 Every MG-23 job then skips cleanly — a skipped job, never a red one — and dev
 returns to MG-24 operator-run reconciliation. This is the intended emergency
 stop; use it before you start debugging a misbehaving apply.

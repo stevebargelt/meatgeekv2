@@ -163,9 +163,12 @@ else bad "D2: the apply identity must create exactly one federated credential (f
 if printf '%s\n' "$apply_fn" | grep -q 'local env="\$INFRA_APPLY_ENVIRONMENT"'; then
   ok "D2: the apply identity's environment is bound to \$INFRA_APPLY_ENVIRONMENT"
 else bad "D2: bootstrap_infra_apply_identity must bind env to \$INFRA_APPLY_ENVIRONMENT"; fi
-if printf '%s\n' "$apply_fn" | grep -q 'subject="repo:\${GITHUB_REPO}:environment:\${env}"'; then
-  ok "D2: the apply credential's subject resolves to repo:${GITHUB_REPO}:environment:${INFRA_APPLY_ENVIRONMENT}"
-else bad "D2: the apply credential subject must be repo:\${GITHUB_REPO}:environment:\${env}"; fi
+# MG-42: the subject is composed from the repo's LIVE sub-claim prefix, never
+# from a `repo:${GITHUB_REPO}` literal. The literal is what reverted this exact
+# credential on every re-run and broke the dev auto-apply loop.
+if printf '%s\n' "$apply_fn" | grep -q 'subject="\$(federated_environment_subject "\$env")"'; then
+  ok "D2: the apply credential's subject is composed from the DERIVED prefix for ${INFRA_APPLY_ENVIRONMENT}"
+else bad "D2: the apply credential subject must be \$(federated_environment_subject \"\$env\") — MG-42"; fi
 if printf '%s\n' "$apply_fn" | grep -q 'prune_unexpected_federated_credentials'; then
   ok "D2: the apply identity prunes every credential outside its expected set"
 else bad "D2: the apply identity must prune unexpected federated credentials"; fi
@@ -355,12 +358,26 @@ if sed -e ':a' -e '/\\$/N; s/\\\n/ /; ta' "$BOOT" \
 else ok "RBAC-admin never flows through the unconditioned role-assignment helper"; fi
 
 # --- OIDC: federated subjects are per-GitHub-Environment, not branch-only ----
-if grep -q 'repo:${GITHUB_REPO}:environment:${env}' "$BOOT"; then
-  ok "federated subject is scoped per GitHub Environment"
-else bad "federated subject must be environment-scoped"; fi
+# MG-42: the environment scoping now lives in federated_environment_subject,
+# which is the ONE place a subject string is built. Asserting on the helper
+# rather than on an interpolated literal is the point — the literal was the bug.
+if grep -q '^federated_environment_subject()' "$BOOT" \
+   && grep -q "printf '%s:environment:%s'" "$BOOT"; then
+  ok "federated subject is scoped per GitHub Environment (composed by federated_environment_subject)"
+else bad "federated subject must be environment-scoped, composed by federated_environment_subject"; fi
 if grep -Eq 'subject.*:ref:refs/heads' "$BOOT"; then
   bad "federated subject must NOT be a bare branch ref"
 else ok "no branch-ref-only federated subject"; fi
+# EXACT-SET check on every subject-related function this file defines. A
+# contains-check would not notice a NEW `federated_ref_subject` appearing beside
+# the environment one — and a ref-scoped subject gates trust by which branch ran
+# instead of by the environment's protection rules, which is the thing the whole
+# map exists to prevent.
+subject_fns="$(grep -Eo '^[a-z_]*subject[a-z_]*\(\)' "$BOOT" | sort | tr '\n' ' ')"
+expected_subject_fns="assert_oidc_subject_prefix() federated_environment_subject() resolve_oidc_subject_prefix() "
+[ "$subject_fns" = "$expected_subject_fns" ] \
+  && ok "MG-42: exactly three subject functions exist — validate, resolve, compose (no ref-scoped composer)" \
+  || bad "MG-42: subject functions must be exactly '${expected_subject_fns}' (got '${subject_fns}')"
 
 # --- OIDC subject CONSISTENCY (MG-24 red-fix): bootstrap subjects == workflow ---
 # The dev-auth-fails bug was a silent DRIFT: bootstrap federated
@@ -476,13 +493,23 @@ esac
 if [ "${APP_DEPLOY_ENVIRONMENT:-}" != "${INFRA_APPLY_ENVIRONMENT:-}" ]; then
   ok "app-deploy and infra-apply federate DIFFERENT environments (no shared subject)"
 else bad "app-deploy and infra-apply must not share a GitHub Environment"; fi
-# The TWO remaining dev identities must resolve to two DISTINCT OIDC subjects.
-dev_subjects="$(printf '%s\n%s\n' \
-  "repo:${GITHUB_REPO}:environment:${INFRA_APPLY_ENVIRONMENT}" \
-  "repo:${GITHUB_REPO}:environment:${APP_DEPLOY_ENVIRONMENT}" | sort -u | grep -c .)"
-[ "$dev_subjects" -eq 2 ] \
-  && ok "the two dev identities (apply, app-deploy) present two DISTINCT OIDC subjects" \
-  || bad "the dev apply / app-deploy identities must present two distinct subjects (got $dev_subjects)"
+# The TWO remaining dev identities must resolve to two DISTINCT OIDC subjects —
+# under EITHER prefix. MG-42 made the prefix a RUNTIME fact, so asserting only
+# the default form would stop covering the prefix this repo actually presents.
+# Distinctness is a property of the environment suffix; this proves it holds
+# whichever prefix the live repo turns out to have, by running the real composer.
+for probe_prefix in \
+  "repo:${GITHUB_REPO}" \
+  "repo:${GITHUB_REPO%%/*}@4857343/${GITHUB_REPO##*/}@1304558512"; do
+  dev_subjects="$( (
+      OIDC_SUBJECT_PREFIX="$probe_prefix"
+      federated_environment_subject "$INFRA_APPLY_ENVIRONMENT"; printf '\n'
+      federated_environment_subject "$APP_DEPLOY_ENVIRONMENT"; printf '\n'
+    ) 2>/dev/null | sort -u | grep -c .)"
+  [ "$dev_subjects" -eq 2 ] \
+    && ok "the two dev identities present two DISTINCT OIDC subjects under prefix '${probe_prefix}'" \
+    || bad "the dev apply / app-deploy identities must present two distinct subjects under '${probe_prefix}' (got $dev_subjects)"
+done
 
 # --- F16: GITHUB_REPO is a committed constant, not env-overridable ----------
 # The OIDC trust ROOT. An inherited GITHUB_REPO would re-point every identity's
@@ -499,6 +526,299 @@ for v in GITHUB_ENVIRONMENTS STATE_ENVIRONMENTS PLAN_IDENTITY_ENVIRONMENTS; do
     bad "${v} must NOT read an env override (an injected environment mints an unreviewed trust)"
   else ok "${v} is a committed constant, not env-overridable"; fi
 done
+
+# ===========================================================================
+# MG-42: the OIDC subject PREFIX is DERIVED from GitHub, then PROVEN against
+# GITHUB_REPO — and fails closed on anything it cannot prove.
+# ===========================================================================
+# THE BUG. This repo's GitHub org customizes the Actions OIDC `sub` claim to
+# inject the numeric owner-id and repo-id, so a job scoped to an environment
+# presents `repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:<env>`. Bootstrap
+# hardcoded `repo:<owner>/<repo>:environment:<env>`, which matched nothing:
+# every azure/login died AADSTS700213. Worse, ensure_federated_credential
+# reconciles on SUBJECT, so each re-run "repaired" the hand-corrected
+# development-infra-apply credential back to the broken value.
+#
+# THE SECURITY COST, AND WHAT PAYS FOR IT. The federated subject IS the OIDC
+# trust binding (F16). Reading any part of it from a remote API gives whatever
+# answers that API a say in which repository's workflows may assume identities
+# holding Contributor on the dev resource group. So the derived value is
+# admitted ONLY if it resolves to the same owner/repo the committed constant
+# names; everything else must DIE rather than fall back. The tests below are
+# mostly NEGATIVE for that reason — "it honours a custom prefix" is one property,
+# "it refuses every prefix it cannot prove" is the one that matters.
+
+# The prefix global exists, starts EMPTY, and is not env-overridable (F16 again:
+# an inherited OIDC_SUBJECT_PREFIX would re-point trust exactly as an inherited
+# GITHUB_REPO would).
+if grep -Eq '^OIDC_SUBJECT_PREFIX=""$' "$BOOT"; then
+  ok "MG-42: OIDC_SUBJECT_PREFIX starts EMPTY (unresolved until proven)"
+else bad "MG-42: OIDC_SUBJECT_PREFIX must be declared empty and resolved at run time"; fi
+if grep -Eq 'OIDC_SUBJECT_PREFIX="\$\{OIDC_SUBJECT_PREFIX:-' "$BOOT"; then
+  bad "MG-42: OIDC_SUBJECT_PREFIX must NOT read an env override (it is half the OIDC trust binding)"
+else ok "MG-42: OIDC_SUBJECT_PREFIX is not env-overridable (F16 applies to it too)"; fi
+# COMMENTS STRIPPED for every call-site count below: this file's comments
+# legitimately QUOTE the call shape they document (the helper carries a `usage:`
+# line), so counting the raw source would measure prose, not call sites.
+boot_code="$(grep -vE '^[[:space:]]*#' "$BOOT")"
+# No call site may still interpolate the hardcoded literal — that IS the bug.
+if printf '%s\n' "$boot_code" | grep -q 'subject="repo:${GITHUB_REPO}:environment:'; then
+  bad "MG-42: no federated subject may be built from a hardcoded 'repo:\${GITHUB_REPO}' literal"
+else ok "MG-42: no hardcoded 'repo:\${GITHUB_REPO}:environment:' subject literal remains"; fi
+# ALL THREE identities compose through the helper — plan/read, app-deploy, apply.
+subject_call_sites="$(printf '%s\n' "$boot_code" \
+  | grep -c 'subject="\$(federated_environment_subject "\$env")"' || true)"
+[ "$subject_call_sites" -eq 3 ] \
+  && ok "MG-42: all THREE federated subjects (plan, app-deploy, apply) compose from the derived prefix" \
+  || bad "MG-42: expected 3 federated_environment_subject call sites, found ${subject_call_sites}"
+# A bare assignment would swallow the helper's die inside the command
+# substitution and federate a bogus subject anyway — same rule as the az_discover
+# call sites (T4).
+if [ "$(printf '%s\n' "$boot_code" \
+        | grep -c 'subject="\$(federated_environment_subject "\$env")" || exit 1' || true)" -eq 3 ]; then
+  ok "MG-42: every subject composition carries '|| exit 1' (a die cannot be swallowed)"
+else bad "MG-42: every 'subject=\$(federated_environment_subject …)' must carry '|| exit 1'"; fi
+# Resolution happens in main BEFORE any identity is provisioned, so an
+# unprovable prefix aborts while nothing has been created.
+main_body_mg42="$(awk '/^main\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT" | grep -vE '^[[:space:]]*#')"
+resolve_line="$(printf '%s\n' "$main_body_mg42" | grep -n 'resolve_oidc_subject_prefix' | head -1 | cut -d: -f1)"
+first_identity="$(printf '%s\n' "$main_body_mg42" | grep -n 'bootstrap_[a-z_]*identity' | head -1 | cut -d: -f1)"
+if [ -n "$resolve_line" ] && [ -n "$first_identity" ] && [ "$resolve_line" -lt "$first_identity" ]; then
+  ok "MG-42: main() resolves the subject prefix BEFORE provisioning any identity"
+else bad "MG-42: main() must call resolve_oidc_subject_prefix before the first bootstrap_*_identity"; fi
+
+# --- assert_oidc_subject_prefix: POSITIVE (shapes that name THIS repo) ------
+mg42_owner="${GITHUB_REPO%%/*}"
+mg42_repo="${GITHUB_REPO##*/}"
+for p in \
+  "repo:${GITHUB_REPO}" \
+  "repo:${mg42_owner}@4857343/${mg42_repo}@1304558512" \
+  "repo:${mg42_owner}@4857343/${mg42_repo}" \
+  "repo:${mg42_owner}/${mg42_repo}@1304558512"; do
+  if ( assert_oidc_subject_prefix "$p" "test" >/dev/null 2>&1 ); then
+    ok "MG-42: accepts a prefix naming this repo: ${p}"
+  else bad "MG-42: should ACCEPT the prefix '${p}' (it names ${GITHUB_REPO})"; fi
+done
+
+# --- assert_oidc_subject_prefix: NEGATIVE (the direction that matters) ------
+# Each of these would, if accepted, federate this stack's identities — the dev
+# apply identity included — to a subject the committed trust root does not name.
+for p in \
+  "repo:attacker/${mg42_repo}" \
+  "repo:${mg42_owner}/${mg42_repo}-fork" \
+  "repo:${mg42_owner}-evil/${mg42_repo}" \
+  "repo:attacker@1/${mg42_repo}@2" \
+  "repo:${mg42_owner}/${mg42_repo}:ref:refs/heads/main" \
+  "repo:${mg42_owner}/${mg42_repo}:job_workflow_ref:x" \
+  "repo:${mg42_owner}@abc/${mg42_repo}" \
+  "repo:${mg42_owner}/${mg42_repo}@" \
+  "repo:${mg42_repo}" \
+  "${GITHUB_REPO}" \
+  "" ; do
+  if ( assert_oidc_subject_prefix "$p" "test" >/dev/null 2>&1 ); then
+    bad "MG-42: must REJECT the prefix '${p}' (it does not unambiguously name ${GITHUB_REPO})"
+  else ok "MG-42: rejects a prefix that does not name this repo: '${p}'"; fi
+done
+
+# --- resolve_oidc_subject_prefix: the live gh response, STUBBED ------------
+# No network and no credentials here (and none are wanted — a bootstrap must
+# never be run from a test). `gh` is stubbed as a shell function, which
+# `command -v gh` also finds, so the auth gate and the api read both hit it.
+#
+#   usage: mg42_resolve <api-stdout-or-stderr> <api-exit> [<auth-exit>] \
+#                       [<status-line>] [<extra-stdout-on-failure>]
+# Echoes the RESOLVED prefix; exits non-zero and echoes nothing when the
+# resolution DIES — which is what most of these cases assert.
+#
+# The stub emits a REALISTIC STATUS LINE because the resolver reads one: it runs
+# `gh api -i`, which prints the response status line and headers on stdout ahead
+# of the body — on success AND on an HTTP error — while the human-readable
+# diagnostic goes to stderr. <status-line> defaults to a 200 and may be set to
+# the empty string to model the no-response case (DNS/proxy), where gh prints no
+# headers at all. <extra-stdout-on-failure> is the response BODY on an error
+# status, which exists so a case can put a fake status line inside the body and
+# prove it cannot spoof the real one.
+#
+# EVERY local here is mg42_-prefixed on purpose: bash locals are dynamically
+# scoped, so a bare `status_line` in this helper would be SHADOWED by
+# resolve_oidc_subject_prefix's own local of that name — the stub would read the
+# variable the function under test had just declared empty, emit no status line,
+# and every case would "pass" by dying.
+mg42_resolve() {
+  local mg42_api_out="$1" mg42_api_status="$2" mg42_auth_status="${3:-0}"
+  local mg42_status_line="${4-HTTP/2.0 200 OK}" mg42_fail_body="${5-}"
+  (
+    gh() {
+      case "${1:-}" in
+        auth) return "$mg42_auth_status" ;;
+        api)  if [ -n "$mg42_status_line" ]; then
+                printf '%s\r\n' "$mg42_status_line"
+                printf 'content-type: application/json; charset=utf-8\r\n'
+                printf '\r\n'
+              fi
+              if [ "$mg42_api_status" -eq 0 ]; then printf '%s' "$mg42_api_out"
+              else printf '%s' "$mg42_api_out" >&2; printf '%s' "$mg42_fail_body"; fi
+              return "$mg42_api_status" ;;
+      esac
+      return 0
+    }
+    resolve_oidc_subject_prefix >/dev/null 2>&1 || exit 1
+    printf '%s' "$OIDC_SUBJECT_PREFIX"
+  )
+}
+
+mg42_custom="repo:${mg42_owner}@4857343/${mg42_repo}@1304558512"
+# 1. A CUSTOM prefix is HONOURED — the whole point of MG-42. This is the live
+#    2026-07-27 response shape.
+got="$(mg42_resolve "{\"use_default\": false, \"include_claim_keys\": [\"repo\"], \"sub_claim_prefix\": \"${mg42_custom}\"}" 0)" || got="DIED"
+[ "$got" = "$mg42_custom" ] \
+  && ok "MG-42: a CUSTOM sub_claim_prefix is honoured (${got})" \
+  || bad "MG-42: a custom sub_claim_prefix must be honoured (expected '${mg42_custom}', got '${got}')"
+# ...and the composed subject is the one the workflow job actually presents.
+got_subject="$( ( OIDC_SUBJECT_PREFIX="$mg42_custom"; federated_environment_subject "$INFRA_APPLY_ENVIRONMENT" ) 2>/dev/null )"
+[ "$got_subject" = "${mg42_custom}:environment:${INFRA_APPLY_ENVIRONMENT}" ] \
+  && ok "MG-42: the apply subject composes to ${got_subject} (matches the presented token)" \
+  || bad "MG-42: apply subject must be '${mg42_custom}:environment:${INFRA_APPLY_ENVIRONMENT}' (got '${got_subject}')"
+# 1b. THE CANONICAL LIVE FIXTURE. Recorded fact, not an invention: this is the
+#     VERBATIM body returned by
+#       gh api repos/stevebargelt/meatgeekv2/actions/oidc/customization/sub
+#     run against the real repository on the host, 2026-07-27 and re-confirmed
+#     2026-07-28. Do not "tidy" it — the field order, the `use_default: true`,
+#     and the `use_immutable_subject` key are all part of what was observed.
+#
+#     THIS IS THE CASE EVERY EARLIER FIXTURE GOT WRONG. `use_default` is TRUE and
+#     a custom prefix is present, together — they are not mutually exclusive on
+#     this account, because `use_default` describes the claim-KEY list while the
+#     enterprise policy injects the id prefix independently. A resolver that lets
+#     use_default veto the prefix resolves this body to 'repo:stevebargelt/meatgeekv2',
+#     the exact broken subject MG-42 exists to eliminate, and (because
+#     ensure_federated_credential reconciles ON SUBJECT) would delete and recreate
+#     the hand-corrected development-infra-apply credential dead.
+mg42_live_body='{"use_default":true,"use_immutable_subject":false,"sub_claim_prefix":"repo:stevebargelt@4857343/meatgeekv2@1304558512"}'
+mg42_live_prefix="repo:stevebargelt@4857343/meatgeekv2@1304558512"
+got="$(mg42_resolve "$mg42_live_body" 0)" || got="DIED"
+[ "$got" = "$mg42_live_prefix" ] \
+  && ok "MG-42: the VERBATIM live 2026-07-27 response resolves to ${mg42_live_prefix} (use_default=true does NOT veto the prefix)" \
+  || bad "MG-42: the live response must resolve to '${mg42_live_prefix}' (got '${got}') — use_default must not override a present sub_claim_prefix"
+got_subject="$( ( OIDC_SUBJECT_PREFIX="$mg42_live_prefix"; federated_environment_subject "$INFRA_APPLY_ENVIRONMENT" ) 2>/dev/null )"
+[ "$got_subject" = "repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:development-infra-apply" ] \
+  && ok "MG-42: the live prefix composes the apply subject ${got_subject} (the string the token actually carries)" \
+  || bad "MG-42: the live prefix must compose 'repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:development-infra-apply' (got '${got_subject}')"
+# 2. use_default=true with NO sub_claim_prefix to contradict it IS the default.
+#    BOTH halves are required — this case says nothing about a body that carries
+#    a prefix (see 1b, which is exactly that body and resolves the other way).
+got="$(mg42_resolve '{"use_default": true}' 0)" || got="DIED"
+[ "$got" = "repo:${GITHUB_REPO}" ] \
+  && ok "MG-42: use_default=true AND no sub_claim_prefix falls back to the DEFAULT prefix (repo:${GITHUB_REPO})" \
+  || bad "MG-42: use_default=true with no prefix must fall back to 'repo:${GITHUB_REPO}' (got '${got}')"
+# 3. An absent/empty sub_claim_prefix alongside use_default=FALSE is NOT the
+#    default — it is GitHub positively stating a customization exists whose
+#    prefix we could not read. That is the same epistemic position as a 403 or a
+#    5xx, and those die. Falling back here would write the default subject over
+#    three live credentials on a guess (MG-42-F1).
+for mg42_unreadable in \
+  '{"use_default": false, "include_claim_keys": []}' \
+  '{"use_default": false, "include_claim_keys": ["repo","context"]}' \
+  '{"use_default": false, "sub_claim_prefix": ""}' \
+  '{"use_default": false, "sub_claim_prefix": null}'; do
+  got="$(mg42_resolve "$mg42_unreadable" 0)" || got="DIED"
+  [ "$got" = "DIED" ] \
+    && ok "MG-42: use_default=false with an UNREADABLE sub_claim_prefix fails closed: ${mg42_unreadable}" \
+    || bad "MG-42: '${mg42_unreadable}' must abort (a customization exists, its prefix is unreadable), not resolve to '${got}'"
+done
+# 4. An EXACT 404 STATUS is GitHub's "no customization configured" — the one
+#    failure read as a fact rather than an outage (the auth gate has ruled out
+#    the other common cause of a 404). Kept passing so the anti-spoof tightening
+#    below cannot be over-broad: the genuine fallback must still work.
+got="$(mg42_resolve 'gh: Not Found (HTTP 404)' 1 0 'HTTP/2.0 404 Not Found')" || got="DIED"
+[ "$got" = "repo:${GITHUB_REPO}" ] \
+  && ok "MG-42: an exact 404 STATUS (no customization configured) falls back to the DEFAULT prefix" \
+  || bad "MG-42: a 404 status must fall back to 'repo:${GITHUB_REPO}' (got '${got}')"
+# 5. ANY OTHER gh failure is an OUTAGE, not a fact. Falling back here would
+#    rewrite live credentials to a subject no token matches. Rows are
+#    <status-line>|<stderr diagnostic>; an EMPTY status line is the no-response
+#    case, where gh never got far enough to have a status at all.
+while IFS='|' read -r mg42_line mg42_err; do
+  [ -n "$mg42_err" ] || continue
+  got="$(mg42_resolve "$mg42_err" 1 0 "$mg42_line")" || got="DIED"
+  [ "$got" = "DIED" ] \
+    && ok "MG-42: a non-404 gh failure FAILS CLOSED, never falls back: ${mg42_err}" \
+    || bad "MG-42: '${mg42_err}' must abort, not resolve to '${got}'"
+done <<'MG42_FAILURES'
+HTTP/2.0 500 Internal Server Error|gh: Server Error (HTTP 500)
+HTTP/2.0 403 Forbidden|gh: Forbidden (HTTP 403)
+|error connecting to api.github.com
+HTTP/2.0 429 Too Many Requests|gh: API rate limit exceeded (HTTP 429)
+MG42_FAILURES
+# 5b. THE ROUND-2 REGRESSION (red-wide, HIGH). The fallback used to be decided by
+#     an UNANCHORED substring grep over gh's stderr — `grep -q 'HTTP 404'`. Any
+#     failure whose human-readable diagnostic merely CONTAINS that text took the
+#     DESTRUCTIVE branch: a captive-portal/proxy error page, a reworded gh
+#     diagnostic, an unrelated nested 404 in a multi-part message. On this
+#     repository the fallback resolves 'repo:stevebargelt/meatgeekv2', and
+#     ensure_federated_credential reconciles ON SUBJECT, so it would delete and
+#     recreate all three live credentials on a subject no token carries
+#     (AADSTS700213) — the hand-corrected development-infra-apply one included.
+#     The status line is the authority now, and it is matched ANCHORED.
+#
+#     Rows: <status-line>|<stderr containing the literal text "HTTP 404">
+while IFS='|' read -r mg42_line mg42_err; do
+  [ -n "$mg42_err" ] || continue
+  got="$(mg42_resolve "$mg42_err" 1 0 "$mg42_line")" || got="DIED"
+  [ "$got" = "DIED" ] \
+    && ok "MG-42-R2: a non-404 failure whose TEXT contains 'HTTP 404' fails closed: ${mg42_err}" \
+    || bad "MG-42-R2: '${mg42_err}' is not a 404 — it must abort, not resolve to '${got}' (unanchored substring match on gh's diagnostic)"
+done <<'MG42_SUBSTRING_404'
+HTTP/2.0 502 Bad Gateway|<html><title>Proxy Error</title>upstream said: HTTP 404</html>
+HTTP/2.0 500 Internal Server Error|gh: Server Error (HTTP 500); a dependent call returned HTTP 404
+HTTP/2.0 403 Forbidden|gh: Forbidden (HTTP 403) — see HTTP 404 handling in the docs
+|error connecting to api.github.com (captive portal returned HTTP 404)
+MG42_SUBSTRING_404
+# 5c. ...and the BODY cannot spoof the status either. Only the FIRST line of the
+#     response is ever read as a status line, so a 5xx whose body contains a
+#     verbatim '404 Not Found' status line must still abort.
+got="$(mg42_resolve 'gh: Server Error (HTTP 500)' 1 0 'HTTP/2.0 500 Internal Server Error' \
+  'HTTP/2.0 404 Not Found
+{"message":"Not Found"}')" || got="DIED"
+[ "$got" = "DIED" ] \
+  && ok "MG-42-R2: a status line inside the response BODY cannot spoof the real status" \
+  || bad "MG-42-R2: a body-embedded '404 Not Found' status line must not be read as the response status (got '${got}')"
+# 5d. A near-miss status line is not a 404 either: the code is delimited, so
+#     '4045' and a 404 mentioned mid-line both fail closed.
+for mg42_line in 'HTTP/2.0 4045 Nonsense' 'HTTP/2.0 500 upstream HTTP/2.0 404 Not Found' 'not a status line at all'; do
+  got="$(mg42_resolve 'gh: failed' 1 0 "$mg42_line")" || got="DIED"
+  [ "$got" = "DIED" ] \
+    && ok "MG-42-R2: a near-miss status line fails closed: '${mg42_line}'" \
+    || bad "MG-42-R2: '${mg42_line}' is not an exact 404 status — must abort, not resolve to '${got}'"
+done
+# 6. An UNAUTHENTICATED gh aborts BEFORE the api read — otherwise its 404s are
+#    indistinguishable from "no customization configured".
+got="$(mg42_resolve "{\"sub_claim_prefix\": \"${mg42_custom}\"}" 0 1)" || got="DIED"
+[ "$got" = "DIED" ] \
+  && ok "MG-42: an UNAUTHENTICATED gh fails closed (a 404 must not be read as 'no customization')" \
+  || bad "MG-42: an unauthenticated gh must abort (got '${got}')"
+# 7. A prefix naming ANOTHER REPOSITORY aborts. This is the trust-root attack the
+#    validation exists for: it would re-point every identity, dev apply included.
+got="$(mg42_resolve '{"sub_claim_prefix": "repo:attacker/meatgeekv2"}' 0)" || got="DIED"
+[ "$got" = "DIED" ] \
+  && ok "MG-42: a prefix naming ANOTHER repository fails closed (F16 trust root preserved)" \
+  || bad "MG-42: a foreign-repo prefix must abort, not resolve to '${got}'"
+# 8. Malformed JSON is not "no customization" either.
+got="$(mg42_resolve 'not json at all' 0)" || got="DIED"
+[ "$got" = "DIED" ] \
+  && ok "MG-42: an unparseable customization response fails closed" \
+  || bad "MG-42: unparseable JSON must abort, not resolve to '${got}'"
+
+# --- federated_environment_subject: fails closed on unusable input ----------
+# An UNRESOLVED prefix would compose ':environment:<env>' — a subject matching
+# nothing, or something unintended.
+if ( OIDC_SUBJECT_PREFIX="" federated_environment_subject "development" >/dev/null 2>&1 ); then
+  bad "MG-42: composing a subject before the prefix is resolved must DIE"
+else ok "MG-42: composing a subject before the prefix is resolved fails closed"; fi
+# An EMPTY environment would compose '<prefix>:environment:'.
+if ( OIDC_SUBJECT_PREFIX="repo:${GITHUB_REPO}" federated_environment_subject "" >/dev/null 2>&1 ); then
+  bad "MG-42: composing a subject for an EMPTY environment must DIE"
+else ok "MG-42: composing a subject for an empty environment fails closed"; fi
 
 # --- State containers stay exactly tfstate-dev / tfstate-prod ---------------
 # GITHUB_ENVIRONMENTS used to drive BOTH federation and the state-container loop.
@@ -1211,7 +1531,107 @@ func() {
   echo "unknown argument publish"
   return 0
 }
-deploy_summary="$( bootstrap_deploy_identity 2>/dev/null || true )"
+# MG-42: main() resolves OIDC_SUBJECT_PREFIX before ANY identity is provisioned,
+# so a harness that exercises an identity function must model that state. Without
+# it federated_environment_subject dies (by design — see the fail-closed test
+# immediately below), the identity aborts, and this heredoc assertion would be
+# testing a function that never reached its summary.
+deploy_summary="$( OIDC_SUBJECT_PREFIX="repo:${GITHUB_REPO}" bootstrap_deploy_identity 2>/dev/null || true )"
+# ...and the converse, which is the security property: with the prefix
+# UNRESOLVED the identity must abort rather than federate ':environment:<env>'.
+# The `|| exit 1` at the call site is what makes the die propagate out of the
+# command substitution instead of being swallowed into an empty subject.
+#
+# ASSERTED ON THE MESSAGE, not merely on a non-zero exit. bootstrap_deploy_identity
+# reads the state account before it composes the subject, so under a bare stub it
+# would die EARLIER for an unrelated reason and a status-only check would pass
+# vacuously. The stub below is complete enough to reach the subject step, and the
+# assertion names the die we mean.
+#
+# The stub is defined at TOP LEVEL for the Bash 3.2 parser-bug reason documented
+# above; only the call goes inside the `$(...)` capture.
+az() {
+  case "$*" in
+    "account show --query id -o tsv")       echo "11111111-1111-1111-1111-111111111111" ;;
+    "account show --query tenantId -o tsv") echo "22222222-2222-2222-2222-222222222222" ;;
+    *"storage account show"*)  echo "/subscriptions/1/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/sa" ;;
+    *"ad app list"*)           echo "33333333-3333-3333-3333-333333333333" ;;
+    *"ad sp list"*)            echo "44444444-4444-4444-4444-444444444444" ;;
+    *) return 0 ;;
+  esac
+}
+mg42_unresolved_err="$(
+  ( OIDC_SUBJECT_PREFIX="" bootstrap_deploy_identity 2>&1 >/dev/null )
+)" || true
+# The `|| true` sits OUTSIDE the substitution on purpose. The call site's
+# `|| exit 1` terminates the subshell outright — that is the point of it, and an
+# inner `|| true` would never run — so the capture must absorb the non-zero here
+# or errexit (inherited from sourcing bootstrap.sh) would end this suite.
+if printf '%s' "$mg42_unresolved_err" | grep -q 'before resolve_oidc_subject_prefix'; then
+  ok "MG-42: an identity aborts AT the subject step when the prefix is unresolved (no bogus subject federated)"
+else bad "MG-42: bootstrap_deploy_identity must abort naming the unresolved subject prefix (got: ${mg42_unresolved_err})"; fi
+
+# ===========================================================================
+# MG-42: ensure_federated_credential reconciles to the DERIVED subject
+# ===========================================================================
+# This is the half of MG-42 that was actively destructive. ensure_federated_credential
+# reconciles on SUBJECT, so while the desired subject was the hardcoded
+# `repo:<owner>/<repo>:environment:<env>` every bootstrap re-run DELETED the
+# hand-corrected development-infra-apply credential and recreated it on the
+# broken subject — taking the live dev auto-apply loop down again each time.
+# Reconciling toward the DERIVED subject is what makes a re-run safe.
+#
+# Capture the az MUTATIONS the reconciler performs (fd 3 carries them past the
+# function's own logging) so the assertions are about what it DID, not what it
+# printed.
+#   usage: mg42_fc_calls <existing-subject-on-the-app> <desired-subject>
+mg42_fc_calls() {
+  local existing="$1" desired="$2"
+  (
+    az() {
+      case "$*" in
+        *"federated-credential list"*)   printf '%s' "$existing" ;;
+        *"federated-credential create"*) printf 'CREATE %s\n' "$*" >&3 ;;
+        *"federated-credential delete"*) printf 'DELETE %s\n' "$*" >&3 ;;
+        *) return 0 ;;
+      esac
+    }
+    ensure_federated_credential app-1 cred-1 "$desired" "desc" >/dev/null 2>&1
+  ) 3>&1
+}
+mg42_custom_subject="repo:${GITHUB_REPO%%/*}@4857343/${GITHUB_REPO##*/}@1304558512:environment:${INFRA_APPLY_ENVIRONMENT}"
+mg42_legacy_subject="repo:${GITHUB_REPO}:environment:${INFRA_APPLY_ENVIRONMENT}"
+
+# 1. THE REGRESSION ITSELF: the credential is already on the manually-corrected
+#    custom subject and the derived subject agrees — a re-run must do NOTHING.
+mg42_calls="$(mg42_fc_calls "$mg42_custom_subject" "$mg42_custom_subject")"
+if [ -z "$mg42_calls" ]; then
+  ok "MG-42: a re-run leaves the hand-corrected credential ALONE when the derived subject matches (the dev apply loop survives)"
+else bad "MG-42: a re-run must not touch a credential already on the derived subject (did: ${mg42_calls})"; fi
+
+# 2. The stale HARDCODED subject is reconciled FORWARD to the derived one —
+#    delete then recreate, and the recreate carries the derived subject.
+# The create's `--parameters` payload is multi-line JSON, so the subject lands on
+# a LATER line than the CREATE marker — grep the whole capture for it, never just
+# the marker line.
+mg42_calls="$(mg42_fc_calls "$mg42_legacy_subject" "$mg42_custom_subject")"
+if printf '%s\n' "$mg42_calls" | grep -q '^DELETE' \
+   && printf '%s\n' "$mg42_calls" | grep -q '^CREATE' \
+   && printf '%s\n' "$mg42_calls" | grep -qF "\"subject\": \"${mg42_custom_subject}\""; then
+  ok "MG-42: a credential stuck on the old hardcoded subject is reconciled to the DERIVED subject"
+else bad "MG-42: a stale hardcoded subject must be deleted and recreated on the derived subject (did: ${mg42_calls})"; fi
+# ...and it must NEVER recreate on the hardcoded subject — that is the reversion.
+if printf '%s\n' "$mg42_calls" | grep -qF "\"subject\": \"${mg42_legacy_subject}\""; then
+  bad "MG-42: the reconciler must never write the hardcoded subject back (that is the reversion this ticket removes)"
+else ok "MG-42: the reconciler never writes the hardcoded subject back"; fi
+
+# 3. An ABSENT credential is created directly on the derived subject.
+mg42_calls="$(mg42_fc_calls "" "$mg42_custom_subject")"
+if printf '%s\n' "$mg42_calls" | grep -q '^CREATE' \
+   && printf '%s\n' "$mg42_calls" | grep -qF "\"subject\": \"${mg42_custom_subject}\"" \
+   && ! printf '%s\n' "$mg42_calls" | grep -q '^DELETE'; then
+  ok "MG-42: an absent credential is created directly on the derived subject"
+else bad "MG-42: an absent credential must be created on the derived subject with no delete (did: ${mg42_calls})"; fi
 unset -f az func
 
 case "$deploy_summary" in
