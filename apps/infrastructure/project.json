@@ -38,6 +38,13 @@
         "cwd": "apps/infrastructure"
       }
     },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node scripts/cosmos-export/run-tests.mjs",
+        "cwd": "apps/infrastructure"
+      }
+    },
     "format": {
       "executor": "nx:run-commands",
       "options": {

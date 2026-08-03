@@ -359,6 +359,26 @@ jobs:
         # operator's shell while still reaching a PASS is fail-open.
         run: bash apps/infrastructure/scripts/fixtures/run-destroy-guard-fixtures.sh
 
+      - name: V1 Cosmos export tool tests (MG-48)
+        # The export tool gates a PERMANENT deletion of the V1 Cosmos account,
+        # so its failure paths — count mismatch, 429 with retries exhausted,
+        # transport drop mid-pagination, tampered export — are what is actually
+        # being trusted, and they are asserted here by exit code against a fake
+        # client. It belongs in THIS job because the suite reaches no network
+        # and needs no credentials, which is the same property the job as a
+        # whole is built to prove.
+        #
+        # Invoked THROUGH run-tests.mjs, not `node --test` directly: the bare
+        # runner exits 0 when it discovers no test files, so a rename would
+        # leave this step green and empty. The wrapper floors both the file
+        # count and the executed test count — same reasoning as
+        # assert-suite-completion.sh above, in Node rather than bash.
+        #
+        # No `npm ci`: the suite is node: built-ins plus its own fake, so it
+        # runs on the runner's Node as-is. @azure/cosmos is imported only by the
+        # real-client factory, which the tests never take.
+        run: node apps/infrastructure/scripts/cosmos-export/run-tests.mjs
+
       - name: Terraform module tests (every test-bearing module)
         # `terraform test` was not wired into CI at all before MG-23, and when
         # it first was, only modules/monitoring ran. modules/functions (14
