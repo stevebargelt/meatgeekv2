@@ -1597,17 +1597,92 @@ they would on a real condition denial. The core escalation test would report
 success having probed nothing at all — the one false green this section cannot
 afford, because its outcome is what unblocks activation.
 
+**An unreplaced placeholder is the same false green, and `[ -n ... ]` cannot see
+it.** `<apply-sp-object-id>` is a non-empty string; a test for non-emptiness
+passes it straight into `--assignee-object-id`, Azure rejects the malformed
+assignee, and the block records `rejected (expected)`. So the object id is
+**resolved here from the app id** with an exactly-one-match check, and whatever
+ends up in the variable must have **GUID shape** — the test that a placeholder
+fails and a real id passes.
+
+**Distinguish the two rejections.** Every expected-rejection test (T2, T3, T4a,
+T5) is asking one question — *did Azure evaluate the ABAC condition and deny?* —
+and `az` exits non-zero for that **and** for a request it never evaluated at all.
+Only the first is evidence. What you should see:
+
+- **Denied by the condition — the expected result.** `az` exits non-zero and the
+  error names `AuthorizationFailed` or `RoleAssignmentUpdateNotPermitted` (a
+  condition-not-satisfied error). The block prints
+  `DENIED BY THE CONDITION — expected`. **This is the outcome you record.**
+- **Rejected as a request — NOT a result.** `az` exits non-zero on a malformed
+  assignee or scope, an unsubstituted placeholder, a CLI argument error, an
+  expired login, a network failure. No authorization code appears. The block
+  prints `STOP: … rejected, but NOT by the ABAC condition`, echoes the raw
+  output, and **fails the test**. The condition was never exercised; fix the
+  input and re-run. Do not record it either way.
+
 ```bash
 SUB="$(az account show --query id -o tsv)"
-APPLY_SP_OBJECT_ID='<apply-sp-object-id>'   # az ad sp list --filter "appId eq '<APPLY-APP-ID>'" --query '[].id' -o tsv
+
+# The apply SP's APP id — the client id committed in step 1. The OBJECT id is
+# RESOLVED below, never pasted: a hand-pasted one is the placeholder failure this
+# preflight exists to stop.
+APPLY_APP_ID='<apply-app-id>'
+APPLY_SP_OBJECT_ID=''
+
+# A GUID, and nothing else. This is the test `[ -n ... ]` was standing in for:
+# '<apply-sp-object-id>' is non-empty but has no GUID shape, so it can never
+# reach an --assignee-object-id. Rejects any leftover angle bracket by shape.
+t_is_guid() { # <value>
+  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+# ALL matches, never [0] — the same rule §3 and B10's check() state. [0] would
+# collapse an ambiguous answer into a perfectly resolved-looking id, and the
+# shape test would then be vouching for the wrong object.
+if t_is_guid "$APPLY_APP_ID"; then
+  SP_MATCHES="$(az ad sp list --filter "appId eq '$APPLY_APP_ID'" --query '[].id' -o tsv)"
+  if [ "$(printf '%s\n' "$SP_MATCHES" | grep -c .)" = 1 ]; then
+    APPLY_SP_OBJECT_ID="$SP_MATCHES"
+  else
+    echo "REFUSING: appId '$APPLY_APP_ID' resolved $(printf '%s\n' "$SP_MATCHES" | grep -c .) service principals, not exactly 1 — resolve the ambiguity before any T-test runs." >&2
+  fi
+else
+  echo "REFUSING: \$APPLY_APP_ID ('$APPLY_APP_ID') is not a GUID — substitute the apply app's real client id." >&2
+fi
 
 # The gate each mutating T-block calls. A function, so a refusal returns instead
 # of killing the scratch-job shell mid-suite.
 t_ready() {
-  [ -n "$SUB" ] && [ -n "$APPLY_SP_OBJECT_ID" ] && return 0
-  echo "REFUSING: \$SUB / \$APPLY_SP_OBJECT_ID unresolved — a T-test run now probes a malformed scope and reports 'rejected (expected)' for the wrong reason. Re-run this preflight; do not record the result of an ungated run." >&2
+  t_is_guid "$SUB" && t_is_guid "$APPLY_SP_OBJECT_ID" && return 0
+  echo "REFUSING: \$SUB / \$APPLY_SP_OBJECT_ID are not both resolved GUIDs (sub='$SUB' sp='$APPLY_SP_OBJECT_ID') — a T-test run now probes a malformed scope or assignee and reports 'rejected (expected)' for the wrong reason. Re-run this preflight; do not record the result of an ungated run." >&2
   return 1
 }
+
+# Every expected-rejection test goes through THIS, never through
+# `... && echo FAILURE || echo "rejected (expected)"`. ANY non-zero az exit
+# satisfies that pattern, so a request Azure never evaluated — a malformed
+# assignee, an unsubstituted placeholder, a CLI argument error, an expired login
+# — is recorded as the condition denying. Only the authorization outcomes Azure
+# names count as evidence; everything else STOPS the test for a human to read.
+t_expect_deny() { # <label> <command...>
+  local label="$1" out rc
+  shift
+  out="$("$@" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '!!! PERMITTED — THIS IS A FAILURE (%s)\n' "$label"
+    return 1
+  fi
+  case "$out" in
+    *AuthorizationFailed*|*RoleAssignmentUpdateNotPermitted*)
+      printf 'DENIED BY THE CONDITION — expected (%s)\n' "$label"
+      return 0 ;;
+  esac
+  printf 'STOP: %s was rejected, but NOT by the ABAC condition — az exited %s with no AuthorizationFailed / RoleAssignmentUpdateNotPermitted. That is a rejected REQUEST, and it proves nothing about the condition. Do not record it as the expected rejection. Raw output:\n' "$label" "$rc" >&2
+  printf '%s\n' "$out" >&2
+  return 1
+}
+
 t_ready && echo "preflight OK: sub=$SUB sp=$APPLY_SP_OBJECT_ID"
 ```
 
@@ -1684,18 +1759,27 @@ Keep the 8 assignments in place — T4 consumes them.
 ```bash
 RG="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
 if t_ready; then
+  t2_denied=0; t2_total=0
   for ROLE in "Owner" "Contributor" "User Access Administrator" "Role Based Access Control Administrator"; do
     echo "== $ROLE"
-    az role assignment create --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+    t2_total=$((t2_total + 1))
+    t_expect_deny "$ROLE" az role assignment create \
+      --assignee-object-id "$APPLY_SP_OBJECT_ID" \
       --assignee-principal-type ServicePrincipal \
-      --role "$ROLE" --scope "$RG" \
-      && echo "!!! PERMITTED — THIS IS A FAILURE" || echo "rejected (expected)"
+      --role "$ROLE" --scope "$RG" && t2_denied=$((t2_denied + 1))
   done
+  [ "$t2_denied" = "$t2_total" ] \
+    && echo "T2 PASS — all $t2_total denied BY THE CONDITION" \
+    || echo "T2 NOT PASSED — only $t2_denied of $t2_total were denied by the condition; do NOT record T2 as passing" >&2
 fi
 ```
 
-- **Expected:** all four **rejected** (`AuthorizationFailed`, or an explicit
-  condition-not-satisfied error).
+- **Expected:** all four **rejected**, each one carrying `AuthorizationFailed` or
+  an explicit condition-not-satisfied error (`RoleAssignmentUpdateNotPermitted`)
+  — `DENIED BY THE CONDITION — expected` four times, then `T2 PASS`. A
+  non-zero exit without one of those codes prints `STOP:` and the raw error
+  instead: the request never reached the condition, so T2 is **not** passed and
+  **not** failed. Fix the input and re-run.
 - **This is the core escalation test.** A PERMIT on any of the four means the
   condition is not constraining the write action at all — most likely it was
   authored with an empty or malformed GUID list. **Stop activation.**
@@ -1706,19 +1790,32 @@ fi
 ### T3 — REJECT an allowlisted role granted to a real USER, declared as a service principal
 
 ```bash
-USER_OBJ="$(az ad user show --id <a-real-user-upn> --query id -o tsv)"
-if t_ready && [ -n "$USER_OBJ" ]; then
-  az role assignment create --assignee-object-id "$USER_OBJ" \
+USER_OBJ="$(az ad user show --id '<a-real-user-upn>' --query id -o tsv)"
+if t_ready && t_is_guid "$USER_OBJ"; then
+  T3_OUT="$(az role assignment create --assignee-object-id "$USER_OBJ" \
     --assignee-principal-type ServicePrincipal \
     --role "Storage Blob Data Owner" \
-    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
+    --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" 2>&1)"; T3_RC=$?
+  printf '%s\n' "$T3_OUT"
+  if [ "$T3_RC" -eq 0 ]; then
+    echo "T3 = Branch B — PERMITTED. Delete it now (below) and record the residual."
+  else
+    case "$T3_OUT" in
+      *AuthorizationFailed*|*RoleAssignmentUpdateNotPermitted*)
+        echo "T3 = Branch A — DENIED BY THE CONDITION." ;;
+      *)
+        echo "STOP: T3 was rejected, but NOT by the condition (az exited $T3_RC, no authorization code above) — a rejected REQUEST decides NEITHER branch of B2. Fix it and re-run; record nothing." >&2 ;;
+    esac
+  fi
 else
-  echo "REFUSING: user object id unresolved — an empty assignee proves nothing about the PrincipalType clause." >&2
+  echo "REFUSING: user object id unresolved or not a GUID ('$USER_OBJ') — an empty or placeholder assignee proves nothing about the PrincipalType clause." >&2
 fi
 ```
 
-- **Expected (Branch A of B2):** rejected — Azure cross-checks the declared
-  principal type against the directory.
+- **Expected (Branch A of B2):** rejected **with an authorization code** — Azure
+  cross-checks the declared principal type against the directory. A rejection
+  without one is the `STOP:` line above: the UPN did not resolve to a real user,
+  or the request was malformed, and B2 stays unanswered.
 - **If PERMITTED (Branch B of B2):** the PrincipalType clause is **advisory,
   not enforced**. Delete the assignment immediately, record it in the residuals
   (§10), and note that the RoleDefinitionId allowlist is the only real
@@ -1732,7 +1829,7 @@ does not mean "no scope" to the CLI — it falls back to a broader default, so a
 tidy-up delete can act somewhere you never named:
 
 ```bash
-if t_ready && [ -n "$USER_OBJ" ]; then
+if t_ready && t_is_guid "$USER_OBJ"; then
   az role assignment delete --assignee-object-id "$USER_OBJ" \
     --role "Storage Blob Data Owner" \
     --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
@@ -1748,9 +1845,26 @@ without ever escalating — an **outage primitive**.
 ```bash
 # 4a — REJECT deleting a NON-allowlisted assignment.
 # Pick any pre-existing assignment in the RG whose role is not in the allowlist
-# (e.g. a Reader or Monitoring Reader grant made by the operator).
-az role assignment delete --ids "<NON_ALLOWLISTED_ASSIGNMENT_ID>" \
-  && echo "!!! PERMITTED — THIS IS A FAILURE" || echo "rejected (expected)"
+# (e.g. a Reader or Monitoring Reader grant made by the operator) and paste its
+# FULL id. Unreplaced, the placeholder is non-empty and Azure rejects it as a
+# malformed id with the same non-zero exit a condition denial produces — which
+# is why the id is shape-checked and the outcome is classified, not assumed.
+#   az role assignment list --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
+#     --query "[?roleDefinitionName=='Reader'].id" -o tsv
+NON_ALLOWLISTED_ID='<non-allowlisted-assignment-id>'
+
+t4a_id_ok=0
+case "$NON_ALLOWLISTED_ID" in
+  /subscriptions/*/providers/Microsoft.Authorization/roleAssignments/*) t4a_id_ok=1 ;;
+esac
+case "$NON_ALLOWLISTED_ID" in *'<'*|*'>'*) t4a_id_ok=0 ;; esac
+
+if t_ready && [ "$t4a_id_ok" = 1 ]; then
+  t_expect_deny "4a delete non-allowlisted" \
+    az role assignment delete --ids "$NON_ALLOWLISTED_ID"
+else
+  echo "REFUSING: \$NON_ALLOWLISTED_ID ('$NON_ALLOWLISTED_ID') is not a full role-assignment id — Azure would reject the request itself, and 4a would record that as the condition refusing the delete." >&2
+fi
 
 # 4b — PERMIT deleting an allowlisted assignment (one of T1's).
 if t_ready; then
@@ -1760,7 +1874,9 @@ if t_ready; then
 fi
 ```
 
-- **Expected:** 4a rejected, 4b permitted.
+- **Expected:** 4a `DENIED BY THE CONDITION — expected`, 4b permitted. A 4a
+  rejection that carries no authorization code prints `STOP:` instead and does
+  not count: the delete clause is unproven, not proven.
 - **If 4a is PERMITTED:** the delete clause is missing or matched nothing —
   check that `build_rbac_admin_condition` emitted **both** clauses and that the
   live condition (`az role assignment list --query "[0].condition"`) contains a
@@ -1775,16 +1891,23 @@ fi
 
 ```bash
 if t_ready; then
+  t5_denied=0; t5_total=0
   for ROLE in "Contributor" "Role Based Access Control Administrator"; do
-    az role assignment delete --assignee-object-id "$APPLY_SP_OBJECT_ID" \
+    t5_total=$((t5_total + 1))
+    t_expect_deny "$ROLE" az role assignment delete \
+      --assignee-object-id "$APPLY_SP_OBJECT_ID" \
       --role "$ROLE" --scope "/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg" \
-      && echo "!!! PERMITTED — THIS IS A FAILURE ($ROLE)" || echo "rejected (expected)"
+      && t5_denied=$((t5_denied + 1))
   done
+  [ "$t5_denied" = "$t5_total" ] \
+    && echo "T5 PASS — both denied BY THE CONDITION" \
+    || echo "T5 NOT PASSED — only $t5_denied of $t5_total were denied by the condition; do NOT record T5 as passing" >&2
 fi
 ```
 
-- **Expected:** both rejected — neither role is in the allowlist, so the delete
-  clause refuses.
+- **Expected:** both rejected **with an authorization code** — neither role is in
+  the allowlist, so the delete clause refuses. A rejection without one prints
+  `STOP:` and leaves T5 unproven rather than passed.
 - **If PERMITTED:** the identity can disarm itself (and, combined with T2's
   failure mode, re-arm differently). Worse, it can lock itself out and leave dev
   unreconcilable until an operator restores the grants with `bootstrap.sh`.
@@ -1803,57 +1926,102 @@ the live condition stays frozen at its first-ever value.
 ```bash
 RG="/subscriptions/$SUB/resourceGroups/meatgeek-v2-dev-rg"
 RBAC_ADMIN="Role Based Access Control Administrator"
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_ROOT="$(git rev-parse --show-toplevel)" || REPO_ROOT=''
 ALLOWLIST="$REPO_ROOT/apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv"
 
-# Capture BOTH the condition and the assignment ID. The id is what proves the
-# reconcile was IN PLACE rather than a delete+recreate.
-BEFORE="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
-BEFORE_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
-
-# AN EMPTY CAPTURE IS NOT A BASELINE, and the comparison below cannot tell the
-# difference: `[ "" != "$AFTER" ]` is TRUE, so an unauthenticated or mis-scoped
-# read prints "PASS — condition reconciled" having compared nothing — and prints
-# it only after bootstrap has already rewritten the live condition. Nothing is
-# mutated until the baseline exists.
-if t_ready && [ -n "$BEFORE" ] && [ -n "$BEFORE_ID" ]; then
-  # Add a 9th role to the allowlist TEMPORARILY (do not commit this):
-  printf 'Monitoring Reader\tPENDING\n' >> "$ALLOWLIST"
-  # Subshell: the re-run and the revert below both resolve paths from the repo
-  # root, so this must not leave you sitting in the bootstrap directory.
-  (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)   # as the operator, not the SP
+# T6 IS ONE BLOCK — setup, assertions, revert and restore all inside the same
+# `if`. Split across guards, a refusal only skips the setup and execution falls
+# through to the restore, and THE RESTORE RUNS BOOTSTRAP: an unintended
+# bootstrap.sh against the live tenant is the exact hazard the rest of this
+# runbook exists to prevent.
+#
+# Pasted on its own, `t_ready` is not defined in this shell at all — and an
+# undefined command in an `if` is just a false condition, which is how a T6 with
+# NO preflight quietly proceeds. `command -v` turns that into a refusal.
+t6_mutated=0
+if ! command -v t_ready >/dev/null 2>&1; then
+  echo "REFUSING: t_ready is not defined in this shell — T6 runs bootstrap.sh against the LIVE tenant and will not run on unvalidated ids. Paste §6's preflight block first, then re-run T6." >&2
+elif ! t_ready; then
+  :   # t_ready has already said why, and nothing here has run.
+elif [ -z "$REPO_ROOT" ] || [ ! -f "$ALLOWLIST" ]; then
+  echo "REFUSING: not in the repository (root='$REPO_ROOT') or the allowlist is missing at '$ALLOWLIST' — T6 cannot revert what it cannot find, so it does not change it." >&2
+elif ! git diff --quiet -- "$ALLOWLIST"; then
+  echo "REFUSING: $ALLOWLIST already has uncommitted changes. T6 reverts with 'git checkout --', which would discard them, and the 8-role baseline it restores would not be the committed one. Commit or stash first." >&2
 else
-  echo "REFUSING: no baseline condition/id captured — T6 would report PASS against an empty BEFORE. Fix the read first; the allowlist is untouched." >&2
-fi
+  # Capture BOTH the condition and the assignment ID. The id is what proves the
+  # reconcile was IN PLACE rather than a delete+recreate.
+  BEFORE="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+    --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
+  BEFORE_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+    --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
 
-AFTER="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
-AFTER_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
-  --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
+  # AN EMPTY CAPTURE IS NOT A BASELINE, and the comparison below cannot tell the
+  # difference: `[ "" != "$AFTER" ]` is TRUE, so an unauthenticated or mis-scoped
+  # read prints "PASS — condition reconciled" having compared nothing — and prints
+  # it only after bootstrap has already rewritten the live condition. Nothing is
+  # mutated until the baseline exists.
+  if [ -z "$BEFORE" ] || [ -z "$BEFORE_ID" ]; then
+    echo "REFUSING: no baseline condition/id captured — T6 would report PASS against an empty BEFORE. Fix the read first; the allowlist is untouched." >&2
+  elif ! printf 'Monitoring Reader\tPENDING\n' >> "$ALLOWLIST"; then
+    echo "REFUSING: could not append the temporary 9th role to $ALLOWLIST — nothing was changed and no bootstrap ran." >&2
+  else
+    # THE FLAG IS SET HERE, before the run and not after it: from the moment the
+    # file changed, the revert below is mandatory whatever bootstrap does. It is
+    # what makes the restore reachable, so nothing that skipped the append can
+    # reach a bootstrap re-run.
+    t6_mutated=1
+    # Subshell: the re-run and the revert both resolve paths from the repo root,
+    # so this must not leave you sitting in the bootstrap directory.
+    (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)   # as the operator, not the SP
+    t6_boot_rc=$?
 
-[ "$BEFORE" != "$AFTER" ] && echo "PASS — condition reconciled" || echo "FAIL — condition frozen"
-[ "$BEFORE_ID" = "$AFTER_ID" ] && echo "PASS — same assignment, updated IN PLACE" \
-                              || echo "FAIL — assignment was delete+recreated (no-grant window)"
+    if [ "$t6_boot_rc" -ne 0 ]; then
+      echo "STOP: bootstrap exited $t6_boot_rc with the 9th role in the allowlist — T6 is NOT evaluated (the condition may be partly written). The revert below still runs, because the file was changed." >&2
+    else
+      AFTER="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+        --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"
+      AFTER_ID="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
+        --query "[?roleDefinitionName=='$RBAC_ADMIN'].id | [0]" -o tsv)"
 
-# Revert the allowlist and re-run bootstrap to restore the 8-role condition.
-# The path is ABSOLUTE via $REPO_ROOT because `git checkout -- <pathspec>`
-# resolves against your CWD: the repo-relative form run from inside the bootstrap
-# directory fails with "did not match any file(s) known to git", exits non-zero,
-# and reverts NOTHING — after which an unconditional re-run would re-apply the
-# NINE-role condition you just finished proving, leaving the apply identity's
-# allowlist permanently widened while the log reads as a clean revert. So the
-# revert has to succeed before the restore re-runs.
-if git checkout -- "$ALLOWLIST"; then
-  (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)
-else
-  echo "STOP: allowlist revert FAILED — do NOT re-run bootstrap; it would re-apply the 9-role condition. Restore $ALLOWLIST by hand, confirm with 'git diff --exit-code', then re-run bootstrap." >&2
+      if [ -z "$AFTER" ] || [ -z "$AFTER_ID" ]; then
+        echo "STOP: the post-run read came back empty — an empty AFTER differs from any BEFORE, so the comparison below would print PASS having read nothing. T6 is not evaluated." >&2
+      else
+        [ "$BEFORE" != "$AFTER" ] && echo "PASS — condition reconciled" || echo "FAIL — condition frozen"
+        [ "$BEFORE_ID" = "$AFTER_ID" ] && echo "PASS — same assignment, updated IN PLACE" \
+                                      || echo "FAIL — assignment was delete+recreated (no-grant window)"
+      fi
+    fi
+
+    # Revert the allowlist and re-run bootstrap to restore the 8-role condition.
+    # Reachable ONLY because $t6_mutated is set — i.e. only on the path that
+    # actually widened the allowlist.
+    #
+    # The path is ABSOLUTE via $REPO_ROOT because `git checkout -- <pathspec>`
+    # resolves against your CWD: the repo-relative form run from inside the
+    # bootstrap directory fails with "did not match any file(s) known to git",
+    # exits non-zero, and reverts NOTHING — after which an unconditional re-run
+    # would re-apply the NINE-role condition you just finished proving, leaving
+    # the apply identity's allowlist permanently widened while the log reads as a
+    # clean revert. So the revert has to succeed before the restore re-runs.
+    if [ "$t6_mutated" = 1 ]; then
+      if git checkout -- "$ALLOWLIST"; then
+        (cd "$REPO_ROOT/apps/infrastructure/bootstrap" && ./bootstrap.sh)
+      else
+        echo "STOP: allowlist revert FAILED — do NOT re-run bootstrap; it would re-apply the 9-role condition. Restore $ALLOWLIST by hand, confirm with 'git diff --exit-code', then re-run bootstrap." >&2
+      fi
+    fi
+  fi
 fi
 ```
 
 - **Expected:** the live condition **changes**, then changes back — and the
   **assignment id is identical throughout**. Both assertions must pass.
+- **If the block refuses, nothing ran.** T6 is the only test here that runs
+  `bootstrap.sh`, so every precondition — the preflight actually being loaded in
+  this shell, a clean allowlist, a real baseline — is checked before the file is
+  touched, and the restoring re-run is reachable only from the path that widened
+  it. Paste T6 on its own without §6's preflight and it refuses; it does not
+  half-run.
 - **Why the id check matters:** the reconcile must be an in-place
   `az role assignment update`, never a delete+recreate. A changed id means the
   grant was momentarily **absent**, which is the window that can strip the apply
@@ -1928,11 +2096,50 @@ nothing fails while they are outstanding — confirm all four explicitly here:
   red until the first `azure/login` fails `AADSTS700213` — with
   `DEV_TF_BACKEND_READY` already true and the apply loop live.
 
+This is the command that arms the live post-merge apply loop, so it takes an
+**explicit target** and an **explicit acknowledgement**. A bare `gh variable set`
+resolves against whatever repository your current directory's git remote happens
+to name — from the wrong checkout, or a directory you forgot you were in, it arms
+a repository you never meant to name. A shell cannot prove you judged B1–B10 and
+T1–T7, but it can refuse to be pasted absent-mindedly, and it can refuse to write
+to a target you did not type. Fill in both lines; leave either unset and the
+block refuses and mutates nothing.
+
 ```bash
-gh variable set DEV_TF_BACKEND_READY --body true    # REPOSITORY scope — see §2
+ACTIVATION_REPO='<owner>/<repo>'   # the repository this runbook has been verifying
+ACTIVATION_ACK=''                  # set to exactly: B1-B10 AND T1-T7 VERIFIED
+
+# Resolve the target rather than trusting the string: gh must be able to see it,
+# and the name it answers with must be the name you typed. A rename or a typo
+# that lands on a different repository answers with a different nameWithOwner,
+# and that mismatch refuses instead of arming the wrong loop.
+RESOLVED_REPO="$(gh repo view "$ACTIVATION_REPO" --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || RESOLVED_REPO=''
+
+if [ "$ACTIVATION_ACK" != 'B1-B10 AND T1-T7 VERIFIED' ]; then
+  echo "REFUSING: no activation acknowledgement. Set ACTIVATION_ACK='B1-B10 AND T1-T7 VERIFIED' only once every B-check and T-test above is resolved and recorded. DEV_TF_BACKEND_READY is unchanged." >&2
+elif [ -z "$RESOLVED_REPO" ]; then
+  echo "REFUSING: '$ACTIVATION_REPO' did not resolve through gh — an unresolved target means the write would have fallen back to ambient repository context. DEV_TF_BACKEND_READY is unchanged." >&2
+elif [ "$RESOLVED_REPO" != "$ACTIVATION_REPO" ]; then
+  echo "REFUSING: '$ACTIVATION_REPO' resolves to '$RESOLVED_REPO' — arming the apply loop on a repository other than the one you named is exactly what this check is for. Confirm which is correct, then re-run. DEV_TF_BACKEND_READY is unchanged." >&2
+else
+  # --repo is what makes the target the one above and not the ambient one.
+  # No --env: REPOSITORY scope, see §2.
+  gh variable set DEV_TF_BACKEND_READY --body true --repo "$RESOLVED_REPO"
+  gh variable list --repo "$RESOLVED_REPO" | grep '^DEV_TF_BACKEND_READY'   # must show: true
+fi
 ```
 
-To **deactivate** (any time, no code change): set it to `false` or delete it.
+To **deactivate** (any time, no code change): set it to `false` or delete it —
+pinned to the same explicit target, and with **no acknowledgement gate**. The
+gate exists to slow down arming the loop; disarming it is the safe direction and
+stays one command:
+
+```bash
+gh variable set DEV_TF_BACKEND_READY --body false --repo '<owner>/<repo>'
+# or, equivalently:
+gh variable delete DEV_TF_BACKEND_READY --repo '<owner>/<repo>'
+```
+
 Every MG-23 job then skips cleanly — a skipped job, never a red one — and dev
 returns to MG-24 operator-run reconciliation. This is the intended emergency
 stop; use it before you start debugging a misbehaving apply.
