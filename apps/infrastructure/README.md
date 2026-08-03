@@ -234,6 +234,58 @@ prod `always_ready >= 1`). The former `functions_app_service_plan_sku` var is
 **removed**. See
 [ADR: Flex Consumption hosting model](../../learnings/decisions/mg-24-flex-consumption-hosting-model.md).
 
+## Provider pinning & lock files
+
+Pinning has **two halves and needs both**: a `required_providers` version
+constraint gives the resolver a range, and a committed `.terraform.lock.hcl`
+gives it the exact version and `h1:`/`zh:` hashes inside that range. The root
+module **and every module under `modules/`** carry both. All of them constrain
+`azurerm ~> 4.0`, and every provider a module locks resolves to the same build
+the root locks — azurerm **4.81.0**, azapi **2.11.0**, time **0.14.0**.
+
+That is not preventive hygiene. `modules/iot-hub` declared no `azurerm`
+constraint at all, so CI's `terraform init` resolved whatever the registry served
+that minute. On **2026-08-03** that became azurerm **v5.0.1**, whose breaking
+`azurerm_eventhub` schema (`namespace_name`/`resource_group_name` →
+`namespace_id`) turned `validate-infrastructure` red on every PR — and left
+`main` latent-red — without a single line of this repo having changed. A gate
+whose result depends on the registry clock is not a gate. The stack stays on
+**azurerm 4.x** deliberately; moving to v5 is separate, deliberate work, not
+something a fresh `init` gets to decide.
+
+**Adding a `*.tftest.hcl` to a module makes it CI-invoked, and that carries an
+obligation.** `tf-static-checks.sh` **check 16** fails the build when a
+test-bearing module has no committed `.terraform.lock.hcl`, has one that exists
+on disk but is **untracked** (it would simply be absent from the CI checkout), or
+uses a provider — the `<prefix>` of any `resource "<prefix>_…"` /
+`data "<prefix>_…"` block — that it declares no version constraint for.
+Discovery is the same `find` on `*.tftest.hcl` that `ci.yml` uses to select
+modules, so a module cannot start being CI-invoked without also being gated.
+
+Locks are **multi-platform, on the same four platforms** everywhere:
+`linux_amd64` (the GitHub runners), `darwin_arm64` (Apple-silicon workstation),
+`darwin_amd64` (Intel Mac fallback) and `linux_arm64` (arm64 build/review
+containers). `init` only trusts a provider whose hash for the *current* platform
+is already recorded, so regenerating with fewer platforms both dirties the tree
+and hands the dropped platforms an unpinned resolution. Always pass all four —
+from the module directory, or from `apps/infrastructure` for the root:
+
+```bash
+terraform init -backend=false
+terraform providers lock \
+  -platform=linux_amd64 -platform=linux_arm64 \
+  -platform=darwin_arm64 -platform=darwin_amd64
+```
+
+Verify a regeneration two ways before committing it: `terraform providers lock`
+must report "All checksums for this platform were already tracked" for every
+platform, and a following `terraform init -backend=false` must leave the file
+byte-identical. `ci.yml` inits the root **and** every test-bearing module with
+`-lockfile=readonly`, so an init that would have to amend a lock **fails**
+instead of quietly rewriting it. A dirty `git diff` on any `.terraform.lock.hcl`
+is a provider that resolved outside the lock — treat it as a supply-chain event,
+not a formatting nit.
+
 ## Terraform / Nx Commands
 
 ```bash
@@ -280,8 +332,11 @@ reference, missing per-env state keys, a stray local `*.tfstate`, a missing
 `meatgeek-v2-` prefix, a secret OUTPUT (best-effort — direct or obfuscated-index
 reference), a secret value in the Function App app*settings (with the one coupled
 App Insights exemption — the full conn string is allowed **only** when
-`local_authentication_enabled = false`), a SAS-based IoT Hub route, and
-(check 12) a README that stops documenting the fail-closed
+`local_authentication_enabled = false`), a SAS-based IoT Hub route,
+(check 16) a CI-invoked module that floats its providers — no committed or no
+tracked `.terraform.lock.hcl`, or a provider it uses with no explicit version
+constraint (see [Provider pinning & lock files](#provider-pinning--lock-files)) —
+and (check 12) a README that stops documenting the fail-closed
 `scripts/tf-plan-secret-inspection.sh` as a REQUIRED pre-apply gate. It runs in
 the `validate-infrastructure` job. Note: the secret-output/app_settings scans are
 a best-effort lexical guard; the authoritative secret-in-state guarantee is the
