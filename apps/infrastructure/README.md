@@ -165,7 +165,8 @@ change goes: PR → `ci.yml`'s `validate-infrastructure` job runs the
 **credentialless** sequence (`assert-credentialless.sh` → `fmt -check` →
 `terraform init -backend=false -input=false -lockfile=readonly` → `validate` →
 `terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard
-fixtures → per-module `terraform test`) → review → merge to `main` →
+fixtures → V1 Cosmos export tool tests (MG-48, `run-tests.mjs`) → per-module
+`terraform test`) → review → merge to `main` →
 `.github/workflows/infra-apply-dev.yml` runs the fail-closed pre-apply secret
 gate and destroy circuit-breaker, applies the exact saved plan, and then fails
 the run on any drift. Applying dev by hand races that loop.
@@ -298,6 +299,8 @@ nx plan infrastructure --args="--env=dev"      # terraform plan -var-file=enviro
 nx apply infrastructure                        # terraform apply tfplan   (bootstrap/recovery — dev steady state is CI-run)
 nx output infrastructure                       # terraform output
 nx destroy infrastructure --args="--env=dev"   # terraform destroy (careful!)
+nx test infrastructure                         # node scripts/cosmos-export/run-tests.mjs (MG-48) —
+                                               #   also picked up by `nx run-many -t test --all`
 ```
 
 Three invocation rules, each of which fails in a different and non-obvious way
@@ -556,6 +559,53 @@ The app deploy (`apps/api/project.json` + `.github/workflows/app-deploy-prod.yml
 reads the Function App name from `terraform output -raw function_app_name` rather
 than hardcoding it, so a naming change in Terraform can never desync the publish
 target.
+
+## V1 Cosmos export tool (MG-48)
+
+`scripts/cosmos-export/` is a standalone, read-only export CLI for the
+**legacy V1** Cosmos DB account — unrelated to the V2 stack this Terraform
+project provisions. It exists because V1 is being deleted to reclaim cost and
+free the subscription's Cosmos free-tier slot, and V1's continuous backup dies
+with the account, so a static export has to exist first. Run
+`node scripts/cosmos-export/cosmos-export.mjs --help` for full usage; only
+what `--help` doesn't already cover is captured below.
+
+**No live Azure run has happened.** All 50 unit tests (`nx test infrastructure`,
+CI-wired above) run against an injected fake client — the V1 subscription is
+disabled until 2026-08-06 and the build environment holds no credentials.
+
+**Auth.** The account key is read **only** from the `COSMOS_EXPORT_KEY`
+environment variable; passing it as a CLI argument is refused, since arguments
+land in shell history and `ps` output for every user on the box. Prefer a
+**read-only** key — the tool only ever reads. AAD via `DefaultAzureCredential`
+is also supported (`--auth aad`), and needs the Cosmos DB Built-in Data Reader
+role plus `@azure/identity` installed.
+
+**Exit codes — the operator contract.** Scripts that wrap this tool key off
+the exit code, so treat it as stable:
+
+| Code | Meaning |
+| ---- | ------- |
+| 0    | verified-complete |
+| 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success |
+| 2    | reconciliation failure — written count doesn't match the pre-export `SELECT VALUE COUNT(1)`, the account has zero containers to export, or (in `--verify`) an on-disk hash/size/line-count mismatch or live-count drift |
+| 3    | throttling abort — 429 with retries exhausted |
+| 4    | auth failure |
+| 5    | transport abort mid-pagination |
+
+**Safety semantics.**
+
+- `manifest.json` is written only once **every** container in scope has
+  reconciled, so a failed run never leaves behind anything that could be
+  mistaken for a finished export.
+- A container that fails to reconcile keeps its output as `*.jsonl.partial`
+  rather than the final `.jsonl` name.
+- `--verify` re-checks the manifest against both the on-disk files (hash,
+  size, line count) and the live account (current counts). Run it again,
+  possibly days after the export, immediately before the account is deleted.
+- The per-container count query runs **before** pagination starts, so the
+  account should be quiesced during export — a concurrent write during export
+  will correctly trip reconciliation rather than being silently included.
 
 ---
 
