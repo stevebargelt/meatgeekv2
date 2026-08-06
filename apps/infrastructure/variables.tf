@@ -58,24 +58,23 @@ variable "iot_hub_sku_capacity" {
 # The account name is derived deterministically in main.tf (local.cosmos_account_name)
 # and the account is provisioned inside the V2 resource group by the cosmos-db module,
 # so there are no existing/shared-account inputs here anymore.
-variable "cosmos_database_throughput" {
-  description = "Shared throughput for the environment-specific database (RU/s)"
-  type        = number
-  default     = 400
-  validation {
-    condition     = var.cosmos_database_throughput >= 200 && var.cosmos_database_throughput <= 100000
-    error_message = "Database throughput must be between 200 and 100,000 RU/s."
-  }
-}
+#
+# The former cosmos_database_throughput / cosmos_database_max_throughput inputs are
+# REMOVED (MG-48). They reached the module and were consumed only by a cost-estimate
+# output — no database-level throughput and no autoscale block was ever provisioned
+# from them. Container throughput lives in the module (temperatures = 400 RU/s).
+variable "cosmos_enable_free_tier" {
+  description = <<-EOT
+    Claim the CosmosDB free tier (1000 RU/s + 25 GB free) for this environment's
+    account. Azure allows exactly ONE free-tier account per SUBSCRIPTION, so at most
+    one environment may set this true — dev holds the slot (MG-48).
 
-variable "cosmos_database_max_throughput" {
-  description = "Maximum throughput for database auto-scaling (RU/s)"
-  type        = number
-  default     = 4000
-  validation {
-    condition     = var.cosmos_database_max_throughput >= 200
-    error_message = "Max throughput must be at least 200 RU/s (minimum for auto-scaling)."
-  }
+    ⚠️ FORCE-NEW: free_tier_enabled is settable only at account CREATION. Changing
+    this value DESTROYS AND RECREATES module.cosmos_db.azurerm_cosmosdb_account.main
+    and drops its data. Treat a flip as a migration, not a config change.
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "temperature_data_ttl_days" {

@@ -89,14 +89,15 @@ output "database_throughput" {
   value       = azurerm_cosmosdb_sql_database.meatgeek.throughput
 }
 
-output "estimated_monthly_cost" {
-  description = "Estimated monthly cost for this database in USD"
-  value = {
-    base_throughput = var.database_throughput * 0.008 * 24 * 30 # $0.008 per RU/hour
-    max_throughput  = var.database_max_throughput * 0.008 * 24 * 30
-    storage_gb      = "Variable based on data volume"
-  }
-}
+# The former `estimated_monthly_cost` output was REMOVED (MG-48). It was wrong by
+# 100x — it read $0.008 as a per-RU/s-hour rate when Azure charges it per 100 RU/s
+# per hour, so it reported ~$2,304/mo for a 400 RU/s database that costs ~$23/mo.
+# It was also computed from `database_throughput` / `database_max_throughput`,
+# inputs that governed NOTHING: this module sets no database-level throughput and
+# has no autoscale_settings block anywhere, so those variables described a
+# provisioning shape that does not exist. Both are deleted with it. A cost figure
+# that is confidently wrong is worse than no cost figure — this one was found
+# during a cost-reduction effort, where it would have misdirected the reader.
 
 # Environment Information
 output "environment_info" {
@@ -105,6 +106,5 @@ output "environment_info" {
     environment     = var.environment
     database_prefix = var.resource_prefix
     ttl_days        = var.temperature_data_ttl / 86400
-    auto_scale_max  = var.database_max_throughput
   }
 }

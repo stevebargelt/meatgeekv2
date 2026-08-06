@@ -47,30 +47,19 @@ variable "consistency_max_staleness_prefix" {
 
 # Free-tier knob (one free-tier account allowed per subscription; dev-only)
 variable "enable_free_tier" {
-  description = "Enable the CosmosDB free tier for the V2 account (one per subscription)"
+  description = <<-EOT
+    Enable the CosmosDB free tier (1000 RU/s + 25 GB free) for the V2 account.
+    Azure permits exactly ONE free-tier Cosmos account per SUBSCRIPTION, so at most
+    one environment may set this true.
+
+    ⚠️ FORCE-NEW: `free_tier_enabled` can only be set at account CREATION. Azure
+    exposes no update path, so CHANGING THIS VALUE — in either direction — makes
+    Terraform DESTROY AND RECREATE azurerm_cosmosdb_account.main, dropping every
+    document the account holds. Flipping it is a data-migration decision, not a
+    config tweak.
+  EOT
   type        = bool
   default     = false
-}
-
-# Database configuration
-variable "database_throughput" {
-  description = "Shared throughput for the database (RU/s)"
-  type        = number
-  default     = 400
-  validation {
-    condition     = var.database_throughput >= 200 && var.database_throughput <= 100000
-    error_message = "Database throughput must be between 200 and 100,000 RU/s."
-  }
-}
-
-variable "database_max_throughput" {
-  description = "Maximum throughput for auto-scaling (RU/s)"
-  type        = number
-  default     = 4000
-  validation {
-    condition     = var.database_max_throughput >= 200
-    error_message = "Max throughput must be at least 200 RU/s (minimum for auto-scaling)."
-  }
 }
 
 # TTL configuration for temperature data

@@ -249,7 +249,7 @@ resource "azurerm_cosmosdb_sql_role_assignment" "iot_hub_writer" {
 #   cosmos_account_name  (string)  globally-unique, Azure-valid account name
 #   resource_group_name  (string)  the V2 resource group the account lives in
 #   location             (string)  Azure region for the account
-#   resource_prefix / environment / throughput / ttl / tags as before
+#   resource_prefix / environment / free-tier / ttl / tags as before
 # The former V1 shared-account adoption inputs are removed — V2 no longer reads
 # or adopts the V1 shared Cosmos account; it provisions and owns its own.
 module "cosmos_db" {
@@ -261,9 +261,8 @@ module "cosmos_db" {
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
 
-  database_throughput     = var.cosmos_database_throughput
-  database_max_throughput = var.cosmos_database_max_throughput
-  temperature_data_ttl    = var.temperature_data_ttl_days * 86400 # Convert days to seconds
+  enable_free_tier     = var.cosmos_enable_free_tier
+  temperature_data_ttl = var.temperature_data_ttl_days * 86400 # Convert days to seconds
 
   tags = local.common_tags
 }
