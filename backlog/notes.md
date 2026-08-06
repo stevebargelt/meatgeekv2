@@ -75,3 +75,5 @@ why V2 pays ~$24/mo it need not. Operator confirmed nothing calls the V1 API.
 - The apply's post-apply secret gate correctly distinguishes "could not read state" (fail closed)
   from "never bound state" (nothing to inspect, exit 0). A `success` on a backlog-only commit is
   not a fail-open.
+
+**2026-08-06 in progress.** Credit reset; VSE02 Enabled. MG-42 AC4 first half DONE — bootstrap re-run reconciled all three fed creds to the derived prefix (appdeploy-dev and oidc-prod repaired, infra-apply-dev untouched). Awaiting the dev apply's environment-scoped azure/login for AC4's second half. MG-48 Phase 1 started: archive RG + storage created, APIM backup running server-side (APIM state Updating). NOTHING deleted yet — the delete is gated on verifying the backup blob is non-trivial.
