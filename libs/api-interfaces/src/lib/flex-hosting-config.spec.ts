@@ -265,4 +265,42 @@ describe('MG-51: the Cosmos database name reaches every consumer from one Terraf
     );
     expect(devEnv).not.toMatch(/databaseName:[^\n]*\|\|/);
   });
+
+  it('keeps database-name literals out of every deployable Terraform config and the dev Function App environment', () => {
+    // Fixtures are intentionally excluded: their concrete values exercise
+    // Terraform's plan assertions. This scan covers only configuration that can
+    // ship to an environment, where a literal would become a second source of
+    // truth on the next Cosmos database migration.
+    const infrastructureRoot = path.join(REPO_ROOT, 'apps/infrastructure');
+    const terraformConfigs: string[] = [];
+    const collect = (directory: string) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const absolute = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          collect(absolute);
+        } else if (
+          entry.isFile() &&
+          (entry.name.endsWith('.tf') || entry.name.endsWith('.tfvars'))
+        ) {
+          terraformConfigs.push(absolute);
+        }
+      }
+    };
+    collect(infrastructureRoot);
+
+    // A concrete provisioned database follows the resource-prefix + "-db"
+    // convention. Match only executable text, so explanatory comments may name
+    // the historical outage without becoming false positives.
+    const databaseLiteral = /["']meatgeek(?:-v2)?-(?:dev|prod)-db["']/;
+    for (const config of terraformConfigs) {
+      expect(stripComments(fs.readFileSync(config, 'utf8'))).not.toMatch(databaseLiteral);
+    }
+
+    const devEnvironment = readRepo('apps/api/src/environments/environment.development.ts').replace(
+      /\/\*[\s\S]*?\*\//g,
+      ''
+    );
+    expect(devEnvironment).not.toMatch(databaseLiteral);
+    expect(devEnvironment).not.toMatch(/databaseName:[^\n]*(?:\|\||\?\?)/);
+  });
 });
