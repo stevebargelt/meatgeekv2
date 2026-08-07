@@ -16,6 +16,66 @@ terraform {
   }
 }
 
+# MG-48 REPLACEMENT-PROPAGATION AUDIT — this module, enumerated in full.
+#
+# THE RULE, in attribute-kind terms rather than resource types: a reference to a
+# parent's COMPUTED attribute (`.id`, an endpoint URI, a principal id) is unknown
+# until the new parent exists, so it carries REPLACEMENT. A reference to a
+# parent's CONFIGURED value — `.name` above all — is a static literal, identical
+# before and after, so it carries ORDERING ONLY. Terraform never plans the child
+# for replacement, Azure destroys it with the parent regardless, and state is left
+# listing a resource that no longer exists.
+#
+# The enumeration is written out because assuming "the obvious ones are all of
+# them" is what has now broken dev repeatedly. It is deliberately NOT limited to
+# arguments spelled `<something>_name`, and NOT to bare references: `entity_path`
+# is a name-valued argument not spelled that way, and `endpoint_uri` reaches a
+# name from INSIDE a string interpolation. The VALUE decides, never the spelling.
+# Arguments are named rather than line numbers, which rot.
+#
+# CONFIGURED-NAME references — ordering only, so every child listed here carries
+# an explicit replace_triggered_by naming that parent:
+#   azurerm_eventhub.temperature_data          -> eventhub_namespace.main  (namespace_name)
+#   ..._endpoint_eventhub.eventhub_realtime    -> eventhub_namespace.main  (endpoint_uri, interpolated)
+#   ..._endpoint_eventhub.eventhub_realtime    -> eventhub.temperature_data (entity_path)
+#   azurerm_iothub_route.cosmos                -> iothub.main              (iothub_name)
+#   azurerm_iothub_route.cosmos                -> ..._cosmosdb_account.cosmos_storage (endpoint_names)
+#   azurerm_iothub_route.eventhub              -> iothub.main              (iothub_name)
+#   azurerm_iothub_route.eventhub              -> ..._endpoint_eventhub.eventhub_realtime (endpoint_names)
+#   azurerm_iothub_consumer_group.functions    -> iothub.main              (iothub_name)
+#   azurerm_iothub_consumer_group.realtime     -> iothub.main              (iothub_name)
+#
+# COMPUTED references — these carry replacement natively. No lifecycle block is
+# needed and adding one would be noise, not safety:
+#   azurerm_role_assignment.iothub_eventhub_sender -> eventhub.temperature_data (scope, `.id`)
+#   azurerm_role_assignment.iothub_eventhub_sender -> iothub.main (principal_id, identity)
+#   both routing endpoints                         -> iothub.main (iothub_id, `.id`)
+#
+# CROSS-BOUNDARY values, which no lifecycle block in this module can name because
+# replace_triggered_by accepts only managed resources in the SAME module:
+# var.cosmos_database_name and var.cosmos_container_name are configured literals
+# that carry nothing, which is why terraform_data.cosmos_target_ready below
+# carries the corresponding COMPUTED ids instead. var.cosmos_account_endpoint is
+# module.cosmos_db.endpoint, a computed attribute, so it does go unknown when the
+# account is replaced — and the account reaches this module a second way besides,
+# via account -> database -> cosmos_target_ready -> endpoint.
+# var.resource_group_name is excluded on the boundary static check 18 documents:
+# an RG replacement is a whole-stack event the destroy guard blocks on sight.
+#
+# STRUCTURALLY EXCLUDED: outputs.tf reaches several of these resources by `.name`.
+# An `output` block cannot carry a `lifecycle` block, so there is nothing to
+# assert there — that is an exclusion, not an unclosed gap.
+#
+# PLAN SHAPE, MEASURED rather than argued (Terraform 1.9.8, synthetic
+# terraform_data graph, real apply, no credentials — transcripts in the MG-48
+# step-4 result notes): adding a lifecycle block to a resource ALREADY IN STATE,
+# or extending an existing replace_triggered_by list, plans as "No changes"; and a
+# trigger whose referenced parent is planned for CREATE does not fire. Both
+# properties matter here, because this module's routes, consumer groups and Event
+# Hub path are all in live dev state while the Cosmos endpoint is not — together
+# they are why the blocks below add nothing to the MG-48 repair plan and keep it
+# CREATES-ONLY.
+
 # IoT Hub
 #
 # DOCUMENTED EXCEPTION (MG-24 ADR) — key/SAS auth is INTENTIONALLY kept enabled.
