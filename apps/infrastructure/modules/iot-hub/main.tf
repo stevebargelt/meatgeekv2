@@ -82,6 +82,19 @@ resource "azurerm_eventhub" "temperature_data" {
   resource_group_name = var.resource_group_name
   partition_count     = 2
   message_retention   = 1
+
+  # NOT redundant with the namespace_name reference above — do not delete this.
+  # `azurerm_eventhub_namespace.main.name` is the namespace's CONFIGURED name:
+  # identical before and after the namespace is replaced, so the reference carries
+  # ORDERING but never REPLACEMENT. Terraform would leave this Event Hub unplanned
+  # while Azure destroyed it along with its parent namespace, and state would keep
+  # listing an entity that no longer exists — the same class of defect that
+  # orphaned the Cosmos database and its containers on 2026-08-06 (MG-48). A
+  # reference to a parent's COMPUTED attribute (`.id`) would carry replacement; a
+  # reference to its configured `name` does not.
+  lifecycle {
+    replace_triggered_by = [azurerm_eventhub_namespace.main]
+  }
 }
 
 # Identity-based send access for the IoT Hub routing endpoint.
@@ -219,8 +232,19 @@ resource "azurerm_iothub_route" "cosmos" {
   # had already destroyed the Function App's Cosmos data-plane role assignment.
   # replace_triggered_by forces the route to be replaced with the endpoint, and
   # the reference above then orders the route's destroy before the endpoint's.
+  #
+  # azurerm_iothub.main is listed for the SAME reason, one level up (MG-48). PR #37
+  # fixed route-to-ENDPOINT propagation and left route-to-HUB propagation broken:
+  # `iothub_name` above reaches the hub by its configured name too, so a hub
+  # replacement would destroy this route in Azure while Terraform kept it in state,
+  # unplanned. Hub replacement is not hypothetical — tf-plan-destroy-guard.sh's own
+  # header names IoT Hub `location` as ForceNew, so a single-token edit plans the
+  # hub as a destroy-and-recreate.
   lifecycle {
-    replace_triggered_by = [azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage]
+    replace_triggered_by = [
+      azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage,
+      azurerm_iothub.main,
+    ]
   }
 }
 
@@ -240,8 +264,16 @@ resource "azurerm_iothub_route" "eventhub" {
   # (which the Event Hub namespace or entity being replaced would cascade into)
   # leaves this route untouched and Azure rejects the endpoint delete with
   # IH400111. Not redundant with the endpoint_names reference — see above.
+  #
+  # azurerm_iothub.main is listed for the route-to-HUB pairing, exactly as on the
+  # Cosmos route above: `iothub_name` reaches the hub by its configured name, which
+  # survives a hub replacement unchanged, so without this the route is orphaned in
+  # state when the hub is replaced.
   lifecycle {
-    replace_triggered_by = [azurerm_iothub_endpoint_eventhub.eventhub_realtime]
+    replace_triggered_by = [
+      azurerm_iothub_endpoint_eventhub.eventhub_realtime,
+      azurerm_iothub.main,
+    ]
   }
 }
 
@@ -251,6 +283,16 @@ resource "azurerm_iothub_consumer_group" "functions" {
   iothub_name            = azurerm_iothub.main.name
   eventhub_endpoint_name = "events"
   resource_group_name    = var.resource_group_name
+
+  # NOT redundant with the iothub_name reference above — do not delete this. The
+  # hub's configured name is identical before and after a hub replacement, so the
+  # reference orders this consumer group but never plans it for replacement. Azure
+  # destroys the consumer group with the hub regardless, leaving state listing a
+  # resource that does not exist — and the Function App's IoT trigger then binds to
+  # a consumer group the hub has never heard of. See the routes above; MG-48.
+  lifecycle {
+    replace_triggered_by = [azurerm_iothub.main]
+  }
 }
 
 # Consumer group for real-time processing
@@ -259,4 +301,9 @@ resource "azurerm_iothub_consumer_group" "realtime" {
   iothub_name            = azurerm_iothub.main.name
   eventhub_endpoint_name = "events"
   resource_group_name    = var.resource_group_name
+
+  # Same hub pairing as the functions consumer group above, for the same reason.
+  lifecycle {
+    replace_triggered_by = [azurerm_iothub.main]
+  }
 }
