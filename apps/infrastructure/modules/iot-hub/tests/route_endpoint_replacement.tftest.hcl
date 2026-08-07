@@ -43,6 +43,8 @@ variables {
   cosmos_account_endpoint   = "https://mgv2dev.documents.azure.com/"
   cosmos_database_name      = "meatgeek"
   cosmos_container_name     = "temperatures"
+  cosmos_database_id        = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2dev/sqlDatabases/meatgeek"
+  cosmos_container_id       = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2dev/sqlDatabases/meatgeek/containers/temperatures"
   cosmos_role_assignment_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2dev/sqlRoleAssignments/11111111-1111-1111-1111-111111111111"
 }
 
