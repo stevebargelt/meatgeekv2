@@ -15,7 +15,9 @@
  *     always-ready (prod), and both declare the Flex scale knobs;
  *   - the Flex-deprecated app settings are pruned from the environment configs;
  *   - the inherited Y1/EP1 service-plan-SKU input is gone and the module plan is
- *     the Flex FC1 plan (the single-model replacement).
+ *     the Flex FC1 plan (the single-model replacement);
+ *   - the Cosmos DATABASE NAME reaches the Function App from the same Terraform
+ *     value that creates the database, and no consumer restates it (MG-51).
  *
  * Like its siblings (infra-security-posture / ci-toolchain-pin / prod-deploy-split)
  * this is a *repo-tooling* invariant. It lives in api-interfaces because that leaf
@@ -175,5 +177,130 @@ describe('MG-24 Flex: deprecated settings + legacy plan SKU are gone', () => {
     // And the app is the Flex resource type (the linux_function_app is gone).
     expect(live).toMatch(/resource\s+"azurerm_function_app_flex_consumption"/);
     expect(live).not.toMatch(/resource\s+"azurerm_linux_function_app"/);
+  });
+});
+
+/**
+ * MG-51 — the Cosmos database name is ONE value with several consumers.
+ *
+ * Terraform creates the database as `${resource_prefix}-db`. The IoT Hub path
+ * has always been handed that name through module wiring; the Functions path was
+ * handed only the account endpoint, so the API guessed — and guessed a database
+ * that has never existed, silently, while an IoT-path health check stayed green.
+ * The asymmetry is the defect, and the fix is only durable if it stays a single
+ * source: MG-53 changes this value during a migration cutover by editing
+ * modules/cosmos-db/main.tf, and every consumer must move with it for free.
+ *
+ * This is exactly a cross-file invariant — the module plan proves the setting
+ * renders, but only the root can show both consumers read the same output, and
+ * only the app tree can show nothing restates the literal.
+ */
+describe('MG-51: the Cosmos database name reaches every consumer from one Terraform source', () => {
+  const stripComments = (tf: string) =>
+    tf
+      .split('\n')
+      .filter(l => !/^\s*#/.test(l))
+      .join('\n');
+
+  it('the database is still created from resource_prefix (the value everything else derives from)', () => {
+    const cosmos = stripComments(readRepo('apps/infrastructure/modules/cosmos-db/main.tf'));
+    expect(cosmos).toMatch(
+      /resource\s+"azurerm_cosmosdb_sql_database"\s+"meatgeek"\s*\{[\s\S]*?name\s*=\s*"\$\{var\.resource_prefix\}-db"/
+    );
+    // Published so consumers can read it rather than rebuild it.
+    const outputs = stripComments(readRepo('apps/infrastructure/modules/cosmos-db/outputs.tf'));
+    expect(outputs).toMatch(
+      /output\s+"database_name"\s*\{[\s\S]*?value\s*=\s*azurerm_cosmosdb_sql_database\.meatgeek\.name/
+    );
+  });
+
+  it('the root wires that output to BOTH the IoT Hub and the Functions module', () => {
+    const root = stripComments(readRepo('apps/infrastructure/main.tf'));
+    const wirings =
+      root.match(/cosmos_database_name\s*=\s*module\.cosmos_db\.database_name/g) ?? [];
+    // One for iot_hub, one for azure_functions. The Functions half is what MG-51
+    // added; a future consumer must join them, not spell the name again.
+    expect(wirings.length).toBe(2);
+    // No consumer may be handed a literal instead of the module output.
+    expect(root).not.toMatch(/cosmos_database_name\s*=\s*"/);
+  });
+
+  it('the Functions module publishes it as the app setting the API reads', () => {
+    const live = stripComments(readRepo('apps/infrastructure/modules/functions/main.tf'));
+    expect(live).toMatch(/"COSMOSDB_DATABASE_NAME"\s*=\s*var\.cosmos_database_name/);
+    // The account endpoint alone was the defect — both must be present.
+    expect(live).toMatch(/"COSMOSDB__accountEndpoint"\s*=\s*var\.cosmos_account_endpoint/);
+    // The module input carries no default: an unwired caller must fail at plan
+    // time rather than deploy an app pointed at nothing.
+    const vars = stripComments(readRepo('apps/infrastructure/modules/functions/variables.tf'));
+    expect(vars).toMatch(/variable\s+"cosmos_database_name"\s*\{[\s\S]*?\n\}/);
+    const block = vars.match(/variable\s+"cosmos_database_name"\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(block).not.toMatch(/^\s*default\s*=/m);
+  });
+
+  it('no Terraform source or app config hardcodes a database name', () => {
+    // The current name (meatgeek-v2-dev-db) may appear ONLY in module test
+    // fixtures, which must pin a concrete value to assert against. Anywhere in
+    // the shipped configuration it is a second source of truth that survives the
+    // MG-53 cutover as a stale literal.
+    for (const rel of [
+      'apps/infrastructure/main.tf',
+      'apps/infrastructure/modules/functions/main.tf',
+      'apps/infrastructure/modules/iot-hub/main.tf',
+      'apps/infrastructure/environments/dev.tfvars',
+      'apps/infrastructure/environments/prod.tfvars',
+    ]) {
+      expect(stripComments(readRepo(rel))).not.toMatch(/meatgeek(-v2)?(-dev|-prod)?-db/);
+    }
+    // And the app-side fallback that produced the defect is gone, not relocated:
+    // the databaseName assignment resolves the setting and nothing else. (The
+    // block comment above it names the removed default, so comments are stripped
+    // here too.)
+    const devEnv = readRepo('apps/api/src/environments/environment.development.ts').replace(
+      /\/\*[\s\S]*?\*\//g,
+      ''
+    );
+    expect(devEnv).toMatch(
+      /databaseName:\s*requiredFromInfrastructure\('COSMOSDB_DATABASE_NAME'\),/
+    );
+    expect(devEnv).not.toMatch(/databaseName:[^\n]*\|\|/);
+  });
+
+  it('keeps database-name literals out of every deployable Terraform config and the dev Function App environment', () => {
+    // Fixtures are intentionally excluded: their concrete values exercise
+    // Terraform's plan assertions. This scan covers only configuration that can
+    // ship to an environment, where a literal would become a second source of
+    // truth on the next Cosmos database migration.
+    const infrastructureRoot = path.join(REPO_ROOT, 'apps/infrastructure');
+    const terraformConfigs: string[] = [];
+    const collect = (directory: string) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const absolute = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          collect(absolute);
+        } else if (
+          entry.isFile() &&
+          (entry.name.endsWith('.tf') || entry.name.endsWith('.tfvars'))
+        ) {
+          terraformConfigs.push(absolute);
+        }
+      }
+    };
+    collect(infrastructureRoot);
+
+    // A concrete provisioned database follows the resource-prefix + "-db"
+    // convention. Match only executable text, so explanatory comments may name
+    // the historical outage without becoming false positives.
+    const databaseLiteral = /["']meatgeek(?:-v2)?-(?:dev|prod)-db["']/;
+    for (const config of terraformConfigs) {
+      expect(stripComments(fs.readFileSync(config, 'utf8'))).not.toMatch(databaseLiteral);
+    }
+
+    const devEnvironment = readRepo('apps/api/src/environments/environment.development.ts').replace(
+      /\/\*[\s\S]*?\*\//g,
+      ''
+    );
+    expect(devEnvironment).not.toMatch(databaseLiteral);
+    expect(devEnvironment).not.toMatch(/databaseName:[^\n]*(?:\|\||\?\?)/);
   });
 });

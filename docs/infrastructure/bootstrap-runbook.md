@@ -948,7 +948,12 @@ APP_ID_URI="$(az ad app show --id "$API_APP_ID" --query 'identifierUris[0]' -o t
 #   → api://<DEV_API_CLIENT_ID>  (equals the emitted DEV_API_APP_ID_URI)
 
 # `/api/devices` is a real, idempotent GET route (function getDevices in
-# apps/api/src/main.ts); there is NO health endpoint and no anonymous carve-out.
+# apps/api/src/main.ts). A GET health/cosmos route also exists (MG-51,
+# apps/api/src/functions/health/cosmos-health.ts) but sits behind the SAME
+# platform-layer Easy Auth gate as every other route — there is still no
+# anonymous carve-out on this Function App — so it does not change the
+# no-token / wrong-audience behaviour under test here; devices is used below
+# because it is the route this procedure was already written against.
 # The getDevicesHandler REQUIRES a user id — read from the `userId` query param
 # or the `x-user-id` header — and returns HTTP 400 "User ID is required" without
 # one. So the VALID-token call must carry it, or it 400s instead of 2xx. The id
@@ -1001,6 +1006,32 @@ the populated `functions_auth_*` values, and a deployed app, so this step is
 > (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) is both allowed and pre-authorized. To
 > demonstrate caller-pinning, acquire the same-scope token from a client that is
 > NOT in the allowlist (e.g. a second app registration) and confirm a 401/403.
+
+> **Cosmos health check (MG-51) — not yet run live.** `GET health/cosmos`
+> (`apps/api/src/functions/health/cosmos-health.ts`) authenticates with the
+> Function App's own managed identity and performs a Cosmos metadata read of the
+> `COSMOSDB_DATABASE_NAME` this bootstrap wires above: 200 when the account is
+> reachable, the identity holds its data-plane role, **and** the configured
+> database exists; 503 otherwise. It exists because the IoT Hub ingest path and
+> this API path share no code — a receiver-side check driven through IoT
+> telemetry can read green while the API is pointed at a database that does not
+> exist, which is exactly the defect MG-51 fixed. Treat it the same way as the
+> rest of this step: it has unit and integration coverage against a stubbed
+> Cosmos client, but **no live 200 has been observed** — there is no automated
+> dev app-deploy workflow yet (**MG-36**, still open), so nothing has published
+> this build to a live Function App to call it against. Once MG-36 (or a manual
+> publish, as above) lands a build, `curl` this route with the same delegated
+> token as the devices call and record the status code as the check to run
+> **after** the next dev apply and deploy — not as a result already in hand.
+> The response body deliberately carries neither the account endpoint nor the
+> database name, healthy or not: a 503 reports one of three fixed codes
+> (`cosmos_database_name_not_configured`, `cosmos_account_endpoint_not_configured`,
+> `cosmos_probe_failed`) plus, only for a probe failure, the dependency's numeric
+> status — 404 the configured database is absent, 403 the identity lacks its
+> data-plane role, 401 its token was refused — never the dependency's error text.
+> The Function App log line carries the same two fields and nothing more. Do not
+> read an empty body as a broken check; that redaction is the fix a prior
+> review round of MG-51 hardened it with.
 
 ### Step 7 — Second plan is a NO-OP
 

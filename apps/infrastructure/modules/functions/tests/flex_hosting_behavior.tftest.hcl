@@ -39,6 +39,7 @@ variables {
   storage_account_name                   = "mgv2devabc123def456"
   application_insights_connection_string = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://westus2.in.applicationinsights.azure.com/"
   cosmos_account_endpoint                = "https://mgv2dev.documents.azure.com/"
+  cosmos_database_name                   = "meatgeek-v2-dev-db"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   cors_allowed_origins                   = ["http://localhost:4200"]
