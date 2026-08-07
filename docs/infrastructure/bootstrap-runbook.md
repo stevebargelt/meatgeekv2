@@ -1023,6 +1023,15 @@ the populated `functions_auth_*` values, and a deployed app, so this step is
 > publish, as above) lands a build, `curl` this route with the same delegated
 > token as the devices call and record the status code as the check to run
 > **after** the next dev apply and deploy — not as a result already in hand.
+> The response body deliberately carries neither the account endpoint nor the
+> database name, healthy or not: a 503 reports one of three fixed codes
+> (`cosmos_database_name_not_configured`, `cosmos_account_endpoint_not_configured`,
+> `cosmos_probe_failed`) plus, only for a probe failure, the dependency's numeric
+> status — 404 the configured database is absent, 403 the identity lacks its
+> data-plane role, 401 its token was refused — never the dependency's error text.
+> The Function App log line carries the same two fields and nothing more. Do not
+> read an empty body as a broken check; that redaction is the fix a prior
+> review round of MG-51 hardened it with.
 
 ### Step 7 — Second plan is a NO-OP
 
