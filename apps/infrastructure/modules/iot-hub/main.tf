@@ -129,6 +129,38 @@ resource "terraform_data" "cosmos_role_ready" {
 # a structural dependency on those objects EXISTING rather than on what they are
 # called.
 #
+# The chain, end to end: the Cosmos database is planned for replacement -> its
+# `.id` is a computed attribute and so is UNKNOWN at plan time -> this handle's
+# triggers_replace no longer matches the value in state -> the handle is planned
+# for replacement -> the endpoint's replace_triggered_by fires. Every link needs a
+# value that is COMPUTED; a name would be known and identical at every step, which
+# is the whole defect this ticket exists to close.
+#
+# The payload is on `triggers_replace` rather than `input`. Be precise about why,
+# because the tempting reason is not the true one. MEASURED, not assumed (Terraform
+# 1.9.8, synthetic terraform_data graph, real apply, no credentials — transcript in
+# the MG-48 result notes): a whole-resource `replace_triggered_by` reference fires
+# when the referenced resource is planned for UPDATE as well as for REPLACEMENT. So
+# `input` would ALSO have propagated here — the handle would have been updated in
+# place (`input = "..." -> (known after apply)`) and the endpoint replaced anyway.
+# Any comment claiming the `input` form is inert is wrong; it was tested.
+#
+# `triggers_replace` is still the right argument, for two reasons that survive the
+# correction. First, it does not depend on update-also-fires, which is a property of
+# how Terraform evaluates a bare resource reference and not something the docs
+# promise; `triggers_replace` states the intent directly and keeps working if that
+# evaluation is ever narrowed. Second, it makes this node's own lifecycle match the
+# thing it stands for: the handle IS the target's identity, so when the target is
+# replaced the handle should be replaced too, not quietly mutate while continuing to
+# claim it represents an object that no longer exists.
+#
+# Plan-shape cost, stated so it is not discovered later: because the handle is
+# REPLACED rather than updated, a future target replacement puts one additional
+# delete token in that plan — which is already destroy-gated many times over by the
+# account, database, containers and endpoint themselves, so it changes nothing an
+# operator has to authorize. It adds NOTHING to this repair: cosmos_target_ready is
+# brand new here, a pure create under either shape.
+#
 # The endpoint's own arguments reach the target through var.cosmos_database_name
 # and var.cosmos_container_name, which are CONFIGURED literals: identical before
 # and after the database is destroyed and recreated. Ordering through them is not
@@ -151,7 +183,7 @@ resource "terraform_data" "cosmos_role_ready" {
 # Acyclicity is unchanged: only the endpoint sits downstream of this handle, never
 # azurerm_iothub.main, and the cosmos-db module has no edge back into this one.
 resource "terraform_data" "cosmos_target_ready" {
-  input = {
+  triggers_replace = {
     database_id  = var.cosmos_database_id
     container_id = var.cosmos_container_id
   }
@@ -183,11 +215,17 @@ resource "azurerm_iothub_endpoint_cosmosdb_account" "cosmos_storage" {
 
   # NOT redundant with the depends_on above — do not delete this. depends_on
   # propagates ORDERING only; it never plans this endpoint for replacement. When
-  # the database or container is replaced its id changes, cosmos_target_ready is
-  # replaced with it, and this block is what carries that replacement through to
-  # the endpoint. Without it the endpoint would keep pointing, unchanged, at a
-  # database that Azure had already destroyed and recreated — state claiming a
-  # binding that no longer exists, which is the shape of the IH400142 failure.
+  # the database or container is planned for replacement its `.id` goes UNKNOWN at
+  # plan time, cosmos_target_ready's triggers_replace no longer matches state so
+  # that handle is planned for replacement too, and this block is what carries the
+  # replacement the last hop to the endpoint. The reference below names the handle
+  # as a WHOLE RESOURCE; measured against Terraform 1.9.8, that form fires when the
+  # referenced resource is planned for update OR for replacement (see the handle's
+  # own comment — the distinction is documented there and the transcript is in the
+  # MG-48 result notes). Without this block the endpoint would keep pointing,
+  # unchanged, at a database that Azure had already destroyed and recreated — state
+  # claiming a binding that no longer exists, which is the shape of the IH400142
+  # failure.
   lifecycle {
     replace_triggered_by = [terraform_data.cosmos_target_ready]
   }
@@ -208,6 +246,34 @@ resource "azurerm_iothub_endpoint_eventhub" "eventhub_realtime" {
   entity_path         = azurerm_eventhub.temperature_data.name
 
   depends_on = [azurerm_role_assignment.iothub_eventhub_sender]
+
+  # NOT redundant with the two references above — do not delete this. BOTH of them
+  # reach their parent through the parent's CONFIGURED name, which is the MG-48
+  # defect class in its less obvious form: `entity_path` is a bare
+  # `azurerm_eventhub.temperature_data.name` and `endpoint_uri` interpolates
+  # `azurerm_eventhub_namespace.main.name` inside a string. Neither attribute is
+  # spelled `<something>_name`, and one is not even a bare reference, but the VALUE
+  # is what matters — both are static literals ("temperature-data",
+  # "meatgeek-v2-dev-eventhub-ns-<suffix>"), byte-identical before and after their
+  # parent is destroyed and recreated. Ordering, never replacement.
+  #
+  # This became REACHABLE, not merely latent, once azurerm_eventhub.temperature_data
+  # gained its own replace_triggered_by on the namespace above: the Event Hub now
+  # replaces with its namespace while this endpoint, pointing at it, would not.
+  # Terraform would try to delete the Event Hub with a live routing endpoint still
+  # bound to it, and the eventhub-realtime-route pointing at THAT — the IH400111
+  # ordering failure, reintroduced on the one data path this ticket promised not to
+  # disturb. A partial fix that opens a new path is worse than no fix.
+  #
+  # The route downstream already names this endpoint in its own replace_triggered_by
+  # (see azurerm_iothub_route.eventhub), so the cascade completes: namespace ->
+  # event hub -> endpoint -> route.
+  lifecycle {
+    replace_triggered_by = [
+      azurerm_eventhub_namespace.main,
+      azurerm_eventhub.temperature_data,
+    ]
+  }
 }
 
 # Parallel route #1: all DeviceMessages → Cosmos (storage of record).
