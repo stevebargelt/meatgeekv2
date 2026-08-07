@@ -21,15 +21,18 @@
 # names, are what the handle carries.
 #
 # That handle carries its payload on `triggers_replace`, and the assertions below
-# read triggers_replace deliberately. To be accurate about why: a whole-resource
-# `replace_triggered_by` reference — which is what the endpoint uses — fires on the
-# referenced resource being planned for UPDATE as well as for REPLACEMENT, measured
-# on Terraform 1.9.8 against a synthetic terraform_data graph. So an `input`-carried
-# payload would propagate too; it is not inert. triggers_replace is preferred
-# because it does not rely on that update-also-fires behaviour, and because it makes
-# the handle's own lifecycle match the object it stands for. Either way, what these
-# assertions actually guard is the payload being the computed IDS rather than the
-# configured names — that is the part whose loss is silent.
+# read triggers_replace deliberately, because on this wiring the argument is
+# load-bearing. The endpoint triggers on `terraform_data.cosmos_target_ready.id`,
+# and terraform_data keeps its id byte-identical across an in-place update —
+# measured on Terraform 1.9.8 against a synthetic terraform_data graph, transcripts
+# in the MG-48 step-3 result notes. A payload on `input` would therefore leave the
+# handle UPDATED rather than replaced, its id unchanged, and the endpoint would not
+# be replaced at all: the propagation would break silently while the handle still
+# carried exactly the right value. `triggers_replace` forces replacement, which is
+# what makes the id unknown at plan time and carries the signal across. So these
+# assertions guard two things whose loss is silent — the payload being the computed
+# IDS rather than the configured names, and it sitting on the argument that actually
+# replaces the handle.
 #
 # WHAT THESE ASSERTIONS DO NOT PROVE. They pin the wiring — that each handle
 # carries the value it is supposed to carry — not the replacement behaviour built
@@ -82,8 +85,9 @@ run "cosmos_endpoint_gated_on_role_assignment" {
 # plan and still look like a dependency, while silently carrying a literal that
 # survives the target's destruction unchanged: the endpoint would then be ordered
 # after nothing, which is the IH400142 shape. Moving the payload back to `input`
-# also fails these assertions — deliberately, so the choice of argument stays a
-# decision someone has to make on purpose rather than drift.
+# also fails these assertions — deliberately, because on `input` the handle is
+# updated in place, its id never changes, and the endpoint's replace_triggered_by
+# never fires at all.
 run "cosmos_endpoint_gated_on_target_existing" {
   command = plan
 
