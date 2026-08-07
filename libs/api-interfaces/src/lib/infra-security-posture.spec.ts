@@ -955,13 +955,32 @@ describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DIS
   const RUNNER = path.join(FIXTURES, 'run-flex-secret-gate-fixtures.sh');
   const fixture = (name: string): string => path.join(FIXTURES, name);
 
-  function run(shell: string, args: string[]): { code: number; out: string } {
+  // `status` and `signal` are carried alongside `code` so a failing assertion can
+  // distinguish a real nonzero EXIT (a verdict the gate rendered) from a null
+  // status — killed by a signal, or execFileSync never running the process at all.
+  // Collapsing both into `code: 1` reports an environment failure as a gate verdict.
+  function run(
+    shell: string,
+    args: string[]
+  ): { code: number; out: string; status: number | null; signal: string | null } {
     try {
       const out = execFileSync(shell, args, { encoding: 'utf8' });
-      return { code: 0, out };
+      return { code: 0, out, status: 0, signal: null };
     } catch (e) {
-      const err = e as { status?: number; stdout?: string; stderr?: string };
-      return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+      const err = e as {
+        status?: number | null;
+        signal?: string | null;
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
+      const captured = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+      return {
+        code: err.status ?? 1,
+        out: captured || (err.message ?? ''),
+        status: err.status ?? null,
+        signal: err.signal ?? null,
+      };
     }
   }
 
@@ -1007,9 +1026,26 @@ describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DIS
   });
 
   it('the committed fixture runner drives every flex/azapi gate case green (bash + sh)', () => {
-    const { code, out } = run('bash', [RUNNER]);
-    expect(code).toBe(0);
-    expect(out).toMatch(/all fixtures behaved as expected/);
+    const r = run('bash', [RUNNER]);
+    // Asserted as ONE object so a failure carries the harness log — which names
+    // WHICH case failed under WHICH shell — instead of a bare "Expected 0 /
+    // Received 1" that says nothing about the 32 checks behind it. `signal` and a
+    // null `status` are asserted alongside so a runner killed by a signal (or one
+    // execFileSync could not spawn) is not reported as a gate verdict.
+    expect({
+      case: 'run-flex-secret-gate-fixtures.sh',
+      shell: 'bash',
+      status: r.status,
+      signal: r.signal,
+      log: r.out,
+    }).toEqual({
+      case: 'run-flex-secret-gate-fixtures.sh',
+      shell: 'bash',
+      status: 0,
+      signal: null,
+      log: expect.stringContaining('all fixtures behaved as expected'),
+    });
+    const out = r.out;
     // The two azapi-account cases are present in the run.
     expect(out).toMatch(/flex-plan-accepted\.json: exit 0 as expected/);
     expect(out).toMatch(/flex-plan-reenabled-shared-key\.json: nonzero \(\d+\) as expected/);
@@ -1018,6 +1054,101 @@ describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DIS
       /flex-plan-siteconfig-localauth-enabled\.json: nonzero \(\d+\) as expected/
     );
     expect(out).toMatch(/flex-plan-siteconfig-noncred\.json: nonzero \(\d+\) as expected/);
+  });
+
+  it('does not accept an mktemp-failure result unless the PATH stub actually intercepted the gate call', () => {
+    // The gate below deliberately emits the expected FATAL without calling mktemp.
+    // This models a future unrelated early failure that would otherwise make the
+    // environment case green while the stub had silently stopped intercepting.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-40-no-stub-'));
+    const scripts = path.join(root, 'scripts');
+    const copiedFixtures = path.join(scripts, 'fixtures');
+    try {
+      fs.mkdirSync(scripts, { recursive: true });
+      fs.cpSync(FIXTURES, copiedFixtures, { recursive: true });
+      fs.writeFileSync(
+        path.join(scripts, 'tf-plan-secret-inspection.sh'),
+        `#!/bin/sh
+if [ "${'${PATH}'}" = /nonexistent ]; then
+  echo 'FATAL: jq is required' >&2
+  exit 1
+fi
+case "${'$*'}" in
+  *flex-plan-accepted.json*|*secret-gate-empty-resource-changes.json*) exit 0 ;;
+  *) echo 'FATAL: cannot create a temp file' >&2; exit 1 ;;
+esac
+`
+      );
+      fs.chmodSync(path.join(scripts, 'tf-plan-secret-inspection.sh'), 0o755);
+
+      const r = run('bash', [path.join(copiedFixtures, 'run-flex-secret-gate-fixtures.sh')]);
+      expect({ status: r.status, signal: r.signal, log: r.out }).toEqual({
+        status: 1,
+        signal: null,
+        log: expect.stringContaining('BOTH the stub interception marker and temp-file FATAL'),
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the PATH-stub test when the gate names mktemp by absolute path', () => {
+    // This exercises the guard's failure branch instead of merely scanning the
+    // real gate. The fake gate otherwise supplies all fixture verdicts the
+    // harness expects, so the observed failure is specifically the anti-vacuity
+    // guard rather than an unrelated fixture failure.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-40-absolute-mktemp-'));
+    const scripts = path.join(root, 'scripts');
+    const copiedFixtures = path.join(scripts, 'fixtures');
+    try {
+      fs.mkdirSync(scripts, { recursive: true });
+      fs.cpSync(FIXTURES, copiedFixtures, { recursive: true });
+      fs.writeFileSync(
+        path.join(scripts, 'tf-plan-secret-inspection.sh'),
+        `#!/bin/sh
+# /bin/mktemp is intentionally named to prove the harness refuses this shape.
+if [ "${'${PATH}'}" = /nonexistent ]; then
+  echo 'FATAL: jq is required' >&2
+  exit 1
+fi
+case "${'$*'}" in
+  *flex-plan-accepted.json*|*secret-gate-empty-resource-changes.json*) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+      );
+      fs.chmodSync(path.join(scripts, 'tf-plan-secret-inspection.sh'), 0o755);
+
+      const r = run('bash', [path.join(copiedFixtures, 'run-flex-secret-gate-fixtures.sh')]);
+      expect({ status: r.status, signal: r.signal, log: r.out }).toEqual({
+        status: 1,
+        signal: null,
+        log: expect.stringContaining('names mktemp by ABSOLUTE path'),
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps signaled and failed-to-spawn runners distinct from a nonzero gate verdict', () => {
+    const signaled = run('sh', ['-c', 'kill -TERM $$']);
+    const spawnFailed = run('mg-40-command-does-not-exist', ['-c', 'exit 1']);
+
+    expect({ code: signaled.code, status: signaled.status, signal: signaled.signal }).toEqual({
+      code: 1,
+      status: null,
+      signal: 'SIGTERM',
+    });
+    expect({
+      code: spawnFailed.code,
+      status: spawnFailed.status,
+      signal: spawnFailed.signal,
+    }).toEqual({
+      code: 1,
+      status: null,
+      signal: null,
+    });
+    expect(spawnFailed.out).toMatch(/mg-40-command-does-not-exist/);
   });
 });
 
