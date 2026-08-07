@@ -106,6 +106,8 @@
 #      replace_triggered_by does not appear in `terraform show -json` at all — so no
 #      Terraform-native assertion can discriminate. The pairing is DERIVED per route
 #      rather than hardcoded, so a block attached to the wrong route fails too.
+#      The trigger must name the endpoint's `.id`, NOT the bare endpoint address —
+#      see the ATTRIBUTE FORM paragraph under 18, which applies verbatim here.
 #      Finding ZERO routes is a failure, not a vacuous pass.
 #  18. A CHILD REACHES ITS PARENT BY THE PARENT'S CONFIGURED NAME AND IS NOT
 #      REPLACED WITH IT (MG-48). The general form of check 17, stated in
@@ -125,6 +127,32 @@
 #      five containers along with it, state kept listing all six, and the IoT Hub
 #      Cosmos endpoint's create then failed with IH400142 "Database does not
 #      exist".
+#      ATTRIBUTE FORM, NOT THE BARE RESOURCE — a SECOND, OPPOSITE hazard this
+#      check also fails on, and the one the fix itself introduced before it was
+#      caught. `replace_triggered_by = [azurerm_iothub.main]` (the whole resource)
+#      and `= [azurerm_iothub.main.id]` (one attribute) are not the same rule. A
+#      BARE whole-resource reference fires whenever that resource has ANY planned
+#      change — an in-place UPDATE included — so `[azurerm_cosmosdb_account.main]`
+#      on the SQL database means adding a tag to the account, or editing its backup
+#      policy or consistency level, DESTROYS AND RECREATES the database and every
+#      container under it, losing every stored document. The same shape on
+#      azurerm_iothub.main would recreate both routes and both consumer groups on a
+#      tag or sku-capacity edit — a device-message routing gap plus a Function App
+#      trigger rebinding to a fresh consumer group — and on
+#      azurerm_eventhub_namespace.main it would cascade through the Event Hub and
+#      its endpoint into the live real-time telemetry path. That is strictly worse
+#      than the orphaning it was added to prevent: it turns routine, previously safe
+#      edits into data-loss and outage events. An ATTRIBUTE reference fires on the
+#      attribute's VALUE changing, and `.id` is exactly the identity signal wanted:
+#      unknown at plan time when the parent is REPLACED (so it fires), byte-identical
+#      across an in-place edit (so it stays quiet). Unlike bare-reference
+#      fires-on-update — an observed behaviour — that is a documented property.
+#      So every entry must be `<parent>.id`, and ANY bare whole-resource entry in
+#      ANY replace_triggered_by list under INFRA_DIR fails this check, whether or
+#      not the resource carrying it reaches a parent by name. An entry naming some
+#      OTHER attribute (`<parent>.name`, `<parent>.output`) is not flagged as bare,
+#      but it does not satisfy a pairing either: `.name` is the configured literal
+#      whose immunity to replacement is the whole defect.
 #      THE VALUE DECIDES, NEVER THE SPELLING. Discovery keys on the VALUE being a
 #      configured-name reference to a managed resource — the ARGUMENT's own name is
 #      irrelevant, and the reference counts wherever it appears in the value,
@@ -783,6 +811,92 @@ else
 fi
 check "CI-invoked modules pin their providers (explicit constraint + committed lock)" "${pin_hits%$'\n'}"
 
+# --- SHARED: parsing a replace_triggered_by list (checks 17 and 18) ----------------
+# Both checks have to distinguish an ATTRIBUTE trigger (`azurerm_iothub.main.id`)
+# from a BARE whole-resource trigger (`azurerm_iothub.main`), because the two have
+# different runtime semantics and only one of them is correct here — see the
+# ATTRIBUTE FORM paragraph in the header. A plain address grep cannot tell them
+# apart: it reads the same address out of both. So the raw list is split into
+# ELEMENTS and each element is classified.
+#
+# One space-separated record per list element:
+#   attr  <address>       <attribute>   e.g. `attr azurerm_iothub.main id`
+#   bare  <address>       -             a whole-resource reference
+#   other <element>       -             anything this grep cannot classify (an
+#                                       indexed reference, a function call). Not
+#                                       flagged as bare — it is not provably the
+#                                       update-firing form — and it satisfies no
+#                                       pairing, so a list made only of these still
+#                                       fails closed on the pairing side.
+# Fields are space-separated rather than tab-separated on purpose: every field is
+# an HCL identifier or a `-`, so no field can contain a space (the `other` case
+# has its whitespace squeezed out), and `read` then needs no IFS override at the
+# call site. That sidesteps the empty-field/tab-collapse trap check 17 documents.
+#
+# The awk lives in a TOP-LEVEL function, like checks 16's and 17's, because bash
+# 3.2.57 (/bin/bash on the operator's Mac) mis-parses quoted patterns inlined in
+# `$( … )` and `set -u` then aborts the script (MG-42 finding F5). It is POSIX awk:
+# no 3-argument match(), no gensub, since CI runners ship mawk.
+rtb_entries() {
+  printf '%s\n' "$1" | awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    {
+      s = $0
+      if (index(s, "[") == 0) next
+      sub(/^[^[]*\[/, "", s)
+      sub(/\].*$/, "", s)
+      n = split(s, parts, ",")
+      for (i = 1; i <= n; i++) {
+        e = trim(parts[i])
+        if (e == "") continue
+        if (e ~ /^[a-z][a-z0-9_]*\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/) {
+          a = e; sub(/^[a-z][a-z0-9_]*\.[A-Za-z0-9_]+\./, "", a)
+          addr = e; sub(/\.[A-Za-z0-9_]+$/, "", addr)
+          printf "attr %s %s\n", addr, a
+        } else if (e ~ /^[a-z][a-z0-9_]*\.[A-Za-z0-9_]+$/) {
+          printf "bare %s -\n", e
+        } else {
+          gsub(/[[:space:]]+/, "", e)
+          printf "other %s -\n", e
+        }
+      }
+    }
+  '
+}
+
+# Project rtb_entries down to one of three views. `case` is inside a top-level
+# function for the same bash 3.2 reason as the awk above.
+#   id       -> addresses named in the correct `<address>.id` form (the pairing)
+#   attraddr -> addresses named through ANY attribute, `.id` or not — used to tell
+#               "wrong parent" from "right parent, wrong attribute"
+#   bare     -> addresses named as a whole resource (the update-firing hazard)
+#   any      -> every element as written, for "…names X instead" messages
+rtb_select() {
+  local raw="$1" mode="$2"
+  rtb_entries "${raw}" | while read -r e_kind e_addr e_attr; do
+    [[ -n "${e_kind}" ]] || continue
+    case "${mode}" in
+      id) [[ "${e_kind}" == "attr" && "${e_attr}" == "id" ]] && printf '%s\n' "${e_addr}" ;;
+      attraddr) [[ "${e_kind}" == "attr" ]] && printf '%s\n' "${e_addr}" ;;
+      bare) [[ "${e_kind}" == "bare" ]] && printf '%s\n' "${e_addr}" ;;
+      any)
+        if [[ "${e_kind}" == "attr" ]]; then
+          printf '%s.%s\n' "${e_addr}" "${e_attr}"
+        else
+          printf '%s\n' "${e_addr}"
+        fi
+        ;;
+    esac
+  done | sort -u
+}
+
+# The same list flattened onto one line for a message. Empty stays empty.
+rtb_flatten() {
+  local flat
+  flat="$(rtb_select "$1" any | grep -v '^$' | tr '\n' ' ' || true)"
+  printf '%s\n' "${flat% }"
+}
+
 # --- CHECK 17. IoT Hub routes replace with their endpoints (MG-48) -----------------
 # One record per `azurerm_iothub_route` block: file, start line, resource label, the
 # raw `endpoint_names` list, and the raw `replace_triggered_by` list. Comments are
@@ -850,20 +964,27 @@ else
   while IFS=$'\t' read -r r_file r_line r_label r_eps r_rtb; do
     [[ -n "${r_label}" ]] || continue
     ep_refs="$(iothub_endpoint_refs "${r_eps}")"
-    rtb_refs="$(iothub_endpoint_refs "${r_rtb}")"
-    rtb_flat="$(printf '%s\n' "${rtb_refs}" | grep -v '^$' | tr '\n' ' ' || true)"
-    rtb_flat="${rtb_flat% }"
+    # The pairing is satisfied ONLY by the `<endpoint>.id` attribute form. A bare
+    # whole-resource entry names the right endpoint and still has the wrong
+    # semantics (it fires on the endpoint being UPDATED in place, recreating the
+    # route and opening a device-message routing gap on an ordinary edit), so it
+    # is reported separately rather than counted as the pairing.
+    rtb_ids="$(rtb_select "${r_rtb}" id)"
+    rtb_bare="$(rtb_select "${r_rtb}" bare)"
+    rtb_flat="$(rtb_flatten "${r_rtb}")"
     if [[ -z "${ep_refs}" ]]; then
       route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} names no azurerm_iothub_endpoint_* resource in endpoint_names, so its replace_triggered_by pairing cannot be verified — reference the endpoint resource, because Azure rejects deleting an endpoint a live route still points at (IH400111, the 2026-08-06 dev-apply outage)"$'\n'
       continue
     fi
     while IFS= read -r ep; do
       [[ -n "${ep}" ]] || continue
-      if ! printf '%s\n' "${rtb_refs}" | grep -qxF "${ep}"; then
-        if [[ -z "${rtb_flat}" ]]; then
-          route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} routes to ${ep} but declares no lifecycle { replace_triggered_by = [${ep}] } — replacing that endpoint would leave this route pointing at it and Azure rejects the endpoint delete with IH400111, the failure that broke the dev apply on 2026-08-06"$'\n'
+      if ! printf '%s\n' "${rtb_ids}" | grep -qxF "${ep}"; then
+        if printf '%s\n' "${rtb_bare}" | grep -qxF "${ep}"; then
+          route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} names ${ep} in replace_triggered_by as a BARE whole-resource reference instead of ${ep}.id — the bare form also fires when that endpoint is planned for an in-place UPDATE, so an ordinary edit to the endpoint would destroy and recreate this route and open a device-message routing gap for no reason. Write ${ep}.id: the id is unknown at plan time when the endpoint is REPLACED (so the pairing still fires, IH400111 still averted) and byte-identical across an in-place edit (so it stays quiet)"$'\n'
+        elif [[ -z "${rtb_flat}" ]]; then
+          route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} routes to ${ep} but declares no lifecycle { replace_triggered_by = [${ep}.id] } — replacing that endpoint would leave this route pointing at it and Azure rejects the endpoint delete with IH400111, the failure that broke the dev apply on 2026-08-06"$'\n'
         else
-          route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} routes to ${ep} but its replace_triggered_by names ${rtb_flat} instead — the route it actually guards is the wrong one, so replacing ${ep} still leaves this route pointing at it and Azure rejects the endpoint delete with IH400111, the failure that broke the dev apply on 2026-08-06"$'\n'
+          route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} routes to ${ep} but its replace_triggered_by names ${rtb_flat} instead of ${ep}.id — the route it actually guards is the wrong one, so replacing ${ep} still leaves this route pointing at it and Azure rejects the endpoint delete with IH400111, the failure that broke the dev apply on 2026-08-06"$'\n'
         fi
       fi
     done <<< "${ep_refs}"
@@ -942,8 +1063,13 @@ name_ref_child_blocks() {
         if (index(" " parents " ", " " addr " ") == 0) parents = parents " " addr
       }
     }
+    # A block is recorded when it reaches a parent by name (the pairing question)
+    # OR when it carries a replace_triggered_by list at all (the attribute-form
+    # question, which applies to EVERY such list in the tree — a bare
+    # whole-resource trigger is an update-fires hazard whether or not the resource
+    # carrying it also has a name-referenced parent).
     function emit() {
-      if (label != "" && trim(parents) != "")
+      if (label != "" && (trim(parents) != "" || trim(rtb) != ""))
         printf "%s\t%d\t%s\t%s\t%s\n", f, startline, label, dash(parents), dash(rtb)
       label = ""; parents = ""; rtb = ""; inres = 0; inrtb = 0
     }
@@ -970,13 +1096,6 @@ name_ref_child_blocks() {
   ' "$1"
 }
 
-# The managed-resource addresses a replace_triggered_by list mentions. The
-# trailing `.name` of a reference is not part of the address, so the two sides
-# become directly comparable.
-hcl_resource_addrs() {
-  printf '%s\n' "$1" | grep -oE '[a-z][a-z0-9_]*\.[A-Za-z0-9_]+' | sort -u || true
-}
-
 name_ref_records=""
 while IFS= read -r tf_file; do
   [[ -n "${tf_file}" ]] || continue
@@ -990,35 +1109,67 @@ name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 name_replace_hits=""
 name_ref_pairs=0
 name_ref_children=0
-if [[ -z "${name_ref_records}" ]]; then
+name_ref_lists=0
+# A here-string over empty records yields one empty line, which the guard below
+# skips — so the loop is unconditional and the fail-closed test is on the PAIR
+# COUNT rather than on the record list. That distinction matters now that a block
+# can be recorded for its replace_triggered_by alone: a tree with lists but no
+# discovered pairs must still fail closed.
+while IFS=$'\t' read -r n_file n_line n_child n_parents n_rtb; do
+  [[ -n "${n_child}" ]] || continue
+  # Only `<parent>.id` counts as a trigger. A bare whole-resource entry is
+  # reported on its own terms below and deliberately NOT accepted as a pairing:
+  # it fires on the parent's in-place update too, which is a data-loss / outage
+  # hazard of its own, and silently accepting it would leave the tree one edit
+  # away from recreating live data stores on a tag change.
+  rtb_ids="$(rtb_select "${n_rtb}" id)"
+  rtb_attr_addrs="$(rtb_select "${n_rtb}" attraddr)"
+  rtb_bare="$(rtb_select "${n_rtb}" bare)"
+  rtb_flat="$(rtb_flatten "${n_rtb}")"
+  if [[ "${n_rtb}" != "-" ]]; then
+    name_ref_lists=$((name_ref_lists + 1))
+  fi
+  while IFS= read -r n_bare; do
+    [[ -n "${n_bare}" ]] || continue
+    name_replace_hits+="${n_file}:${n_line}: ${n_child}'s replace_triggered_by names the whole resource ${n_bare} instead of ${n_bare}.id — a BARE whole-resource trigger also fires when that parent is planned for an in-place UPDATE, so an ordinary tag / sku / policy edit on ${n_bare} would DESTROY AND RECREATE ${n_child} (on a Cosmos database or container that is every stored document; on an IoT Hub route or consumer group it is a routing gap and a trigger rebind). That is strictly worse than the orphaning replace_triggered_by is here to prevent. Name the parent's identity instead: ${n_bare}.id is unknown at plan time when ${n_bare} is REPLACED, so the trigger still fires, and byte-identical across an in-place edit, so it stays quiet (MG-48 F4)"$'\n'
+  done <<< "${rtb_bare}"
+  [[ "${n_parents}" != "-" ]] || continue
+  name_ref_children=$((name_ref_children + 1))
+  for n_parent in ${n_parents}; do
+    name_ref_pairs=$((name_ref_pairs + 1))
+    if ! printf '%s\n' "${rtb_ids}" | grep -qxF "${n_parent}"; then
+      if printf '%s\n' "${rtb_bare}" | grep -qxF "${n_parent}"; then
+        # The right parent in the wrong form — already reported above, with the
+        # in-place-update hazard named. Reporting it a second time as a missing or
+        # mis-aimed pairing would describe the same line as two different defects.
+        continue
+      fi
+      if printf '%s\n' "${rtb_attr_addrs}" | grep -qxF "${n_parent}"; then
+        # The right parent through the wrong attribute. Only `.id` is the parent's
+        # identity; every other attribute either survives replacement unchanged
+        # (`.name` is the configured literal this whole check is about) or tracks
+        # something that is not existence at all.
+        name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name and its replace_triggered_by names ${n_parent} through the wrong attribute — the list reads ${rtb_flat}, not ${n_parent}.id. A trigger fires on the referenced ATTRIBUTE's value changing, and only \`.id\` is the parent's identity: it is unknown at plan time when ${n_parent} is REPLACED. ${n_parent}.name in particular is the configured literal that is byte-identical across a replacement — triggering on it is the original MG-48 defect wearing a lifecycle block"$'\n'
+        continue
+      fi
+      if [[ -z "${rtb_flat}" ]]; then
+        name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name but declares no lifecycle { replace_triggered_by = [${n_parent}.id] } — the name is a static literal, identical before and after, so Terraform would never plan ${n_child} for replacement while Azure destroys it with ${n_parent} anyway, leaving state listing a resource that no longer exists (MG-48: this is how meatgeek-v2-dev-db and its five containers became ghosts and the IoT Hub Cosmos endpoint create failed with IH400142). The reference need not be an argument spelled *_name, and need not be bare — it counts wherever the VALUE reads ${n_parent}.name, including inside a \"\${...}\" interpolation or a list. Name the parent's \`.id\`, never the bare parent: the bare form fires on an in-place update too and would recreate ${n_child} on an ordinary edit"$'\n'
+      else
+        name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name but its replace_triggered_by names ${rtb_flat} instead of ${n_parent}.id — the parent it actually guards is the wrong one, so replacing ${n_parent} still leaves ${n_child} unplanned in state while Azure destroys it (MG-48; add ${n_parent}.id to the list rather than swapping it in — a child may have more than one name-referenced parent)"$'\n'
+      fi
+    fi
+  done
+done <<< "${name_ref_records}"
+if [[ "${name_ref_pairs}" -eq 0 ]]; then
   # Same fail-closed logic as checks 13/14/15/16/17: matching nothing must never
   # pass. This stack has twenty such pairs; a scan that finds none has stopped
   # working, and a silent pass here is exactly how the next account replacement
   # orphans its children again.
   name_replace_hits+="no '<managed resource>.<label>.name' reference found in any resource block under ${INFRA_DIR} — this check has stopped working (it must never pass by finding nothing)"$'\n'
-else
-  while IFS=$'\t' read -r n_file n_line n_child n_parents n_rtb; do
-    [[ -n "${n_child}" ]] || continue
-    [[ "${n_parents}" != "-" ]] || continue
-    name_ref_children=$((name_ref_children + 1))
-    rtb_addrs="$(hcl_resource_addrs "${n_rtb}")"
-    rtb_flat="$(printf '%s\n' "${rtb_addrs}" | grep -v '^$' | tr '\n' ' ' || true)"
-    rtb_flat="${rtb_flat% }"
-    for n_parent in ${n_parents}; do
-      name_ref_pairs=$((name_ref_pairs + 1))
-      if ! printf '%s\n' "${rtb_addrs}" | grep -qxF "${n_parent}"; then
-        if [[ -z "${rtb_flat}" ]]; then
-          name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name but declares no lifecycle { replace_triggered_by = [${n_parent}] } — the name is a static literal, identical before and after, so Terraform would never plan ${n_child} for replacement while Azure destroys it with ${n_parent} anyway, leaving state listing a resource that no longer exists (MG-48: this is how meatgeek-v2-dev-db and its five containers became ghosts and the IoT Hub Cosmos endpoint create failed with IH400142). The reference need not be an argument spelled *_name, and need not be bare — it counts wherever the VALUE reads ${n_parent}.name, including inside a \"\${...}\" interpolation or a list"$'\n'
-        else
-          name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name but its replace_triggered_by names ${rtb_flat} instead — the parent it actually guards is the wrong one, so replacing ${n_parent} still leaves ${n_child} unplanned in state while Azure destroys it (MG-48; add ${n_parent} to the list rather than swapping it in — a child may have more than one name-referenced parent)"$'\n'
-        fi
-      fi
-    done
-  done <<< "${name_ref_records}"
 fi
 # Print the discovered size so a pass is demonstrably non-vacuous rather than a
 # scan that quietly matched nothing.
-echo "  check 18: discovered ${name_ref_pairs} name-referenced (child, parent) pair(s) across ${name_ref_children} child resource(s)"
+echo "  check 18: discovered ${name_ref_pairs} name-referenced (child, parent) pair(s) across ${name_ref_children} child resource(s); inspected ${name_ref_lists} replace_triggered_by list(s) for the attribute form"
 check "children reached by a parent's configured name are replaced with it (replace_triggered_by pairing)" "${name_replace_hits%$'\n'}"
 
 echo
