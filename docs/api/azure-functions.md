@@ -399,6 +399,14 @@ APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50
 # identity holds a Cosmos SQL data-plane role assignment.
 COSMOSDB__accountEndpoint=<cosmos-account-endpoint>
 
+# Which database inside that account. A plain app setting (not a `__`-suffixed
+# identity binding) — the API reads it itself via `environment.cosmosDb.databaseName`.
+# Terraform-owned (module.cosmos_db.database_name) and REQUIRED: the module input
+# has no default and validates non-empty, so a caller that omits it fails at
+# `terraform plan` rather than shipping an app pointed at a database that does not
+# exist (MG-51).
+COSMOSDB_DATABASE_NAME=<cosmos-database-name>
+
 # IoT telemetry (Event Hubs-compatible) — identity-based. NON-SECRET
 # fully-qualified namespace only; the managed identity holds Azure Event Hubs
 # Data Receiver.

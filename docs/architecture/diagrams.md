@@ -139,7 +139,7 @@ flowchart LR
         subgraph FnHost["Flex Consumption Function App<br/>FC1 plan<br/>node 24<br/>system-assigned managed identity"]
             apiBin[apps/api bundle<br/>HTTP triggers: cooks, devices, temperatures/current<br/>EventHub trigger: realtime broadcast]
             otelFn["@azure/monitor-opentelemetry<br/>useAzureMonitor + standalone sampler"]:::proposed
-            envFn[/APPLICATIONINSIGHTS_CONNECTION_STRING<br/>APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50<br/>COSMOSDB__accountEndpoint<br/>IOTHUB_EVENTS__fullyQualifiedNamespace<br/>AzureSignalRConnectionString__serviceUri<br/>all identity-based, non-secret endpoints/]
+            envFn[/APPLICATIONINSIGHTS_CONNECTION_STRING<br/>APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50<br/>COSMOSDB__accountEndpoint<br/>COSMOSDB_DATABASE_NAME<br/>IOTHUB_EVENTS__fullyQualifiedNamespace<br/>AzureSignalRConnectionString__serviceUri<br/>identity-based non-secret endpoints, plus the Terraform-owned database name/]
         end
 
         iotMgd[IoT Hub<br/>system-assigned identity<br/>cosmos-storage-route<br/>eventhub-realtime-route]
@@ -405,8 +405,13 @@ flowchart TB
   `IOTHUB_EVENTS__fullyQualifiedNamespace`,
   `AzureSignalRConnectionString__serviceUri`) resolved against that
   identity, **never** connection strings or primary keys, and no such
-  secret is emitted as a Terraform output. The Flex deployment storage uses the
-  same identity (`storage_authentication_type = "SystemAssignedIdentity"` on a
+  secret is emitted as a Terraform output. Alongside the Cosmos endpoint sits
+  one plain (non-endpoint) value, `COSMOSDB_DATABASE_NAME` — the API reads it
+  itself rather than the host resolving it — required with no default and
+  Terraform-owned (`module.cosmos_db.database_name`), so the app can never be
+  deployed pointed at a database that does not exist (MG-51). The Flex
+  deployment storage uses the same identity
+  (`storage_authentication_type = "SystemAssignedIdentity"` on a
   `blobContainer`; shared-key access disabled).
   The single non-secret exception is Application Insights, wired via its
   telemetry `APPLICATIONINSIGHTS_CONNECTION_STRING`. App Service
