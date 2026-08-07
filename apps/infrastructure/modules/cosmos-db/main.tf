@@ -93,12 +93,71 @@ resource "azurerm_cosmosdb_account" "main" {
 }
 
 # Create environment-specific database within the V2-owned account
+#
+# REPLACEMENT PROPAGATION RULE — read this before deleting any lifecycle block in
+# this file. A child that reaches its parent through one of the parent's COMPUTED
+# attributes (`.id`, an endpoint URI) carries REPLACEMENT: the attribute is
+# unknown until the new parent exists, so the child's own configuration changes
+# and Terraform plans it for replacement too. A child that reaches its parent
+# through the parent's CONFIGURED `name` carries ORDERING ONLY: that name is a
+# static literal, identical before and after, so the child's configuration never
+# changes, Terraform never plans the child for replacement — while Azure destroys
+# it along with the parent regardless. State is then left listing a resource that
+# no longer exists, and the next apply builds on a lie.
+#
+# STATE THE RULE BY ATTRIBUTE KIND, NOT BY ARGUMENT NAME (MG-48 re-audit). What
+# decides the question is whether the VALUE is one the parent's own configuration
+# SETS — ordering only — or one Azure COMPUTES at create time — replacement. It is
+# NOT whether the argument happens to be spelled `*_name`, and NOT whether the
+# reference stands alone as a bare `<type>.<label>.name`. Two shapes that read as
+# exceptions and are not:
+#   - a configured attribute other than `name`. Every child below reaches the
+#     account through `azurerm_cosmosdb_account.main.resource_group_name`, which
+#     is set by the account's own config and so carries ordering only, exactly
+#     like `.name` does.
+#   - a reference buried inside a string interpolation, e.g.
+#     `"sb://${azurerm_eventhub_namespace.main.name}.servicebus.windows.net"` in
+#     modules/iot-hub. Being inside quotes changes nothing about what the value is.
+# Reading this rule as a `.name`-suffix heuristic is precisely how instances of
+# this defect survived three successive enumerations of it. If you are deciding
+# whether a reference needs a lifecycle block, ask what produces the value, not
+# what the argument is called.
+#
+# TRIGGER ON THE PARENT'S IDENTITY, NOT ON THE PARENT. Every list below names
+# `<parent>.id`, never the bare `<parent>` address, and the difference is
+# destructive. A BARE whole-resource reference fires whenever ANY of that
+# resource's attributes change — including an ordinary IN-PLACE update. Under the
+# bare form, adding a tag to azurerm_cosmosdb_account.main, changing its backup
+# policy, or changing its consistency level would DESTROY AND RECREATE this
+# database and all five containers, losing every stored document: a routine,
+# previously safe edit turned into a data-loss event, strictly worse than the bug
+# these lifecycle blocks exist to fix. An ATTRIBUTE reference instead fires when
+# that attribute's VALUE changes. `.id` is computed, so a replaced parent's id is
+# unknown at plan time and the trigger fires — which is the case that matters
+# here — while an in-place tag / policy / consistency edit leaves the id untouched
+# and the child is left alone. That is exactly the intended semantics, and it is a
+# DOCUMENTED property of attribute references, whereas bare-reference
+# update-also-fires is an observed one; depend on the former.
+#
+# Every account_name / database_name reference below is that second kind. That is
+# not hypothetical here: `free_tier_enabled` is create-only, so claiming the free
+# tier REPLACED azurerm_cosmosdb_account.main. Terraform planned no change for
+# this database or its five containers, Azure deleted them with the account
+# anyway, state kept listing all six, and the IoT Hub Cosmos endpoint's create
+# then failed with IH400142 "Database does not exist. DatabaseName:
+# meatgeek-v2-dev-db". replace_triggered_by is what makes the plan match what
+# Azure actually does; the name references below still supply the ordering.
 resource "azurerm_cosmosdb_sql_database" "meatgeek" {
   name                = "${var.resource_prefix}-db"
   resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
   account_name        = azurerm_cosmosdb_account.main.name
 
   # No throughput at database level - containers will have individual throughput for minimal usage
+
+  # NOT redundant with the account_name reference above — see the rule above.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id]
+  }
 }
 
 # Container: devices
@@ -145,6 +204,14 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
   # Unique key constraint for device names per user
   unique_key {
     paths = ["/userId", "/name"]
+  }
+
+  # NOT redundant with the account_name / database_name references above — both
+  # are configured literals and carry ordering only. See the rule above the
+  # database block. Azure destroys a container with either parent, so both belong
+  # here: replacing the account destroys the database, which destroys this.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }
 
@@ -194,6 +261,12 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
       }
     }
   }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
+  }
 }
 
 # Container: cooks
@@ -242,6 +315,12 @@ resource "azurerm_cosmosdb_sql_container" "cooks" {
       }
     }
   }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
+  }
 }
 
 # Container: users
@@ -267,6 +346,12 @@ resource "azurerm_cosmosdb_sql_container" "users" {
   # Unique constraint on email addresses
   unique_key {
     paths = ["/email"]
+  }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }
 
@@ -311,5 +396,11 @@ resource "azurerm_cosmosdb_sql_container" "recipes" {
         order = "descending"
       }
     }
+  }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }

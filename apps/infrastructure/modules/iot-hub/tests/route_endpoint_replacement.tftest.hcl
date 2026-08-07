@@ -22,6 +22,19 @@
 # block removed it is "1 to add, 1 to destroy" and the route is left live, which
 # is the IH400111 failure. See the MG-48 result notes for both transcripts.
 #
+# The same synthetic graph is also where the FORM of every trigger in main.tf was
+# settled, and that result is worth carrying here because it is invisible to any
+# assertion below. With the parent and child both in state: a BARE whole-resource
+# reference (`[azurerm_iothub.main]`) replaces the child when the parent is merely
+# UPDATED IN PLACE, while an attribute reference (`[azurerm_iothub.main.id]`)
+# replaces it only when the parent is genuinely replaced — an id is unknown at plan
+# time on replacement and byte-identical on an in-place edit. Under the bare form a
+# single tag on the hub would have recreated both routes and both consumer groups,
+# and a tag on the Event Hub namespace would have cascaded to the event hub, the
+# endpoint and this route. Every trigger in main.tf therefore names the parent's
+# `.id`; if one ever reverts to the bare form, the hazard is an outage on the path
+# these very assertions exist to protect.
+#
 # What this file DOES pin is the premise the fix rests on: each route reaches its
 # endpoint through an attribute whose value is a STATIC LITERAL, identical before
 # and after replacement. That is precisely why the endpoint_names reference below
@@ -29,6 +42,15 @@
 # `replace_triggered_by` lifecycle block in main.tf. If someone ever makes an
 # endpoint name derive from something that changes on replacement, these
 # assertions fail and the lifecycle blocks should be revisited.
+#
+# The second run block pins the SAME premise one level down, on the Event Hub
+# endpoint's own parents. That pairing was missed twice because it does not look
+# like the others: `entity_path` is not spelled `<something>_name`, and
+# `endpoint_uri` reaches the namespace through an INTERPOLATION inside a string
+# rather than a bare reference. Neither shape changes what matters — the value is
+# a configured literal either way — so both are asserted here explicitly, as the
+# standing reminder that this class is about the KIND of value a reference carries
+# and never about how the argument is spelled.
 #
 # Run:  terraform -chdir=apps/infrastructure/modules/iot-hub test
 # (init the module dir with `terraform init -backend=false` first).
@@ -43,6 +65,8 @@ variables {
   cosmos_account_endpoint   = "https://mgv2dev.documents.azure.com/"
   cosmos_database_name      = "meatgeek"
   cosmos_container_name     = "temperatures"
+  cosmos_database_id        = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2dev/sqlDatabases/meatgeek"
+  cosmos_container_id       = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2dev/sqlDatabases/meatgeek/containers/temperatures"
   cosmos_role_assignment_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2dev/sqlRoleAssignments/11111111-1111-1111-1111-111111111111"
 }
 
@@ -70,5 +94,38 @@ run "routes_reach_their_endpoints_through_a_static_literal_name" {
   assert {
     condition     = one(azurerm_iothub_route.eventhub.endpoint_names) == "eventhub-realtime"
     error_message = "Event Hub route must route to the eventhub-realtime endpoint — this is the pairing azurerm_iothub_route.eventhub's replace_triggered_by must name"
+  }
+}
+
+# The Event Hub endpoint reaches BOTH its parents by a configured name, in the two
+# shapes that a suffix-matching scan does not see: entity_path (a bare reference on
+# an argument not named `*_name`) and endpoint_uri (an interpolation inside a
+# string). Both values are static literals, so both carry ordering and neither
+# carries replacement — which is why the endpoint carries replace_triggered_by for
+# the namespace AND the event hub in main.tf. This matters more since the event hub
+# gained its own pairing on the namespace: without the endpoint's block the event
+# hub would replace while the endpoint bound to it did not, and Azure would reject
+# the delete with IH400111 on the live telemetry path.
+run "eventhub_endpoint_reaches_its_parents_through_static_literal_names" {
+  command = plan
+
+  assert {
+    condition     = azurerm_eventhub.temperature_data.name == "temperature-data"
+    error_message = "the Event Hub name must be the fixed literal 'temperature-data' — it is identical before and after the hub is replaced, which is exactly why entity_path below cannot carry replacement on its own"
+  }
+
+  assert {
+    condition     = azurerm_iothub_endpoint_eventhub.eventhub_realtime.entity_path == azurerm_eventhub.temperature_data.name
+    error_message = "the Event Hub endpoint must target azurerm_eventhub.temperature_data — that is the parent azurerm_iothub_endpoint_eventhub.eventhub_realtime's replace_triggered_by must name, and entity_path reaching it by NAME is why the lifecycle block is required rather than optional"
+  }
+
+  assert {
+    condition     = azurerm_iothub_endpoint_eventhub.eventhub_realtime.endpoint_uri == "sb://${azurerm_eventhub_namespace.main.name}.servicebus.windows.net"
+    error_message = "the Event Hub endpoint's endpoint_uri must be built from azurerm_eventhub_namespace.main's configured name — an interpolated name is still a configured literal, so this reference is the second parent pairing the endpoint's replace_triggered_by must name; a scan keyed on bare `<type>.<label>.name` references would miss it entirely"
+  }
+
+  assert {
+    condition     = azurerm_eventhub.temperature_data.namespace_name == azurerm_eventhub_namespace.main.name
+    error_message = "the Event Hub must sit in azurerm_eventhub_namespace.main and reach it by configured name — this is the pairing azurerm_eventhub.temperature_data's own replace_triggered_by must name, and the reason the endpoint above needs the namespace in its list too"
   }
 }

@@ -1,28 +1,116 @@
-**Last session ended 2026-08-06.**
+**Last session ended 2026-08-07.**
 
-**Where we left off:** The Cosmos free-tier claim is the only open thread. It was attempted and
-FAILED mid-apply (Azure `IH400111` — cannot delete a routing endpoint a route still references),
-which briefly destroyed the Function App's Cosmos role assignment before being reverted. The root
-cause is now fixed, guarded and merged (`29cebf2`, PR #37). Re-landing was deliberately deferred
-to a fresh session rather than retried at the end of a long one.
+**Where we left off:** The free tier is CLAIMED — `mgv2-dev-f640e19ae7ab` has `enableFreeTier=true`
+and that slot was expensive to get. But the re-land broke the dev Cosmos data path on the way in.
+`free_tier_enabled` is create-only, so claiming it REPLACED `azurerm_cosmosdb_account.main`; Azure
+destroyed the account's SQL database and all five containers with it, while Terraform — which had
+never planned them for replacement — left state listing all six as existing. The apply then died
+creating the IoT Hub Cosmos endpoint: `IH400142 "Database does not exist. DatabaseName:
+meatgeek-v2-dev-db"` (run 31146292145, job 92766768140). Dev is partially broken: account fine,
+database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route absent.
 
 **Picked up next:**
 
-1. **MG-48 — re-land the Cosmos free tier (~$24/mo). The full step-by-step is IN THE TICKET; read
-   it first.** Short form: `git revert a2dab91` -> push -> the automatic apply refuses at the
-   destroy guard (expected, that path cannot carry authorization — MG-50) -> read the token set
-   that failed run prints -> **expect SEVEN tokens now, not five** (both IoT Hub routes joined the
-   chain via the ordering fix; that growth is the fix working) -> `workflow_dispatch`
-   `Apply Dev Infrastructure` with that exact set -> approve the `development-infra-apply-recovery`
-   gate -> verify `enableFreeTier=true`, 5 containers, 2 Cosmos role assignments, both routes
-   enabled, and the run's FINAL DRIFT PLAN green (that step is the real verdict).
-   **If it stalls partway: revert FIRST to restore dev, diagnose second.** That is what worked.
+1. **MG-48 — repair the dev Cosmos data path. The code fix is in (this branch); what remains is
+   ONE creates-only apply.** Read (a)-(c) below before running it — each is a way this repair
+   silently turns into a no-op, into something worse than the current breakage, or into a
+   half-authorized replacement.
+
+   Short form: land the fix -> automatic apply on `main` -> **the plan must be CREATES-ONLY.** If
+   it is, it applies with no gate at all and you are done: verify the database, 5 containers, the
+   `cosmos-storage` endpoint + `cosmos-storage-route`, 2 Cosmos role assignments, both routes
+   enabled (`cosmos-storage-route` AND the untouched `eventhub-realtime-route`), and
+   the run's FINAL DRIFT PLAN green (that step is the real verdict). **If any delete or replace
+   token appears, STOP and re-scope — do not authorize it.** A destroy authorization here is a
+   destroy authorization over the free-tier account (see (b)); that is the one thing this repair
+   exists to avoid.
+
+   **(a) THE REPAIR IS REFRESH-DRIVEN. The code fix prevents recurrence; it repairs nothing.**
+   What turns the six ghosts into creates is Terraform's REFRESH reading them back as absent from
+   Azure. `infra-apply-dev.yml` does not pass `-refresh=false` today and the final drift plan
+   relies on the same behaviour — **introducing `-refresh=false`, or reaching for a `-target`ed
+   plan to "keep it small", silently reverts this repair to a no-op that fails again at IH400142.**
+   If refresh does NOT produce creates for all six, the fallback is `terraform state rm` of the
+   ghosts. **NOT `taint`, NOT `-replace`** — both emit delete tokens and trip the destroy guard,
+   which is exactly the gate we are trying not to need.
+
+   **(b) REPLACING THE FREE-TIER ACCOUNT IS NOW ALL-OR-NOTHING OVER A NON-REISSUABLE RESOURCE.**
+   With the closure fixed, an account replacement takes the database and containers with it by
+   plan as well as in fact — correct, and much more dangerous. Azure allows ONE free-tier account
+   per subscription and the account name is deterministic, so if the slot or the name is not
+   released synchronously on delete, the create half fails and dev is left with **no Cosmos account
+   at all** — strictly worse than today's partial breakage. Second, independent argument for
+   extending MG-35's `prevent_destroy` to the DEV account, not just prod.
+
+   **(c) The token count is the size of the account's dependent closure — never a fixed number.**
+   The old note here said "expect SEVEN tokens now, not five." That expectation is dead and was
+   always the wrong shape: **the closure grows every time this class of bug is fixed correctly.**
+   Count it by MECHANISM, never from memory. A resource is in the delete-or-replace set only if
+   the account's replacement makes one of ITS OWN ForceNew arguments change, or if a
+   `replace_triggered_by` reaches it. On this branch that is: the account; the SQL database; the
+   five containers; BOTH `azurerm_cosmosdb_sql_role_assignment`s (root `main.tf` — `scope` and
+   `role_definition_id` are built from the account's computed id);
+   `module.iot_hub.terraform_data.cosmos_target_ready`, whose `triggers_replace` carries the
+   database and container ids; the `cosmos-storage` endpoint and the `cosmos-storage-route`
+   behind it; and — easy to miss, because it lives nowhere near the Cosmos module —
+   `module.monitoring`'s Cosmos diagnostic setting and 429 metric alert, which both address the
+   account by its computed id. Thirteen or fourteen, depending on how the provider classifies
+   `azurerm_monitor_metric_alert.scopes`, which no one here has read out of a real plan.
+   Tomorrow it is more. **Read the set out of the run's own output; do not carry a number forward
+   from these notes.** An operator who reads a larger set as a regression will either stop or
+   authorize a truncated set, and a truncated set is how you get half a replacement.
+
+   **That closure is a REPLACEMENT closure, not an update closure — and only because of how the
+   triggers are spelled.** Every `replace_triggered_by` entry on this branch names the parent's
+   `.id` (`azurerm_cosmosdb_account.main.id`), never the bare address
+   (`azurerm_cosmosdb_account.main`). A trigger fires when the referenced VALUE changes: an id is
+   unknown at plan time when the parent is REPLACED, so it fires; it is byte-identical across an
+   in-place edit, so it stays quiet. **A bare whole-resource trigger also fires on the parent's
+   in-place UPDATE.** In the bare form, adding a tag to the account, changing its backup policy or
+   its consistency level would destroy and recreate the database and all five containers — every
+   stored document — and on the IoT Hub side a namespace tag or a throughput-unit scale would take
+   the Event Hub, the endpoint and the route with it, while a hub tag or sku change would recreate
+   both routes and both consumer groups the Functions triggers bind to. Routine edits becoming data
+   loss and a routing gap is strictly worse than the orphaning this branch fixes. Operationally:
+   **if a plan for an ordinary tag / sku / policy edit ever shows `-/+` on the containers, the
+   routes or the consumer groups, do not authorize it** — a trigger has been rewritten to the bare
+   form. Static check 18 rejects that form by name and inspects EVERY `replace_triggered_by` list
+   in the tree, not only the ones on name-referenced children, so it should not be landable; a plan
+   that shows it means the check was bypassed or narrowed.
+
+   **`module.iot_hub.terraform_data.cosmos_role_ready` is NOT in that set** — an earlier draft of
+   this note counted both handles, which is wrong. Its payload sits on `input`, which is not
+   ForceNew: when the role-assignment id goes unknown that handle is UPDATED IN PLACE (`~`), so
+   it never reaches the destroy guard. Only `cosmos_target_ready` is replaced, because its
+   payload sits on `triggers_replace`. Two things follow. An update token transcribed into a
+   destroy-authorization list is a transcription error (see 3). And if `cosmos_target_ready` ever
+   shows as `~` instead of `-/+`, someone has moved its payload back onto `input`, which
+   **silently breaks the propagation** — per the MEASURED note in `modules/iot-hub/main.tf`,
+   `terraform_data` keeps its `id` byte-identical across an in-place update, and the endpoint
+   triggers on that `.id`, so the endpoint would not be replaced at all. Do not authorize such a
+   plan: static check 19 asserts both halves of that contract, so a `~` here means it was
+   bypassed.
+
 2. **MG-47 — cost analysis.** The retirement is done, so the useful move now is measuring the NEXT
    cycle against ~$182 baseline and, more importantly, fixing the budget alerting that let the
    credit empty silently (budgets were configured at 50/150 with `admin_email` set, and nobody was
    told). MG-47 also gates MG-25 prod activation.
 3. **MG-50 — the GitOps destroy-authorization gap.** Sizeable change to a safety-critical path;
    treat as `implementation_full`, not a quick fix. It is the direct cause of MG-38's condition.
+   **It got bigger with the closure fix:** authorization is hand-transcribed exact addresses, and
+   at a dozen-plus of them it is past the point where a human transcribes it reliably. Per (c) the
+   set only grows, it now reaches into `module.monitoring`, and it sits next to look-alike tokens
+   that must NOT be transcribed into it (`cosmos_role_ready` updates in place). A mistyped,
+   dropped or wrongly-included address in that list is not a typo, it is a partial replacement.
+4. **Wire the Cosmos DATABASE NAME into the Function App — separate ticket, deliberately NOT in
+   the MG-48 repair.** Terraform creates `${resource_prefix}-db` (= `meatgeek-v2-dev-db`), but
+   `modules/functions/main.tf:259` passes only `COSMOSDB__accountEndpoint` — no database name. So
+   `apps/api/src/environments/environment.development.ts:5` falls through to its default,
+   `'meatgeek-dev'`, **a database that has never existed in any environment.** Consequence worth
+   internalising: after the repair, a "dev is healthy" check via the IoT path (telemetry lands in
+   Cosmos) can pass GREEN while the API path is still misconfigured — they do not share a code
+   path. Kept out of the repair on purpose: an `app_settings` change is an UPDATE, not a create,
+   and would break CREATES-ONLY. Do not smuggle it in.
 
 **External state to remember:**
 
@@ -48,6 +136,29 @@ to a fresh session rather than retried at the end of a long one.
 - **Free-tier re-land deferred on purpose** — the known blocker is fixed, but a 7-resource
   replacement chain across Cosmos / IoT Hub routing / Cosmos RBAC deserves fresh attention. A
   correct plan is not an achievable plan; that is precisely what the failed attempt taught.
+  **Confirmed the hard way on 2026-08-07:** the chain was never 7, because the enumeration was
+  built by listing resources instead of by asking which references carry replacement.
+- **A reference to a parent's CONFIGURED `name` carries ordering ONLY; only a reference to a
+  COMPUTED attribute (`.id`, `.endpoint`) carries replacement.** That one sentence is the whole
+  bug class, and it has now broken dev twice — once at the route/endpoint layer (`29cebf2`), once
+  at the account/database layer. Static check 18 is the guard, and it is DISCOVERY-DRIVEN rather
+  than a Cosmos allowlist for exactly this reason: a type-keyed check would have passed green on
+  the day it shipped while five IoT Hub pairs sat broken. It keys on the VALUE — any
+  configured-name reference to a managed resource, including one interpolated inside a string —
+  not on the argument's name. An earlier draft matched only `*_name = <type>.<label>.name` and
+  was blind to `entity_path = azurerm_eventhub.temperature_data.name` and to
+  `endpoint_uri = "sb://${azurerm_eventhub_namespace.main.name}..."`, which is the same defect on
+  the Event Hub path. **Do not "fix" it by narrowing it.** Every exclusion it does make
+  (`resource_group_name`; `module`/`output` blocks, which cannot carry a lifecycle block) is
+  listed in the check's own header, because an undocumented exclusion is how the next enumeration
+  gap gets created.
+- **The second half of that rule: name the parent's `.id`, never the bare parent.** Both forms
+  propagate replacement, so the difference is invisible in the plan the fix was written for — which
+  is why `29cebf2` shipped the bare form and nobody noticed. The bare form ADDITIONALLY fires on
+  the parent's in-place update (measured on a synthetic graph, not inferred), turning a tag edit
+  into a recreate of every child; see (c) above for what that costs on each path. This branch
+  rewrote all of them to `.id`, the pre-existing `29cebf2` entries included — fixing only the new
+  ones would have left the hazard half-closed on the routes.
 - **A human approval gate is NOT the long-term answer** for destructive applies (operator: "a
   human can't approve every deploy, that is a bottleneck"). MG-50 proposes git-tracked declarative
   authorization. For prod, the right control is `prevent_destroy` on data-bearing resources
@@ -77,7 +188,8 @@ to a fresh session rather than retried at the end of a long one.
   `SNYK_TOKEN`, and prod-workflow `uses:` pinning.
 - PR #35 — verified Cosmos export tool (read-only, count-reconciled, 50 tests).
 - PR #37 (`29cebf2`) — IoT Hub route/endpoint replacement ordering fix + static check 17.
-- PR #36 merged then REVERTED (`a2dab91`) — free-tier config, pending re-land.
+- PR #36 merged then REVERTED (`a2dab91`) — free-tier config; re-landed 2026-08-07 (`071ec34`).
+  The account carries `enableFreeTier=true` from that apply; the same apply orphaned its children.
 - Filed: MG-43, MG-44, MG-45, MG-46, MG-47, MG-48, MG-49, MG-50.
 
 **Lessons that cost real time (all cost >15 min this session):**
