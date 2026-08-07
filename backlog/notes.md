@@ -1,31 +1,38 @@
 **Last session ended 2026-08-07.**
 
-**Where we left off:** The free tier is CLAIMED — `mgv2-dev-f640e19ae7ab` has `enableFreeTier=true`
-and that slot was expensive to get. But the re-land broke the dev Cosmos data path on the way in.
-`free_tier_enabled` is create-only, so claiming it REPLACED `azurerm_cosmosdb_account.main`; Azure
-destroyed the account's SQL database and all five containers with it, while Terraform — which had
-never planned them for replacement — left state listing all six as existing. The apply then died
-creating the IoT Hub Cosmos endpoint: `IH400142 "Database does not exist. DatabaseName:
-meatgeek-v2-dev-db"` (run 31146292145, job 92766768140). Dev is partially broken: account fine,
-database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route absent.
+**Where we left off:** **MG-48's free tier is CLAIMED and dev is FULLY REPAIRED.** Both landed and
+verified live; nothing is outstanding on the infrastructure.
+
+The re-land broke the dev Cosmos data path on the way in — `free_tier_enabled` is create-only, so
+claiming it REPLACED the account, Azure destroyed the SQL database and all five containers with it,
+and Terraform (which had never planned them for replacement) left state listing all six as
+existing. The apply died creating the IoT Hub Cosmos endpoint with `IH400142 "Database does not
+exist"`. **That was diagnosed, fixed and repaired the same session.** PR #38 (`99ce110`) fixed the
+propagation class across both modules; PR #39 (`9a6fed9`) committed the mutation fixtures. The
+repair apply (run 31158767820) came back **12 planned changes / 0 DESTRUCTIVE, 11 added / 0 changed
+/ 0 destroyed, final drift plan CONVERGED** — creates-only, unattended, **no human gate**, because
+refresh detected the six ghosts as absent and planned them as creates. Live-verified after:
+`enableFreeTier: true`, `meatgeek-v2-dev-db`, all 5 containers, 2 Cosmos role assignments, both
+routes enabled, `cosmos-storage` endpoint and the diagnostic setting. A subsequent main apply is a
+clean 0/0/0 no-op.
+
+**MG-48 REMAINS OPEN on ONE acceptance criterion, and it is time-gated, not work-gated:** post-change
+spend measured against the next billing cycle and recorded on MG-47. Six of seven criteria are met
+with evidence — the full walk is in the ticket's Acceptance walk grid. **Do not close it until the
+bill shows the saving.** There is no engineering left to do on it.
 
 **Picked up next:**
 
-1. **MG-48 — repair the dev Cosmos data path. The code fix is in (this branch); what remains is
-   ONE creates-only apply.** Read (a)-(c) below before running it — each is a way this repair
-   silently turns into a no-op, into something worse than the current breakage, or into a
-   half-authorized replacement.
+1. **MG-47 — cost analysis, which now also gates MG-48's closure.** Measure the next cycle against
+   the ~$182 baseline, and fix the budget alerting that let the credit empty silently (budgets were
+   configured at 50/150 with `admin_email` set, and nobody was told). Also gates MG-25 prod
+   activation.
 
-   Short form: land the fix -> automatic apply on `main` -> **the plan must be CREATES-ONLY.** If
-   it is, it applies with no gate at all and you are done: verify the database, 5 containers, the
-   `cosmos-storage` endpoint + `cosmos-storage-route`, 2 Cosmos role assignments, both routes
-   enabled (`cosmos-storage-route` AND the untouched `eventhub-realtime-route`), and
-   the run's FINAL DRIFT PLAN green (that step is the real verdict). **If any delete or replace
-   token appears, STOP and re-scope — do not authorize it.** A destroy authorization here is a
-   destroy authorization over the free-tier account (see (b)); that is the one thing this repair
-   exists to avoid.
+**Operational rules for the Cosmos account — these govern any FUTURE replacement, and every one of
+them was learned by breaking dev.** They are no longer a to-do list; they are the manual.
 
-   **(a) THE REPAIR IS REFRESH-DRIVEN. The code fix prevents recurrence; it repairs nothing.**
+   **(a) A REPAIR OF ORPHANED CHILDREN IS REFRESH-DRIVEN. Code fixes prevent recurrence; they
+   repair nothing.**
    What turns the six ghosts into creates is Terraform's REFRESH reading them back as absent from
    Azure. `infra-apply-dev.yml` does not pass `-refresh=false` today and the final drift plan
    relies on the same behaviour — **introducing `-refresh=false`, or reaching for a `-target`ed
@@ -91,26 +98,32 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
    plan: static check 19 asserts both halves of that contract, so a `~` here means it was
    bypassed.
 
-2. **MG-47 — cost analysis.** The retirement is done, so the useful move now is measuring the NEXT
-   cycle against ~$182 baseline and, more importantly, fixing the budget alerting that let the
-   credit empty silently (budgets were configured at 50/150 with `admin_email` set, and nobody was
-   told). MG-47 also gates MG-25 prod activation.
-3. **MG-50 — the GitOps destroy-authorization gap.** Sizeable change to a safety-critical path;
+2. **MG-52 — migrate name-based parent references to id-based.** Filed 2026-08-07 off a deprecation
+   warning in the repair apply: `namespace_name` is deprecated in favour of `namespace_id` and
+   removed in azurerm v5. **This is not a deprecation chore — it RETIRES the bug class instead of
+   guarding it.** A parent reached by its COMPUTED id propagates replacement natively, with no
+   lifecycle block and nothing for a static check to police. Azure is deprecating exactly the form
+   that causes the bug in favour of exactly the form that fixes it. Treat as `implementation_full`:
+   it changes replacement semantics on the path that has already broken dev twice, and check 18's
+   pair floor must shrink pair-by-pair with justification, never by casual re-baselining.
+3. **MG-51 — wire the Cosmos DATABASE NAME into the Function App.** Terraform creates
+   `${resource_prefix}-db` (= `meatgeek-v2-dev-db`) but `modules/functions/main.tf:259` passes only
+   `COSMOSDB__accountEndpoint`, so `apps/api/src/environments/environment.development.ts:5` falls
+   through to `'meatgeek-dev'` — **a database that has never existed in any environment.** Worth
+   internalising: a "dev is healthy" check via the IoT path (telemetry landing in Cosmos) passes
+   GREEN while the API path is still misconfigured — they do not share a code path. Kept out of the
+   MG-48 repair on purpose: an `app_settings` change is an UPDATE, not a create, and would have
+   broken CREATES-ONLY.
+4. **MG-50 — the GitOps destroy-authorization gap.** Sizeable change to a safety-critical path;
    treat as `implementation_full`, not a quick fix. It is the direct cause of MG-38's condition.
    **It got bigger with the closure fix:** authorization is hand-transcribed exact addresses, and
    at a dozen-plus of them it is past the point where a human transcribes it reliably. Per (c) the
    set only grows, it now reaches into `module.monitoring`, and it sits next to look-alike tokens
    that must NOT be transcribed into it (`cosmos_role_ready` updates in place). A mistyped,
    dropped or wrongly-included address in that list is not a typo, it is a partial replacement.
-4. **Wire the Cosmos DATABASE NAME into the Function App — separate ticket, deliberately NOT in
-   the MG-48 repair.** Terraform creates `${resource_prefix}-db` (= `meatgeek-v2-dev-db`), but
-   `modules/functions/main.tf:259` passes only `COSMOSDB__accountEndpoint` — no database name. So
-   `apps/api/src/environments/environment.development.ts:5` falls through to its default,
-   `'meatgeek-dev'`, **a database that has never existed in any environment.** Consequence worth
-   internalising: after the repair, a "dev is healthy" check via the IoT path (telemetry lands in
-   Cosmos) can pass GREEN while the API path is still misconfigured — they do not share a code
-   path. Kept out of the repair on purpose: an `app_settings` change is an UPDATE, not a create,
-   and would break CREATES-ONLY. Do not smuggle it in.
+   **Counter-evidence worth holding onto, though: the MG-48 repair itself needed NO authorization
+   and NO gate**, because a creates-only plan never reaches the guard. The bottleneck is destructive
+   changes specifically, not the loop — ordinary reconciliation already runs with nobody in it.
 
 **External state to remember:**
 
@@ -187,10 +200,20 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
   `-lockfile=readonly`, static check 16. **MG-39 REMAINS OPEN** for snyk@master SHA-pinning +
   `SNYK_TOKEN`, and prod-workflow `uses:` pinning.
 - PR #35 — verified Cosmos export tool (read-only, count-reconciled, 50 tests).
-- PR #37 (`29cebf2`) — IoT Hub route/endpoint replacement ordering fix + static check 17.
+- PR #37 (`29cebf2`) — IoT Hub route/endpoint replacement ordering fix + static check 17. Its
+  ordering fix WORKED on the re-land: destroys ran route -> endpoint -> account and IH400111 did not
+  recur. It shipped the bare-address trigger form, corrected in PR #38.
 - PR #36 merged then REVERTED (`a2dab91`) — free-tier config; re-landed 2026-08-07 (`071ec34`).
   The account carries `enableFreeTier=true` from that apply; the same apply orphaned its children.
-- Filed: MG-43, MG-44, MG-45, MG-46, MG-47, MG-48, MG-49, MG-50.
+- **PR #38 (`99ce110`) — the propagation fix.** Cosmos database + 5 containers, the Event Hub, the
+  Event Hub endpoint, both routes and both consumer groups now replace with their parents; the IoT
+  Hub Cosmos endpoint gained a cross-module dependency on the database via a `terraform_data`
+  handle (`replace_triggered_by` is module-local, so the module input contract carries identity,
+  not just names); every trigger in the `.id` form; static checks 18 and 19.
+- **PR #39 (`9a6fed9`) — 8 committed mutation fixtures for checks 18/19**, wired into the
+  credentialless CI job, passing under bash 5.3.15 AND macOS `/bin/bash` 3.2.57. Closes the gap
+  where both guards were hand-verified once by a transcript nobody could re-execute.
+- Filed: MG-43, MG-44, MG-45, MG-46, MG-47, MG-48, MG-49, MG-50, MG-51, MG-52.
 
 **Lessons that cost real time (all cost >15 min this session):**
 
@@ -204,3 +227,23 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
 - **macOS `/bin/bash` is 3.2.57.** A `case` with quoted patterns inside `$( … )` aborts scripts
   there while CI bash 5 stays green, and `bash -n` cannot detect it. Run repo shell locally.
 - **No dedicated worktree** — never switch branches or run two agents while one is live.
+- **A reviewer's severity is an input, not a verdict — and so is your own recollection.** Two calls
+  went the other way this session. A red graded the `input`-vs-`triggers_replace` handle a LOW
+  comment inaccuracy; the orchestrator re-graded it HIGH on the reasoning that a whole-resource
+  trigger fires only on replacement. The engineer then MEASURED it on a synthetic graph — it fires
+  on in-place update too — so the red's original grading was right. Conversely, a red graded the
+  bare-vs-`.id` trigger form a HIGH, and it was: the bare form would have made a routine tag edit
+  destroy every document. Measure before overriding, and when an agent pushes back with evidence,
+  that is the system working.
+- **Don't batch findings that share files into a fanout step.** A four-finding batch where three
+  touched `tf-static-checks.sh` and two touched `notes.md` was split into parallel work items that
+  conflicted on merge; the run failed `integration_blocked` and published nothing. Same-file work
+  goes to ONE sequential agent pass.
+- **Backticks inside a double-quoted Bash argument are live command substitution.** A `--rationale`
+  lost the word `input` twice from the highest-severity finding's diagnosis; the only symptom was a
+  quiet `command not found: input`, and the mangled text was already persisted. Use single quotes
+  for code identifiers in Bash-passed prose, or none.
+- **`gh run list --commit <sha>` returned `[]` for a commit whose runs existed** (they carry that
+  `headSha`, and `--branch main` finds them). A Monitor armed on that filter stayed silent through a
+  complete CI-plus-apply cycle. Same lesson as the jmespath one, in a new place: verify a wait
+  condition returns data BEFORE arming anything on it.
