@@ -34,7 +34,7 @@ terraform {
 # Arguments are named rather than line numbers, which rot.
 #
 # CONFIGURED-NAME references — ordering only, so every child listed here carries
-# an explicit replace_triggered_by naming that parent:
+# an explicit replace_triggered_by naming that parent's `.id`:
 #   azurerm_eventhub.temperature_data          -> eventhub_namespace.main  (namespace_name)
 #   ..._endpoint_eventhub.eventhub_realtime    -> eventhub_namespace.main  (endpoint_uri, interpolated)
 #   ..._endpoint_eventhub.eventhub_realtime    -> eventhub.temperature_data (entity_path)
@@ -66,15 +66,35 @@ terraform {
 # An `output` block cannot carry a `lifecycle` block, so there is nothing to
 # assert there — that is an exclusion, not an unclosed gap.
 #
-# PLAN SHAPE, MEASURED rather than argued (Terraform 1.9.8, synthetic
-# terraform_data graph, real apply, no credentials — transcripts in the MG-48
-# step-4 result notes): adding a lifecycle block to a resource ALREADY IN STATE,
-# or extending an existing replace_triggered_by list, plans as "No changes"; and a
-# trigger whose referenced parent is planned for CREATE does not fire. Both
-# properties matter here, because this module's routes, consumer groups and Event
-# Hub path are all in live dev state while the Cosmos endpoint is not — together
-# they are why the blocks below add nothing to the MG-48 repair plan and keep it
-# CREATES-ONLY.
+# EVERY TRIGGER NAMES THE PARENT'S `.id`, NEVER THE BARE RESOURCE. This is not a
+# style choice; the two forms have different semantics and the bare one is unsafe.
+# MEASURED (Terraform 1.9.8, synthetic terraform_data graph, real apply, no
+# credentials — transcripts in the MG-48 step-3 result notes), parent in state,
+# child in state:
+#   * parent UPDATED IN PLACE  -> bare form REPLACES the child; `.id` form does not.
+#   * parent REPLACED          -> both forms replace the child.
+# A bare whole-resource reference therefore turns every routine in-place edit into
+# a destroy-and-recreate of the children: one tag on azurerm_iothub.main would
+# have replaced both routes and both consumer groups — a device-message routing
+# gap plus consumer groups the Function App's triggers rebind to — and one tag or
+# throughput-unit scale on azurerm_eventhub_namespace.main would have cascaded
+# namespace -> event hub -> endpoint -> route across the live telemetry path. That
+# is strictly worse than the orphaning defect this ticket exists to close. An
+# `.id` reference fires on the attribute's VALUE changing: on replacement the new
+# id is unknown at plan time so it fires, while an in-place tag or sku edit leaves
+# the id byte-identical so it does not. Exactly the intended semantics, and unlike
+# bare-reference update-also-fires it is the documented behaviour of an attribute
+# reference rather than an observed property of how Terraform evaluates a bare one.
+#
+# PLAN SHAPE, MEASURED the same way: adding a lifecycle block to a resource ALREADY
+# IN STATE, extending an existing replace_triggered_by list, or rewriting a bare
+# trigger to the `.id` form all plan as "No changes" — a lifecycle block is not part
+# of resource state; and a trigger whose referenced parent is planned for CREATE
+# does not fire, under EITHER form (verified by removing the parent from state and
+# re-planning: "1 to add, 0 to change, 0 to destroy"). Both properties matter here,
+# because this module's routes, consumer groups and Event Hub path are all in live
+# dev state while the Cosmos endpoint is not — together they are why the blocks
+# below add nothing to the MG-48 repair plan and keep it CREATES-ONLY.
 
 # IoT Hub
 #
@@ -150,10 +170,16 @@ resource "azurerm_eventhub" "temperature_data" {
   # while Azure destroyed it along with its parent namespace, and state would keep
   # listing an entity that no longer exists — the same class of defect that
   # orphaned the Cosmos database and its containers on 2026-08-06 (MG-48). A
-  # reference to a parent's COMPUTED attribute (`.id`) would carry replacement; a
+  # reference to a parent's COMPUTED attribute (`.id`) carries replacement; a
   # reference to its configured `name` does not.
+  #
+  # The trigger names the namespace's `.id`, not the namespace. The bare form also
+  # fires on the namespace being UPDATED IN PLACE (measured — see the module
+  # header), so a tag edit or a throughput-unit scale on the namespace would
+  # DESTROY AND RECREATE this Event Hub and cascade through the endpoint and route
+  # bound to it, dropping the live telemetry path for no reason.
   lifecycle {
-    replace_triggered_by = [azurerm_eventhub_namespace.main]
+    replace_triggered_by = [azurerm_eventhub_namespace.main.id]
   }
 }
 
@@ -196,30 +222,34 @@ resource "terraform_data" "cosmos_role_ready" {
 # value that is COMPUTED; a name would be known and identical at every step, which
 # is the whole defect this ticket exists to close.
 #
-# The payload is on `triggers_replace` rather than `input`. Be precise about why,
-# because the tempting reason is not the true one. MEASURED, not assumed (Terraform
-# 1.9.8, synthetic terraform_data graph, real apply, no credentials — transcript in
-# the MG-48 result notes): a whole-resource `replace_triggered_by` reference fires
-# when the referenced resource is planned for UPDATE as well as for REPLACEMENT. So
-# `input` would ALSO have propagated here — the handle would have been updated in
-# place (`input = "..." -> (known after apply)`) and the endpoint replaced anyway.
-# Any comment claiming the `input` form is inert is wrong; it was tested.
+# The payload is on `triggers_replace` rather than `input`, and with the endpoint
+# triggering on this handle's `.id` that is now REQUIRED rather than merely tidier.
+# MEASURED (Terraform 1.9.8, synthetic terraform_data graph, real apply, no
+# credentials — transcripts in the MG-48 step-3 result notes): terraform_data keeps
+# its `id` byte-identical across an in-place update and only regenerates it on
+# replacement. So an `input`-carried payload would leave this handle UPDATED in
+# place, its `.id` unchanged, and the endpoint's trigger would NOT fire — the
+# propagation would break silently while every assertion about the handle carrying
+# the right value still passed. `triggers_replace` forces the handle to be REPLACED,
+# which is what makes its `.id` unknown at plan time and carries the signal across.
 #
-# `triggers_replace` is still the right argument, for two reasons that survive the
-# correction. First, it does not depend on update-also-fires, which is a property of
-# how Terraform evaluates a bare resource reference and not something the docs
-# promise; `triggers_replace` states the intent directly and keeps working if that
-# evaluation is ever narrowed. Second, it makes this node's own lifecycle match the
-# thing it stands for: the handle IS the target's identity, so when the target is
-# replaced the handle should be replaced too, not quietly mutate while continuing to
-# claim it represents an object that no longer exists.
+# (An earlier revision of this comment justified `triggers_replace` as merely
+# preferable, on the ground that a BARE whole-resource trigger fires on update too
+# and `input` would therefore have propagated. That measurement was correct, but the
+# endpoint no longer uses the bare form — precisely because firing on update is a
+# hazard, not a feature — so the argument it supported no longer applies.)
+#
+# It also makes this node's own lifecycle match the thing it stands for: the handle
+# IS the target's identity, so when the target is replaced the handle should be
+# replaced too, not quietly mutate while continuing to claim it represents an object
+# that no longer exists.
 #
 # Plan-shape cost, stated so it is not discovered later: because the handle is
 # REPLACED rather than updated, a future target replacement puts one additional
 # delete token in that plan — which is already destroy-gated many times over by the
 # account, database, containers and endpoint themselves, so it changes nothing an
 # operator has to authorize. It adds NOTHING to this repair: cosmos_target_ready is
-# brand new here, a pure create under either shape.
+# brand new here, a pure create.
 #
 # The endpoint's own arguments reach the target through var.cosmos_database_name
 # and var.cosmos_container_name, which are CONFIGURED literals: identical before
@@ -278,16 +308,15 @@ resource "azurerm_iothub_endpoint_cosmosdb_account" "cosmos_storage" {
   # the database or container is planned for replacement its `.id` goes UNKNOWN at
   # plan time, cosmos_target_ready's triggers_replace no longer matches state so
   # that handle is planned for replacement too, and this block is what carries the
-  # replacement the last hop to the endpoint. The reference below names the handle
-  # as a WHOLE RESOURCE; measured against Terraform 1.9.8, that form fires when the
-  # referenced resource is planned for update OR for replacement (see the handle's
-  # own comment — the distinction is documented there and the transcript is in the
-  # MG-48 result notes). Without this block the endpoint would keep pointing,
+  # replacement the last hop to the endpoint. The reference below names the handle's
+  # `.id`, not the handle: terraform_data regenerates its id only on replacement, so
+  # the trigger fires exactly when the target's identity changed and never on some
+  # unrelated in-place edit. Without this block the endpoint would keep pointing,
   # unchanged, at a database that Azure had already destroyed and recreated — state
   # claiming a binding that no longer exists, which is the shape of the IH400142
   # failure.
   lifecycle {
-    replace_triggered_by = [terraform_data.cosmos_target_ready]
+    replace_triggered_by = [terraform_data.cosmos_target_ready.id]
   }
 }
 
@@ -328,10 +357,13 @@ resource "azurerm_iothub_endpoint_eventhub" "eventhub_realtime" {
   # The route downstream already names this endpoint in its own replace_triggered_by
   # (see azurerm_iothub_route.eventhub), so the cascade completes: namespace ->
   # event hub -> endpoint -> route.
+  # Both entries name the parent's `.id` so this endpoint is replaced when a parent
+  # is REPLACED and left alone when a parent is merely updated in place — see the
+  # module header for the measured difference between the two forms.
   lifecycle {
     replace_triggered_by = [
-      azurerm_eventhub_namespace.main,
-      azurerm_eventhub.temperature_data,
+      azurerm_eventhub_namespace.main.id,
+      azurerm_eventhub.temperature_data.id,
     ]
   }
 }
@@ -366,10 +398,18 @@ resource "azurerm_iothub_route" "cosmos" {
   # unplanned. Hub replacement is not hypothetical — tf-plan-destroy-guard.sh's own
   # header names IoT Hub `location` as ForceNew, so a single-token edit plans the
   # hub as a destroy-and-recreate.
+  #
+  # Both entries name the parent's `.id`. The bare whole-resource form — which is
+  # what PR #37 shipped here — also fires when the named parent is planned for an
+  # in-place UPDATE (measured; see the module header), so a single tag or sku
+  # capacity change on azurerm_iothub.main would have destroyed and recreated this
+  # route, opening a device-message routing gap for no reason at all. Triggering on
+  # the id fires on replacement (new id, unknown at plan time) and stays quiet on an
+  # in-place edit (id byte-identical), which is the property this block wants.
   lifecycle {
     replace_triggered_by = [
-      azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage,
-      azurerm_iothub.main,
+      azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage.id,
+      azurerm_iothub.main.id,
     ]
   }
 }
@@ -394,11 +434,13 @@ resource "azurerm_iothub_route" "eventhub" {
   # azurerm_iothub.main is listed for the route-to-HUB pairing, exactly as on the
   # Cosmos route above: `iothub_name` reaches the hub by its configured name, which
   # survives a hub replacement unchanged, so without this the route is orphaned in
-  # state when the hub is replaced.
+  # state when the hub is replaced. Both entries name the parent's `.id`, for the
+  # same reason as the Cosmos route above — and it matters more on this one, which
+  # carries the live real-time telemetry path.
   lifecycle {
     replace_triggered_by = [
-      azurerm_iothub_endpoint_eventhub.eventhub_realtime,
-      azurerm_iothub.main,
+      azurerm_iothub_endpoint_eventhub.eventhub_realtime.id,
+      azurerm_iothub.main.id,
     ]
   }
 }
@@ -416,8 +458,13 @@ resource "azurerm_iothub_consumer_group" "functions" {
   # destroys the consumer group with the hub regardless, leaving state listing a
   # resource that does not exist — and the Function App's IoT trigger then binds to
   # a consumer group the hub has never heard of. See the routes above; MG-48.
+  #
+  # The trigger names the hub's `.id`. With the bare form, any in-place hub edit — a
+  # tag, an sku capacity bump — would have recreated this consumer group, and the
+  # Function App's IoT trigger rebinds to a recreated consumer group from the start
+  # of its retained stream rather than from its stored checkpoint.
   lifecycle {
-    replace_triggered_by = [azurerm_iothub.main]
+    replace_triggered_by = [azurerm_iothub.main.id]
   }
 }
 
@@ -428,8 +475,9 @@ resource "azurerm_iothub_consumer_group" "realtime" {
   eventhub_endpoint_name = "events"
   resource_group_name    = var.resource_group_name
 
-  # Same hub pairing as the functions consumer group above, for the same reason.
+  # Same hub pairing as the functions consumer group above, on the hub's `.id` for
+  # the same two reasons.
   lifecycle {
-    replace_triggered_by = [azurerm_iothub.main]
+    replace_triggered_by = [azurerm_iothub.main.id]
   }
 }

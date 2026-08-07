@@ -22,6 +22,19 @@
 # block removed it is "1 to add, 1 to destroy" and the route is left live, which
 # is the IH400111 failure. See the MG-48 result notes for both transcripts.
 #
+# The same synthetic graph is also where the FORM of every trigger in main.tf was
+# settled, and that result is worth carrying here because it is invisible to any
+# assertion below. With the parent and child both in state: a BARE whole-resource
+# reference (`[azurerm_iothub.main]`) replaces the child when the parent is merely
+# UPDATED IN PLACE, while an attribute reference (`[azurerm_iothub.main.id]`)
+# replaces it only when the parent is genuinely replaced — an id is unknown at plan
+# time on replacement and byte-identical on an in-place edit. Under the bare form a
+# single tag on the hub would have recreated both routes and both consumer groups,
+# and a tag on the Event Hub namespace would have cascaded to the event hub, the
+# endpoint and this route. Every trigger in main.tf therefore names the parent's
+# `.id`; if one ever reverts to the bare form, the hazard is an outage on the path
+# these very assertions exist to protect.
+#
 # What this file DOES pin is the premise the fix rests on: each route reaches its
 # endpoint through an attribute whose value is a STATIC LITERAL, identical before
 # and after replacement. That is precisely why the endpoint_names reference below
