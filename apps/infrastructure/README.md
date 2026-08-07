@@ -564,9 +564,11 @@ target.
 
 `scripts/cosmos-export/` is a standalone, read-only export CLI for the
 **legacy V1** Cosmos DB account — unrelated to the V2 stack this Terraform
-project provisions. It exists because V1 is being deleted to reclaim cost and
-free the subscription's Cosmos free-tier slot, and V1's continuous backup dies
-with the account, so a static export has to exist first. Run
+project provisions. It exists because V1 was deleted to reclaim cost and free
+the subscription's Cosmos free-tier slot, which V2 dev now claims (MG-48;
+`cosmos_enable_free_tier = true` in `environments/dev.tfvars`, not yet
+applied), and V1's continuous backup would have died with the account, so a
+static export had to exist first. Run
 `node scripts/cosmos-export/cosmos-export.mjs --help` for full usage; only
 what `--help` doesn't already cover is captured below.
 
