@@ -123,6 +123,22 @@ resource "azurerm_cosmosdb_account" "main" {
 # whether a reference needs a lifecycle block, ask what produces the value, not
 # what the argument is called.
 #
+# TRIGGER ON THE PARENT'S IDENTITY, NOT ON THE PARENT. Every list below names
+# `<parent>.id`, never the bare `<parent>` address, and the difference is
+# destructive. A BARE whole-resource reference fires whenever ANY of that
+# resource's attributes change — including an ordinary IN-PLACE update. Under the
+# bare form, adding a tag to azurerm_cosmosdb_account.main, changing its backup
+# policy, or changing its consistency level would DESTROY AND RECREATE this
+# database and all five containers, losing every stored document: a routine,
+# previously safe edit turned into a data-loss event, strictly worse than the bug
+# these lifecycle blocks exist to fix. An ATTRIBUTE reference instead fires when
+# that attribute's VALUE changes. `.id` is computed, so a replaced parent's id is
+# unknown at plan time and the trigger fires — which is the case that matters
+# here — while an in-place tag / policy / consistency edit leaves the id untouched
+# and the child is left alone. That is exactly the intended semantics, and it is a
+# DOCUMENTED property of attribute references, whereas bare-reference
+# update-also-fires is an observed one; depend on the former.
+#
 # Every account_name / database_name reference below is that second kind. That is
 # not hypothetical here: `free_tier_enabled` is create-only, so claiming the free
 # tier REPLACED azurerm_cosmosdb_account.main. Terraform planned no change for
@@ -140,7 +156,7 @@ resource "azurerm_cosmosdb_sql_database" "meatgeek" {
 
   # NOT redundant with the account_name reference above — see the rule above.
   lifecycle {
-    replace_triggered_by = [azurerm_cosmosdb_account.main]
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id]
   }
 }
 
@@ -195,7 +211,7 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
   # database block. Azure destroys a container with either parent, so both belong
   # here: replacing the account destroys the database, which destroys this.
   lifecycle {
-    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }
 
@@ -249,7 +265,7 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
   # NOT redundant with the account_name / database_name references above — see the
   # rule above the database block.
   lifecycle {
-    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }
 
@@ -303,7 +319,7 @@ resource "azurerm_cosmosdb_sql_container" "cooks" {
   # NOT redundant with the account_name / database_name references above — see the
   # rule above the database block.
   lifecycle {
-    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }
 
@@ -335,7 +351,7 @@ resource "azurerm_cosmosdb_sql_container" "users" {
   # NOT redundant with the account_name / database_name references above — see the
   # rule above the database block.
   lifecycle {
-    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }
 
@@ -385,6 +401,6 @@ resource "azurerm_cosmosdb_sql_container" "recipes" {
   # NOT redundant with the account_name / database_name references above — see the
   # rule above the database block.
   lifecycle {
-    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
   }
 }
