@@ -314,7 +314,15 @@ module "azure_functions" {
 
   # Identity-based service endpoints (NON-SECRET). Runtime authorization is via
   # the Function App's managed identity + the role assignments below.
+  #
+  # The database NAME travels with the endpoint (MG-51). It comes from the SAME
+  # module output that creates the database — the identical source the IoT Hub
+  # path above reads — so the two consumers cannot drift and a migration changes
+  # the name in ONE place (modules/cosmos-db/main.tf) rather than in each
+  # consumer. Restating the literal here would be the second source of truth the
+  # iot_hub block's comment already warns against.
   cosmos_account_endpoint = module.cosmos_db.endpoint
+  cosmos_database_name    = module.cosmos_db.database_name
   eventhub_namespace_fqdn = module.iot_hub.eventhub_namespace_fqdn
   signalr_service_uri     = module.signalr.service_uri
 

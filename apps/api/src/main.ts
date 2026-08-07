@@ -15,6 +15,7 @@ import { negotiateHandler, signalRConnInfoInput } from './functions/signalr/nego
 import { signalROutput } from './functions/signalr/envelope';
 import { getCurrentTemperaturesHandler } from './functions/temperatures/get-current';
 import { getDevicesHandler } from './functions/devices/get-devices';
+import { cosmosHealthHandler } from './functions/health/cosmos-health';
 
 // Register HTTP triggers
 app.http('getCooks', {
@@ -74,6 +75,20 @@ app.http('getDevices', {
   authLevel: 'anonymous',
   route: 'devices',
   handler: getDevicesHandler,
+});
+
+// Cosmos health probe (MG-51). Registered alongside the business endpoints on
+// purpose: it must run inside the deployed app, with the app's own settings and
+// managed identity, or it proves nothing about the API's path to Cosmos.
+//
+// authLevel stays 'anonymous' for the same reason as the endpoints above — the
+// platform-layer Easy Auth gate (auth_settings_v2) validates the bearer token
+// before any function executes, so this is not anonymous end-to-end.
+app.http('cosmosHealth', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'health/cosmos',
+  handler: cosmosHealthHandler,
 });
 
 console.log('MeatGeek V2 API Functions registered successfully');

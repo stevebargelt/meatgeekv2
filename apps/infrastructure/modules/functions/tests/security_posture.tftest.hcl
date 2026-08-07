@@ -27,6 +27,7 @@ variables {
   storage_account_name                   = "mgv2devabc123def456"
   application_insights_connection_string = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://westus2.in.applicationinsights.azure.com/;LiveEndpoint=https://westus2.livediagnostics.monitor.azure.com/"
   cosmos_account_endpoint                = "https://mgv2dev.documents.azure.com/"
+  cosmos_database_name                   = "meatgeek-v2-dev-db"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   # dev/prod tfvars always supply explicit, non-empty CORS origins (no wildcard).
@@ -128,6 +129,36 @@ run "appinsights_full_connection_string_aad" {
     condition     = alltrue([for v in values(azurerm_function_app_flex_consumption.main.app_settings) : !can(regex("(?i)(accountkey|sharedaccesskey|primarykey|secondarykey)=", v))])
     error_message = "No SAS/account/primary key may appear in Function App app_settings"
   }
+}
+
+# MG-51 — the Cosmos wiring names a DATABASE, not just an account. The endpoint
+# alone left the API to guess, and it guessed a database that has never existed
+# while the IoT ingest path (wired with the real name) kept passing. Both halves
+# are asserted on the rendered plan: the setting is present, and its value is the
+# module input rather than a literal restated here.
+run "cosmos_database_name_reaches_the_app" {
+  command = plan
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.app_settings["COSMOSDB_DATABASE_NAME"] == var.cosmos_database_name
+    error_message = "COSMOSDB_DATABASE_NAME must be set from var.cosmos_database_name — the API reads this setting and has no fallback (MG-51)"
+  }
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.app_settings["COSMOSDB__accountEndpoint"] == var.cosmos_account_endpoint
+    error_message = "COSMOSDB__accountEndpoint must still be set alongside the database name — the app needs both to reach Cosmos"
+  }
+}
+
+# MG-51 negative — an empty database name is refused at plan time. A blank
+# setting deploys an app that cannot resolve a database at all, which is the same
+# outage as the absent setting this ticket fixes; it must not be expressible.
+run "empty_cosmos_database_name_is_refused" {
+  command = plan
+  variables {
+    cosmos_database_name = ""
+  }
+  expect_failures = [
+    var.cosmos_database_name,
+  ]
 }
 
 # item 3 (configured path) — Easy Auth is validation-only: client-secret-free,
