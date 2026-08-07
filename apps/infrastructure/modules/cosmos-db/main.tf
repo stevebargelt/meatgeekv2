@@ -105,6 +105,24 @@ resource "azurerm_cosmosdb_account" "main" {
 # it along with the parent regardless. State is then left listing a resource that
 # no longer exists, and the next apply builds on a lie.
 #
+# STATE THE RULE BY ATTRIBUTE KIND, NOT BY ARGUMENT NAME (MG-48 re-audit). What
+# decides the question is whether the VALUE is one the parent's own configuration
+# SETS — ordering only — or one Azure COMPUTES at create time — replacement. It is
+# NOT whether the argument happens to be spelled `*_name`, and NOT whether the
+# reference stands alone as a bare `<type>.<label>.name`. Two shapes that read as
+# exceptions and are not:
+#   - a configured attribute other than `name`. Every child below reaches the
+#     account through `azurerm_cosmosdb_account.main.resource_group_name`, which
+#     is set by the account's own config and so carries ordering only, exactly
+#     like `.name` does.
+#   - a reference buried inside a string interpolation, e.g.
+#     `"sb://${azurerm_eventhub_namespace.main.name}.servicebus.windows.net"` in
+#     modules/iot-hub. Being inside quotes changes nothing about what the value is.
+# Reading this rule as a `.name`-suffix heuristic is precisely how instances of
+# this defect survived three successive enumerations of it. If you are deciding
+# whether a reference needs a lifecycle block, ask what produces the value, not
+# what the argument is called.
+#
 # Every account_name / database_name reference below is that second kind. That is
 # not hypothetical here: `free_tier_enabled` is create-only, so claiming the free
 # tier REPLACED azurerm_cosmosdb_account.main. Terraform planned no change for
