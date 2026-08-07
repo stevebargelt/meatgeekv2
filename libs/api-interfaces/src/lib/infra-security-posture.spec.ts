@@ -955,13 +955,32 @@ describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DIS
   const RUNNER = path.join(FIXTURES, 'run-flex-secret-gate-fixtures.sh');
   const fixture = (name: string): string => path.join(FIXTURES, name);
 
-  function run(shell: string, args: string[]): { code: number; out: string } {
+  // `status` and `signal` are carried alongside `code` so a failing assertion can
+  // distinguish a real nonzero EXIT (a verdict the gate rendered) from a null
+  // status — killed by a signal, or execFileSync never running the process at all.
+  // Collapsing both into `code: 1` reports an environment failure as a gate verdict.
+  function run(
+    shell: string,
+    args: string[]
+  ): { code: number; out: string; status: number | null; signal: string | null } {
     try {
       const out = execFileSync(shell, args, { encoding: 'utf8' });
-      return { code: 0, out };
+      return { code: 0, out, status: 0, signal: null };
     } catch (e) {
-      const err = e as { status?: number; stdout?: string; stderr?: string };
-      return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+      const err = e as {
+        status?: number | null;
+        signal?: string | null;
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
+      const captured = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+      return {
+        code: err.status ?? 1,
+        out: captured || (err.message ?? ''),
+        status: err.status ?? null,
+        signal: err.signal ?? null,
+      };
     }
   }
 
@@ -1007,9 +1026,26 @@ describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DIS
   });
 
   it('the committed fixture runner drives every flex/azapi gate case green (bash + sh)', () => {
-    const { code, out } = run('bash', [RUNNER]);
-    expect(code).toBe(0);
-    expect(out).toMatch(/all fixtures behaved as expected/);
+    const r = run('bash', [RUNNER]);
+    // Asserted as ONE object so a failure carries the harness log — which names
+    // WHICH case failed under WHICH shell — instead of a bare "Expected 0 /
+    // Received 1" that says nothing about the 32 checks behind it. `signal` and a
+    // null `status` are asserted alongside so a runner killed by a signal (or one
+    // execFileSync could not spawn) is not reported as a gate verdict.
+    expect({
+      case: 'run-flex-secret-gate-fixtures.sh',
+      shell: 'bash',
+      status: r.status,
+      signal: r.signal,
+      log: r.out,
+    }).toEqual({
+      case: 'run-flex-secret-gate-fixtures.sh',
+      shell: 'bash',
+      status: 0,
+      signal: null,
+      log: expect.stringContaining('all fixtures behaved as expected'),
+    });
+    const out = r.out;
     // The two azapi-account cases are present in the run.
     expect(out).toMatch(/flex-plan-accepted\.json: exit 0 as expected/);
     expect(out).toMatch(/flex-plan-reenabled-shared-key\.json: nonzero \(\d+\) as expected/);
