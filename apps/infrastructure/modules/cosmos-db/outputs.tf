@@ -58,8 +58,22 @@ output "container_names" {
 # (see the route comments in modules/iot-hub/main.tf for the same distinction one
 # layer up). Names still cross the boundary next to these ids — the Azure APIs
 # want the literal name — but the ids are what carry identity.
+#
+# CONSUME THESE AS AN ATTRIBUTE, never as a bare resource address. The distinction
+# is not cosmetic and it cuts the opposite way from the one above. Downstream, an
+# id ends up on a trigger, and `replace_triggered_by = [azurerm_cosmosdb_account.main]`
+# naming a WHOLE resource fires when that resource is planned for in-place UPDATE as
+# well as for replacement (measured against Terraform 1.9.8), so a trigger written
+# that way turns a routine tag, backup-policy or consistency-level edit on the parent
+# into a destroy-and-recreate of every container beneath it — data loss dressed up as
+# a safety feature. The `.id` form fires on the VALUE changing instead: unknown
+# at plan time when the parent is replaced, untouched by an in-place edit. That is
+# a documented property rather than an observed one, and it is the whole reason
+# what crosses this boundary is an id and not the resource that produced it.
+# Over-triggering was caught in review on this change before it shipped; re-opening
+# it is as easy as writing the bare form in a new consumer.
 output "container_ids" {
-  description = "Resource IDs of all containers created in the database. Computed, unlike container_names: an id changes when a container is replaced, so a consumer that must be replaced WITH a container references the id — the configured name survives replacement unchanged and cannot carry that dependency."
+  description = "Resource IDs of all containers created in the database. Computed, unlike container_names: an id changes when a container is replaced, so a consumer that must be replaced WITH a container references the id — the configured name survives replacement unchanged and cannot carry that dependency. Reference the id as an attribute in replace_triggered_by; a bare whole-resource address there also fires on the parent's in-place update and would recreate the container on an ordinary tag edit."
   value = {
     devices      = azurerm_cosmosdb_sql_container.devices.id
     temperatures = azurerm_cosmosdb_sql_container.temperatures.id
