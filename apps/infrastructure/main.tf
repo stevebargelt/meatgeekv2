@@ -217,9 +217,21 @@ module "iot_hub" {
   iot_hub_sku_capacity = var.iot_hub_sku_capacity
 
   # Parallel routing destinations: direct→Cosmos for storage, EventHub→Functions for real-time fan-out.
+  #
+  # Names AND ids both cross the boundary (MG-48). The Azure API writes the literal
+  # names into the routing endpoint, but a name is a configured literal that is
+  # byte-identical before and after its target is destroyed and recreated — so
+  # names alone erase, at the boundary, whether the database and container still
+  # exist. The ids are computed and change on replacement, which is what gives the
+  # endpoint a real dependency on the target existing (terraform_data.cosmos_target_ready
+  # in modules/iot-hub/main.tf). The container name is now read from the module
+  # too, rather than restated here: Terraform owns that name, and a consumer that
+  # spells it out itself is a second source of truth that can silently drift.
   cosmos_account_endpoint = module.cosmos_db.endpoint
   cosmos_database_name    = module.cosmos_db.database_name
-  cosmos_container_name   = "temperatures"
+  cosmos_container_name   = module.cosmos_db.container_names.temperatures
+  cosmos_database_id      = module.cosmos_db.database_id
+  cosmos_container_id     = module.cosmos_db.container_ids.temperatures
 
   # Dependency handle: the Cosmos routing endpoint uses the IoT Hub identity, so
   # it must be created only AFTER that identity holds the data-plane role. Only

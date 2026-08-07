@@ -111,6 +111,39 @@ resource "terraform_data" "cosmos_role_ready" {
   input = var.cosmos_role_assignment_id
 }
 
+# Dependency handle for the Cosmos routing TARGET (MG-48). It carries the ids of
+# the SQL database and the container the endpoint writes into, giving the endpoint
+# a structural dependency on those objects EXISTING rather than on what they are
+# called.
+#
+# The endpoint's own arguments reach the target through var.cosmos_database_name
+# and var.cosmos_container_name, which are CONFIGURED literals: identical before
+# and after the database is destroyed and recreated. Ordering through them is not
+# ordering at all — nothing in this module's graph knows the database exists, so
+# the endpoint's create is only ever racing it. That is exactly how the 2026-08-06
+# dev apply died: free_tier_enabled is create-only, so claiming the free tier
+# replaced the Cosmos account, Azure destroyed meatgeek-v2-dev-db and its five
+# containers along with it, Terraform never planned those children for replacement
+# (same static-name defect as the routes below), and this endpoint's create then
+# failed with Azure IH400142 "Database does not exist". An id is COMPUTED and
+# changes when the object is replaced, which is what makes it usable both as an
+# ordering edge and — via replace_triggered_by — as a replacement trigger.
+#
+# This is a SEPARATE node from cosmos_role_ready above, deliberately. That handle
+# is already in live state; feeding it a value that is unknown at plan time would
+# plan it for REPLACEMENT, and tf-plan-destroy-guard.sh classifies a replace as a
+# protected delete. cosmos_target_ready is brand new, so it is a pure create and
+# adds no delete token to the repair plan. Do not fold the two together.
+#
+# Acyclicity is unchanged: only the endpoint sits downstream of this handle, never
+# azurerm_iothub.main, and the cosmos-db module has no edge back into this one.
+resource "terraform_data" "cosmos_target_ready" {
+  input = {
+    database_id  = var.cosmos_database_id
+    container_id = var.cosmos_container_id
+  }
+}
+
 # Custom routing endpoint: Cosmos DB temperatures container (identity-based auth).
 # The IoT Hub system-assigned identity (output: identity_principal_id) must hold
 # the "Cosmos DB Built-in Data Contributor" role on the Cosmos account BEFORE this
@@ -129,7 +162,22 @@ resource "azurerm_iothub_endpoint_cosmosdb_account" "cosmos_storage" {
 
   authentication_type = "identityBased"
 
-  depends_on = [terraform_data.cosmos_role_ready]
+  # Two independent preconditions, one handle each: the data-plane role must exist
+  # (Azure validates the identity's access at creation, MG-24) AND the database and
+  # container must exist (IH400142, MG-48). The names above cannot carry the second
+  # one — they are literals that survive the target's destruction unchanged.
+  depends_on = [terraform_data.cosmos_role_ready, terraform_data.cosmos_target_ready]
+
+  # NOT redundant with the depends_on above — do not delete this. depends_on
+  # propagates ORDERING only; it never plans this endpoint for replacement. When
+  # the database or container is replaced its id changes, cosmos_target_ready is
+  # replaced with it, and this block is what carries that replacement through to
+  # the endpoint. Without it the endpoint would keep pointing, unchanged, at a
+  # database that Azure had already destroyed and recreated — state claiming a
+  # binding that no longer exists, which is the shape of the IH400142 failure.
+  lifecycle {
+    replace_triggered_by = [terraform_data.cosmos_target_ready]
+  }
 }
 
 # Custom routing endpoint: Event Hub for real-time fan-out to Functions.

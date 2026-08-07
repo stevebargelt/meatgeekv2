@@ -47,6 +47,31 @@ variable "cosmos_container_name" {
   type        = string
 }
 
+variable "cosmos_database_id" {
+  description = <<-EOT
+    Resource ID of the Cosmos SQL database that owns the routing target container.
+    It exists ONLY to carry that database's IDENTITY across the module boundary
+    (MG-48). cosmos_database_name above is a CONFIGURED literal — byte-identical
+    before and after the database is destroyed and recreated — so a name tells this
+    module what the database is called but erases, at the boundary, whether the
+    thing it names still exists. An id is COMPUTED and changes on replacement,
+    which is what lets the Cosmos routing endpoint both order after the database
+    and be replaced with it (see terraform_data.cosmos_target_ready in main.tf).
+    The names stay because the Azure API writes the literal names into the
+    endpoint; the ids are what carry existence.
+  EOT
+  type        = string
+}
+
+variable "cosmos_container_id" {
+  description = <<-EOT
+    Resource ID of the Cosmos container receiving routed device telemetry. Same
+    role as cosmos_database_id above — identity, not name — so the routing
+    endpoint depends on the container EXISTING and is replaced along with it.
+  EOT
+  type        = string
+}
+
 variable "cosmos_role_assignment_id" {
   description = <<-EOT
     ID of the Cosmos DB SQL data-plane role assignment ("Cosmos DB Built-in Data
