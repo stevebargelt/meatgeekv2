@@ -1,79 +1,60 @@
-**Session 2026-08-03/04. THREE PRs merged. MG-42 open on AC4 only. Azure subscription VSE02 is DOWN until 2026-08-06.**
+**Session 2026-08-06. MG-42 CLOSED. MeatGeek V1 FULLY RETIRED. ~$85-115/mo reclaimed. One self-inflicted dev outage, reverted and root-caused.**
 
-## DO THIS FIRST WHEN THE CREDIT RESETS (2026-08-06)
+## Next action: re-land the Cosmos free tier (~$24/mo)
 
-VSE02 (`c7e800cb`) is **DISABLED** — MSDN monthly credit exhausted, `spendingLimit: On`. Operator
-decided NOT to pay to restart early. Everything below is blocked on the reset.
+Everything blocking it is fixed and merged. **Full step-by-step procedure is in MG-48** — read it
+before starting; it names the exact verification commands and the failure protocol.
 
-**Order matters — AC4 first, it is fastest and unblocks the dev GitOps loop.**
+Short version: `git revert a2dab91` -> push -> the automatic apply refuses at the destroy guard
+(expected, see MG-50) -> read the token set it prints (**expect SEVEN now, not five** — both IoT
+Hub routes joined the chain via the ordering fix, which is the fix working) -> `workflow_dispatch`
+`Apply Dev Infrastructure` with that exact set -> approve the recovery gate -> verify
+`enableFreeTier=true`, 5 containers, 2 role assignments, both routes, and the run's FINAL DRIFT
+PLAN green.
 
-### 1. MG-42 AC4 — closes the ticket, NO code needed (all merged)
-1. `az account list --refresh --all` — **NOT `az account show`**, which reads a CACHED profile and
-   reported `Enabled` for a disabled subscription all through 2026-08-03. Cost a wrong assertion.
-2. `az login` as Owner; `az account set --subscription c7e800cb-0ee6-4175-9605-a6b97c6f419f`
-3. `cd apps/infrastructure/bootstrap && ./bootstrap.sh` from main
-4. Confirm all three fed creds carry `repo:stevebargelt@4857343/meatgeekv2@1304558512:environment:<env>`.
-   Baseline: `infra-apply-dev` (8d7d37cb) already correct — a re-run MUST leave it alone;
-   `appdeploy-dev` (8426e178) and `oidc-prod` (3e1ac1f5) still on the BROKEN default prefix.
-5. Environment-scoped `azure/login` succeeds, no `AADSTS700213`
-6. Close MG-42 with the Acceptance Evidence grid — AC1/2/3/5 evidence is already in the ticket body,
-   only AC4's row is missing.
+**If it stalls partway: revert FIRST (restores dev), diagnose second.** That is what worked today.
 
-The old "never re-run bootstrap.sh" hazard is GONE — the integration suite proves against the
-verbatim live API response that a re-run leaves the hand-corrected credential untouched.
+## Shipped today
 
-### 2. MG-48 Phase 1 — ~$50-60/mo, no data risk. Full runbook is IN THE TICKET.
-**Gotcha that will waste your first attempt:** APIM is `Suspended` separately from the subscription.
-`az apim backup` and `az apim api export` are served by the INSTANCE and both fail while it holds
-(verified: `Invalid API Management service state: Suspended`), even though `az apim show` answers
-fine. MG-48 step 0b polls `provisioningState` until it leaves `Stopped`.
-Then: backup -> **verify blob is MEGABYTES** -> download + hash OFF Azure -> export OpenAPI -> delete.
+- **MG-42 CLOSED** (audit `879efbb`) with a full Acceptance Evidence grid. AC4 proven live: the
+  bootstrap re-run reconciled all three fed creds onto the derived prefix (`appdeploy-dev` and
+  `oidc-prod` REPAIRED, `infra-apply-dev` untouched — 3 matched, 0 wrong), and GitHub Actions run
+  **31132208038** shows `Azure login (OIDC — dev infra-apply identity) = success`, no
+  `AADSTS700213`. Open since 2026-07-27.
+- **MG-48 V1 retirement COMPLETE.** `az resource list` returns zero MeatGeek/Meatgeek resources.
+  Deleted: APIM (~$34.61), Event Hubs `meetgeek` (~$11), ACR (~$5), RG `MeatGeek-IoT-Test-Devices`
+  (~$10-20, incl. a Premium_LRS disk that billed in full while the VM was deallocated), V1 Cosmos,
+  and all five V1 resource groups. Operator had removed `testhubmeatgeek` (~$25) earlier.
+- **PR #37 (`29cebf2`)** — IoT Hub route/endpoint replacement ordering fix + static check 17.
 
-### 3. MG-48 Phase 2 — ~$24/mo more. SMOKE THE EXPORT TOOL ON V2 DEV FIRST (step is in the ticket).
-### 4. MG-47 — real per-RG spend, Cosmos throughput check, and fix the budget alerting that failed silently.
+## Archive — ~/meatgeek-v1-archive/ (84 MB, README reconstructs V1's architecture)
 
-## Shipped this session
+APIM backup blob (sha256 verified) + OpenAPI for both APIs; ARM templates for all six RGs; the
+full 73 MB arm64 telemetry image (.NET 6 IoT Edge module) + reconstructed Dockerfile; Event Hubs
+topology; and **9,886 Cosmos documents (42 sessions / 9,843 statuses / 1 cook), triple-verified**.
+V1 source also lives on in GitHub: `meatgeek-azure-sessions`, `MeatGeek-IoT`,
+`meatgeek-azure-proxies`, `MeatGeek-Shared` (archived), `MeatGeek-IoTEdge`.
 
-- **MG-39 AC#2** (`0209495`, PR #34) — azurerm floated to v5.0.1 and broke `azurerm_eventhub`,
-  leaving every PR red and main latent-red. Pinned `~> 4.0`, six tracked multi-platform locks,
-  `-lockfile=readonly`, tf-static-checks **check 16**. MG-39 REMAINS OPEN: snyk@master SHA-pinning
-  + SNYK_TOKEN, and prod-workflow `uses:` pinning.
-- **MG-42** (`879efbb`, PR #33) — derived OIDC subject prefix, integration suite, runbook guards,
-  bash-3.2 test fix, CI completion guard. **Still OPEN on AC4 only.**
-- **MG-48 export tool** (`c107fca`, PR #35) — read-only, count-reconciled Cosmos exporter,
-  50 tests, CI-wired. Real SDK path deliberately unexercised; covered by the V2-dev smoke run.
+## Filed today
 
-## Filed this session (all from evidence, not speculation)
+**MG-49** cosmos-export `--auth aad` documented but `@azure/identity` absent (V2 dev has
+`disableLocalAuth=true`, so a key-only tool cannot export V2).
+**MG-50** GitOps gap — destroy authorization is a `workflow_dispatch`-only input, so ANY
+destructive change drops the loop into manual mode. Operator: "a human can't approve every deploy,
+that is a bottleneck." Proposed fix: git-tracked declarative token file. This is also the direct
+cause of MG-38's condition.
 
-MG-43 (runbook guard harness + 4 blocks that fail `bash -n`), MG-44 (CI bash-3.2 matrix),
-MG-45 (forge-test unusable here — package-lock trips `npm ls --all`; agents improvise validation
-until fixed), MG-46 (completion guard trusts self-reported pass count), MG-47 (cost analysis),
-MG-48 (retire V1 — ~$85-100/mo, with full runbooks).
+## Lessons that cost real time today
 
-## Cost picture (operator-supplied actuals, ~$182.40/cycle)
-
-VMs 43.58, Cosmos 41.52, APIM 34.61, IoT Hub 23.39, Event Hubs 21.77, Storage 17.53.
-**VSE02 hosts FOUR projects — MeatGeek V2 is only about a THIRD.** V1 legacy is roughly half:
-APIM Developer ($34.61, 100% V1, and there is no APIM in the V2 terraform), a second paid S1 IoT
-Hub (`testhubmeatgeek`, a TEST hub), a Cosmos account, 4 storage accounts. Constellation and
-forge-ntfy are also in here. **V1 holds the subscription's single Cosmos free-tier slot**, which is
-why V2 pays ~$24/mo it need not. Operator confirmed nothing calls the V1 API.
-
-## Hard-won lessons — do not relearn
-
-- **macOS `/bin/bash` is 3.2.57, no newer bash on this box.** A `case` with quoted patterns
-  lexically inside `$( … )` is mis-parsed there but fine on CI bash 5. Bit TWICE this session
-  (MG-42 F5 truncated `bootstrap.test.sh` at 229/321; MG-39's check 16 aborted tf-static-checks).
-  **`bash -n` does NOT detect it** — bash defers parsing `$( )` bodies. Only execution finds it. MG-44.
-- **No dedicated worktree.** Never switch branches or run two agents while one is live — a bounded
-  recheck was destroyed that way and had to be re-run.
-- **Run things on macOS yourself.** Three of MG-42's seven findings came from the orchestrator
-  executing on the real platform; containers are bash 5 and cannot see that class.
-- **`az account show` lies** (cached profile). Use `az account list --refresh`.
-- The dev auto-apply triggers on `workflow_run` of CI, which fires for PR runs too — those show
-  `skipped` via the `head_branch == main` gate. A skipped apply is usually NOT drift.
-- The apply's post-apply secret gate correctly distinguishes "could not read state" (fail closed)
-  from "never bound state" (nothing to inspect, exit 0). A `success` on a backlog-only commit is
-  not a fail-open.
-
-**2026-08-06 in progress.** Credit reset; VSE02 Enabled. MG-42 AC4 first half DONE — bootstrap re-run reconciled all three fed creds to the derived prefix (appdeploy-dev and oidc-prod repaired, infra-apply-dev untouched). Awaiting the dev apply's environment-scoped azure/login for AC4's second half. MG-48 Phase 1 started: archive RG + storage created, APIM backup running server-side (APIM state Updating). NOTHING deleted yet — the delete is gated on verifying the backup blob is non-trivial.
+- **An empty query result means "absent OR you asked wrong."** A wrong-cased jmespath
+  (`cosmosDBSqlContainers` vs `cosmosDbSqlContainers`) made a healthy endpoint look destroyed and
+  produced an overstated damage report. Distinguish before concluding.
+- **`${PIPESTATUS[0]}` is EMPTY in zsh** (it is `pipestatus`, 1-indexed). It silently turned a
+  PASSING verify into a refusal. Capture exit codes without a pipe, or use bash explicitly.
+- **A correct plan is not an achievable plan.** The destroy set was reviewed for legitimacy — the
+  right check — but not for whether Azure would permit the ordering. Different question.
+- **A grep with an unquoted `--include=*.tf` silently does nothing in zsh** (glob expansion errors
+  the command). A dependency check almost got skipped before deleting five resource groups.
+- **macOS `/bin/bash` is 3.2.57.** A `case` with quoted patterns inside `$( … )` aborts scripts
+  there while CI bash 5 stays green, and `bash -n` cannot detect it. Run repo shell locally.
+- **No dedicated worktree** — never switch branches or run two agents while one is live.
