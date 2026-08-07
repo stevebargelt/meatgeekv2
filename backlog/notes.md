@@ -45,12 +45,31 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
    **(c) The token count is the size of the account's dependent closure — never a fixed number.**
    The old note here said "expect SEVEN tokens now, not five." That expectation is dead and was
    always the wrong shape: **the closure grows every time this class of bug is fixed correctly.**
-   Today it is roughly thirteen (account, database, 5 containers, 2 Cosmos role assignments — both
-   scoped by the account's computed id — both `terraform_data` handles, the Cosmos endpoint and the
-   Cosmos route). Tomorrow it is more. **Read the set out of the failed run's own output; do not
-   carry a number forward from these notes.** An operator who reads a larger set as a regression
-   will either stop or authorize a truncated set, and a truncated set is how you get half a
-   replacement.
+   Count it by MECHANISM, never from memory. A resource is in the delete-or-replace set only if
+   the account's replacement makes one of ITS OWN ForceNew arguments change, or if a
+   `replace_triggered_by` reaches it. On this branch that is: the account; the SQL database; the
+   five containers; BOTH `azurerm_cosmosdb_sql_role_assignment`s (root `main.tf` — `scope` and
+   `role_definition_id` are built from the account's computed id);
+   `module.iot_hub.terraform_data.cosmos_target_ready`, whose `triggers_replace` carries the
+   database and container ids; the `cosmos-storage` endpoint and the `cosmos-storage-route`
+   behind it; and — easy to miss, because it lives nowhere near the Cosmos module —
+   `module.monitoring`'s Cosmos diagnostic setting and 429 metric alert, which both address the
+   account by its computed id. Thirteen or fourteen, depending on how the provider classifies
+   `azurerm_monitor_metric_alert.scopes`, which no one here has read out of a real plan.
+   Tomorrow it is more. **Read the set out of the run's own output; do not carry a number forward
+   from these notes.** An operator who reads a larger set as a regression will either stop or
+   authorize a truncated set, and a truncated set is how you get half a replacement.
+
+   **`module.iot_hub.terraform_data.cosmos_role_ready` is NOT in that set** — an earlier draft of
+   this note counted both handles, which is wrong. Its payload sits on `input`, which is not
+   ForceNew: when the role-assignment id goes unknown that handle is UPDATED IN PLACE (`~`), so
+   it never reaches the destroy guard. Only `cosmos_target_ready` is replaced, because its
+   payload sits on `triggers_replace`. Two things follow. An update token transcribed into a
+   destroy-authorization list is a transcription error (see 3). And if `cosmos_target_ready` ever
+   shows as `~` instead of `-/+`, someone has moved its payload back onto `input`: per the
+   MEASURED note in `modules/iot-hub/main.tf` that still propagates to the endpoint, but the
+   handle then goes on claiming to represent an object Azure destroyed and recreated — and this
+   count shifts by one.
 
 2. **MG-47 — cost analysis.** The retirement is done, so the useful move now is measuring the NEXT
    cycle against ~$182 baseline and, more importantly, fixing the budget alerting that let the
@@ -59,8 +78,10 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
 3. **MG-50 — the GitOps destroy-authorization gap.** Sizeable change to a safety-critical path;
    treat as `implementation_full`, not a quick fix. It is the direct cause of MG-38's condition.
    **It got bigger with the closure fix:** authorization is hand-transcribed exact addresses, and
-   at ~13 of them it is past the point where a human transcribes it reliably. Per (c) the set only
-   grows. A mistyped or dropped address in that list is not a typo, it is a partial replacement.
+   at a dozen-plus of them it is past the point where a human transcribes it reliably. Per (c) the
+   set only grows, it now reaches into `module.monitoring`, and it sits next to look-alike tokens
+   that must NOT be transcribed into it (`cosmos_role_ready` updates in place). A mistyped,
+   dropped or wrongly-included address in that list is not a typo, it is a partial replacement.
 4. **Wire the Cosmos DATABASE NAME into the Function App — separate ticket, deliberately NOT in
    the MG-48 repair.** Terraform creates `${resource_prefix}-db` (= `meatgeek-v2-dev-db`), but
    `modules/functions/main.tf:259` passes only `COSMOSDB__accountEndpoint` — no database name. So
@@ -102,7 +123,15 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
   bug class, and it has now broken dev twice — once at the route/endpoint layer (`29cebf2`), once
   at the account/database layer. Static check 18 is the guard, and it is DISCOVERY-DRIVEN rather
   than a Cosmos allowlist for exactly this reason: a type-keyed check would have passed green on
-  the day it shipped while five IoT Hub pairs sat broken. **Do not "fix" it by narrowing it.**
+  the day it shipped while five IoT Hub pairs sat broken. It keys on the VALUE — any
+  configured-name reference to a managed resource, including one interpolated inside a string —
+  not on the argument's name. An earlier draft matched only `*_name = <type>.<label>.name` and
+  was blind to `entity_path = azurerm_eventhub.temperature_data.name` and to
+  `endpoint_uri = "sb://${azurerm_eventhub_namespace.main.name}..."`, which is the same defect on
+  the Event Hub path. **Do not "fix" it by narrowing it.** Every exclusion it does make
+  (`resource_group_name`; `module`/`output` blocks, which cannot carry a lifecycle block) is
+  listed in the check's own header, because an undocumented exclusion is how the next enumeration
+  gap gets created.
 - **A human approval gate is NOT the long-term answer** for destructive applies (operator: "a
   human can't approve every deploy, that is a bottleneck"). MG-50 proposes git-tracked declarative
   authorization. For prod, the right control is `prevent_destroy` on data-bearing resources
