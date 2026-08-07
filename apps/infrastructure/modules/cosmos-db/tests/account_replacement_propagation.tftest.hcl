@@ -19,8 +19,15 @@
 # apps/infrastructure/scripts/tf-static-checks.sh is the real guard: it scans the
 # committed HCL for every child that reaches a parent by the parent's configured
 # name and requires that child to carry a matching lifecycle.replace_triggered_by.
-# That check is enumeration-complete by construction (it discovers pairs rather
-# than listing them) and is mutation-verified. This file cannot replace it.
+# It is DISCOVERY-DRIVEN rather than an allowlist, which makes it complete over
+# the reference SHAPES its scan recognizes — a new resource of a type nobody
+# anticipated is covered the day it is written. That is NOT the same as being
+# enumeration-complete, and an earlier revision of this preamble claimed it was.
+# The correction matters, so it is stated rather than quietly dropped: a lexical
+# scan can only match shapes it was taught, every unmatched shape is an unguarded
+# pairing, and check 18's own exclusion boundary is the authoritative list of what
+# it does not see. Read that boundary, not this file, before concluding a
+# reference is covered.
 #
 # A second limit, stated plainly: the assertions below compare VALUES, and value
 # equality cannot distinguish "the child references the parent" from "the child
@@ -29,8 +36,8 @@
 # invalidate the fix — see below.
 #
 # What this file DOES pin is the premise the fix rests on. Each child reaches its
-# parent through the parent's CONFIGURED `name` (main.tf:99 for the database;
-# :109-110, :156-157, :204-205, :252-253, :278-279 for the containers), and every
+# parent through the parent's CONFIGURED `name` (main.tf:119 for the database;
+# :134-135, :189-190, :243-244, :297-298, :329-330 for the containers), and every
 # one of those names is a pure function of input variables — a static literal,
 # identical before and after a replacement. That is exactly why those references
 # propagate ORDERING but not REPLACEMENT, and therefore why each of the six
@@ -49,10 +56,42 @@
 # be evaluated — and the lifecycle blocks should be revisited: a reference to a
 # computed attribute carries replacement on its own.
 #
-# `resource_group_name` is deliberately NOT asserted here, for the same reason
-# check 18 excludes it: every resource in the stack reaches the resource group by
-# name, and an RG replacement is a whole-stack event the destroy guard blocks on
-# sight. It is not a Cosmos-account pairing.
+# REFERENCE AUDIT OF THIS MODULE, and a correction to an earlier revision of this
+# file. The MG-48 re-dispatch found that the sibling iot-hub module carried a
+# whole class of parent reference nobody had enumerated: values that reach a
+# parent by configured name WITHOUT being a bare `<type>.<label>.name` — an
+# `entity_path` whose field name does not end in `_name`, and a parent name
+# interpolated inside a larger string. Both are invisible to a scan keyed on the
+# argument's name or on a bare reference. So this module was re-scanned for every
+# managed-resource reference of any shape, not just the ones check 18 matches:
+#
+#   grep -nE '(^|[^A-Za-z0-9_.])azurerm_[a-z0-9_]+\.[a-z0-9_]+\.[a-z0-9_]+' main.tf
+#   grep -nE '"\$\{[^}]*azurerm_' main.tf
+#
+# Result: 17 managed-resource references inside `resource` blocks, and ZERO
+# interpolated ones — the shape that broke iot-hub does not occur in this module.
+# The 17 fall into exactly three attribute shapes, all configured, all therefore
+# ordering-only:
+#
+#   account_name        = azurerm_cosmosdb_account.main.name           (6: db + 5 containers)
+#   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name  (5: containers)
+#   resource_group_name = azurerm_cosmosdb_account.main.resource_group_name (6)
+#
+# That third shape is the correction. An earlier revision of this preamble
+# declined to assert `resource_group_name` "for the same reason check 18 excludes
+# it — it is not a Cosmos-account pairing." That is FALSE HERE, and a reader who
+# believed it would mis-enumerate the module. These lines do not reach a resource
+# group at all: they reach `azurerm_cosmosdb_account.main`, the very parent this
+# file is about, through a configured attribute that simply is not called `name`.
+# They are Cosmos-account pairings. Check 18 skips them TWICE — once because the
+# field is `resource_group_name`, once because the value's trailing attribute is
+# not `.name` — so nothing but this file pins them.
+#
+# They are not a defect: the same `replace_triggered_by = [azurerm_cosmosdb_account.main]`
+# that covers the `account_name` reference covers this one, because it names the
+# parent, not the attribute. The point is that the coverage is a coincidence of
+# the two shapes sharing a parent, not something either scan verified — so the
+# shape is asserted below rather than excluded on a rationale that does not hold.
 #
 # Run:  terraform -chdir=apps/infrastructure/modules/cosmos-db test
 # (init the module dir with `terraform init -backend=false` first).
@@ -99,6 +138,42 @@ run "database_reaches_its_account_through_the_accounts_configured_name" {
   assert {
     condition     = azurerm_cosmosdb_sql_database.meatgeek.account_name == azurerm_cosmosdb_account.main.name
     error_message = "The SQL database must reach the account through azurerm_cosmosdb_account.main.name — a configured value identical before and after replacement. This pairing is what azurerm_cosmosdb_sql_database.meatgeek's replace_triggered_by must name; without that block Azure destroys the database with the account while Terraform's state keeps listing it"
+  }
+}
+
+# THE THIRD SHAPE, asserted because no static scan sees it. Every one of the six
+# children also reaches azurerm_cosmosdb_account.main through the account's
+# CONFIGURED `resource_group_name` attribute. It is a reference to the ACCOUNT —
+# not to a resource group — and it is exactly as ordering-only as `account_name`,
+# for exactly the same reason: the value is var.resource_group_name passed
+# through, byte-identical before and after the account is replaced.
+#
+# The first assertion is the load-bearing one: it pins that the attribute really
+# is a pure function of the input variable. If the account's resource_group_name
+# ever became computed, this reference would start carrying replacement on its
+# own and the lifecycle blocks would no longer be the thing doing the work.
+run "children_reach_the_account_through_its_configured_resource_group_name" {
+  command = plan
+
+  assert {
+    condition     = azurerm_cosmosdb_account.main.resource_group_name == var.resource_group_name
+    error_message = "The account's resource_group_name must be var.resource_group_name unchanged — a configured value. This is what makes the six children's `resource_group_name = azurerm_cosmosdb_account.main.resource_group_name` references ordering-only rather than replacement-carrying. Static check 18 cannot see this shape (the field is excluded by name AND the value's trailing attribute is not `.name`), so if it ever becomes computed this assertion is the only place that will notice"
+  }
+
+  assert {
+    condition     = azurerm_cosmosdb_sql_database.meatgeek.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name
+    error_message = "The SQL database reaches azurerm_cosmosdb_account.main through the account's configured resource_group_name — a second, unscanned pairing with the SAME parent as its account_name reference. It is already covered by the database's replace_triggered_by only because that block names the parent rather than the attribute; nothing verifies that coincidence except this assertion"
+  }
+
+  assert {
+    condition = alltrue([
+      azurerm_cosmosdb_sql_container.devices.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.temperatures.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.cooks.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.users.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.recipes.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+    ])
+    error_message = "All five containers reach azurerm_cosmosdb_account.main through the account's configured resource_group_name. If a container ever sourced its resource group from anywhere else — var.resource_group_name directly, or a different parent — it would stop being paired with the account through this attribute, and the enumeration in this file's preamble would be stale. That silent staleness is how MG-48 broke dev three times"
   }
 }
 
