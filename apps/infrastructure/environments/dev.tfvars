@@ -54,23 +54,9 @@ iot_hub_sku_name     = "S1"
 iot_hub_sku_capacity = 1
 
 # CosmosDB - V2-owned account (created by the cosmos-db module)
-#
-# FREE TIER — dev holds the subscription's one free-tier slot (MG-48).
-# Azure grants exactly ONE free-tier Cosmos account per SUBSCRIPTION (1000 RU/s +
-# 25 GB free). That slot was occupied by the V1 `meatgeek` account, which is why
-# V2 dev was created with it off and has been paying full price ever since; V1 was
-# retired on 2026-08-06 (data exported and verified first — 9,886 documents), so
-# the slot is now free and dev claims it. Dev provisions 400 RU/s on the
-# temperatures container against a 1000 RU/s allowance, so the ENTIRE Cosmos
-# throughput charge for dev (~$24/mo) goes to zero. Prod is explicitly false in
-# prod.tfvars so a prod apply can never take the slot out from under dev.
-#
-# ⚠️ FORCE-NEW: free_tier_enabled is settable only at account CREATION. Flipping
-# this DESTROYS AND RECREATES module.cosmos_db.azurerm_cosmosdb_account.main. Dev is
-# greenfield so the recreate is acceptable here, but the apply must be authorized
-# through the dev workflow's destroy guard (authorized_changes).
-cosmos_enable_free_tier   = true
-temperature_data_ttl_days = 7 # Shorter retention for dev (cost savings)
+cosmos_database_throughput     = 400  # Minimum allowed (will use full remaining capacity)
+cosmos_database_max_throughput = 1000 # Auto-scale maximum for dev
+temperature_data_ttl_days      = 7    # Shorter retention for dev (cost savings)
 
 # Azure Functions — Flex Consumption (MG-24 hosting revision, 2026-07-23).
 # Replaces the inherited Y1 service plan. Flex resolves the Y1 MI-storage 403 by

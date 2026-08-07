@@ -212,20 +212,9 @@ module "cosmos_db" {
   cosmos_account_name = local.cosmos_account_name   # V2 owns this account
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
-  # ... free-tier / ttl / tags
+  # ... throughput / ttl / tags
 }
 ```
-
-**Free tier (MG-48).** Azure allows exactly one free-tier Cosmos account per
-subscription (1000 RU/s + 25 GB free). `cosmos_enable_free_tier` claims it for
-an environment; dev sets it `true` and prod sets it explicitly `false` so a
-prod apply can never take the slot from dev. `free_tier_enabled` is settable
-only at account **creation** — flipping this variable in either direction
-forces Terraform to **destroy and recreate**
-`module.cosmos_db.azurerm_cosmosdb_account.main`. Applying that requires the
-dev apply workflow's destroy guard to be explicitly authorized (see
-[CI/CD Pipeline](../development/ci-cd.md)); the guard is fail-closed and
-refuses the run otherwise.
 
 ## Nx Integration
 
@@ -295,8 +284,9 @@ location    = "West US 2"   # Flex-supported region (MG-24). NOTE: location fans
 iot_hub_sku_name     = "S1"   # S1 required for message routing (F1 cannot route)
 iot_hub_sku_capacity = 1
 
-cosmos_enable_free_tier   = true  # dev holds the subscription's one free-tier slot (MG-48)
-temperature_data_ttl_days = 7
+cosmos_database_throughput     = 400    # V2-owned account
+cosmos_database_max_throughput = 1000
+temperature_data_ttl_days      = 7
 
 # Azure Functions: SINGLE Flex Consumption model (FC1) for both envs — the former
 # functions_app_service_plan_sku (Y1/EP1) is REMOVED (MG-24). Tuned by scale knobs:

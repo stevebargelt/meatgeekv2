@@ -38,21 +38,9 @@ iot_hub_sku_name     = "S1" # Standard tier - 400,000 messages/day
 iot_hub_sku_capacity = 2    # 2 units for redundancy
 
 # CosmosDB - V2-owned account (created by the cosmos-db module)
-#
-# FREE TIER — EXPLICITLY OFF for prod, and it must stay off (MG-48).
-# The subscription has exactly ONE free-tier Cosmos slot and DEV holds it (see
-# dev.tfvars). This is set false explicitly rather than left to the module default
-# so the decision is visible at the point someone would change it: if prod ever
-# claimed the slot, Azure would refuse dev's account the free tier and dev's next
-# apply would silently start paying again. Prod's throughput is also far past the
-# 1000 RU/s allowance, so the tier would buy prod nothing.
-#
-# ⚠️ FORCE-NEW: free_tier_enabled is settable only at account CREATION. Setting this
-# true DESTROYS AND RECREATES module.cosmos_db.azurerm_cosmosdb_account.main — in
-# prod that is PRODUCTION DATA LOSS, and nothing in this graph stops it (there is
-# deliberately no prevent_destroy; see the location warning above and MG-35).
-cosmos_enable_free_tier   = false
-temperature_data_ttl_days = 90 # Full 90-day retention for production
+cosmos_database_throughput     = 400  # Cost-optimized base throughput
+cosmos_database_max_throughput = 4000 # Auto-scale for production spikes when needed
+temperature_data_ttl_days      = 90   # Full 90-day retention for production
 
 # Azure Functions — Flex Consumption (MG-24 hosting revision, 2026-07-23).
 # Replaces the inherited EP1 Premium plan. EP1 is NOT retained (MG-24 point 6: no
