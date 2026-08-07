@@ -159,6 +159,21 @@ resource "azurerm_iothub_route" "cosmos" {
   condition      = "true"
   endpoint_names = [azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage.name]
   enabled        = true
+
+  # NOT redundant with the endpoint_names reference above — do not delete this.
+  # That reference propagates ORDERING but not REPLACEMENT, because the attribute
+  # it reads (`.name`) is the static literal "cosmos-storage": identical before and
+  # after the endpoint is replaced. The route's own configuration therefore never
+  # changes, Terraform never plans the route for replacement, and it tries to
+  # delete the endpoint while this route still points at it. Azure refuses that —
+  # IH400111, "Route to cosmos-storage endpoint is invalid: endpoint does not
+  # exist" — which is how the 2026-08-06 dev apply died partway through, after it
+  # had already destroyed the Function App's Cosmos data-plane role assignment.
+  # replace_triggered_by forces the route to be replaced with the endpoint, and
+  # the reference above then orders the route's destroy before the endpoint's.
+  lifecycle {
+    replace_triggered_by = [azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage]
+  }
 }
 
 # Parallel route #2: all DeviceMessages → Event Hub (real-time path).
@@ -171,6 +186,15 @@ resource "azurerm_iothub_route" "eventhub" {
   condition      = "true"
   endpoint_names = [azurerm_iothub_endpoint_eventhub.eventhub_realtime.name]
   enabled        = true
+
+  # Same defect as the Cosmos route above, latent rather than fired: `.name` here
+  # is the static literal "eventhub-realtime", so replacing the Event Hub endpoint
+  # (which the Event Hub namespace or entity being replaced would cascade into)
+  # leaves this route untouched and Azure rejects the endpoint delete with
+  # IH400111. Not redundant with the endpoint_names reference — see above.
+  lifecycle {
+    replace_triggered_by = [azurerm_iothub_endpoint_eventhub.eventhub_realtime]
+  }
 }
 
 # Consumer group for Azure Functions

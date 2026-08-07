@@ -91,6 +91,22 @@
 #      whose result depends on the registry clock is not a gate. Discovery here is
 #      find-driven on *.tftest.hcl — the SAME rule ci.yml uses to pick modules —
 #      so a module cannot start being CI-invoked without also being covered.
+#  17. AN IOT HUB ROUTE DOES NOT REPLACE WITH ITS ENDPOINT (MG-48). Every
+#      `azurerm_iothub_route` must carry `lifecycle { replace_triggered_by = [...] }`
+#      naming the SAME endpoint resource its `endpoint_names` routes to. The
+#      endpoint_names reference alone propagates ordering but not replacement — it
+#      reads `.name`, a static literal that is identical before and after the
+#      endpoint is replaced — so the route is never planned for replacement and
+#      Terraform tries to delete an endpoint a live route still points at. Azure
+#      refuses that with IH400111, which is how the 2026-08-06 dev apply died
+#      partway through. This is a LEXICAL check by necessity: replacement is a
+#      state-diff property, every `command = plan` run in `terraform test` starts
+#      from EMPTY state, `command = apply` is banned by check 15 (that ban is what
+#      keeps the PR gate credentialless and must not be weakened), and
+#      replace_triggered_by does not appear in `terraform show -json` at all — so no
+#      Terraform-native assertion can discriminate. The pairing is DERIVED per route
+#      rather than hardcoded, so a block attached to the wrong route fails too.
+#      Finding ZERO routes is a failure, not a vacuous pass.
 #
 # OPERATOR-ACCEPTED RESIDUAL (MG-24 — operator decision, steve@bargelt.com):
 #   The azurerm_application_insights.main resource STAYS Terraform-managed. Every
@@ -688,6 +704,94 @@ else
   done <<< "${tftest_modules}"
 fi
 check "CI-invoked modules pin their providers (explicit constraint + committed lock)" "${pin_hits%$'\n'}"
+
+# --- CHECK 17. IoT Hub routes replace with their endpoints (MG-48) -----------------
+# One record per `azurerm_iothub_route` block: file, start line, resource label, the
+# raw `endpoint_names` list, and the raw `replace_triggered_by` list. Comments are
+# stripped first — the committed routes DISCUSS `endpoint_names` and
+# `replace_triggered_by` in prose right next to the code, so a scan that cannot tell
+# one from the other would read the explanation as the declaration.
+#
+# Empty list fields are emitted as "-" rather than left empty: `read` with IFS=tab
+# collapses runs of tab (tab is IFS whitespace), so an empty endpoint_names field
+# would silently shift replace_triggered_by into its place and the pairing would
+# check itself. As with check 16's folding, this lives in a top-level function
+# because bash 3.2 — /bin/bash on the operator's Mac — mis-parses quoted patterns
+# inlined in `$( … )`.
+iothub_route_blocks() {
+  awk -v f="$1" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function dash(s) { s = trim(s); return (s == "" ? "-" : s) }
+    function emit() {
+      if (label != "") printf "%s\t%d\t%s\t%s\t%s\n", f, startline, label, dash(eps), dash(rtb)
+      label = ""; eps = ""; rtb = ""; inroute = 0; ineps = 0; inrtb = 0
+    }
+    { line = $0; sub(/#.*$/, "", line) }
+    line ~ /^[[:space:]]*resource[[:space:]]+"azurerm_iothub_route"[[:space:]]+"/ {
+      emit()
+      inroute = 1; startline = NR
+      label = line
+      sub(/^.*"azurerm_iothub_route"[[:space:]]+"/, "", label)
+      sub(/".*$/, "", label)
+      next
+    }
+    inroute == 0 { next }
+    ineps == 1 { eps = eps " " line; if (line ~ /\]/) ineps = 0; next }
+    inrtb == 1 { rtb = rtb " " line; if (line ~ /\]/) inrtb = 0; next }
+    line ~ /endpoint_names[[:space:]]*=/ { eps = eps " " line; if (line !~ /\]/) ineps = 1; next }
+    line ~ /replace_triggered_by[[:space:]]*=/ { rtb = rtb " " line; if (line !~ /\]/) inrtb = 1; next }
+    line ~ /^\}/ { emit(); next }
+    END { emit() }
+  ' "$1"
+}
+
+# The endpoint RESOURCE addresses a list mentions — `azurerm_iothub_endpoint_<type>.<label>`.
+# The trailing `.name` of an endpoint_names reference is not part of the address, so
+# the two lists become directly comparable.
+iothub_endpoint_refs() {
+  printf '%s\n' "$1" | grep -oE 'azurerm_iothub_endpoint_[a-z0-9_]+\.[A-Za-z0-9_]+' | sort -u || true
+}
+
+route_records=""
+while IFS= read -r tf_file; do
+  [[ -n "${tf_file}" ]] || continue
+  grep -q 'azurerm_iothub_route' "${tf_file}" 2>/dev/null || continue
+  route_records+="$(iothub_route_blocks "${tf_file}")"$'\n'
+done <<< "$(
+  find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' -o -name '.git' \) -prune -o \
+    -type f -name '*.tf' -print 2>/dev/null | sort
+)"
+route_records="$(printf '%s' "${route_records}" | grep -v '^$' || true)"
+
+route_replace_hits=""
+if [[ -z "${route_records}" ]]; then
+  # Same fail-open logic as checks 13/14/15/16: matching nothing must never pass. A
+  # refactor that renames or relocates the routes must move this guard with them.
+  route_replace_hits+="no azurerm_iothub_route resources found under ${INFRA_DIR} — this check has stopped working (it must never pass by finding nothing)"$'\n'
+else
+  while IFS=$'\t' read -r r_file r_line r_label r_eps r_rtb; do
+    [[ -n "${r_label}" ]] || continue
+    ep_refs="$(iothub_endpoint_refs "${r_eps}")"
+    rtb_refs="$(iothub_endpoint_refs "${r_rtb}")"
+    rtb_flat="$(printf '%s\n' "${rtb_refs}" | grep -v '^$' | tr '\n' ' ' || true)"
+    rtb_flat="${rtb_flat% }"
+    if [[ -z "${ep_refs}" ]]; then
+      route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} names no azurerm_iothub_endpoint_* resource in endpoint_names, so its replace_triggered_by pairing cannot be verified — reference the endpoint resource, because Azure rejects deleting an endpoint a live route still points at (IH400111, the 2026-08-06 dev-apply outage)"$'\n'
+      continue
+    fi
+    while IFS= read -r ep; do
+      [[ -n "${ep}" ]] || continue
+      if ! printf '%s\n' "${rtb_refs}" | grep -qxF "${ep}"; then
+        if [[ -z "${rtb_flat}" ]]; then
+          route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} routes to ${ep} but declares no lifecycle { replace_triggered_by = [${ep}] } — replacing that endpoint would leave this route pointing at it and Azure rejects the endpoint delete with IH400111, the failure that broke the dev apply on 2026-08-06"$'\n'
+        else
+          route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} routes to ${ep} but its replace_triggered_by names ${rtb_flat} instead — the route it actually guards is the wrong one, so replacing ${ep} still leaves this route pointing at it and Azure rejects the endpoint delete with IH400111, the failure that broke the dev apply on 2026-08-06"$'\n'
+        fi
+      fi
+    done <<< "${ep_refs}"
+  done <<< "${route_records}"
+fi
+check "IoT Hub routes are replaced with their endpoints (replace_triggered_by pairing)" "${route_replace_hits%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then
