@@ -1055,6 +1055,101 @@ describe('MG-24 azapi storage fix: the fail-closed gate accepts a shared-key-DIS
     );
     expect(out).toMatch(/flex-plan-siteconfig-noncred\.json: nonzero \(\d+\) as expected/);
   });
+
+  it('does not accept an mktemp-failure result unless the PATH stub actually intercepted the gate call', () => {
+    // The gate below deliberately emits the expected FATAL without calling mktemp.
+    // This models a future unrelated early failure that would otherwise make the
+    // environment case green while the stub had silently stopped intercepting.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-40-no-stub-'));
+    const scripts = path.join(root, 'scripts');
+    const copiedFixtures = path.join(scripts, 'fixtures');
+    try {
+      fs.mkdirSync(scripts, { recursive: true });
+      fs.cpSync(FIXTURES, copiedFixtures, { recursive: true });
+      fs.writeFileSync(
+        path.join(scripts, 'tf-plan-secret-inspection.sh'),
+        `#!/bin/sh
+if [ "${'${PATH}'}" = /nonexistent ]; then
+  echo 'FATAL: jq is required' >&2
+  exit 1
+fi
+case "${'$*'}" in
+  *flex-plan-accepted.json*|*secret-gate-empty-resource-changes.json*) exit 0 ;;
+  *) echo 'FATAL: cannot create a temp file' >&2; exit 1 ;;
+esac
+`
+      );
+      fs.chmodSync(path.join(scripts, 'tf-plan-secret-inspection.sh'), 0o755);
+
+      const r = run('bash', [path.join(copiedFixtures, 'run-flex-secret-gate-fixtures.sh')]);
+      expect({ status: r.status, signal: r.signal, log: r.out }).toEqual({
+        status: 1,
+        signal: null,
+        log: expect.stringContaining('BOTH the stub interception marker and temp-file FATAL'),
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the PATH-stub test when the gate names mktemp by absolute path', () => {
+    // This exercises the guard's failure branch instead of merely scanning the
+    // real gate. The fake gate otherwise supplies all fixture verdicts the
+    // harness expects, so the observed failure is specifically the anti-vacuity
+    // guard rather than an unrelated fixture failure.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-40-absolute-mktemp-'));
+    const scripts = path.join(root, 'scripts');
+    const copiedFixtures = path.join(scripts, 'fixtures');
+    try {
+      fs.mkdirSync(scripts, { recursive: true });
+      fs.cpSync(FIXTURES, copiedFixtures, { recursive: true });
+      fs.writeFileSync(
+        path.join(scripts, 'tf-plan-secret-inspection.sh'),
+        `#!/bin/sh
+# /bin/mktemp is intentionally named to prove the harness refuses this shape.
+if [ "${'${PATH}'}" = /nonexistent ]; then
+  echo 'FATAL: jq is required' >&2
+  exit 1
+fi
+case "${'$*'}" in
+  *flex-plan-accepted.json*|*secret-gate-empty-resource-changes.json*) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+      );
+      fs.chmodSync(path.join(scripts, 'tf-plan-secret-inspection.sh'), 0o755);
+
+      const r = run('bash', [path.join(copiedFixtures, 'run-flex-secret-gate-fixtures.sh')]);
+      expect({ status: r.status, signal: r.signal, log: r.out }).toEqual({
+        status: 1,
+        signal: null,
+        log: expect.stringContaining('names mktemp by ABSOLUTE path'),
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps signaled and failed-to-spawn runners distinct from a nonzero gate verdict', () => {
+    const signaled = run('sh', ['-c', 'kill -TERM $$']);
+    const spawnFailed = run('mg-40-command-does-not-exist', ['-c', 'exit 1']);
+
+    expect({ code: signaled.code, status: signaled.status, signal: signaled.signal }).toEqual({
+      code: 1,
+      status: null,
+      signal: 'SIGTERM',
+    });
+    expect({
+      code: spawnFailed.code,
+      status: spawnFailed.status,
+      signal: spawnFailed.signal,
+    }).toEqual({
+      code: 1,
+      status: null,
+      signal: null,
+    });
+    expect(spawnFailed.out).toMatch(/mg-40-command-does-not-exist/);
+  });
 });
 
 describe('MG-24 second-plan no-op: the gate accepts the App Insights conn string in the Flex site_config (native field) under the same coupling', () => {

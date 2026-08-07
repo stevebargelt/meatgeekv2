@@ -243,10 +243,10 @@ for shell_bin in ${SHELL_BINS}; do
   else
     PATH="${STUB_BIN}:${PATH}" "${shell_bin}" "${GATE}" --json "${VALID_FIXTURE}" >"${OUT}" 2>&1
     code=$?
-    if [ "${code}" -ne 0 ] && grep -q 'cannot create a temp file' "${OUT}"; then
-      echo "  ✓ [env] failing mktemp (stubbed on PATH): nonzero (${code}) with a temp-file FATAL"
+    if [ "${code}" -ne 0 ] && grep -q 'stub mktemp: refusing to create a temp file' "${OUT}" && grep -q 'cannot create a temp file' "${OUT}"; then
+      echo "  ✓ [env] failing mktemp (stubbed on PATH): stub intercepted mktemp and the gate rendered a temp-file FATAL"
     else
-      echo "  ✗ [env] failing mktemp (stubbed on PATH): expected nonzero naming the temp-file failure, got ${code}" >&2
+      echo "  ✗ [env] failing mktemp (stubbed on PATH): expected nonzero with BOTH the stub interception marker and temp-file FATAL, got ${code}" >&2
       sed 's/^/      /' "${OUT}" >&2
       failures=$((failures + 1))
     fi
