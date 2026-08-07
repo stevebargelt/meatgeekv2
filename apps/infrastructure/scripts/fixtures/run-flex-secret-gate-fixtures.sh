@@ -19,9 +19,10 @@
 #     `?` / `// empty` and yielded nothing. The gate walked zero resources and
 #     printed PASS. Pinned by the secret-gate-*-string / -object fixtures.
 #   * TEMP-FILE FAILURE — the gate stages its collected rows through `mktemp`.
-#     Unchecked, a read-only or nonexistent TMPDIR made mktemp fail, left the path
-#     EMPTY, redirected all three inspection loops to/from "", and still printed
-#     PASS. Pinned by the TMPDIR environment case below, which needs no fixture.
+#     Unchecked, a failing mktemp left the path EMPTY, redirected all three
+#     inspection loops to/from "", and still printed PASS. Pinned by the
+#     mktemp-failure environment case below, which needs no fixture: it forces the
+#     failure with a stub `mktemp` on PATH (see that case for why NOT via TMPDIR).
 #   * A valid EMPTY resource_changes array must still PASS — that is a real
 #     converged no-op plan (what infra-apply-dev.yml's final drift plan emits on a
 #     healthy run), and failing it would wedge the GitOps loop. Pinned by
@@ -93,6 +94,19 @@ CASES_FILE="${WORK}/cases"
 printf '%s\n' "${CASES}" | grep -v '^[[:space:]]*$' > "${CASES_FILE}"
 OUT="${WORK}/out"
 
+# A stub `mktemp` that always fails, for the temp-file environment case below. It
+# is prepended to PATH for that one invocation only, so the gate's own bare
+# `mktemp` resolves to this instead of the real binary. Shebang is /bin/sh so the
+# stub itself is interpreter-independent.
+STUB_BIN="${WORK}/stub-bin"
+mkdir -p "${STUB_BIN}"
+cat > "${STUB_BIN}/mktemp" <<'STUB'
+#!/bin/sh
+echo "stub mktemp: refusing to create a temp file" >&2
+exit 1
+STUB
+chmod +x "${STUB_BIN}/mktemp"
+
 # Report what `sh` actually resolves to. On many systems /bin/sh IS bash, in which
 # case "both shells" is bash twice and the dash-portability property is NOT being
 # tested here. That is a property of this harness's existing dual-shell contract,
@@ -111,6 +125,7 @@ counts=""
 for shell_bin in ${SHELL_BINS}; do
   echo "== running fixtures under: ${shell_bin} =="
   checks=0
+  failures_before=${failures}
 
   # Read with `< file` (not a pipe) so the loop runs in THIS shell and the
   # `checks` / `failures` counters survive — the same dash-portable discipline the
@@ -207,17 +222,34 @@ for shell_bin in ${SHELL_BINS}; do
   # weak test: a case that fails because it could not even exec the gate proves
   # nothing about the gate's fail-closed behaviour.
 
-  # TMPDIR unusable -> mktemp fails -> the gate must FATAL, not stage zero rows
-  # and print PASS (the pre-fix behaviour was exit 0 with a clean PASS line).
+  # mktemp fails -> the gate must FATAL, not stage zero rows and print PASS (the
+  # pre-fix behaviour was exit 0 with a clean PASS line).
+  #
+  # The failure is forced with a STUB `mktemp` ahead of the real one on PATH, NOT
+  # by pointing TMPDIR at an unwritable directory. TMPDIR is not a portable lever:
+  # GNU mktemp honours it and fails, but macOS mktemp IGNORES an unwritable TMPDIR
+  # and falls back to /var/folders — so mktemp SUCCEEDS, the gate correctly accepts
+  # the valid fixture, and this case reported a false red on every Darwin host
+  # under every shell. Skipping the case on Darwin would assert an MG-23 blocker-1
+  # fail-closed control on ONE platform; the stub exercises it on BOTH.
+  #
+  # A PATH stub can only intercept a BARE `mktemp`. If the gate ever called it by
+  # absolute path the stub would be bypassed and this case would go green for the
+  # wrong reason, so that is checked rather than assumed.
   checks=$((checks + 1))
-  TMPDIR="/nonexistent-tmpdir-$$" "${shell_bin}" "${GATE}" --json "${VALID_FIXTURE}" >"${OUT}" 2>&1
-  code=$?
-  if [ "${code}" -ne 0 ] && grep -q 'temp file' "${OUT}"; then
-    echo "  ✓ [env] unwritable TMPDIR: nonzero (${code}) with a temp-file FATAL"
-  else
-    echo "  ✗ [env] unwritable TMPDIR: expected nonzero naming the temp-file failure, got ${code}" >&2
-    sed 's/^/      /' "${OUT}" >&2
+  if grep -q '/bin/mktemp' "${GATE}"; then
+    echo "  ✗ [env] mktemp failure: the gate names mktemp by ABSOLUTE path — a PATH stub cannot intercept it, so this case would be vacuous" >&2
     failures=$((failures + 1))
+  else
+    PATH="${STUB_BIN}:${PATH}" "${shell_bin}" "${GATE}" --json "${VALID_FIXTURE}" >"${OUT}" 2>&1
+    code=$?
+    if [ "${code}" -ne 0 ] && grep -q 'stub mktemp: refusing to create a temp file' "${OUT}" && grep -q 'cannot create a temp file' "${OUT}"; then
+      echo "  ✓ [env] failing mktemp (stubbed on PATH): stub intercepted mktemp and the gate rendered a temp-file FATAL"
+    else
+      echo "  ✗ [env] failing mktemp (stubbed on PATH): expected nonzero with BOTH the stub interception marker and temp-file FATAL, got ${code}" >&2
+      sed 's/^/      /' "${OUT}" >&2
+      failures=$((failures + 1))
+    fi
   fi
 
   # PATH stripped -> the gate's own tool preflight must FATAL. The shell is
@@ -236,6 +268,13 @@ for shell_bin in ${SHELL_BINS}; do
   fi
 
   echo "  -- ${shell_bin}: ${checks} checks"
+  # Name the shell on STDERR too. Every ✗ above goes to stderr while the "running
+  # under" header goes to stdout, so a consumer that captures the streams
+  # separately (infra-security-posture.spec.ts concatenates stdout then stderr)
+  # otherwise sees a pile of failed cases with no way to attribute them to a shell.
+  if [ "${failures}" -ne "${failures_before}" ]; then
+    echo "  ✗ ${shell_bin}: $((failures - failures_before)) case(s) above failed under THIS shell" >&2
+  fi
   if [ "${checks}" -lt "${MIN_CHECKS_PER_SHELL}" ]; then
     echo "  ✗ ${shell_bin}: ran ${checks} checks, floor is ${MIN_CHECKS_PER_SHELL} — the harness silently ran fewer cases than it advertises" >&2
     failures=$((failures + 1))
