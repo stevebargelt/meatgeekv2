@@ -110,7 +110,7 @@
 #  18. A CHILD REACHES ITS PARENT BY THE PARENT'S CONFIGURED NAME AND IS NOT
 #      REPLACED WITH IT (MG-48). The general form of check 17, stated in
 #      ATTRIBUTE-KIND terms rather than resource types: wherever a `resource`
-#      block assigns `<something>_name = <managed resource>.<label>.name`, that
+#      block carries a VALUE that reads `<managed resource>.<label>.name`, that
 #      child must carry `lifecycle { replace_triggered_by = [...] }` naming that
 #      parent's address. A reference to a parent's COMPUTED attribute (`.id`, an
 #      endpoint URI) carries replacement — it is unknown until the new parent
@@ -125,29 +125,59 @@
 #      five containers along with it, state kept listing all six, and the IoT Hub
 #      Cosmos endpoint's create then failed with IH400142 "Database does not
 #      exist".
+#      THE VALUE DECIDES, NEVER THE SPELLING. Discovery keys on the VALUE being a
+#      configured-name reference to a managed resource — the ARGUMENT's own name is
+#      irrelevant, and the reference counts wherever it appears in the value,
+#      including inside a `"${...}"` interpolation or inside a list. An earlier
+#      revision of this check gated discovery on the argument matching
+#      `^[A-Za-z0-9_]+_name$` and on the value being a BARE reference. That is a
+#      syntactic heuristic wearing the rule's clothes, and it was blind to two real
+#      pairs in the committed tree: azurerm_iothub_endpoint_eventhub.eventhub_realtime
+#      reaches azurerm_eventhub.temperature_data through `entity_path` (a
+#      name-valued argument not spelled `*_name`) and azurerm_eventhub_namespace.main
+#      through `endpoint_uri = "sb://${...name}.servicebus.windows.net"` (a reference
+#      inside a string). Both are the SAME defect; neither was seen. A check that
+#      states the rule in attribute-kind terms must implement it that way.
 #      DISCOVERY-DRIVEN, NOT AN ALLOWLIST. Keying this on Cosmos resource types
 #      would encode the very assumption that has now broken dev twice ("the
 #      obvious two are all of them") and would have passed green against the five
 #      latent IoT Hub pairs. Every (child, parent) pair is derived from the HCL,
 #      so a new resource of any type is covered the day it is written.
-#      EXCLUSION BOUNDARY — documented because an undocumented exclusion is how
-#      the next enumeration gap gets created:
-#        * `resource_group_name` is excluded. Every resource in the stack reaches
-#          the RG by name; an RG replacement is a whole-stack event that
-#          tf-plan-destroy-guard.sh blocks on sight, so pairing every resource to
-#          it would add no protection and drown the real pairs.
-#        * A right-hand side under `data.` / `var.` / `local.` / `module.` is
-#          excluded because replace_triggered_by accepts only MANAGED resources in
-#          the SAME module — none of those may appear in it, so there is no
-#          in-module fix to demand. (Where such a boundary reference genuinely
-#          needs to carry replacement, the fix is to pass the parent's id across
-#          the boundary onto a `terraform_data` handle, as modules/iot-hub does
-#          with terraform_data.cosmos_target_ready.)
+#      EXCLUSION BOUNDARY — the COMPLETE list, documented because an undocumented
+#      exclusion is how the next enumeration gap gets created. Anything not named
+#      here is in scope:
+#        * A parent that IS the resource group (`azurerm_resource_group.<label>`)
+#          is excluded, whatever argument reaches it and whether the reference is
+#          bare or interpolated. This is a VALUE-keyed exclusion, not the argument
+#          name `resource_group_name`: keying on the spelling is the mistake above,
+#          and it would let `"...${azurerm_resource_group.main.name}..."` in some
+#          other argument slip through as an unreviewed pair. Every resource in the
+#          stack reaches the RG by name, and an RG replacement is a whole-stack
+#          event tf-plan-destroy-guard.sh blocks on sight, so pairing all of them
+#          to it would add no protection and would drown the real pairs. ACCEPTED
+#          RESIDUAL, recorded as such: an RG replacement really would orphan them,
+#          and the destroy guard — not this check — is what stops it.
+#        * A right-hand side under `data.` / `var.` / `local.` / `module.` /
+#          `each.` / `self.` / `count.` / `path.` / `terraform.` is excluded
+#          because replace_triggered_by accepts only MANAGED resources in the SAME
+#          module — none of those may appear in it, so there is no in-module fix to
+#          demand. (Where such a boundary reference genuinely needs to carry
+#          replacement, the fix is to pass the parent's id across the boundary onto
+#          a `terraform_data` handle, as modules/iot-hub does with
+#          terraform_data.cosmos_target_ready.)
 #        * `module` and `output` blocks are out of scope STRUCTURALLY: neither can
 #          carry a `lifecycle` block, so there is nothing to assert. This is why
 #          the root main.tf `log_analytics_workspace_name` module argument and
 #          modules/cosmos-db/outputs.tf's `account_name`/`database_name` are not
 #          hits.
+#        * The child's OWN `lifecycle { replace_triggered_by = [...] }` list is not
+#          scanned for parents — it is the answer, not the question.
+#        * Only the `.name` attribute is treated as a configured-name reference.
+#          A grep has no access to the provider schema, so it cannot tell which
+#          other attributes are configured (`.location`, `.sku`) from which are
+#          computed; `.name` is both unambiguous and the one attribute that
+#          IDENTIFIES a parent, which is what an orphaned binding hinges on. This
+#          is a KNOWN RESIDUAL, not a claim of completeness.
 #      LEXICAL BY NECESSITY, for exactly check 17's reasons: replacement is a
 #      state-diff property, `command = plan` always starts from EMPTY state,
 #      `command = apply` is banned by check 15 (that ban is what keeps the PR gate
@@ -848,11 +878,16 @@ check "IoT Hub routes are replaced with their endpoints (replace_triggered_by pa
 # way, and the raw `replace_triggered_by` list. See the header for the rule and
 # the exclusion boundary.
 #
-# Comments are stripped FIRST. The committed HCL discusses `replace_triggered_by`
-# and `account_name`/`iothub_name` in prose immediately beside the code — a scan
-# that cannot tell one from the other would read the explanation as the
-# declaration. Over-stripping a `#` inside a string literal is safe here: it can
-# only mask a violation, never invent one.
+# Comments are stripped FIRST, and this is load-bearing, not hygiene: both
+# modules/cosmos-db/main.tf and modules/iot-hub/main.tf DISCUSS
+# `"sb://${azurerm_eventhub_namespace.main.name}..."` in prose, inside a comment,
+# in a file where no such argument exists — a scan that cannot tell explanation
+# from declaration would invent a pair in the cosmos-db module and fail the
+# committed tree. Over-stripping a `#` inside a string literal is safe: it can
+# only mask a violation, never invent one. `//` comments are deliberately NOT
+# stripped — `endpoint_uri = "sb://..."` would be truncated, destroying the very
+# reference this check exists to see. `terraform fmt` (enforced earlier in the
+# same CI job) normalizes `//` comments to `#`, so nothing is lost.
 #
 # Block boundaries are the same assumption check 17 makes: a top-level block ends
 # at a `}` in column 0, which `terraform fmt` (enforced earlier in the same CI
@@ -872,6 +907,41 @@ name_ref_child_blocks() {
   awk -v f="$1" '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
     function dash(s) { s = trim(s); return (s == "" ? "-" : s) }
+    # Collect every configured-name reference carried by a value, wherever it sits
+    # in that value. This is the whole point of the check: the ARGUMENT name is
+    # irrelevant (`entity_path` carries one) and the reference need not be bare
+    # (`endpoint_uri = "sb://${...name}.servicebus.windows.net"` carries one inside
+    # a string). Written for POSIX awk — CI runners ship mawk, which has no
+    # 3-argument match() — so the scan walks the line with 2-argument match() plus
+    # RSTART/RLENGTH and substr() rather than capturing groups.
+    function scan_names(s,   tok, before, after, first, addr) {
+      while (match(s, /[a-z][a-z0-9_]*\.[A-Za-z0-9_]+\.name/) > 0) {
+        tok = substr(s, RSTART, RLENGTH)
+        before = (RSTART > 1) ? substr(s, RSTART - 1, 1) : ""
+        after = substr(s, RSTART + RLENGTH, 1)
+        s = substr(s, RSTART + RLENGTH)
+        # A match that starts mid-identifier is a fragment of a LONGER reference,
+        # not a reference: without this, `data.azurerm_client_config.current.name`
+        # would yield the bogus managed address `azurerm_client_config.current`,
+        # because the regex simply restarts after the `data.` prefix it cannot
+        # match. Likewise a match that runs INTO more identifier characters is a
+        # different attribute (`.namespace_name`), not `.name`.
+        if (before ~ /[A-Za-z0-9_.]/) continue
+        if (after ~ /[A-Za-z0-9_]/) continue
+        first = tok; sub(/\..*$/, "", first)
+        # Not a managed resource in this module, so it cannot appear in
+        # replace_triggered_by and there is no in-module fix to demand.
+        if (first == "var" || first == "local" || first == "module" || first == "data" ||
+            first == "each" || first == "self" || first == "count" || first == "path" ||
+            first == "terraform") continue
+        addr = tok; sub(/\.name$/, "", addr)
+        # The resource group is excluded by VALUE, not by argument spelling — see
+        # the exclusion boundary in the header. An RG replacement orphans the whole
+        # stack and tf-plan-destroy-guard.sh blocks it on sight.
+        if (first == "azurerm_resource_group") continue
+        if (index(" " parents " ", " " addr " ") == 0) parents = parents " " addr
+      }
+    }
     function emit() {
       if (label != "" && trim(parents) != "")
         printf "%s\t%d\t%s\t%s\t%s\n", f, startline, label, dash(parents), dash(rtb)
@@ -888,28 +958,14 @@ name_ref_child_blocks() {
       next
     }
     inres == 0 { next }
+    # The child s own replace_triggered_by list is captured, never scanned for
+    # parents: it is the answer to this check, not another question.
     inrtb == 1 { rtb = rtb " " line; if (line ~ /\]/) inrtb = 0; next }
     line ~ /replace_triggered_by[[:space:]]*=/ { rtb = rtb " " line; if (line !~ /\]/) inrtb = 1; next }
     line ~ /^\}/ { emit(); next }
-    line ~ /=/ {
-      fld = line; sub(/[[:space:]]*=.*$/, "", fld); fld = trim(fld)
-      val = line; sub(/^[^=]*=[[:space:]]*/, "", val); val = trim(val)
-      # An argument whose NAME ends in _name and whose VALUE is exactly a
-      # <type>.<label>.name reference. resource_group_name is excluded (see the
-      # header). A data./module. reference has four dot-segments and cannot match
-      # this pattern at all; var./local./each./self. are rejected by name below,
-      # because none of them may appear in replace_triggered_by.
-      if (fld !~ /^[A-Za-z0-9_]+_name$/) next
-      if (fld == "resource_group_name") next
-      if (val !~ /^[a-z][a-z0-9_]*\.[A-Za-z0-9_]+\.name$/) next
-      first = val; sub(/\..*$/, "", first)
-      if (first == "var" || first == "local" || first == "module" || first == "data" ||
-          first == "each" || first == "self" || first == "count" || first == "path" ||
-          first == "terraform") next
-      addr = val; sub(/\.name$/, "", addr)
-      if (index(" " parents " ", " " addr " ") == 0) parents = parents " " addr
-      next
-    }
+    # Every remaining line inside the block is a value-bearing line, including the
+    # continuation lines of a multi-line list, so all of them are scanned.
+    { scan_names(line) }
     END { emit() }
   ' "$1"
 }
@@ -936,10 +992,10 @@ name_ref_pairs=0
 name_ref_children=0
 if [[ -z "${name_ref_records}" ]]; then
   # Same fail-closed logic as checks 13/14/15/16/17: matching nothing must never
-  # pass. This stack has 16 such pairs; a scan that finds none has stopped
+  # pass. This stack has twenty such pairs; a scan that finds none has stopped
   # working, and a silent pass here is exactly how the next account replacement
   # orphans its children again.
-  name_replace_hits+="no '<something>_name = <managed resource>.<label>.name' reference found in any resource block under ${INFRA_DIR} — this check has stopped working (it must never pass by finding nothing)"$'\n'
+  name_replace_hits+="no '<managed resource>.<label>.name' reference found in any resource block under ${INFRA_DIR} — this check has stopped working (it must never pass by finding nothing)"$'\n'
 else
   while IFS=$'\t' read -r n_file n_line n_child n_parents n_rtb; do
     [[ -n "${n_child}" ]] || continue
@@ -952,7 +1008,7 @@ else
       name_ref_pairs=$((name_ref_pairs + 1))
       if ! printf '%s\n' "${rtb_addrs}" | grep -qxF "${n_parent}"; then
         if [[ -z "${rtb_flat}" ]]; then
-          name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name but declares no lifecycle { replace_triggered_by = [${n_parent}] } — the name is a static literal, identical before and after, so Terraform would never plan ${n_child} for replacement while Azure destroys it with ${n_parent} anyway, leaving state listing a resource that no longer exists (MG-48: this is how meatgeek-v2-dev-db and its five containers became ghosts and the IoT Hub Cosmos endpoint create failed with IH400142)"$'\n'
+          name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name but declares no lifecycle { replace_triggered_by = [${n_parent}] } — the name is a static literal, identical before and after, so Terraform would never plan ${n_child} for replacement while Azure destroys it with ${n_parent} anyway, leaving state listing a resource that no longer exists (MG-48: this is how meatgeek-v2-dev-db and its five containers became ghosts and the IoT Hub Cosmos endpoint create failed with IH400142). The reference need not be an argument spelled *_name, and need not be bare — it counts wherever the VALUE reads ${n_parent}.name, including inside a \"\${...}\" interpolation or a list"$'\n'
         else
           name_replace_hits+="${n_file}:${n_line}: ${n_child} reaches ${n_parent} by that parent's configured name but its replace_triggered_by names ${rtb_flat} instead — the parent it actually guards is the wrong one, so replacing ${n_parent} still leaves ${n_child} unplanned in state while Azure destroys it (MG-48; add ${n_parent} to the list rather than swapping it in — a child may have more than one name-referenced parent)"$'\n'
         fi
