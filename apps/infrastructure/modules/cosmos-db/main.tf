@@ -93,12 +93,37 @@ resource "azurerm_cosmosdb_account" "main" {
 }
 
 # Create environment-specific database within the V2-owned account
+#
+# REPLACEMENT PROPAGATION RULE — read this before deleting any lifecycle block in
+# this file. A child that reaches its parent through one of the parent's COMPUTED
+# attributes (`.id`, an endpoint URI) carries REPLACEMENT: the attribute is
+# unknown until the new parent exists, so the child's own configuration changes
+# and Terraform plans it for replacement too. A child that reaches its parent
+# through the parent's CONFIGURED `name` carries ORDERING ONLY: that name is a
+# static literal, identical before and after, so the child's configuration never
+# changes, Terraform never plans the child for replacement — while Azure destroys
+# it along with the parent regardless. State is then left listing a resource that
+# no longer exists, and the next apply builds on a lie.
+#
+# Every account_name / database_name reference below is that second kind. That is
+# not hypothetical here: `free_tier_enabled` is create-only, so claiming the free
+# tier REPLACED azurerm_cosmosdb_account.main. Terraform planned no change for
+# this database or its five containers, Azure deleted them with the account
+# anyway, state kept listing all six, and the IoT Hub Cosmos endpoint's create
+# then failed with IH400142 "Database does not exist. DatabaseName:
+# meatgeek-v2-dev-db". replace_triggered_by is what makes the plan match what
+# Azure actually does; the name references below still supply the ordering.
 resource "azurerm_cosmosdb_sql_database" "meatgeek" {
   name                = "${var.resource_prefix}-db"
   resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
   account_name        = azurerm_cosmosdb_account.main.name
 
   # No throughput at database level - containers will have individual throughput for minimal usage
+
+  # NOT redundant with the account_name reference above — see the rule above.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main]
+  }
 }
 
 # Container: devices
@@ -145,6 +170,14 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
   # Unique key constraint for device names per user
   unique_key {
     paths = ["/userId", "/name"]
+  }
+
+  # NOT redundant with the account_name / database_name references above — both
+  # are configured literals and carry ordering only. See the rule above the
+  # database block. Azure destroys a container with either parent, so both belong
+  # here: replacing the account destroys the database, which destroys this.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
   }
 }
 
@@ -194,6 +227,12 @@ resource "azurerm_cosmosdb_sql_container" "temperatures" {
       }
     }
   }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
+  }
 }
 
 # Container: cooks
@@ -242,6 +281,12 @@ resource "azurerm_cosmosdb_sql_container" "cooks" {
       }
     }
   }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
+  }
 }
 
 # Container: users
@@ -267,6 +312,12 @@ resource "azurerm_cosmosdb_sql_container" "users" {
   # Unique constraint on email addresses
   unique_key {
     paths = ["/email"]
+  }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
   }
 }
 
@@ -311,5 +362,11 @@ resource "azurerm_cosmosdb_sql_container" "recipes" {
         order = "descending"
       }
     }
+  }
+
+  # NOT redundant with the account_name / database_name references above — see the
+  # rule above the database block.
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main, azurerm_cosmosdb_sql_database.meatgeek]
   }
 }
