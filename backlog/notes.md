@@ -60,6 +60,24 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
    from these notes.** An operator who reads a larger set as a regression will either stop or
    authorize a truncated set, and a truncated set is how you get half a replacement.
 
+   **That closure is a REPLACEMENT closure, not an update closure — and only because of how the
+   triggers are spelled.** Every `replace_triggered_by` entry on this branch names the parent's
+   `.id` (`azurerm_cosmosdb_account.main.id`), never the bare address
+   (`azurerm_cosmosdb_account.main`). A trigger fires when the referenced VALUE changes: an id is
+   unknown at plan time when the parent is REPLACED, so it fires; it is byte-identical across an
+   in-place edit, so it stays quiet. **A bare whole-resource trigger also fires on the parent's
+   in-place UPDATE.** In the bare form, adding a tag to the account, changing its backup policy or
+   its consistency level would destroy and recreate the database and all five containers — every
+   stored document — and on the IoT Hub side a namespace tag or a throughput-unit scale would take
+   the Event Hub, the endpoint and the route with it, while a hub tag or sku change would recreate
+   both routes and both consumer groups the Functions triggers bind to. Routine edits becoming data
+   loss and a routing gap is strictly worse than the orphaning this branch fixes. Operationally:
+   **if a plan for an ordinary tag / sku / policy edit ever shows `-/+` on the containers, the
+   routes or the consumer groups, do not authorize it** — a trigger has been rewritten to the bare
+   form. Static check 18 rejects that form by name and inspects EVERY `replace_triggered_by` list
+   in the tree, not only the ones on name-referenced children, so it should not be landable; a plan
+   that shows it means the check was bypassed or narrowed.
+
    **`module.iot_hub.terraform_data.cosmos_role_ready` is NOT in that set** — an earlier draft of
    this note counted both handles, which is wrong. Its payload sits on `input`, which is not
    ForceNew: when the role-assignment id goes unknown that handle is UPDATED IN PLACE (`~`), so
@@ -132,6 +150,13 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
   (`resource_group_name`; `module`/`output` blocks, which cannot carry a lifecycle block) is
   listed in the check's own header, because an undocumented exclusion is how the next enumeration
   gap gets created.
+- **The second half of that rule: name the parent's `.id`, never the bare parent.** Both forms
+  propagate replacement, so the difference is invisible in the plan the fix was written for — which
+  is why `29cebf2` shipped the bare form and nobody noticed. The bare form ADDITIONALLY fires on
+  the parent's in-place update (measured on a synthetic graph, not inferred), turning a tag edit
+  into a recreate of every child; see (c) above for what that costs on each path. This branch
+  rewrote all of them to `.id`, the pre-existing `29cebf2` entries included — fixing only the new
+  ones would have left the hazard half-closed on the routes.
 - **A human approval gate is NOT the long-term answer** for destructive applies (operator: "a
   human can't approve every deploy, that is a bottleneck"). MG-50 proposes git-tracked declarative
   authorization. For prod, the right control is `prevent_destroy` on data-bearing resources
