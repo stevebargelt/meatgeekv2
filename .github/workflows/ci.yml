@@ -359,6 +359,12 @@ jobs:
         # operator's shell while still reaching a PASS is fail-open.
         run: bash apps/infrastructure/scripts/fixtures/run-destroy-guard-fixtures.sh
 
+      - name: Cross-module replacement-propagation fixtures (MG-48)
+        # Checks 18 and 19 are lexical Terraform guards, so their regression
+        # coverage mutates isolated INFRA_DIR copies and needs neither Azure
+        # credentials nor a terraform binary.
+        run: bash apps/infrastructure/scripts/fixtures/run-cross-module-propagation-fixtures.sh
+
       - name: V1 Cosmos export tool tests (MG-48)
         # The export tool gates a PERMANENT deletion of the V1 Cosmos account,
         # so its failure paths — count mismatch, 429 with retries exhausted,
