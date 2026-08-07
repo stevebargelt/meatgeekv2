@@ -120,19 +120,23 @@ describe('MG-51: GET /health/cosmos registered Function App contract', () => {
     expect(response.status).toBe(200);
     expect(response.jsonBody).toMatchObject({
       status: 'healthy',
-      details: { accountEndpoint: ENDPOINT, databaseName: DATABASE },
       requestId: 'healthy-request',
     });
+    // The route the Functions host actually serves must not hand a caller the
+    // account it dialled or the database it read.
+    expect(JSON.stringify(response.jsonBody)).not.toContain(ENDPOINT);
+    expect(JSON.stringify(response.jsonBody)).not.toContain(DATABASE);
   });
 
   it.each([
-    ['Cosmos is unreachable', 'connect ECONNREFUSED'],
-    ['the configured database is absent', 'Resource Not Found (404)'],
+    ['Cosmos is unreachable', `connect ECONNREFUSED ${ENDPOINT}`, undefined],
+    ['the configured database is absent', `Owner resource ${DATABASE} does not exist`, 404],
     [
       'managed identity token acquisition fails',
-      'managed identity token request failed: 401 Unauthorized',
+      'managed identity token request failed: 401 Unauthorized, X-IDENTITY-HEADER=1a2b3c4d',
+      401,
     ],
-  ])('returns 503 when %s', async (_scenario, failure) => {
+  ])('returns 503 without disclosing anything when %s', async (_scenario, failure, statusCode) => {
     const registration = loadRegisteredHealth({
       COSMOSDB__accountEndpoint: ENDPOINT,
       COSMOSDB_DATABASE_NAME: DATABASE,
@@ -143,7 +147,7 @@ describe('MG-51: GET /health/cosmos registered Function App contract', () => {
       registration,
       () => ({
         readDatabase: async () => {
-          throw new Error(failure);
+          throw Object.assign(new Error(failure), statusCode === undefined ? {} : { statusCode });
         },
       }),
       invocationContext
@@ -152,12 +156,16 @@ describe('MG-51: GET /health/cosmos registered Function App contract', () => {
     expect(response.status).toBe(503);
     expect(response.jsonBody).toMatchObject({
       status: 'unhealthy',
-      error: failure,
-      details: { accountEndpoint: ENDPOINT, databaseName: DATABASE },
+      error: 'cosmos_probe_failed',
+      ...(statusCode === undefined ? {} : { probeStatusCode: statusCode }),
     });
-    expect(invocationContext.error as jest.Mock).toHaveBeenCalledWith(
-      expect.stringContaining(failure)
-    );
+
+    const logged = (invocationContext.error as jest.Mock).mock.calls.flat().map(String).join('\n');
+    for (const disclosure of [failure, ENDPOINT, DATABASE, '1a2b3c4d']) {
+      expect(JSON.stringify(response.jsonBody)).not.toContain(disclosure);
+      expect(logged).not.toContain(disclosure);
+    }
+    expect(logged).toContain('cosmos_probe_failed');
   });
 
   it('refuses to register with a missing database setting rather than registering a route with a default', () => {

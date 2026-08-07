@@ -21,6 +21,11 @@ import type { HealthStatus } from '@meatgeekv2/api-interfaces';
  * cheapest call that can only succeed if the account is reachable, the identity
  * holds a data-plane role, AND the configured database exists. It creates
  * nothing and touches no container.
+ *
+ * What it deliberately does NOT report: the account endpoint, the database name,
+ * or any text a dependency produced. The 200/503 plus a fixed failure code is
+ * the entire signal; a caller that is entitled to know which database is
+ * configured reads it from the Function App's settings.
  */
 
 /** The one Cosmos operation this check performs, behind a seam. */
@@ -30,11 +35,27 @@ export interface CosmosDatabaseProbe {
 
 export type CosmosProbeFactory = (accountEndpoint: string) => CosmosDatabaseProbe;
 
+/**
+ * The only failure vocabulary this check speaks. Each code names the STEP that
+ * failed, chosen by control flow — never derived from a dependency's error text.
+ * A Cosmos or managed-identity error can carry token fragments, the
+ * X-IDENTITY-HEADER, internal URLs or the account host, and this endpoint must
+ * put none of that in a response body or a log line.
+ */
+export type CosmosHealthFailure =
+  | 'cosmos_database_name_not_configured'
+  | 'cosmos_account_endpoint_not_configured'
+  | 'cosmos_probe_failed';
+
 export interface CosmosHealthResult extends HealthStatus {
-  details: {
-    accountEndpoint: string;
-    databaseName: string;
-  };
+  error?: CosmosHealthFailure;
+  /**
+   * The numeric HTTP status the dependency reported, when it reported one. This
+   * is the whole diagnostic budget for a failure: 404 says the configured
+   * database is absent, 403 says the identity lacks its data-plane role, 401
+   * says the token was refused. A number cannot carry an identifier.
+   */
+  probeStatusCode?: number;
 }
 
 /**
@@ -107,37 +128,50 @@ export async function checkCosmosHealth(
   probeFactory: CosmosProbeFactory = realCosmosProbe
 ): Promise<CosmosHealthResult> {
   const startedAt = Date.now();
+  const unhealthy = (error: CosmosHealthFailure, probeStatusCode?: number): CosmosHealthResult => ({
+    status: 'unhealthy',
+    responseTime: Date.now() - startedAt,
+    error,
+    ...(probeStatusCode === undefined ? {} : { probeStatusCode }),
+  });
+
+  // Resolving `environment` can itself throw when infrastructure never set
+  // COSMOSDB_DATABASE_NAME — that is the MG-51 failure, and reporting it as
+  // unhealthy here is what makes it visible from a health check rather than
+  // from a user-facing 404 much later.
+  let databaseName: string;
+  try {
+    databaseName = environment.cosmosDb.databaseName;
+  } catch {
+    return unhealthy('cosmos_database_name_not_configured');
+  }
+
   const accountEndpoint = process.env['COSMOSDB__accountEndpoint'] ?? '';
-  let databaseName = '';
+  if (!accountEndpoint) {
+    return unhealthy('cosmos_account_endpoint_not_configured');
+  }
 
   try {
-    // Resolving `environment` can itself throw when infrastructure never set
-    // COSMOSDB_DATABASE_NAME — that is the MG-51 failure, and reporting it as
-    // unhealthy here is what makes it visible from a health check rather than
-    // from a user-facing 404 much later.
-    databaseName = environment.cosmosDb.databaseName;
-
-    if (!accountEndpoint) {
-      throw new Error(
-        'COSMOSDB__accountEndpoint is not set — the Function App has no Cosmos account to reach'
-      );
-    }
-
     await probeFactory(accountEndpoint).readDatabase(databaseName);
-
-    return {
-      status: 'healthy',
-      responseTime: Date.now() - startedAt,
-      details: { accountEndpoint, databaseName },
-    };
   } catch (error) {
-    return {
-      status: 'unhealthy',
-      responseTime: Date.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error),
-      details: { accountEndpoint, databaseName },
-    };
+    return unhealthy('cosmos_probe_failed', dependencyStatusCode(error));
   }
+
+  return {
+    status: 'healthy',
+    responseTime: Date.now() - startedAt,
+  };
+}
+
+/** Numbers only — anything the dependency phrased as text is discarded here. */
+function dependencyStatusCode(error: unknown): number | undefined {
+  const reported = error as { statusCode?: unknown; code?: unknown } | null | undefined;
+  for (const value of [reported?.statusCode, reported?.code]) {
+    if (typeof value === 'number') {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 export async function cosmosHealthHandler(
@@ -150,15 +184,31 @@ export async function cosmosHealthHandler(
   const result = await checkCosmosHealth(probeFactory);
 
   if (result.status !== 'healthy') {
-    context.error(`Cosmos health check failed: ${result.error}`);
+    // `result.error` is a fixed code and `probeStatusCode` a number, so this log
+    // line cannot carry a token, an identity header, or an account identifier.
+    context.error(
+      `Cosmos health check failed: ${result.error}` +
+        (result.probeStatusCode === undefined ? '' : ` (status ${result.probeStatusCode})`)
+    );
   }
 
+  // Projected field by field rather than spread: the response body is an
+  // allowlist, so a field added to CosmosHealthResult later cannot reach a
+  // caller by accident. The 200/503 carries the health signal; the configured
+  // account and database are read from the Function App's settings by whoever
+  // is entitled to them, not served from here.
   return {
     status: result.status === 'healthy' ? 200 : 503,
     headers: {
       'Content-Type': 'application/json',
       'X-Request-ID': context.invocationId,
     },
-    jsonBody: { ...result, requestId: context.invocationId },
+    jsonBody: {
+      status: result.status,
+      responseTime: result.responseTime,
+      error: result.error,
+      probeStatusCode: result.probeStatusCode,
+      requestId: context.invocationId,
+    },
   };
 }
