@@ -84,10 +84,12 @@ database and containers are GHOSTS IN STATE, Cosmos routing endpoint and route a
    it never reaches the destroy guard. Only `cosmos_target_ready` is replaced, because its
    payload sits on `triggers_replace`. Two things follow. An update token transcribed into a
    destroy-authorization list is a transcription error (see 3). And if `cosmos_target_ready` ever
-   shows as `~` instead of `-/+`, someone has moved its payload back onto `input`: per the
-   MEASURED note in `modules/iot-hub/main.tf` that still propagates to the endpoint, but the
-   handle then goes on claiming to represent an object Azure destroyed and recreated — and this
-   count shifts by one.
+   shows as `~` instead of `-/+`, someone has moved its payload back onto `input`, which
+   **silently breaks the propagation** — per the MEASURED note in `modules/iot-hub/main.tf`,
+   `terraform_data` keeps its `id` byte-identical across an in-place update, and the endpoint
+   triggers on that `.id`, so the endpoint would not be replaced at all. Do not authorize such a
+   plan: static check 19 asserts both halves of that contract, so a `~` here means it was
+   bypassed.
 
 2. **MG-47 — cost analysis.** The retirement is done, so the useful move now is measuring the NEXT
    cycle against ~$182 baseline and, more importantly, fixing the budget alerting that let the

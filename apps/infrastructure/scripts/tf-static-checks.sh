@@ -192,7 +192,12 @@
 #          demand. (Where such a boundary reference genuinely needs to carry
 #          replacement, the fix is to pass the parent's id across the boundary onto
 #          a `terraform_data` handle, as modules/iot-hub does with
-#          terraform_data.cosmos_target_ready.)
+#          terraform_data.cosmos_target_ready. That handle-and-endpoint link is
+#          the MG-48 mechanism itself and it is INVISIBLE here — the endpoint
+#          reaches the database through `var.cosmos_database_name`, a `var.`
+#          right-hand side this bullet excludes — so it is asserted explicitly, by
+#          address, in CHECK 19. Discovery and explicit contract are complements:
+#          19 is where a link this scan cannot see gets named.)
 #        * `module` and `output` blocks are out of scope STRUCTURALLY: neither can
 #          carry a `lifecycle` block, so there is nothing to assert. This is why
 #          the root main.tf `log_analytics_workspace_name` module argument and
@@ -200,19 +205,96 @@
 #          hits.
 #        * The child's OWN `lifecycle { replace_triggered_by = [...] }` list is not
 #          scanned for parents — it is the answer, not the question.
-#        * Only the `.name` attribute is treated as a configured-name reference.
-#          A grep has no access to the provider schema, so it cannot tell which
-#          other attributes are configured (`.location`, `.sku`) from which are
-#          computed; `.name` is both unambiguous and the one attribute that
-#          IDENTIFIES a parent, which is what an orphaned binding hinges on. This
-#          is a KNOWN RESIDUAL, not a claim of completeness.
+#        * DISCOVERY COVERS THE `.name` ATTRIBUTE SPECIFICALLY, and no other.
+#          `<type>.<label>.location`, `.sku`, `.kind` and every other configured
+#          attribute are NOT discovered, so a child that reaches a parent only
+#          through one of those is not a hit here. Stated as a scope limit rather
+#          than left implicit, because this is the boundary most likely to be
+#          mistaken for completeness.
+#          WHY IT STOPS AT `.name`, and why widening it would be a REGRESSION: a
+#          grep has no access to the provider schema, so it cannot tell which
+#          attributes are configured (`.location`, `.sku`) from which are computed
+#          (`.id`, `.endpoint`) — and a computed reference already carries
+#          replacement correctly, so pairing it would be a demand for a lifecycle
+#          block that fixes nothing. Treating EVERY attribute as configured would
+#          therefore trade this known gap for a flood of false pairs on references
+#          that are already safe, and a check that cries wolf gets disabled, which
+#          costs the twenty real pairs it does catch. `.name` earns the narrowness
+#          on evidence, not convenience: configured-name references are the
+#          OBSERVED defect class in this stack — every MG-48 orphaning (the SQL
+#          database and its five containers, the route/endpoint pairs, the Event
+#          Hub path) ran through a parent's configured name, and `.name` is the
+#          one attribute that IDENTIFIES a parent, which is what an orphaned
+#          binding hinges on.
+#          THE COMPLEMENT FOR WHAT THIS MISSES IS CHECK 19, not a wider regex.
+#          Where a link is real but outside discovery's shape — the cross-module
+#          Cosmos target contract, where the endpoint reaches the database through
+#          `var.cosmos_database_name` and never names a managed resource at all —
+#          it is asserted EXPLICITLY by address in check 19. So the answer to "this
+#          scan cannot see link X" is to name X in 19, and the residual left here
+#          is only the links nobody has named yet: a KNOWN RESIDUAL, not a claim of
+#          completeness.
 #      LEXICAL BY NECESSITY, for exactly check 17's reasons: replacement is a
 #      state-diff property, `command = plan` always starts from EMPTY state,
 #      `command = apply` is banned by check 15 (that ban is what keeps the PR gate
 #      credentialless and must not be weakened), and replace_triggered_by never
 #      appears in `terraform show -json`. No Terraform-native assertion can see
 #      this, which makes this check the only automated guard there is.
-#      Finding ZERO pairs is a failure, not a vacuous pass.
+#      A PAIR-COUNT FLOOR, not merely a zero test. Finding ZERO pairs is a failure,
+#      but zero is far too weak a bar on its own: a regex edit that narrowed the
+#      scan from twenty pairs to one would still have found something, still have
+#      passed, and still have stopped guarding nineteen children — the fail-open
+#      shape this check exists to refuse, arriving as a silent narrowing rather
+#      than as a clean break. So the count discovered in the committed tree is
+#      recorded as NAME_REF_PAIR_FLOOR and anything below it fails. The floor is
+#      a RATCHET: adding a name-referenced child raises it (pairs above the floor
+#      pass), and the only legitimate way it comes DOWN is a reviewed decision
+#      that a pair genuinely left the tree — deleting a resource, or moving one
+#      onto a computed reference. Re-baselining it to silence a red check is the
+#      failure mode, not the fix.
+#  19. THE CROSS-MODULE COSMOS TARGET CONTRACT IS BROKEN (MG-48). The MECHANISM
+#      this whole ticket turns on, asserted EXPLICITLY by address because check 18
+#      structurally cannot see it. 18 discovers a child that reaches a parent
+#      through `<managed resource>.<label>.name`; the cross-module link has no such
+#      shape. azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage reaches the
+#      SQL database through `var.cosmos_database_name` — a `var.` right-hand side,
+#      excluded from 18 by the boundary above precisely because a variable is not a
+#      managed resource and cannot legally appear in replace_triggered_by. The
+#      cosmos-db module and the iot-hub module are separate modules, so no direct
+#      reference between them is possible at all. Consequence, measured on the
+#      committed tree: DELETING the endpoint's entire lifecycle block leaves all
+#      eighteen preceding checks and both iot-hub test suites GREEN. The central
+#      repair of this ticket was, until this check, unguarded.
+#      The contract has TWO halves and both are asserted, because either one alone
+#      is inert:
+#        (a) terraform_data.cosmos_target_ready must carry a `triggers_replace`
+#            covering BOTH the database and the container id inputs
+#            (var.cosmos_database_id, var.cosmos_container_id). The payload must be
+#            on triggers_replace, not `input`: MEASURED (Terraform 1.9.8) that
+#            terraform_data keeps its `id` byte-identical across an in-place update
+#            and regenerates it only on REPLACEMENT, so an input-carried payload
+#            leaves the handle updated in place, its `.id` unchanged, and the
+#            endpoint's trigger silently never fires.
+#        (b) azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage must declare
+#            `lifecycle { replace_triggered_by = [...] }` naming that handle's `.id`
+#            attribute. `depends_on` is not a substitute — it carries ORDERING only
+#            and never plans the endpoint for replacement — and the bare handle
+#            address is not a substitute either, for the ATTRIBUTE FORM reasons
+#            under 18 which apply verbatim.
+#      Chain, end to end: database replaced -> its `.id` unknown at plan time ->
+#      the handle's triggers_replace no longer matches state -> the handle is
+#      REPLACED -> its `.id` is unknown -> the endpoint's replace_triggered_by
+#      fires. Break either half and the endpoint keeps pointing at a database Azure
+#      destroyed and recreated — Azure IH400142 "Database does not exist", the
+#      2026-08-07 dev failure.
+#      NAMED, NOT DISCOVERED, and that is a deliberate trade. An explicit contract
+#      cannot generalize to the next cross-module link, so it is stated as a floor
+#      the discovery checks build on rather than a replacement for them: 18 covers
+#      the shapes it can see, 19 covers this named link, and a NEW cross-module
+#      link must be added here by hand. Renaming or relocating either resource
+#      fails this check by name rather than silently voiding it, which is what
+#      makes that maintenance burden visible instead of invisible.
+#      Finding neither resource is a failure, not a vacuous pass.
 #
 # OPERATOR-ACCEPTED RESIDUAL (MG-24 — operator decision, steve@bargelt.com):
 #   The azurerm_application_insights.main resource STAYS Terraform-managed. Every
@@ -1106,6 +1188,12 @@ done <<< "$(
 )"
 name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 
+# The pair count discovered in the committed tree, recorded as a FLOOR. Falling
+# below it fails — see the ratchet paragraph under 18 in the header. Raise it
+# freely as the stack grows; lowering it is a reviewed decision, never a reflex to
+# make a red check green.
+NAME_REF_PAIR_FLOOR=20
+
 name_replace_hits=""
 name_ref_pairs=0
 name_ref_children=0
@@ -1162,15 +1250,133 @@ while IFS=$'\t' read -r n_file n_line n_child n_parents n_rtb; do
 done <<< "${name_ref_records}"
 if [[ "${name_ref_pairs}" -eq 0 ]]; then
   # Same fail-closed logic as checks 13/14/15/16/17: matching nothing must never
-  # pass. This stack has twenty such pairs; a scan that finds none has stopped
-  # working, and a silent pass here is exactly how the next account replacement
-  # orphans its children again.
+  # pass. A scan that finds none has stopped working, and a silent pass here is
+  # exactly how the next account replacement orphans its children again.
   name_replace_hits+="no '<managed resource>.<label>.name' reference found in any resource block under ${INFRA_DIR} — this check has stopped working (it must never pass by finding nothing)"$'\n'
+elif [[ "${name_ref_pairs}" -lt "${NAME_REF_PAIR_FLOOR}" ]]; then
+  name_replace_hits+="this scan discovered ${name_ref_pairs} name-referenced (child, parent) pair(s), below the recorded floor of ${NAME_REF_PAIR_FLOOR} — THE SCAN HAS NARROWED and must be re-examined before this number is touched. A zero test alone would have passed this: nineteen of twenty pairs can stop being discovered while one still is, and every child that dropped out is then unguarded with the check still green. Find out WHY the count fell first. If a discovery regex, the block-boundary assumption or the exclusion boundary was edited, that edit is the defect — fix it, do not lower the floor to match it. Only lower NAME_REF_PAIR_FLOOR (in this script, next to its definition) when the tree genuinely lost a pair — a resource deleted, or one moved off a configured-name reference onto a computed one — and say which pair and why in the commit message. Re-baselining this casually converts the guard back into the fail-open scan it was written to replace"$'\n'
 fi
 # Print the discovered size so a pass is demonstrably non-vacuous rather than a
 # scan that quietly matched nothing.
-echo "  check 18: discovered ${name_ref_pairs} name-referenced (child, parent) pair(s) across ${name_ref_children} child resource(s); inspected ${name_ref_lists} replace_triggered_by list(s) for the attribute form"
+echo "  check 18: discovered ${name_ref_pairs} name-referenced (child, parent) pair(s) (floor ${NAME_REF_PAIR_FLOOR}) across ${name_ref_children} child resource(s); inspected ${name_ref_lists} replace_triggered_by list(s) for the attribute form"
 check "children reached by a parent's configured name are replaced with it (replace_triggered_by pairing)" "${name_replace_hits%$'\n'}"
+
+# --- CHECK 19. The cross-module Cosmos target contract, by address (MG-48) ---------
+# Check 18 discovers children that reach a parent through that parent's configured
+# `name`. This link does not have that shape — the endpoint reaches the database
+# through `var.cosmos_database_name`, across a module boundary, so no managed
+# resource is named and there is nothing for discovery to key on. It is therefore
+# asserted EXPLICITLY, by address, both halves of it. See 19 in the header.
+#
+# One record per resource block whose address is one of the two under contract:
+# file, start line, address, the raw `triggers_replace` map, the raw
+# `replace_triggered_by` list. Comments are stripped FIRST and that is load-bearing
+# here, not hygiene: the block comments in modules/iot-hub/main.tf discuss both
+# `triggers_replace` and `replace_triggered_by` in prose immediately next to the
+# code, so a scan that could not tell explanation from declaration would read the
+# comment that explains the fix as the fix.
+#
+# `triggers_replace` is a MAP (`{ ... }`) where replace_triggered_by is a list
+# (`[ ... ]`), so its continuation is closed on `}` rather than `]`. The map's own
+# closing brace is indented and the resource's is in column 0 — the same
+# `terraform fmt` guarantee checks 17 and 18 already rest on.
+#
+# As with checks 16/17/18 the awk lives in a TOP-LEVEL function rather than inlined
+# in a `$( … )`: bash 3.2.57 — /bin/bash on the operator's Mac — mis-parses quoted
+# patterns inside a command substitution, and under `set -u` the dead substitution
+# aborts the whole script (MG-42 finding F5). The awk is POSIX: no 3-argument
+# match(), because CI runners ship mawk. Empty fields are emitted as "-" so `read`
+# with IFS=tab cannot collapse a run of tabs and shift the next field into place.
+cosmos_contract_blocks() {
+  awk -v f="$1" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function dash(s) { s = trim(s); return (s == "" ? "-" : s) }
+    function emit() {
+      if (label == "terraform_data.cosmos_target_ready" ||
+          label == "azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage")
+        printf "%s\t%d\t%s\t%s\t%s\n", f, startline, label, dash(trg), dash(rtb)
+      label = ""; trg = ""; rtb = ""; inres = 0; intrg = 0; inrtb = 0
+    }
+    { line = $0; sub(/#.*$/, "", line) }
+    line ~ /^[[:space:]]*resource[[:space:]]+"[a-z][a-z0-9_]*"[[:space:]]+"/ {
+      emit()
+      inres = 1; startline = NR
+      label = line
+      sub(/^[[:space:]]*resource[[:space:]]+"/, "", label)
+      sub(/"[[:space:]]+"/, ".", label)
+      sub(/".*$/, "", label)
+      next
+    }
+    inres == 0 { next }
+    intrg == 1 { trg = trg " " line; if (line ~ /\}/) intrg = 0; next }
+    inrtb == 1 { rtb = rtb " " line; if (line ~ /\]/) inrtb = 0; next }
+    line ~ /triggers_replace[[:space:]]*=/ { trg = trg " " line; if (line !~ /\}/) intrg = 1; next }
+    line ~ /replace_triggered_by[[:space:]]*=/ { rtb = rtb " " line; if (line !~ /\]/) inrtb = 1; next }
+    line ~ /^\}/ { emit(); next }
+    END { emit() }
+  ' "$1"
+}
+
+cosmos_contract_records=""
+while IFS= read -r tf_file; do
+  [[ -n "${tf_file}" ]] || continue
+  cosmos_contract_records+="$(cosmos_contract_blocks "${tf_file}")"$'\n'
+done <<< "$(
+  find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' -o -name '.git' \) -prune -o \
+    -type f -name '*.tf' -print 2>/dev/null | sort
+)"
+cosmos_contract_records="$(printf '%s' "${cosmos_contract_records}" | grep -v '^$' || true)"
+
+cosmos_contract_hits=""
+cosmos_handle_seen=0
+cosmos_endpoint_seen=0
+while IFS=$'\t' read -r x_file x_line x_addr x_trg x_rtb; do
+  [[ -n "${x_addr}" ]] || continue
+  if [[ "${x_addr}" == "terraform_data.cosmos_target_ready" ]]; then
+    cosmos_handle_seen=1
+    # HALF (a): the handle must be forced to REPLACE on the target's identity. The
+    # payload has to sit on triggers_replace — an `input` payload leaves the handle
+    # updated in place with its id byte-identical, and the endpoint's trigger below
+    # then never fires while every assertion about the handle still passes.
+    if [[ "${x_trg}" == "-" ]]; then
+      cosmos_contract_hits+="${x_file}:${x_line}: terraform_data.cosmos_target_ready declares no triggers_replace — the Cosmos target ids must sit on triggers_replace = { database_id = var.cosmos_database_id, container_id = var.cosmos_container_id }, not on \`input\` and not nowhere. MEASURED (Terraform 1.9.8): terraform_data keeps its \`id\` byte-identical across an in-place update and regenerates it only on REPLACEMENT, so a payload anywhere but triggers_replace leaves this handle UPDATED, its \`.id\` unchanged, and azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage's replace_triggered_by silently never fires. The endpoint would keep pointing at a database Azure had already destroyed and recreated — Azure IH400142 \"Database does not exist\", the failure this ticket exists to close (MG-48 F5)"$'\n'
+    else
+      if ! printf '%s' "${x_trg}" | grep -q 'var\.cosmos_database_id'; then
+        cosmos_contract_hits+="${x_file}:${x_line}: terraform_data.cosmos_target_ready's triggers_replace does not carry var.cosmos_database_id — the endpoint's dependency on the SQL DATABASE existing is what this handle stands for, and only the database's computed id expresses it. var.cosmos_database_name is a configured literal, identical before and after Azure destroys and recreates the database, so it cannot carry replacement across the module boundary at all (MG-48 F5)"$'\n'
+      fi
+      if ! printf '%s' "${x_trg}" | grep -q 'var\.cosmos_container_id'; then
+        cosmos_contract_hits+="${x_file}:${x_line}: terraform_data.cosmos_target_ready's triggers_replace does not carry var.cosmos_container_id — the endpoint writes into the CONTAINER, so the container's destruction must reach it for the same reason as the database's. var.cosmos_container_name is a configured literal and cannot express whether the container still exists (MG-48 F5)"$'\n'
+      fi
+    fi
+  fi
+  if [[ "${x_addr}" == "azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage" ]]; then
+    cosmos_endpoint_seen=1
+    # HALF (b): the last hop. Only the `.id` attribute form counts, for the ATTRIBUTE
+    # FORM reasons under 18 — the bare handle address would additionally fire on an
+    # in-place update of the handle.
+    x_ids="$(rtb_select "${x_rtb}" id)"
+    x_flat="$(rtb_flatten "${x_rtb}")"
+    if ! printf '%s\n' "${x_ids}" | grep -qxF 'terraform_data.cosmos_target_ready'; then
+      if [[ -z "${x_flat}" ]]; then
+        cosmos_contract_hits+="${x_file}:${x_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage declares no lifecycle { replace_triggered_by = [terraform_data.cosmos_target_ready.id] } — this block is the LAST HOP of the MG-48 propagation chain and deleting it breaks the whole ticket silently: checks 1-18 and both iot-hub test suites stay green because the endpoint reaches the database through var.cosmos_database_name, a variable, which check 18 cannot and must not discover. depends_on is NOT a substitute — it carries ordering only and never plans this endpoint for replacement, so the endpoint would keep pointing, unchanged, at a database Azure had already destroyed and recreated (Azure IH400142 \"Database does not exist\") (MG-48 F5)"$'\n'
+      else
+        cosmos_contract_hits+="${x_file}:${x_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage's replace_triggered_by reads ${x_flat} instead of naming terraform_data.cosmos_target_ready.id — the last hop of the MG-48 chain is not wired. Only the handle's \`.id\` attribute is its identity: terraform_data regenerates that id on REPLACEMENT and keeps it byte-identical across an in-place edit, so it fires exactly when the Cosmos target's identity changed and stays quiet otherwise. The bare handle address would also fire on the handle being updated in place, and any other attribute does not track existence (MG-48 F5)"$'\n'
+      fi
+    fi
+  fi
+done <<< "${cosmos_contract_records}"
+
+# Fail closed on either half going missing. A rename or relocation must break this
+# check by name rather than quietly void it — an explicit contract whose subjects
+# have vanished is not a satisfied contract, it is an unenforced one.
+if [[ "${cosmos_handle_seen}" -eq 0 ]]; then
+  cosmos_contract_hits+="no resource \"terraform_data\" \"cosmos_target_ready\" found under ${INFRA_DIR} — this check has stopped working (it must never pass by finding nothing). If the handle was renamed or moved, update this check to the new address; if it was deleted, the cross-module Cosmos replacement propagation has been removed with it (MG-48 F5)"$'\n'
+fi
+if [[ "${cosmos_endpoint_seen}" -eq 0 ]]; then
+  cosmos_contract_hits+="no resource \"azurerm_iothub_endpoint_cosmosdb_account\" \"cosmos_storage\" found under ${INFRA_DIR} — this check has stopped working (it must never pass by finding nothing). If the endpoint was renamed or moved, update this check to the new address (MG-48 F5)"$'\n'
+fi
+echo "  check 19: located ${cosmos_handle_seen}/1 target handle and ${cosmos_endpoint_seen}/1 Cosmos endpoint under the explicit cross-module contract"
+check "the cross-module Cosmos target contract is wired end to end (triggers_replace + replace_triggered_by)" "${cosmos_contract_hits%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then
