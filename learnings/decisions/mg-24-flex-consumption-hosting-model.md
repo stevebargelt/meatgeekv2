@@ -92,14 +92,39 @@ The Flex resource is configured with:
 
 ### Why this resolves the Y1 403 (Azure-Files-free)
 
-Flex Consumption does **not** use an Azure Files content share. Its deployment
+Flex Consumption does **not** use an Azure Files content share. Its **deployment**
 artifact (the package zip) lives in a **blob container** reached over **managed
 identity / AAD**, not a shared key. Because the deployment path is MI-blob, the
 functions storage account can **keep `allowSharedKeyAccess = false`** and Flex
-still deploys and runs. The hosting model and the secrets-out-of-state storage
+still **deploys**. The hosting model and the secrets-out-of-state storage
 posture are **no longer in conflict** — which is exactly the coupling that broke
 Y1. (The account is also created via azapi over the control plane so its own
 key-auth data-plane reads never 403 — see the control-plane section below.)
+
+> **Correction (MG-58).** An earlier revision of this paragraph read "…and Flex
+> still **deploys and runs**." **The "and runs" half was false**, and it is
+> retracted. It generalised a true statement about **deployment** storage into a
+> false one about **host** storage — two **independent authentication surfaces**
+> that merely share one account. Deployment storage is configured by the flex
+> resource's own `storage_*` arguments (documented above) and was always
+> correct. The **host's own required storage** (`AzureWebJobsStorage` — host
+> lock / singleton leases, timer schedule status, key store) is configured by a
+> **separate app setting**, and this ADR's omission of it meant the app shipped
+> with **no host-storage connection in any form**: `azure.functions.webjobs.storage`
+> was permanently `Unhealthy` / `AuthenticationFailed` in dev, and `func publish`
+> ended with the "app appears to be unhealthy" warning, from MG-24 until MG-58.
+> HTTP triggers do not need host storage, which is why it went unnoticed.
+>
+> The fix **keeps** `allowSharedKeyAccess = false` — it completes the managed
+> identity configuration rather than relaxing the storage posture — by publishing
+> the identity-based, credential-free **account-name** form
+> (`AzureWebJobsStorage__accountName`). So the sentence above is now true as
+> narrowed: Flex deploys **and runs** with shared key disabled, but only because
+> host storage is **explicitly** configured for identity, never because Flex
+> configures it for us. See
+> [`mg-58-host-storage-managed-identity`](mg-58-host-storage-managed-identity.md),
+> which also resolves the MG-24 `shared_access_key_enabled` conditional in
+> writing.
 
 ### West US 2 — and the whole-stack relocation blast radius
 
@@ -224,11 +249,23 @@ That ADR established:
 
 - The **shared-key-disabled** posture on the functions storage account (the
   Storage row) — which Flex's MI-blob deployment lets us **keep** rather than
-  relax. Flex is what makes that row's "shared-key auth safely off without breaking
-  the Functions runtime" claim continue to hold under the new hosting model. The
-  invariant is now expressed as **`allowSharedKeyAccess = false`** in the azapi
-  account body (the account moved to control-plane azapi, per the section above),
-  not the former azurerm `shared_access_key_enabled` attribute.
+  relax. The invariant is now expressed as **`allowSharedKeyAccess = false`** in
+  the azapi account body (the account moved to control-plane azapi, per the
+  section above), not the former azurerm `shared_access_key_enabled` attribute.
+
+  > **Correction (MG-58).** This bullet previously continued: "Flex is what makes
+  > that row's 'shared-key auth safely off without breaking the Functions
+  > runtime' claim continue to hold under the new hosting model." **Retracted for
+  > the same reason as the Y1-403 paragraph above** — Flex's MI-blob *deployment*
+  > path makes it hold for **deployment** storage only. The **host** storage
+  > surface needed its own identity-based setting, which MG-24 never published,
+  > so the claim was **false of the runtime** until MG-58 published
+  > `AzureWebJobsStorage__accountName`. What makes the claim hold now is that
+  > **both** surfaces are explicitly identity-configured — and they are asserted
+  > as two **separately named** module-test invariants
+  > (`deployment_storage_is_managed_identity_only` and
+  > `host_storage_is_managed_identity_only`) precisely so one surface's green
+  > assertion can never again stand in for the other's.
 - The **fail-closed gate machinery** (`tf-plan-secret-inspection.sh` +
   `tf-static-checks.sh` check 9) that this change re-points at the
   `azurerm_function_app_flex_consumption` resource shape AND the azapi storage
