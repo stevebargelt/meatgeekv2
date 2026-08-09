@@ -92,6 +92,16 @@ variable "cosmos_account_endpoint" {
   type        = string
 }
 
+variable "cosmos_database_name" {
+  description = "Name of the Terraform-owned Cosmos SQL database the API reads and writes (non-secret), published to the app as COSMOSDB_DATABASE_NAME. NO DEFAULT on purpose: the API has no safe fallback for this value, so a caller that forgets to wire it must fail at plan time rather than deploy an app pointed at a database that does not exist (MG-51)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.cosmos_database_name)) > 0
+    error_message = "cosmos_database_name must be non-empty — an empty setting is the same defect as an absent one (MG-51)."
+  }
+}
+
 variable "eventhub_namespace_fqdn" {
   description = "Fully-qualified Event Hubs namespace hostname (non-secret) for the IoT telemetry stream. Runtime access is identity-based via an Azure Event Hubs Data Receiver role assignment."
   type        = string

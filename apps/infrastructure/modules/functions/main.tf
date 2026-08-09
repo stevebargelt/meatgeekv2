@@ -258,6 +258,24 @@ resource "azurerm_function_app_flex_consumption" "main" {
     # granted via the Cosmos SQL role assignment in the root module.
     "COSMOSDB__accountEndpoint" = var.cosmos_account_endpoint
 
+    # Which DATABASE inside that account the API talks to. The endpoint alone
+    # never said, so the app fell back to a database that has never existed in
+    # this stack while the IoT ingest path — which DOES receive the real name
+    # through module wiring — kept passing (MG-51).
+    #
+    # Plain app setting, NOT a `__`-suffixed binding property: the value is read
+    # by the API's own code (process.env.COSMOSDB_DATABASE_NAME), not resolved by
+    # the Functions host as part of the COSMOSDB identity-based connection.
+    #
+    # No replacement propagation is wired for this, and that is not the MG-48
+    # omission it resembles. This setting is a STRING the app reads at runtime,
+    # not an Azure resource bound to the database: when the database is destroyed
+    # and recreated its configured name is byte-identical, so there is nothing
+    # about this app_setting to replace. The MG-48 chain exists because
+    # azurerm_iothub_endpoint_cosmosdb_account is a resource that must be rebuilt
+    # against the new target; an app setting has no such state.
+    "COSMOSDB_DATABASE_NAME" = var.cosmos_database_name
+
     # IoT telemetry (Event Hubs-compatible) — identity-based. The fully-qualified
     # namespace is non-secret; the identity is granted Azure Event Hubs Data
     # Receiver in the root module.

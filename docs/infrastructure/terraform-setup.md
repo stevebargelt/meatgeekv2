@@ -516,7 +516,17 @@ and authenticated-smoke-test procedure.
 > `IOTHUB_EVENTS__fullyQualifiedNamespace`,
 > `AzureSignalRConnectionString__serviceUri`) — **no connection-string or
 > primary-key VALUE is injected as an app setting or surfaced as a Terraform
-> output**, so there is no plaintext secret to route through Key Vault. Each data
+> output**, so there is no plaintext secret to route through Key Vault.
+>
+> The database **name** travels alongside that Cosmos endpoint as its own plain
+> app setting, `COSMOSDB_DATABASE_NAME` — not a `__`-suffixed identity binding,
+> since the API reads it itself rather than the host resolving it. It comes from
+> the functions module's `cosmos_database_name` input, which is **required with
+> no default**: an empty or unset value fails Terraform validation at plan time
+> rather than deploying an app pointed at a database that does not exist. The
+> value is Terraform-owned (`module.cosmos_db.database_name`, the same
+> expression the IoT Hub routing endpoint already reads) so the API and the IoT
+> ingest path cannot drift onto two different names (**MG-51**). Each data
 > service's key does still exist as an inherent **computed attribute** in state
 > (true of any TF-managed resource); the control is to render those keys
 > non-authenticating by disabling local/key auth where safe
