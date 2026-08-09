@@ -9,20 +9,45 @@ MG-53 is lifted. Nothing is mid-flight; the session ended at a clean stopping po
 
 **Picked up next:**
 
-1. **MG-58 before MG-53 — recommended ordering, not yet decided.** MG-58 (filed this session) is a
-   PRE-EXISTING dev defect found during the MG-51 live proof: the dev Function host cannot
+1. **MG-58 — BUILT, awaiting the live proofs. Ordering SETTLED: MG-58 lands before MG-53.** MG-58 is
+   a PRE-EXISTING dev defect found during the MG-51 live proof: the dev Function host cannot
    authenticate to `AzureWebJobsStorage` (`AuthenticationFailed`), logged every ~30s, and it also
    produces the "app appears to be unhealthy" warning at the end of every `func ... publish`. HTTP
    triggers are unaffected, which is exactly why it went unnoticed. MG-24 predicted this hazard
    verbatim ("Storage: `shared_access_key_enabled = false` ONLY IF the Function host storage is fully
    managed-identity; VERIFY first, else keep keys as a documented exception (do NOT break
-   Functions)") and the conditional looks unresolved. The argument for doing it first: MG-53 is a
-   container migration + cutover, and running it while the host storage-plane identity is broken
-   makes any failure ambiguous between the two causes. The operator has NOT ruled on this ordering.
+   Functions)"); that conditional is now **resolved in the managed-identity branch** — shared keys
+   stay disabled, there is NO documented key exception. See
+   `learnings/decisions/mg-58-host-storage-managed-identity.md`.
+   The ordering question is closed in favour of MG-58 first, for the reason originally given: MG-53
+   is a container migration + cutover, and running it while the host storage-plane identity is broken
+   makes any failure ambiguous between the two causes.
+   **What shipped in the repo:** the identity-based `AzureWebJobsStorage__accountName` app setting
+   (account-name form only — no connection string, no `*ServiceUri` variant), narrowed Terraform and
+   Jest guards that previously asserted the defect as an invariant, and a permanent 15-minute
+   `storageHeartbeat` timer in `apps/api` as the storage-dependent proof path. **NO role delta** —
+   `functions_storage_blob` / `functions_storage_queue` and the role allowlist are untouched, and no
+   `bootstrap.sh` re-run is involved.
+   **What is NOT done:** the three live proofs. They need an operator with an Azure credential and
+   are all written up, with exact commands and KQL, in
+   `docs/infrastructure/mg58-host-storage-verification.md` — a positive `webjobs.storage` **Healthy**
+   row after a deliberate host restart (absence of `Unhealthy` rows is explicitly NOT the proof: the
+   dev workspace has a hard 2 GB/day cap and 3-5 min lag), a clean `func publish`, and an observed
+   `storage-heartbeat` timer invocation. Do the runbook's **pre-merge two-plan convergence** check
+   out of band before this reaches `main` — `infra-apply-dev.yml` fails on ANY drift in the same run
+   that applies, and this exact resource has previously carried a reflected-setting second-plan diff.
 
-2. **MG-53 is UNBLOCKED** (migration + cutover only). Its gate — the live API-path proof — passed on
-   2026-08-09. Route as `implementation_full`. MG-54 (deletion + the 1000 RU/s free-tier ceiling)
-   remains a SEPARATE second authorization point and must not be folded in.
+   **MG-60 DEPENDS ON MG-58 landing.** MG-60 owns the open question of whether
+   `Storage Queue Data Contributor` on the Functions storage account is actually required by the Flex
+   host, or is an over-grant. MG-58 deliberately makes **no** role change and takes **no** position
+   on the answer — the justification recorded at `modules/functions/main.tf` (Flex runtime triggers
+   and scaling) is neither confirmed nor disproven. Do not prune the role as a drive-by.
+
+2. **MG-53** (migration + cutover only). Its original gate — the live API-path proof — passed on
+   2026-08-09. It is now **sequenced behind MG-58**: start it once MG-58's three live proofs are in,
+   so a cutover failure is not ambiguous between the two causes (see item 1). Route as
+   `implementation_full`. MG-54 (deletion + the 1000 RU/s free-tier ceiling) remains a SEPARATE
+   second authorization point and must not be folded in.
 
 3. **A NON-TICKET thread awaiting an operator call: the API serves stub data, not Cosmos.**
    `GET /api/cooks` returns hardcoded fixtures (`cook-1`, "Weekend Brisket", literal 2025 dates) and
@@ -102,7 +127,12 @@ MG-53 is lifted. Nothing is mid-flight; the session ended at a clean stopping po
 - **MG-51** — dev Functions now receives the Terraform-owned Cosmos database name; app-side fallback
   removed in favour of failing loudly; new `/api/health/cosmos` endpoint exercises the API path to
   Cosmos. Merged `dc0941f` (PR #40), closed with an acceptance-evidence grid.
-- **MG-58** — FILED (not fixed): dev Function host cannot authenticate to `AzureWebJobsStorage`.
+- **MG-58** — dev Function host cannot authenticate to `AzureWebJobsStorage`. **FIX BUILT** (single
+  Terraform apply: the identity-based `AzureWebJobsStorage__accountName` setting, plus a permanent
+  `storageHeartbeat` timer as the proof path); the MG-24 conditional is resolved in the
+  managed-identity branch. **NOT yet proven live** — see item 1 above and
+  `docs/infrastructure/mg58-host-storage-verification.md`. Blocks MG-53; blocked-by-nothing; MG-60
+  depends on it.
 - **FG-696** — FILED against the **forge** repo (not this one): the review ledger has no disposition
   for "remediated, humanly verified, but ledger evidence unavailable and the cycle is exhausted."
   `accepted_risk` is the least-false legal exit today and should not remain the permanent vocabulary.
