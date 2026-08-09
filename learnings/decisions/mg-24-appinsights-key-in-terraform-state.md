@@ -218,9 +218,31 @@ inherent computed attributes. The operator-approved decision is to apply it
 | --- | --- | --- | --- |
 | **Cosmos DB** (`azurerm_cosmosdb_account.main`) | `primary_key`, `secondary_key`, `connection_strings` | `local_authentication_enabled = false` | Data-plane access is AAD/RBAC: the Function App **and** the IoT Hub identity each hold *Cosmos DB Built-in Data Contributor* (SQL role assignments). Both keep working with key auth off; the in-state key can no longer authenticate. |
 | **SignalR** (`azurerm_signalr_service.main`) | `primary_access_key`, `primary_connection_string` | `local_auth_enabled = false` | The Function App connects identity-based via `AzureSignalRConnectionString__serviceUri` and holds *SignalR Service Owner*. AAD negotiation keeps working with AccessKey auth off. |
-| **Storage** (`azapi_resource.functions_storage`, `Microsoft.Storage/storageAccounts`) | account access keys, connection string | `allowSharedKeyAccess = false` (in the azapi body) | Deployment storage is **fully managed-identity** under the MG-24 Flex hosting model: the Flex app reads its package from a `blobContainer` via `storage_authentication_type = "SystemAssignedIdentity"` (no Azure Files content share, no `storage_account_access_key`, no key-based `AzureWebJobsStorage`), and the identity holds *Storage Blob Data Owner* + *Storage Queue Data Contributor*. The account is created via **azapi over the ARM control plane** — NOT `azurerm_storage_account`, whose OWN key-auth data-plane reads **403** on a shared-key-disabled account with `storage_use_azuread` unset (proven on live Azure) — so the shared-key-disabled invariant now lives in the azapi body's `allowSharedKeyAccess = false`, not the former `shared_access_key_enabled` attribute. Shared-key auth is safely off without breaking the Functions runtime — see [ADR: Flex Consumption hosting model](mg-24-flex-consumption-hosting-model.md). |
+| **Storage** (`azapi_resource.functions_storage`, `Microsoft.Storage/storageAccounts`) | account access keys, connection string | `allowSharedKeyAccess = false` (in the azapi body) | **Both** storage surfaces on this account are **explicitly** managed-identity (MG-58 — see the correction below). **Deployment** storage: the Flex app reads its package from a `blobContainer` via `storage_authentication_type = "SystemAssignedIdentity"` (no Azure Files content share, no `storage_account_access_key`). **Host** storage: the host reaches its own required storage (host lock / singleton leases, timer schedule status, key store) via the identity-based, credential-free **account-name** setting **`AzureWebJobsStorage__accountName`** — the credential-carrying `AzureWebJobsStorage` connection-string form stays forbidden. The identity holds *Storage Blob Data Owner* + *Storage Queue Data Contributor*. The account is created via **azapi over the ARM control plane** — NOT `azurerm_storage_account`, whose OWN key-auth data-plane reads **403** on a shared-key-disabled account with `storage_use_azuread` unset (proven on live Azure) — so the shared-key-disabled invariant now lives in the azapi body's `allowSharedKeyAccess = false`, not the former `shared_access_key_enabled` attribute. Shared-key auth is safely off without breaking the Functions runtime — see [ADR: Flex Consumption hosting model](mg-24-flex-consumption-hosting-model.md) and [ADR: host storage managed identity](mg-58-host-storage-managed-identity.md). |
 | **Event Hubs namespace** (`azurerm_eventhub_namespace.main`) | auto-created `RootManageSharedAccessKey` primary/secondary keys + connection strings | `local_authentication_enabled = false` | Both access paths are identity-based: the IoT Hub **produces** via `azurerm_iothub_endpoint_eventhub.eventhub_realtime` (`authentication_type = identityBased` + *Azure Event Hubs Data Sender*), and the Function App **consumes** via *Azure Event Hubs Data Receiver* (`IOTHUB_EVENTS__fullyQualifiedNamespace`). Nothing reads the RootManage key, so SAS auth is safely off (round 12). |
 | **IoT Hub** (`azurerm_iothub.main`) | `shared_access_policy[].primary_key` / `secondary_key` (SAS) | **NOT disabled — the SOLE documented exception** | Real BBQ **devices**, the **data-pusher**, and the **device-controller** authenticate to the hub with **SAS keys** (the device SDKs' supported path). Setting `local_authentication_enabled = false` would sever device connectivity. Key auth is deliberately kept enabled; the in-state SAS keys are **live credentials**. This is now the **only** service whose in-state key remains live. |
+
+> **Correction (MG-58) — the Storage row inferred identity auth from an
+> ABSENCE.** The row previously justified itself with the phrase "no key-based
+> `AzureWebJobsStorage`", treating the *absence* of the credential-carrying
+> setting as evidence that host storage was identity-authenticated. **It was
+> not.** No host-storage setting existed **in any form**, so the host had no way
+> to reach the account at all: `azure.functions.webjobs.storage` was permanently
+> `Unhealthy` / `AuthenticationFailed` in dev from MG-24 until MG-58. The
+> shared-key-disabled *control* was correct throughout and is unchanged — what
+> was wrong was the *justification*, and with it the claim that the Functions
+> runtime was unbroken. The row above now names the **positive** setting
+> (`AzureWebJobsStorage__accountName`) rather than resting on an absence.
+>
+> **The generalisable lesson, which applies to every row in this table:**
+> "no credential is configured here" and "this is authenticated by identity" are
+> **different claims**, and the first does not imply the second — a surface that
+> is configured with *nothing at all* satisfies the first and fails the second.
+> Wherever a control is stated as the absence of a credential, the corresponding
+> **positive** identity configuration must be named alongside it, or the row
+> cannot distinguish a hardened surface from a broken one. MG-58 records the
+> resolution of the MG-24 `shared_access_key_enabled` conditional in full:
+> [`mg-58-host-storage-managed-identity`](mg-58-host-storage-managed-identity.md).
 
 The load-bearing facts that made the App Insights key inert (local auth off →
 key cannot authenticate; runtime access is identity-based; restricted state
