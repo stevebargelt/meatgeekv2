@@ -51,15 +51,22 @@ run "function_app_name_is_globally_unique" {
   }
 }
 
-# MG-24 Flex deployment-storage posture — the deployment package is read from a
+# MG-24 Flex DEPLOYMENT-storage posture — the deployment package is read from a
 # blobContainer authenticated by the Function App's SYSTEM-ASSIGNED managed
 # identity, and the underlying storage account keeps shared-key access DISABLED.
-# There is no Azure Files content share and no shared key, so AzureWebJobsStorage
-# cannot fall back to a key and no key can leak into state — the precondition the
-# gate's storage-residual acceptance relies on. The account is created via azapi
-# over the ARM control plane (Microsoft.Storage/storageAccounts), so shared-key
+# There is no Azure Files content share and no shared key, so nothing can fall
+# back to a key and no key can leak into state — the precondition the gate's
+# storage-residual acceptance relies on. The account is created via azapi over the
+# ARM control plane (Microsoft.Storage/storageAccounts), so shared-key
 # disablement is asserted on the azapi body (allowSharedKeyAccess=false) rather
 # than the former azurerm shared_access_key_enabled attribute.
+#
+# SCOPE (MG-58): this run block covers DEPLOYMENT storage ONLY. HOST storage
+# (AzureWebJobsStorage) is a SEPARATE authentication surface on the SAME account
+# and is asserted by its own run block below. Do NOT fold the two together — a
+# fully-configured deployment surface coexisted with a completely unconfigured
+# host surface while this assertion stayed green, and that is exactly how the
+# MG-58 defect survived MG-24's verify phase.
 run "deployment_storage_is_managed_identity_only" {
   command = plan
   assert {
@@ -96,6 +103,54 @@ run "deployment_storage_is_managed_identity_only" {
   assert {
     condition     = azurerm_function_app_flex_consumption.main.runtime_name == "node" && azurerm_function_app_flex_consumption.main.runtime_version == "24"
     error_message = "Flex runtime must be node / version 24"
+  }
+}
+
+# MG-58 HOST-storage posture — a SEPARATELY NAMED invariant, deliberately NOT
+# folded into deployment_storage_is_managed_identity_only above. Host storage and
+# deployment storage are two independent authentication surfaces that happen to
+# share one storage account: the flex resource's storage_* arguments configure
+# only the DEPLOYMENT surface, and the host's own required storage (host lock and
+# singleton leases, timer schedule status, the key store) is configured only by
+# the AzureWebJobsStorage* app setting. Nothing about one implies the other.
+#
+# Both halves of the posture are asserted here, because a green half is what let
+# the defect through:
+#   POSITIVE — the identity-based account-name form is PRESENT and names the
+#     functions storage account. Its absence is the MG-58 outage
+#     (azure.functions.webjobs.storage Unhealthy / AuthenticationFailed).
+#   NEGATIVE — the credential-carrying connection-string form is ABSENT, and so is
+#     every service-URI variant. The account-name form and the service-URI form
+#     are ALTERNATIVES, not complements.
+# The account NAME is not a credential: no key, no SAS, no connection string
+# reaches app_settings or state, so this is compatible with — and depends on —
+# allowSharedKeyAccess=false asserted above. Shared keys are NOT restored.
+run "host_storage_is_managed_identity_only" {
+  command = plan
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.app_settings["AzureWebJobsStorage__accountName"] == var.storage_account_name
+    error_message = "Host storage must be wired identity-based via AzureWebJobsStorage__accountName = the functions storage account name (MG-58). Absent, the host cannot authenticate to its own required storage and no storage-dependent trigger (timer schedule status, singleton lease) can run"
+  }
+  # NEGATIVE: the credential-carrying form must never come back. This is the
+  # secrets-out-of-state invariant for the host surface — a connection string here
+  # would carry an account key or SAS, which the account cannot even mint
+  # (allowSharedKeyAccess=false) and which must never reach app_settings or state.
+  assert {
+    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "AzureWebJobsStorage")
+    error_message = "The bare AzureWebJobsStorage connection-string form must NOT be an app setting — it carries a shared key or SAS. Host storage authenticates by managed identity (MG-58); shared keys stay disabled"
+  }
+  # NEGATIVE: exactly ONE host-storage form is published. Expressed as a set
+  # equality so it also rejects a variant nobody thought to name.
+  assert {
+    condition     = [for k in sort(keys(azurerm_function_app_flex_consumption.main.app_settings)) : k if startswith(k, "AzureWebJobsStorage")] == ["AzureWebJobsStorage__accountName"]
+    error_message = "Exactly ONE host-storage setting form may be published — the account-name form. No AzureWebJobsStorage__blobServiceUri/__queueServiceUri/__tableServiceUri variant may accompany it: the forms are alternatives, and this account is on standard Azure DNS with no private endpoint and no VNet integration (MG-58)"
+  }
+  # The host reaches that account over its SYSTEM-ASSIGNED identity — the same
+  # identity the deployment surface uses and the one the storage data roles are
+  # granted to. Without an identity the account name resolves to nothing.
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.identity[0].type == "SystemAssigned"
+    error_message = "The identity-based host-storage form requires the app's system-assigned managed identity — AzureWebJobsStorage__accountName has no credential of its own to fall back on"
   }
 }
 

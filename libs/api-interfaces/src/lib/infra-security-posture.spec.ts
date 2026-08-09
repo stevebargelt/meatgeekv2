@@ -201,10 +201,45 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       // classic-Functions app setting. Guard the leftover cannot creep back.
       expect(live).not.toMatch(/FUNCTIONS_WORKER_RUNTIME/);
       expect(live).not.toMatch(/FUNCTIONS_EXTENSION_VERSION/);
-      expect(live).not.toMatch(/AzureWebJobsStorage/);
       // The runtime is declared the Flex-native way.
       expect(live).toMatch(/runtime_name\s*=\s*"node"/);
       expect(live).toMatch(/runtime_version\s*=\s*"24"/);
+    });
+
+    it('wires HOST storage identity-based via the account-name form — no connection string, no service-URI variant (MG-58)', () => {
+      // MG-58: this assertion used to be a blanket `not.toMatch(/AzureWebJobsStorage/)`
+      // sitting alongside the Flex-forbidden classic settings above, on the false
+      // premise that Flex configures the host's own storage for us. It does not.
+      // Only DEPLOYMENT storage is configured by the flex resource's storage_*
+      // arguments; HOST storage is a separate authentication surface on the same
+      // account, and with no setting at all the host reported
+      // azure.functions.webjobs.storage Unhealthy / AuthenticationFailed every ~30s.
+      // The guard is NARROWED, not deleted: what must hold is a pair.
+      //
+      // POSITIVE — the identity-based account-name form is present and carries the
+      // account NAME (not a credential), sourced from the module local rather than
+      // a literal.
+      expect(live).toMatch(
+        /"AzureWebJobsStorage__accountName"\s*=\s*local\.functions_storage_account_name/
+      );
+      // NEGATIVE — the credential-carrying connection-string form stays forbidden.
+      // `AzureWebJobsStorage` must appear ONLY as the `__accountName` key: a bare
+      // assignment, or an `AzureWebJobsStorage = "..."`/`"AzureWebJobsStorage" = `
+      // setting, would carry an account key or SAS into app_settings and state.
+      expect(live).not.toMatch(/"?AzureWebJobsStorage"?\s*=/);
+      // NEGATIVE — no service-URI variant. The account-name and service-URI forms
+      // are ALTERNATIVES: the service-URI form is for sovereign clouds / custom or
+      // private endpoints, and this account is on standard Azure DNS with no
+      // private endpoint and no VNet integration anywhere in the stack. Publishing
+      // both forms, or the wrong one, is its own defect.
+      expect(live).not.toMatch(/AzureWebJobsStorage__(blob|queue|table)ServiceUri/);
+      // Belt-and-braces on the "exactly one form" rule: enumerate every
+      // AzureWebJobsStorage* key the module actually publishes and require the set
+      // to be exactly the account-name form, so a variant nobody thought to name
+      // cannot slip past the two negatives above.
+      expect(live.match(/AzureWebJobsStorage[A-Za-z0-9_]*/g)).toEqual([
+        'AzureWebJobsStorage__accountName',
+      ]);
     });
 
     it('App Insights ingestion is AAD identity-based — full conn string via the native site_config field, no hardcoded ikey', () => {

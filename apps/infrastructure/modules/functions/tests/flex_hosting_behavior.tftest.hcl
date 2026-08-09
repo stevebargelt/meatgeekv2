@@ -137,10 +137,37 @@ run "flex_deprecated_app_settings_are_pruned" {
     condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "FUNCTIONS_EXTENSION_VERSION")
     error_message = "FUNCTIONS_EXTENSION_VERSION is Flex-managed — must not be in app_settings"
   }
-  # No classic host-storage setting (Flex configures host storage itself).
+  # HOST STORAGE (MG-58) — NARROWED, not removed. The old assertion here demanded
+  # ZERO keys starting with "AzureWebJobsStorage" on the stated premise that Flex
+  # configures the host's own storage for us. That premise was FALSE and this
+  # assertion is what froze the MG-58 defect in place as an invariant: the host
+  # had no host-storage connection at all and reported
+  # azure.functions.webjobs.storage Unhealthy/AuthenticationFailed every ~30s.
+  #
+  # What must actually hold is a PAIR: the credential-carrying connection-string
+  # form is ABSENT (that is the real secrets-out-of-state invariant), every
+  # *ServiceUri variant is ABSENT (the account is on standard Azure DNS, and the
+  # two forms are alternatives — publishing both is its own defect), and the
+  # identity-based account-name form is PRESENT (without it the host cannot
+  # authenticate to its own storage).
   assert {
-    condition     = length([for k in keys(azurerm_function_app_flex_consumption.main.app_settings) : k if startswith(k, "AzureWebJobsStorage")]) == 0
-    error_message = "No AzureWebJobsStorage* setting may be present on Flex — host storage is Flex-managed (and would carry a key)"
+    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "AzureWebJobsStorage")
+    error_message = "The bare AzureWebJobsStorage (connection-string) form must NOT be an app setting — it carries a shared key/SAS and the account sets allowSharedKeyAccess=false. Host storage authenticates by managed identity via AzureWebJobsStorage__accountName"
+  }
+  # EXACTLY ONE host-storage form. Written as "the set of AzureWebJobsStorage* keys
+  # is exactly {AzureWebJobsStorage__accountName}" rather than as three separate
+  # not-contains checks, so it also rejects any OTHER variant nobody thought to
+  # name — __blobServiceUri / __queueServiceUri / __tableServiceUri included.
+  assert {
+    condition     = [for k in sort(keys(azurerm_function_app_flex_consumption.main.app_settings)) : k if startswith(k, "AzureWebJobsStorage")] == ["AzureWebJobsStorage__accountName"]
+    error_message = "Host storage must be configured by EXACTLY ONE setting — the identity-based account-name form AzureWebJobsStorage__accountName. No __blobServiceUri/__queueServiceUri/__tableServiceUri variant may be published alongside it: the account-name and service-URI forms are ALTERNATIVES (the service-URI form is for sovereign clouds / custom / private endpoints, and this account is on standard Azure DNS with no private endpoint and no VNet). Publishing both forms, or the wrong one, is its own defect (MG-58)"
+  }
+  # …and it names the FUNCTIONS STORAGE ACCOUNT. Asserted against the module input
+  # rather than a literal restated here (the MG-51 convention), so a rename of the
+  # account cannot silently decouple the host from its own storage.
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.app_settings["AzureWebJobsStorage__accountName"] == var.storage_account_name
+    error_message = "AzureWebJobsStorage__accountName must be the functions storage account NAME (a name, NOT a credential — no key, no SAS, no connection string). Without it the host cannot authenticate to its own required storage: azure.functions.webjobs.storage reports Unhealthy/AuthenticationFailed every ~30s and timer schedule status / singleton leases cannot be persisted (MG-58)"
   }
   assert {
     condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "WEBSITE_NODE_DEFAULT_VERSION")

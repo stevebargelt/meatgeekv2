@@ -57,6 +57,12 @@ jest.mock('@azure/functions', () => {
       http: (name: string, config: HttpRegistration) => {
         mockRegistrations[name] = config;
       },
+      // main.ts also registers the MG-58 host-storage heartbeat timer. This
+      // suite is about the SignalR producers, so the registration is swallowed
+      // rather than captured — but the stub must exist, or importing main.ts
+      // throws before any HTTP registration lands. The timer's own wiring is
+      // asserted in functions/health/storage-heartbeat.spec.ts.
+      timer: () => undefined,
     },
   };
 });
