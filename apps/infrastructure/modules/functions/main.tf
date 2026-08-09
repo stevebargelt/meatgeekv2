@@ -25,6 +25,14 @@
 #     over the ARM CONTROL PLANE, because the azurerm_storage_account resource
 #     itself performs shared-key storage DATA-PLANE reads that 403 on a shared-key-
 #     disabled account with storage_use_azuread unset (MG-24 operational fix).
+#   * HOST storage is a SEPARATE authentication surface from deployment storage,
+#     on the SAME account (MG-58). Deployment storage is configured by the flex
+#     resource's own storage_* arguments; the host's own required storage is
+#     configured by the AzureWebJobsStorage__accountName app setting — the
+#     identity-based, account-name form, which carries no credential. Neither
+#     surface implies the other: a fully-configured deployment surface coexisted
+#     with a completely unconfigured host surface for the whole of MG-24, which is
+#     why the two are now asserted as two independent invariants.
 #   * Application Insights ingestion is identity-based (AAD): the managed
 #     identity is granted 'Monitoring Metrics Publisher' on the App Insights
 #     resource (root module) and the host authenticates telemetry via
@@ -232,13 +240,50 @@ resource "azurerm_function_app_flex_consumption" "main" {
   # against the app's managed identity). No connection strings / primary keys.
   # Flex-forbidden classic-Functions settings (FUNCTIONS_WORKER_RUNTIME,
   # FUNCTIONS_EXTENSION_VERSION, WEBSITE_NODE_DEFAULT_VERSION, WEBSITE_CONTENT*,
-  # WEBSITE_RUN_FROM_PACKAGE, WEBSITE_TIME_ZONE, AzureWebJobsStorage*) are
-  # intentionally NOT set — Flex DECLARES the worker runtime via the resource's
-  # runtime_name/runtime_version (node/24) and manages the extension version,
-  # package mount and host storage itself. In particular FUNCTIONS_WORKER_RUNTIME
-  # is REJECTED on a Flex site: setting it fails the create with 400 BadRequest
-  # (ExtendedCode 51021, "app setting … is invalid for Flex Consumption sites").
+  # WEBSITE_RUN_FROM_PACKAGE, WEBSITE_TIME_ZONE) are intentionally NOT set — Flex
+  # DECLARES the worker runtime via the resource's runtime_name/runtime_version
+  # (node/24) and manages the extension version and the package mount. In
+  # particular FUNCTIONS_WORKER_RUNTIME is REJECTED on a Flex site: setting it
+  # fails the create with 400 BadRequest (ExtendedCode 51021, "app setting … is
+  # invalid for Flex Consumption sites").
+  #
+  # HOST STORAGE IS *NOT* IN THAT LIST — MG-58 CORRECTION. An earlier revision of
+  # this comment asserted that Flex configures the host's own storage connection
+  # for us and therefore that no AzureWebJobsStorage* setting belonged here. That
+  # was FALSE, and the omission it justified is the MG-58 defect: the host had no
+  # host-storage connection at all, so azure.functions.webjobs.storage reported
+  # Unhealthy/AuthenticationFailed every ~30s and `func publish` ended with the
+  # "app appears to be unhealthy" warning. Only DEPLOYMENT storage is configured
+  # by the resource's own storage_* arguments above; HOST storage
+  # (AzureWebJobsStorage) is a SEPARATE authentication surface on the same account
+  # and must be declared explicitly. The credential-carrying `AzureWebJobsStorage`
+  # connection-string form is still forbidden — the identity-based form below
+  # replaces it.
   app_settings = {
+    # HOST STORAGE — identity-based, ACCOUNT-NAME form (MG-58).
+    #
+    # This is the setting the Functions host resolves against the app's system-
+    # assigned managed identity to reach its own required storage (host lock /
+    # singleton leases, timer schedule status, key store). It carries a NAME, not
+    # a credential: no key, no SAS, no connection string — so it is compatible
+    # with allowSharedKeyAccess=false on the account above and nothing secret
+    # reaches app_settings or state.
+    #
+    # WHY THE ACCOUNT-NAME FORM AND NOT `AzureWebJobsStorage__blobServiceUri` &c:
+    # the two forms are ALTERNATIVES, not complements, and publishing both (or the
+    # wrong one) is its own defect. The service-URI form exists for accounts the
+    # host cannot address by standard Azure DNS — sovereign clouds, custom or
+    # private endpoints. This account is on standard public-cloud DNS: it is a
+    # plain Standard_LRS StorageV2 account with no private endpoint, no VNet
+    # integration and no network restriction anywhere in this stack, and the
+    # already-working deployment endpoint above is likewise composed against
+    # `blob.core.windows.net`. So the account name alone is sufficient and the
+    # service-URI variants are deliberately NOT set. NOTE FOR THE FUTURE: if this
+    # app ever moves behind private endpoints / VNet integration (MG-34's secure
+    # off-VNet edge), this choice must be revisited — the reason is recorded, not
+    # just the choice. See the MG-58 ADR.
+    "AzureWebJobsStorage__accountName" = local.functions_storage_account_name
+
     # Application Insights — identity-based (AAD) telemetry ingestion. The
     # managed identity is granted 'Monitoring Metrics Publisher' on the App
     # Insights resource (root module); Authorization=AAD makes the host
