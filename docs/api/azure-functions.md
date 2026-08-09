@@ -7,6 +7,40 @@ MeatGeek V2 uses Azure Functions for two distinct purposes within the parallel p
 1. **Lightweight Real-time Functions**: SignalR broadcasting only (no database operations)
 2. **API Functions**: Cook management, device management, and data queries
 
+## Registered Functions
+
+What `apps/api/src/main.ts` registers with the Functions host today. Everything
+below the next heading describes the target architecture, some of which is not
+yet wired.
+
+| Function                 | Trigger     | Route / schedule                  | Purpose                                         |
+| ------------------------ | ----------- | --------------------------------- | ----------------------------------------------- |
+| `getCooks`               | HTTP `GET`  | `cooks`                           | List cooks                                      |
+| `startCook`              | HTTP `POST` | `cooks`                           | Start a cook (emits `cook_started` on SignalR)  |
+| `stopCook`               | HTTP `POST` | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
+| `negotiate`              | HTTP `POST` | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
+| `getCurrentTemperatures` | HTTP `GET`  | `temperatures/current/{deviceId}` | Latest reading for a device                     |
+| `getDevices`             | HTTP `GET`  | `devices`                         | List devices                                    |
+| `cosmosHealth`           | HTTP `GET`  | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos     |
+| `storageHeartbeat`       | **Timer**   | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path             |
+
+`storageHeartbeat` exists because it is the **only** registration that needs
+`AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and
+singleton lease in the host storage account, so the invocation appearing in
+`FunctionAppLogs` is itself the proof that host storage authenticates — a proof
+no HTTP trigger can give, which is why the host sat
+`azure.functions.webjobs.storage: Unhealthy / AuthenticationFailed` for weeks
+while all seven endpoints answered 200. The handler only logs; it writes no blob
+and takes no Azure SDK dependency, because the storage dependency being proved is
+the **host's**, not the handler's. See
+[MG-58 host-storage verification](../infrastructure/mg58-host-storage-verification.md).
+
+HTTP `authLevel` is `anonymous` at the Functions runtime throughout, on purpose:
+the MG-24 platform layer (Easy Auth / `auth_settings_v2` with
+`unauthenticated_action = Return401`) validates the Entra bearer token before any
+function executes. That gate covers HTTP only — a timer is not reachable from the
+edge at all.
+
 ## Function Architecture
 
 ### **Real-time Processing Functions**
@@ -28,42 +62,34 @@ const signalRService = new SignalRService();
 
 export const broadcastTemperature: EventHubHandler = async (messages, context) => {
   const tracer = trace.getTracer('meatgeek.realtime');
-  
-  return tracer.startActiveSpan('temperature.broadcast', async (span) => {
+
+  return tracer.startActiveSpan('temperature.broadcast', async span => {
     try {
       span.setAttributes({
         'message.count': messages.length,
-        'function.type': 'realtime'
+        'function.type': 'realtime',
       });
 
       // Process messages in parallel for better performance
       const broadcastPromises = messages.map(async (eventData, index) => {
-        return tracer.startActiveSpan(`temperature.broadcast.${index}`, async (msgSpan) => {
+        return tracer.startActiveSpan(`temperature.broadcast.${index}`, async msgSpan => {
           try {
             // Extract temperature data from EventData
             const temp = EventDataAdapter.extractTemperatureData(eventData);
             const deviceMetadata = EventDataAdapter.getDeviceMetadata(eventData);
-            
+
             msgSpan.setAttributes({
               'device.id': deviceMetadata.deviceId,
               'cook.id': temp.cookId || 'none',
-              'temperature.grill': temp.grillTemp || 0
+              'temperature.grill': temp.grillTemp || 0,
             });
 
             // Broadcast to device group (all users watching this device)
-            await signalRService.sendToGroup(
-              `device-${temp.deviceId}`, 
-              'temperatureUpdate', 
-              temp
-            );
+            await signalRService.sendToGroup(`device-${temp.deviceId}`, 'temperatureUpdate', temp);
 
             // If part of active cook, broadcast to cook group
             if (temp.cookId) {
-              await signalRService.sendToGroup(
-                `cook-${temp.cookId}`, 
-                'temperatureUpdate', 
-                temp
-              );
+              await signalRService.sendToGroup(`cook-${temp.cookId}`, 'temperatureUpdate', temp);
             }
 
             msgSpan.addEvent('temperature.broadcasted');
@@ -80,12 +106,11 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
       });
 
       await Promise.all(broadcastPromises);
-      
+
       span.setAttributes({
-        'broadcast.success_count': broadcastPromises.length
+        'broadcast.success_count': broadcastPromises.length,
       });
       span.setStatus({ code: SpanStatusCode.OK });
-      
     } catch (error) {
       span.recordException(error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
@@ -98,6 +123,7 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
 ```
 
 **Function Configuration** (`broadcast-temperature/function.json`):
+
 ```json
 {
   "bindings": [
@@ -116,13 +142,14 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
 }
 ```
 
-### **API Functions** 
+### **API Functions**
 
 These functions handle **HTTP triggers** for cook management and data queries.
 
 #### Cook Management Functions
 
 **Start Cook Function**:
+
 ```typescript
 // apps/api/src/functions/cooks/start-cook.ts
 import { HttpTrigger } from '@azure/functions';
@@ -142,10 +169,10 @@ async function startCookHandler(
   // Authenticate and authorize user
   const user = await authMiddleware.requireAuth(context, req);
   await authMiddleware.requirePermission(user, 'cook:create', request.deviceId);
-  
+
   const cookManager = new CookManager();
   const signalRService = new SignalRService();
-  
+
   // Create new cook record in CosmosDB with authenticated user
   const newCook = await cookManager.createCook({
     deviceId: request.deviceId,
@@ -154,16 +181,16 @@ async function startCookHandler(
     meatType: request.meatType,
     targetTemps: request.targetTemps,
     status: 'active',
-    startTime: new Date()
+    startTime: new Date(),
   });
-  
+
   // Notify device via SignalR about new cook
   await signalRService.sendToGroup(`device-${request.deviceId}`, 'cookStarted', {
     cookId: newCook.id,
     deviceId: request.deviceId,
-    name: newCook.name
+    name: newCook.name,
   });
-  
+
   return newCook;
 }
 
@@ -175,49 +202,53 @@ export const startCook: HttpTrigger = async (context, req) => {
       method: 'POST',
       path: '/cooks',
       successStatusCode: 201,
-      operationId: 'startCook'
+      operationId: 'startCook',
     },
-    (request) => startCookHandler(request, context, req)
+    request => startCookHandler(request, context, req)
   );
 };
 ```
 
 **Temperature History Function**:
+
 ```typescript
 // apps/api/src/functions/temperatures/get-cook-history.ts
 import { HttpTrigger } from '@azure/functions';
 import { CosmosClient } from '@meatgeekv2/azure-client';
 import { TemperatureReading } from '@meatgeekv2/api-interfaces';
 
-async function getCookHistoryHandler(cookId: string, context: Context): Promise<TemperatureReading[]> {
+async function getCookHistoryHandler(
+  cookId: string,
+  context: Context
+): Promise<TemperatureReading[]> {
   const cosmosClient = new CosmosClient();
-  
+
   // Query temperatures for specific cook
   // Data is already stored with cookId from direct IoT Hub routing
   const query = {
     query: 'SELECT * FROM c WHERE c.cookId = @cookId ORDER BY c.timestamp ASC',
-    parameters: [{ name: '@cookId', value: cookId }]
+    parameters: [{ name: '@cookId', value: cookId }],
   };
-  
+
   const temperatures = await cosmosClient.queryTemperatures(query);
   return temperatures;
 }
 
 export const getCookHistory: HttpTrigger = async (context, req) => {
   const authMiddleware = new JWTMiddleware();
-  
+
   try {
     // Authenticate user
     const user = await authMiddleware.requireAuth(context, req);
-    
+
     const cookId = req.params.cookId;
     if (!cookId) {
       return { status: 400, body: { error: 'cookId parameter required' } };
     }
-    
+
     // Authorize access to cook data
     await authMiddleware.requirePermission(user, 'cook:view', cookId);
-    
+
     const history = await getCookHistoryHandler(cookId, context);
     return { status: 200, body: history };
   } catch (error) {
@@ -249,11 +280,11 @@ export class EventDataAdapter {
    */
   static extractTemperatureData(eventData: EventData): TemperatureReading {
     const body = eventData.body;
-    
+
     if (typeof body === 'string') {
       return JSON.parse(body);
     }
-    
+
     return body as TemperatureReading;
   }
 
@@ -261,10 +292,11 @@ export class EventDataAdapter {
    * Extract trace context for OpenTelemetry correlation
    */
   static extractTraceContext(eventData: EventData): any {
-    const traceParent = eventData.systemProperties?.['traceparent'] ||
-                       eventData.properties?.['traceparent'] ||
-                       eventData.applicationProperties?.['traceparent'];
-    
+    const traceParent =
+      eventData.systemProperties?.['traceparent'] ||
+      eventData.properties?.['traceparent'] ||
+      eventData.applicationProperties?.['traceparent'];
+
     return TracingHelper.extractTraceContext(traceParent);
   }
 
@@ -273,12 +305,13 @@ export class EventDataAdapter {
    */
   static getDeviceMetadata(eventData: EventData): { deviceId: string; cookId?: string } {
     // IoT Hub enriches messages with device metadata
-    const deviceId = eventData.systemProperties?.['iothub-connection-device-id'] ||
-                    eventData.properties?.['device.id'] ||
-                    eventData.applicationProperties?.['device.id'];
+    const deviceId =
+      eventData.systemProperties?.['iothub-connection-device-id'] ||
+      eventData.properties?.['device.id'] ||
+      eventData.applicationProperties?.['device.id'];
 
-    const cookId = eventData.properties?.['cook.id'] ||
-                  eventData.applicationProperties?.['cook.id'];
+    const cookId =
+      eventData.properties?.['cook.id'] || eventData.applicationProperties?.['cook.id'];
 
     return { deviceId, cookId };
   }
@@ -295,6 +328,7 @@ export class EventDataAdapter {
 ## Function App Configuration
 
 ### **Host Configuration** (`host.json`):
+
 ```json
 {
   "version": "2.0",
@@ -346,7 +380,7 @@ on SignalR, `shared_access_key_enabled = false` on the Functions storage account
 (Flex deployment storage is `storage_authentication_type = "SystemAssignedIdentity"`), and
 `local_authentication_enabled = false` on the Event Hubs namespace (both its
 producer — the identity-based IoT Hub routing endpoint — and its consumer — the
-Function App via *Azure Event Hubs Data Receiver* — are AAD, so the RootManage key
+Function App via _Azure Event Hubs Data Receiver_ — are AAD, so the RootManage key
 is unused). For those four the in-state
 key is a **present-but-non-authenticating residual**. **IoT Hub is the SOLE
 documented exception:** its SAS keys stay **live** because real devices, the
@@ -422,7 +456,7 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 > resolves each service using the app's managed identity against the non-secret
 > endpoint, so **no service key is written to app settings**. The Flex deployment
 > storage is likewise identity-based (`storage_authentication_type =
-> "SystemAssignedIdentity"`), so no storage account
+"SystemAssignedIdentity"`), so no storage account
 > key reaches app settings either. (The services' inherent keys still exist as
 > computed attributes in Terraform state, made non-authenticating by disabling
 > local/key auth — IoT Hub excepted — as described above.)
@@ -449,6 +483,7 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 ## Function Deployment
 
 ### **Development Deployment**:
+
 ```bash
 # Build and deploy to development environment.
 # The deploy target runs `func azure functionapp publish {args.functionApp}`,
@@ -458,6 +493,7 @@ nx deploy api --functionApp=$(terraform output -raw function_app_name)
 ```
 
 ### **Production Deployment**:
+
 ```bash
 # Build optimized production bundle
 nx build api --configuration=production
@@ -469,32 +505,37 @@ nx deploy api --functionApp=<prod Function App name>
 ## Performance Optimizations
 
 ### **Real-time Functions**:
+
 - **Event Hub batching**: Process multiple messages simultaneously
 - **No database operations**: Only SignalR broadcasting for minimal latency
 - **Parallel processing**: Handle multiple temperature updates concurrently
 - **Error isolation**: Failed broadcasts don't affect other messages
 
 ### **API Functions**:
+
 - **Connection pooling**: Reuse CosmosDB connections
 - **OpenAPI validation**: Early request validation
 - **Structured logging**: Easy debugging and monitoring
 - **Caching**: Cache frequently accessed cook data
 
 ### **Cost Optimization**:
+
 - **Consumption plan viable**: Lightweight real-time functions
-- **Separate scaling**: Real-time and API functions scale independently  
+- **Separate scaling**: Real-time and API functions scale independently
 - **Efficient batching**: Minimize Function executions
 - **Direct storage**: No Function costs for temperature persistence
 
 ## Monitoring & Observability
 
 ### **Key Metrics**:
+
 - **Real-time latency**: Event Hub → SignalR broadcast time
 - **Function execution time**: Performance monitoring
 - **Error rates**: Failed broadcasts or API calls
 - **Throughput**: Messages processed per second
 
 ### **Custom Telemetry**:
+
 - **Cook session metrics**: Active cooks, average cook time
 - **Temperature metrics**: Average temperatures, alert frequencies
 - **Device metrics**: Device connectivity, message rates

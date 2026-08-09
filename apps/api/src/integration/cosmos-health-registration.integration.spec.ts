@@ -28,6 +28,12 @@ jest.mock('@azure/functions', () => {
       http: (name: string, registration: HttpRegistration) => {
         registrations[name] = registration;
       },
+      // main.ts also registers the MG-58 host-storage heartbeat timer. This
+      // suite asserts the Cosmos health ROUTE, so the registration is swallowed
+      // rather than captured — but the stub must exist, or importing main.ts
+      // throws before health/cosmos is registered. The timer's own wiring is
+      // asserted in functions/health/storage-heartbeat.spec.ts.
+      timer: () => undefined,
     },
   };
 });
