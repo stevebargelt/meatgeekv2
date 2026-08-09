@@ -16,6 +16,10 @@ import { signalROutput } from './functions/signalr/envelope';
 import { getCurrentTemperaturesHandler } from './functions/temperatures/get-current';
 import { getDevicesHandler } from './functions/devices/get-devices';
 import { cosmosHealthHandler } from './functions/health/cosmos-health';
+import {
+  STORAGE_HEARTBEAT_SCHEDULE,
+  storageHeartbeatHandler,
+} from './functions/health/storage-heartbeat';
 
 // Register HTTP triggers
 app.http('getCooks', {
@@ -89,6 +93,17 @@ app.http('cosmosHealth', {
   authLevel: 'anonymous',
   route: 'health/cosmos',
   handler: cosmosHealthHandler,
+});
+
+// Host-storage heartbeat (MG-58). The ONLY timer in this app, and the only
+// registration that needs AzureWebJobsStorage: the host keeps this timer's
+// schedule status and singleton lease in the host storage account, so the
+// invocation itself is the proof that host storage authenticates. Every other
+// registration above is an HTTP trigger, which needs no host storage — which is
+// why the host sat Unhealthy for weeks while all of them answered 200.
+app.timer('storageHeartbeat', {
+  schedule: STORAGE_HEARTBEAT_SCHEDULE,
+  handler: storageHeartbeatHandler,
 });
 
 console.log('MeatGeek V2 API Functions registered successfully');
