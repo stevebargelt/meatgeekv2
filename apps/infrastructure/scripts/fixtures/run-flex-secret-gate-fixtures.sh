@@ -62,6 +62,7 @@ CASES="
 flex-plan-accepted.json pass auto
 flex-plan-reenabled-shared-key.json fail auto
 flex-plan-appsetting-key.json fail auto
+flex-plan-host-storage-connstr.json fail auto
 flex-plan-siteconfig-key.json fail auto
 flex-plan-siteconfig-localauth-enabled.json fail auto
 flex-plan-siteconfig-noncred.json fail auto
@@ -74,10 +75,10 @@ secret-gate-planned-values-string.json fail json
 secret-gate-invalid.json fail json
 "
 
-# 13 fixture cases + 1 redaction case + 2 environment cases. Raise this floor
-# whenever a case is added, so the harness cannot quietly run fewer than it
-# advertises.
-MIN_CHECKS_PER_SHELL=16
+# 14 fixture cases + 1 redaction case + 1 positive-control shape case + 2
+# environment cases. Raise this floor whenever a case is added, so the harness
+# cannot quietly run fewer than it advertises.
+MIN_CHECKS_PER_SHELL=18
 
 # Resolve each shell to an ABSOLUTE path: the PATH-stripped environment case below
 # cannot rely on PATH lookup to find its own interpreter.
@@ -164,6 +165,51 @@ for shell_bin in ${SHELL_BINS}; do
       fi
     fi
   done < "${CASES_FILE}"
+
+  # --- POSITIVE-CONTROL SHAPE case (MG-58) -----------------------------------
+  # THE ACCEPTED FIXTURE MUST ACTUALLY CARRY THE SETTING IT CLAIMS TO CLEAR.
+  #
+  # flex-plan-accepted.json is the harness's only "gate says yes" row, and every
+  # environment case above reuses it precisely because the gate PASSes it. That
+  # makes it a control, and a control that has silently drifted behind
+  # modules/functions/main.tf proves nothing: MG-58 added the identity-based host
+  # storage setting to the module while the fixture kept the pre-MG-58 app_settings
+  # map, so "the accepted shape passes" was a claim about a shape that is no longer
+  # deployed. An exit code cannot detect that — absence of a key is exactly what a
+  # PASS looks like — so the shape is asserted lexically here.
+  #
+  # The pairing is the point. This case and the flex-plan-host-storage-connstr.json
+  # row above are a MUTATION CONTROL on the one setting MG-58 introduces: the
+  # account-name form must be present in the document the gate ACCEPTS, and the
+  # credential-carrying connection-string form must be present in the document the
+  # gate REJECTS. Assert both ends, or a fixture edit that defangs either one
+  # leaves the pair green and vacuous.
+  #
+  # The *ServiceUri variants are asserted ABSENT from the accepted control too:
+  # they are ALTERNATIVES to the account-name form, not complements, and the
+  # account is on standard Azure DNS (see modules/functions/main.tf and the MG-58
+  # ADR). Publishing both forms is its own defect, so the accepted shape must not
+  # quietly grow one.
+  checks=$((checks + 1))
+  NEG_HOST_FIXTURE="${HERE}/flex-plan-host-storage-connstr.json"
+  shape_err=""
+  if [ ! -f "${NEG_HOST_FIXTURE}" ]; then
+    shape_err="negative host-storage fixture missing: ${NEG_HOST_FIXTURE}"
+  elif ! grep -q '"AzureWebJobsStorage__accountName"' "${VALID_FIXTURE}"; then
+    shape_err="the ACCEPTED control does not carry AzureWebJobsStorage__accountName — it has drifted behind modules/functions/main.tf, so its PASS is a claim about a shape that is not deployed"
+  elif grep -qE '"AzureWebJobsStorage"[[:space:]]*:' "${VALID_FIXTURE}"; then
+    shape_err="the ACCEPTED control carries the credential-carrying bare AzureWebJobsStorage connection-string form — that document must never be a PASS"
+  elif grep -qE '"AzureWebJobsStorage__(blob|queue|table|file)ServiceUri"' "${VALID_FIXTURE}"; then
+    shape_err="the ACCEPTED control carries a *ServiceUri host-storage variant — the account-name form and the service-URI forms are alternatives, and publishing both is its own defect"
+  elif ! grep -qE '"AzureWebJobsStorage"[[:space:]]*:.*AccountKey[[:space:]]*=' "${NEG_HOST_FIXTURE}"; then
+    shape_err="the NEGATIVE host-storage fixture no longer carries a bare AzureWebJobsStorage connection string with an account key — its rejection would be for some other reason, making the pair vacuous"
+  fi
+  if [ -n "${shape_err}" ]; then
+    echo "  ✗ [shape] ${shape_err}" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ✓ [shape] host-storage mutation control intact: accepted fixture carries ONLY the account-name form; negative fixture carries the connection-string form"
+  fi
 
   # --- REDACTION case (MG-23 red) --------------------------------------------
   # THE GATE MUST NOT PRINT THE SECRET IT REJECTS.

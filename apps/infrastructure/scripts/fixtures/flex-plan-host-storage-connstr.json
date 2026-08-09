@@ -1,4 +1,5 @@
 {
+  "_comment": "MG-58 negative control for the HOST-STORAGE setting. Byte-for-byte flex-plan-accepted.json except for ONE app_settings entry: the identity-based account-name form has been replaced by the credential-carrying `AzureWebJobsStorage` connection-string form (the pre-MG-24 shape, and the tempting 'just make it work' substitute if the identity path ever looks hard). That is the exact regression MG-58 must never allow back: it puts a live storage account key into app_settings and into Terraform state, and it silently defeats allowSharedKeyAccess=false on the account below. The gate must exit NONZERO on this document. Paired with flex-plan-accepted.json, the two fixtures are a mutation control on the one setting this ticket introduces — the identity form PASSES, the credential form FAILS. The key value here is not a real credential; it is the literal base64 of a placeholder string.",
   "format_version": "1.2",
   "terraform_version": "1.9.0",
   "planned_values": {
@@ -49,7 +50,7 @@
                 "storage_container_type": "blobContainer",
                 "storage_container_endpoint": "https://mgv2funcabc123def456.blob.core.windows.net/deployment-package",
                 "app_settings": {
-                  "AzureWebJobsStorage__accountName": "mgv2funcabc123def456",
+                  "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=mgv2funcabc123def456;AccountKey=Zm9yYmlkZGVuSG9zdFN0b3JhZ2VLZXlWYWx1ZT09;EndpointSuffix=core.windows.net",
                   "APPLICATIONINSIGHTS_AUTHENTICATION_STRING": "Authorization=AAD",
                   "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE": "50",
                   "COSMOSDB__accountEndpoint": "https://mgv2-cosmos.documents.azure.com:443/",

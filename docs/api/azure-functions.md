@@ -484,13 +484,16 @@ AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
 
 ### **Development Deployment**:
 
-```bash
-# Build and deploy to development environment.
-# The deploy target runs `func azure functionapp publish {args.functionApp}`,
-# so pass --functionApp=<Function App name> (there is no --env flag).
-nx build api --configuration=development
-nx deploy api --functionApp=$(terraform output -raw function_app_name)
-```
+**Do not use `nx deploy api` against dev.** The `deploy` target in
+`apps/api/project.json` runs a bare `func azure functionapp publish` — no
+`--javascript`, no `--no-build`, and no `--omit=dev` install inside
+`dist/apps/api` — and that does **not** work on Flex Consumption. The recipe that
+does (MG-21) is written out once, in the deployment section of the MG-58 runbook,
+and this page deliberately does not copy it: a deploy recipe duplicated across
+three files is a recipe with three chances to go stale, and it had already gone
+stale here.
+
+➡️ **[MG-58 runbook → §3 Deploy the app build](../infrastructure/mg58-host-storage-verification.md#3-deploy-the-app-build-carrying-the-timer-probe)** — the authoritative dev deploy sequence (`nx build api` → `npm install --omit=dev` inside `dist/apps/api` → `func azure functionapp publish <app> --javascript --no-build`).
 
 ### **Production Deployment**:
 
@@ -501,6 +504,14 @@ nx deploy api --functionApp=<prod Function App name>
 ```
 
 > In production this runs from CI, not by hand. The `app-deploy-prod.yml` workflow invokes `nx deploy api --functionApp=<prod Function App name>` automatically **after the CI/CD Pipeline completes green on a push to `main`**, gated by the `PROD_DEPLOY_ENABLED` repository variable. See [CI/CD Pipeline → Prod](../development/ci-cd.md#prod).
+>
+> ⚠️ **UNVERIFIED ON FLEX CONSUMPTION.** This is the command the prod workflow
+> actually runs today, so it is recorded as-is rather than quietly rewritten —
+> but it is the same bare `nx deploy api` target that fails on Flex in dev, and
+> no prod deploy has been observed succeeding against a Flex-hosted prod app. It
+> is written down here as the current state, **not** as a validated path. Before
+> the first prod deploy, either the target is brought up to the MG-58 §3 recipe
+> or this path is proven on Flex and the warning removed.
 
 ## Performance Optimizations
 
