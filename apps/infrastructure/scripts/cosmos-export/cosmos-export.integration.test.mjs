@@ -1,6 +1,9 @@
 // Integration contract coverage for MG-49.  These tests exercise main() with
 // the real exporter pipeline and a Cosmos-shaped client, keeping Azure itself
 // out of scope while covering the CLI's observable exit/error guarantees.
+//
+// Dependency-free tier: every client here is injected. The cases that take
+// createRealClient's real SDK imports live in cosmos-export.sdk.test.mjs.
 
 import { strict as assert } from 'node:assert';
 import { mkdtemp, readFile, readdir } from 'node:fs/promises';
@@ -8,7 +11,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 
-import { createRealClient, main } from './cosmos-export.mjs';
+import { main } from './cosmos-export.mjs';
 import { EXIT } from './export-core.mjs';
 import {
   FakeCosmosError,
@@ -93,19 +96,7 @@ describe('MG-49 main() integration exit contracts', () => {
   });
 });
 
-describe('MG-49 real SDK and secret-boundary integration', () => {
-  it('loads the installed Azure Identity SDK and constructs its default credential offline', async () => {
-    const client = await createRealClient({
-      endpoint: 'https://meatgeek.documents.azure.com:443/',
-      authMode: 'aad',
-      key: '',
-    });
-
-    // Constructing a client/credential must not make a token request.  Calling
-    // any client method is deliberately out of scope: that would contact Azure.
-    assert.equal(client.constructor.name, 'CosmosClient');
-  });
-
+describe('MG-49 secret-boundary integration', () => {
   it('key and AAD export flows never persist or log either credential secret', async () => {
     const spec = { db: { cooks: { count: 1, pages: [docs('cook', 1)] } } };
     const keyDir = await outDir();

@@ -79,6 +79,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: V1 Cosmos export tool — real Azure SDK tier (MG-49)
+        # The other tier of apps/infrastructure/scripts/cosmos-export runs in
+        # validate-infrastructure, which deliberately installs nothing. These
+        # cases take createRealClient's real @azure/cosmos and @azure/identity
+        # imports and construct a DefaultAzureCredential, so they need the
+        # node_modules the step above just produced. They are still offline: a
+        # credential is constructed, never used, and no client method is called.
+        #
+        # Deliberately NOT gated on a matrix leg. It re-runs once per project,
+        # which is cheap, and the alternative — `if: matrix.project == 'api'` —
+        # would silently stop running the moment someone edits the matrix. That
+        # is the fail-open shape run-tests.mjs exists to refuse.
+        run: node apps/infrastructure/scripts/cosmos-export/run-tests.mjs --sdk
+
       - name: Lint ${{ matrix.project }}
         run: npx nx lint ${{ matrix.project }}
 
@@ -411,9 +425,18 @@ jobs:
         # count and the executed test count — same reasoning as
         # assert-suite-completion.sh above, in Node rather than bash.
         #
-        # No `npm ci`: the suite is node: built-ins plus its own fake, so it
-        # runs on the runner's Node as-is. @azure/cosmos is imported only by the
-        # real-client factory, which the tests never take.
+        # No `npm ci`: THIS TIER is node: built-ins plus its own fake, so it runs
+        # on the runner's Node as-is. Every client it uses is injected, so it
+        # resolves no Azure package.
+        #
+        # It is a tier, not the whole suite (MG-49). createRealClient's real
+        # `import('@azure/cosmos')` / `import('@azure/identity')` also has to be
+        # verified somewhere, and it cannot be verified here: that would mean
+        # `npm ci` in a job whose dependency-free, credentialless character is
+        # the property it exists to prove. So those cases live in
+        # cosmos-export.sdk.test.mjs and run in lint-and-test, after its install.
+        # Both tiers go through run-tests.mjs and both are floored; neither can
+        # be dropped without turning its step red.
         run: node apps/infrastructure/scripts/cosmos-export/run-tests.mjs
 
       - name: Terraform module tests (every test-bearing module)
