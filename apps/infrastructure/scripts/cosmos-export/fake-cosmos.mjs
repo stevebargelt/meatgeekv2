@@ -28,6 +28,45 @@ export const transportError = () =>
 
 export const authError = () => new FakeCosmosError('Unauthorized', { statusCode: 401 });
 
+// What an account with disableLocalAuth: true returns to a principal holding
+// only control-plane RBAC (subscription Owner and nothing else).
+export const forbiddenError = () =>
+  new FakeCosmosError(
+    'Request blocked by Auth meatgeek : Request is blocked because principal does not have required RBAC permissions to perform action',
+    { statusCode: 403 }
+  );
+
+// What DefaultAzureCredential raises when every credential in the chain fails
+// — no az login, no managed identity, no service principal in the environment.
+export const credentialUnavailableError = () =>
+  new FakeCosmosError('DefaultAzureCredential failed to retrieve a token from the included', {
+    name: 'AggregateAuthenticationError',
+  });
+
+// Stand-ins for the two modules createRealClient imports, so what the auth
+// wiring hands to CosmosClient can be asserted without the SDK or a network.
+export function fakeCosmosModule(constructed) {
+  return {
+    CosmosClient: class CosmosClient {
+      constructor(options) {
+        constructed.push(options);
+        this.options = options;
+      }
+    },
+  };
+}
+
+export function fakeIdentityModule({ throwOnConstruct } = {}) {
+  return {
+    DefaultAzureCredential: class DefaultAzureCredential {
+      constructor() {
+        if (throwOnConstruct) throw throwOnConstruct;
+        this.credentialKind = 'DefaultAzureCredential';
+      }
+    },
+  };
+}
+
 export function docs(prefix, count, from = 0) {
   return Array.from({ length: count }, (_, i) => ({
     id: `${prefix}-${from + i}`,

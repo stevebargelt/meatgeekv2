@@ -69,6 +69,73 @@ export const defaultLog = {
 // cost worth paying, a leaked document is not.
 const BRACKETED = /[{[][\s\S]*[}\]]/g;
 
+// Bracket-shape is only half the problem. An SDK error can carry a credential
+// inline and unbracketed — an AccountKey lifted out of a connection string, a
+// bearer token, a SAS signature — and that text goes straight to the operator's
+// terminal and whatever is capturing it. So secrets are matched by SHAPE rather
+// than by punctuation, and the value is replaced whole: never a prefix, never a
+// length, never a hash, because each of those is still a fact about the secret.
+//
+// There is deliberately NO exemption list. Benign Cosmos key names like
+// `partitionKey` used to be exempted so a common diagnostic stayed readable,
+// and that exemption was the only thing in this scrubber that could decide NOT
+// to redact — which made it the only thing worth attacking. It was: a quote
+// inside `AccountKey"partitionKey=` reset where the key pattern began matching,
+// the captured key became the exempt suffix, and the secret was emitted
+// verbatim. Every repair for that shape ends in a rule about which characters
+// delimit a key token, and every such rule is a character class an attacker
+// gets to write into. So the exemption is gone and a credential-shaped key
+// ALWAYS redacts. `partitionKey=deviceId` reads `partitionKey=[redacted]`; that
+// is a diagnostic-readability cost, paid once, to delete the whole defect class.
+
+// The key half of a credential pair, and ONLY the key half: optionally quoted,
+// separated by '=' or ':' because the same field arrives as a connection-string
+// fragment and as JSON. The opening and closing quotes are matched
+// independently rather than as a backreference, so a malformed `"AccountKey':`
+// is still recognised as a credential rather than falling through unmatched.
+const CREDENTIAL_KEY =
+  /(?<![\w-])(["']?)([\w-]*(?:key|token|secret|password|credential|sig)[\w-]*)(["']?)(\s*[=:]\s*)/gi;
+
+const SECRET_PATTERNS = [
+  [/\bBearer\s+[\w.~+/=-]+/gi, 'Bearer [redacted]'],
+  // A JWT: three base64url segments. Long enough per segment that dotted host
+  // names and namespaced identifiers do not match.
+  [/\b[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}\b/g, '[redacted]'],
+  // Connection-string / SAS fields, value running to whatever delimits it.
+  [/\b(AccountEndpoint|sv)\s*=\s*[^;&\s]*/gi, '$1=[redacted]'],
+];
+
+// A credential-shaped key name's value is not parsed — it is consumed to the
+// end of the line and replaced whole. Deciding where a quoted value ENDS is
+// what leaked twice: mismatched, escaped, unterminated and nested quotes are
+// unbounded, and SDK error text is precisely where malformed input turns up.
+// A line break is the one boundary a value
+// cannot straddle without the remainder being dropped anyway (describeError
+// keeps only the first line), so quote characters are ordinary content here and
+// an ambiguous parse always redacts more.
+function redactCredentialValues(text) {
+  CREDENTIAL_KEY.lastIndex = 0;
+  let out = '';
+  let cursor = 0;
+  let match;
+  while ((match = CREDENTIAL_KEY.exec(text)) !== null) {
+    const lineEnd = text.indexOf('\n', CREDENTIAL_KEY.lastIndex);
+    const end = lineEnd === -1 ? text.length : lineEnd;
+    out += text.slice(cursor, match.index) + match[0] + '[redacted]';
+    cursor = end;
+    CREDENTIAL_KEY.lastIndex = end;
+  }
+  return out + text.slice(cursor);
+}
+
+function scrubSecrets(text) {
+  let out = text;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    out = out.replace(pattern, replacement);
+  }
+  return redactCredentialValues(out);
+}
+
 export function describeError(err) {
   if (err instanceof ExportError) return err.message;
   const parts = [];
@@ -77,17 +144,36 @@ export function describeError(err) {
   const code = err?.statusCode ?? err?.code;
   if (code !== undefined && code !== null) parts.push(`status=${code}`);
   const raw = typeof err?.message === 'string' ? err.message : '';
-  const scrubbed = raw.replace(BRACKETED, '[redacted]').split('\n')[0].trim().slice(0, 200);
+  // Both scrubs run on the whole message BEFORE the 200-char cap: truncating
+  // first can cut a secret in half and leave the first half in the log.
+  const scrubbed = scrubSecrets(raw.replace(BRACKETED, '[redacted]'))
+    .split('\n')[0]
+    .trim()
+    .slice(0, 200);
   if (scrubbed) parts.push(scrubbed);
   return parts.join(' ') || 'unknown error';
 }
+
+// The @azure/identity credential-acquisition failures. AggregateAuthentication-
+// Error is the common one for DefaultAzureCredential with nothing logged in.
+const IDENTITY_AUTH_ERRORS = new Set([
+  'CredentialUnavailableError',
+  'AuthenticationError',
+  'AuthenticationRequiredError',
+  'AggregateAuthenticationError',
+]);
 
 export function classifyError(err) {
   const status = Number(err?.statusCode ?? err?.code);
   if (status === 429) return EXIT.THROTTLED;
   if (status === 401 || status === 403) return EXIT.AUTH;
-  const name = String(err?.name ?? '');
-  if (name === 'AuthenticationError' || name.startsWith('Credential')) return EXIT.AUTH;
+  // A credential that cannot be acquired at all carries no HTTP status, so it
+  // is recognised by name — and by EXACT name. @azure/identity's set is finite
+  // and documented, while a substring match on 'Credential' or 'Authentication'
+  // also swallows names like CredentialTransportError, sending an operator to
+  // re-issue RBAC grants for what was really a connection reset. Exit 4 means
+  // "your credentials are wrong"; anything else here is exit 5.
+  if (IDENTITY_AUTH_ERRORS.has(String(err?.name ?? ''))) return EXIT.AUTH;
   const code = err?.code;
   if (code === 'Unauthorized' || code === 'Forbidden') return EXIT.AUTH;
   return EXIT.TRANSPORT;
