@@ -212,70 +212,9 @@ async function pathExists(p) {
   }
 }
 
-// A resource the caller named by id is simply not there. That is the same
-// operator error as a filter that matched nothing under enumeration, so it is
-// left to assertFiltersMatched to report with the usage exit code. ONLY 404 is
-// treated this way — a 403 is an authorization failure and still aborts.
-function isNotFound(err) {
-  const status = Number(err?.statusCode ?? err?.code);
-  return status === 404 || err?.code === 'NotFound';
-}
-
-async function containerExists(client, database, container) {
-  try {
-    await client.database(database).container(container).read();
-    return true;
-  } catch (err) {
-    if (isNotFound(err)) return false;
-    throw toExportError(
-      err,
-      `${targetKey(database, container)}: reading container metadata failed`
-    );
-  }
-}
-
-// MG-49: a --database export must not reach above the databases it was given.
-// Cosmos scopes a data-plane role assignment at '/', at /dbs/<database> or at
-// /dbs/<database>/colls/<container>, and NOTHING at account level is covered by
-// a /dbs/<database> grant — so enumerating the account's databases to find the
-// one the caller already named 403s a correctly-scoped least-privilege reader
-// before a single document is read. A filtered run therefore ADDRESSES what it
-// was given by id and discovers nothing above it: the named databases, and,
-// when --container narrows it further, the named containers too. That leaves
-// --container-only (no --database) on the enumerating path, where it belongs:
-// finding a container in an unknown database is an account-level question.
-async function listScopedTargets(client, databases, containers) {
-  const targets = [];
-  for (const database of databases) {
-    if (containers.length) {
-      for (const container of containers) {
-        if (await containerExists(client, database, container)) {
-          targets.push({ database, container });
-        }
-      }
-      continue;
-    }
-    let listed;
-    try {
-      listed = await client.database(database).containers.readAll().fetchAll();
-    } catch (err) {
-      if (isNotFound(err)) continue;
-      throw toExportError(err, `enumerating containers in ${database}`);
-    }
-    for (const container of listed.resources ?? []) {
-      targets.push({ database, container: container.id });
-    }
-  }
-  return targets;
-}
-
 export async function listTargets(client, filters = {}) {
-  const dbFilter = filters.databases ?? [];
+  const dbFilter = filters.databases?.length ? new Set(filters.databases) : null;
   const containerFilter = filters.containers?.length ? new Set(filters.containers) : null;
-  if (dbFilter.length) {
-    return listScopedTargets(client, dbFilter, filters.containers ?? []);
-  }
-
   const targets = [];
   let databases;
   try {
@@ -284,6 +223,7 @@ export async function listTargets(client, filters = {}) {
     throw toExportError(err, 'enumerating databases');
   }
   for (const db of databases.resources ?? []) {
+    if (dbFilter && !dbFilter.has(db.id)) continue;
     let containers;
     try {
       containers = await client.database(db.id).containers.readAll().fetchAll();
@@ -530,15 +470,6 @@ async function readManifest(outDir) {
     );
   }
   return manifest;
-}
-
-// --verify's scope is whatever the export recorded, not what argv says, and the
-// client has to be built already knowing it (see createRealClient's note on
-// endpoint discovery), so the manifest is read once here before anything
-// reaches the network. Reading it twice is cheaper than a client that cannot be
-// told what scope it is allowed to touch.
-export async function readManifestFilters(outDir) {
-  return (await readManifest(outDir)).filters ?? {};
 }
 
 export async function runVerify({ client, outDir, log = defaultLog }) {

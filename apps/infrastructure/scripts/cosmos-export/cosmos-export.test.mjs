@@ -17,7 +17,6 @@ import { describe, it } from 'node:test';
 import { createRealClient, main } from './cosmos-export.mjs';
 import { EXIT, MANIFEST_FILENAME } from './export-core.mjs';
 import {
-  accountScopeForbiddenError,
   authError,
   credentialUnavailableError,
   docs,
@@ -36,10 +35,7 @@ async function outDir() {
   return mkdtemp(path.join(tmpdir(), 'cosmos-export-'));
 }
 
-async function run(
-  argv,
-  { spec = {}, env = {}, listError, containerListError, client, createClient } = {}
-) {
+async function run(argv, { spec = {}, env = {}, listError, client, createClient } = {}) {
   const lines = [];
   const log = { info: line => lines.push(line), error: line => lines.push(line) };
   const clientArgs = [];
@@ -49,7 +45,7 @@ async function run(
     createClient: async args => {
       clientArgs.push(args);
       if (createClient) return createClient(args);
-      return client ?? fakeClient(spec, { listError, containerListError });
+      return client ?? fakeClient(spec, { listError });
     },
     log,
   });
@@ -698,138 +694,6 @@ describe('--verify', () => {
     const { code, out } = await verify(dir);
     assert.equal(code, EXIT.RECONCILE);
     assert.match(out, /not valid JSON/);
-  });
-});
-
-// MG-49, from a live smoke against V2 dev. A Cosmos DB Built-in Data Reader
-// assignment scoped to /dbs/meatgeek-v2-dev-db — the correct least-privilege
-// grant — could not run a --database-filtered export, because the tool asked the
-// ACCOUNT what databases it held before it applied the filter. The fake here
-// holds exactly that grant: account-level enumeration is forbidden, direct
-// access succeeds. A filtered export has to complete against it, and an
-// unfiltered one has to keep failing, since that one really does need the
-// account.
-describe('database-scoped RBAC (MG-49)', () => {
-  const ACCOUNT = 'mgv2-dev-f640e19ae7ab';
-  const DATABASE = 'meatgeek-v2-dev-db';
-  const spec = {
-    [DATABASE]: {
-      temperatures: { count: 2, pages: [docs('t', 2)] },
-      sessions: { count: 1, pages: [docs('s', 1)] },
-    },
-  };
-
-  function scopedRun(argv, overrides = {}) {
-    return run(['--account', ACCOUNT, '--auth', 'aad', ...argv], {
-      spec,
-      env: { COSMOS_EXPORT_KEY: undefined },
-      listError: accountScopeForbiddenError(),
-      ...overrides,
-    });
-  }
-
-  it('a --database export completes where account enumeration is forbidden', async () => {
-    const dir = await outDir();
-    const { code } = await scopedRun(['--out', dir, '--database', DATABASE]);
-
-    assert.equal(code, EXIT.OK);
-    const manifest = await readManifest(dir);
-    assert.deepEqual(
-      manifest.containers.map(c => `${c.database}/${c.container}`),
-      [`${DATABASE}/temperatures`, `${DATABASE}/sessions`]
-    );
-    assert.equal(manifest.totals.documents, 3);
-  });
-
-  it('...and --verify of that export completes too', async () => {
-    const dir = await outDir();
-    assert.equal((await scopedRun(['--out', dir, '--database', DATABASE])).code, EXIT.OK);
-
-    const { code, out } = await scopedRun(['--out', dir, '--verify']);
-    assert.equal(code, EXIT.OK, out);
-    assert.match(out, /VERIFIED: 2 container\(s\) \/ 3 document\(s\)/);
-  });
-
-  it('--database --container completes where database enumeration is forbidden as well', async () => {
-    const dir = await outDir();
-    const { code } = await scopedRun(
-      ['--out', dir, '--database', DATABASE, '--container', 'sessions'],
-      {
-        containerListError: accountScopeForbiddenError(),
-      }
-    );
-
-    assert.equal(code, EXIT.OK);
-    const manifest = await readManifest(dir);
-    assert.deepEqual(
-      manifest.containers.map(c => `${c.database}/${c.container}`),
-      [`${DATABASE}/sessions`]
-    );
-    assert.equal(await exists(path.join(dir, `${DATABASE}__temperatures.jsonl`)), false);
-  });
-
-  it('an unfiltered export against the same grant still fails, loudly and with exit 4', async () => {
-    const dir = await outDir();
-    const { code, out } = await scopedRun(['--out', dir]);
-
-    assert.equal(code, EXIT.AUTH);
-    assert.match(out, /enumerating databases/);
-    assert.match(out, /Request blocked by Auth/);
-    assert.match(out, /exit 4 \(auth failure\)/);
-    assert.deepEqual(await readdir(dir), [], 'nothing is written on the way to the 403');
-  });
-
-  it('a --database typo is still a usage error, not a 404 dressed up as a transport abort', async () => {
-    const dir = await outDir();
-    const { code, out } = await scopedRun(['--out', dir, '--database', 'typo-db']);
-
-    assert.equal(code, EXIT.USAGE);
-    assert.match(out, /matched nothing/);
-    assert.equal(await exists(path.join(dir, MANIFEST_FILENAME)), false);
-  });
-
-  // Not enumerating databases is necessary but not sufficient: with endpoint
-  // discovery left on, the SDK reads the DATABASE ACCOUNT for its region list
-  // before the first data request, which is the account-scoped call the live
-  // smoke actually died on. Nothing injecting a client wholesale can see this.
-  it('a scoped run builds a client that will not probe the account for regions', async () => {
-    const constructed = [];
-    const loaders = {
-      loadCosmos: async () => fakeCosmosModule(constructed),
-      loadIdentity: async () => fakeIdentityModule(),
-    };
-
-    await createRealClient({
-      endpoint: `https://${ACCOUNT}.documents.azure.com:443/`,
-      authMode: 'aad',
-      databaseScoped: true,
-      ...loaders,
-    });
-    await createRealClient({
-      endpoint: `https://${ACCOUNT}.documents.azure.com:443/`,
-      authMode: 'aad',
-      ...loaders,
-    });
-
-    assert.equal(constructed[0].connectionPolicy.enableEndpointDiscovery, false);
-    assert.equal(constructed[1].connectionPolicy.enableEndpointDiscovery, true);
-    assert.equal(constructed[0].connectionPolicy.retryOptions.maxRetryAttemptCount, 9);
-  });
-
-  it('main tells the client factory which runs are database-scoped', async () => {
-    const dir = await outDir();
-    const scoped = await scopedRun(['--out', dir, '--database', DATABASE]);
-    assert.equal(scoped.clientArgs[0].databaseScoped, true);
-
-    const unscoped = await scopedRun(['--out', await outDir()]);
-    assert.equal(unscoped.clientArgs[0].databaseScoped, false);
-
-    const verified = await scopedRun(['--out', dir, '--verify']);
-    assert.equal(
-      verified.clientArgs[0].databaseScoped,
-      true,
-      "--verify takes its scope from the manifest's filters, not from argv"
-    );
   });
 });
 

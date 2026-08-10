@@ -32,7 +32,6 @@ import {
   defaultLog,
   describeError,
   exitLabel,
-  readManifestFilters,
   runExport,
   runVerify,
 } from './export-core.mjs';
@@ -60,14 +59,7 @@ MODE
 
 SCOPE
   --database <id>      Only this database. Repeatable. Default: every database.
-                       A filtered run addresses the database directly and makes
-                       no account-level call, so it needs only a /dbs/<id>-scoped
-                       role assignment — see RBAC SCOPE under AUTH.
   --container <id>     Only this container. Repeatable. Default: every container.
-                       Passed WITH --database, the container is addressed
-                       directly too. Passed alone it still costs account scope:
-                       finding a container in an unnamed database means listing
-                       the account's databases.
   --page-size <n>      Documents per page request (default 1000).
 
 AUTH
@@ -94,7 +86,7 @@ AUTH
                        RBAC. Subscription Owner is not sufficient — with Owner
                        and no data-plane assignment every request here comes
                        back 403. That 403 reads like a tool bug and is not;
-                       assign yourself a data-plane role:
+                       assign yourself a data-plane role on the account:
 
                          az cosmosdb sql role assignment create \\
                            --account-name <account-name> \\
@@ -102,41 +94,17 @@ AUTH
                            --role-definition-id \\
                              00000000-0000-0000-0000-000000000001 \\
                            --principal-id <principal-object-id> \\
-                           --scope "<see RBAC SCOPE below>"
+                           --scope "/"
 
                        ...0001 is the built-in Cosmos DB Data READER, which is
-                       all this tool needs. Your own principal id is
-                       'az ad signed-in-user show --query id -o tsv'.
-                       Assignments take a minute or two to propagate.
+                       all this tool needs. --scope "/" is the whole account;
+                       narrow it to /dbs/<database> if you prefer. Your own
+                       principal id is 'az ad signed-in-user show --query id
+                       -o tsv'. Assignments take a minute or two to propagate.
 
                        Any authorization failure — a 403 from a missing
                        assignment, or a credential that cannot be acquired at
                        all — exits 4, the same as a key-auth 401.
-
-  RBAC SCOPE           The --scope of that assignment is part of this tool's
-                       contract, because what the tool reads depends on how the
-                       run is filtered. Grant the NARROWEST that covers the run:
-
-                         no --database          "/"
-                           A full-account export lists the account's databases,
-                           which only account scope permits.
-
-                         --database <db>        "/dbs/<db>"
-                           Repeat the --scope per database if you pass more than
-                           one --database. The run addresses each database by id
-                           and never asks the account what it holds.
-
-                         --database <db>
-                           --container <c>      "/dbs/<db>/colls/<c>"
-                           With both flags the run addresses the container
-                           directly and makes no database- or account-level call.
-                           This is proven against the test fake, NOT yet against
-                           a live account — if a container-scoped grant 403s,
-                           widen to /dbs/<db> and file it.
-
-                       A scope too narrow for the run fails fast with exit 4 and
-                       reads 'Request blocked by Auth ... on any scope'; it does
-                       NOT silently fall back to a wider read.
 
 BEHAVIOUR
   Every container's count is read (SELECT VALUE COUNT(1) FROM c) before export
@@ -279,7 +247,6 @@ export async function createRealClient({
   endpoint,
   authMode,
   key,
-  databaseScoped = false,
   loadCosmos = () => import('@azure/cosmos'),
   loadIdentity = () => import('@azure/identity'),
 }) {
@@ -290,18 +257,6 @@ export async function createRealClient({
       fixedRetryIntervalInMilliseconds: 0,
       maxWaitTimeInSeconds: 60,
     },
-    // MG-49: with endpoint discovery on — the SDK default — the client reads the
-    // DATABASE ACCOUNT before it issues its first data request, to learn which
-    // regions the account can be read from. That probe is 'Read DatabaseAccount',
-    // an ACCOUNT-scoped operation, and it is the call a /dbs/<database>-scoped
-    // Data Reader is refused for, before anything the operator actually asked for
-    // is attempted. Not enumerating databases is therefore necessary but not
-    // sufficient; the SDK's own account probe has to go too. A filtered run talks
-    // to the endpoint it was given and never asks the account about itself. The
-    // cost is cross-region read failover, which a single-endpoint read-only
-    // export does not use. An unfiltered run needs account scope regardless, so
-    // it keeps discovery exactly as it was.
-    enableEndpointDiscovery: !databaseScoped,
   };
   if (authMode === 'key') {
     return new CosmosClient({ endpoint, key, connectionPolicy });
@@ -336,15 +291,7 @@ export async function main({ argv, env, createClient = createRealClient, log = d
       );
     }
 
-    const scopedDatabases = cfg.verify
-      ? ((await readManifestFilters(cfg.out)).databases ?? [])
-      : cfg.databases;
-    const client = await createClient({
-      endpoint,
-      authMode,
-      key,
-      databaseScoped: scopedDatabases.length > 0,
-    });
+    const client = await createClient({ endpoint, authMode, key });
     if (cfg.verify) {
       await runVerify({ client, outDir: cfg.out, log });
     } else {
