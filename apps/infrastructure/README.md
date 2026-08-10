@@ -715,7 +715,11 @@ is unset — it is the only mode that works against an account with
 why `--auth aad` had to work at all). It needs a Cosmos DB **data-plane** role
 assignment — the built-in Data Reader is enough — which is separate from, and
 not granted by, control-plane RBAC: subscription Owner alone still gets a 403
-that reads like a tool bug. `--help` carries the exact
+that reads like a tool bug. The assignment must be **account-scoped**
+(`--scope "/"`) — even for a `--database`- or `--container`-filtered export —
+because the tool reads account-level metadata before applying any filter. A
+narrower `/dbs/<database>` assignment does **not** work today; that gap is
+tracked as **MG-66**. `--help` carries the exact
 `az cosmosdb sql role assignment create` invocation to fix that; it isn't
 repeated here.
 

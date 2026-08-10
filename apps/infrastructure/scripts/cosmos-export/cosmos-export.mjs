@@ -97,10 +97,16 @@ AUTH
                            --scope "/"
 
                        ...0001 is the built-in Cosmos DB Data READER, which is
-                       all this tool needs. --scope "/" is the whole account;
-                       narrow it to /dbs/<database> if you prefer. Your own
-                       principal id is 'az ad signed-in-user show --query id
-                       -o tsv'. Assignments take a minute or two to propagate.
+                       all this tool needs. The assignment must be at ACCOUNT
+                       scope, --scope "/": this tool reads account-level
+                       metadata — the database list, and the SDK's own region
+                       lookup — before it applies any filter. A narrower
+                       /dbs/<database> or /dbs/<db>/colls/<c> assignment does
+                       NOT work today, even with --database or --container. It
+                       403s on that account read. That is a known limitation,
+                       not your mistake — MG-66 tracks it. Your own principal
+                       id is 'az ad signed-in-user show --query id -o tsv'.
+                       Assignments take a minute or two to propagate.
 
                        Any authorization failure — a 403 from a missing
                        assignment, or a credential that cannot be acquired at
