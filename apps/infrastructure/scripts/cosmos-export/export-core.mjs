@@ -214,11 +214,72 @@ async function pathExists(p) {
 
 // A resource the caller named by id is simply not there. That is the same
 // operator error as a filter that matched nothing under enumeration, so it is
-// left to assertFiltersMatched to report with the usage exit code. ONLY 404 is
-// treated this way — a 403 is an authorization failure and still aborts.
-function isNotFound(err) {
+// left to assertFiltersMatched to report with the usage exit code.
+//
+// The bar for "not there" is deliberately high, because this is the ONLY
+// metadata failure in this file that does not abort — and a metadata failure
+// mistaken for an absence drops a real container out of an export that still
+// exits 0. So an absence has to carry BOTH halves of an unambiguous 404:
+//
+//   * an HTTP status of exactly 404, read from `statusCode` or from a NUMERIC
+//     `code` (the SDK sets one or the other); a non-numeric `code` is a
+//     resource code and never a status, so it can no longer stand in for one.
+//   * a not-found resource code — `code` or `body.code` — because 404 is the
+//     status the service returns for "no such resource", and the code is the
+//     service naming that resource.
+//
+// A permission failure cannot satisfy that pair. A 403 or 401 carries its own
+// status, so the mislabelled `{ statusCode: 403, code: 'NotFound' }` an
+// intermediary can emit fails the status half and aborts as the auth failure it
+// is; a bare `code: 'NotFound'` with no status at all fails it too, as does a
+// throttle, a 5xx or a socket reset. Everything that is not an absence goes to
+// toExportError with its exit code intact: 401/403 -> 4, 429 -> 3, the rest -> 5.
+const NOT_FOUND_CODES = new Set(['notfound', 'resourcenotfound', '404']);
+
+function httpStatusOf(err) {
   const status = Number(err?.statusCode ?? err?.code);
-  return status === 404 || err?.code === 'NotFound';
+  return Number.isInteger(status) ? status : null;
+}
+
+function isNotFound(err) {
+  if (httpStatusOf(err) !== 404) return false;
+  const code = err?.code ?? err?.body?.code;
+  return code !== undefined && code !== null && NOT_FOUND_CODES.has(String(code).toLowerCase());
+}
+
+// Even an unambiguous 404 is still only ONE read's answer, and one answer is not
+// proof: a metadata replica that is failing over, or a partition mid-split, can
+// 404 a container that is really there. Believing it would omit that container
+// from an export that still reports success — the exact shape this tool exists
+// to refuse — so the 404 is corroborated against the one authority that can
+// contradict it: the parent database's own container list.
+//
+// A bounded retry was the alternative and is strictly weaker. It re-asks the
+// same question of the same broken answer, so a PERSISTENT spurious 404 (the
+// realistic one — a stale routing entry, not a transient blip) survives any
+// number of attempts and still reads as an absence. The parent answers the
+// question actually being asked. The cost is one extra metadata call, paid only
+// on the 404 path; the cost of the alternative is a silently short export.
+async function confirmContainerAbsent(client, database, container) {
+  const key = targetKey(database, container);
+  let listed;
+  try {
+    listed = await client.database(database).containers.readAll().fetchAll();
+  } catch (err) {
+    // The database is unambiguously absent too, so nothing under it exists.
+    if (isNotFound(err)) return true;
+    throw toExportError(
+      err,
+      `${key}: the container metadata read returned 404 and that absence could NOT be corroborated against ${database}, so ${container} cannot be proven absent`
+    );
+  }
+  if ((listed.resources ?? []).some(entry => entry.id === container)) {
+    throw new ExportError(
+      EXIT.TRANSPORT,
+      `${key}: the container metadata read returned 404, but ${database} still lists ${container} — refusing to omit a container that exists from the export`
+    );
+  }
+  return true;
 }
 
 async function containerExists(client, database, container) {
@@ -226,11 +287,13 @@ async function containerExists(client, database, container) {
     await client.database(database).container(container).read();
     return true;
   } catch (err) {
-    if (isNotFound(err)) return false;
-    throw toExportError(
-      err,
-      `${targetKey(database, container)}: reading container metadata failed`
-    );
+    if (!isNotFound(err)) {
+      throw toExportError(
+        err,
+        `${targetKey(database, container)}: reading container metadata failed`
+      );
+    }
+    return !(await confirmContainerAbsent(client, database, container));
   }
 }
 
@@ -259,6 +322,12 @@ async function listScopedTargets(client, databases, containers) {
     try {
       listed = await client.database(database).containers.readAll().fetchAll();
     } catch (err) {
+      // A DATABASE that goes missing here needs no corroboration, because it
+      // cannot be omitted silently: the database contributes every target
+      // bearing its name, so a database that resolves to nothing leaves its own
+      // name unmatched and assertFiltersMatched aborts the run. Corroborating it
+      // would mean enumerating the account — the account-level call MG-49 exists
+      // to avoid, and the one a /dbs/<database> grant is refused for.
       if (isNotFound(err)) continue;
       throw toExportError(err, `enumerating containers in ${database}`);
     }
@@ -465,6 +534,22 @@ export async function runExport({
     entries.push(entry);
   }
 
+  // A manifest that lists only what was exported cannot represent a target that
+  // went missing — which is why an omitted container used to verify clean.
+  // `filters` is what the run was ASKED for and `absentTargets` is every
+  // requested target it PROVED absent, so --verify can hold the manifest to the
+  // request afterwards: any requested target that is in neither list is an
+  // omission, and is now detectable rather than invisible. Only the
+  // directly-addressed path can enumerate its request, since only there is the
+  // request a finite set of (database, container) pairs.
+  const exported = new Set(entries.map(e => targetKey(e.database, e.container)));
+  const absentTargets =
+    databases.length && containers.length
+      ? databases
+          .flatMap(database => containers.map(container => targetKey(database, container)))
+          .filter(key => !exported.has(key))
+      : [];
+
   const manifest = {
     tool: TOOL_NAME,
     toolVersion: TOOL_VERSION,
@@ -475,6 +560,7 @@ export async function runExport({
       databases: databases.length ? [...databases] : null,
       containers: containers.length ? [...containers] : null,
     },
+    absentTargets,
     containers: entries,
     totals: {
       containers: entries.length,
@@ -529,7 +615,91 @@ async function readManifest(outDir) {
       `${manifestPath} has no container list — it did not come from ${TOOL_NAME}`
     );
   }
+  assertFilterShape(manifest, manifestPath);
   return manifest;
+}
+
+// The manifest's own record of what was requested decides two things that must
+// not be decided by a truthy accident: which scope the verify client is built
+// for, and what the manifest is held to cover. A `databases` field that is a
+// bare string has a `.length`, so it used to select the database-scoped client
+// while an object without one did not — neither is a list of ids, and both are
+// a damaged manifest. A missing `filters` is NOT damage: manifests written
+// before this field existed verify unfiltered, exactly as they always did.
+function assertIdList(value, field, manifestPath) {
+  if (value === undefined || value === null) return;
+  if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || id === '')) {
+    throw new ExportError(
+      EXIT.RECONCILE,
+      `${manifestPath}: ${field} is not a list of ids — the manifest's record of what was requested is unreadable, so this export cannot be held to it`
+    );
+  }
+}
+
+function assertFilterShape(manifest, manifestPath) {
+  const filters = manifest.filters;
+  if (filters !== undefined && filters !== null) {
+    if (typeof filters !== 'object' || Array.isArray(filters)) {
+      throw new ExportError(
+        EXIT.RECONCILE,
+        `${manifestPath}: filters is not an object — the manifest's record of what was requested is unreadable, so this export cannot be held to it`
+      );
+    }
+    assertIdList(filters.databases, 'filters.databases', manifestPath);
+    assertIdList(filters.containers, 'filters.containers', manifestPath);
+  }
+  assertIdList(manifest.absentTargets, 'absentTargets', manifestPath);
+}
+
+// --verify's "requested" is the manifest's own filter set — the export recorded
+// what it was asked for, so the manifest can be held to that request days later,
+// against an account that may have drifted. Without this a manifest that simply
+// omits a requested container verifies clean: it is self-consistent, because it
+// only ever claims what it holds, and the live-account cross-check cannot see
+// the omission if the same metadata failure repeats during verification.
+//
+// An older manifest carrying no absentTargets asserts no absence, so every
+// requested target must be present in it. That fails closed by construction: a
+// manifest that cannot show a target was legitimately not there is a manifest
+// that cannot be verified as complete.
+function manifestCoverageProblems(manifest) {
+  const databases = manifest.filters?.databases ?? [];
+  const containers = manifest.filters?.containers ?? [];
+  const absent = new Set(manifest.absentTargets ?? []);
+  const exported = new Set(manifest.containers.map(e => targetKey(e.database, e.container)));
+  const problems = [];
+
+  if (databases.length && containers.length) {
+    for (const database of databases) {
+      for (const container of containers) {
+        const key = targetKey(database, container);
+        if (!exported.has(key) && !absent.has(key)) {
+          problems.push(
+            `${key}: the export was asked for it, but the manifest neither exports it nor records it as absent from the account — the export does not cover what it was asked for`
+          );
+        }
+      }
+    }
+    return problems;
+  }
+
+  const exportedDbs = new Set(manifest.containers.map(e => e.database));
+  const exportedContainers = new Set(manifest.containers.map(e => e.container));
+  for (const database of databases) {
+    if (!exportedDbs.has(database)) {
+      problems.push(
+        `${database}: the export was asked for this database, but the manifest holds no container from it`
+      );
+    }
+  }
+  for (const container of containers) {
+    if (!exportedContainers.has(container)) {
+      problems.push(
+        `${container}: the export was asked for this container, but the manifest holds no copy of it`
+      );
+    }
+  }
+  return problems;
 }
 
 // --verify's scope is whatever the export recorded, not what argv says, and the
@@ -543,7 +713,7 @@ export async function readManifestFilters(outDir) {
 
 export async function runVerify({ client, outDir, log = defaultLog }) {
   const manifest = await readManifest(outDir);
-  const problems = [];
+  const problems = manifestCoverageProblems(manifest);
 
   for (const entry of manifest.containers) {
     const key = targetKey(entry.database, entry.container);

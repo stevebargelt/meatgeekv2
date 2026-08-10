@@ -479,6 +479,27 @@ describe('listTargets', () => {
       );
     });
 
+    // The cost of corroborating a container's absence against its database: a
+    // grant scoped to /dbs/<db>/colls/<c> can read the container but cannot list
+    // the database, so a container that 404s under that grant cannot be PROVEN
+    // absent. That is exit 4, not a skip — a run that cannot account for a
+    // requested container does not get to finish.
+    it('a 404 whose absence cannot be corroborated aborts instead of assuming absence', async () => {
+      const containerScoped = fakeClient(spec, {
+        listError: accountScopeForbiddenError(),
+        containerListError: accountScopeForbiddenError(),
+      });
+
+      await assert.rejects(
+        () => listTargets(containerScoped, { databases: ['meatgeek-prod'], containers: ['typo'] }),
+        err => {
+          assert.equal(err.exitCode, EXIT.AUTH);
+          assert.match(err.message, /could NOT be corroborated against meatgeek-prod/);
+          return true;
+        }
+      );
+    });
+
     it('still aborts on a 403 — only a 404 means "you named something absent"', async () => {
       const forbidden = fakeClient(spec, {
         listError: accountScopeForbiddenError(),

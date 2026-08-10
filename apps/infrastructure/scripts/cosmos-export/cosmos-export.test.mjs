@@ -24,6 +24,7 @@ import {
   fakeClient,
   fakeCosmosModule,
   fakeIdentityModule,
+  FakeCosmosError,
   forbiddenError,
   throttleError,
   transportError,
@@ -71,6 +72,33 @@ async function exists(p) {
   } catch {
     return false;
   }
+}
+
+// Wrap the realistic fake so a resource that exists in its backing data can
+// still receive a service error from the metadata read. This is deliberately
+// different from removing the resource: the exporter's safety contract must
+// distinguish a definite absence from a failed lookup.
+function clientWithMetadataError(spec, shouldFail, error) {
+  const client = fakeClient(spec);
+  return {
+    ...client,
+    database(databaseId) {
+      const database = client.database(databaseId);
+      return {
+        ...database,
+        container(containerId) {
+          const container = database.container(containerId);
+          return {
+            ...container,
+            read: async () => {
+              if (shouldFail(databaseId, containerId)) throw error();
+              return container.read();
+            },
+          };
+        },
+      };
+    },
+  };
 }
 
 function execFileAsync(file, args, options) {
@@ -698,6 +726,266 @@ describe('--verify', () => {
     const { code, out } = await verify(dir);
     assert.equal(code, EXIT.RECONCILE);
     assert.match(out, /not valid JSON/);
+  });
+
+  async function reseedManifest(dir, edit) {
+    const manifestPath = path.join(dir, MANIFEST_FILENAME);
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    edit(manifest);
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+
+  // A bare string has a .length, so it used to select the database-scoped client
+  // — the one thing in the manifest that changes what the verify run is allowed
+  // to touch, decided by a truthy accident rather than by a list of ids.
+  it('rejects a filters list that is not a list of ids, before a client is built', async () => {
+    const dir = await seededExport();
+    await reseedManifest(dir, manifest => {
+      manifest.filters = { databases: 'meatgeek-prod', containers: null };
+    });
+
+    const { code, out, clientsCreated } = await verify(dir);
+    assert.equal(code, EXIT.RECONCILE);
+    assert.match(out, /filters\.databases is not a list of ids/);
+    assert.equal(clientsCreated, 0);
+  });
+
+  it('rejects a filters field that is not an object at all', async () => {
+    const dir = await seededExport();
+    await reseedManifest(dir, manifest => {
+      manifest.filters = 'everything';
+    });
+
+    const { code, out } = await verify(dir);
+    assert.equal(code, EXIT.RECONCILE);
+    assert.match(out, /filters is not an object/);
+  });
+
+  it('rejects an absentTargets field that is not a list of ids', async () => {
+    const dir = await seededExport();
+    await reseedManifest(dir, manifest => {
+      manifest.absentTargets = { 'meatgeek-prod/cooks': true };
+    });
+
+    const { code, out } = await verify(dir);
+    assert.equal(code, EXIT.RECONCILE);
+    assert.match(out, /absentTargets is not a list of ids/);
+  });
+
+  it('verifies an older manifest that predates the filters field, unfiltered', async () => {
+    const dir = await seededExport();
+    await reseedManifest(dir, manifest => {
+      delete manifest.filters;
+      delete manifest.absentTargets;
+    });
+
+    const { code, out } = await verify(dir);
+    assert.equal(code, EXIT.OK, out);
+    assert.match(out, /VERIFIED: 2 container\(s\) \/ 3 document\(s\)/);
+  });
+});
+
+// The direct-addressing path is the one that can lose data quietly. Under
+// --database + --container the exporter addresses each target by id, so the only
+// thing standing between a failed metadata read and a container dropped from the
+// export is what this file asserts. assertFiltersMatched cannot be that thing:
+// it works from FLAT sets of database and container names, so with two databases
+// holding the same two container names, alpha/critical can vanish while every
+// requested name is still represented somewhere. These tests all attack exactly
+// that target, and the rule they encode is one line: only an unambiguous,
+// terminal absence may be treated as "not present"; everything else aborts,
+// non-zero, with no manifest written.
+describe('directly addressed filtered targets (MG-49 safety probe)', () => {
+  const scopedSpec = () => ({
+    alpha: {
+      critical: { count: 1, pages: [docs('alpha-critical', 1)] },
+      retained: { count: 1, pages: [docs('alpha-retained', 1)] },
+    },
+    beta: {
+      critical: { count: 1, pages: [docs('beta-critical', 1)] },
+      retained: { count: 1, pages: [docs('beta-retained', 1)] },
+    },
+  });
+  const filters = [
+    '--database',
+    'alpha',
+    '--database',
+    'beta',
+    '--container',
+    'critical',
+    '--container',
+    'retained',
+  ];
+  const key = entry => `${entry.database}/${entry.container}`;
+  const failsAlphaCritical = (database, container) =>
+    database === 'alpha' && container === 'critical';
+
+  // The container EXISTS in the spec throughout — the metadata read is what
+  // fails, which is the distinction the whole repair turns on.
+  async function exportWith(error) {
+    const dir = await outDir();
+    const client = clientWithMetadataError(scopedSpec(), failsAlphaCritical, error);
+    const exported = await run(['--account', 'meatgeek', '--out', dir, ...filters], { client });
+    return { dir, client, exported };
+  }
+
+  async function assertAbortedWithNothingWritten(dir, exported, expectedExit) {
+    assert.equal(exported.code, expectedExit, exported.out);
+    assert.doesNotMatch(exported.out, /EXPORT VERIFIED/);
+    assert.match(exported.out, /alpha\/critical/, 'the failure has to name the container');
+    assert.equal(
+      await exists(path.join(dir, MANIFEST_FILENAME)),
+      false,
+      'no manifest may vouch for an export that could not account for a requested container'
+    );
+  }
+
+  it('a persistent 404 the database contradicts aborts rather than omitting the container', async () => {
+    const { dir, exported } = await exportWith(
+      () =>
+        new FakeCosmosError('replica returned 404 while the container still exists', {
+          statusCode: 404,
+          code: 'NotFound',
+        })
+    );
+
+    await assertAbortedWithNothingWritten(dir, exported, EXIT.TRANSPORT);
+    assert.match(exported.out, /alpha still lists critical/);
+    assert.match(exported.out, /refusing to omit a container that exists/);
+  });
+
+  it('a 404 carrying no resource code is not an unambiguous absence', async () => {
+    const { dir, exported } = await exportWith(
+      () => new FakeCosmosError('gateway returned a bare 404', { statusCode: 404 })
+    );
+
+    await assertAbortedWithNothingWritten(dir, exported, EXIT.TRANSPORT);
+    assert.match(exported.out, /reading container metadata failed/);
+  });
+
+  // Each of these carries the not-found CODE, which used to be enough on its
+  // own to read as an absence. None of them is one.
+  const NEVER_AN_ABSENCE = [
+    ['a 403 mislabelled by an intermediary', { statusCode: 403, code: 'NotFound' }, EXIT.AUTH],
+    ['a 401 mislabelled by an intermediary', { statusCode: 401, code: 'NotFound' }, EXIT.AUTH],
+    ['a 429 mislabelled by an intermediary', { statusCode: 429, code: 'NotFound' }, EXIT.THROTTLED],
+    [
+      'a socket reset with no HTTP status at all',
+      { code: 'NotFound', name: 'RestError' },
+      EXIT.TRANSPORT,
+    ],
+  ];
+
+  for (const [label, shape, expectedExit] of NEVER_AN_ABSENCE) {
+    it(`${label} exits ${expectedExit}, never a skip`, async () => {
+      const { dir, exported } = await exportWith(
+        () => new FakeCosmosError('metadata read failed', shape)
+      );
+
+      await assertAbortedWithNothingWritten(dir, exported, expectedExit);
+    });
+  }
+
+  // The 403 case is the reviewer's mixed multi-target scenario in full: three
+  // healthy targets across two databases, one erroring, and the run must not
+  // reach EXPORT VERIFIED with the fourth quietly missing.
+  it('an erroring target in a mixed multi-target run leaves no verified, incomplete export behind', async () => {
+    const { dir, exported } = await exportWith(
+      () =>
+        new FakeCosmosError('forbidden metadata read mislabelled by an intermediary', {
+          statusCode: 403,
+          code: 'NotFound',
+        })
+    );
+
+    assert.equal(exported.code, EXIT.AUTH);
+    assert.deepEqual(await readdir(dir), [], 'nothing is written on the way to the abort');
+
+    const verified = await run(['--account', 'meatgeek', '--out', dir, '--verify'], {
+      spec: scopedSpec(),
+    });
+    assert.equal(verified.code, EXIT.RECONCILE, 'there is no export here to verify');
+    assert.match(verified.out, /no manifest\.json/);
+  });
+
+  it('a container genuinely absent from one database is recorded, and the rest still export', async () => {
+    const spec = scopedSpec();
+    delete spec.alpha.critical;
+    const dir = await outDir();
+
+    const { code, out } = await run(['--account', 'meatgeek', '--out', dir, ...filters], { spec });
+
+    assert.equal(code, EXIT.OK, out);
+    assert.match(out, /EXPORT VERIFIED/);
+    const manifest = await readManifest(dir);
+    assert.deepEqual(manifest.containers.map(key), [
+      'alpha/retained',
+      'beta/critical',
+      'beta/retained',
+    ]);
+    assert.deepEqual(
+      manifest.absentTargets,
+      ['alpha/critical'],
+      'a proven absence is recorded, so the manifest can be held to the whole request later'
+    );
+
+    const verified = await run(['--account', 'meatgeek', '--out', dir, '--verify'], { spec });
+    assert.equal(verified.code, EXIT.OK, verified.out);
+  });
+
+  it('a container absent from every requested database is still the exit-1 filter contract', async () => {
+    const spec = scopedSpec();
+    delete spec.alpha.critical;
+    delete spec.beta.critical;
+    const dir = await outDir();
+
+    const { code, out } = await run(
+      [
+        '--account',
+        'meatgeek',
+        '--out',
+        dir,
+        '--database',
+        'alpha',
+        '--database',
+        'beta',
+        '--container',
+        'critical',
+      ],
+      { spec }
+    );
+
+    assert.equal(code, EXIT.USAGE);
+    assert.match(out, /matched nothing/);
+    assert.equal(await exists(path.join(dir, MANIFEST_FILENAME)), false);
+  });
+
+  it('--verify refuses a manifest that is missing a requested container', async () => {
+    const dir = await outDir();
+    assert.equal(
+      (await run(['--account', 'meatgeek', '--out', dir, ...filters], { spec: scopedSpec() })).code,
+      EXIT.OK
+    );
+
+    // The omission a fail-open metadata read would have produced, made by hand:
+    // the manifest simply does not mention alpha/critical. The account no longer
+    // holds it either, so the live-vs-manifest cross-check cannot see it — the
+    // recorded request is the only thing that can, which is the point.
+    const manifestPath = path.join(dir, MANIFEST_FILENAME);
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.containers = manifest.containers.filter(entry => key(entry) !== 'alpha/critical');
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+    await rm(path.join(dir, 'alpha__critical.jsonl'));
+
+    const drifted = scopedSpec();
+    delete drifted.alpha.critical;
+    const { code, out } = await run(['--account', 'meatgeek', '--out', dir, '--verify'], {
+      spec: drifted,
+    });
+
+    assert.equal(code, EXIT.RECONCILE);
+    assert.match(out, /alpha\/critical: the export was asked for it/);
+    assert.match(out, /DO NOT DELETE THE ACCOUNT/);
   });
 });
 

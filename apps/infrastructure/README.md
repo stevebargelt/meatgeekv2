@@ -693,7 +693,7 @@ static export had to exist first. Run
 `node scripts/cosmos-export/cosmos-export.mjs --help` for full usage; only
 what `--help` doesn't already cover is captured below.
 
-**No live Azure run has happened.** The dependency-free tier (100 tests across
+**No live Azure run has happened.** The dependency-free tier (115 tests across
 3 files, `nx test infrastructure`, CI-wired above) runs entirely against an
 injected fake client — the V1 subscription is disabled until 2026-08-06 and
 the build environment holds no credentials. A second, smaller tier
@@ -725,12 +725,12 @@ assignment is not a free choice — it has to cover what the run reads, and what
 the run reads depends on how it is filtered. Grant the narrowest that covers
 the run:
 
-| Run                               | `--scope`             | Why                                                                                                                                                     |
-| --------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| no `--database`                   | `/`                   | A full-account export lists the account's databases, which only account scope permits.                                                                  |
-| `--database <db>`                 | `/dbs/<db>`           | Each named database is addressed by id; the run makes no account-level call. Repeat the assignment per database if you pass more than one `--database`. |
-| `--database <db> --container <c>` | `/dbs/<db>/colls/<c>` | With both flags the container is addressed directly; the run makes no database- or account-level call.                                                  |
-| `--container <c>` alone           | `/`                   | Finding a container in an unnamed database means listing the account's databases. Pair it with `--database` to stay narrow.                             |
+| Run                               | `--scope`             | Why                                                                                                                                                                                                                                                                                                                      |
+| --------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| no `--database`                   | `/`                   | A full-account export lists the account's databases, which only account scope permits.                                                                                                                                                                                                                                   |
+| `--database <db>`                 | `/dbs/<db>`           | Each named database is addressed by id; the run makes no account-level call. Repeat the assignment per database if you pass more than one `--database`.                                                                                                                                                                  |
+| `--database <db> --container <c>` | `/dbs/<db>/colls/<c>` | With both flags the container is addressed directly; the run makes no database- or account-level call — unless its metadata read 404s, since proving a container absent reads the database's container list (see **Safety semantics**), so a container that is genuinely missing under this grant exits 4 rather than 1. |
+| `--container <c>` alone           | `/`                   | Finding a container in an unnamed database means listing the account's databases. Pair it with `--database` to stay narrow.                                                                                                                                                                                              |
 
 A scope too narrow for the run fails fast with **exit 4** and Cosmos's
 `Request blocked by Auth … on any scope`; nothing falls back to a wider read.
@@ -774,14 +774,14 @@ recurs by construction.
 **Exit codes — the operator contract.** Scripts that wrap this tool key off
 the exit code, so treat it as stable:
 
-| Code | Meaning                                                                                                                                                                                                                 |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | verified-complete                                                                                                                                                                                                       |
-| 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success                                                                    |
-| 2    | reconciliation failure — written count doesn't match the pre-export `SELECT VALUE COUNT(1)`, the account has zero containers to export, or (in `--verify`) an on-disk hash/size/line-count mismatch or live-count drift |
-| 3    | throttling abort — 429 with retries exhausted                                                                                                                                                                           |
-| 4    | auth failure — a 401/403 from the service, or a credential that could not be acquired at all (matched by exact `@azure/identity` error-class name, e.g. `AggregateAuthenticationError`)                                 |
-| 5    | transport abort mid-pagination — also covers a non-credential error whose class name merely resembles one (e.g. `CredentialTransportError` from an `ECONNRESET`), which is deliberately excluded from exit 4            |
+| Code | Meaning                                                                                                                                                                                                                                                                                    |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0    | verified-complete                                                                                                                                                                                                                                                                          |
+| 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success                                                                                                                                       |
+| 2    | reconciliation failure — written count doesn't match the pre-export `SELECT VALUE COUNT(1)`, the account has zero containers to export, or (in `--verify`) an on-disk hash/size/line-count mismatch or live-count drift                                                                    |
+| 3    | throttling abort — 429 with retries exhausted                                                                                                                                                                                                                                              |
+| 4    | auth failure — a 401/403 from the service, or a credential that could not be acquired at all (matched by exact `@azure/identity` error-class name, e.g. `AggregateAuthenticationError`)                                                                                                    |
+| 5    | transport abort mid-pagination — also covers a non-credential error whose class name merely resembles one (e.g. `CredentialTransportError` from an `ECONNRESET`), which is deliberately excluded from exit 4, and a container metadata 404 that could not be established as a real absence |
 
 **Safety semantics.**
 
@@ -796,6 +796,21 @@ the exit code, so treat it as stable:
 - The per-container count query runs **before** pagination starts, so the
   account should be quiesced during export — a concurrent write during export
   will correctly trip reconciliation rather than being silently included.
+- **No silent skip covers metadata reads, not just pagination.** A container
+  named with `--database`/`--container` is addressed directly, and it is passed
+  over only when the service _proves_ it is not there: an unambiguous 404 — that
+  status **and** the not-found resource code — which the parent database's
+  container list then confirms. A single 404 is not proof on its own (a replica
+  mid-failover emits one for a container that is really there), and a not-found
+  code on a 403 is a permission failure, not an absence. Every other metadata
+  failure aborts with its own exit code and writes no manifest.
+- The manifest records the `filters` the run was asked for **and**
+  `absentTargets`, every requested target it proved absent. That is what lets
+  `--verify` hold the export to its own request: a manifest that neither exports
+  a requested container nor records it as absent fails verification, even when
+  the account no longer holds that container either. A manifest written before
+  these fields existed verifies unfiltered, as it always did; a `filters` field
+  that is not a list of ids is rejected rather than interpreted.
 
 ---
 
