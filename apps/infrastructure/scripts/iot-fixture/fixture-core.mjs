@@ -38,6 +38,38 @@
 // arrive by sending a device message; it never writes to Cosmos, and it creates,
 // repoints or deletes no Cosmos resource. fixture-core.test.mjs asserts that
 // mechanically against the source text.
+//
+// ACCEPTED DEVIATION FROM libs/api-specs TemperatureReading, FLAGGED TO MG-59.
+// spec/components/schemas/temperature.yaml declares `additionalProperties: false`
+// on TemperatureReading, and the bodies this module builds deliberately carry
+// four properties that schema forbids: the synthetic marker, the run id, the
+// sequence and the ticket. That is not an oversight and the schema is NOT edited
+// here. HR3 requires an unmistakable marker IN THE BODY — it is the only field
+// that survives the trip through the hub into a Cosmos document, and without it
+// MG-53 cannot tell a fixture document from a real reading and MG-54 cannot cite
+// what it is authorised to dispose of. The fixture is not an API producer: no
+// handler validates these bodies against the schema, because nothing in the repo
+// reads this container at all yet (that absence is MG-59's subject). When MG-59
+// gives the API a real Cosmos reader, it inherits the question of whether a
+// strict validator must tolerate marked fixture documents; this comment is the
+// flag. Marker fields are namespaced enough (`syntheticFixture`, `fixtureRunId`,
+// `fixtureSequence`) that they cannot collide with a future telemetry field.
+//
+// A FINDING THIS TICKET RECORDS AND DOES NOT FIX: IoT Hub writes a JSON document
+// to a Cosmos endpoint only when the D2C message declares both a JSON content
+// type and utf-8 encoding as SYSTEM properties. Absent them the routed payload
+// is treated as opaque and the body is not queryable as JSON, which would make
+// the marker unfindable and this whole proof impossible. This module sets both
+// explicitly (see D2C_SYSTEM_PROPERTIES). The repo's REAL producer,
+// apps/data-pusher, sets NEITHER — buildPublishProperties (apps/data-pusher/
+// cmd/main.go) emits only messageId, correlation.id and traceparent, and
+// buildPublishTopic URL-encodes exactly those onto the MQTT topic. So this
+// ticket's proof covers the FIXTURE's message shape and not the data-pusher's.
+// That gap is a latent defect recorded in the MG-67 runbook, deliberately not
+// fixed here: fixing a live producer is not in this ticket's scope, and doing it
+// under cover of a verification ticket is how unreviewed producer changes ship.
+
+import { randomUUID } from 'node:crypto';
 
 export const TOOL_NAME = 'iot-fixture';
 export const TOOL_VERSION = '1.0.0';
@@ -285,4 +317,208 @@ export function toFixtureError(err, context) {
       ? ' — auth failure, NOT an absence: this says nothing about whether the route delivered'
       : ' — retries exhausted, aborting rather than reporting an absence';
   return new FixtureError(code, `${context}: ${detail}${suffix}`);
+}
+
+// ---------------------------------------------------------------------------
+// The synthetic document contract (HR3).
+//
+// Everything below decides what a fixture document IS, and it is load-bearing
+// for two later tickets rather than housekeeping. MG-53 will refuse to proceed
+// if the source containers hold any document this fixture did not produce, and
+// MG-54's destructive authorization cites these documents by id and count. Both
+// need a match rule with ZERO ambiguity, which is why correlation here is a
+// field a human can read and a script can match exactly — not a timestamp
+// window, not a count delta, not "the newest N documents".
+//
+// The correlation key is MARKER + RUN ID, and deliberately not the document id.
+// Nothing in this repo records what id a routed document ends up with: the IoT
+// Hub Cosmos endpoint assigns one when the body does not supply one, and whether
+// it honours a supplied `id` is platform behaviour no file here pins down. A
+// sender-chosen `id` is included anyway because it costs nothing and makes the
+// requested-vs-observed comparison in the evidence record meaningful — but the
+// read-back matches on marker + run id, so a platform that renames every
+// document still leaves the proof intact.
+// ---------------------------------------------------------------------------
+
+// The durable dev fixture device. It outlives this ticket — MG-62 reuses it for
+// the post-cutover proof — so it is named for what it is rather than for the
+// ticket that first needed it, and it reads unmistakably as a test fixture
+// rather than as somebody's grill.
+export const FIXTURE_DEVICE_ID = 'meatgeek-v2-dev-synthetic-fixture-device';
+
+// The marker. Field name and value are both greppable, and the value names the
+// ticket so a document found in six months explains its own provenance. Derived
+// from TICKET rather than spelled twice: the two cannot drift apart.
+export const SYNTHETIC_MARKER_FIELD = 'syntheticFixture';
+export const SYNTHETIC_MARKER = `${TICKET}-SYNTHETIC-FIXTURE`;
+
+// The per-run correlator and the within-run ordinal.
+export const RUN_ID_FIELD = 'fixtureRunId';
+export const SEQUENCE_FIELD = 'fixtureSequence';
+
+// Fixed, small, and a constant rather than a flag ON PURPOSE. The evidence
+// record states a count that MG-53 checks the source against; if an operator
+// could pass --count, the recorded number and the code would drift and a
+// mismatch downstream would be unattributable. Three is enough to make a
+// partial read-back (2 of 3) an observable outcome rather than a theoretical
+// one, and small enough that the fixture leaves almost nothing behind.
+export const MESSAGES_PER_RUN = 3;
+
+// Contract fields a partition key may not land on: overwriting any of them
+// would silently break correlation, which is exactly the failure this tool
+// exists to make impossible.
+const RESERVED_BODY_FIELDS = new Set([
+  'id',
+  'timestamp',
+  'ticket',
+  SYNTHETIC_MARKER_FIELD,
+  RUN_ID_FIELD,
+  SEQUENCE_FIELD,
+]);
+
+// IoT Hub system properties, in az's `$.`-prefixed spelling. `$.ct` and `$.ce`
+// are the two that decide whether the routed payload becomes a queryable JSON
+// document or an opaque blob (see the finding in the module header). `$.mid`
+// carries the per-message id hub-side, which is a diagnostic handle only — the
+// route does not propagate it into the document, so it is never the correlator.
+export const D2C_CONTENT_TYPE = 'application/json';
+export const D2C_CONTENT_ENCODING = 'utf-8';
+export const D2C_SYSTEM_PROPERTIES = {
+  CONTENT_TYPE: '$.ct',
+  CONTENT_ENCODING: '$.ce',
+  MESSAGE_ID: '$.mid',
+};
+
+function requireNonEmptyString(value, name) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new FixtureError(EXIT.USAGE, `${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+// The BODY FIELD the partition key names — `deviceId` for a container whose
+// partition key path is `/deviceId`, the spelling apps/data-pusher/internal/
+// wire/types.go already marshals. Parsing the path is container-definition's
+// job; this refuses anything that is not already a single plain field name, so
+// a `/a/b` path or a raw path with its leading slash fails loudly here instead
+// of producing a body with a property nothing can query.
+function requirePartitionKeyField(value) {
+  requireNonEmptyString(value, 'partitionKeyField');
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    // Scrubbed before it is echoed: this is the one value here that came from
+    // OUTSIDE (the measured container definition), and by this line it is
+    // already known NOT to be a plain field name — so it is arbitrary text on a
+    // failure path, which is exactly what HR1 says must not go out unscrubbed.
+    throw new FixtureError(
+      EXIT.USAGE,
+      `partitionKeyField must be a single plain field name, not a path: got "${scrubSecrets(value)}"`
+    );
+  }
+  if (RESERVED_BODY_FIELDS.has(value)) {
+    throw new FixtureError(
+      EXIT.USAGE,
+      `the measured partition key field "${value}" collides with a fixture contract field; ` +
+        'the marker and run id could not survive it, so this refuses rather than sending'
+    );
+  }
+  return value;
+}
+
+// A fresh correlator per invocation, from crypto.randomUUID. Nothing here reads
+// a counter, a file, an environment variable or anything a previous run wrote —
+// HR2's repeatability is a property of the generator, not of operator
+// discipline. The uuid source is injectable so a test can pin the value; the
+// default is the only thing the CLI ever passes.
+export function newRunId(uuid = randomUUID) {
+  return `${TICKET.toLowerCase()}-run-${uuid()}`;
+}
+
+// Builds the run's messages. Every body carries the marker, the run id, the
+// fixture device under the container's own partition key spelling, and a
+// timestamp; every message declares JSON content type and utf-8 encoding.
+//
+// `now` is injected so the artifact under test is byte-reproducible. There is
+// deliberately no `count` parameter — see MESSAGES_PER_RUN.
+export function buildFixtureMessages({
+  runId,
+  partitionKeyField,
+  deviceId = FIXTURE_DEVICE_ID,
+  now = Date.now,
+} = {}) {
+  requireNonEmptyString(runId, 'runId');
+  requireNonEmptyString(deviceId, 'deviceId');
+  requirePartitionKeyField(partitionKeyField);
+
+  return Array.from({ length: MESSAGES_PER_RUN }, (_, index) => {
+    const sequence = index + 1;
+    // Both identifiers derive from the run id, so two runs cannot collide even
+    // if they start in the same millisecond.
+    const messageId = `${runId}-${sequence}`;
+    return {
+      messageId,
+      sequence,
+      body: {
+        id: messageId,
+        [partitionKeyField]: deviceId,
+        timestamp: new Date(now()).toISOString(),
+        [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
+        [RUN_ID_FIELD]: runId,
+        [SEQUENCE_FIELD]: sequence,
+        ticket: TICKET,
+      },
+      systemProperties: {
+        [D2C_SYSTEM_PROPERTIES.CONTENT_TYPE]: D2C_CONTENT_TYPE,
+        [D2C_SYSTEM_PROPERTIES.CONTENT_ENCODING]: D2C_CONTENT_ENCODING,
+        [D2C_SYSTEM_PROPERTIES.MESSAGE_ID]: messageId,
+      },
+    };
+  });
+}
+
+// az's `--properties` takes `key=value` pairs joined by `;`. Values are refused
+// rather than escaped if they carry a delimiter: a silently mangled `$.ct`
+// means the hub writes an opaque payload instead of a JSON document, and the
+// run would then fail as an absence for a reason that had nothing to do with
+// the route.
+export function formatD2cProperties(systemProperties) {
+  const entries = Object.entries(systemProperties ?? {});
+  if (entries.length === 0) {
+    throw new FixtureError(EXIT.USAGE, 'refusing to send a message with no system properties');
+  }
+  return entries
+    .map(([key, value]) => {
+      const pair = `${key}=${value}`;
+      if (/[;\s]/.test(pair)) {
+        throw new FixtureError(EXIT.USAGE, `system property "${key}" carries a delimiter`);
+      }
+      return pair;
+    })
+    .join(';');
+}
+
+const isPlainObject = value => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+// Does this document carry the marker AT ALL? Separate from the run-correlated
+// check because the two failures are different: a document without the marker
+// in a read-back is a MARKER VIOLATION (a defect in this sender, per HR3), while
+// a marked document from an earlier run is simply not this run's.
+export function hasSyntheticMarker(doc) {
+  return isPlainObject(doc) && doc[SYNTHETIC_MARKER_FIELD] === SYNTHETIC_MARKER;
+}
+
+// The zero-ambiguity validator the read-back gates on. Strict identity on both
+// fields: a truthy value is not the marker, a prefix is not the marker, and a
+// different run's id is not this run's. Anything that is not a plain object —
+// null, an array, a JSON string the caller forgot to parse — is not a synthetic
+// document, and extra properties the platform added (_ts, _rid, _etag) are
+// ignored.
+//
+// A missing runId THROWS rather than returning false: it is a caller-contract
+// error, and returning false would make it look like an absence and eventually
+// like a timeout, which is precisely the class of quiet misattribution this
+// tool exists to refuse.
+export function isSyntheticDocument(doc, runId) {
+  requireNonEmptyString(runId, 'runId');
+  if (!hasSyntheticMarker(doc)) return false;
+  return doc[RUN_ID_FIELD] === runId;
 }

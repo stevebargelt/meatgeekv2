@@ -14,12 +14,26 @@ import { describe, it } from 'node:test';
 
 import {
   CHILD_OUTPUT_MAX_LINES,
+  D2C_CONTENT_ENCODING,
+  D2C_CONTENT_TYPE,
+  D2C_SYSTEM_PROPERTIES,
   EXIT,
+  FIXTURE_DEVICE_ID,
   FixtureError,
+  MESSAGES_PER_RUN,
+  RUN_ID_FIELD,
+  SEQUENCE_FIELD,
+  SYNTHETIC_MARKER,
+  SYNTHETIC_MARKER_FIELD,
   TICKET,
+  buildFixtureMessages,
   classifyError,
   describeError,
   exitLabel,
+  formatD2cProperties,
+  hasSyntheticMarker,
+  isSyntheticDocument,
+  newRunId,
   scrubChildOutput,
   scrubSecrets,
   toFixtureError,
@@ -37,6 +51,18 @@ import {
 } from './fake-azure.mjs';
 
 const readSource = relative => readFile(fileURLToPath(new URL(relative, import.meta.url)), 'utf8');
+
+// assert.throws returns nothing, and every refusal in this tool is asserted BY
+// EXIT CODE rather than by message text, so the error itself has to come back.
+const refusal = (fn, context = '') => {
+  try {
+    fn();
+  } catch (err) {
+    assert.ok(err instanceof FixtureError, `${context}: threw ${err?.name}, not a FixtureError`);
+    return err;
+  }
+  return assert.fail(`${context}: expected a FixtureError, nothing was thrown`);
+};
 
 describe('exit vocabulary', () => {
   // MG-53 and MG-54 act on what this tool concluded. Two failure classes sharing
@@ -325,7 +351,7 @@ describe('describeError secret scrubbing', () => {
   it('passes a FixtureError message through unchanged', () => {
     const err = new FixtureError(
       EXIT.TIMEOUT,
-      'device meatgeek-v2-dev-fixture-device: nothing arrived within 120000ms'
+      `device ${FIXTURE_DEVICE_ID}: nothing arrived within 120000ms`
     );
     assert.equal(describeError(err), err.message);
   });
@@ -502,6 +528,269 @@ describe('the fake az spawn', () => {
   });
 });
 
+// The synthetic document contract (HR3). These are not shape tests for their own
+// sake: MG-53 refuses to proceed if the source holds a document this fixture did
+// not produce, and MG-54 cites these documents by id and count in a destructive
+// authorization. Both need the marker to be unmistakable and the correlation to
+// be exact.
+describe('the synthetic document contract', () => {
+  const PARTITION_FIELD = 'deviceId';
+  const FIXED_CLOCK = () => Date.parse('2026-08-10T12:00:00.000Z');
+  const build = (overrides = {}) =>
+    buildFixtureMessages({
+      runId: 'mg-67-run-fixed',
+      partitionKeyField: PARTITION_FIELD,
+      now: FIXED_CLOCK,
+      ...overrides,
+    });
+
+  it('names the device unmistakably as a test fixture, not as an appliance', () => {
+    assert.match(FIXTURE_DEVICE_ID, /fixture/);
+    assert.match(FIXTURE_DEVICE_ID, /synthetic/);
+    // It is a durable dev fixture MG-62 reuses, so it is scoped to dev and is
+    // a legal IoT Hub device id.
+    assert.match(FIXTURE_DEVICE_ID, /^[A-Za-z0-9-]{1,128}$/);
+    assert.match(FIXTURE_DEVICE_ID, /dev/);
+  });
+
+  it('names the ticket in the marker, so a stray document explains itself', () => {
+    assert.equal(SYNTHETIC_MARKER, 'MG-67-SYNTHETIC-FIXTURE');
+    assert.ok(SYNTHETIC_MARKER.includes(TICKET), 'the marker does not name the ticket');
+    assert.equal(SYNTHETIC_MARKER_FIELD, 'syntheticFixture');
+  });
+
+  it('puts the marker, the run id, the fixture device and a timestamp in every body', () => {
+    const messages = build();
+    assert.equal(messages.length, MESSAGES_PER_RUN);
+    for (const message of messages) {
+      const { body } = message;
+      assert.equal(body[SYNTHETIC_MARKER_FIELD], SYNTHETIC_MARKER);
+      assert.equal(body[RUN_ID_FIELD], 'mg-67-run-fixed');
+      // Spelled exactly as the container's partition key path demands — the
+      // same spelling apps/data-pusher/internal/wire/types.go marshals.
+      assert.equal(body[PARTITION_FIELD], FIXTURE_DEVICE_ID);
+      assert.equal(body.timestamp, '2026-08-10T12:00:00.000Z');
+      assert.equal(body.ticket, TICKET);
+      assert.equal(body[SEQUENCE_FIELD], message.sequence);
+    }
+    assert.deepEqual(
+      messages.map(m => m.sequence),
+      [1, 2, 3]
+    );
+  });
+
+  it('survives the JSON round-trip the hub will put it through', () => {
+    for (const { body } of build()) {
+      const routed = JSON.parse(JSON.stringify(body));
+      assert.deepEqual(routed, body);
+      assert.ok(JSON.stringify(body).includes(SYNTHETIC_MARKER));
+    }
+  });
+
+  // A constant, not a flag: the evidence record states a count MG-53 checks the
+  // source against, and an operator-supplied count would let the recorded number
+  // drift from the code.
+  it('sends a fixed count that no argument can override', () => {
+    assert.equal(MESSAGES_PER_RUN, 3);
+    assert.equal(build({ count: 99 }).length, MESSAGES_PER_RUN);
+    assert.equal(build({ messages: 0 }).length, MESSAGES_PER_RUN);
+  });
+
+  it('declares JSON content type and utf-8 encoding on every message', () => {
+    for (const { systemProperties, messageId } of build()) {
+      assert.equal(systemProperties[D2C_SYSTEM_PROPERTIES.CONTENT_TYPE], 'application/json');
+      assert.equal(systemProperties[D2C_SYSTEM_PROPERTIES.CONTENT_ENCODING], 'utf-8');
+      assert.equal(systemProperties[D2C_SYSTEM_PROPERTIES.MESSAGE_ID], messageId);
+    }
+    assert.equal(D2C_CONTENT_TYPE, 'application/json');
+    assert.equal(D2C_CONTENT_ENCODING, 'utf-8');
+    // Without both of these IoT Hub routes an opaque payload rather than a JSON
+    // document, the marker becomes unqueryable, and the proof is impossible.
+    assert.equal(D2C_SYSTEM_PROPERTIES.CONTENT_TYPE, '$.ct');
+    assert.equal(D2C_SYSTEM_PROPERTIES.CONTENT_ENCODING, '$.ce');
+  });
+
+  it('renders the system properties in the form az takes', () => {
+    const [message] = build();
+    const rendered = formatD2cProperties(message.systemProperties);
+    assert.equal(rendered, `$.ct=application/json;$.ce=utf-8;$.mid=${message.messageId}`);
+  });
+
+  // A mangled $.ct means the hub writes an opaque payload and the run then fails
+  // as an absence for a reason that has nothing to do with the route. Refuse
+  // rather than escape.
+  it('refuses a system property carrying a delimiter, and an empty set', () => {
+    for (const bad of [{ '$.ct': 'application/json;$.ce=utf-8' }, { '$.mid': 'has space' }]) {
+      assert.equal(refusal(() => formatD2cProperties(bad)).exitCode, EXIT.USAGE);
+    }
+    assert.equal(refusal(() => formatD2cProperties({})).exitCode, EXIT.USAGE);
+    assert.equal(refusal(() => formatD2cProperties(undefined)).exitCode, EXIT.USAGE);
+  });
+
+  it('mints a distinct run id per invocation and never repeats one', () => {
+    const ids = new Set(Array.from({ length: 500 }, () => newRunId()));
+    assert.equal(ids.size, 500);
+    for (const id of ids) {
+      assert.match(id, /^mg-67-run-[0-9a-f-]{36}$/);
+    }
+  });
+
+  // HR2 repeatability: two runs produce two independently identified document
+  // sets, and neither depends on setup the other performed.
+  it('gives two successive builds different run ids and disjoint identifiers', () => {
+    const first = build({ runId: newRunId() });
+    const second = build({ runId: newRunId() });
+
+    const runIdOf = messages => new Set(messages.map(m => m.body[RUN_ID_FIELD]));
+    const firstRun = runIdOf(first);
+    const secondRun = runIdOf(second);
+    assert.equal(firstRun.size, 1);
+    assert.equal(secondRun.size, 1);
+    assert.notDeepEqual([...firstRun], [...secondRun]);
+
+    const identifiers = messages => messages.flatMap(m => [m.messageId, m.body.id]);
+    const firstIds = new Set(identifiers(first));
+    assert.equal(firstIds.size, MESSAGES_PER_RUN, 'ids collide within one run');
+    for (const id of identifiers(second)) {
+      assert.equal(firstIds.has(id), false, `run 2 reused ${id}`);
+    }
+  });
+
+  it('carries a sender-chosen id that is not the correlation key', () => {
+    const [message] = build();
+    assert.equal(message.body.id, message.messageId);
+    // The id is NOT what the read-back matches on: the platform assigns the
+    // document id and whether it honours this one is not pinned down anywhere.
+    // A document with a completely different id still correlates.
+    const renamed = { ...message.body, id: 'whatever-the-platform-chose' };
+    assert.equal(isSyntheticDocument(renamed, 'mg-67-run-fixed'), true);
+  });
+
+  it('refuses a partition key that is a path, or that collides with the contract', () => {
+    for (const bad of ['/deviceId', 'a/b', '', '  ', 'device-id', 42, null, undefined]) {
+      const err = refusal(() => build({ partitionKeyField: bad }), `accepted ${String(bad)}`);
+      assert.equal(err.exitCode, EXIT.USAGE);
+    }
+    // Landing the partition key on a contract field would overwrite the marker
+    // or the run id and silently destroy the correlation.
+    for (const reserved of ['id', 'timestamp', 'ticket', SYNTHETIC_MARKER_FIELD, RUN_ID_FIELD]) {
+      const err = refusal(() => build({ partitionKeyField: reserved }), reserved);
+      assert.equal(err.exitCode, EXIT.USAGE);
+      assert.match(err.message, /collides/);
+    }
+  });
+
+  // The partition key field is the one input here that came from outside (the
+  // measured container definition), and the refusal echoes it — so the echo goes
+  // through the scrubber, on this failure path like every other (HR1).
+  it('scrubs the rejected partition key rather than echoing it back', () => {
+    const err = refusal(() => build({ partitionKeyField: '/AccountKey=not-a-real-key-0000' }));
+    assert.equal(err.exitCode, EXIT.USAGE);
+    assert.doesNotMatch(err.message, /not-a-real-key/);
+    assert.match(err.message, /\[redacted\]/);
+    assert.equal(describeError(err), err.message);
+  });
+
+  it('refuses to build without a run id or a device', () => {
+    for (const bad of ['', '   ', null, 7]) {
+      assert.equal(refusal(() => build({ runId: bad })).exitCode, EXIT.USAGE);
+      assert.equal(refusal(() => build({ deviceId: bad })).exitCode, EXIT.USAGE);
+    }
+    assert.equal(refusal(() => buildFixtureMessages()).exitCode, EXIT.USAGE);
+  });
+});
+
+describe('isSyntheticDocument', () => {
+  const RUN = 'mg-67-run-abc';
+  const marked = (extra = {}) => ({
+    id: `${RUN}-1`,
+    deviceId: FIXTURE_DEVICE_ID,
+    timestamp: '2026-08-10T12:00:00.000Z',
+    [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
+    [RUN_ID_FIELD]: RUN,
+    [SEQUENCE_FIELD]: 1,
+    ...extra,
+  });
+
+  it('accepts a document this run built, including the fields Cosmos adds', () => {
+    assert.equal(isSyntheticDocument(marked(), RUN), true);
+    assert.equal(
+      isSyntheticDocument(marked({ _ts: 1786000000, _rid: 'x', _etag: '"0000"' }), RUN),
+      true
+    );
+    const [message] = buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId' });
+    assert.equal(isSyntheticDocument(message.body, RUN), true);
+  });
+
+  it('rejects a document with no marker — the MARKER VIOLATION shape', () => {
+    const { [SYNTHETIC_MARKER_FIELD]: _dropped, ...unmarked } = marked();
+    assert.equal(isSyntheticDocument(unmarked, RUN), false);
+    assert.equal(hasSyntheticMarker(unmarked), false);
+    // A real-looking temperature reading is exactly what must NOT pass.
+    assert.equal(
+      isSyntheticDocument(
+        { id: 'r-1', deviceId: 'some-real-grill', timestamp: '2026-08-10T12:00:00.000Z' },
+        RUN
+      ),
+      false
+    );
+  });
+
+  it('rejects a marker that is merely truthy, or nearly right', () => {
+    for (const value of [
+      true,
+      1,
+      {},
+      [],
+      `${SYNTHETIC_MARKER}-tampered`,
+      'MG-67',
+      'mg-67-synthetic-fixture',
+    ]) {
+      assert.equal(
+        isSyntheticDocument(marked({ [SYNTHETIC_MARKER_FIELD]: value }), RUN),
+        false,
+        JSON.stringify(value)
+      );
+    }
+  });
+
+  it('rejects a marked document carrying a DIFFERENT run id', () => {
+    // Marked, so it is not a marker violation — it is simply another run's
+    // document, and counting it would make a partial arrival look complete.
+    const other = marked({ [RUN_ID_FIELD]: 'mg-67-run-somebody-else' });
+    assert.equal(hasSyntheticMarker(other), true);
+    assert.equal(isSyntheticDocument(other, RUN), false);
+    const { [RUN_ID_FIELD]: _dropped, ...noRun } = marked();
+    assert.equal(isSyntheticDocument(noRun, RUN), false);
+    assert.equal(isSyntheticDocument(marked({ [RUN_ID_FIELD]: `${RUN}-1` }), RUN), false);
+  });
+
+  it('rejects anything that is not a plain object', () => {
+    for (const value of [
+      null,
+      undefined,
+      0,
+      '',
+      'a string',
+      JSON.stringify(marked()),
+      [marked()],
+      [],
+    ]) {
+      assert.equal(isSyntheticDocument(value, RUN), false, JSON.stringify(value) ?? 'undefined');
+      assert.equal(hasSyntheticMarker(value), false);
+    }
+  });
+
+  // Returning false for a missing run id would read as an absence and end as a
+  // timeout — a caller bug misattributed to the route. Throw instead.
+  it('throws rather than returning false when the caller supplies no run id', () => {
+    for (const bad of [undefined, null, '', '   ', 5]) {
+      const err = refusal(() => isSyntheticDocument(marked(), bad), String(bad));
+      assert.equal(err.exitCode, EXIT.USAGE);
+    }
+  });
+});
+
 describe('module boundaries', () => {
   const SOURCES = ['./fixture-core.mjs', './fake-azure.mjs'];
 
@@ -554,5 +843,35 @@ describe('module boundaries', () => {
     ]) {
       assert.equal(pattern.test(source), false, `fixture-core.mjs matches ${pattern}`);
     }
+  });
+
+  // HR2 repeatability, proved structurally rather than by running twice: a build
+  // cannot depend on state a previous run wrote if the module can read no state
+  // at all. The run id comes from crypto.randomUUID and nothing else.
+  it('reads no file and no environment variable, so no run can depend on another', async () => {
+    const source = await readSource('./fixture-core.mjs');
+    for (const pattern of [
+      /node:fs/,
+      /\breadFileSync?\b/,
+      /\bwriteFileSync?\b/,
+      /process\.env/,
+      /localStorage/,
+    ]) {
+      assert.equal(pattern.test(source), false, `fixture-core.mjs matches ${pattern}`);
+    }
+  });
+
+  // Two decisions that are only defensible while their reasoning is attached to
+  // them, and that a later edit would otherwise quietly drop.
+  it('records the accepted schema deviation and the data-pusher finding', async () => {
+    const source = await readSource('./fixture-core.mjs');
+    // The marker deviates from TemperatureReading's additionalProperties: false
+    // on purpose; the schema is not edited and MG-59 inherits the question.
+    assert.match(source, /additionalProperties: false/);
+    assert.match(source, /MG-59/);
+    // The repo's real producer sets neither content type nor encoding: recorded
+    // here as a finding, deliberately not fixed by a verification ticket.
+    assert.match(source, /data-pusher/);
+    assert.match(source, /buildPublishProperties/);
   });
 });
