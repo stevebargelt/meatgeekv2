@@ -1,117 +1,130 @@
-**Last session ended 2026-08-07.**
+**Last session ended 2026-08-10.**
 
-**Where we left off:** MG-48's free tier is CLAIMED and dev is FULLY REPAIRED — nothing is
-outstanding on the infrastructure. Claiming the free tier replaced the Cosmos account (the flag is
-create-only), which orphaned its SQL database and five containers in state and killed the apply at
-`IH400142 "Database does not exist"`. That was diagnosed, fixed and repaired the same session: PR
-#38 (`99ce110`) fixed the propagation class across both modules, PR #39 (`9a6fed9`) committed the
-mutation fixtures, and the repair apply (run 31158767820) came back **12 planned / 0 DESTRUCTIVE,
-11 added / 0 changed / 0 destroyed, final drift plan CONVERGED** — creates-only, unattended, **no
-human gate**. Three subsequent main applies converge at 0/0/0. Live-verified after:
-`enableFreeTier: true`, `meatgeek-v2-dev-db`, all 5 containers, 2 Cosmos role assignments, both
-routes enabled, `cosmos-storage` endpoint and the diagnostic setting.
+**Where we left off:** MG-58 shipped across TWO commits and is CLOSED with a full
+acceptance-evidence grid. It stopped being "a missing app setting" partway through: the azurerm
+provider (v4.81.0) composes and injects a scalar `AzureWebJobsStorage` connection string with an
+EMPTY `AccountKey` on every Function App create AND update, and conceals it on read by routing it
+into `storage_access_key` — so it is absent from HCL, plan and state BY CONSTRUCTION, it shadows
+the identity form the host would otherwise use, and it re-breaks host storage on any future update
+for any unrelated reason. The first commit (`e785a74`, PR #42) added the correct
+`AzureWebJobsStorage__accountName` setting and SHIPPED A NON-FIX past eleven green checks and two
+clean convergence plans — every gate was telling the truth about the configuration while the
+deployed site stayed broken. The second (`f21f89f`, PR #43) added the only thing that can see it: a
+fail-closed live post-apply gate against the deployed site. All five live proofs pass on evidence
+taken after both landed. **MG-53 is now unblocked.**
 
 **Picked up next:**
 
-1. **MG-47 — cost analysis. This also gates MG-48's closure.** MG-48 is open on exactly ONE
-   acceptance criterion: post-change spend measured against the next billing cycle and recorded
-   here. Six of seven criteria are met with evidence (walk grid is in the MG-48 body). **There is no
-   engineering left on MG-48 — do not close it until the bill shows the saving, and do not reopen
-   the infrastructure work looking for something to do.** The other half of MG-47 is real work now:
-   fix the budget alerting that let the credit empty silently (budgets were configured at 50/150
-   with `admin_email` set and nobody was told). Also gates MG-25 prod activation.
-2. **MG-52 — migrate name-based parent references to id-based.** Filed off a deprecation warning in
-   the repair apply: `namespace_name` is deprecated for `namespace_id`, removed in azurerm v5. **Not
-   a deprecation chore — it RETIRES the bug class instead of guarding it.** A parent reached by its
-   COMPUTED id propagates replacement natively, with no lifecycle block and nothing for a static
-   check to police. Treat as `implementation_full`: it changes replacement semantics on the path
-   that has broken dev twice, and check 18's pair floor (currently 20) must shrink pair-by-pair with
-   justification, never by casual re-baselining.
-3. **MG-50 — the GitOps destroy-authorization gap.** `implementation_full`. It got bigger this
-   session: the authorization set now reaches into `module.monitoring`, sits beside look-alike
-   tokens that must NOT be transcribed into it, and only grows as this bug class is fixed correctly.
-   **But scope the complaint correctly — the MG-48 repair needed no authorization and no gate at
-   all**, because a creates-only plan never reaches the guard. The bottleneck is destructive changes
-   specifically, not the reconciliation loop.
-4. **Non-ticket thread: duplicate `~/meatgeek-v1-archive/` (84 MB) off the Mac.** It is the ONLY
-   copy of several V1 artifacts and it currently lives on one machine.
+1. **MG-53 — the Cosmos shared-throughput migration.** `implementation_full`. This is what MG-58
+   was clearing the way for, and its blocker is gone. Its topology language was CORRECTED this
+   session and that correction is what makes it safe to run: the Function health endpoint is a
+   DATABASE-LEVEL reader, the business API routes are NOT Cosmos readers or writers at all, and IoT
+   Hub is the only live document writer. Step 7 and its AC now demand two independent proofs —
+   `/api/health/cosmos` healthy against the NEW database name, AND live IoT telemetry landing as
+   NEW documents in the destination. Neither is evidence for the other. Do not let a plan claim API
+   persistence; there is none. MG-54 remains the separate destructive authorization point and must
+   not be folded in.
+2. **MG-59 — the API persistence gap.** Filed this session, and it must stay sequenced AFTER
+   MG-53/MG-54. Implementing it first introduces brand-new writers to the source database exactly
+   while MG-53 is copying and reconciling counts, which destroys the reconciliation. It is a
+   production-activation blocker (MG-25) and larger than it looks: `libs/azure-client` imports no
+   Cosmos SDK, every method is a `console.log` TODO, its `healthCheck()` returns a hardcoded
+   `'healthy'`, and no handler imports it at all.
+3. **MG-60 and MG-61 — both fell out of MG-58 and both depend on it having landed.** MG-60: whether
+   the Flex runtime genuinely needs the Storage Queue Data Contributor grant (a red-wide finding
+   objected to pruning it; a prune needs an allowlist edit plus a privileged `bootstrap.sh` re-run
+   AFTER the apply). MG-61: `DEPLOYMENT_STORAGE_CONNECTION_STRING`, the provider's SECOND injection,
+   found by MG-58's own gate on its first live run — its value has never been inspected.
+4. **MG-47's alerting half is still untouched** and remains the ticket's more important failure.
+   Four defects are diagnosed and recorded on the ticket. Unchanged from the last two sessions.
 
 **External state to remember:**
 
-- **`~/meatgeek-v1-archive/` (84 MB) is OFF-REPO and single-copy**: the APIM backup blob
-  (sha256-verified, restores only INTO an APIM instance), OpenAPI for both V1 APIs, ARM templates
-  for all six V1 resource groups, the 73 MB arm64 telemetry image + reconstructed Dockerfile, Event
-  Hubs topology, and 9,886 Cosmos documents (triple-verified).
-- V1 source survives in GitHub: `meatgeek-azure-sessions`, `MeatGeek-IoT`, `meatgeek-azure-proxies`,
-  `MeatGeek-Shared` (archived), `MeatGeek-IoTEdge`.
-- `meatgeek-archive-rg` was created by hand (deliberately NOT terraform-managed) as a write target
-  for the APIM backup. Safe to delete once the archive is duplicated off-Azure.
-- Soft-deleted Key Vault `meatgeekkv` auto-purges **2026-11-04**. Free, no action.
-- `az account show` reads a CACHED profile — it reported `Enabled` for a DISABLED subscription.
-  Always `az account list --refresh`.
+- **Dev is healthy and the fix is durable, but understand WHY it is currently clean.** The scalar
+  key was removed by a one-time hand-run `az functionapp config appsettings delete` during
+  diagnosis. Terraform does NOT and CANNOT remove it. What makes this durable is the committed
+  post-apply gate (`apps/infrastructure/scripts/assert-live-host-storage.sh` +
+  `.github/workflows/infra-apply-dev.yml`), which remediates ONLY when the key is present and then
+  FAILS the run. **A red dev apply naming the live host-storage gate is the system working, not a
+  regression** — it means the provider re-injected.
+- **Live dev is the MG-58 build published manually as the OPERATOR identity** to
+  `meatgeek-v2-dev-func-259d4bf5b628`. EIGHT functions now registered — the seven HTTP ones plus
+  `storageHeartbeat`, a permanent 15-minute timer (`0 0,15,30,45 * * * *`). Still not reproducible
+  from CI; MG-36 (automated dev app deploy) is still open.
+- **`storageHeartbeat` is load-bearing, do not delete it as "just a probe".** A timer cannot fire
+  without host storage (schedule state + singleton lease live there), so it is the continuous
+  host-storage signal dev otherwise lacks — App Insights emits nothing in dev (MG-37).
+- **There is no "Healthy" row to look for.** The platform logs `Process reporting unhealthy` ONLY
+  when unhealthy and stays silent when healthy. An acceptance criterion demanding a positive Healthy
+  row is unsatisfiable and one was corrected this session. The real positive signals are
+  `Host lock lease acquired` (a blob lease IN the host storage account) and a `storageHeartbeat`
+  execution — both proof-by-consequence.
+- **`func azure functionapp publish` is NOT an injector.** Proven by capturing host-storage setting
+  NAMES before and after a publish: identical, `__accountName` only. Terraform's update path is the
+  sole injector.
+- **Prod inherits the identical injection at its FIRST apply** and a plan-only pipeline cannot see
+  it. Recorded in the `infra-deploy-prod.yml` header as an MG-25 activation precondition.
+- The MG-21 manual deploy recipe still holds: `npx nx build api` →
+  `npm install --omit=dev --ignore-scripts` inside `dist/apps/api` →
+  `func azure functionapp publish <fa> --javascript --no-build`. Bare `nx deploy api` does NOT work
+  on Flex.
+- Dev Function logs live in Log Analytics, NOT App Insights (that is MG-37): workspace
+  `meatgeek-v2-dev-logs`, guid `6632bb13-0766-4250-9423-622e00be3482`, 3-5 minute ingestion lag,
+  2 GB/day cap (`dataIngestionStatus: RespectQuota`, not currently blocking).
+- Terraform init still needs the derived state-account name:
+  `-backend-config="storage_account_name=$(bash scripts/state-account-name.sh "$SUB")"` alongside
+  `-backend-config=environments/backend-dev.hcl`. `SUB=c7e800cb-0ee6-4175-9605-a6b97c6f419f`.
+- **`set -euo pipefail` pasted into an interactive zsh KILLS THE SESSION** (nounset fires on the
+  prompt's own expansions). Runbook blocks that begin with it must be saved to a file and run as a
+  script, never pasted.
+- `az functionapp show --query` returns nulls here — pipe to `jq`. `az account show` reads a cached
+  profile — always `az account list --refresh`.
+- `~/meatgeek-v1-archive/` (84 MB) is still OFF-REPO and SINGLE-COPY on one Mac.
+- Soft-deleted Key Vault `meatgeekkv` auto-purges 2026-11-04. Free, no action.
 
 **Decisions worth not relitigating:**
 
-- **The whole bug class, in one sentence: a reference to a parent's CONFIGURED `name` carries
-  ordering ONLY; only a reference to a COMPUTED attribute carries replacement.** It has now broken
-  dev twice, at the route/endpoint layer (`29cebf2`) and the account/database layer (`99ce110`).
-- **Second half of that rule: name the parent's `.id`, never the bare parent.** Both propagate
-  replacement, so the difference is invisible in the plan the fix is written for — which is why
-  `29cebf2` shipped the bare form and nobody noticed. The bare form ALSO fires on the parent's
-  in-place UPDATE (measured on a synthetic graph, not inferred), so a routine tag edit would have
-  destroyed the database and all five containers. All entries are now `.id`, pre-existing ones
-  included. **If a plan for an ordinary tag/sku/policy edit ever shows `-/+` on containers, routes
-  or consumer groups, do not authorize it** — a trigger was rewritten to the bare form.
-- **Check 18 is discovery-driven and keys on the VALUE, not the argument name** — an earlier draft
-  matched only `*_name = <type>.<label>.name` and was blind to `entity_path` and to an interpolated
-  `endpoint_uri`. **Do not "fix" it by narrowing it.** Its exclusions are documented in its own
-  header because an undocumented exclusion is how the next enumeration gap gets created.
-- **Repairing orphaned children is REFRESH-DRIVEN.** Code fixes prevent recurrence; they repair
-  nothing. Introducing `-refresh=false` or a `-target`ed plan silently reverts such a repair to a
-  no-op. If refresh does not produce the creates, the fallback is `terraform state rm` — **NOT
-  `taint`, NOT `-replace`**, which emit delete tokens and trip the guard.
-- **Replacing the free-tier account is now ALL-OR-NOTHING over a non-reissuable resource.** One
-  free-tier account per subscription and a deterministic name: if the slot is not released
-  synchronously on delete, the create half fails and dev is left with no Cosmos account at all.
-  Independent argument for extending MG-35's `prevent_destroy` to the DEV account.
-- **Token counts are the size of the dependent closure — never a fixed number.** "Expect SEVEN" was
-  wrong (it was six); the closure grows every time this class is fixed correctly. Read the set out
-  of the run's own output. `cosmos_role_ready` is NOT in it (its payload is on `input`, updated in
-  place); `cosmos_target_ready` IS (payload on `triggers_replace`).
-- **MG-51 was deliberately kept OUT of the repair** — an `app_settings` change is an UPDATE, not a
-  create, and would have broken CREATES-ONLY.
+- **Two fixes for the scalar key were eliminated with evidence, not preference.** Declaring it in
+  `app_settings` suppresses the injection on the wire but the read-side concealment makes refreshed
+  state permanently disagree with config — a perpetual plan diff that breaks the fail-on-any-drift
+  gate every run. A second `azapi` writer would delete the provider's other injected settings,
+  because that ARM sub-resource is replace-the-whole-collection. Do not revisit either.
+- **The live gate fails the run even after successfully remediating** (operator decision, option A).
+  A silent self-heal would reproduce the exact invisibility that let the non-fix ship, and would
+  mask a provider upgrade changing the behaviour. Remediation is gated on actual presence so
+  ordinary pushes are a no-op.
+- **The one-key remediation is a client-side read-modify-write with no ETag.** The ADR now records
+  that it NARROWS the collateral-loss window rather than eliminating it — an earlier claim that it
+  was hazard-free was wrong and is corrected in place. The workflow asserts the setting-name set
+  differs by exactly the removed key.
+- **The `~> 4.0` azurerm constraint is deliberately left floating.** The live assertion catches a
+  behaviour change in either direction, which beats pinning to a known-buggy version.
+- **No role was touched by MG-58** and none should be as a side effect of MG-60: the host acquired a
+  blob lease and ran a timer under the existing grants, so the identity's permissions were never the
+  problem.
+- **The queue-role prune was pulled OUT of MG-58 twice** — once from the assessment, once from the
+  plan — and is MG-60. Removing a storage role while repairing storage auth makes any failure
+  ambiguous between the two changes.
+
+**Operational notes for driving forge here:**
+
+- **Container agents CANNOT read ticket bodies.** `backlog/*.md` is stale and the DB is unreachable
+  from inside the container, so the `--brief` passed to `forge new` is the ENTIRE contract, and it is
+  frozen at run creation. Editing a ticket mid-run reaches nobody. The `request-changes` gate
+  rationale is the only channel that reaches the next agent — an `advance` rationale does not (a
+  build pass rewrote `backlog/notes.md` against an explicit advance-gate instruction).
+- **The feature pipeline commits onto local `main`.** It did so on both MG-58 runs. Branch the work
+  off and `git branch -f main origin/main` before pushing.
+- **A fix pass on a multi-step plan reliably fans out into children that duplicate each other's work
+  and then collide** (`integration_blocked`), twice on MG-58. "Do it in one pass" in the rationale
+  does not bind the fanout. Recovery is cheap: every child publishes its own branch, so compare them
+  and take the strongest — both times one child was a strict superset.
 
 **Shipped (for reference):**
 
-- **PR #38 (`99ce110`)** — replacement propagation for the Cosmos account's dependents: database + 5
-  containers, the Event Hub, the Event Hub endpoint, both routes, both consumer groups; the IoT Hub
-  Cosmos endpoint gained a cross-module dependency via a `terraform_data` handle (`replace_triggered_by`
-  is module-local, so the module input contract carries identity, not just names); static checks 18
-  and 19.
-- **PR #39 (`9a6fed9`)** — 8 committed mutation fixtures for checks 18/19, wired into the
-  credentialless CI job, passing under bash 5.3.15 AND macOS `/bin/bash` 3.2.57. Closes the gap
-  where both guards were hand-verified once by a transcript nobody could re-execute.
-- Free-tier config re-landed (`071ec34`), reverting the earlier `a2dab91`.
-- Filed this session: **MG-51** (Function App never receives the database name — a dev health check
-  via the IoT path passes GREEN while the API path is misconfigured; they share no code path) and
-  **MG-52** (name→id migration).
-
-**Lessons that cost real time:**
-
-- **A reviewer's severity is an input, not a verdict — and so is your own recollection.** A red
-  graded the `input`-vs-`triggers_replace` handle LOW; the orchestrator re-graded it HIGH from
-  memory of Terraform semantics; the engineer MEASURED it and the red was right. In the same run a
-  different red's HIGH was correct and load-bearing. Measure before overriding.
-- **Don't batch findings that share files into a fanout step.** Four findings where three touched
-  `tf-static-checks.sh` conflicted on merge; the run failed `integration_blocked` and published
-  nothing. Same-file work goes to ONE sequential agent pass.
-- **Backticks inside a double-quoted Bash argument are live command substitution** — a `--rationale`
-  silently lost a word from its highest-severity finding. Single-quote code identifiers, or omit.
-- **`gh run list --commit <sha>` returned `[]` for a commit whose runs existed** (`--branch main`
-  finds them). A Monitor armed on that filter stayed silent through a full CI+apply cycle. Prove a
-  wait condition returns data BEFORE arming anything on it.
-- **`forge-stable` cannot dispatch ticketed work here** — it validates `--ticket` against the FILE
-  backlog, which is a stale mirror stopping around MG-36. Use bare `forge`.
-- macOS `/bin/bash` is 3.2.57; a `case` inside `$( )` aborts there while CI bash 5 stays green.
-- An unquoted `--include=*.tf` in `grep` silently does nothing in zsh — hit again this session.
-- **No dedicated worktree** — never switch branches or run two agents while one is live.
+- **MG-58** — dev Function host storage now authenticates by managed identity; the provider's
+  re-injection is caught by a committed fail-closed live post-apply gate that remediates and fails
+  loudly. Two commits: `e785a74` (PR #42) and `f21f89f` (PR #43). Closed with an evidence grid.
+- **MG-59, MG-60, MG-61** — FILED this session, none started.
+- MG-53 / MG-54 topology language corrected; MG-54's unsatisfiable "application reading and writing"
+  precondition replaced with evidence for the paths that actually exist.
