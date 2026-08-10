@@ -956,7 +956,243 @@ jobs:
               ;;
           esac
 
-      # 12. The saved plan is a sensitive artifact (it embeds planned values). It
+      # 12. LIVE HOST-STORAGE GATE (MG-58, guard 4). THE ONLY ASSERTION IN THIS
+      #     WORKFLOW MADE AGAINST THE DEPLOYED SITE RATHER THAN AGAINST
+      #     CONFIGURATION TEXT — and the reason it exists is that every other gate
+      #     in this repo was green while the defect was live.
+      #
+      #     WHAT SHIPPED PAST ELEVEN GREEN CHECKS. PR #42 added the identity-based
+      #     host-storage setting `AzureWebJobsStorage__accountName` and it was
+      #     CORRECT. The dev Function App nevertheless carried, at the same time, a
+      #     scalar `AzureWebJobsStorage` CONNECTION STRING whose AccountKey was
+      #     empty, against an account with allowSharedKeyAccess=false. The Functions
+      #     host resolves the connection-string form FIRST and never reaches the
+      #     identity form, so host storage was dead: no host lock lease, no timer
+      #     schedule status, `Process reporting unhealthy` every ~30s. The setting
+      #     that shipped was not wrong; it was SHADOWED.
+      #
+      #     WHY NO EXISTING GATE COULD EVER HAVE SEEN IT. The scalar key appears in
+      #     ZERO .tf files — grep and confirm. hashicorp/azurerm v4.81.0 (pinned in
+      #     apps/infrastructure/.terraform.lock.hcl) COMPOSES AND WRITES that key
+      #     itself, on the Function App create AND on every Update, and on READ
+      #     routes it out of `app_settings` into the `storage_access_key` attribute.
+      #     So it is structurally absent from HCL, from the saved plan document and
+      #     from post-apply state, no diff on it is representable, and the provider
+      #     can never prune it either. It is NOT drift and NOT a human edit, and it
+      #     is not fixable in HCL: declaring the key would suppress the injection on
+      #     the wire at the cost of a PERPETUAL provider diff that reddens the final
+      #     drift plan on every run (the MG-24 App Insights shape), and a second
+      #     writer on the app-settings sub-resource replaces the WHOLE collection
+      #     and would silently delete the provider's other injected settings. Both
+      #     routes are eliminated on evidence in the ADR.
+      #
+      #     SO AUTHORITY SPLITS, DELIBERATELY: the desired state stays authoritative
+      #     for the identity form's PRESENCE (modules/functions/main.tf and its
+      #     terraform tests), and THIS step becomes authoritative for the scalar
+      #     form's ABSENCE. Guards 1-3 remain regression fences against a human
+      #     reintroducing the key in HCL; only this one can observe the defect that
+      #     actually shipped.
+      #
+      #     PLACED AFTER THE FINAL DRIFT PLAN AND BEFORE THE SHRED, on purpose. The
+      #     drift plan is the convergence proof and it must be measured against live
+      #     state this step has not yet perturbed; running the remediation first
+      #     would let a Terraform-visible change land between the apply and the
+      #     proof. Nothing here writes to Terraform state, so the convergence
+      #     conclusion drawn above it stays true.
+      #
+      #     FAIL-LOUD, NOT SILENT SELF-HEAL — a deliberate policy choice with a
+      #     stated cost. When the key is found this step deletes it, re-reads, and
+      #     re-asserts, and then FAILS THE RUN ANYWAY. A remediation that left the
+      #     run green would reproduce the EXACT property that let a non-fix ship
+      #     past every check: an invisible defect behind a green pipeline. It would
+      #     also mask the moment a provider upgrade changes this behaviour, in
+      #     either direction. The cost is honest and is accepted in the ADR: main
+      #     goes red after any change that updates the Function App, until the
+      #     provider is fixed upstream. Remediation is CONDITIONAL ON PRESENCE, so
+      #     the steady state on the many pushes that touch no infrastructure is zero
+      #     deletions and zero red runs.
+      #
+      #     BOUNDED BLAST RADIUS. The delete names exactly ONE setting key on
+      #     exactly ONE app, both resolved from `terraform output` rather than from
+      #     any literal, and it is reached only after the gate reported that key
+      #     present (its exit code 3). The app-settings sub-resource is
+      #     replace-the-whole-collection, so a broader delete would strip
+      #     provider-injected settings the module never declares — health-check
+      #     ping-failure, the App Insights connection string, deployment storage —
+      #     and the loss would be invisible in HCL for precisely the reason the
+      #     current defect is.
+      #
+      #     SECRET HYGIENE. `az functionapp config appsettings list` returns
+      #     VALUES, connection strings among them, and this job's log is retained
+      #     and broadly readable. The document is therefore piped STRAIGHT into the
+      #     gate's stdin: no file, no `tee`, no artifact, no echo. `az ...
+      #     appsettings delete` echoes the app's full settings list on success, so
+      #     its stdout is discarded too. Only STDERR is ever captured and printed,
+      #     and only on a failure path — it carries the CLI's diagnostic text, not
+      #     the settings document. The gate itself prints setting NAMES and fixed
+      #     reasons, never values, so its own output is safe to read.
+      #
+      #     NO NEW AUTHORITY IS TAKEN. This runs inside the existing apply job,
+      #     under its existing `id-token: write`, its existing
+      #     `development-infra-apply` environment and the `azure/login` already
+      #     performed above. No new job, no new permission, no second login, and no
+      #     RBAC change of any kind — the infra-apply identity already holds
+      #     Contributor on the dev resource group, which is what both the read and
+      #     the one-key delete need.
+      #
+      #     PROD IS NOT COVERED AND THAT IS RECORDED, NOT FORGOTTEN. The same
+      #     provider and the same module build the prod Function App, so prod will
+      #     inherit the identical injection at its FIRST apply, invisibly to a
+      #     plan-only pipeline. infra-deploy-prod.yml carries that as a named MG-25
+      #     activation precondition.
+      - name: Live host-storage gate (fail-closed, on the DEPLOYED site)
+        # UNCONDITIONALLY always(), and specifically NOT gated on the
+        # `steps.freshness*` outputs. A `timeout-minutes` kill can land before
+        # `freshness_final` ever records an output, and a step conditioned on an
+        # output that was never written does not run — and the partially-applied
+        # run is exactly the case most likely to have UPDATED the Function App and
+        # therefore re-injected the key. The "could this run have touched the app
+        # at all?" question is answered INSIDE the step instead, from the runner's
+        # actual state rather than from a step output that may be missing.
+        #
+        # Three outcomes, kept distinct on purpose, mirroring the post-apply state
+        # gate's reasoning:
+        #   * nothing bound / no Function App in state -> clean exit 0, with a
+        #     message saying WHY nothing could have been mutated;
+        #   * live settings unreadable -> RED, fail-closed, printing the CLI's own
+        #     stderr, because "cannot tell" is never "nothing to see";
+        #   * readable -> assert, and act on the verdict.
+        if: always()
+        run: |
+          set -eu
+
+          # `.terraform/` exists only once `terraform init` has bound the backend.
+          # Its ABSENCE is positive proof this run never authenticated, never
+          # planned and never applied — so it cannot have caused an injection, and
+          # there is nothing for this gate to have an opinion about.
+          if [ ! -d apps/infrastructure/.terraform ]; then
+            echo "No initialized backend in the workspace — this run never bound state and never reached the Function App, so it cannot have caused a host-storage injection. Nothing to assert."
+            exit 0
+          fi
+          cd apps/infrastructure
+
+          ERR="$(mktemp)"
+
+          # Is there a Function App at all? A state read that FAILS is not the same
+          # question, and is not an answer: fail closed and say why.
+          if ! TF_ADDRS="$(terraform state list 2>"$ERR")"; then
+            echo "Could not read state to resolve the Function App — failing closed." >&2
+            echo "terraform state list reported:" >&2
+            cat "$ERR" >&2
+            rm -f "$ERR"
+            exit 1
+          fi
+          if ! printf '%s\n' "$TF_ADDRS" | grep -q 'azurerm_function_app'; then
+            echo "No Function App in state — the provider has not created one, so it cannot have injected a host-storage connection string into one. Nothing to assert."
+            rm -f "$ERR"
+            exit 0
+          fi
+
+          # Resolve BOTH the app and the expected storage account from the DESIRED
+          # state, never from a literal. That is what makes the account-name
+          # comparison a live-versus-desired assertion rather than a live-versus-
+          # itself tautology. These are names, not secrets.
+          if ! RG="$(terraform output -raw resource_group_name 2>"$ERR")" || [ -z "$RG" ]; then
+            echo "Could not resolve resource_group_name from terraform output — failing closed." >&2
+            cat "$ERR" >&2
+            rm -f "$ERR"
+            exit 1
+          fi
+          if ! APP="$(terraform output -raw function_app_name 2>"$ERR")" || [ -z "$APP" ]; then
+            echo "Could not resolve function_app_name from terraform output — failing closed." >&2
+            cat "$ERR" >&2
+            rm -f "$ERR"
+            exit 1
+          fi
+          if ! SA="$(terraform output -raw storage_account_name 2>"$ERR")" || [ -z "$SA" ]; then
+            echo "Could not resolve storage_account_name from terraform output — failing closed." >&2
+            cat "$ERR" >&2
+            rm -f "$ERR"
+            exit 1
+          fi
+
+          echo "Asserting live host storage on $APP (resource group $RG; expected storage account $SA)."
+
+          # THE ASSERT PATH. The settings document reaches the gate's STDIN and
+          # nowhere else. Only the CLI's stderr is captured, and it is printed only
+          # when the read itself failed.
+          set +e
+          az functionapp config appsettings list \
+            --resource-group "$RG" --name "$APP" \
+            --only-show-errors --output json 2>"$ERR" \
+            | scripts/assert-live-host-storage.sh --account-name "$SA"
+          RC=("${PIPESTATUS[@]}")
+          set -e
+          AZ_RC="${RC[0]}"
+          GATE_RC="${RC[1]}"
+
+          if [ "$AZ_RC" -ne 0 ]; then
+            echo "Could not READ the live app settings for $APP — failing closed. An unreadable site is not a clean site; 'cannot tell' is never 'nothing to see'." >&2
+            echo "az functionapp config appsettings list reported:" >&2
+            cat "$ERR" >&2
+            rm -f "$ERR"
+            exit 1
+          fi
+          rm -f "$ERR"
+
+          if [ "$GATE_RC" -eq 0 ]; then
+            echo "LIVE HOST STORAGE CLEAN — the scalar AzureWebJobsStorage setting is absent from $APP and the identity form names $SA."
+          elif [ "$GATE_RC" -eq 3 ]; then
+            echo "The scalar AzureWebJobsStorage setting is PRESENT on $APP. Deleting exactly that one setting on exactly that one app." >&2
+            DEL_ERR="$(mktemp)"
+            # stdout DISCARDED: this command echoes the app's FULL settings list,
+            # values included, on success.
+            if ! az functionapp config appsettings delete \
+                 --resource-group "$RG" --name "$APP" \
+                 --setting-names AzureWebJobsStorage \
+                 --only-show-errors --output none >/dev/null 2>"$DEL_ERR"; then
+              echo "The one-key deletion FAILED — the shadowing setting is still on $APP and host storage is still dead." >&2
+              echo "az functionapp config appsettings delete reported:" >&2
+              cat "$DEL_ERR" >&2
+              rm -f "$DEL_ERR"
+              exit 1
+            fi
+            rm -f "$DEL_ERR"
+
+            # RE-READ AND RE-ASSERT. A delete that reported success is not proof
+            # the site is clean; only reading it back is.
+            RE_ERR="$(mktemp)"
+            set +e
+            az functionapp config appsettings list \
+              --resource-group "$RG" --name "$APP" \
+              --only-show-errors --output json 2>"$RE_ERR" \
+              | scripts/assert-live-host-storage.sh --account-name "$SA"
+            RE_RC=("${PIPESTATUS[@]}")
+            set -e
+            if [ "${RE_RC[0]}" -ne 0 ]; then
+              echo "Deleted the setting but could not RE-READ $APP to confirm — failing closed." >&2
+              cat "$RE_ERR" >&2
+              rm -f "$RE_ERR"
+              exit 1
+            fi
+            rm -f "$RE_ERR"
+            if [ "${RE_RC[1]}" -ne 0 ]; then
+              echo "REMEDIATION DID NOT TAKE — the gate still rejects $APP after the deletion. Do NOT restore shared keys and do NOT remove AzureWebJobsStorage__accountName; that rollback is strictly worse than the defect." >&2
+              exit 1
+            fi
+
+            echo "Remediated: the scalar setting is gone and the gate now passes on $APP." >&2
+            echo "FAILING THE RUN ANYWAY, deliberately. The cause is hashicorp/azurerm v4.81.0 composing and writing the scalar AzureWebJobsStorage connection string on every Function App create AND Update, and hiding it on read — it is NOT drift and NOT a human edit, and no HCL, plan or state surface can represent it. A silent self-heal here would reproduce the exact invisibility that let a non-fix ship past eleven green checks." >&2
+            echo "Read: learnings/decisions/mg-58-host-storage-managed-identity.md (why authority splits, and the rejected alternatives)." >&2
+            echo "Then: docs/infrastructure/mg58-host-storage-verification.md (the operator proof sequence — restart, host lock lease, storageHeartbeat, then the exact-SHA publish)." >&2
+            exit 1
+          else
+            echo "The live host-storage gate REJECTED $APP (exit $GATE_RC). Its reasons are above; they name setting NAMES only, never values." >&2
+            echo "Read: learnings/decisions/mg-58-host-storage-managed-identity.md and docs/infrastructure/mg58-host-storage-verification.md." >&2
+            exit 1
+          fi
+
+      # 13. The saved plan is a sensitive artifact (it embeds planned values). It
       #     is NEVER uploaded — there is no upload-artifact step anywhere in this
       #     workflow, by design — but remove it explicitly rather than relying on
       #     runner teardown.
