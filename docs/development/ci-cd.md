@@ -22,7 +22,7 @@ These jobs run on every push and pull request and gate merges into `main` (see [
 | Job | What it does | Matrix |
 |-----|--------------|--------|
 | `setup` | Installs dependencies with `npm ci` and computes affected apps/libs via `npx nx show projects --affected` | — |
-| `lint-and-test` | Runs `nx lint <project>` and `nx test <project> --coverage`, then uploads coverage to Codecov | `api`, `web`, `mobile`, `api-interfaces` |
+| `lint-and-test` | Runs `nx lint <project>` and `nx test <project> --coverage`, then uploads coverage to Codecov. Also runs the V1 Cosmos export tool's real-SDK test tier (MG-49) once per matrix leg, after `npm ci` — see [V1 Cosmos export tool](../../apps/infrastructure/README.md#v1-cosmos-export-tool-mg-48) | `api`, `web`, `mobile`, `api-interfaces` |
 | `build-typescript` | Runs `nx build <app>` and uploads the `dist/apps/<app>` artifact | `api`, `web` |
 | `build-go` | Runs `make build`, `make test`, and `make build-arm` for each Go app | `device-controller`, `data-pusher` |
 | `validate-infrastructure` | The **credentialless** infrastructure gate — see [PR validation](#dev-infrastructure--automated-gitops-reconciliation-mg-23). `assert-credentialless.sh` → `terraform fmt -check -recursive` → `terraform init -backend=false -input=false -lockfile=readonly` → `terraform validate` → `terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard fixtures → V1 Cosmos export tool tests (MG-48) → per-module `terraform test` → OTel config validate | — |

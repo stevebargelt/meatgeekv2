@@ -302,7 +302,10 @@ nx plan infrastructure --args="--env=dev"      # terraform plan -var-file=enviro
 nx apply infrastructure                        # terraform apply tfplan   (bootstrap/recovery — dev steady state is CI-run)
 nx output infrastructure                       # terraform output
 nx destroy infrastructure --args="--env=dev"   # terraform destroy (careful!)
-nx test infrastructure                         # node scripts/cosmos-export/run-tests.mjs (MG-48) —
+nx test infrastructure                         # node scripts/cosmos-export/run-tests.mjs (MG-48) — the
+                                               #   dependency-free tier only; `run-tests.mjs --sdk` is a
+                                               #   second tier CI runs separately in lint-and-test, after
+                                               #   `npm ci` (see the cosmos-export section below) —
                                                #   also picked up by `nx run-many -t test --all`
 ```
 
@@ -689,16 +692,50 @@ static export had to exist first. Run
 `node scripts/cosmos-export/cosmos-export.mjs --help` for full usage; only
 what `--help` doesn't already cover is captured below.
 
-**No live Azure run has happened.** All 50 unit tests (`nx test infrastructure`,
-CI-wired above) run against an injected fake client — the V1 subscription is
-disabled until 2026-08-06 and the build environment holds no credentials.
+**No live Azure run has happened.** The dependency-free tier (87 tests across
+3 files, `nx test infrastructure`, CI-wired above) runs entirely against an
+injected fake client — the V1 subscription is disabled until 2026-08-06 and
+the build environment holds no credentials. A second, smaller tier
+(`run-tests.mjs --sdk`, 2 tests, CI-wired into `lint-and-test` after `npm ci`)
+constructs the **real** `CosmosClient` and `DefaultAzureCredential` to prove
+the auth wiring actually builds — that is construction only, no network call
+and no credential ever used, so the no-live-Azure-run claim holds for both
+tiers, but only the first tier runs against the fake. A test that imports a
+real Azure package belongs in the second tier and is routed there by file
+name alone — name it `*.sdk.test.mjs` or it fails in the dependency-free job,
+which has no `node_modules`.
 
 **Auth.** The account key is read **only** from the `COSMOS_EXPORT_KEY`
 environment variable; passing it as a CLI argument is refused, since arguments
 land in shell history and `ps` output for every user on the box. Prefer a
 **read-only** key — the tool only ever reads. AAD via `DefaultAzureCredential`
-is also supported (`--auth aad`), and needs the Cosmos DB Built-in Data Reader
-role plus `@azure/identity` installed.
+(`--auth aad`) is also supported and is the default once `COSMOS_EXPORT_KEY`
+is unset — it is the only mode that works against an account with
+`disableLocalAuth: true` (V2's dev Cosmos account is one; that requirement is
+why `--auth aad` had to work at all). It needs a Cosmos DB **data-plane** role
+assignment — the built-in Data Reader is enough — which is separate from, and
+not granted by, control-plane RBAC: subscription Owner alone still gets a 403
+that reads like a tool bug. The assignment must be **account-scoped**
+(`--scope "/"`) — even for a `--database`- or `--container`-filtered export —
+because the tool reads account-level metadata before applying any filter. A
+narrower `/dbs/<database>` assignment does **not** work today; that gap is
+tracked as **MG-66**. `--help` carries the exact
+`az cosmosdb sql role assignment create` invocation to fix that; it isn't
+repeated here.
+
+**Error output is redacted.** Any error text this tool prints is scrubbed
+first: the value of any key matching
+`/key|token|secret|password|credential|sig/i` is replaced with `[redacted]`,
+unconditionally, with no exemption list — so ordinary diagnostics are caught
+along with real secrets (`partitionKey=deviceId` prints as
+`partitionKey=[redacted]`), and redaction runs to the end of the line, so text
+*after* a credential on the same line is lost too (`sig=[redacted]` can
+swallow a trailing " failed"). This is deliberate, not a bug: an exemption for
+benign key names was tried and caused an actual secret leak (a quote inside a
+credential-shaped key defeated the match), so the rule is now that no fragment
+of a credential may survive — over-redaction is acceptable, under-redaction is
+not. See MG-63 before reintroducing an exemption; it explains why that leak
+recurs by construction.
 
 **Exit codes — the operator contract.** Scripts that wrap this tool key off
 the exit code, so treat it as stable:
@@ -709,8 +746,8 @@ the exit code, so treat it as stable:
 | 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success |
 | 2    | reconciliation failure — written count doesn't match the pre-export `SELECT VALUE COUNT(1)`, the account has zero containers to export, or (in `--verify`) an on-disk hash/size/line-count mismatch or live-count drift |
 | 3    | throttling abort — 429 with retries exhausted |
-| 4    | auth failure |
-| 5    | transport abort mid-pagination |
+| 4    | auth failure — a 401/403 from the service, or a credential that could not be acquired at all (matched by exact `@azure/identity` error-class name, e.g. `AggregateAuthenticationError`) |
+| 5    | transport abort mid-pagination — also covers a non-credential error whose class name merely resembles one (e.g. `CredentialTransportError` from an `ECONNRESET`), which is deliberately excluded from exit 4 |
 
 **Safety semantics.**
 

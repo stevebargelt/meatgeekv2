@@ -14,9 +14,19 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
-import { main } from './cosmos-export.mjs';
+import { createRealClient, main } from './cosmos-export.mjs';
 import { EXIT, MANIFEST_FILENAME } from './export-core.mjs';
-import { authError, docs, fakeClient, throttleError, transportError } from './fake-cosmos.mjs';
+import {
+  authError,
+  credentialUnavailableError,
+  docs,
+  fakeClient,
+  fakeCosmosModule,
+  fakeIdentityModule,
+  forbiddenError,
+  throttleError,
+  transportError,
+} from './fake-cosmos.mjs';
 
 const TEST_KEY = 'test-key-must-never-be-logged-or-persisted';
 const CLI_PATH = fileURLToPath(new URL('./cosmos-export.mjs', import.meta.url));
@@ -25,20 +35,21 @@ async function outDir() {
   return mkdtemp(path.join(tmpdir(), 'cosmos-export-'));
 }
 
-async function run(argv, { spec = {}, env = {}, listError, client } = {}) {
+async function run(argv, { spec = {}, env = {}, listError, client, createClient } = {}) {
   const lines = [];
   const log = { info: line => lines.push(line), error: line => lines.push(line) };
-  let clientsCreated = 0;
+  const clientArgs = [];
   const code = await main({
     argv,
     env: { COSMOS_EXPORT_KEY: TEST_KEY, ...env },
-    createClient: async () => {
-      clientsCreated += 1;
+    createClient: async args => {
+      clientArgs.push(args);
+      if (createClient) return createClient(args);
       return client ?? fakeClient(spec, { listError });
     },
     log,
   });
-  return { code, lines, out: lines.join('\n'), clientsCreated };
+  return { code, lines, out: lines.join('\n'), clientsCreated: clientArgs.length, clientArgs };
 }
 
 async function exportRun(dir, spec, extraArgs = []) {
@@ -365,6 +376,125 @@ describe('auth failures are distinguishable', () => {
   });
 });
 
+// The V2 dev account has disableLocalAuth: true, so aad is the only mode that
+// can ever reach it. These drive the real createRealClient with stand-in SDK
+// modules: the wiring it hands to CosmosClient is the whole product of the aad
+// path, and it is not exercised by anything that injects a client wholesale.
+describe('--auth aad (MG-49)', () => {
+  const ENDPOINT = 'https://meatgeek.documents.azure.com:443/';
+
+  async function buildClient(authMode, identityOptions) {
+    const constructed = [];
+    await createRealClient({
+      endpoint: ENDPOINT,
+      authMode,
+      key: TEST_KEY,
+      loadCosmos: async () => fakeCosmosModule(constructed),
+      loadIdentity: async () => fakeIdentityModule(identityOptions),
+    });
+    return constructed;
+  }
+
+  it('builds the client with a DefaultAzureCredential and no key', async () => {
+    const [options] = await buildClient('aad');
+
+    assert.equal(options.aadCredentials?.credentialKind, 'DefaultAzureCredential');
+    assert.equal(options.key, undefined);
+    assert.equal(options.endpoint, ENDPOINT);
+    assert.doesNotMatch(JSON.stringify(options), new RegExp(TEST_KEY));
+  });
+
+  it('--auth key still builds the client from the key, with no credential', async () => {
+    const [options] = await buildClient('key');
+
+    assert.equal(options.key, TEST_KEY);
+    assert.equal(options.aadCredentials, undefined);
+  });
+
+  it('both modes keep the same retry policy', async () => {
+    const [aad] = await buildClient('aad');
+    const [key] = await buildClient('key');
+
+    assert.deepEqual(aad.connectionPolicy, key.connectionPolicy);
+    assert.equal(aad.connectionPolicy.retryOptions.maxRetryAttemptCount, 9);
+  });
+
+  it('the auth mode is still inferred from COSMOS_EXPORT_KEY when --auth is absent', async () => {
+    const spec = { db: { c: { count: 1, pages: [docs('a', 1)] } } };
+
+    const withKey = await run(['--account', 'meatgeek', '--out', await outDir()], { spec });
+    assert.equal(withKey.code, EXIT.OK);
+    assert.equal(withKey.clientArgs[0].authMode, 'key');
+
+    const dir = await outDir();
+    const withoutKey = await run(['--account', 'meatgeek', '--out', dir], {
+      spec,
+      env: { COSMOS_EXPORT_KEY: undefined },
+    });
+    assert.equal(withoutKey.code, EXIT.OK);
+    assert.equal(withoutKey.clientArgs[0].authMode, 'aad');
+    assert.equal(withoutKey.clientArgs[0].key, '');
+    assert.match(await readFile(path.join(dir, MANIFEST_FILENAME), 'utf8'), /"authMode": "aad"/);
+  });
+
+  it('a 403 from a missing data-plane role assignment exits 4, not 5, and writes nothing', async () => {
+    const dir = await outDir();
+    const { code, out } = await run(['--account', 'meatgeek', '--out', dir, '--auth', 'aad'], {
+      env: { COSMOS_EXPORT_KEY: undefined },
+      listError: forbiddenError(),
+    });
+
+    assert.equal(code, EXIT.AUTH);
+    assert.match(out, /exit 4 \(auth failure\)/);
+    assert.deepEqual(await readdir(dir), []);
+  });
+
+  it('a credential that cannot be acquired at all exits 4, not an unhandled rejection', async () => {
+    const dir = await outDir();
+    const { code, out } = await run(['--account', 'meatgeek', '--out', dir, '--auth', 'aad'], {
+      env: { COSMOS_EXPORT_KEY: undefined },
+      createClient: args =>
+        createRealClient({
+          ...args,
+          loadCosmos: async () => fakeCosmosModule([]),
+          loadIdentity: async () =>
+            fakeIdentityModule({ throwOnConstruct: credentialUnavailableError() }),
+        }),
+    });
+
+    assert.equal(code, EXIT.AUTH);
+    assert.match(out, /exit 4 \(auth failure\)/);
+    assert.match(out, /AggregateAuthenticationError/);
+    assert.deepEqual(await readdir(dir), []);
+  });
+
+  it('an unsupported --auth value is a usage error before any client is built', async () => {
+    const { code, out, clientsCreated } = await run([
+      '--account',
+      'meatgeek',
+      '--out',
+      '/tmp/should-not-be-created',
+      '--auth',
+      'sas',
+    ]);
+
+    assert.equal(code, EXIT.USAGE);
+    assert.equal(clientsCreated, 0);
+    assert.match(out, /--auth must be 'key' or 'aad', got 'sas'/);
+    assert.equal(await exists('/tmp/should-not-be-created'), false);
+  });
+
+  it('--help names the data-plane role assignment and no longer says to install anything', async () => {
+    const { out } = await run(['--help']);
+
+    assert.match(out, /az cosmosdb sql role assignment create/);
+    assert.match(out, /--role-definition-id/);
+    assert.match(out, /00000000-0000-0000-0000-000000000001/);
+    assert.match(out, /Subscription Owner is not sufficient/);
+    assert.doesNotMatch(out, /@azure\/identity/);
+  });
+});
+
 describe('secrets and document contents never reach the logs or disk', () => {
   it('a successful run logs counts, never document bodies, and never the key', async () => {
     const dir = await outDir();
@@ -391,6 +521,30 @@ describe('secrets and document contents never reach the logs or disk', () => {
     assert.equal(code, EXIT.TRANSPORT);
     assert.doesNotMatch(out, /SECRET-PAYLOAD/);
     assert.match(out, /\[redacted\]/);
+  });
+
+  // The guarantee is about what actually gets logged, so this asserts on the
+  // whole of what the CLI emitted — and on the exit code, because the same
+  // error is the one a name-substring match used to mis-report as exit 4.
+  it('an SDK error carrying a connection string and a token leaks neither, and still exits 5', async () => {
+    const dir = await outDir();
+    const accountKey = 'Ab3xQ9zK7pLmN2vR5tYw8sD4fG6hJ1kZ0cV';
+    const token =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJtZWF0Z2VlayJ9.dBjftJeZ4CVPmB92K27uhbUJU1p1rwW1gFWFOEjXk';
+    const leaky = Object.assign(
+      new Error(
+        `socket hang up; AccountEndpoint=https://meatgeek.documents.azure.com:443/;AccountKey=${accountKey}; sent Authorization: Bearer ${token}`
+      ),
+      { name: 'CredentialTransportError', code: 'ECONNRESET' }
+    );
+    const { code, out } = await run(['--account', 'meatgeek', '--out', dir], { listError: leaky });
+
+    assert.equal(code, EXIT.TRANSPORT);
+    assert.match(out, /exit 5 \(transport abort\)/);
+    assert.doesNotMatch(out, new RegExp(accountKey));
+    assert.doesNotMatch(out, /eyJ/);
+    assert.match(out, /AccountKey=\[redacted\]/);
+    assert.deepEqual(await readdir(dir), []);
   });
 });
 

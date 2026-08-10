@@ -248,3 +248,7 @@ temp/
 # forge — per-developer claude-code config (machine-local, not committed)
 .claude/settings.local.json
 .claude/commands/
+
+# forge — per-developer claude-code config (machine-local, not committed)
+.agents/skills/forge-orient/
+.agents/skills/forge-handoff/

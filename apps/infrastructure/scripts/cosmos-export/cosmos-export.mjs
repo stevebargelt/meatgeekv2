@@ -77,9 +77,40 @@ AUTH
                        Prefer the READ-ONLY key: this tool only reads, and a
                        read-only key makes that true of the credential too.
   --auth aad           Azure Entra ID via DefaultAzureCredential (az login,
-                       managed identity, env service principal). Requires the
-                       Cosmos DB Built-in Data Reader role on the account and
-                       @azure/identity to be installed.
+                       managed identity, env service principal). The default
+                       when COSMOS_EXPORT_KEY is unset, and the ONLY mode that
+                       works against an account with disableLocalAuth: true,
+                       where the service refuses key auth outright.
+
+                       Cosmos data-plane access is NOT granted by control-plane
+                       RBAC. Subscription Owner is not sufficient — with Owner
+                       and no data-plane assignment every request here comes
+                       back 403. That 403 reads like a tool bug and is not;
+                       assign yourself a data-plane role on the account:
+
+                         az cosmosdb sql role assignment create \\
+                           --account-name <account-name> \\
+                           --resource-group <resource-group> \\
+                           --role-definition-id \\
+                             00000000-0000-0000-0000-000000000001 \\
+                           --principal-id <principal-object-id> \\
+                           --scope "/"
+
+                       ...0001 is the built-in Cosmos DB Data READER, which is
+                       all this tool needs. The assignment must be at ACCOUNT
+                       scope, --scope "/": this tool reads account-level
+                       metadata — the database list, and the SDK's own region
+                       lookup — before it applies any filter. A narrower
+                       /dbs/<database> or /dbs/<db>/colls/<c> assignment does
+                       NOT work today, even with --database or --container. It
+                       403s on that account read. That is a known limitation,
+                       not your mistake — MG-66 tracks it. Your own principal
+                       id is 'az ad signed-in-user show --query id -o tsv'.
+                       Assignments take a minute or two to propagate.
+
+                       Any authorization failure — a 403 from a missing
+                       assignment, or a credential that cannot be acquired at
+                       all — exits 4, the same as a key-auth 401.
 
 BEHAVIOUR
   Every container's count is read (SELECT VALUE COUNT(1) FROM c) before export
@@ -214,8 +245,18 @@ function accountNameFrom(endpoint) {
   }
 }
 
-async function createRealClient({ endpoint, authMode, key }) {
-  const { CosmosClient } = await import('@azure/cosmos');
+// The two SDK modules are loaded through injectable thunks for the same reason
+// the client itself is injected into main(): it is the only way to assert what
+// the auth wiring actually hands to CosmosClient — that aad mode passes a
+// credential and no key, and key mode the reverse — without an Azure account.
+export async function createRealClient({
+  endpoint,
+  authMode,
+  key,
+  loadCosmos = () => import('@azure/cosmos'),
+  loadIdentity = () => import('@azure/identity'),
+}) {
+  const { CosmosClient } = await loadCosmos();
   const connectionPolicy = {
     retryOptions: {
       maxRetryAttemptCount: 9,
@@ -226,15 +267,7 @@ async function createRealClient({ endpoint, authMode, key }) {
   if (authMode === 'key') {
     return new CosmosClient({ endpoint, key, connectionPolicy });
   }
-  let DefaultAzureCredential;
-  try {
-    ({ DefaultAzureCredential } = await import('@azure/identity'));
-  } catch {
-    throw new ExportError(
-      EXIT.AUTH,
-      '--auth aad needs @azure/identity, which is not installed. Use --auth key with COSMOS_EXPORT_KEY, or install @azure/identity.'
-    );
-  }
+  const { DefaultAzureCredential } = await loadIdentity();
   return new CosmosClient({
     endpoint,
     aadCredentials: new DefaultAzureCredential(),
