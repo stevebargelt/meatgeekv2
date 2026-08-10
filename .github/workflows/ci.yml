@@ -365,6 +365,37 @@ jobs:
         # credentials nor a terraform binary.
         run: bash apps/infrastructure/scripts/fixtures/run-cross-module-propagation-fixtures.sh
 
+      - name: Live host-storage gate fixtures (MG-58)
+        # The post-apply live host-storage gate is the ONLY gate in this system
+        # that can OBSERVE the MG-58 defect class. The pinned azurerm provider
+        # (v4.81.0) composes and writes the scalar `AzureWebJobsStorage`
+        # connection string on every Function App create AND update, then routes
+        # it out of `app_settings` on read — so the key is absent from HCL, from
+        # `terraform show -json` and from state by construction. Every
+        # config-surface check in this job was green while the live dev site
+        # carried the key and host storage was dead. The live gate is therefore
+        # load-bearing, and this harness is what proves it still rejects the
+        # documents it is supposed to reject.
+        #
+        # It belongs in THIS job for the same reason the two harnesses above do:
+        # every fixture IS the document the gate consumes, so it needs no Azure,
+        # no credentials, no `az` and no `terraform` binary, and it cannot weaken
+        # the credentialless posture assert-credentialless.sh proves at runtime.
+        # The gate itself CANNOT run here — asserting against the deployed site
+        # requires an Azure identity, and giving this PR-reachable job one would
+        # trade a load-bearing invariant for a gate that has a correct home in
+        # the post-merge apply job. That split is deliberate; see
+        # apps/infrastructure/README.md.
+        #
+        # Exit codes are asserted EXACTLY, under both bash and dash: the apply
+        # job's bounded remediation keys off 3 ("the scalar key is present —
+        # delete that one setting on that one app and re-assert") versus 1
+        # ("every other violation and every operational failure"). A harness that
+        # accepted any nonzero would let those two swap silently, and the
+        # workflow would then either stop remediating a remediable defect or
+        # start deleting settings in response to an unreadable document.
+        run: bash apps/infrastructure/scripts/fixtures/run-live-host-storage-fixtures.sh
+
       - name: V1 Cosmos export tool tests (MG-48)
         # The export tool gates a PERMANENT deletion of the V1 Cosmos account,
         # so its failure paths — count mismatch, 429 with retries exhausted,
