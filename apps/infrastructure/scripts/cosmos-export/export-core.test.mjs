@@ -16,7 +16,14 @@ import {
   fileNameFor,
   listTargets,
 } from './export-core.mjs';
-import { authError, docs, fakeClient, throttleError, transportError } from './fake-cosmos.mjs';
+import {
+  accountScopeForbiddenError,
+  authError,
+  docs,
+  fakeClient,
+  throttleError,
+  transportError,
+} from './fake-cosmos.mjs';
 
 const SOURCES = ['./export-core.mjs', './cosmos-export.mjs'];
 
@@ -430,5 +437,83 @@ describe('listTargets', () => {
         return true;
       }
     );
+  });
+
+  // MG-49. The fake below holds exactly the permissions a /dbs/<database>-scoped
+  // Data Reader holds: account-level enumeration is forbidden, the database
+  // itself is readable.
+  describe('a database filter never touches the account (MG-49)', () => {
+    const accountForbidden = () => fakeClient(spec, { listError: accountScopeForbiddenError() });
+
+    it('resolves the named database directly', async () => {
+      const targets = await listTargets(accountForbidden(), { databases: ['meatgeek-prod'] });
+      assert.deepEqual(targets, [
+        { database: 'meatgeek-prod', container: 'cooks' },
+        { database: 'meatgeek-prod', container: 'devices' },
+      ]);
+    });
+
+    it('resolves a named container without enumerating the database either', async () => {
+      const containerOnly = fakeClient(spec, {
+        listError: accountScopeForbiddenError(),
+        containerListError: accountScopeForbiddenError(),
+      });
+
+      assert.deepEqual(
+        await listTargets(containerOnly, {
+          databases: ['meatgeek-prod'],
+          containers: ['cooks'],
+        }),
+        [{ database: 'meatgeek-prod', container: 'cooks' }]
+      );
+    });
+
+    it('reports a database that is not there as no targets, so it stays a usage error', async () => {
+      assert.deepEqual(await listTargets(accountForbidden(), { databases: ['typo'] }), []);
+      assert.deepEqual(
+        await listTargets(accountForbidden(), {
+          databases: ['meatgeek-prod'],
+          containers: ['typo'],
+        }),
+        []
+      );
+    });
+
+    it('still aborts on a 403 — only a 404 means "you named something absent"', async () => {
+      const forbidden = fakeClient(spec, {
+        listError: accountScopeForbiddenError(),
+        containerListError: authError(),
+      });
+
+      await assert.rejects(
+        () => listTargets(forbidden, { databases: ['meatgeek-prod'] }),
+        err => {
+          assert.equal(err.exitCode, EXIT.AUTH);
+          assert.match(err.message, /enumerating containers in meatgeek-prod/);
+          return true;
+        }
+      );
+    });
+
+    it('an unfiltered list still enumerates the account, and still fails when it may not', async () => {
+      await assert.rejects(
+        () => listTargets(accountForbidden()),
+        err => {
+          assert.equal(err.exitCode, EXIT.AUTH);
+          assert.match(err.message, /enumerating databases/);
+          return true;
+        }
+      );
+    });
+
+    it('--container alone is an account-level question and still asks it', async () => {
+      await assert.rejects(
+        () => listTargets(accountForbidden(), { containers: ['cooks'] }),
+        err => {
+          assert.equal(err.exitCode, EXIT.AUTH);
+          return true;
+        }
+      );
+    });
   });
 });

@@ -36,6 +36,16 @@ export const forbiddenError = () =>
     { statusCode: 403 }
   );
 
+// What a DATABASE-scoped assignment returns for an ACCOUNT-level operation —
+// the live MG-49 smoke, where the operator held Cosmos DB Built-in Data Reader
+// at /dbs/meatgeek-v2-dev-db and a filtered export still failed before reading
+// a single document, because the tool started at the account.
+export const accountScopeForbiddenError = () =>
+  new FakeCosmosError(
+    'Request blocked by Auth mgv2-dev-f640e19ae7ab : Request for Read DatabaseAccount is blocked because principal 8f2b1c40-0000-4a1e-9f00-1c0de1234567 does not have required RBAC permissions to perform action(s) [Microsoft.DocumentDB/databaseAccounts/readMetadata] on any scope. Learn more: https://aka.ms/cosmos-native-rbac',
+    { statusCode: 403 }
+  );
+
 // What DefaultAzureCredential raises when every credential in the chain fails
 // — no az login, no managed identity, no service principal in the environment.
 export const credentialUnavailableError = () =>
@@ -91,7 +101,12 @@ async function* pageIterator(spec) {
 }
 
 // spec: { <database>: { <container>: { count, pages, throwAfterPages?, error?, countError? } } }
-export function fakeClient(spec, { listError } = {}) {
+//
+// listError fails ACCOUNT-level database enumeration and containerListError
+// fails DATABASE-level container enumeration, so a fake can be given exactly the
+// permissions a narrowly-scoped role assignment grants: set both and only a
+// directly-addressed container is reachable (MG-49).
+export function fakeClient(spec, { listError, containerListError } = {}) {
   return {
     databases: {
       readAll: () => ({
@@ -109,7 +124,10 @@ export function fakeClient(spec, { listError } = {}) {
       return {
         containers: {
           readAll: () => ({
-            fetchAll: async () => ({ resources: Object.keys(containers).map(id => ({ id })) }),
+            fetchAll: async () => {
+              if (containerListError) throw containerListError;
+              return { resources: Object.keys(containers).map(id => ({ id })) };
+            },
           }),
           create: mutationGuard('containers.create'),
           createIfNotExists: mutationGuard('containers.createIfNotExists'),
@@ -119,6 +137,7 @@ export function fakeClient(spec, { listError } = {}) {
           const containerSpec = containers[containerId];
           if (!containerSpec) throw new FakeCosmosError('NotFound', { statusCode: 404 });
           return {
+            read: async () => ({ resource: { id: containerId } }),
             items: {
               query: () => ({
                 fetchAll: async () => {

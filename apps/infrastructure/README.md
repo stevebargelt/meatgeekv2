@@ -160,7 +160,7 @@ nx output infrastructure
 ```
 
 **Steady-state dev infrastructure reconciles through CI**, not from a
-workstation. Under **MG-23** (*automated dev GitOps reconciliation*, CI-run) a
+workstation. Under **MG-23** (_automated dev GitOps reconciliation_, CI-run) a
 change goes: PR → `ci.yml`'s `validate-infrastructure` job runs the
 **credentialless** sequence (`assert-credentialless.sh` → `fmt -check` →
 `terraform init -backend=false -input=false -lockfile=readonly` → `validate` →
@@ -210,13 +210,13 @@ Activation of the dev loop is operator-gated: see
 
 ## Module Structure
 
-| Module                | Responsibility                                             |
-| --------------------- | ---------------------------------------------------------- |
-| `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices    |
-| `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs |
+| Module                | Responsibility                                                                                                                                                                         |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices                                                                                                                                |
+| `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs                                                                                                                             |
 | `modules/functions/`  | Flex Consumption Function App (`azurerm_function_app_flex_consumption`) on an `FC1` `azurerm_service_plan` + its own storage account (MI blob deployment container, length-safe names) |
-| `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs) |
-| `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                      |
+| `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs)                                                                                                                             |
+| `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                                                                                                                                                  |
 
 The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it does
 **not** read a shared V1 account via a data source. There is no adoption of a pre-existing shared Cosmos account
@@ -269,7 +269,7 @@ modules, so a module cannot start being CI-invoked without also being gated.
 Locks are **multi-platform, on the same four platforms** everywhere:
 `linux_amd64` (the GitHub runners), `darwin_arm64` (Apple-silicon workstation),
 `darwin_amd64` (Intel Mac fallback) and `linux_arm64` (arm64 build/review
-containers). `init` only trusts a provider whose hash for the *current* platform
+containers). `init` only trusts a provider whose hash for the _current_ platform
 is already recorded, so regenerating with fewer platforms both dirties the tree
 and hands the dropped platforms an unpinned resolution. Always pass all four —
 from the module directory, or from `apps/infrastructure` for the root:
@@ -313,7 +313,7 @@ Three invocation rules, each of which fails in a different and non-obvious way
 if ignored:
 
 - **Pass the environment as `--args="--env=<env>"`, never as a bare `--env=<env>`.**
-  `env` is a reserved `nx:run-commands` option typed as an *object*, so passing
+  `env` is a reserved `nx:run-commands` option typed as an _object_, so passing
   it bare is rejected before Terraform runs with
   `Property 'env' does not match the schema. 'dev' should be a 'object'.`
 - **`init` and `format` must use the `nx run <project>:<target>` form.** Bare
@@ -321,7 +321,7 @@ if ignored:
   `format` commands — they launch the workspace initializer / Prettier and the
   Terraform target never runs at all.
 - **`apply` takes no environment argument.** Its command is `terraform apply
-  tfplan`, which has no `{args.*}` placeholder, so a trailing `--args="--env=dev"`
+tfplan`, which has no `{args.*}` placeholder, so a trailing `--args="--env=dev"`
   is forwarded verbatim as `terraform apply tfplan --env=dev` and Terraform
   rejects it. The environment is already baked into `tfplan` by the preceding
   `nx plan`.
@@ -360,7 +360,7 @@ outputs — the former `cosmos_db_connection_string`, `iot_hub_connection_string
 `signalr_connection_string`, and `environment_config` aggregate outputs were
 **removed** (MG-24 S1), so no runtime credential is ever surfaced as an output or
 placed in app settings. (Note: each data service's key still exists as an
-inherent *computed attribute* in state — see "No runtime secret is USED …" under
+inherent _computed attribute_ in state — see "No runtime secret is USED …" under
 Security Notes for the full posture and how local-auth-disable renders those keys
 non-authenticating.) Consumers reach every service **identity-based** (managed
 identity + RBAC) via the non-secret endpoints below.
@@ -378,11 +378,11 @@ terraform output development_urls                # non-secret endpoint URLs
 The Function App runs under a **system-assigned managed identity** and is granted
 narrowly-scoped data-plane RBAC by the root module:
 
-| Service       | Non-secret endpoint (app setting)                                                                                                                                                                                                                                                                                                                                                                                   | Role granted to the Function App identity |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| Cosmos DB     | `COSMOSDB__accountEndpoint`                                                                                                                                                                                                                                                                                                                                                                                         | Cosmos DB Built-in Data Contributor       |
-| IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`                                                                                                                                                                                                                                                                                                                                                                            | Azure Event Hubs Data Receiver            |
-| SignalR       | `AzureSignalRConnectionString__serviceUri`                                                                                                                                                                                                                                                                                                                                                                          | SignalR Service Owner                     |
+| Service       | Non-secret endpoint (app setting)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Role granted to the Function App identity |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Cosmos DB     | `COSMOSDB__accountEndpoint`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Cosmos DB Built-in Data Contributor       |
+| IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Azure Event Hubs Data Receiver            |
+| SignalR       | `AzureSignalRConnectionString__serviceUri`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | SignalR Service Owner                     |
 | App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` — the FULL TF-managed connection string (`InstrumentationKey=…;IngestionEndpoint=…` — Microsoft requires the ikey as the destination-resource identifier even under Entra) wired via the **native** `site_config.application_insights_connection_string` field, **not** an app setting (Azure surfaces it to the host unchanged as this env var); plus the `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD` app setting. The ikey **cannot authenticate**: `local_authentication_enabled = false` on the App Insights resource forces AAD-only ingestion. | Monitoring Metrics Publisher              |
 
 The IoT Hub's own system-assigned identity likewise writes to Cosmos (Built-in
@@ -608,6 +608,7 @@ bash scripts/fixtures/run-live-host-storage-fixtures.sh
 
   (The **prod** deploy identity and a prod infra-apply identity are **MG-25**
   deliverables, out of scope here.)
+
 - **The resource-group boundary is load-bearing.** No identity inside
   `meatgeek-v2-dev-rg` holds a role outside it; the state account lives in a
   **separate** resource group (`meatgeek-v2-tfstate-rg`); there is no Microsoft
@@ -623,55 +624,55 @@ bash scripts/fixtures/run-live-host-storage-fixtures.sh
 - **No runtime secret is USED or surfaced; in-state keys are made
   non-authenticating (IoT Hub is the documented exception).** Cosmos /
   IoT-telemetry (Event Hubs) / SignalR access is identity-based (managed identity
-  + RBAC + non-secret endpoints); the Function App's host storage uses its
-  managed identity. **No connection-string or primary-key VALUE is placed in app
-  settings or surfaced as a Terraform output.** The accurate posture about
-  *state itself*, however, is NOT "no keys in state": every TF-managed data
-  service exposes its key/connection-string as a **computed attribute** that
-  Terraform reads back into state by construction (no `azurerm` argument
-  suppresses it) — exactly like App Insights. The control is to make those keys
-  **inert for authentication** by disabling local/key auth where safe:
-  `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
-  on SignalR, `shared_access_key_enabled = false` on the Functions storage
-  account (host storage is fully managed-identity), and
-  `local_authentication_enabled = false` on the Event Hubs namespace (its
-  auto-created `RootManageSharedAccessKey` is unused — the IoT Hub produces to it
-  identity-based and the Function App consumes via *Azure Event Hubs Data
-  Receiver*). With local auth off, the
-  in-state key is a **present-but-non-authenticating residual**.
-  **IoT Hub is the SOLE deliberate exception:** devices, the data-pusher, and the
-  device-controller authenticate with **SAS keys**, so key auth is intentionally
-  kept enabled and its in-state SAS keys are live — mitigated by restricted,
-  container-scoped state access and documented in the MG-24 ADR. The coupled
-  invariant (Cosmos/SignalR/Storage/Event Hubs namespace local auth must stay
-  disabled) is machine-enforced by the fail-closed
-  `scripts/tf-plan-secret-inspection.sh` gate, which flags any of those services
-  as a violation if local auth is re-enabled and accepts the IoT Hub keys with a
-  note. **Application Insights
-  telemetry ingestion is
-  AAD-authenticated:** the Function App authenticates via its managed identity —
-  `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a
-  `Monitoring Metrics Publisher` role assignment on the App Insights resource.
-  The **full** TF-managed App Insights connection string (with the
-  `InstrumentationKey`) is wired via the native
-  `site_config.application_insights_connection_string` field — **not** an app
-  setting (moved there to kill a perpetual second-plan diff; Azure surfaces it to
-  the host unchanged as the `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env
-  var, so `apps/api` telemetry is unaffected) — **because Microsoft requires
-  the connection string as the destination-resource identifier even under
-  Entra** — but the embedded ikey **cannot authenticate**: the App Insights
-  resource sets `local_authentication_enabled = false`, which forces AAD-only
-  ingestion and disables ikey/local auth. The connection string / instrumentation
-  key is therefore present in that `site_config` field and (as a computed attribute of
-  `azurerm_application_insights.main`) in Terraform state, but it is a
-  **present-but-non-authenticating** residual: **safe ONLY while local auth is
-  disabled**. That coupled invariant is machine-enforced — `tf-static-checks.sh`
-  check 9 rejects the full conn string reaching the Function module (now the
-  `site_config` field) unless
-  `local_authentication_enabled = false`, and the fail-closed
-  `scripts/tf-plan-secret-inspection.sh` gate enforces the same over the real
-  plan. See
-  [ADR: App Insights key in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
+  - RBAC + non-secret endpoints); the Function App's host storage uses its
+    managed identity. **No connection-string or primary-key VALUE is placed in app
+    settings or surfaced as a Terraform output.** The accurate posture about
+    _state itself_, however, is NOT "no keys in state": every TF-managed data
+    service exposes its key/connection-string as a **computed attribute** that
+    Terraform reads back into state by construction (no `azurerm` argument
+    suppresses it) — exactly like App Insights. The control is to make those keys
+    **inert for authentication** by disabling local/key auth where safe:
+    `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
+    on SignalR, `shared_access_key_enabled = false` on the Functions storage
+    account (host storage is fully managed-identity), and
+    `local_authentication_enabled = false` on the Event Hubs namespace (its
+    auto-created `RootManageSharedAccessKey` is unused — the IoT Hub produces to it
+    identity-based and the Function App consumes via _Azure Event Hubs Data
+    Receiver_). With local auth off, the
+    in-state key is a **present-but-non-authenticating residual**.
+    **IoT Hub is the SOLE deliberate exception:** devices, the data-pusher, and the
+    device-controller authenticate with **SAS keys**, so key auth is intentionally
+    kept enabled and its in-state SAS keys are live — mitigated by restricted,
+    container-scoped state access and documented in the MG-24 ADR. The coupled
+    invariant (Cosmos/SignalR/Storage/Event Hubs namespace local auth must stay
+    disabled) is machine-enforced by the fail-closed
+    `scripts/tf-plan-secret-inspection.sh` gate, which flags any of those services
+    as a violation if local auth is re-enabled and accepts the IoT Hub keys with a
+    note. **Application Insights
+    telemetry ingestion is
+    AAD-authenticated:** the Function App authenticates via its managed identity —
+    `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a
+    `Monitoring Metrics Publisher` role assignment on the App Insights resource.
+    The **full** TF-managed App Insights connection string (with the
+    `InstrumentationKey`) is wired via the native
+    `site_config.application_insights_connection_string` field — **not** an app
+    setting (moved there to kill a perpetual second-plan diff; Azure surfaces it to
+    the host unchanged as the `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env
+    var, so `apps/api` telemetry is unaffected) — **because Microsoft requires
+    the connection string as the destination-resource identifier even under
+    Entra** — but the embedded ikey **cannot authenticate**: the App Insights
+    resource sets `local_authentication_enabled = false`, which forces AAD-only
+    ingestion and disables ikey/local auth. The connection string / instrumentation
+    key is therefore present in that `site_config` field and (as a computed attribute of
+    `azurerm_application_insights.main`) in Terraform state, but it is a
+    **present-but-non-authenticating** residual: **safe ONLY while local auth is
+    disabled**. That coupled invariant is machine-enforced — `tf-static-checks.sh`
+    check 9 rejects the full conn string reaching the Function module (now the
+    `site_config` field) unless
+    `local_authentication_enabled = false`, and the fail-closed
+    `scripts/tf-plan-secret-inspection.sh` gate enforces the same over the real
+    plan. See
+    [ADR: App Insights key in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 ## Deploy Alignment (Function App name)
 
@@ -692,7 +693,7 @@ static export had to exist first. Run
 `node scripts/cosmos-export/cosmos-export.mjs --help` for full usage; only
 what `--help` doesn't already cover is captured below.
 
-**No live Azure run has happened.** The dependency-free tier (87 tests across
+**No live Azure run has happened.** The dependency-free tier (100 tests across
 3 files, `nx test infrastructure`, CI-wired above) runs entirely against an
 injected fake client — the V1 subscription is disabled until 2026-08-06 and
 the build environment holds no credentials. A second, smaller tier
@@ -719,13 +720,50 @@ that reads like a tool bug. `--help` carries the exact
 `az cosmosdb sql role assignment create` invocation to fix that; it isn't
 repeated here.
 
+**The RBAC scope is part of the contract (MG-49).** The `--scope` of that
+assignment is not a free choice — it has to cover what the run reads, and what
+the run reads depends on how it is filtered. Grant the narrowest that covers
+the run:
+
+| Run                               | `--scope`             | Why                                                                                                                                                     |
+| --------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| no `--database`                   | `/`                   | A full-account export lists the account's databases, which only account scope permits.                                                                  |
+| `--database <db>`                 | `/dbs/<db>`           | Each named database is addressed by id; the run makes no account-level call. Repeat the assignment per database if you pass more than one `--database`. |
+| `--database <db> --container <c>` | `/dbs/<db>/colls/<c>` | With both flags the container is addressed directly; the run makes no database- or account-level call.                                                  |
+| `--container <c>` alone           | `/`                   | Finding a container in an unnamed database means listing the account's databases. Pair it with `--database` to stay narrow.                             |
+
+A scope too narrow for the run fails fast with **exit 4** and Cosmos's
+`Request blocked by Auth … on any scope`; nothing falls back to a wider read.
+`--verify` takes its scope from the `filters` the manifest recorded, not from
+its own argv, so verifying a `--database` export needs only that database's
+scope too.
+
+Two things had to change for the database-scoped row to be true, and both are
+worth knowing before touching this code. The tool used to enumerate the
+account's databases before applying `--database`, and — less visibly — the
+Cosmos SDK reads the **database account** for its region list before the first
+data request when `enableEndpointDiscovery` is left at its default. That probe
+is an account-scoped operation and it is the one the live smoke actually died
+on, so a filtered run now disables endpoint discovery: it talks to the endpoint
+it was given and never asks the account about itself. The cost is cross-region
+read failover, which a single-endpoint read-only export does not use. An
+unfiltered run is unchanged — it needs account scope regardless.
+
+Evidence, precisely: the account- and database-scoped rows are proven in the
+dependency-free tier against a fake whose account-level (and, for the container
+row, database-level) enumeration returns the live 403, and whose direct access
+succeeds. The **container-scoped row has not been exercised against a live
+account.** If a container-scoped grant 403s in the field, widen to `/dbs/<db>`
+and reopen MG-49 — the tool overstating a supported scope is what created that
+ticket.
+
 **Error output is redacted.** Any error text this tool prints is scrubbed
 first: the value of any key matching
 `/key|token|secret|password|credential|sig/i` is replaced with `[redacted]`,
 unconditionally, with no exemption list — so ordinary diagnostics are caught
 along with real secrets (`partitionKey=deviceId` prints as
 `partitionKey=[redacted]`), and redaction runs to the end of the line, so text
-*after* a credential on the same line is lost too (`sig=[redacted]` can
+_after_ a credential on the same line is lost too (`sig=[redacted]` can
 swallow a trailing " failed"). This is deliberate, not a bug: an exemption for
 benign key names was tried and caused an actual secret leak (a quote inside a
 credential-shaped key defeated the match), so the rule is now that no fragment
@@ -736,14 +774,14 @@ recurs by construction.
 **Exit codes — the operator contract.** Scripts that wrap this tool key off
 the exit code, so treat it as stable:
 
-| Code | Meaning |
-| ---- | ------- |
-| 0    | verified-complete |
-| 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success |
+| Code | Meaning                                                                                                                                                                                                                 |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | verified-complete                                                                                                                                                                                                       |
+| 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success                                                                    |
 | 2    | reconciliation failure — written count doesn't match the pre-export `SELECT VALUE COUNT(1)`, the account has zero containers to export, or (in `--verify`) an on-disk hash/size/line-count mismatch or live-count drift |
-| 3    | throttling abort — 429 with retries exhausted |
-| 4    | auth failure — a 401/403 from the service, or a credential that could not be acquired at all (matched by exact `@azure/identity` error-class name, e.g. `AggregateAuthenticationError`) |
-| 5    | transport abort mid-pagination — also covers a non-credential error whose class name merely resembles one (e.g. `CredentialTransportError` from an `ECONNRESET`), which is deliberately excluded from exit 4 |
+| 3    | throttling abort — 429 with retries exhausted                                                                                                                                                                           |
+| 4    | auth failure — a 401/403 from the service, or a credential that could not be acquired at all (matched by exact `@azure/identity` error-class name, e.g. `AggregateAuthenticationError`)                                 |
+| 5    | transport abort mid-pagination — also covers a non-credential error whose class name merely resembles one (e.g. `CredentialTransportError` from an `ECONNRESET`), which is deliberately excluded from exit 4            |
 
 **Safety semantics.**
 
