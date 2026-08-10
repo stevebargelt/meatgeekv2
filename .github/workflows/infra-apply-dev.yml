@@ -1022,6 +1022,20 @@ jobs:
       #     and the loss would be invisible in HCL for precisely the reason the
       #     current defect is.
       #
+      #     AND THAT HAZARD IS NARROWED, NOT ELIMINATED — say so rather than imply
+      #     otherwise. Because the sub-resource IS replace-the-whole-collection,
+      #     there is no server-side per-key delete: `az ... appsettings delete`
+      #     GETs the collection, drops the key CLIENT-SIDE and PUTs it all back,
+      #     with no ETag and no If-Match. It inherits the same read-modify-write
+      #     hazard the ADR uses to reject a second azapi writer. What makes the
+      #     narrower window acceptable is that this runs inside the apply job —
+      #     the only writer to dev infrastructure — and only when the key is
+      #     actually present, so the window is one CLI call wide and the steady
+      #     state is zero cycles. What makes it SAFE ENOUGH is that the residual
+      #     is DETECTED: the setting NAME set is captured before and after the
+      #     delete and must differ by exactly the one removed key, or the run goes
+      #     red naming the cause. See the ADR's Consequences section.
+      #
       #     SECRET HYGIENE. `az functionapp config appsettings list` returns
       #     VALUES, connection strings among them, and this job's log is retained
       #     and broadly readable. The document is therefore piped STRAIGHT into the
@@ -1121,11 +1135,27 @@ jobs:
           # THE ASSERT PATH. The settings document reaches the gate's STDIN and
           # nowhere else. Only the CLI's stderr is captured, and it is printed only
           # when the read itself failed.
+          # `--names-out` asks the GATE to write the setting NAME list to a file.
+          # It is the gate, not this step, that writes it: the settings document
+          # must reach the gate's stdin and nowhere else, so a second `az ... list`
+          # piped somewhere else — even into `jq -r '.[].name'` — is exactly the
+          # shape that invariant forbids, and is one edit away from `.[].value`.
+          # This costs no extra API call: the pre-deletion set falls out of the
+          # assert that is already running, and the post-deletion set out of the
+          # re-assert that already follows the delete.
+          NAMES_BEFORE="$(mktemp)"
+          NAMES_AFTER="$(mktemp)"
+          # Swept on EVERY exit path, including the fail-closed ones that exit
+          # before the comparison is reached. They hold NAMES only, so this is
+          # tidiness rather than hygiene — but an unswept temp is how a later
+          # edit ends up reading a stale set and concluding nothing was lost.
+          trap 'rm -f "$NAMES_BEFORE" "$NAMES_AFTER"' EXIT
+
           set +e
           az functionapp config appsettings list \
             --resource-group "$RG" --name "$APP" \
             --only-show-errors --output json 2>"$ERR" \
-            | scripts/assert-live-host-storage.sh --account-name "$SA"
+            | scripts/assert-live-host-storage.sh --account-name "$SA" --names-out "$NAMES_BEFORE"
           RC=("${PIPESTATUS[@]}")
           set -e
           AZ_RC="${RC[0]}"
@@ -1144,6 +1174,37 @@ jobs:
             echo "LIVE HOST STORAGE CLEAN — the scalar AzureWebJobsStorage setting is absent from $APP and the identity form names $SA."
           elif [ "$GATE_RC" -eq 3 ]; then
             echo "The scalar AzureWebJobsStorage setting is PRESENT on $APP. Deleting exactly that one setting on exactly that one app." >&2
+
+            # COLLATERAL-LOSS DETECTION. `az functionapp config appsettings
+            # delete` is NOT a server-side per-key delete: the app-settings
+            # sub-resource is replace-the-whole-collection, so the CLI GETs the
+            # collection, drops the key client-side and PUTs the whole thing
+            # back, with no ETag and no If-Match. That is the SAME read-modify-
+            # write hazard used to reject a second azapi writer in the ADR. This
+            # mechanism NARROWS the window — it does not eliminate it — and the
+            # narrower window is acceptable only because this step runs inside
+            # the apply job, which is the sole writer to dev infrastructure, and
+            # only when the key is actually present. It is not acceptable
+            # UNDETECTED, so the loss is detected here.
+            #
+            # NAMES ONLY, AND WRITTEN BY THE GATE. Both sets come from the gate's
+            # `--names-out`, so the only thing that can ever land in these files is
+            # a setting NAME the gate chose to emit — the same class of output it
+            # already prints. This step never handles the settings document, which
+            # is what keeps the "document reaches the gate's stdin and nowhere
+            # else" invariant intact. It also costs no extra API call: the BEFORE
+            # set falls out of the assert that already ran, and the AFTER set out
+            # of the re-assert that already follows the delete.
+            #
+            # The pre-deletion NAME set was written by the assert above. If it is
+            # missing or empty the gate did not produce one, and deleting with no
+            # way to detect collateral loss is not acceptable.
+            if [ ! -s "$NAMES_BEFORE" ]; then
+              echo "The gate did not produce a pre-deletion setting NAME set for $APP — failing closed rather than deleting with no way to detect collateral loss." >&2
+              rm -f "$NAMES_BEFORE" "$NAMES_AFTER"
+              exit 1
+            fi
+
             DEL_ERR="$(mktemp)"
             # stdout DISCARDED: this command echoes the app's FULL settings list,
             # values included, on success.
@@ -1154,30 +1215,77 @@ jobs:
               echo "The one-key deletion FAILED — the shadowing setting is still on $APP and host storage is still dead." >&2
               echo "az functionapp config appsettings delete reported:" >&2
               cat "$DEL_ERR" >&2
-              rm -f "$DEL_ERR"
+              rm -f "$DEL_ERR" "$NAMES_BEFORE" "$NAMES_AFTER"
               exit 1
             fi
             rm -f "$DEL_ERR"
 
             # RE-READ AND RE-ASSERT. A delete that reported success is not proof
-            # the site is clean; only reading it back is.
+            # the site is clean; only reading it back is. This same read also
+            # produces the post-deletion NAME set for the comparison below.
             RE_ERR="$(mktemp)"
             set +e
             az functionapp config appsettings list \
               --resource-group "$RG" --name "$APP" \
               --only-show-errors --output json 2>"$RE_ERR" \
-              | scripts/assert-live-host-storage.sh --account-name "$SA"
+              | scripts/assert-live-host-storage.sh --account-name "$SA" --names-out "$NAMES_AFTER"
             RE_RC=("${PIPESTATUS[@]}")
             set -e
             if [ "${RE_RC[0]}" -ne 0 ]; then
               echo "Deleted the setting but could not RE-READ $APP to confirm — failing closed." >&2
               cat "$RE_ERR" >&2
-              rm -f "$RE_ERR"
+              rm -f "$RE_ERR" "$NAMES_BEFORE" "$NAMES_AFTER"
               exit 1
             fi
             rm -f "$RE_ERR"
-            if [ "${RE_RC[1]}" -ne 0 ]; then
-              echo "REMEDIATION DID NOT TAKE — the gate still rejects $APP after the deletion. Do NOT restore shared keys and do NOT remove AzureWebJobsStorage__accountName; that rollback is strictly worse than the defect." >&2
+
+            # THE SET DIFFERENCE. The two NAME sets must differ by EXACTLY the one
+            # key that was removed. Anything else lost, and anything gained, is
+            # RED: that is the read-modify-write hazard actually materialising,
+            # and it is the failure that would otherwise be invisible in HCL for
+            # the same reason the original defect was.
+            #
+            # Names are lowercased for the comparison because App Service folds
+            # case on setting names, so a re-spelling is not a loss and must not
+            # be reported as one.
+            if [ ! -s "$NAMES_AFTER" ]; then
+              echo "The gate did not produce a post-deletion setting NAME set for $APP — failing closed. Collateral loss cannot be ruled out." >&2
+              rm -f "$NAMES_BEFORE" "$NAMES_AFTER"
+              exit 1
+            fi
+            BEFORE_SORTED="$(mktemp)"
+            AFTER_SORTED="$(mktemp)"
+            tr '[:upper:]' '[:lower:]' < "$NAMES_BEFORE" | sort > "$BEFORE_SORTED"
+            tr '[:upper:]' '[:lower:]' < "$NAMES_AFTER" | sort > "$AFTER_SORTED"
+            LOST="$(comm -23 "$BEFORE_SORTED" "$AFTER_SORTED")"
+            GAINED="$(comm -13 "$BEFORE_SORTED" "$AFTER_SORTED")"
+            EXPECTED_LOSS="$(printf '%s' 'AzureWebJobsStorage' | tr '[:upper:]' '[:lower:]')"
+            rm -f "$NAMES_BEFORE" "$NAMES_AFTER" "$BEFORE_SORTED" "$AFTER_SORTED"
+
+            if [ "$LOST" != "$EXPECTED_LOSS" ] || [ -n "$GAINED" ]; then
+              echo "COLLATERAL SETTING LOSS DETECTED on $APP — the one-key deletion changed MORE than the one key." >&2
+              echo "  expected to lose exactly: $EXPECTED_LOSS" >&2
+              echo "  actually lost:" >&2
+              printf '%s\n' "$LOST" | sed 's/^/      /' >&2
+              echo "  gained:" >&2
+              printf '%s\n' "$GAINED" | sed 's/^/      /' >&2
+              echo "CAUSE: the app-settings sub-resource is replace-the-whole-collection, and 'az functionapp config appsettings delete' performs a CLIENT-SIDE read-modify-write with no ETag and no If-Match. A concurrent writer between its GET and its PUT loses whatever it wrote. Settings the module never declares (health-check ping-failure, App Insights connection string and instrumentation key, deployment storage) are the ones most likely lost, and their loss is invisible in HCL." >&2
+              echo "DO NOT re-run this workflow to 'fix' it — re-apply Terraform and inspect the live settings against docs/infrastructure/mg58-host-storage-verification.md first." >&2
+              exit 1
+            fi
+            echo "Bounded: the deletion removed exactly one setting name and added none." >&2
+            # THE RE-ASSERT OUTCOMES MEAN DIFFERENT THINGS AND MUST NOT BE
+            # COLLAPSED. Reporting "remediation did not take" when the deletion
+            # in fact succeeded points an operator at the wrong thing during an
+            # incident: they go looking at the delete and the identity's
+            # permissions, when what remains is a separate violation the gate has
+            # already named above. Fail-loud in BOTH cases — this is about naming
+            # the right cause, not softening the failure.
+            if [ "${RE_RC[1]}" -eq 3 ]; then
+              echo "REMEDIATION DID NOT TAKE — the scalar AzureWebJobsStorage setting is STILL PRESENT on $APP after the deletion reported success. The shadowing setting is live and host storage is still dead. Do NOT restore shared keys and do NOT remove AzureWebJobsStorage__accountName; that rollback is strictly worse than the defect." >&2
+              exit 1
+            elif [ "${RE_RC[1]}" -ne 0 ]; then
+              echo "The scalar AzureWebJobsStorage setting WAS REMOVED from $APP, but the gate still rejects it for another reason — see the violations above (exit ${RE_RC[1]}). The shadowing defect is fixed; a DIFFERENT host-storage violation remains, most likely the identity form being absent, duplicated, or naming the wrong storage account. Do NOT restore shared keys and do NOT remove AzureWebJobsStorage__accountName; that rollback is strictly worse than the defect." >&2
               exit 1
             fi
 

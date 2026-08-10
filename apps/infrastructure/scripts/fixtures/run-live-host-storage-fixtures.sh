@@ -90,7 +90,19 @@ INJECTED="${HERE}/live-appsettings-scalar-injected.json"
 MISMATCH="${HERE}/live-appsettings-accountname-mismatch.json"
 SENTINEL_FIXTURE="${HERE}/live-appsettings-sentinel.json"
 
-for required in "${CLEAN}" "${INJECTED}" "${MISMATCH}" "${SENTINEL_FIXTURE}"; do
+# CASE-VARIANT CONTROLS. App Service app-setting names are CASE-INSENSITIVE, so
+# each of these documents carries THE FORBIDDEN SCALAR SETTING just as surely as
+# live-appsettings-scalar-injected.json does — the Functions host resolves any of
+# them ahead of the identity form. A case-SENSITIVE gate returned PASS on exactly
+# this shape, which meant the apply job took its clean branch and never
+# remediated: a fail-open in the one gate authoritative for this defect class.
+# These are committed rather than derived because the fixture pair IS the proof.
+LOWERCASE="${HERE}/live-appsettings-scalar-lowercase.json"
+UPPERCASE="${HERE}/live-appsettings-scalar-uppercase.json"
+MIXEDCASE="${HERE}/live-appsettings-scalar-mixedcase.json"
+
+for required in "${CLEAN}" "${INJECTED}" "${MISMATCH}" "${SENTINEL_FIXTURE}" \
+                "${LOWERCASE}" "${UPPERCASE}" "${MIXEDCASE}"; do
   [ -f "${required}" ] || { echo "FATAL: required fixture missing: ${required}" >&2; exit 2; }
 done
 
@@ -110,6 +122,9 @@ done
 CASES="
 live-appsettings-clean.json 0 file dump
 live-appsettings-scalar-injected.json 3 file dump
+live-appsettings-scalar-lowercase.json 3 file dump
+live-appsettings-scalar-uppercase.json 3 file dump
+live-appsettings-scalar-mixedcase.json 3 file dump
 live-appsettings-accountname-missing.json 1 file dump
 live-appsettings-accountname-mismatch.json 1 file quiet
 live-appsettings-malformed.json 1 file dump
@@ -118,12 +133,13 @@ live-appsettings-clean.json 0 stdin dump
 live-appsettings-scalar-injected.json 3 dash dump
 "
 
-# 8 fixture rows + 2 marker cases + 2 argument cases + 1 non-vacuity case
+# 11 fixture rows + 2 marker cases + 2 argument cases + 1 non-vacuity case
 # + 5 structural fail-closed cases + 2 exact-matching cases + 2 redaction cases
-# + 1 accept-path value-hygiene case + 1 [shape] case + 1 [pair] case.
+# + 1 accept-path value-hygiene case + 1 [shape] case + 1 [pair] case
+# + 3 [case] remediation-branch cases + 1 [case-pair] case + 2 [names-out] cases.
 # Raise this floor whenever a case is added, so the harness cannot quietly run
 # fewer than it advertises.
-MIN_CHECKS_PER_SHELL=25
+MIN_CHECKS_PER_SHELL=34
 
 # Resolve each shell to an ABSOLUTE path.
 SHELL_BINS=""
@@ -263,6 +279,76 @@ for shell_bin in ${SHELL_BINS}; do
     echo "  ✓ [marker] the clean document emits NO SCALAR_KEY_PRESENT line on either stream"
   else
     echo "  ✗ [marker] the clean document emitted a SCALAR_KEY_PRESENT marker (${clean_marker} occurrence(s)) — the apply job would delete a setting on a healthy site" >&2
+    failures=$((failures + 1))
+  fi
+
+  # --- CASE-VARIANT cases -----------------------------------------------------
+  # THE DEMONSTRATED FAIL-OPEN, pinned. Each case-variant document must not
+  # merely be REJECTED — it must enter the SAME one-key remediation branch the
+  # canonical spelling enters. That means two things together, and neither alone
+  # is sufficient:
+  #   * exit 3, not 1. The apply job remediates on 3 specifically; a variant that
+  #     collapsed to 1 would be reported and then left on the site.
+  #   * the `SCALAR_KEY_PRESENT=AzureWebJobsStorage` marker, exactly once, on
+  #     STDOUT, spelled CANONICALLY. The marker is the gate/workflow contract and
+  #     the workflow deletes the canonical name; the management plane folds case,
+  #     so the canonical name removes whichever capitalisation is live. A marker
+  #     echoing the OBSERVED spelling instead would still delete the right
+  #     setting, but it would break the contract the spec pins, so it is asserted
+  #     in the canonical form deliberately.
+  for casevar in "lowercase:${LOWERCASE}" "uppercase:${UPPERCASE}" "mixedcase:${MIXEDCASE}"; do
+    case_label="${casevar%%:*}"
+    case_path="${casevar#*:}"
+    checks=$((checks + 1))
+    "${shell_bin}" "${GATE}" --account-name "${ACCOUNT}" "${case_path}" >"${OUT}" 2>"${ERR}"
+    code=$?
+    case_marker="$(grep -c "^SCALAR_KEY_PRESENT=${SCALAR_KEY}\$" "${OUT}" 2>/dev/null || true)"
+    case_marker="$(printf '%s' "${case_marker}" | tr -d ' ')"
+    if [ "${code}" -eq 3 ] && [ "${case_marker}" = "1" ]; then
+      echo "  ✓ [case/${case_label}] a case-variant scalar key is exit 3 and emits the canonical SCALAR_KEY_PRESENT marker — it enters the same one-key remediation branch"
+    else
+      echo "  ✗ [case/${case_label}] expected exit 3 with exactly one canonical SCALAR_KEY_PRESENT marker, got exit ${code} with ${case_marker} marker(s)" >&2
+      if [ "${code}" -eq 0 ]; then
+        echo "      FAIL-OPEN: App Service app-setting names are CASE-INSENSITIVE, so this document carries the forbidden scalar setting and the host resolves it ahead of the identity form. A PASS here means the apply job takes its clean branch and never remediates." >&2
+      fi
+      sed 's/^/      /' "${OUT}" >&2
+      failures=$((failures + 1))
+    fi
+  done
+
+  # --- NAMES-OUT cases --------------------------------------------------------
+  # `--names-out` is load-bearing for the apply job's collateral-loss detection:
+  # it compares the setting NAME set before its one-key delete against the set
+  # after, and fails RED on any other difference. Two properties matter.
+  #   * It writes NAMES ONLY. The whole reason the gate exports this rather than
+  #     the caller capturing it is that the settings document must never leave
+  #     the gate's stdin; that is worthless if the export leaks values.
+  #   * It FAILS CLOSED when it cannot write. A caller that proceeded to delete
+  #     with an empty or stale set would compare against nothing and conclude
+  #     nothing was lost — the vacuous-PASS shape this gate exists to close.
+  checks=$((checks + 1))
+  names_out="${WORK}/names-out.txt"
+  rm -f "${names_out}"
+  "${shell_bin}" "${GATE}" --account-name "${ACCOUNT}" --names-out "${names_out}" "${SENTINEL_FIXTURE}" >"${OUT}" 2>"${ERR}"
+  code=$?
+  no_hits="$(grep -o "${SENTINEL}" "${names_out}" 2>/dev/null | wc -l | tr -d ' ')"
+  no_lines="$(grep -c . "${names_out}" 2>/dev/null || true)"
+  no_lines="$(printf '%s' "${no_lines}" | tr -d ' ')"
+  if [ "${code}" -eq 3 ] && [ "${no_hits}" = "0" ] && [ "${no_lines}" -gt 0 ]; then
+    echo "  ✓ [names-out] wrote ${no_lines} setting NAME(s) and NOT the sentinel that laces every value in that fixture"
+  else
+    echo "  ✗ [names-out] expected exit 3 and a names-only export, got exit ${code} with ${no_lines} line(s) and ${no_hits} sentinel occurrence(s)" >&2
+    failures=$((failures + 1))
+  fi
+
+  checks=$((checks + 1))
+  "${shell_bin}" "${GATE}" --account-name "${ACCOUNT}" --names-out "${WORK}/no-such-dir/names.txt" "${CLEAN}" >"${OUT}" 2>&1
+  code=$?
+  if [ "${code}" -eq 1 ] && grep -q 'FATAL' "${OUT}"; then
+    echo "  ✓ [names-out] an unwritable --names-out path is FATAL even on an otherwise CLEAN document — fail-closed"
+  else
+    echo "  ✗ [names-out] expected exit 1 with a FATAL on an unwritable --names-out path, got ${code}" >&2
+    sed 's/^/      /' "${OUT}" >&2
     failures=$((failures + 1))
   fi
 
@@ -486,6 +572,47 @@ for shell_bin in ${SHELL_BINS}; do
     failures=$((failures + 1))
   else
     echo "  ✓ [pair] clean and scalar-injected differ by EXACTLY the ${SCALAR_KEY} entry, whose value is byte-identical to the live observation"
+  fi
+
+  # --- CASE-PAIR case: the variants are one-key mutations too ------------------
+  # Same discipline as [pair], applied to the three case-variant controls. Each
+  # must differ from the clean document by EXACTLY ONE entry; that entry must
+  # lowercase to the scalar key, must NOT be spelled canonically (or it is just a
+  # duplicate of the injected fixture and proves nothing about case), and must
+  # carry the live scalar value. Without this, a fixture edit that "fixed" the
+  # capitalisation would leave the [case] rows green while testing nothing.
+  checks=$((checks + 1))
+  casepair_err=""
+  for casevar in "lowercase:${LOWERCASE}" "uppercase:${UPPERCASE}" "mixedcase:${MIXEDCASE}"; do
+    case_label="${casevar%%:*}"
+    case_path="${casevar#*:}"
+    [ -n "${casepair_err}" ] && continue
+    cp_norm="$(jq -S --arg s "${SCALAR_KEY}" '
+      map(select((.name | ascii_downcase) != ($s | ascii_downcase))) | sort_by(.name)
+    ' "${case_path}" 2>/dev/null)" || { casepair_err="${case_label}: not parseable JSON"; continue; }
+    cp_names="$(jq -r --arg s "${SCALAR_KEY}" '
+      .[].name | select((. | ascii_downcase) == ($s | ascii_downcase))
+    ' "${case_path}" 2>/dev/null)"
+    cp_count="$(printf '%s' "${cp_names}" | grep -c . || true)"
+    cp_count="$(printf '%s' "${cp_count}" | tr -d ' ')"
+    cp_value="$(jq -r --arg s "${SCALAR_KEY}" '
+      first(.[] | select((.name | ascii_downcase) == ($s | ascii_downcase)) | .value) // ""
+    ' "${case_path}" 2>/dev/null)"
+    if [ "${cp_count}" != "1" ]; then
+      casepair_err="${case_label}: carries ${cp_count} scalar-key entr(y/ies); the mutation is exactly one"
+    elif [ "${cp_names}" = "${SCALAR_KEY}" ]; then
+      casepair_err="${case_label}: spells the key CANONICALLY (${cp_names}) — it is a duplicate of the injected fixture and proves nothing about case-insensitivity"
+    elif [ "${cp_value}" != "${LIVE_SCALAR_VALUE}" ]; then
+      casepair_err="${case_label}: scalar value is not the value observed on the live site — the control has become synthetic"
+    elif [ "${cp_norm}" != "${clean_norm}" ]; then
+      casepair_err="${case_label}: differs from the clean document by MORE than the scalar entry, so its exit 3 is not attributable to the case-variant key"
+    fi
+  done
+  if [ -n "${casepair_err}" ]; then
+    echo "  ✗ [case-pair] ${casepair_err}" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ✓ [case-pair] each case-variant control is a one-key mutation of the clean document, spelled non-canonically, carrying the live scalar value"
   fi
 
   echo "  -- ${shell_bin}: ${checks} checks"

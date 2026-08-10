@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (decision binding; **revised 2026-08-10** — the root cause
   is the provider, not the module, and the ticket's framing changed with it; see
-  *Root cause* and the Honest boundary)
+  _Root cause_ and the Honest boundary)
 - **Date:** 2026-08-09; **revised 2026-08-10**
 - **Ticket:** MG-58 (dev Function host cannot authenticate to `AzureWebJobsStorage`)
 - **Scope:** `apps/infrastructure/modules/functions` (the Flex Function App's
@@ -25,8 +25,8 @@
 > it. The decision below is therefore **to recognise that and put the authority
 > where it can live**: the desired state stays authoritative for the identity
 > form's PRESENCE, and a post-apply assertion against the LIVE site becomes
-> authoritative for the scalar form's ABSENCE. See *Root cause* and
-> *(e) Split authority*.
+> authoritative for the scalar form's ABSENCE. See _Root cause_ and
+> _(e) Split authority_.
 
 > **Honest boundary (revised 2026-08-10).** What is verified, and what is not,
 > stated separately — because the first version of this ADR treated a green
@@ -34,20 +34,54 @@
 > this ticket exists to correct.
 >
 > **Verified in this pass, in the build container, against `/project`:**
-> `npx nx test api-interfaces` green (6 suites, 291 tests);
+> `npx nx test api-interfaces` green (6 suites, 303 tests);
 > `bash apps/infrastructure/scripts/fixtures/run-live-host-storage-fixtures.sh`
-> green under **both** `bash` and `sh` (25 checks each, counts equal), and also
-> under `dash`;
+> green under **both** `bash` and `sh` (34 checks each, counts equal) — and on
+> this machine `/bin/sh` **is** `dash`, so the dash-portability leg is genuinely
+> exercised rather than being `bash` twice;
 > `bash apps/infrastructure/scripts/fixtures/run-flex-secret-gate-fixtures.sh`
 > green under both shells (18 checks each);
 > `bash apps/infrastructure/scripts/tf-static-checks.sh` green across all 19
 > checks with **no allowlist drift in either direction**;
+> `npx nx format:check` clean and `npx tsc -p libs/api-interfaces/tsconfig.spec.json --noEmit` clean;
 > and guard 3 re-proven **by mutation rather than by report** — adding the scalar
 > key to `live-appsettings-clean.json` turned the harness RED (harness exit 1,
 > gate exit 3), and the fixture was restored byte-exact afterwards.
 >
+> **The three review findings of 2026-08-10, each fixed and each re-proven by
+> mutation rather than by assertion:**
+>
+> 1. **Case-variant fail-open (high).** A document carrying `AZUREWEBJOBSSTORAGE`
+>    with the empty-AccountKey connection string plus a correct
+>    `AzureWebJobsStorage__accountName` **exited 0 with PASS**, so the workflow
+>    took its clean branch and never remediated. App Service app-setting names are
+>    **case-insensitive**, so that document is the forbidden setting. Both key
+>    comparisons now fold case with jq `ascii_downcase` on the **whole** key —
+>    POSIX-clean, no bash-4 construct — and whole-key exactness is preserved,
+>    since the lowercased identity form is still a different string. Three
+>    committed fixtures (lower, upper, mixed) assert exit **3** _and_ entry into
+>    the same one-key remediation branch. Reverting only the fold turns exactly
+>    those six harness cases red with `expected exit 3, got 0`.
+> 2. **False safety rationale, and a real detection gap (see _Consequences_).**
+>    The claim that the chosen `az … appsettings delete` avoided the
+>    read-modify-write hazard used to reject a second azapi writer was **wrong**:
+>    the endpoint is replace-whole-collection, so the CLI does a client-side
+>    GET→drop→PUT with no ETag. The wording now records that the mechanism
+>    **narrows** the window rather than eliminating it, and the residual is now
+>    **detected** — the setting NAME set is captured before and after the delete
+>    (via the gate's new `--names-out`, so the settings document still never
+>    leaves the gate's stdin) and must differ by exactly the one removed key.
+>    Simulated end-to-end against stub `az`/`terraform`: a delete that also
+>    dropped an unrelated setting failed RED naming both losses.
+> 3. **Misdirecting operator message (low).** The re-assert outcomes are no longer
+>    collapsed: exit **3** means the delete did not take and the key is still
+>    present; any other nonzero means the delete **succeeded** and a different
+>    violation remains. Both still fail the run. Simulated: a site whose identity
+>    form was absent produced the "WAS REMOVED … another reason" wording, not
+>    "REMEDIATION DID NOT TAKE".
+>
 > **NOT verified in this pass, and why — do not read this as green.** `terraform
-> fmt -check`, `terraform validate` and `terraform test` in
+fmt -check`, `terraform validate` and `terraform test` in
 > `apps/infrastructure/modules/functions` **were not run: no `terraform` (or
 > `tofu`) binary exists in the build container.** They are CI-gated and must be
 > read from the pull request's own run, not from this document. The module change
@@ -65,7 +99,7 @@
 >
 > **Do not read any green guard as "the host can reach its storage account."**
 > That inference — a green guard read as an operational fact — is exactly how
-> this defect shipped past eleven green checks (see *The architectural lesson*).
+> this defect shipped past eleven green checks (see _The architectural lesson_).
 
 ## Context
 
@@ -78,7 +112,7 @@ but left an explicit, written conditional attached to that hardening
 > documented exception (do NOT break Functions).
 
 **The verification was never performed, and the conditional was never settled.**
-What settled instead was an *assumption*, recorded in two places as though it
+What settled instead was an _assumption_, recorded in two places as though it
 were a finding:
 
 - `modules/functions/main.tf` (the `app_settings` header comment) asserted that
@@ -120,11 +154,11 @@ keys are disabled. **The setting that shipped was not wrong; it was SHADOWED.**
 own source at the pinned version**, not inferred from behaviour. Three code
 paths, and all three are load-bearing:
 
-| # | Path | What it does | Why it matters |
-| --- | --- | --- | --- |
-| 1 | **WRITE, unconditional** — `ExpandSiteConfigFunctionFlexConsumptionApp` in `helpers/function_app_schema.go` | Appends the scalar key `AzureWebJobsStorage` to app settings whenever the composed storage string is non-empty, with **no branch on the authentication type**. Called from **both** the create and the update path of `function_app_flex_consumption_resource.go`. | The classic Linux/Windows Function App expanders **in the same file** *do* branch — emitting the `__accountName` form under managed identity and the scalar form otherwise. **The Flex expander never got that branch. That asymmetry is the defect.** |
-| 2 | **THE VALUE** — composed from `StorageStringFmt` | Account name parsed out of `storage_container_endpoint`, plus the `storage_access_key` attribute — which is **EMPTY** under `storage_authentication_type = "SystemAssignedIdentity"`. | Rendering that format with an empty key yields **byte-for-byte** the unusable string observed on the live site. The value is a **fingerprint of provider injection**. |
-| 3 | **READ, concealed** — the resource's settings unpacker | Special-cases the key and routes it **out of `app_settings` into the `storage_access_key` attribute**. | The key **never lands in the `app_settings` map in state**, so **no plan diff on it is representable**, and **the provider can never prune an app setting it does not believe exists**. |
+| #   | Path                                                                                                        | What it does                                                                                                                                                                                                                                                       | Why it matters                                                                                                                                                                                                                                         |
+| --- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | **WRITE, unconditional** — `ExpandSiteConfigFunctionFlexConsumptionApp` in `helpers/function_app_schema.go` | Appends the scalar key `AzureWebJobsStorage` to app settings whenever the composed storage string is non-empty, with **no branch on the authentication type**. Called from **both** the create and the update path of `function_app_flex_consumption_resource.go`. | The classic Linux/Windows Function App expanders **in the same file** _do_ branch — emitting the `__accountName` form under managed identity and the scalar form otherwise. **The Flex expander never got that branch. That asymmetry is the defect.** |
+| 2   | **THE VALUE** — composed from `StorageStringFmt`                                                            | Account name parsed out of `storage_container_endpoint`, plus the `storage_access_key` attribute — which is **EMPTY** under `storage_authentication_type = "SystemAssignedIdentity"`.                                                                              | Rendering that format with an empty key yields **byte-for-byte** the unusable string observed on the live site. The value is a **fingerprint of provider injection**.                                                                                  |
+| 3   | **READ, concealed** — the resource's settings unpacker                                                      | Special-cases the key and routes it **out of `app_settings` into the `storage_access_key` attribute**.                                                                                                                                                             | The key **never lands in the `app_settings` map in state**, so **no plan diff on it is representable**, and **the provider can never prune an app setting it does not believe exists**.                                                                |
 
 ### Three corollaries, each of which changes what "success" looks like
 
@@ -136,7 +170,7 @@ paths, and all three are load-bearing:
    `az functionapp config appsettings delete` was living on borrowed time, and
    nothing in the pipeline would have reported its reversal.
 2. **This is also why the defect survived the last GitOps apply intact.** The
-   apply that shipped PR #42 *updated* the Function App, which re-ran the
+   apply that shipped PR #42 _updated_ the Function App, which re-ran the
    injection. Config-clean and site-dirty are different claims; every gate this
    repo had asserted only the first.
 3. **A NO-OP apply is the correct, SUCCESSFUL outcome for this change.** The
@@ -164,7 +198,7 @@ publish, was the injector.
 
 **The Function host storage is made fully managed-identity; shared keys stay
 disabled on the Functions storage account; there is NO documented key
-exception.** The `ONLY IF` in MG-24 is satisfied by *completing* the
+exception.** The `ONLY IF` in MG-24 is satisfied by _completing_ the
 managed-identity configuration — publishing the one identity-based setting the
 app was missing — not by relaxing the storage posture to accommodate its
 absence. The IoT Hub remains the **sole** documented live-key exception in this
@@ -176,19 +210,19 @@ This is the correct branch on the merits — Flex Consumption fully supports
 identity-based host storage, Microsoft recommends it, and **this same identity
 already authenticates successfully to Cosmos and SignalR**, so the identity
 itself was never in question and the fault was specific to the storage account's
-data plane. (App Insights is *configured* for AAD ingestion but is **not**
+data plane. (App Insights is _configured_ for AAD ingestion but is **not**
 cited as corroboration here: MG-37 records it emitting nothing in dev, so it is
 an unproven path, not a working one.) It is also worth recording that **the
 alternative branch was, concretely, the expensive one.** Restoring keys
 would have had to defeat four independent controls that already encode this
 direction:
 
-| Control | Location | What a key restoration would have to do |
-| --- | --- | --- |
-| The account body itself | `modules/functions/main.tf:129` — `allowSharedKeyAccess = false` in the `azapi_resource.functions_storage` body | Flip it, re-enabling a live account key that Terraform then reads into state |
-| `tf-static-checks.sh` | `scripts/tf-static-checks.sh:498-499` | Defeat a `grep` that fails the PR the moment that line disappears from the module |
-| `tf-plan-secret-inspection.sh`, positive assertion | `scripts/tf-plan-secret-inspection.sh:689-698` | Defeat a positive plan-time assertion that the azapi storage-account body sets `allowSharedKeyAccess=false` |
-| `tf-plan-secret-inspection.sh`, `deploy_storage_key` | `scripts/tf-plan-secret-inspection.sh:425-432`, `578-579` | Defeat a check that rejects a raw storage key **unconditionally on presence** — deliberately not marker-based, because a raw Azure storage key is opaque base64 carrying **no** lexical credential marker (no `AccountKey=`, no `sig=`), so presence is the only signal available |
+| Control                                              | Location                                                                                                        | What a key restoration would have to do                                                                                                                                                                                                                                           |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The account body itself                              | `modules/functions/main.tf:129` — `allowSharedKeyAccess = false` in the `azapi_resource.functions_storage` body | Flip it, re-enabling a live account key that Terraform then reads into state                                                                                                                                                                                                      |
+| `tf-static-checks.sh`                                | `scripts/tf-static-checks.sh:498-499`                                                                           | Defeat a `grep` that fails the PR the moment that line disappears from the module                                                                                                                                                                                                 |
+| `tf-plan-secret-inspection.sh`, positive assertion   | `scripts/tf-plan-secret-inspection.sh:689-698`                                                                  | Defeat a positive plan-time assertion that the azapi storage-account body sets `allowSharedKeyAccess=false`                                                                                                                                                                       |
+| `tf-plan-secret-inspection.sh`, `deploy_storage_key` | `scripts/tf-plan-secret-inspection.sh:425-432`, `578-579`                                                       | Defeat a check that rejects a raw storage key **unconditionally on presence** — deliberately not marker-based, because a raw Azure storage key is opaque base64 carrying **no** lexical credential marker (no `AccountKey=`, no `sig=`), so presence is the only signal available |
 
 Two of those four are CI gates that fail the pull request, and the fourth is
 non-negotiable by construction. A key restoration was therefore never the cheap
@@ -198,14 +232,14 @@ from a posture the repository has already paid for.
 **Rollback is explicitly NOT via shared keys.** If the live proofs do not land —
 that is, if **no `Host lock lease acquired` row appears after a recorded restart
 boundary and no `storageHeartbeat` execution is observed** (the corrected
-signals; see *(i)* — do **not** look for a `Healthy` row, none is ever emitted) —
+signals; see _(i)_ — do **not** look for a `Healthy` row, none is ever emitted) —
 the setting is reverted and MG-58 is re-opened with concrete evidence naming the
-specific element of *this app's* configuration that managed identity cannot
+specific element of _this app's_ configuration that managed identity cannot
 support. "MI was harder" is not that evidence.
 
 **And note what rollback does NOT mean, post-2026-08-10.** Reverting the
 account-name setting is **strictly worse than the defect being fixed**: it
-returns the app to having *no* usable host-storage configuration at all, while
+returns the app to having _no_ usable host-storage configuration at all, while
 the provider keeps injecting the empty-key scalar form regardless. The recorded
 connection-string value
 (`DefaultEndpointsProtocol=https;AccountName=…;AccountKey=;EndpointSuffix=…`) is
@@ -259,10 +293,10 @@ managed identity** on the Functions storage account. **This ticket makes NO role
 change** — no role is added, removed or re-scoped, `tf-managed-role-allowlist.tsv`
 is untouched, and no `bootstrap.sh` re-run is required or implied.
 
-| Role (scope) | Declared at | Feature that requires it | Status |
-| --- | --- | --- | --- |
-| **Storage Blob Data Owner** (storage account) | `modules/functions/main.tf:455-460` | The documented minimum for the host's **required storage**: the host's own containers (`azure-webjobs-hosts`), blob **leases** for the singleton/host lock, **timer schedule status** persistence, and the runtime read of the **deployment package** from the blob container under `storage_authentication_type = "SystemAssignedIdentity"`. | **Justified.** This is the role the account-name setting above is resolved against; it is what makes host storage work at all. |
-| **Storage Queue Data Contributor** (storage account) | `modules/functions/main.tf:462-467` | The justification on record is the one written at `modules/functions/main.tf:443-448` — the Flex runtime's **triggers and scaling** need queue data-plane access on the app's own storage account. | **UNRESOLVED, owned by MG-60.** The question is disputed and undisproven; MG-60 exists to settle it against Microsoft's documented Flex host-storage requirements and **depends on MG-58 landing first**. |
+| Role (scope)                                         | Declared at                         | Feature that requires it                                                                                                                                                                                                                                                                                                                      | Status                                                                                                                                                                                                    |
+| ---------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Storage Blob Data Owner** (storage account)        | `modules/functions/main.tf:455-460` | The documented minimum for the host's **required storage**: the host's own containers (`azure-webjobs-hosts`), blob **leases** for the singleton/host lock, **timer schedule status** persistence, and the runtime read of the **deployment package** from the blob container under `storage_authentication_type = "SystemAssignedIdentity"`. | **Justified.** This is the role the account-name setting above is resolved against; it is what makes host storage work at all.                                                                            |
+| **Storage Queue Data Contributor** (storage account) | `modules/functions/main.tf:462-467` | The justification on record is the one written at `modules/functions/main.tf:443-448` — the Flex runtime's **triggers and scaling** need queue data-plane access on the app's own storage account.                                                                                                                                            | **UNRESOLVED, owned by MG-60.** The question is disputed and undisproven; MG-60 exists to settle it against Microsoft's documented Flex host-storage requirements and **depends on MG-58 landing first**. |
 
 Two rows, matching one-for-one the two `azurerm_role_assignment` blocks that
 exist against the storage account in `modules/functions/main.tf`. (A third
@@ -291,14 +325,14 @@ a **finding to surface** on MG-58, not a silent adjustment.
 **Host storage and deployment storage are two independent authentication
 surfaces that happen to share one storage account.**
 
-| Surface | Configured by | Status through MG-24 |
-| --- | --- | --- |
-| **Deployment** storage — the package ZIP the app runs from | The Flex resource's own `storage_container_type` / `storage_container_endpoint` / `storage_authentication_type = "SystemAssignedIdentity"` arguments (`modules/functions/main.tf:205-208`) | **Fully configured and working.** Confirmed as part of MG-58 rather than assumed: the two surfaces do not share a fate, and this one was never broken. |
-| **Host** storage — the host's own required storage (host lock, leases, timer schedule status, key store) | The `AzureWebJobsStorage__accountName` app setting — **and nothing else** | **Completely unconfigured.** Permanently `AuthenticationFailed`. |
+| Surface                                                                                                  | Configured by                                                                                                                                                                              | Status through MG-24                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Deployment** storage — the package ZIP the app runs from                                               | The Flex resource's own `storage_container_type` / `storage_container_endpoint` / `storage_authentication_type = "SystemAssignedIdentity"` arguments (`modules/functions/main.tf:205-208`) | **Fully configured and working.** Confirmed as part of MG-58 rather than assumed: the two surfaces do not share a fate, and this one was never broken. |
+| **Host** storage — the host's own required storage (host lock, leases, timer schedule status, key store) | The `AzureWebJobsStorage__accountName` app setting — **and nothing else**                                                                                                                  | **Completely unconfigured.** Permanently `AuthenticationFailed`.                                                                                       |
 
 A fully-configured deployment surface **coexisted with a completely
 unconfigured host surface while every guard in the repository stayed green.**
-The guards were green because they asserted the *absence* of the
+The guards were green because they asserted the _absence_ of the
 credential-carrying form, and absence-of-a-credential was silently read as
 presence-of-identity-auth. An invariant of the form "no key is configured here"
 cannot, on its own, distinguish "configured by identity" from "not configured at
@@ -316,7 +350,7 @@ Two corrections follow, both landed in the module change alongside this ADR:
 2. Every absence-asserting guard was **narrowed, not deleted** — each now
    asserts the negative **and** the corresponding positive: the
    credential-carrying `AzureWebJobsStorage` connection-string form and every
-   `*ServiceUri` variant are **absent**, *and* the account-name form is
+   `*ServiceUri` variant are **absent**, _and_ the account-name form is
    **present**. A pure-absence assertion is now understood to be a
    half-assertion wherever a positive counterpart exists.
 
@@ -325,17 +359,17 @@ Two corrections follow, both landed in the module change alongside this ADR:
 **The desired state stays authoritative for the identity form's PRESENCE. A
 post-apply assertion against the LIVE site becomes authoritative for the scalar
 form's ABSENCE.** These are two different claims on two different surfaces, and
-after *Root cause* there is no surface that can carry both.
+after _Root cause_ there is no surface that can carry both.
 
-| Claim | Authority | Enforced by |
-| --- | --- | --- |
-| `AzureWebJobsStorage__accountName` is present, Terraform-owned, and equals `var.storage_account_name` | **The desired state** — `modules/functions/main.tf` | `tests/security_posture.tftest.hcl`, `tests/flex_hosting_behavior.tftest.hcl` (unchanged by this revision) |
-| The scalar `AzureWebJobsStorage` is **absent from the deployed site** | **The live post-apply gate** — and nowhere else, because nowhere else *can* | `scripts/assert-live-host-storage.sh`, run by the dev apply job in `.github/workflows/infra-apply-dev.yml`, pinned by `infra-apply-dev.spec.ts` and `infra-security-posture.spec.ts` |
+| Claim                                                                                                 | Authority                                                                   | Enforced by                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AzureWebJobsStorage__accountName` is present, Terraform-owned, and equals `var.storage_account_name` | **The desired state** — `modules/functions/main.tf`                         | `tests/security_posture.tftest.hcl`, `tests/flex_hosting_behavior.tftest.hcl` (unchanged by this revision)                                                                           |
+| The scalar `AzureWebJobsStorage` is **absent from the deployed site**                                 | **The live post-apply gate** — and nowhere else, because nowhere else _can_ | `scripts/assert-live-host-storage.sh`, run by the dev apply job in `.github/workflows/infra-apply-dev.yml`, pinned by `infra-apply-dev.spec.ts` and `infra-security-posture.spec.ts` |
 
 **Guards 1–3 are regression fences, not detectors.** This distinction is the
 whole lesson and is easy to lose. The tftest guards, the plan/state secret
 inspection and the static HCL scan all assert the scalar key's absence from
-*configuration*, where it was **genuinely absent all along** — they passed before
+_configuration_, where it was **genuinely absent all along** — they passed before
 the defect, during the defect, and after it. They protect against **a human
 reintroducing the key in HCL**, which is a real risk worth fencing. They are
 structurally incapable of observing **the injection that actually shipped**.
@@ -427,10 +461,10 @@ volume that vanishes both when the defect is fixed **and** when ingestion simply
 stops. So absence remains inadmissible. The fix is to demand **positive signals
 that are stronger than a log line**:
 
-| Signal | Why it proves working host storage |
-| --- | --- |
+| Signal                                                           | Why it proves working host storage                                                                                                                                    |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`Host lock lease acquired`** after a recorded restart boundary | The host lock is a **blob lease IN the host storage account**. It **cannot be taken** without working data-plane access. This is proof by consequence, not by report. |
-| **A `storageHeartbeat` timer execution** | The timer's **schedule status and singleton lease live in that same account**. A timer that fires has necessarily read and written host storage. |
+| **A `storageHeartbeat` timer execution**                         | The timer's **schedule status and singleton lease live in that same account**. A timer that fires has necessarily read and written host storage.                      |
 
 **Proof by consequence is stronger than a log line**, which is why this is an
 upgrade rather than a workaround: a log line asserts that some component believed
@@ -468,9 +502,9 @@ in this pass is comment-only.
 - **(a) DECLARE `AzureWebJobsStorage` in the module's `app_settings`** (set it to
   the empty string, or to the identity form, to override the injection).
   **REJECTED — it works on the wire and fails permanently in the plan.**
-  Declaring the key *would* suppress the injected value on the deployed site: the
+  Declaring the key _would_ suppress the injected value on the deployed site: the
   module's setting wins the merge. But the **read path routes that key out of
-  `app_settings` into `storage_access_key`** (*Root cause*, path 3), so state can
+  `app_settings` into `storage_access_key`** (_Root cause_, path 3), so state can
   **never** carry a key the configuration does. Config-has / state-lacks is a
   **permanent diff**: every plan proposes to add it, every apply "adds" it, and
   every subsequent plan proposes it again. That **reddens the final drift gate on
@@ -497,6 +531,17 @@ in this pass is comment-only.
   alongside `azurerm`. Sole ownership of a resource and shared ownership of a
   replace-whole-collection sub-resource are not the same pattern, and the
   existing precedent should not be read as licensing the second.
+
+  **Note the honest limit of this rejection.** The read-modify-write hazard named
+  here is **not** absent from the mechanism actually chosen — `az functionapp
+config appsettings delete` performs the same client-side GET→drop→PUT against
+  the same replace-whole-collection endpoint. What distinguishes them is
+  **exposure, not immunity**: (b) would install a permanent second writer racing
+  `azurerm` on every apply, while the remediation is a one-call window inside the
+  sole writer, fires only when the key is present, and has its collateral loss
+  **detected** by a before/after setting-NAME set comparison. See the
+  corresponding bullet in _Consequences_.
+
 - **Restore shared keys and use the connection-string `AzureWebJobsStorage`
   form.** **Rejected.** It reintroduces a live storage credential into
   `app_settings` and Terraform state, reverses the posture MG-24 paid for, and
@@ -533,27 +578,69 @@ in this pass is comment-only.
 - **MG-58 is sequenced before MG-53** (the Cosmos shared-throughput migration),
   so that a cutover failure there is not ambiguous between a Cosmos cause and a
   broken host storage plane.
-- **The live proofs are the corrected ones** (see *(i)*). A **positive `Healthy`
+- **The live proofs are the corrected ones** (see _(i)_). A **positive `Healthy`
   row is UNSATISFIABLE and must not be reintroduced** into any acceptance text —
   the platform is silent when healthy. The proofs are: **`Host lock lease
-  acquired`** after a recorded restart boundary, **a `storageHeartbeat` timer
+acquired`** after a recorded restart boundary, **a `storageHeartbeat` timer
   execution**, and **T4** — the exact-SHA `func azure functionapp publish`
   completing with no "app appears to be unhealthy" warning. The first two have
   passed; **T4 is the one still outstanding**, and MG-58 closes only when it
   joins them. Sequence and queries:
-  `docs/infrastructure/mg58-host-storage-verification.md`. The *disappearance* of
+  `docs/infrastructure/mg58-host-storage-verification.md`. The _disappearance_ of
   `Unhealthy` rows remains **not** proof: the dev Log Analytics workspace has a
   hard ingestion cap, and the defect's own ~30s rows are themselves ingestion
-  volume that vanishes when the defect is fixed *and* when ingestion simply
+  volume that vanishes when the defect is fixed _and_ when ingestion simply
   stops.
 - **The dev apply job now holds a new class of authority**: an imperative,
   credentialed management-plane mutation (`az functionapp config appsettings
-  delete`) that sits outside everything the workflow's other gates reason about.
+delete`) that sits outside everything the workflow's other gates reason about.
   It is bounded to **one key on one app**, both resolved from `terraform output`
   rather than from any literal, fires **only** when the gate reports that key
   present, and **never leaves the run green when it fires**. Widening it is a
   security regression, not a convenience: the sub-resource is
   replace-the-whole-collection.
+- **The chosen remediation NARROWS the collateral-loss window; it does not
+  eliminate it. This corrects an earlier claim in this ADR that did not survive
+  scrutiny.** Alternative (b) above is rejected because the app-settings
+  sub-resource is **replace-the-whole-collection**, so a second writer would
+  silently delete settings it does not declare. That reasoning is sound — but it
+  applies to `az functionapp config appsettings delete` **as well**, and the
+  earlier framing implied an asymmetry that does not exist. If the endpoint is
+  replace-whole-collection then **there is no server-side per-key delete**: the
+  CLI must GET the collection, drop the key **client-side**, and PUT the whole
+  collection back, **with no ETag and no `If-Match`**. It inherits exactly the
+  silent-setting-loss hazard used to reject (b). Both cannot be safe for the
+  reason (b) is unsafe.
+
+  **Why the narrower window is nonetheless acceptable here**, stated as a bound
+  rather than an absence:
+  - The remediation runs **inside the apply job**, which is **the only writer to
+    dev infrastructure**. There is no second Terraform writer and no other
+    automation mutating this app, so the GET→PUT window has no expected
+    concurrent writer — whereas (b) would have created a **permanent** second
+    writer racing `azurerm` on **every apply**, which is a standing condition
+    rather than a bounded window.
+  - It fires **only when the key is actually present**, so the steady state is
+    **zero** read-modify-write cycles, not one per run.
+  - The window is **one CLI call wide**, not the lifetime of a resource.
+
+  **And the residual hazard is DETECTED rather than assumed away.** The gate
+  already emits the full list of setting **NAMES**, which costs nothing to
+  capture. The workflow therefore records the name set immediately **before** the
+  delete and again **after**, and asserts the two differ by **exactly the one
+  removed key** — anything else lost, and anything gained, **fails the run RED**
+  and names the read-modify-write cause. That converts an unbounded silent-loss
+  hazard into a **detected** one without adding a second Terraform writer. Names
+  are captured through `jq -r '.[].name'` on a pipe, so no VALUE is written to
+  disk and the secret-hygiene rule below is unaffected.
+
+- **The re-assert outcomes are kept distinct.** After the deletion the gate is
+  re-run, and its exit code carries different meanings that must not be
+  collapsed into "remediation did not take": exit **3** means the delete genuinely
+  did not take and the scalar key is **still present**; any other nonzero means
+  the delete **succeeded** and a **different** violation remains. Collapsing them
+  points an operator at the delete and at the identity's permissions during an
+  incident when the actual remaining fault is elsewhere. Both still fail the run.
 - **The live settings document is never persisted.** `az … appsettings list`
   returns VALUES, connection strings among them, into a retained and broadly
   readable CI log. It is piped **straight into the gate's stdin** — no file, no
@@ -568,20 +655,20 @@ in this pass is comment-only.
   load-bearing security invariant for a gate that has a correct home elsewhere.
   This is a threat-model boundary, not a missing credential.
 - **`main` will go red after Function-App-updating applies** until the provider is
-  fixed upstream — the accepted cost of *(f)*. Steady state on infrastructure-free
+  fixed upstream — the accepted cost of _(f)_. Steady state on infrastructure-free
   pushes is zero deletions and zero red runs.
-- **MG-25 inherits a named activation precondition** *(j)*: no prod apply without
+- **MG-25 inherits a named activation precondition** _(j)_: no prod apply without
   the same live assertion. **MG-58 carries no role delta in any environment.**
 - **This ADR's apparatus has a retirement condition.** If a future `azurerm`
   release gives the Flex expander the authentication-type branch its
   Linux/Windows siblings already have, the injection stops, the live gate goes
   quiet, and the workflow step and its remediation can be removed — leaving the
   desired state authoritative for both claims, as it should have been. Retire it
-  on **observed** silence (see *(g)*), never on a changelog reading alone.
+  on **observed** silence (see _(g)_), never on a changelog reading alone.
 - **Amended alongside this ADR**, both for stating the retracted premise:
   [`mg-24-flex-consumption-hosting-model`](mg-24-flex-consumption-hosting-model.md)
   (the "Flex still deploys and runs" claim, true of deployment storage and false
   of host storage until this ticket) and
   [`mg-24-appinsights-key-in-terraform-state`](mg-24-appinsights-key-in-terraform-state.md)
-  (the Storage row, which inferred full managed identity from the *absence* of a
+  (the Storage row, which inferred full managed identity from the _absence_ of a
   key-based `AzureWebJobsStorage` and now names the positive setting instead).

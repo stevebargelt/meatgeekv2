@@ -35,8 +35,8 @@
 #   * THIS gate becomes authoritative for the scalar form's ABSENCE.
 #
 # WHAT IT ASSERTS, against an `az functionapp config appsettings list` document:
-#   1. The EXACT scalar key `AzureWebJobsStorage` is ABSENT.
-#   2. The EXACT key `AzureWebJobsStorage__accountName` is PRESENT exactly once
+#   1. The scalar key `AzureWebJobsStorage` is ABSENT, in ANY capitalisation.
+#   2. The key `AzureWebJobsStorage__accountName` is PRESENT exactly once
 #      and its value EQUALS the `--account-name` the caller passed (which the
 #      caller resolves from `terraform output`, i.e. from the desired state — so
 #      this compares LIVE against DESIRED, not live against itself).
@@ -45,12 +45,37 @@
 #      Update path injects (whose presence is itself evidence that an UPDATE, not
 #      a create and not `func publish`, was the injector).
 #
-# KEY MATCHING IS EXACT IN BOTH DIRECTIONS, and that is load-bearing. A PREFIX
-# match would conflate the two forms and make this gate either permanently red
-# (`AzureWebJobsStorage__accountName` read as the scalar form) or permanently
-# vacuous (a document carrying ONLY the scalar form read as satisfying the
-# account-name requirement). Both comparisons below are jq `==` on the whole
-# string; no prefix, glob, substring or case-folded test is used anywhere.
+# KEY MATCHING IS WHOLE-KEY IN BOTH DIRECTIONS, and CASE-INSENSITIVE. Both
+# properties are load-bearing, and they are independent — do not collapse them.
+#
+#   * WHOLE-KEY, never a prefix. A PREFIX match would conflate the two forms and
+#     make this gate either permanently RED (`AzureWebJobsStorage__accountName`
+#     read as the scalar form) or permanently VACUOUS (a document carrying ONLY
+#     the scalar form read as satisfying the account-name requirement). Both
+#     comparisons below are jq `==` on the WHOLE string. No prefix, glob or
+#     substring test is used anywhere.
+#
+#   * CASE-INSENSITIVE, because APP SERVICE APP-SETTING NAMES ARE. This is not a
+#     stylistic loosening of the point above; it closes a demonstrated FAIL-OPEN.
+#     A site carrying `AZUREWEBJOBSSTORAGE` (or any other capitalisation) with
+#     the empty-AccountKey connection string is carrying THE FORBIDDEN SETTING —
+#     the Functions host resolves it exactly as it resolves the canonical
+#     spelling, because the platform folds case on setting names. A
+#     case-SENSITIVE comparison returned PASS on that document, so the workflow
+#     took its clean branch and never remediated: the one gate in this system
+#     authoritative for this defect class was blind to a spelling of the very
+#     key it exists to keep off the site.
+#
+# The two properties HOLD AT ONCE, which is why case-folding costs nothing here:
+# whole-key equality is evaluated on the lowercased key, and the lowercased
+# identity form (`azurewebjobsstorage__accountname`) is still a DIFFERENT STRING
+# from the lowercased scalar form (`azurewebjobsstorage`). Neither can be
+# mistaken for the other, in either direction, in any capitalisation.
+#
+# Only the KEY is folded. The account-name VALUE is compared with exact `==`:
+# storage account names are lowercase by Azure's own naming rule, so folding the
+# value would buy nothing and would silently accept a value the platform cannot
+# actually have issued.
 #
 # OUTPUT CONTRACT — NAMES AND REASONS, NEVER VALUES.
 # The document this gate consumes carries app setting VALUES, and among them
@@ -89,7 +114,7 @@
 #      is never a PASS, and "cannot tell" is never "nothing to see".
 #
 # USAGE
-#   assert-live-host-storage.sh --account-name <name> <settings.json>
+#   assert-live-host-storage.sh --account-name <name> [--names-out <file>] <settings.json>
 #   az functionapp config appsettings list -g RG -n APP -o json \
 #     | assert-live-host-storage.sh --account-name <name>
 #   assert-live-host-storage.sh --account-name <name> -      # explicit stdin
@@ -115,7 +140,7 @@ IDENTITY_KEY="AzureWebJobsStorage__accountName"
 die() { echo "${PROG}: FATAL: $*" >&2; exit 1; }   # fail-closed
 
 usage() {
-  echo "usage: ${PROG}.sh --account-name <storage-account-name> [<appsettings.json>|-]" >&2
+  echo "usage: ${PROG}.sh --account-name <storage-account-name> [--names-out <file>] [<appsettings.json>|-]" >&2
   echo "       az functionapp config appsettings list -g RG -n APP -o json | ${PROG}.sh --account-name <name>" >&2
 }
 
@@ -127,6 +152,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required but not on PATH"
 # expectation is the vacuous-PASS class this whole file exists to close.
 ACCOUNT_NAME=""
 INPUT=""
+NAMES_OUT=""
 have_input=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -138,6 +164,15 @@ while [ "$#" -gt 0 ]; do
     --account-name=*)
       # POSIX parameter expansion; no bash-only string ops.
       ACCOUNT_NAME="${1#--account-name=}"
+      shift
+      ;;
+    --names-out)
+      [ "$#" -ge 2 ] || { usage; die "--names-out requires a value"; }
+      NAMES_OUT="$2"
+      shift 2
+      ;;
+    --names-out=*)
+      NAMES_OUT="${1#--names-out=}"
       shift
       ;;
     -h|--help)
@@ -241,23 +276,66 @@ echo "${PROG}: live setting NAMES (values deliberately NOT shown):"
 printf '%s\n' "${names}" | sed 's/^/      /'
 echo
 
+# --- 3b. Optional NAME-SET export -------------------------------------------
+# `--names-out <file>` writes the setting NAME list, one per line, verbatim and
+# unsorted, to a caller-supplied path. It exists so the apply job can compare the
+# name set BEFORE its one-key deletion against the set AFTER, and fail if the two
+# differ by anything other than that one key.
+#
+# WHY THE GATE WRITES THIS AND NOT THE CALLER. `az functionapp config appsettings
+# list` returns VALUES. The invariant that makes this whole step safe is that the
+# settings document reaches THIS SCRIPT'S STDIN AND NOWHERE ELSE — no file, no
+# tee, no artifact, no command substitution. A caller that captured names for
+# itself would have to run a second `az ... list` and pipe it somewhere other
+# than here, which is precisely the shape that invariant forbids and which a
+# later edit could widen from `.[].name` to `.[].value`. Exporting from inside
+# the gate keeps the document's only exit a set of NAMES this script chose to
+# emit — the same class of output it already prints to stdout.
+#
+# Fail-closed: a --names-out that cannot be written is a FATAL, because the
+# caller's collateral-loss detection would otherwise silently compare against an
+# empty or stale set and conclude "nothing else was lost".
+if [ -n "${NAMES_OUT}" ]; then
+  printf '%s\n' "${names}" > "${NAMES_OUT}" 2>/dev/null || \
+    die "could not write the setting NAME list to --names-out path '${NAMES_OUT}' — refusing to continue, because a caller relying on this file for collateral-loss detection would compare against nothing and conclude nothing was lost"
+fi
+
 # --- 4. The two comparisons -------------------------------------------------
-# EXACT equality, both directions, via jq `==`. No prefix/substring/case-folded
-# test appears anywhere: `AzureWebJobsStorage__accountName` must never satisfy or
-# trip the scalar check, and the scalar form must never satisfy the account-name
-# requirement.
+# WHOLE-KEY equality on the LOWERCASED key, both directions, via jq `==` — see
+# the header. No prefix/substring test appears anywhere:
+# `AzureWebJobsStorage__accountName` must never satisfy or trip the scalar
+# check, and the scalar form must never satisfy the account-name requirement.
+# Case is folded with jq's `ascii_downcase`, NOT with a shell case-modification
+# expansion: `${v,,}` is bash 4+ only and this gate must behave identically
+# under bash 3.2, bash 5 and dash.
 scalar_count="$(printf '%s\n' "${JSON}" | jq -r --arg k "${SCALAR_KEY}" '
-  [ .[] | select(.name == $k) ] | length
+  ($k | ascii_downcase) as $want
+  | [ .[] | select((.name | ascii_downcase) == $want) ] | length
 ' 2>/dev/null || echo "__PROBE_ERROR__")"
 case "${scalar_count}" in
   ''|*[!0-9]*) die "the scalar-key probe itself failed on ${SRC} (key ${SCALAR_KEY}) — refusing to report PASS on a comparison that did not provably run" ;;
 esac
 
+# The spelling(s) the site ACTUALLY carries, for the operator. A NAME, so this
+# leaks nothing — and it is the difference between "delete AzureWebJobsStorage"
+# and knowing the site spells it `AZUREWEBJOBSSTORAGE`. (The one-key delete does
+# not need this: the management plane folds case on setting names, so deleting
+# the canonical spelling removes whichever capitalisation is present. It is
+# printed so a human reading the log is not told something that contradicts what
+# they see in the portal.)
+scalar_names="$(printf '%s\n' "${JSON}" | jq -r --arg k "${SCALAR_KEY}" '
+  ($k | ascii_downcase) as $want
+  | .[].name | select((. | ascii_downcase) == $want)
+' 2>/dev/null || echo "__PROBE_ERROR__")"
+[ "${scalar_names}" = "__PROBE_ERROR__" ] && \
+  die "the scalar-key spelling probe itself failed on ${SRC} — refusing to report PASS on a partially-run comparison"
+
 # The account-name verdict is a NAMED STATE, not a boolean, so that "the
 # comparison ran and disagreed" can never be confused with "the comparison did
 # not run". Any value other than the five recognized states is a fatal.
 acct_state="$(printf '%s\n' "${JSON}" | jq -r --arg k "${IDENTITY_KEY}" --arg want "${ACCOUNT_NAME}" '
-  [ .[] | select(.name == $k) ] as $m
+  ($k | ascii_downcase) as $wantkey
+  | [ .[] | select((.name | ascii_downcase) == $wantkey) ] as $m
   | if   ($m | length) == 0            then "MISSING"
     elif ($m | length) > 1             then "DUPLICATE"
     elif (($m[0].value | type) != "string") then "NONSTRING"
@@ -281,6 +359,15 @@ if [ "${scalar_count}" -gt 0 ]; then
   # setting NAME, so this leaks nothing; it exists so the caller never has to
   # parse prose to decide whether the one-key delete applies.
   echo "SCALAR_KEY_PRESENT=${SCALAR_KEY}"
+  # The marker is always the CANONICAL spelling: it is a contract with the apply
+  # workflow's one-key delete, and the management plane folds case, so the
+  # canonical name removes whichever capitalisation is live. The OBSERVED
+  # spelling is reported separately when it differs, so the log never tells an
+  # operator something the portal contradicts.
+  if [ "${scalar_names}" != "${SCALAR_KEY}" ]; then
+    echo "  NOTE: the live site spells this key differently from the canonical form. App Service app-setting names are CASE-INSENSITIVE, so this IS the forbidden scalar setting and the host resolves it exactly as it would the canonical spelling. Observed:"
+    printf '%s\n' "${scalar_names}" | sed 's/^/          /'
+  fi
   report "${SCALAR_KEY}" "the credential-carrying scalar host-storage connection string is PRESENT on the live site. The Functions host resolves this form BEFORE ${IDENTITY_KEY}, so it authenticates with the empty AccountKey this value carries against an account with allowSharedKeyAccess=false, and host storage is dead (no host lock lease, no timer schedule status, 'Process reporting unhealthy' every ~30s). CAUSE: hashicorp/azurerm v4.81.0 composes and writes this key on every Function App create AND Update, and hides it on read by routing it into storage_access_key — it is NOT drift and NOT a human edit, and it is absent from HCL, from the plan and from state by construction. FIX: delete exactly this one setting on this one app, then restart the host. See learnings/decisions/mg-58-host-storage-managed-identity.md and docs/infrastructure/mg58-host-storage-verification.md"
 fi
 
@@ -316,8 +403,14 @@ esac
 # are NOT part of guard 4's contract: turning them into failures here would make
 # this gate red for reasons the ticket did not scope, and a gate that cries wolf
 # gets disabled. NAMES only, as everywhere else.
+# Case-folded on the same rule as the two comparisons above, so a case-variant
+# of either exact key is NOT double-reported here as an "additional variant" —
+# it has already been handled as the key it actually is.
 other_hoststorage="$(printf '%s\n' "${JSON}" | jq -r --arg s "${SCALAR_KEY}" --arg i "${IDENTITY_KEY}" '
-  .[].name | select(startswith($s) and . != $s and . != $i)
+  ($s | ascii_downcase) as $sl
+  | ($i | ascii_downcase) as $il
+  | .[].name
+  | select((. | ascii_downcase) | startswith($sl) and . != $sl and . != $il)
 ' 2>/dev/null || echo "__PROBE_ERROR__")"
 [ "${other_hoststorage}" = "__PROBE_ERROR__" ] && \
   die "the host-storage variant probe itself failed on ${SRC} — refusing to report PASS on a partially-run inspection"

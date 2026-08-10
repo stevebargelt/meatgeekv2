@@ -1974,6 +1974,56 @@ describe('MG-58 guard 4: the live host-storage gate (assert-live-host-storage.sh
     });
   });
 
+  describe('the scalar key is matched in ANY capitalisation (App Service folds case on setting names)', () => {
+    const CASE_FIXTURES = [
+      ['lowercase', 'live-appsettings-scalar-lowercase.json'],
+      ['uppercase', 'live-appsettings-scalar-uppercase.json'],
+      ['mixedcase', 'live-appsettings-scalar-mixedcase.json'],
+    ] as const;
+
+    it.each(CASE_FIXTURES)(
+      'the %s fixture is a ONE-KEY mutation of the clean document, spelled non-canonically',
+      (_label, fixture) => {
+        // Non-vacuity for the behavioural cases below: if one of these drifted
+        // back to the canonical spelling it would silently become a duplicate of
+        // live-appsettings-scalar-injected.json and prove nothing about case.
+        const clean = fixtureJson('live-appsettings-clean.json');
+        const variant = fixtureJson(fixture);
+
+        const extra = variant.filter(e => !clean.some(c => String(c.name) === String(e.name)));
+        expect(extra).toHaveLength(1);
+        const addedName = String(extra[0].name);
+        expect(addedName.toLowerCase()).toBe(SCALAR_KEY.toLowerCase());
+        expect(addedName).not.toBe(SCALAR_KEY);
+
+        // Nothing was removed either — the mutation is purely additive.
+        expect(clean.filter(c => !variant.some(e => String(e.name) === String(c.name)))).toEqual(
+          []
+        );
+        // The identity form survives, so the defect under test is the scalar
+        // form SHADOWING a correct identity form, not a missing identity form.
+        expect(variant.some(e => String(e.name) === IDENTITY_KEY)).toBe(true);
+      }
+    );
+
+    describe.each(SHELLS)('under `%s`', shell => {
+      it.each(CASE_FIXTURES)(
+        'the %s scalar key is REJECTED into the one-key remediation branch',
+        (_label, fixture) => {
+          const run = runGate(shell, ['--account-name', ACCOUNT, fixturePath(fixture)]);
+          // exit 3 specifically: the apply job remediates on 3, so a variant that
+          // collapsed to 1 would be reported and then left on the site.
+          expect(run.code).toBe(3);
+          // The marker is spelled CANONICALLY even when the site is not — it is
+          // the gate/workflow contract, and the management plane folds case, so
+          // deleting the canonical name removes whichever spelling is live.
+          expect(run.stdout).toContain(`SCALAR_KEY_PRESENT=${SCALAR_KEY}`);
+          expect(run.stdout).not.toMatch(/PASS/);
+        }
+      );
+    });
+  });
+
   describe('non-vacuity, proven by mutating the GATE (not by asserting it works)', () => {
     /**
      * Copy the gate, apply one textual mutation, and require the MUTANT to reach
@@ -2036,8 +2086,8 @@ describe('MG-58 guard 4: the live host-storage gate (assert-live-host-storage.sh
       // things: it makes the gate permanently red on a correctly-configured
       // site, which is how a gate gets disabled and stops guarding anything.
       const gate = mutantOf(
-        'select(.name == $k) ] | length',
-        'select(.name | startswith($k)) ] | length'
+        'select((.name | ascii_downcase) == $want) ] | length',
+        'select((.name | ascii_downcase) | startswith($want)) ] | length'
       );
       const mutant = runGate(
         'bash',
@@ -2054,6 +2104,35 @@ describe('MG-58 guard 4: the live host-storage gate (assert-live-host-storage.sh
         fixturePath('live-appsettings-clean.json'),
       ]);
       expect(real.code).toBe(0);
+    });
+
+    it('a CASE-SENSITIVE gate ACCEPTS a case-variant scalar key — the fail-open this fold closes', () => {
+      // THE DEMONSTRATED DEFECT, pinned as a mutation so it cannot silently
+      // return. App Service app-setting names are CASE-INSENSITIVE, so a site
+      // carrying `AZUREWEBJOBSSTORAGE` with the empty-AccountKey connection
+      // string is carrying the forbidden setting and the host resolves it ahead
+      // of the identity form. Reverting the fold makes the gate report PASS on
+      // exactly that document — which is what made the apply job take its clean
+      // branch and never remediate.
+      const gate = mutantOf(
+        '($k | ascii_downcase) as $want\n  | [ .[] | select((.name | ascii_downcase) == $want) ] | length',
+        '$k as $want\n  | [ .[] | select(.name == $want) ] | length'
+      );
+      for (const fixture of [
+        'live-appsettings-scalar-lowercase.json',
+        'live-appsettings-scalar-uppercase.json',
+        'live-appsettings-scalar-mixedcase.json',
+      ]) {
+        const mutant = runGate('bash', ['--account-name', ACCOUNT, fixturePath(fixture)], { gate });
+        expect({ fixture, code: mutant.code }).toEqual({ fixture, code: 0 });
+        expect(mutant.stdout).toMatch(/PASS/);
+
+        // ...and the real gate rejects the same document into the remediation
+        // branch. The pair is the proof.
+        const real = runGate('bash', ['--account-name', ACCOUNT, fixturePath(fixture)]);
+        expect({ fixture, code: real.code }).toEqual({ fixture, code: 3 });
+        expect(real.stdout).toContain(`SCALAR_KEY_PRESENT=${SCALAR_KEY}`);
+      }
     });
 
     it('a gate whose structural validation is removed reports a vacuous PASS on `{}` — why fail-closed is asserted', () => {

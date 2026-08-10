@@ -1426,6 +1426,58 @@ describe('MG-23: infra-apply-dev.yml — automated dev GitOps reconciliation', (
       expect(keyFoundBranch).toMatch(/RE_RC/);
     });
 
+    it('DETECTS collateral setting loss around the delete, and fails RED on it', () => {
+      // `az functionapp config appsettings delete` is NOT a server-side per-key
+      // delete. The app-settings sub-resource is replace-the-whole-collection,
+      // so the CLI GETs the collection, drops the key CLIENT-SIDE and PUTs it
+      // all back with no ETag and no If-Match — the same read-modify-write
+      // hazard the ADR uses to reject a second azapi writer. The mechanism
+      // NARROWS that window; it does not eliminate it. So the residual is
+      // DETECTED rather than assumed away: the setting NAME set is captured
+      // before and after and must differ by exactly the one removed key.
+      const before = /--names-out\s+"\$NAMES_BEFORE"/;
+      const after = /--names-out\s+"\$NAMES_AFTER"/;
+      expect(LIVE_RUN).toMatch(before);
+      expect(LIVE_RUN).toMatch(after);
+      // BOTH sets come from the GATE, never from a second `az ... list` piped
+      // somewhere other than the gate — that shape is what the stdin invariant
+      // above forbids, and it is one edit away from `.[].value`.
+      for (const cmd of LIVE_LINES.filter(l => /--names-out/.test(l))) {
+        expect({ cmd, viaGate: /assert-live-host-storage\.sh/.test(cmd) }).toEqual({
+          cmd,
+          viaGate: true,
+        });
+      }
+      expect(LIVE_RUN).not.toMatch(/appsettings list[\s\S]{0,200}?\|\s*jq/);
+
+      // The comparison exists, is a set difference in BOTH directions, and its
+      // failure is RED — anything else lost, and anything gained.
+      expect(keyFoundBranch).toMatch(/comm -23/);
+      expect(keyFoundBranch).toMatch(/comm -13/);
+      const lossBranch = keyFoundBranch.slice(keyFoundBranch.indexOf('COLLATERAL SETTING LOSS'));
+      expect(lossBranch).toMatch(/exit 1/);
+      expect(keyFoundBranch).not.toMatch(/COLLATERAL SETTING LOSS[\s\S]*?\|\| true/);
+    });
+
+    it('does NOT collapse the two re-assert outcomes into one message', () => {
+      // They mean different things and point an operator at different places
+      // during an incident: exit 3 means the delete did not take and the key is
+      // STILL present; any other nonzero means the delete SUCCEEDED and a
+      // different violation remains. Both still fail the run — this is about
+      // naming the right cause, not softening the failure.
+      expect(keyFoundBranch).toMatch(/RE_RC\[1\]\}?"\s+-eq 3/);
+      const stillPresent = /REMEDIATION DID NOT TAKE[^\n]*STILL PRESENT/;
+      expect(keyFoundBranch).toMatch(stillPresent);
+      // The non-3 branch must NOT reuse the "did not take" wording.
+      const elifIdx = keyFoundBranch.indexOf('elif [ "${RE_RC[1]}" -ne 0 ]');
+      expect(elifIdx).toBeGreaterThan(-1);
+      const otherViolation = keyFoundBranch.slice(elifIdx);
+      expect(otherViolation).not.toMatch(/REMEDIATION DID NOT TAKE/);
+      expect(otherViolation).toMatch(/WAS REMOVED/);
+      expect(otherViolation).toMatch(/another reason/);
+      expect(otherViolation).toMatch(/exit 1/);
+    });
+
     it('FAILS THE RUN even after a successful remediation (no silent self-heal)', () => {
       // The deliberate policy choice, with its cost accepted in the ADR. A
       // remediation that left the run green would reproduce the EXACT property
