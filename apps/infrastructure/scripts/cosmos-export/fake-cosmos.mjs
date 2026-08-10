@@ -28,15 +28,6 @@ export const transportError = () =>
 
 export const authError = () => new FakeCosmosError('Unauthorized', { statusCode: 401 });
 
-// What the service returns for a resource that genuinely is not there: the 404
-// status AND the resource code naming it, which is the only pair the exporter
-// accepts as an absence. Every other metadata failure aborts the run.
-export const notFoundError = () =>
-  new FakeCosmosError('Entity with the specified id does not exist in the system', {
-    statusCode: 404,
-    code: 'NotFound',
-  });
-
 // What an account with disableLocalAuth: true returns to a principal holding
 // only control-plane RBAC (subscription Owner and nothing else).
 export const forbiddenError = () =>
@@ -129,7 +120,7 @@ export function fakeClient(spec, { listError, containerListError } = {}) {
     },
     database(databaseId) {
       const containers = spec[databaseId];
-      if (!containers) throw notFoundError();
+      if (!containers) throw new FakeCosmosError('NotFound', { statusCode: 404 });
       return {
         containers: {
           readAll: () => ({
@@ -144,7 +135,7 @@ export function fakeClient(spec, { listError, containerListError } = {}) {
         delete: mutationGuard('database.delete'),
         container(containerId) {
           const containerSpec = containers[containerId];
-          if (!containerSpec) throw notFoundError();
+          if (!containerSpec) throw new FakeCosmosError('NotFound', { statusCode: 404 });
           return {
             read: async () => ({ resource: { id: containerId } }),
             items: {

@@ -129,13 +129,7 @@ AUTH
                          --database <db>
                            --container <c>      "/dbs/<db>/colls/<c>"
                            With both flags the run addresses the container
-                           directly and makes no database- or account-level call
-                           — until a container metadata read comes back 404. An
-                           absence is then corroborated against the database's
-                           container list (see BEHAVIOUR), which that scope does
-                           not cover, so a container that is NOT there under this
-                           grant exits 4 rather than 1. Grant /dbs/<db> if you
-                           need a missing container reported as a usage error.
+                           directly and makes no database- or account-level call.
                            This is proven against the test fake, NOT yet against
                            a live account — if a container-scoped grant 403s,
                            widen to /dbs/<db> and file it.
@@ -150,20 +144,6 @@ BEHAVIOUR
   retries are exhausted, or any transport error mid-pagination ABORTS with a
   non-zero exit. Nothing is skipped to keep going, and a container that did not
   reconcile is left as a *.jsonl.partial file that no manifest vouches for.
-
-  Nothing is skipped applies to metadata reads too. A container named with
-  --database/--container is passed over ONLY when the service proves it is not
-  there: an unambiguous 404 — that HTTP status AND the not-found resource code
-  — which the parent database's own container list then confirms. Anything else
-  ABORTS with no manifest written: a 403 or 401 carrying a not-found code (exit
-  4), a throttle (3), a 404 the database contradicts by still listing the
-  container, and a 404 whose absence cannot be corroborated (5, or the failure's
-  own code). A single 404 is never taken as proof on its own.
-
-  The manifest records what the run was ASKED for and every requested target it
-  proved absent, so --verify holds the export to that request: a manifest that
-  neither exports a requested container nor records it as absent FAILS
-  verification, even when the account no longer holds the container either.
 
   This tool never creates, updates, upserts, patches or deletes anything.
 
