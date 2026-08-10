@@ -1,0 +1,44 @@
+{
+  "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2-dev-f640e19ae7ab/sqlDatabases/meatgeek-v2-dev-db/containers/temperatures",
+  "location": null,
+  "name": "temperatures",
+  "options": {},
+  "resource": {
+    "analyticalStorageTtl": null,
+    "conflictResolutionPolicy": {
+      "conflictResolutionPath": "/_ts",
+      "conflictResolutionProcedure": "",
+      "mode": "LastWriterWins"
+    },
+    "createMode": null,
+    "defaultTtl": 86400,
+    "etag": "\"00000000-0000-0000-0000-000000000000\"",
+    "id": "temperatures",
+    "indexingPolicy": {
+      "automatic": true,
+      "compositeIndexes": [
+        [
+          { "order": "ascending", "path": "/deviceId" },
+          { "order": "descending", "path": "/timestamp" }
+        ]
+      ],
+      "excludedPaths": [{ "path": "/\"_etag\"/?" }],
+      "includedPaths": [{ "path": "/*" }],
+      "indexingMode": "consistent"
+    },
+    "partitionKey": {
+      "kind": "Hash",
+      "paths": ["/deviceId"],
+      "version": 1
+    },
+    "restoreParameters": null,
+    "rid": "AAAAAAAAAAA=",
+    "ts": 1754000000.0,
+    "uniqueKeyPolicy": {
+      "uniqueKeys": []
+    }
+  },
+  "resourceGroup": "meatgeek-v2-dev-rg",
+  "tags": null,
+  "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers"
+}
