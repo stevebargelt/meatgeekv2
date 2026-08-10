@@ -165,11 +165,14 @@ change goes: PR → `ci.yml`'s `validate-infrastructure` job runs the
 **credentialless** sequence (`assert-credentialless.sh` → `fmt -check` →
 `terraform init -backend=false -input=false -lockfile=readonly` → `validate` →
 `terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard
-fixtures → V1 Cosmos export tool tests (MG-48, `run-tests.mjs`) → per-module
-`terraform test`) → review → merge to `main` →
+fixtures → cross-module propagation fixtures → **live host-storage gate
+fixtures (MG-58)** → V1 Cosmos export tool tests (MG-48, `run-tests.mjs`) →
+per-module `terraform test`) → review → merge to `main` →
 `.github/workflows/infra-apply-dev.yml` runs the fail-closed pre-apply secret
-gate and destroy circuit-breaker, applies the exact saved plan, and then fails
-the run on any drift. Applying dev by hand races that loop.
+gate and destroy circuit-breaker, applies the exact saved plan, fails the run on
+any drift, and then asserts host storage against the **deployed site** (the live
+post-apply gate — see _Verifying the absence of secrets_ below). Applying dev by
+hand races that loop.
 
 There is deliberately **no PR-time `terraform plan` and no PR-reachable Azure
 identity**: the PR job holds `permissions: contents: read` only, binds no GitHub
@@ -386,7 +389,10 @@ string is generated or stored in state.
 
 ### Verifying the absence of secrets in state/plan
 
-Two layers, with clearly different strengths:
+Three layers, with clearly different strengths — and, importantly, different
+**surfaces**. Layers 1 and 2 read the CONFIGURATION (sources, plan, state).
+Layer 3 reads the DEPLOYED SITE, and it is the only one of the three that can
+see a setting Terraform never declared:
 
 1. **`scripts/tf-static-checks.sh` — best-effort static guard.** It flags secret
    OUTPUTS in any module/root `outputs.tf` (direct secret-attribute tokens AND
@@ -435,6 +441,100 @@ Two layers, with clearly different strengths:
    check 12 fails CI if this README stops documenting it as the required
    pre-apply gate.
 
+3. **`scripts/assert-live-host-storage.sh` — the LIVE POST-APPLY gate (MG-58).**
+   The **only** gate in this system capable of _observing_ the MG-58 defect
+   class. Stated plainly, because the alternative reading has already cost a
+   release.
+
+   **The defect class.** The pinned provider (hashicorp/azurerm **4.81.0**)
+   composes and **writes** the scalar `AzureWebJobsStorage` connection string on
+   every Function App create **and every update** — with an empty `AccountKey`
+   under `storage_authentication_type = SystemAssignedIdentity` — and on read
+   routes that key out of `app_settings` into `storage_access_key`. The key is
+   therefore absent from HCL, from `terraform show -json` and from state **by
+   construction**: it cannot be declared away, cannot be pruned, and no plan
+   diff on it is representable. The host resolves the scalar connection-string
+   form **first** and never reaches `AzureWebJobsStorage__accountName`, so it
+   authenticates with an unusable key against an account whose shared keys are
+   disabled, and host storage is dead. That state coexisted with a **fully green
+   pipeline**: every check this repo had asserted the key was absent from the
+   CONFIGURATION, where it genuinely was, and nothing asserted anything about
+   the deployed site.
+
+   **Where it runs — the post-merge dev apply job**
+   (`.github/workflows/infra-apply-dev.yml`), placed **after** the final drift
+   plan (so Terraform's convergence proof is measured against live state this
+   step has not yet perturbed) and **before** the plan shred. It is
+   `if: always()`: a partially-failed apply is the case _most_ likely to have
+   updated the Function App and re-injected the key, so it must still be
+   inspected. It runs inside the **existing** apply job under its existing
+   `id-token: write` and `development-infra-apply` environment — no new job, no
+   new permission, no second login, and **no RBAC change**.
+
+   **Why it cannot run on a PR — the credentialless invariant, not a missing
+   credential.** Asserting against the deployed site needs an Azure identity.
+   `ci.yml`'s `validate-infrastructure` job deliberately holds none
+   (`contents: read` only, no GitHub Environment, no `azure/login`, backend-less
+   init), and `scripts/assert-credentialless.sh` proves that at runtime. Adding
+   an identity there would trade a load-bearing security invariant for a gate
+   that already has a correct home post-merge. What the PR job **does** run is
+   the gate's regression harness,
+   `scripts/fixtures/run-live-host-storage-fixtures.sh` — every fixture _is_ a
+   settings document, so it needs no Azure, no credentials, no `az` and no
+   `terraform` binary.
+
+   **What it asserts**, against the live
+   `az functionapp config appsettings list` document, with the app and the
+   expected storage account resolved from `terraform output` rather than any
+   literal (which is what makes it a live-versus-desired assertion rather than a
+   tautology): the exact scalar key `AzureWebJobsStorage` is **absent**, and
+   `AzureWebJobsStorage__accountName` is **present and exactly equal** to the
+   desired storage account name. Matching is exact in both directions — the
+   identity form never satisfies, nor trips, the scalar check by prefix. It
+   **fails closed** on an unreadable, empty or wrong-typed document ("cannot
+   tell" is never "nothing to see"), and prints setting **NAMES** and fixed
+   reasons only, never a value. The live document is piped **straight into the
+   gate's stdin** — no file, no `tee`, no artifact, no echo — because it carries
+   connection-string values and the job log is retained and broadly readable.
+
+   **It remediates exactly one key, and then FAILS THE RUN.** On finding the
+   scalar key, the workflow deletes **that one setting** on **that one app**,
+   re-reads, re-asserts — and fails anyway. Fail-loud is a deliberate policy
+   choice: a silent self-heal would reproduce the precise invisibility that let
+   a non-fix ship past eleven green checks, and would mask the moment a provider
+   upgrade changes this behaviour in either direction. The cost is stated
+   honestly in the ADR — `main` goes red after any change that updates the
+   Function App, until the provider is fixed upstream. Remediation is
+   conditional on presence, so the steady state on the many pushes that touch no
+   infrastructure is zero deletions and zero red runs. The blast radius is
+   bounded on purpose: the app-settings sub-resource is
+   replace-the-whole-collection, so a broader delete would strip
+   provider-injected settings the module never declares.
+
+   **What layers 1 and 2 are actually for here.** The module's `terraform test`
+   assertions and the config-surface fixture gates — the scalar form absent from
+   the declared settings, exactly one `AzureWebJobsStorage*` key and it the
+   identity form equal to `var.storage_account_name`, and a mutation
+   reintroducing the scalar key turning them red — are **regression fences
+   against a human reintroducing the key in HCL**. They are not, and never were,
+   detectors of the defect that actually shipped: that key was never in HCL.
+   Authority splits accordingly — **the desired state stays authoritative for
+   the identity form's PRESENCE; this live post-apply gate is authoritative for
+   the scalar form's ABSENCE.** See
+   [ADR: MG-58 host storage managed identity](../../learnings/decisions/mg-58-host-storage-managed-identity.md)
+   for the eliminated alternatives (declaring the key produces a permanent
+   drift-gate failure; a second Terraform writer on the app-settings
+   sub-resource would silently delete the provider's other injected settings),
+   and the
+   [host-storage verification runbook](../../docs/infrastructure/mg58-host-storage-verification.md)
+   for the operator proof sequence.
+
+   **Prod is not covered, and that is recorded rather than forgotten.** The same
+   provider and the same module build the prod Function App, so prod inherits
+   the identical injection at its first apply, invisibly to a plan-only
+   pipeline. `infra-deploy-prod.yml` carries that as a named **MG-25 activation
+   precondition**.
+
 ```bash
 # Layer 1 — best-effort static guard (fails CI early on the common patterns):
 scripts/tf-static-checks.sh
@@ -445,6 +545,23 @@ terraform plan -var-file=environments/dev.tfvars -out=tfplan
 terraform show -json tfplan | scripts/tf-plan-secret-inspection.sh
 #   or point it at the plan binary directly:
 #   scripts/tf-plan-secret-inspection.sh tfplan
+
+# Layer 3 — LIVE POST-APPLY, FAIL-CLOSED (MG-58). CI runs this in the post-merge
+# dev apply job; reproducing it by hand needs an identity that can read the app.
+# Pipe the document STRAIGHT in — it carries VALUES, so never tee/redirect/save it.
+az functionapp config appsettings list \
+  --resource-group "$(terraform output -raw resource_group_name)" \
+  --name "$(terraform output -raw function_app_name)" \
+  --only-show-errors --output json \
+  | scripts/assert-live-host-storage.sh \
+      --account-name "$(terraform output -raw storage_account_name)"
+#   exit 0 = clean; exit 3 = the scalar AzureWebJobsStorage key is PRESENT
+#     (delete that ONE setting on that ONE app, re-read, re-assert);
+#   exit 1 = any other violation, or any operational failure.
+
+# The gate's own regression harness — no Azure, no credentials, no terraform
+# binary; CI-wired into the credentialless validate-infrastructure job:
+bash scripts/fixtures/run-live-host-storage-fixtures.sh
 ```
 
 ## Security Notes

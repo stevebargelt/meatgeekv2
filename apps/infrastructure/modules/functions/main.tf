@@ -32,7 +32,12 @@
 #     identity-based, account-name form, which carries no credential. Neither
 #     surface implies the other: a fully-configured deployment surface coexisted
 #     with a completely unconfigured host surface for the whole of MG-24, which is
-#     why the two are now asserted as two independent invariants.
+#     why the two are now asserted as two independent invariants. NOTE that this
+#     module is authoritative for that setting's PRESENCE only: the pinned
+#     provider injects the credential-carrying SCALAR AzureWebJobsStorage form on
+#     every create and every update and hides it on read, so its ABSENCE is
+#     asserted post-apply against the LIVE site, not here. The long comment above
+#     app_settings records the provider evidence and names the gate.
 #   * Application Insights ingestion is identity-based (AAD): the managed
 #     identity is granted 'Monitoring Metrics Publisher' on the App Insights
 #     resource (root module) and the host authenticates telemetry via
@@ -256,9 +261,80 @@ resource "azurerm_function_app_flex_consumption" "main" {
   # "app appears to be unhealthy" warning. Only DEPLOYMENT storage is configured
   # by the resource's own storage_* arguments above; HOST storage
   # (AzureWebJobsStorage) is a SEPARATE authentication surface on the same account
-  # and must be declared explicitly. The credential-carrying `AzureWebJobsStorage`
-  # connection-string form is still forbidden — the identity-based form below
-  # replaces it.
+  # and must be declared explicitly.
+  #
+  # WHAT THAT CORRECTION DID *NOT* BUY — MG-58 SECOND CORRECTION. Declaring the
+  # identity form below does NOT make this configuration authoritative for the
+  # ABSENCE of the credential-carrying scalar `AzureWebJobsStorage`
+  # connection-string form. The pinned provider WRITES that key itself and then
+  # conceals it on read. Read from the provider's own source at the pinned
+  # version — hashicorp/azurerm v4.81.0, pinned in
+  # apps/infrastructure/.terraform.lock.hcl:
+  #
+  #   * WRITE, UNCONDITIONAL. In helpers/function_app_schema.go,
+  #     ExpandSiteConfigFunctionFlexConsumptionApp appends the scalar key
+  #     "AzureWebJobsStorage" to the app settings whenever the composed storage
+  #     string is non-empty — with NO branch on the authentication type. (The
+  #     classic Linux/Windows Function App expanders in the SAME file DO branch,
+  #     emitting the `__accountName` form under MI and the scalar form otherwise;
+  #     the Flex expander never got that branch. That asymmetry is the defect.)
+  #     It is called from BOTH the create and the update path of
+  #     function_app_flex_consumption_resource.go.
+  #   * THE VALUE IT WRITES. The string is composed from StorageStringFmt with
+  #     the account name parsed out of `storage_container_endpoint` above and the
+  #     `storage_access_key` attribute — which is EMPTY under
+  #     storage_authentication_type = "SystemAssignedIdentity". So the injected
+  #     value is the deployment endpoint's account with an EMPTY AccountKey
+  #     field: byte-for-byte the unusable string observed on the live dev site.
+  #   * READ, CONCEALED. The resource's settings unpacker special-cases the key
+  #     and routes it OUT of app_settings INTO the `storage_access_key`
+  #     attribute. The key therefore never lands in the app_settings map in
+  #     state, no plan diff on it is representable, and the provider can never
+  #     prune an app setting it does not believe exists.
+  #
+  # CONSEQUENCE, and it is the whole MG-58 defect. The host resolves the scalar
+  # connection-string form FIRST and never reaches the identity form below, so
+  # the correct setting was not missing — it was SHADOWED by an empty key against
+  # an account whose shared keys are disabled. This is also why the defect
+  # survived a fully green pipeline: config-clean and site-dirty are different
+  # claims, and every gate this repo had asserted only the first. And it is why
+  # the manual `az … appsettings delete` repair was not merely undurable but
+  # SCHEDULED FOR REVERSAL — the update path recomposes the string and re-runs
+  # the settings merge unconditionally, so ANY in-place change to this app (a
+  # tag, a CORS origin, an always-ready count) re-injects the key.
+  #
+  # BOTH HCL ROUTES ARE ELIMINATED ON EVIDENCE, which is why this correction is
+  # COMMENT-ONLY — no expression here changes, and the dev plan stays an in-place
+  # update or a no-op:
+  #   * DECLARING the scalar key in app_settings below would suppress the
+  #     injected value on the wire, but read routes that key into
+  #     `storage_access_key` instead of app_settings — so config would carry a
+  #     key state can never carry, producing a PERMANENT plan diff that fails the
+  #     post-apply drift gate on EVERY run. That is the same shape as the
+  #     APPLICATIONINSIGHTS_CONNECTION_STRING perpetual diff recorded a few lines
+  #     below (MG-24), which is precisely why it was moved to a native
+  #     site_config field — a move with no equivalent available here.
+  #   * A SECOND TERRAFORM WRITER (azapi or otherwise) on the app-settings
+  #     sub-resource fails differently: that sub-resource is
+  #     replace-the-whole-collection, so a second owner would silently DELETE the
+  #     provider's other injected settings (the health-check ping-failure
+  #     setting, the App Insights connection string and instrumentation key, the
+  #     deployment-storage connection string). The azapi precedent above does NOT
+  #     transfer: there azapi is the SOLE owner of a WHOLE resource; here it
+  #     would be a CO-owner of ONE sub-resource.
+  #
+  # SO AUTHORITY IS SPLIT, deliberately. This file remains authoritative for the
+  # PRESENCE of the identity form below, guarded by tests/security_posture.
+  # tftest.hcl and tests/flex_hosting_behavior.tftest.hcl. Authority for the
+  # ABSENCE of the scalar form is NOT here and cannot be put here — it lives in
+  # apps/infrastructure/scripts/assert-live-host-storage.sh, run post-apply
+  # against the LIVE site by the dev apply job in
+  # .github/workflows/infra-apply-dev.yml. That gate is the only surface in this
+  # system on which this defect is representable at all; the tftest guards below
+  # are regression fences against a human reintroducing the key in HCL, not
+  # detectors of the injection. See the MG-58 ADR
+  # (learnings/decisions/mg-58-host-storage-managed-identity.md) and the runbook
+  # (docs/infrastructure/mg58-host-storage-verification.md).
   app_settings = {
     # HOST STORAGE — identity-based, ACCOUNT-NAME form (MG-58).
     #

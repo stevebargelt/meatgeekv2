@@ -46,7 +46,7 @@
  *     (require_authentication=true, Return401, token store disabled, NO client
  *     secret). No anonymous carve-out for business (e.g. startCook) OR health.
  */
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -1522,4 +1522,632 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
   // raw text, it false-positives on the prose in root main.tf that documents WHY
   // the tolerance is forbidden). The real assertion belongs on the emitted
   // condition, in bootstrap.test.sh.
+});
+
+/**
+ * MG-58 guard 4 — the LIVE host-storage gate.
+ *
+ * WHY THIS SUITE EXISTS. Every guard this repo had before MG-58 asserted the
+ * credential-carrying scalar `AzureWebJobsStorage` setting was absent from the
+ * CONFIGURATION — where it was genuinely, permanently absent — and nothing
+ * asserted anything about the DEPLOYED SITE. The pinned azurerm provider
+ * composes and writes that key itself on every Function App create and update
+ * and routes it out of app_settings on read, so it is not representable in HCL,
+ * in the plan document or in state. Config-clean and site-dirty therefore
+ * coexisted behind eleven green checks, and a correct-but-shadowed setting
+ * shipped. `scripts/assert-live-host-storage.sh` is the ONLY gate in the system
+ * on which that defect is representable at all, which makes its own properties
+ * load-bearing in a way an ordinary script's are not.
+ *
+ * PORTABILITY IS A SECURITY PROPERTY HERE, NOT A STYLE NOTE. A gate that ERRORS
+ * on one shell while still reaching a PASS is FAIL-OPEN, and this repo has
+ * already shipped exactly that bug once: the bash-4-only `${1,,}` in
+ * tf-plan-secret-inspection.sh raised "bad substitution" on macOS's default bash
+ * 3.2 and let a foreign connection string through as accepted. The construct
+ * scan below is the same list the dash-portability suite above applies to that
+ * gate, and it is here for the same reason.
+ *
+ * This suite is deliberately NOT a duplicate of
+ * scripts/fixtures/run-live-host-storage-fixtures.sh. That harness proves guard
+ * 3 by mutating FIXTURES; this one pins the GATE — its portability, its
+ * fail-closed posture, its exact key matching — and proves its own
+ * non-vacuity by mutating the SCRIPT and requiring the mutants to go green
+ * where the real gate goes red. Both run on every push; the harness runs in the
+ * credentialless validate-infrastructure job, this in the lint-and-test matrix.
+ */
+describe('MG-58 guard 4: the live host-storage gate (assert-live-host-storage.sh)', () => {
+  const GATE = path.join(INFRA, 'scripts', 'assert-live-host-storage.sh');
+  const FIXTURES = path.join(INFRA, 'scripts', 'fixtures');
+
+  /** What a caller resolves from `terraform output -raw` and passes as --account-name. */
+  const ACCOUNT = 'mgv2dev13bd19e9f03d';
+  const SCALAR_KEY = 'AzureWebJobsStorage';
+  const IDENTITY_KEY = 'AzureWebJobsStorage__accountName';
+  /** Present only in fixture VALUES, never in fixture names — names are printed by design. */
+  const SENTINEL = 'MGSENTINELDONOTLOG';
+
+  /** Both shells the gate must behave IDENTICALLY under. `/bin/sh` is dash here. */
+  const SHELLS = ['bash', 'sh'];
+
+  type Setting = { name: unknown; slotSetting?: unknown; value?: unknown };
+  type Run = { code: number; stdout: string; stderr: string; both: string };
+
+  /**
+   * Run the gate (or a mutant of it) under an explicit shell. stdout and stderr
+   * are captured SEPARATELY — merging them would make the redaction cases below
+   * unable to tell which stream a leaked value reached, and the workflow reads
+   * the `SCALAR_KEY_PRESENT=` marker off stdout specifically.
+   *
+   * `input` always defaults to '' rather than being left unset: an empty stdin
+   * pipe makes a gate that unexpectedly reads stdin fail closed instead of
+   * hanging the test run against jest's inherited terminal.
+   */
+  function runGate(
+    shell: string,
+    args: string[],
+    opts: { input?: string; gate?: string } = {}
+  ): Run {
+    const r = spawnSync(shell, [opts.gate ?? GATE, ...args], {
+      encoding: 'utf8',
+      input: opts.input ?? '',
+    });
+    const stdout = r.stdout ?? '';
+    const stderr = r.stderr ?? '';
+    return { code: r.status ?? 1, stdout, stderr, both: `${stdout}${stderr}` };
+  }
+
+  function fixturePath(name: string): string {
+    return path.join(FIXTURES, name);
+  }
+
+  function fixtureJson(name: string): Setting[] {
+    return JSON.parse(fs.readFileSync(fixturePath(name), 'utf8'));
+  }
+
+  /** Write a generated settings document to a fresh temp dir; returns its path. */
+  function writeDoc(content: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg58-live-'));
+    const file = path.join(dir, 'appsettings.json');
+    fs.writeFileSync(file, content);
+    return file;
+  }
+
+  function writeSettings(settings: Setting[]): string {
+    return writeDoc(JSON.stringify(settings));
+  }
+
+  const src = fs.readFileSync(GATE, 'utf8');
+  /**
+   * Scan CODE only. The gate's header comment legitimately NAMES every forbidden
+   * construct (`${v,,}`, `<<<`, `[[ ]]`, …) while documenting why it is absent,
+   * so a raw scan would false-positive on the prose that exists to keep the
+   * constructs out. Same treatment the inspection gate's suite applies.
+   */
+  const code = src
+    .split('\n')
+    .filter(line => !/^\s*#/.test(line))
+    .join('\n');
+
+  describe('portability: runs identically under bash 3.2, bash 5 and dash — a shell-specific error would be FAIL-OPEN', () => {
+    it('source is free of bash-4-only / bash-only constructs', () => {
+      // ${v,,} / ${v^^} case modification: bash 4+. On bash 3.2 this is a "bad
+      // substitution" — the exact shape of the fail-open already shipped once.
+      expect(code).not.toMatch(/\$\{[A-Za-z_][A-Za-z0-9_]*,,\}/);
+      expect(code).not.toMatch(/\$\{[A-Za-z_][A-Za-z0-9_]*\^\^\}/);
+      // Here-strings and process substitution: bash/ksh only, absent in dash.
+      expect(code).not.toMatch(/<<</);
+      expect(code).not.toMatch(/<\s*<\(/);
+      expect(code).not.toMatch(/<\(/);
+      // Associative arrays: bash 4+, and `local -A` is the sneakier spelling.
+      expect(code).not.toMatch(/declare\s+-A/);
+      expect(code).not.toMatch(/local\s+-A/);
+      // `[[ ]]` is a bash/ksh keyword; dash has only `[`.
+      expect(code).not.toMatch(/\[\[/);
+      // Arrays of any kind, incl. `arr=( ... )` / ${arr[@]}.
+      expect(code).not.toMatch(/\$\{[A-Za-z_][A-Za-z0-9_]*\[[@*]\]\}/);
+    });
+
+    it('enables `set -o pipefail` only behind a support probe (dash would abort on it)', () => {
+      // dash has no pipefail: an unguarded `set -o pipefail` prints "Illegal
+      // option -o pipefail" and perturbs the exit code — a gate whose exit code
+      // is decided by its own option handling is not a gate.
+      const unguarded = code
+        .split('\n')
+        .filter(line => /set\s+-o\s+pipefail/.test(line))
+        .filter(line => !/^\s*if\s+\(set -o pipefail\) 2>\/dev\/null; then/.test(line));
+      expect(unguarded).toEqual([]);
+      expect(code).toMatch(/if \(set -o pipefail\) 2>\/dev\/null; then set -o pipefail; fi/);
+    });
+
+    it('parses cleanly under dash (`sh -n`) — no syntax errors', () => {
+      let status = 0;
+      let out = '';
+      try {
+        out = execFileSync('sh', ['-n', GATE], { encoding: 'utf8' });
+      } catch (e) {
+        const err = e as { status?: number; stderr?: string };
+        status = err.status ?? 1;
+        out = err.stderr ?? '';
+      }
+      expect(status).toBe(0);
+      expect(out).not.toMatch(/bad substitution|syntax error/i);
+    });
+
+    it.each(SHELLS)('under `%s`: the accept path is reached with no shell diagnostic', shell => {
+      const run = runGate(shell, [
+        '--account-name',
+        ACCOUNT,
+        fixturePath('live-appsettings-clean.json'),
+      ]);
+      expect(run.code).toBe(0);
+      expect(run.stdout).toMatch(/PASS/);
+      expect(run.both).not.toMatch(/bad substitution|not found|Illegal option|syntax error/i);
+    });
+
+    it.each(SHELLS)('under `%s`: the reject path is reached with no shell diagnostic', shell => {
+      const run = runGate(shell, [
+        '--account-name',
+        ACCOUNT,
+        fixturePath('live-appsettings-scalar-injected.json'),
+      ]);
+      expect(run.code).toBe(3);
+      expect(run.both).not.toMatch(/bad substitution|Illegal option|syntax error/i);
+    });
+  });
+
+  describe('fail-closed: an assertion that could not run is never a PASS', () => {
+    // Every case here must exit 1, not merely nonzero. 3 is the REMEDIABLE
+    // verdict the apply job answers by DELETING a setting; an unreadable or
+    // malformed document must never route into that branch.
+    describe.each(SHELLS)('under `%s`', shell => {
+      it('a missing input path is FATAL, not "no scalar key found"', () => {
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          path.join(os.tmpdir(), 'mg58-does-not-exist.json'),
+        ]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/input not found/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('an EMPTY document is FATAL — an az call that produced nothing is not a clean site', () => {
+        const run = runGate(shell, ['--account-name', ACCOUNT, writeDoc('')]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/no input \(empty/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('EMPTY STDIN is FATAL — the shape the workflow actually uses when a pipe dies', () => {
+        const run = runGate(shell, ['--account-name', ACCOUNT], { input: '' });
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/no input \(empty stdin\)/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('invalid JSON is FATAL, and the unparseable document is NOT echoed (it carries values)', () => {
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          writeDoc(`[{"name":"AzureWebJobsStorage","value":"AccountKey=${SENTINEL}"`),
+        ]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/not valid JSON/);
+        expect(run.both).not.toContain(SENTINEL);
+      });
+
+      it.each([
+        ['an object', '{}', 'object'],
+        [
+          'a wrapper object with a value array',
+          '{"value":[{"name":"AzureWebJobsStorage__accountName"}]}',
+          'object',
+        ],
+        ['a string', '"nope"', 'string'],
+        ['a number', '123', 'number'],
+      ])(
+        'WRONG-TYPED document (%s) is FATAL — it parses, and would yield a vacuous PASS',
+        (_label, json, typeName) => {
+          const run = runGate(shell, ['--account-name', ACCOUNT, writeDoc(json)]);
+          expect(run.code).toBe(1);
+          expect(run.both).toMatch(new RegExp(`top-level is '${typeName}'`));
+          expect(run.stdout).not.toMatch(/PASS/);
+        }
+      );
+
+      it('a top-level `null` document is FATAL — rejected a stage earlier, still exit 1', () => {
+        // `null` is syntactically valid JSON but `jq -e .` treats it as FALSY and
+        // exits nonzero, so the gate rejects it at the parse check rather than at
+        // the shape check. Different message, same verdict — pinned explicitly so
+        // that an implementer "fixing" the parse check to tolerate a falsy
+        // document cannot do so without noticing this document must still die.
+        const run = runGate(shell, ['--account-name', ACCOUNT, writeDoc('null')]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/FATAL/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('an EMPTY ARRAY is FATAL — a live Function App always carries settings', () => {
+        const run = runGate(shell, ['--account-name', ACCOUNT, writeDoc('[]')]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/EMPTY array/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('MALFORMED entries poison the whole document — the key comparisons ARE the assertion', () => {
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          fixturePath('live-appsettings-malformed.json'),
+        ]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/not objects with a string 'name'/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('a MISSING --account-name is FATAL — a gate with no expectation cannot pass', () => {
+        const run = runGate(shell, [fixturePath('live-appsettings-clean.json')]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/--account-name is required/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('an EMPTY --account-name is FATAL — the same vacuous-PASS hole, spelled differently', () => {
+        const run = runGate(shell, [
+          '--account-name',
+          '',
+          fixturePath('live-appsettings-clean.json'),
+        ]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/--account-name is required/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('the identity form ABSENT from the live site is a violation, not an all-clear', () => {
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          fixturePath('live-appsettings-accountname-missing.json'),
+        ]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(new RegExp(`VIOLATION \\[${IDENTITY_KEY}\\]`));
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('the identity form pointing at the WRONG account is a violation — presence is not the assertion', () => {
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          fixturePath('live-appsettings-accountname-mismatch.json'),
+        ]);
+        expect(run.code).toBe(1);
+        expect(run.both).toMatch(/observed=\[REDACTED\]/);
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+    });
+  });
+
+  describe('key matching is EXACT in both directions', () => {
+    // A prefix/substring/case-folded match would make this gate either
+    // permanently RED (the identity form read as the scalar form) or permanently
+    // VACUOUS (a scalar-only document read as satisfying the account-name
+    // requirement). Both directions are pinned, under both shells.
+    describe.each(SHELLS)('under `%s`', shell => {
+      it(`${IDENTITY_KEY} does NOT trip the scalar check`, () => {
+        // Non-vacuity first: the accepted document really does carry a key that
+        // a prefix match would catch. Without this, a fixture edit that dropped
+        // the identity form would leave this case green and meaningless.
+        const clean = fixtureJson('live-appsettings-clean.json');
+        expect(clean.filter(e => String(e.name).startsWith(SCALAR_KEY)).map(e => e.name)).toEqual([
+          IDENTITY_KEY,
+        ]);
+
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          fixturePath('live-appsettings-clean.json'),
+        ]);
+        expect(run.code).toBe(0);
+        expect(run.stdout).not.toMatch(/SCALAR_KEY_PRESENT/);
+        expect(run.stdout).toMatch(/PASS/);
+      });
+
+      it('other AzureWebJobsStorage* variants do NOT trip the scalar check — they are reported as NOTES', () => {
+        const doc = [
+          { name: 'WEBSITE_HEALTHCHECK_MAXPINGFAILURES', slotSetting: false, value: '10' },
+          { name: IDENTITY_KEY, slotSetting: false, value: ACCOUNT },
+          {
+            name: 'AzureWebJobsStorage__blobServiceUri',
+            slotSetting: false,
+            value: `https://${ACCOUNT}.blob.core.windows.net`,
+          },
+          { name: 'AzureWebJobsStorageSomethingElse', slotSetting: false, value: 'x' },
+        ];
+        const run = runGate(shell, ['--account-name', ACCOUNT, writeSettings(doc)]);
+        expect(run.code).toBe(0);
+        expect(run.stdout).not.toMatch(/SCALAR_KEY_PRESENT/);
+        expect(run.stdout).toMatch(/NOTE: additional AzureWebJobsStorage\* setting NAMES/);
+        expect(run.stdout).toMatch(/AzureWebJobsStorage__blobServiceUri/);
+      });
+
+      it('the SCALAR key alone never satisfies the account-name requirement', () => {
+        // The inverse conflation: a site carrying ONLY the broken form must be
+        // reported as BOTH the shadowing defect AND a missing identity form —
+        // never as "an AzureWebJobsStorage key is present, good enough".
+        const doc = [
+          { name: 'WEBSITE_HEALTHCHECK_MAXPINGFAILURES', slotSetting: false, value: '10' },
+          {
+            name: SCALAR_KEY,
+            slotSetting: false,
+            value: `DefaultEndpointsProtocol=https;AccountName=${ACCOUNT};AccountKey=;EndpointSuffix=core.windows.net`,
+          },
+        ];
+        const run = runGate(shell, ['--account-name', ACCOUNT, writeSettings(doc)]);
+        expect(run.code).toBe(3);
+        expect(run.stdout).toContain(`SCALAR_KEY_PRESENT=${SCALAR_KEY}`);
+        expect(run.both).toMatch(new RegExp(`VIOLATION \\[${IDENTITY_KEY}\\]`));
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+
+      it('the exact scalar key present alongside a correct identity form is exit 3 (remediable), not 1', () => {
+        // The apply job's bounded remediation keys off 3 specifically: it deletes
+        // exactly this one key on exactly one app. If this verdict collapsed into
+        // 1, a remediable defect would stop being remediated.
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          fixturePath('live-appsettings-scalar-injected.json'),
+        ]);
+        expect(run.code).toBe(3);
+        expect(run.stdout).toContain(`SCALAR_KEY_PRESENT=${SCALAR_KEY}`);
+        expect(run.both).toMatch(new RegExp(`VIOLATION \\[${SCALAR_KEY}\\]`));
+        expect(run.stdout).not.toMatch(/PASS/);
+      });
+    });
+  });
+
+  describe('output hygiene: setting NAMES and fixed reasons, never VALUES', () => {
+    // The document this gate consumes carries connection strings, and its own
+    // stdout/stderr lands in a retained, broadly-readable CI log. Captured
+    // SEPARATELY, not merged: "it did not leak to stdout" is not the claim.
+    it.each(SHELLS)(
+      'under `%s`: no setting VALUE reaches stdout or stderr on a rejecting run',
+      shell => {
+        const run = runGate(shell, [
+          '--account-name',
+          ACCOUNT,
+          fixturePath('live-appsettings-sentinel.json'),
+        ]);
+        // The redaction claim is vacuous on a run that accepted — pin the reject.
+        expect(run.code).toBe(3);
+        expect(run.stdout).not.toContain(SENTINEL);
+        expect(run.stderr).not.toContain(SENTINEL);
+        // Names ARE printed by design, so the diagnostic surface is still there.
+        expect(run.stdout).toContain(IDENTITY_KEY);
+      }
+    );
+
+    it('the sentinel fixture hides its sentinels in VALUES only — otherwise the redaction cases are unprovable', () => {
+      const doc = fixtureJson('live-appsettings-sentinel.json');
+      expect(doc.length).toBeGreaterThan(0);
+      expect(doc.filter(e => String(e.name).includes(SENTINEL))).toEqual([]);
+      expect(doc.filter(e => String(e.value).includes(SENTINEL)).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('the committed fixture pair is a genuine one-key mutation control', () => {
+    // Guard 3 is proven by MUTATION, not by assertion. That proof is only worth
+    // anything while the two documents differ by exactly the key under test: if
+    // a later edit made them differ some other way, both exit codes would still
+    // look right and the control would have silently stopped controlling. The
+    // absence of a key is exactly what a PASS looks like, so nothing downstream
+    // can notice this drift — only a direct comparison can.
+    const clean = fixtureJson('live-appsettings-clean.json');
+    const injected = fixtureJson('live-appsettings-scalar-injected.json');
+
+    it('the injected document is the clean document PLUS exactly the scalar key', () => {
+      expect(injected.filter(e => e.name !== SCALAR_KEY)).toEqual(clean);
+      const added = injected.map(e => e.name).filter(n => !clean.some(c => c.name === n));
+      expect(added).toEqual([SCALAR_KEY]);
+      const removed = clean.map(e => e.name).filter(n => !injected.some(i => i.name === n));
+      expect(removed).toEqual([]);
+    });
+
+    it('the clean document still carries the identity form equal to the expected account name', () => {
+      const identity = clean.filter(e => e.name === IDENTITY_KEY);
+      expect(identity).toHaveLength(1);
+      expect(identity[0].value).toBe(ACCOUNT);
+      expect(clean.filter(e => e.name === SCALAR_KEY)).toEqual([]);
+    });
+
+    it('the injected scalar value is the value observed live — the real defect, not a synthetic stand-in', () => {
+      const scalar = injected.filter(e => e.name === SCALAR_KEY);
+      expect(scalar).toHaveLength(1);
+      expect(scalar[0].value).toBe(
+        'DefaultEndpointsProtocol=https;AccountName=mgv2dev13bd19e9f03d;AccountKey=;EndpointSuffix=core.windows.net'
+      );
+      // The AccountKey field is EMPTY, and that is the whole point: this string
+      // is a forensic fingerprint of provider injection, NOT a credential and
+      // NOT a restore path. A fixture edit that put key material here would be
+      // committing a secret to the repo.
+      expect(scalar[0].value).toMatch(/AccountKey=;/);
+    });
+  });
+
+  describe('the scalar key is matched in ANY capitalisation (App Service folds case on setting names)', () => {
+    const CASE_FIXTURES = [
+      ['lowercase', 'live-appsettings-scalar-lowercase.json'],
+      ['uppercase', 'live-appsettings-scalar-uppercase.json'],
+      ['mixedcase', 'live-appsettings-scalar-mixedcase.json'],
+    ] as const;
+
+    it.each(CASE_FIXTURES)(
+      'the %s fixture is a ONE-KEY mutation of the clean document, spelled non-canonically',
+      (_label, fixture) => {
+        // Non-vacuity for the behavioural cases below: if one of these drifted
+        // back to the canonical spelling it would silently become a duplicate of
+        // live-appsettings-scalar-injected.json and prove nothing about case.
+        const clean = fixtureJson('live-appsettings-clean.json');
+        const variant = fixtureJson(fixture);
+
+        const extra = variant.filter(e => !clean.some(c => String(c.name) === String(e.name)));
+        expect(extra).toHaveLength(1);
+        const addedName = String(extra[0].name);
+        expect(addedName.toLowerCase()).toBe(SCALAR_KEY.toLowerCase());
+        expect(addedName).not.toBe(SCALAR_KEY);
+
+        // Nothing was removed either — the mutation is purely additive.
+        expect(clean.filter(c => !variant.some(e => String(e.name) === String(c.name)))).toEqual(
+          []
+        );
+        // The identity form survives, so the defect under test is the scalar
+        // form SHADOWING a correct identity form, not a missing identity form.
+        expect(variant.some(e => String(e.name) === IDENTITY_KEY)).toBe(true);
+      }
+    );
+
+    describe.each(SHELLS)('under `%s`', shell => {
+      it.each(CASE_FIXTURES)(
+        'the %s scalar key is REJECTED into the one-key remediation branch',
+        (_label, fixture) => {
+          const run = runGate(shell, ['--account-name', ACCOUNT, fixturePath(fixture)]);
+          // exit 3 specifically: the apply job remediates on 3, so a variant that
+          // collapsed to 1 would be reported and then left on the site.
+          expect(run.code).toBe(3);
+          // The marker is spelled CANONICALLY even when the site is not — it is
+          // the gate/workflow contract, and the management plane folds case, so
+          // deleting the canonical name removes whichever spelling is live.
+          expect(run.stdout).toContain(`SCALAR_KEY_PRESENT=${SCALAR_KEY}`);
+          expect(run.stdout).not.toMatch(/PASS/);
+        }
+      );
+    });
+  });
+
+  describe('non-vacuity, proven by mutating the GATE (not by asserting it works)', () => {
+    /**
+     * Copy the gate, apply one textual mutation, and require the MUTANT to reach
+     * a verdict the real gate refuses. A green suite proves nothing unless the
+     * assertions can be made to fail; these cases make them fail on demand, in
+     * CI, every run. Each mutation asserts it actually applied before running,
+     * so a rename upstream turns this red rather than silently vacuous.
+     */
+    function mutantOf(from: string, to: string): string {
+      expect(src).toContain(from);
+      const mutated = src.split(from).join(to);
+      expect(mutated).not.toBe(src);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg58-mutant-'));
+      const file = path.join(dir, 'assert-live-host-storage.sh');
+      fs.writeFileSync(file, mutated, { mode: 0o755 });
+      return file;
+    }
+
+    it('a gate whose scalar comparison cannot match ACCEPTS the injected document — so exit 3 is driven by that comparison', () => {
+      const gate = mutantOf(
+        'SCALAR_KEY="AzureWebJobsStorage"',
+        'SCALAR_KEY="AzureWebJobsStorageThisNeverMatchesAnything"'
+      );
+      const mutant = runGate(
+        'bash',
+        ['--account-name', ACCOUNT, fixturePath('live-appsettings-scalar-injected.json')],
+        { gate }
+      );
+      expect(mutant.code).toBe(0);
+      expect(mutant.stdout).toMatch(/PASS/);
+
+      // ...and the real gate, same document, rejects it. The pair is the proof.
+      const real = runGate('bash', [
+        '--account-name',
+        ACCOUNT,
+        fixturePath('live-appsettings-scalar-injected.json'),
+      ]);
+      expect(real.code).toBe(3);
+    });
+
+    it('a gate whose account-name comparison always reports MATCH ACCEPTS the mismatch document', () => {
+      const gate = mutantOf('else "MISMATCH" end', 'else "MATCH" end');
+      const mutant = runGate(
+        'bash',
+        ['--account-name', ACCOUNT, fixturePath('live-appsettings-accountname-mismatch.json')],
+        { gate }
+      );
+      expect(mutant.code).toBe(0);
+
+      const real = runGate('bash', [
+        '--account-name',
+        ACCOUNT,
+        fixturePath('live-appsettings-accountname-mismatch.json'),
+      ]);
+      expect(real.code).toBe(1);
+    });
+
+    it('a gate that matches the scalar key by PREFIX goes RED on the clean site — why exactness is load-bearing', () => {
+      // The other half of the conflation. A prefix match does not merely miss
+      // things: it makes the gate permanently red on a correctly-configured
+      // site, which is how a gate gets disabled and stops guarding anything.
+      const gate = mutantOf(
+        'select((.name | ascii_downcase) == $want) ] | length',
+        'select((.name | ascii_downcase) | startswith($want)) ] | length'
+      );
+      const mutant = runGate(
+        'bash',
+        ['--account-name', ACCOUNT, fixturePath('live-appsettings-clean.json')],
+        {
+          gate,
+        }
+      );
+      expect(mutant.code).toBe(3);
+
+      const real = runGate('bash', [
+        '--account-name',
+        ACCOUNT,
+        fixturePath('live-appsettings-clean.json'),
+      ]);
+      expect(real.code).toBe(0);
+    });
+
+    it('a CASE-SENSITIVE gate ACCEPTS a case-variant scalar key — the fail-open this fold closes', () => {
+      // THE DEMONSTRATED DEFECT, pinned as a mutation so it cannot silently
+      // return. App Service app-setting names are CASE-INSENSITIVE, so a site
+      // carrying `AZUREWEBJOBSSTORAGE` with the empty-AccountKey connection
+      // string is carrying the forbidden setting and the host resolves it ahead
+      // of the identity form. Reverting the fold makes the gate report PASS on
+      // exactly that document — which is what made the apply job take its clean
+      // branch and never remediate.
+      const gate = mutantOf(
+        '($k | ascii_downcase) as $want\n  | [ .[] | select((.name | ascii_downcase) == $want) ] | length',
+        '$k as $want\n  | [ .[] | select(.name == $want) ] | length'
+      );
+      for (const fixture of [
+        'live-appsettings-scalar-lowercase.json',
+        'live-appsettings-scalar-uppercase.json',
+        'live-appsettings-scalar-mixedcase.json',
+      ]) {
+        const mutant = runGate('bash', ['--account-name', ACCOUNT, fixturePath(fixture)], { gate });
+        expect({ fixture, code: mutant.code }).toEqual({ fixture, code: 0 });
+        expect(mutant.stdout).toMatch(/PASS/);
+
+        // ...and the real gate rejects the same document into the remediation
+        // branch. The pair is the proof.
+        const real = runGate('bash', ['--account-name', ACCOUNT, fixturePath(fixture)]);
+        expect({ fixture, code: real.code }).toEqual({ fixture, code: 3 });
+        expect(real.stdout).toContain(`SCALAR_KEY_PRESENT=${SCALAR_KEY}`);
+      }
+    });
+
+    it('a gate whose structural validation is removed reports a vacuous PASS on `{}` — why fail-closed is asserted', () => {
+      const gate = mutantOf(
+        '[ "${top_type}" = "array" ] ||',
+        '[ "${top_type}" = "array" ] || true ||'
+      );
+      const mutant = runGate('bash', ['--account-name', ACCOUNT, writeDoc('{}')], { gate });
+      // The mutant sails past the shape check; whatever it then reports, it must
+      // NOT be the real gate's fatal — that is the discrimination being proven.
+      expect(mutant.both).not.toMatch(/expected the JSON 'array'/);
+
+      const real = runGate('bash', ['--account-name', ACCOUNT, writeDoc('{}')]);
+      expect(real.code).toBe(1);
+      expect(real.both).toMatch(/expected the JSON 'array'/);
+    });
+  });
 });

@@ -1,0 +1,21 @@
+[
+  {
+    "name": "AzureWebJobsStorage__accountName",
+    "slotSetting": false,
+    "value": "mgv2dev13bd19e9f03d"
+  },
+  "AzureWebJobsStorage__accountName",
+  {
+    "name": 1234,
+    "slotSetting": false,
+    "value": "a name that is not a string cannot be compared"
+  },
+  {
+    "slotSetting": false,
+    "value": "an entry with no name at all"
+  },
+  [
+    "an array where an object belongs"
+  ],
+  null
+]
