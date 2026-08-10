@@ -854,6 +854,57 @@ describe('directly addressed filtered targets (MG-49 safety probe)', () => {
     assert.match(exported.out, /refusing to omit a container that exists/);
   });
 
+  it('a 404 from the corroborating parent list cannot prove an existing container absent', async () => {
+    // The parent list is a second metadata read, not ground truth by itself:
+    // if it returns a spurious but otherwise unambiguous database-level 404 at
+    // the same time the direct lookup spuriously 404s, accepting it as proof
+    // would recreate the original silent-omission defect. Keep the duplicate
+    // target names across databases so the flat filter check cannot catch it.
+    const base = fakeClient(scopedSpec());
+    const client = {
+      ...base,
+      database(databaseId) {
+        const database = base.database(databaseId);
+        return {
+          ...database,
+          containers: {
+            ...database.containers,
+            readAll: () => ({
+              fetchAll: async () => {
+                if (databaseId === 'alpha')
+                  throw new FakeCosmosError('stale database list', {
+                    statusCode: 404,
+                    code: 'NotFound',
+                  });
+                return database.containers.readAll().fetchAll();
+              },
+            }),
+          },
+          container(containerId) {
+            const container = database.container(containerId);
+            return {
+              ...container,
+              read: async () => {
+                if (databaseId === 'alpha' && containerId === 'critical') {
+                  throw new FakeCosmosError('stale container metadata', {
+                    statusCode: 404,
+                    code: 'NotFound',
+                  });
+                }
+                return container.read();
+              },
+            };
+          },
+        };
+      },
+    };
+    const dir = await outDir();
+    const exported = await run(['--account', 'meatgeek', '--out', dir, ...filters], { client });
+
+    await assertAbortedWithNothingWritten(dir, exported, EXIT.TRANSPORT);
+    assert.match(exported.out, /could NOT be corroborated/);
+  });
+
   it('a 404 carrying no resource code is not an unambiguous absence', async () => {
     const { dir, exported } = await exportWith(
       () => new FakeCosmosError('gateway returned a bare 404', { statusCode: 404 })
