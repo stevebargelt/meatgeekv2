@@ -22,6 +22,59 @@ name: Deploy Prod Infrastructure
 #
 # Bootstrap, resource-group creation, subscription-scoped configuration and
 # disaster recovery stay OPERATOR actions in every environment, including dev.
+#
+# ---------------------------------------------------------------------------
+# MG-25 ACTIVATION PRECONDITION (recorded by MG-58)
+# ---------------------------------------------------------------------------
+# Prod's apply may NOT be activated until prod carries the SAME post-apply LIVE
+# HOST-STORAGE ASSERTION the dev apply job now runs — the "Live host-storage
+# gate (fail-closed, on the DEPLOYED site)" step in infra-apply-dev.yml, backed
+# by apps/infrastructure/scripts/assert-live-host-storage.sh. Treat it as part
+# of MG-25's definition of done, not as a follow-up.
+#
+# WHY. Prod is built by the SAME module (apps/infrastructure/modules/functions)
+# under the SAME pinned provider (hashicorp/azurerm 4.81.0, pinned in
+# apps/infrastructure/.terraform.lock.hcl) as dev, so prod inherits the
+# IDENTICAL injection at its FIRST apply. Under
+# `storage_authentication_type = SystemAssignedIdentity` the provider composes
+# and WRITES a scalar `AzureWebJobsStorage` connection string whose AccountKey
+# is EMPTY — on create and on every Update — and on read routes that key out of
+# `app_settings` into `storage_access_key`. The host resolves the scalar
+# connection-string form first and never reaches
+# `AzureWebJobsStorage__accountName`, so it authenticates with an unusable key
+# against an account with shared keys disabled and host storage is dead: no host
+# lock lease, no timer executions, a `Process reporting unhealthy` row every 30
+# seconds, and a publish that warns the app appears to be unhealthy.
+#
+# A PLAN-ONLY PIPELINE IS STRUCTURALLY BLIND TO IT. Because the provider writes
+# the key without declaring it and hides it again on read, it is absent from HCL,
+# absent from the plan document and absent from post-apply state BY
+# CONSTRUCTION. Reviewing this workflow's plan and seeing nothing is not
+# evidence of a clean site — on dev, config-clean and site-dirty coexisted with
+# a fully green pipeline, which is how a non-fix shipped past eleven checks.
+# The live settings of the deployed app are the ONLY surface on which this
+# defect is representable.
+#
+# CONSEQUENCE FOR MG-25. Adding an apply step here WITHOUT also attaching the
+# live gate to it ships a prod Function App with dead host storage behind a
+# fully green pipeline: precisely the outcome MG-58 exists to prevent, repeated
+# in the environment where it costs most. Port the dev step as-is, including its
+# fail-loud posture — it deletes exactly the one key on exactly the one app,
+# re-asserts, and then FAILS the run, because a silent self-heal would reproduce
+# the original invisibility and would also mask a provider upgrade changing the
+# behaviour. Its remediation needs management-plane write on the prod app; that
+# is an MG-25 identity question, and MG-58 made no RBAC change in any
+# environment.
+#
+# Background / rejected alternatives (declaring the key in `app_settings`; a
+# second writer on the app-settings sub-resource):
+#   learnings/decisions/mg-58-host-storage-managed-identity.md
+# Operator proof sequence (restart, host lock lease, storageHeartbeat timer,
+# then the exact-SHA publish) and the live-settings capture:
+#   docs/infrastructure/mg58-host-storage-verification.md
+#
+# MG-58 changed COMMENTS ONLY in this file. This workflow stays
+# `workflow_dispatch`-only and plan-only; its behaviour is untouched.
 on:
   workflow_dispatch:
 
