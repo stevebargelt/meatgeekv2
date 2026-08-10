@@ -1,0 +1,42 @@
+[
+  {
+    "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
+    "slotSetting": false,
+    "value": "MGSENTINELDONOTLOG-1111-1111-1111-111111111111"
+  },
+  {
+    "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+    "slotSetting": false,
+    "value": "InstrumentationKey=MGSENTINELDONOTLOG;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/"
+  },
+  {
+    "name": "AzureWebJobsStorage",
+    "slotSetting": false,
+    "value": "DefaultEndpointsProtocol=https;AccountName=mgv2dev13bd19e9f03d;AccountKey=MGSENTINELDONOTLOG;EndpointSuffix=core.windows.net"
+  },
+  {
+    "name": "AzureWebJobsStorage__accountName",
+    "slotSetting": false,
+    "value": "MGSENTINELDONOTLOG"
+  },
+  {
+    "name": "AzureWebJobsStorage__blobServiceUri",
+    "slotSetting": false,
+    "value": "https://MGSENTINELDONOTLOG.blob.core.windows.net"
+  },
+  {
+    "name": "COSMOSDB__accountEndpoint",
+    "slotSetting": false,
+    "value": "https://MGSENTINELDONOTLOG.documents.azure.com:443/"
+  },
+  {
+    "name": "DEPLOYMENT_STORAGE_CONNECTION_STRING",
+    "slotSetting": false,
+    "value": "DefaultEndpointsProtocol=https;AccountName=mgv2dev13bd19e9f03d;AccountKey=MGSENTINELDONOTLOG;EndpointSuffix=core.windows.net"
+  },
+  {
+    "name": "AzureSignalRConnectionString",
+    "slotSetting": false,
+    "value": "Endpoint=https://mgv2-dev-signalr.service.signalr.net;AccessKey=MGSENTINELDONOTLOG;Version=1.0;"
+  }
+]
