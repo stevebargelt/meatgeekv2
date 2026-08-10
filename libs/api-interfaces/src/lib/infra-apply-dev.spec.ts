@@ -43,7 +43,17 @@
  *     new code inside a privileged job;
  *   - the workflow_dispatch RECOVERY path takes NO shortcut (it enters the same
  *     single apply job) and carries a manual approval the automatic path does
- *     not.
+ *     not;
+ *   - MG-58's LIVE HOST-STORAGE GATE — the one assertion in this workflow made
+ *     against the DEPLOYED SITE rather than against configuration text. Every
+ *     other control here reads HCL, a plan document or state, and all of them
+ *     were green while dev's Function App carried a scalar `AzureWebJobsStorage`
+ *     connection string the provider injects and hides on read. Its load-bearing
+ *     properties — placement after the convergence proof, unconditional
+ *     execution, a settings document that reaches only the gate's stdin, a
+ *     one-key/one-app remediation reached only when the key was actually found,
+ *     and a failure that is never swallowed — are each a one-line edit away from
+ *     being weakened back into the decorative gate this replaced.
  *
  * SCOPE: this file reads ONLY .github/workflows/infra-apply-dev.yml and the two
  * gate scripts it invokes. ci.yml, bootstrap.sh and the prod workflows are other
@@ -126,6 +136,50 @@ function applyRunLines(): string[] {
     }
   }
   return lines;
+}
+
+/**
+ * A `run:` body reduced to LOGICAL commands: shell comment lines dropped, and
+ * backslash continuations joined into the single command the shell actually
+ * sees.
+ *
+ * Line-at-a-time scanning is what the older assertions in this file do, and it
+ * is adequate for one-line invocations. It is NOT adequate for the live
+ * host-storage gate, whose `az ... appsettings list` spans four physical lines
+ * and whose pipe into the gate script lands on the last of them — a per-line
+ * check would read "an az invocation with no pipe" and "a gate invocation with
+ * no input", i.e. exactly the shape it is meant to forbid, and would pass a
+ * mutation that redirected the settings document to a file on line two.
+ */
+function logicalLines(run: string): string[] {
+  const out: string[] = [];
+  let acc = '';
+  for (const raw of run.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('#') || line === '') continue;
+    if (line.endsWith('\\')) {
+      acc += `${line.slice(0, -1).trim()} `;
+      continue;
+    }
+    out.push(`${acc}${line}`.trim());
+    acc = '';
+  }
+  if (acc.trim() !== '') out.push(acc.trim());
+  return out;
+}
+
+/** Every logical command line in the workflow, across every job and step. */
+function allLogicalLines(): { job: string; step: string; line: string }[] {
+  const out: { job: string; step: string; line: string }[] = [];
+  for (const [jobName, job] of Object.entries(JOBS)) {
+    for (const s of job.steps ?? []) {
+      if (typeof s.run !== 'string') continue;
+      for (const line of logicalLines(s.run)) {
+        out.push({ job: jobName, step: String(s.name ?? '<unnamed>'), line });
+      }
+    }
+  }
+  return out;
 }
 
 /** Index of the first apply step whose `run` matches, else -1. */
@@ -882,7 +936,22 @@ describe('MG-23: infra-apply-dev.yml — automated dev GitOps reconciliation', (
       // A step that forgets the `if:` runs on a superseded tree.
       const ungated = APPLY_STEPS.filter((s, i) => {
         if (i === iFresh) return false;
-        if (/rm -f/.test(String(s.run ?? ''))) return false; // the always() shred
+        // The always() shred, matched on WHAT IT REMOVES. The bare `rm -f` this
+        // used to match is a substring of any step that cleans up a temp file —
+        // MG-58's live host-storage gate does, and it was silently inheriting
+        // the shred's exemption instead of being held to a stated one.
+        if (/rm -f[^\n]*tfplan\.bin/.test(String(s.run ?? ''))) return false;
+        // MG-58's live host-storage gate is EXEMPT on the same reasoning as the
+        // post-apply state gate below, and the exemption is stated rather than
+        // inherited: it must run even when a timeout kill pre-empted the
+        // freshness steps, because a partially-applied run is the case most
+        // likely to have UPDATED the Function App and re-injected the key. Its
+        // equivalent guard lives in the step BODY, keyed on `.terraform/`.
+        if (/assert-live-host-storage\.sh/.test(String(s.run ?? ''))) {
+          expect(String(s.if ?? '').trim()).toBe('always()');
+          expect(String(s.run ?? '')).toMatch(/\.terraform/);
+          return false;
+        }
         // The post-apply state secret gate is EXEMPT, and the exemption is the
         // point rather than an oversight: it must run even when a timeout kill
         // pre-empted the freshness steps entirely (see the always() test below).
@@ -1110,6 +1179,314 @@ describe('MG-23: infra-apply-dev.yml — automated dev GitOps reconciliation', (
     });
   });
 
+  /* ------------------------------------------------------------------------ *
+   * MG-58 GUARD 4 — THE LIVE HOST-STORAGE GATE.
+   *
+   * WHY THIS BLOCK EXISTS AT ALL. PR #42 added the correct identity-based
+   * host-storage setting, two convergence plans came back clean, eleven CI
+   * checks went green, the dev apply succeeded — and host storage was still
+   * dead, because hashicorp/azurerm v4.81.0 itself composes and writes a scalar
+   * `AzureWebJobsStorage` connection string with an EMPTY AccountKey on every
+   * Function App create AND Update, and on read routes it out of `app_settings`
+   * into `storage_access_key`. The Functions host resolves the connection-string
+   * form first and never reaches the identity form. The key is therefore absent
+   * from HCL, absent from the saved plan, absent from post-apply state — so
+   * every gate in this workflow that reads one of those surfaces was
+   * TRUTHFULLY green about a site that was broken.
+   *
+   * Guards 1-3 (the module's tftests and the fixture harnesses) are regression
+   * fences against a HUMAN reintroducing the key in HCL. This step is the only
+   * thing in the system that can observe the defect that actually shipped, which
+   * makes each of its properties below load-bearing rather than stylistic.
+   * ------------------------------------------------------------------------ */
+  describe('MG-58 guard 4: the live host-storage gate (asserted on the DEPLOYED site)', () => {
+    const GATE_SCRIPT = 'apps/infrastructure/scripts/assert-live-host-storage.sh';
+    const iLive = stepIndex(/assert-live-host-storage\.sh/);
+    const iDriftPlan = stepIndex(/terraform plan[^\n]*-detailed-exitcode/);
+    const iShred = stepIndex(/rm -f[^\n]*tfplan\.bin/);
+    const LIVE = APPLY_STEPS[iLive] ?? {};
+    const LIVE_RUN = String(LIVE.run ?? '');
+    const LIVE_LINES = logicalLines(LIVE_RUN);
+
+    // The az INVOCATIONS, distinguished from the `echo` lines that merely NAME
+    // them on the failure paths. Scanning for the command as a substring would
+    // pick up `echo "az functionapp config appsettings list reported:"` and
+    // report a settings read with no pipe into the gate — a false failure that
+    // trains people to delete the assertion rather than keep the message.
+    const AZ_LIST = /^(?:if\s+!\s+)?az functionapp config appsettings list\b/;
+    const AZ_DELETE = /^(?:if\s+!\s+)?az functionapp config appsettings delete\b/;
+
+    /**
+     * The `GATE_RC == 3` (key-present) branch only — from the `elif` that opens
+     * it to the `else` that closes it. Every assertion about the remediation is
+     * scoped to this slice, so "the delete is guarded on the key having been
+     * found" is proven by WHERE the delete is, not merely by the branch existing
+     * somewhere in the same step.
+     */
+    const keyFoundBranch = (() => {
+      const start = LIVE_RUN.indexOf('elif [ "$GATE_RC" -eq 3 ]');
+      if (start === -1) return '';
+      const rest = LIVE_RUN.slice(start);
+      const close = /\n\s*else\b/.exec(rest);
+      return close ? rest.slice(0, close.index) : rest;
+    })();
+
+    it('exists as a real step in the apply job, and in no other job', () => {
+      expect(iLive).toBeGreaterThan(-1);
+      const carriers = allLogicalLines()
+        .filter(l => /assert-live-host-storage\.sh/.test(l.line))
+        .map(l => l.job);
+      expect(Array.from(new Set(carriers))).toEqual(['apply']);
+      // Exactly one step carries it: a second copy would be a second gate
+      // sequence to drift out of step with this one.
+      expect(
+        APPLY_STEPS.filter(s => /assert-live-host-storage\.sh/.test(String(s.run ?? ''))).length
+      ).toBe(1);
+    });
+
+    it('invokes a REAL, EXECUTABLE gate script rather than a documented intention', () => {
+      const p = path.join(REPO_ROOT, GATE_SCRIPT);
+      expect({ script: GATE_SCRIPT, exists: fs.existsSync(p) }).toEqual({
+        script: GATE_SCRIPT,
+        exists: true,
+      });
+      // eslint-disable-next-line no-bitwise
+      const executable = fs.existsSync(p) && (fs.statSync(p).mode & 0o111) !== 0;
+      expect({ script: GATE_SCRIPT, executable }).toEqual({
+        script: GATE_SCRIPT,
+        executable: true,
+      });
+      // ...and the expected account name is passed, so the assertion is
+      // live-versus-DESIRED rather than live-versus-itself.
+      expect(LIVE_RUN).toMatch(/assert-live-host-storage\.sh\s+--account-name\s+"\$SA"/);
+    });
+
+    it('runs AFTER the final drift plan and BEFORE the shred', () => {
+      // Order is the control, exactly as it is for the pre-apply gates. The
+      // drift plan is the convergence PROOF and must be measured against live
+      // state this step has not yet perturbed; remediating first would let a
+      // change land between the apply and the proof. Placing it before the
+      // shred keeps it inside the job's real work rather than in teardown.
+      expect(iDriftPlan).toBeGreaterThan(-1);
+      expect(iShred).toBeGreaterThan(-1);
+      expect(iLive).toBeGreaterThan(iDriftPlan);
+      expect(iLive).toBeLessThan(iShred);
+    });
+
+    it('is UNCONDITIONALLY always(), never freshness-gated', () => {
+      // Same reasoning as the post-apply state gate, one level along: a
+      // `timeout-minutes` kill can land before `freshness_final` ever writes an
+      // output, and a step conditioned on an output that was never written does
+      // not run — while a partially-applied run is precisely the case most
+      // likely to have UPDATED the Function App and re-injected the key.
+      const liveIf = String(LIVE.if ?? '');
+      expect(liveIf.trim()).toBe('always()');
+      expect(liveIf).not.toMatch(/steps\.freshness/);
+      expect(liveIf).not.toMatch(/cancelled\(\)/);
+    });
+
+    it('resolves the three outcomes distinctly, and only "could not have happened" exits 0', () => {
+      // nothing bound / no Function App in state -> clean exit 0, because the
+      // run provably cannot have caused an injection.
+      const preamble = LIVE_RUN.slice(
+        0,
+        LIVE_RUN.indexOf('az functionapp config appsettings list')
+      );
+      expect(preamble).toMatch(/\.terraform/);
+      expect(preamble).toMatch(/terraform state list/);
+      expect(preamble).toMatch(/azurerm_function_app/);
+      expect(preamble).toMatch(/exit 0/);
+
+      // ...but an unreadable state or an unreadable SITE is NOT "nothing to
+      // see": it fails closed and prints the CLI's own stderr, which is the only
+      // thing that tells expired credentials from a deleted app.
+      expect(LIVE_RUN).toMatch(/failing closed/i);
+      expect(LIVE_RUN).toMatch(/az functionapp config appsettings list[\s\S]*2>\s*"?\$/);
+      const afterRead = LIVE_RUN.slice(LIVE_RUN.indexOf('if [ "$AZ_RC" -ne 0 ]'));
+      const unreadable = afterRead.slice(0, afterRead.indexOf('exit 1') + 'exit 1'.length);
+      expect(unreadable).toMatch(/cat\s+"\$ERR"\s*>&2/);
+      expect(unreadable).toMatch(/exit 1/);
+      // The az read's stderr must be CAPTURED, not discarded — the regression
+      // being pinned is a bare `2>/dev/null` on the read.
+      expect(LIVE_RUN).not.toMatch(/appsettings list[\s\S]{0,200}?2>\s*\/dev\/null/);
+    });
+
+    it('never lets the settings DOCUMENT out of the gate’s stdin', () => {
+      // `az functionapp config appsettings list` returns VALUES — connection
+      // strings among them — and this job's log is retained and broadly
+      // readable. The document is piped straight into the gate: no file, no
+      // `tee`, no artifact, no echo, and no command substitution that would
+      // park it in a shell variable someone later prints.
+      const listCmds = LIVE_LINES.filter(l => AZ_LIST.test(l));
+      expect(listCmds.length).toBeGreaterThan(0);
+      for (const cmd of listCmds) {
+        expect({
+          cmd,
+          pipedToGate: /\|\s*scripts\/assert-live-host-storage\.sh/.test(cmd),
+        }).toEqual({ cmd, pipedToGate: true });
+        // No stdout redirection anywhere in the invocation. `2>"$ERR"` and
+        // `>&2` are stderr and are allowed; anything else is a file.
+        expect({ cmd, stdoutRedirected: /(?<!2)>(?!&2)/.test(cmd) }).toEqual({
+          cmd,
+          stdoutRedirected: false,
+        });
+        expect(cmd).not.toMatch(/\btee\b/);
+        expect(cmd).not.toMatch(/\bupload-artifact\b/);
+      }
+      // Never captured into a shell variable — a capture is what makes a later
+      // `echo "$SETTINGS"` possible, and it is the one edit that would satisfy
+      // every per-invocation check above while still putting the document in the
+      // log. There is no assignment form of this command anywhere in the step.
+      expect(LIVE_RUN).not.toMatch(/\$\(\s*(?:if\s+!\s+)?az functionapp config appsettings list/);
+      expect(LIVE_RUN).not.toMatch(/=\s*"?\$\([^)]*appsettings list/);
+      // The only lines that print the command's NAME are fixed diagnostic
+      // labels — no substitution, so nothing of the document can ride along.
+      for (const line of LIVE_LINES.filter(l =>
+        /^(echo|cat|printf)\b[^\n]*appsettings list/.test(l)
+      )) {
+        expect({ line, substitutes: /\$\(|`/.test(line) }).toEqual({ line, substitutes: false });
+      }
+      // The gate's own stdout is safe by construction (names and reasons only),
+      // so it is the one thing that may reach the log.
+      expect(LIVE).not.toHaveProperty('uses');
+    });
+
+    it('discards the DELETE’s stdout, which echoes the full settings list on success', () => {
+      const delCmds = LIVE_LINES.filter(l => AZ_DELETE.test(l));
+      expect(delCmds.length).toBe(1);
+      expect(delCmds[0]).toMatch(/>\s*\/dev\/null/);
+      expect(delCmds[0]).toMatch(/--output none/);
+      // Its stderr is captured separately so the failure path can print the
+      // CLI's diagnostic without printing the document.
+      expect(delCmds[0]).toMatch(/2>\s*"\$DEL_ERR"/);
+    });
+
+    it('remediates EXACTLY one setting key on EXACTLY one app', () => {
+      // The app-settings sub-resource is replace-the-whole-collection, so a
+      // broader delete would strip provider-injected settings the module never
+      // declares — health-check ping-failure, the App Insights connection
+      // string, deployment storage — and the loss would be invisible in HCL for
+      // precisely the reason the current defect is.
+      const delCmds = allLogicalLines().filter(l => AZ_DELETE.test(l.line));
+      expect(delCmds.length).toBe(1);
+      // ...and it is in the apply job, not somewhere a lesser gate could reach.
+      expect(delCmds[0].job).toBe('apply');
+      const del = delCmds[0].line;
+
+      const named = /--setting-names\s+(.*?)\s+--/.exec(del);
+      expect(named).not.toBeNull();
+      expect(
+        String(named?.[1] ?? '')
+          .trim()
+          .split(/\s+/)
+      ).toEqual(['AzureWebJobsStorage']);
+      // The identity form must never be in the blast radius: deleting it is the
+      // rollback that is strictly worse than the defect.
+      expect(del).not.toMatch(/AzureWebJobsStorage__/);
+
+      // One app, and both it and the resource group come from `terraform
+      // output` rather than from a literal — a hardcoded name would let this
+      // step mutate whatever app that string happens to address.
+      expect((del.match(/--name\b/g) ?? []).length).toBe(1);
+      expect(del).toMatch(/--name\s+"\$APP"/);
+      expect(del).toMatch(/--resource-group\s+"\$RG"/);
+      expect(LIVE_RUN).toMatch(/APP="\$\(terraform output -raw function_app_name/);
+      expect(LIVE_RUN).toMatch(/RG="\$\(terraform output -raw resource_group_name/);
+      expect(LIVE_RUN).toMatch(/SA="\$\(terraform output -raw storage_account_name/);
+      // No live resource name may be spelled out in the step.
+      expect(LIVE_RUN).not.toMatch(/mgv2dev/i);
+      expect(LIVE_RUN).not.toMatch(/meatgeek-v2-dev-rg/);
+    });
+
+    it('reaches the delete ONLY when the gate reported the key present', () => {
+      // Steady state on the many pushes that touch no infrastructure is zero
+      // deletions: the remediation is conditional on PRESENCE (the gate's
+      // dedicated exit code 3), not on the gate having failed for any reason.
+      expect(LIVE_RUN).toMatch(/GATE_RC="?\$\{?RC\[1\]/);
+      expect(keyFoundBranch).not.toBe('');
+      expect(keyFoundBranch).toMatch(/az functionapp config appsettings delete/);
+      // ...and it appears nowhere else in the step.
+      expect(LIVE_RUN.indexOf('az functionapp config appsettings delete')).toBeGreaterThan(
+        LIVE_RUN.indexOf('elif [ "$GATE_RC" -eq 3 ]')
+      );
+      // A gate verdict that is neither clean nor key-present is a REJECTION,
+      // and it must fail rather than fall through to remediation.
+      const other = LIVE_RUN.slice(LIVE_RUN.indexOf(keyFoundBranch) + keyFoundBranch.length);
+      expect(other).toMatch(/exit 1/);
+      expect(other).not.toMatch(/appsettings delete/);
+    });
+
+    it('RE-READS and RE-ASSERTS after deleting, rather than trusting the delete', () => {
+      // A delete that reported success is not proof the site is clean; only
+      // reading it back is. The re-read goes through the same gate, and its own
+      // failure to read fails closed.
+      expect((LIVE_RUN.match(/assert-live-host-storage\.sh/g) ?? []).length).toBe(2);
+      expect(keyFoundBranch).toMatch(/az functionapp config appsettings list/);
+      expect(keyFoundBranch).toMatch(/assert-live-host-storage\.sh/);
+      expect(keyFoundBranch).toMatch(/RE_RC/);
+    });
+
+    it('FAILS THE RUN even after a successful remediation (no silent self-heal)', () => {
+      // The deliberate policy choice, with its cost accepted in the ADR. A
+      // remediation that left the run green would reproduce the EXACT property
+      // that let a non-fix ship past eleven green checks — an invisible defect
+      // behind a green pipeline — and would mask the moment a provider upgrade
+      // changes this behaviour in either direction.
+      expect(keyFoundBranch).toMatch(/exit 1/);
+      expect(keyFoundBranch).not.toMatch(/exit 0/);
+      // The last statement of the branch is the failure, not the "remediated"
+      // message: an `exit 1` sitting above a later success path would be dead.
+      const branchLines = logicalLines(keyFoundBranch).filter(l => l !== '');
+      expect(branchLines[branchLines.length - 1]).toBe('exit 1');
+    });
+
+    it('names the CAUSE and points at the ADR and the runbook when it fails', () => {
+      // The operator hitting this red step did not cause it and cannot fix it
+      // in HCL. A failure that only said "scalar key present" would send them
+      // hunting for a human edit or drift that does not exist.
+      expect(keyFoundBranch).toMatch(/azurerm/i);
+      expect(keyFoundBranch).toMatch(
+        /learnings\/decisions\/mg-58-host-storage-managed-identity\.md/
+      );
+      expect(keyFoundBranch).toMatch(/docs\/infrastructure\/mg58-host-storage-verification\.md/);
+    });
+
+    it('never swallows its own failure', () => {
+      // `continue-on-error` on the step, or a trailing `|| true` on the assert
+      // path, converts a fail-closed gate into a decorative one — which is the
+      // failure mode this whole gate exists to end.
+      expect((LIVE as Record<string, unknown>)['continue-on-error']).toBeUndefined();
+      for (const line of LIVE_LINES) {
+        if (/assert-live-host-storage\.sh/.test(line)) {
+          expect({ line, tolerant: /\|\||\btrue\b|continue-on-error/.test(line) }).toEqual({
+            line,
+            tolerant: false,
+          });
+        }
+      }
+      // `set -e` is not enough on a pipeline whose exit code is inspected, so
+      // the step reads PIPESTATUS explicitly rather than swallowing either half.
+      expect(LIVE_RUN).toMatch(/set -eu/);
+      expect(LIVE_RUN).toMatch(/PIPESTATUS/);
+    });
+
+    it('takes NO new authority: no second login, no new permission, no new job', () => {
+      // The step runs inside the EXISTING apply job under the `azure/login`
+      // already performed, its existing environment, and its existing
+      // `id-token: write`. MG-58's brief forbids any RBAC change, and the
+      // cheapest way to violate that accidentally is a new credentialed job.
+      const withIdToken = Object.entries(JOBS)
+        .filter(([, j]) => String((j.permissions ?? {})['id-token'] ?? '') === 'write')
+        .map(([n]) => n);
+      expect(withIdToken).toEqual(['apply']);
+      expect(APPLY.environment).toBe('development-infra-apply');
+      expect(allUses().filter(u => u.startsWith('azure/login')).length).toBe(1);
+      expect((LIVE as Record<string, unknown>)['permissions']).toBeUndefined();
+      expect((LIVE as Record<string, unknown>)['environment']).toBeUndefined();
+      expect(LIVE_RUN).not.toMatch(/\baz login\b/);
+    });
+  });
+
   describe('non-interactive, lock-bound terraform invocation', () => {
     it('inits the persistent dev backend non-interactively', () => {
       const init = APPLY_STEPS[stepIndex(/terraform init\b/)];
@@ -1146,16 +1523,12 @@ describe('MG-23: infra-apply-dev.yml — automated dev GitOps reconciliation', (
       // thrown away with the runner — so the providers it then executed with
       // Contributor + RBAC Administrator would be ones no reviewer ever saw a
       // hash for, and no artifact would survive to say which they were.
-      const initInvocations = applyRunLines().filter((line) =>
-        /terraform init\b/.test(line),
-      );
+      const initInvocations = applyRunLines().filter(line => /terraform init\b/.test(line));
       expect(initInvocations.length).toBeGreaterThan(0);
       // Asserted on the whole init invocation, not the single matched line: the
       // command is written across continuations, and -lockfile=readonly sits on
       // the first line only by convention, not by requirement.
-      expect(applyRunLines().join('\n')).toMatch(
-        /terraform init[\s\S]{0,200}?-lockfile=readonly/,
-      );
+      expect(applyRunLines().join('\n')).toMatch(/terraform init[\s\S]{0,200}?-lockfile=readonly/);
     });
 
     it('passes -input=false to every terraform invocation that can prompt', () => {
