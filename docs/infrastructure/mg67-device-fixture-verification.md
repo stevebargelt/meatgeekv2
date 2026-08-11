@@ -227,32 +227,123 @@ nothing else — the account runs `local_authentication_enabled = false`, so key
 auth could not work even if the tool offered it (it does not). Data-plane access
 is a **separate** grant from control-plane RBAC.
 
+> **This account is shared live infrastructure.** Your principal may **already**
+> hold a Cosmos data-plane assignment that somebody else's work depends on, and
+> §5 deletes something. So §4 does two things before it grants anything: it takes
+> a **snapshot** of every assignment that exists on the account, and it decides
+> whether a grant is needed at all. Everything §5 is allowed to delete is
+> established **here**, at creation time — §5 never searches for "the assignment
+> that looks like ours".
+
+### 4a. Snapshot what already exists, and decide whether to grant at all
+
 ```bash
 az login   # if you have not already; DefaultAzureCredential picks this up
 
 PRINCIPAL_ID=$(az ad signed-in-user show --query id -o tsv)
 echo "principal: $PRINCIPAL_ID"        # a guid, not a credential — safe to record
 
-# 00000000-0000-0000-0000-000000000001 = Cosmos DB Built-in Data READER.
-# Reader, not Contributor: this tool only ever reads. The WRITES come from the
-# IoT Hub's own system-assigned identity, which Terraform already grants
-# Built-in Data Contributor (…0002) in apps/infrastructure/main.tf.
-az cosmosdb sql role assignment create \
-  --account-name "$ACCOUNT" \
-  --resource-group "$RG" \
-  --role-definition-id 00000000-0000-0000-0000-000000000001 \
-  --principal-id "$PRINCIPAL_ID" \
-  --scope "/" \
-  --only-show-errors -o none
+# Built-in Cosmos data-plane role definition guids. Fixed, and the same in every
+# account. …0001 = Data READER (all this tool needs), …0002 = Data Contributor
+# (already held by the IoT Hub's system-assigned identity via Terraform — never
+# granted here).
+DATA_READER=00000000-0000-0000-0000-000000000001
 
-# RECORD the assignment id NOW — you need it in §5, and finding it later is
-# harder than saving it here.
-ASSIGNMENT_ID=$(az cosmosdb sql role assignment list \
+# Two files that outlive your terminal. §5 reads BOTH; losing them means §5
+# refuses to delete anything, which is the correct outcome, not a nuisance.
+BEFORE="/tmp/mg67-role-assignments-before-${STAMP}.json"
+MG67_STATE="/tmp/mg67-role-assignment-${STAMP}.env"
+
+# The snapshot. This is the ground truth for "what existed before I touched
+# anything" — §5 proves against it that it removed exactly one assignment.
+az cosmosdb sql role assignment list \
   --account-name "$ACCOUNT" --resource-group "$RG" --only-show-errors \
-  --query "[?principalId=='$PRINCIPAL_ID' && ends_with(roleDefinitionId, '00000000-0000-0000-0000-000000000001')].id | [0]" \
-  -o tsv)
-echo "ASSIGNMENT_ID=$ASSIGNMENT_ID"    # save this line somewhere you will still have in §5
+  -o json > "$BEFORE"
+jq -r '.[] | [.name, .principalId, .roleDefinitionId, .scope] | @tsv' "$BEFORE"
+
+# Does your principal ALREADY hold an account-scope data-plane assignment?
+# Account scope is the account resource id with no /dbs/ segment appended.
+EXISTING=$(jq -r --arg p "$PRINCIPAL_ID" '
+  [ .[]
+    | select(.principalId == $p)
+    | select((.scope | test("/dbs/")) | not)
+    | select(.roleDefinitionId | test("00000000-0000-0000-0000-00000000000[12]$"))
+    | .name ] | join(" ")' "$BEFORE")
+echo "pre-existing account-scope data-plane assignment(s) for you: ${EXISTING:-none}"
 ```
+
+**If `EXISTING` is non-empty, do NOT create anything.** You can already read the
+container, and granting a second assignment only manufactures something for §5 to
+get wrong. Record the skip and move to §6:
+
+```bash
+if [ -n "$EXISTING" ]; then
+  {
+    echo "MG67_CREATED=no"
+    echo "MG67_ASSIGNMENT_NAME="
+    echo "MG67_PRE_EXISTING=$EXISTING"
+  } > "$MG67_STATE"
+  echo "SKIPPING the grant: you already hold $EXISTING. §5 has NOTHING to remove."
+fi
+```
+
+That pre-existing assignment is **not yours to remove**, in this ticket or any
+other. If you believe it is stale, that is a **finding to raise**, not a step in
+this runbook.
+
+### 4b. Create the temporary assignment under an id YOU mint
+
+```bash
+# Mint the assignment's own id first, so the thing §5 deletes is a value this
+# procedure chose rather than one it looked up afterwards.
+MG67_ASSIGNMENT_NAME=$(
+  (uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null \
+    || python3 -c 'import uuid; print(uuid.uuid4())') | tr 'A-Z' 'a-z'
+)
+
+# It must not already name an assignment on this account. A collision is
+# vanishingly unlikely and catastrophic if unnoticed (§5 would delete somebody
+# else's grant), so it is checked rather than assumed.
+if jq -e --arg n "$MG67_ASSIGNMENT_NAME" 'any(.[]; .name == $n)' "$BEFORE" >/dev/null; then
+  echo "STOP: the minted id already exists on this account. Do not proceed."
+else
+  # Reader, not Contributor: this tool only ever reads. The WRITES come from the
+  # IoT Hub's own system-assigned identity, which Terraform already grants
+  # Built-in Data Contributor (…0002) in apps/infrastructure/main.tf.
+  CREATED_NAME=$(az cosmosdb sql role assignment create \
+    --account-name "$ACCOUNT" \
+    --resource-group "$RG" \
+    --role-definition-id "$DATA_READER" \
+    --principal-id "$PRINCIPAL_ID" \
+    --scope "/" \
+    --role-assignment-id "$MG67_ASSIGNMENT_NAME" \
+    --only-show-errors --query name -o tsv)
+
+  if [ -z "$CREATED_NAME" ]; then
+    echo "STOP: the create returned no assignment id. Something was possibly created that this"
+    echo "      procedure cannot identify — inspect '$BEFORE' against a fresh list BY HAND and"
+    echo "      remove nothing until you can name exactly what changed."
+  else
+    [ "$CREATED_NAME" = "$MG67_ASSIGNMENT_NAME" ] \
+      || echo "NOTE: az assigned '$CREATED_NAME' rather than the minted id; the returned one governs."
+    {
+      echo "MG67_CREATED=yes"
+      echo "MG67_ACCOUNT=$ACCOUNT"
+      echo "MG67_RG=$RG"
+      echo "MG67_PRINCIPAL_ID=$PRINCIPAL_ID"
+      echo "MG67_ASSIGNMENT_NAME=$CREATED_NAME"
+      echo "MG67_BEFORE=$BEFORE"
+    } > "$MG67_STATE"
+    cat "$MG67_STATE"      # PASTE THIS INTO THE TICKET NOW — §5 cannot proceed without it
+  fi
+fi
+```
+
+**Capture, do not search.** The assignment id is recorded at the moment of
+creation, because the only alternative — finding it afterwards by matching on
+principal and role — cannot tell your new assignment apart from one that was
+already there. A grant is a guid; none of these values is a credential, so all of
+them are safe to paste into the ticket.
 
 **Account scope (`--scope "/"`) is required**, not a convenience: the same
 narrower-scope gap that MG-66 tracks for the export tool applies to any
@@ -271,18 +362,76 @@ sent**, so there is nothing to clean up and nothing unrecorded left behind.
 **This step is part of the ticket's definition of done.** Run it as soon as §6
 and §7 are complete.
 
-```bash
-az cosmosdb sql role assignment delete \
-  --account-name "$ACCOUNT" \
-  --resource-group "$RG" \
-  --role-assignment-id "$ASSIGNMENT_ID" \
-  --yes --only-show-errors -o none
+> **Delete by the id §4 captured, and by nothing else.** A removal that finds its
+> target by name shape, by principal, or by "the Data Reader one" can delete a
+> **pre-existing** assignment instead of this run's — silently revoking, on shared
+> live infrastructure, access somebody else depends on and that nothing in this
+> repo will report missing. Every gate below is a refusal: if the id is absent, or
+> the live assignment does not match it, **stop and report**. A leftover
+> assignment is a finding somebody can act on; a wrong deletion is an outage
+> nobody can attribute.
 
-# Prove it is gone — expect an empty result:
-az cosmosdb sql role assignment list \
-  --account-name "$ACCOUNT" --resource-group "$RG" --only-show-errors \
-  --query "[?principalId=='$PRINCIPAL_ID'].{id:id,role:roleDefinitionId,scope:scope}" -o table
+```bash
+# Everything the deletion is allowed to know comes from §4, not from a search.
+. "$MG67_STATE"
+
+REMOVE_OK=yes
+if [ "${MG67_CREATED:-no}" != "yes" ]; then
+  echo "§4 created nothing (you already held ${MG67_PRE_EXISTING:-an assignment})."
+  echo "NOTHING TO REMOVE. Do not delete a pre-existing assignment — it is not this ticket's."
+  REMOVE_OK=no
+elif [ -z "${MG67_ASSIGNMENT_NAME:-}" ]; then
+  echo "STOP: no assignment id was captured. REFUSING to guess which assignment to remove."
+  echo "      Report the assignment as outstanding on the ticket instead."
+  REMOVE_OK=no
+elif jq -e --arg n "$MG67_ASSIGNMENT_NAME" 'any(.[]; .name == $n)' "$MG67_BEFORE" >/dev/null; then
+  echo "STOP: $MG67_ASSIGNMENT_NAME existed BEFORE §4 ran, so it is not the assignment this run"
+  echo "      created. REFUSING to delete it. Report this and remove nothing."
+  REMOVE_OK=no
+else
+  # It must exist, exactly once, with the principal and role §4 granted. Any other
+  # answer means the id does not identify what this procedure created.
+  MATCH=$(az cosmosdb sql role assignment list \
+    --account-name "$MG67_ACCOUNT" --resource-group "$MG67_RG" --only-show-errors \
+    --query "length([?name=='$MG67_ASSIGNMENT_NAME' && principalId=='$MG67_PRINCIPAL_ID' && ends_with(roleDefinitionId, '00000000-0000-0000-0000-000000000001')])" \
+    -o tsv)
+  if [ "$MATCH" != "1" ]; then
+    echo "STOP: $MG67_ASSIGNMENT_NAME matched $MATCH assignment(s), expected exactly 1."
+    echo "      REFUSING to delete. Report it; do not fall back to a principal or name match."
+    REMOVE_OK=no
+  fi
+fi
+
+if [ "$REMOVE_OK" = yes ]; then
+  az cosmosdb sql role assignment delete \
+    --account-name "$MG67_ACCOUNT" \
+    --resource-group "$MG67_RG" \
+    --role-assignment-id "$MG67_ASSIGNMENT_NAME" \
+    --yes --only-show-errors -o none
+fi
 ```
+
+**Then prove that exactly one assignment went, and it was yours:**
+
+```bash
+AFTER="/tmp/mg67-role-assignments-after-${STAMP}.json"
+az cosmosdb sql role assignment list \
+  --account-name "$MG67_ACCOUNT" --resource-group "$MG67_RG" --only-show-errors \
+  -o json > "$AFTER"
+
+# 1. Yours is gone. Expect: true
+jq --arg n "$MG67_ASSIGNMENT_NAME" 'any(.[]; .name == $n) | not' "$AFTER"
+
+# 2. NOTHING ELSE went with it. Expect: EMPTY OUTPUT.
+#    Any name printed here existed before §4 and no longer exists — collateral
+#    damage, and a halt.
+jq -r --slurpfile after "$AFTER" '[.[].name] - [$after[0][].name] | .[]' "$MG67_BEFORE"
+```
+
+Record both outputs on the ticket. The second one is the actual deliverable:
+"the temporary grant is gone" and "nothing else was touched" are two different
+claims, and only the second one rules out the failure this section is written to
+prevent.
 
 ### Why nothing in the system will notice if you skip this
 
@@ -341,15 +490,16 @@ shell history next to the result. The defaults are the same values (180000 ms /
    `fixtureSequence`, `ticket`, the partition field measured in §3 and a
    `timestamp` — and each declaring `$.ct=application/json` and `$.ce=utf-8` as
    system properties. Any nonzero `az` exit aborts the run (**exit 2**) — after
-   recording the ids of any message `az` had already accepted.
+   recording, for every message it attempted, whether `az` accepted it or left
+   its acceptance **unknown**.
 4. **Polls** for the full set within the bound. Timeout is **exit 3**, a document
    without the marker is **exit 6**, a partial or ambiguous read is **exit 7**,
    and documents found only outside the expected partition are **exit 9** —
    never conflated, never reported as an absence.
-5. **Writes the evidence artifact** (§7) — on every path that sent anything,
-   confirmed or not. If that write cannot happen, the run exits **10** and prints
-   the ids for you to record by hand; it never reports a run that changed the
-   live container as though nothing had happened.
+5. **Writes the evidence artifact** (§7) — on **every** outcome that attempted a
+   send, confirmed or not. If that write cannot happen, the run exits **10** and
+   prints the ids for you to record by hand; it never reports a run that changed
+   the live container as though nothing had happened.
 
 ### There is no credential to supply, and none is accepted
 
@@ -375,7 +525,7 @@ supply a credential by hand, that is stop condition 2 (§9) — halt and report.
 | Code | Meaning                         | What it tells you                                                                                                                                                             |
 | ---- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    | confirmed-in-cosmos             | **The only success.** 3 marker-carrying, run-correlated documents were read back out of `temperatures`, and the evidence was written.                                         |
-| 1    | usage error                     | Bad/missing arguments, or a refused credential-shaped flag. Nothing live happened.                                                                                            |
+| 1    | usage error                     | Bad/missing arguments, or a refused credential-shaped flag. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.   |
 | 2    | send failure                    | `az iot device send-d2c-message` failed. Check `az login` and `az extension add --name azure-iot`.                                                                            |
 | 3    | confirmation timeout            | The bound elapsed with the documents not found. **Not an absence, not a success.**                                                                                            |
 | 4    | auth failure                    | 401/403, or no credential could be acquired. **Says nothing about whether the route delivered.** Usually §4 not propagated.                                                   |
@@ -407,12 +557,22 @@ on the lines immediately above it (`confirmation timeout`, `auth failure`, and s
 on) and is not lost. Recording the ids is the action that has to come first;
 diagnosing the route is the action that comes second.
 
-**A partial send is recorded too.** If `az` accepts message 1 and fails on
-message 2, the run exits **2 (send failure)** — but not before writing an
-evidence artifact naming the id that _did_ go, with `scope: "not-attempted"` (no
-read-back was ever performed) and an `unconfirmed-run` finding. The ids also
-appear on the per-message send lines as they go, so a run killed mid-flight still
-leaves them in your terminal.
+#### A send failure is AMBIGUOUS, and the record says so
+
+**`az` reporting failure does not establish that IoT Hub rejected the message.**
+The CLI can fail _after_ the hub accepted it — a nonzero exit on teardown, a
+killed process, a lost response. So a failed send is ambiguous **by
+construction**, and the tool never records one as definitively not-sent.
+
+That applies to the **first** message as much as the third. If `az` fails on
+message 1 of 3, the run exits **2 (send failure)** and still writes an evidence
+artifact: one id in `requestedIds` and in `ambiguousIds`, `uncertain: true`, and
+an `ambiguous-acceptance` finding. **Read that as "this id may be in the
+container", never as "nothing was written"** — treat it as accounted-for when
+MG-53 reconciles the source, exactly like a confirmed one.
+
+The per-message send lines carry the ids as they go, too, so a run killed
+mid-flight leaves them in your terminal even if it never reached the artifact.
 
 ### Running it twice
 
@@ -438,22 +598,45 @@ the ticket. **This file, not this runbook, is what downstream tickets parse** �
 prose procedure that drifts is a documentation bug; a machine-readable record
 that drifts is a wrong deletion.
 
-Fields, by their real names:
+Fields, by their real names. It is **`schemaVersion: 2`**; MG-53 and MG-54 check
+that first and must refuse a version they were not written against.
 
-| Field                                                                                                 | What it carries                                                                                                                                                                       |
-| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                                                                                  |
-| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                                                                                |
-| `confirmed`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`                                        | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`. `scope` is `expected-partition`, `cross-partition`, or `not-attempted` when the run aborted before any read-back. |
-| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                                                                                      |
-| `deviceId`                                                                                            | The fixture device.                                                                                                                                                                   |
-| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                  |
-| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed.                                                                                                                          |
-| **`ids`**, **`count`**                                                                                | **The exact document ids OBSERVED in the read-back, and how many.** This is the list MG-54 cites.                                                                                     |
-| `requestedIds`, `requestedCount`, `expectedCount`, `idDivergence`                                     | What the sender asked for, versus what exists. Divergence is an observation, not a failure.                                                                                           |
-| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                 |
-| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                              |
-| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`.                                                               |
+| Field                                                                                                 | What it carries                                                                                                                                                                                                   |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                                                                                                              |
+| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                                                                                                            |
+| `confirmed`, `uncertain`, `attempted`, `outcome`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`   | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`. `outcome` is the stable slug to branch on. `scope` is `expected-partition`, `cross-partition`, `aborted-after-read-back`, or `not-attempted`. |
+| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                                                                                                                  |
+| `deviceId`                                                                                            | The fixture device.                                                                                                                                                                                               |
+| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                                              |
+| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed.                                                                                                                                                      |
+| **the four id sets** — see below                                                                      | `requestedIds`, `acceptedIds`, `ambiguousIds`, `observedIds`, each with its `…Count`.                                                                                                                             |
+| **`accountableIds`**, **`accountableCount`**                                                          | **Everything that is, or MAY BE, in the container** — accepted ∪ ambiguous ∪ observed, unioned once, here. **This is the set MG-53 must account for.**                                                            |
+| `anomalousIds`, `anomalousCount`                                                                      | Documents the correlated read-back returned that this run **cannot claim**. Kept strictly apart from its own. Non-empty is **stop condition 1** (§9).                                                             |
+| **`ids`**, **`count`**                                                                                | Schema-v1 aliases for `observedIds` / `observedCount` — the same array, so they cannot disagree. **This is the list MG-54 cites for disposal.**                                                                   |
+| `expectedCount`, `idDivergence`                                                                       | What the run expected, and whether a **witnessed** observed document carried an id the sender did not request. Divergence is an observation, not a failure — and never inferred from a count shortfall.           |
+| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                                             |
+| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                                                          |
+| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `ambiguous-acceptance`, `unattributable-documents`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`.                                       |
+
+#### The four id sets are not interchangeable
+
+Do not collapse them, and do not read one as a proxy for another:
+
+| Set            | Means                                                                                                                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `requestedIds` | The sender **attempted** this message. Recorded before the attempt, so a process killed mid-send still accounts for it.                                                                     |
+| `acceptedIds`  | `az` reported success. The message is IoT Hub's problem from there.                                                                                                                         |
+| `ambiguousIds` | `az` reported failure and acceptance is **UNKNOWN**. The CLI can fail _after_ the hub took the message. **Never read this as "not written."**                                               |
+| `observedIds`  | **Read back out of Cosmos.** Monotonic — once a document has been observed, no later failure discards it, so a run that saw documents and _then_ aborted on auth still records what it saw. |
+
+`uncertain: true` means this run does **not** know what the container holds —
+because something's acceptance was never established, or no confirmation
+completed. **`count: 0` alongside `uncertain: true` is not "nothing arrived".**
+The only record that asserts the full expected set is present is `confirmed:
+true`, and `confirmed: true` alongside `uncertain: true` is a legitimate
+combination: the proof holds _and_ some message's acceptance was never
+established. Both facts are true; collapsing either loses a halt condition.
 
 Two things to read out of it immediately:
 
@@ -469,16 +652,26 @@ Two things to read out of it immediately:
 > and values at build **and** write time; a hit refuses the write rather than
 > redacting. It is safe to commit and safe to attach to the ticket.
 
-**A record is written on failure paths too**, carrying an `unconfirmed-run`
-finding — because a run that sent documents it could not confirm has **left them
-in the container**, and MG-53 halts on a document no record accounts for. A
-non-`confirmed` record is a record of what was observed. **It is not proof.**
+**A record is written on EVERY outcome that attempted a send** — timeout, auth,
+transport, marker violation, ambiguity, send failure — carrying an
+`unconfirmed-run` finding. Only a run that refused **before its first attempt**
+(bad arguments, an unmeasurable container, a refused pre-send read) exits without
+one, and that is the only case where "nothing was written" is a fact rather than
+a guess. A non-`confirmed` record is a record of what was observed and what may
+exist. **It is not proof.**
 
-That holds for a **partial send** as well: a run whose `az` invocation failed
-part-way still records the ids it managed to send, with `count: 0`, `ids: []`
-and `scope: "not-attempted"` — nothing was read back, and the record says so
-rather than implying an absence. Read such a record as _"these ids may be in the
-container"_, and treat them as accounted-for when MG-53 reconciles the source.
+That holds for a **partial send** as well, and for a failure on message 1. The
+record carries the attempted ids in `requestedIds`, the ones of unknown fate in
+`ambiguousIds`, and their union with anything observed in `accountableIds`. Read
+it as _"these ids may be in the container"_ and treat them as accounted-for when
+MG-53 reconciles the source. **No record this tool writes ever asserts that
+nothing was written when something was attempted** — an error reported as a known
+absence is the MG-66 conflation, and this is the write side of it.
+
+It also holds for a run that **observed documents and then aborted**. Auth or
+transport failing on a later poll does not discard what an earlier poll already
+saw: those ids stay in `observedIds`, and `scope` reads
+`aborted-after-read-back` rather than `not-attempted`.
 
 If the record itself cannot be written, the run exits **10** and prints the ids —
 see §6's exit-code table. There is no path on which this tool sends a document
@@ -493,8 +686,11 @@ and then stays silent about it.
   hub, the outcome and the exit label, never a secret.
 - The path and content of the evidence artifact from §7a.
 - The registered `deviceId` (from §2a's `list`).
-- The §5 deletion confirmation (the empty `role assignment list` result).
-- Any `findings` entry, especially `ttl-drift`.
+- The §4 state file (`MG67_ASSIGNMENT_NAME` and the principal), and the §5
+  removal proof — **both** checks: yours is gone, and the before/after name diff
+  is empty. If §4 skipped the grant, record that instead.
+- Any `findings` entry, especially `ttl-drift`, `ambiguous-acceptance` and
+  `unattributable-documents`.
 
 ---
 
@@ -579,8 +775,19 @@ SELECT VALUE COUNT(1) FROM c WHERE NOT IS_DEFINED(c.syntheticFixture)
 
 The second query is the one that matters: **any nonzero result is a halt.** Also
 halt if `temperatures` holds more marked documents than your evidence records
-account for. A **smaller** count than recorded is expected TTL expiry — check
+account for.
+
+**Reconcile against `accountableIds`, not against `ids`.** `ids` is what was read
+back; `accountableIds` additionally covers everything a run accepted or left of
+unknown acceptance, which is the set that may exist. Reconciling against the
+narrower one manufactures an unaccounted-for document out of a run that recorded
+it honestly. A **smaller** count than recorded is expected TTL expiry — check
 `expiryInstant` in the evidence before concluding anything else.
+
+The tool also screens for this itself: any document its correlated read-back
+returned that the run cannot claim goes into the record's `anomalousIds` with an
+`unattributable-documents` finding, kept strictly apart from the run's own ids. A
+non-empty `anomalousIds` **is** this stop condition, already named for you.
 
 A container `DocumentCount` metric can be used to screen quickly, but read §8
 first: it tells you a number, never what the documents are.
@@ -659,16 +866,16 @@ disappear.
 
 ## 12. Sign-off checklist
 
-| #   | Item                                                                                                        | Evidence to record                      | State       |
-| --- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------- | ----------- |
-| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                     | the `deviceId` + `status` row           | **NOT RUN** |
-| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                      | the `jq` output                         | **NOT RUN** |
-| 3   | Temporary account-scope Data Reader assignment created (§4)                                                 | the assignment id                       | **NOT RUN** |
-| 4   | `send-fixture.mjs` exits **0** (§6)                                                                         | the exit code + the command line        | **NOT RUN** |
-| 5   | Evidence artifact written and committed, with non-empty `ids`, `count == 3`, and `measuredDefaultTtl` (§7a) | the file path + its contents            | **NOT RUN** |
-| 6   | Source containers hold **only** the recorded documents (§9)                                                 | the two Data Explorer queries           | **NOT RUN** |
-| 7   | Temporary role assignment **removed** (§5)                                                                  | the empty `role assignment list` result | **NOT RUN** |
-| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                     | the finding text                        | **NOT RUN** |
+| #   | Item                                                                                                                                                  | Evidence to record                                  | State       |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------- |
+| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                                                               | the `deviceId` + `status` row                       | **NOT RUN** |
+| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                                                                | the `jq` output                                     | **NOT RUN** |
+| 3   | Temporary account-scope Data Reader assignment created **under a captured id** — or deliberately skipped (§4)                                         | the §4 state file (or the skip note)                | **NOT RUN** |
+| 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                   | the exit code + the command line                    | **NOT RUN** |
+| 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a) | the file path + its contents                        | **NOT RUN** |
+| 6   | Source containers hold **only** the documents `accountableIds` accounts for (§9)                                                                      | the two Data Explorer queries                       | **NOT RUN** |
+| 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5)                                                           | both §5 proofs: yours gone, before/after diff empty | **NOT RUN** |
+| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                               | the finding text                                    | **NOT RUN** |
 
 **MG-67 closes when every line above is recorded — and not before.** Line 4 is
 the traversal; lines 5 and 7 are what the downstream tickets and the security

@@ -824,7 +824,13 @@ false`, so a key mode could not work and could only leak. Data-plane access need
 an **account-scoped** (`--scope "/"`) Cosmos Built-in Data **Reader** assignment —
 the runbook carries both the create and the matching delete, because `azurerm`
 manages only the two declared `azurerm_cosmosdb_sql_role_assignment` resources and
-will never prune a third.
+will never prune a third. **The removal targets the assignment id captured at
+creation time and refuses to guess**: this is a shared live account, your
+principal may already hold a data-plane grant somebody else's work depends on, and
+a delete that finds its target by principal or role shape can revoke **that** one
+instead. The runbook skips the grant entirely if you already hold one, snapshots
+every assignment on the account first, and proves afterwards that exactly one —
+yours — went.
 
 **Exit codes — the operator contract.** Exit **0 means exactly one thing**: 3
 marker-carrying, run-correlated documents were **read back out of** the
@@ -835,7 +841,7 @@ recording them was written. Absence of an error is never success.
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    | confirmed-in-cosmos                                                                                                                                                                                                                                                                          |
 | 1    | usage error — includes a refused credential-shaped or verbosity flag                                                                                                                                                                                                                         |
-| 2    | send failure — `az iot device send-d2c-message` itself failed. If it failed **part-way**, the ids `az` had already accepted are written to the evidence artifact first                                                                                                                       |
+| 2    | send failure — `az iot device send-d2c-message` itself failed. **Ambiguous by construction**: `az` can fail after the hub took the message, so every attempted id is recorded first, as accepted or as of **unknown** acceptance — including a failure on message 1 of 3                     |
 | 3    | confirmation timeout — the bound elapsed with the documents not found                                                                                                                                                                                                                        |
 | 4    | auth failure — a 401/403, or a credential that could not be acquired; **never retried**, and it says nothing about whether the route delivered                                                                                                                                               |
 | 5    | transport abort — retries exhausted                                                                                                                                                                                                                                                          |
@@ -867,15 +873,29 @@ recording them was written. Absence of an error is never success.
   key set and is scanned for credential shapes at build and write time — a hit
   **refuses the write** rather than redacting. It is written atomically and will
   not overwrite an existing file without `--overwrite`.
-- A run that cannot confirm still writes a record, carrying an `unconfirmed-run`
-  finding: documents were left in the container and MG-53 halts on a document no
-  record accounts for. It never claims a success the confirmation did not reach.
-- **Every path that sent anything records what it sent.** A send that aborts
-  part-way still writes the ids `az` accepted, with `count: 0`, `ids: []` and
-  `scope: "not-attempted"` — nothing was read back, and the record says so rather
-  than implying an absence. If the record itself cannot be written or built, the
-  run exits **10** and prints the ids to record by hand. There is no path on which
-  this tool causes a document to exist and then stays silent about it.
+- **The evidence-emission contract: one path, every outcome.** A record is written
+  on **every** outcome that attempted a send — timeout, auth, transport, marker
+  violation, ambiguity, send failure — carrying an `unconfirmed-run` finding; only
+  a run that refused **before its first attempt** exits without one. It never
+  claims a success the confirmation did not reach, and it **never asserts that
+  nothing was written when something was attempted**. If the record itself cannot
+  be written or built, the run exits **10** and prints the ids to record by hand.
+  There is no path on which this tool causes a document to exist and then stays
+  silent about it.
+- **Four id sets (`schemaVersion: 2`), not one.** `requestedIds` (attempted),
+  `acceptedIds` (`az` reported success), `ambiguousIds` (`az` reported failure and
+  acceptance is **UNKNOWN** — the CLI can fail _after_ IoT Hub took the message, so
+  a send failure is ambiguous by construction and is never recorded as not-sent),
+  and `observedIds` (read back out of Cosmos, **monotonic** — a later auth or
+  transport abort never discards what an earlier poll saw). `accountableIds` is
+  their union minus nothing: the set a downstream ticket must account for.
+  `uncertain: true` means the run does not know what the container holds — `count:
+0` alongside it is **not** "nothing arrived". `idDivergence` is **witnessed**
+  (an observed document under an unrequested id), never inferred from a count
+  shortfall: asserting a platform renaming nobody saw, in the one artifact MG-53
+  and MG-54 parse mechanically, makes a downstream ticket act on a fabricated
+  claim. Documents the read-back returned that the run cannot claim go to
+  `anomalousIds`, kept strictly apart from its own.
 - A green hub metric, a green route metric and a green `/api/health/cosmos` are
   **each rejected as proof** — none of them observes a document (MG-24 and MG-58
   are the precedents). The tool consults none of them.
