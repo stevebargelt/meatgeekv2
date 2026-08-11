@@ -10,6 +10,56 @@
 // record that drifts is a wrong deletion. So this module owns exactly one JSON
 // document, with a declared schema version and a closed key set.
 //
+// ===========================================================================
+// THE EVIDENCE-EMISSION CONTRACT (schema version 2)
+//
+// The contract itself lives in fixture-core.mjs (createRunLedger, mergeIds,
+// observedIdsDiverge, mustEmitEvidence). This module is its ARTIFACT SIDE: it
+// transcribes a ledger snapshot, and it deliberately has no idea of its own
+// about what a run put in the container.
+//
+// The record therefore distinguishes FOUR id sets, which earlier versions of
+// this file conflated into one `requestedIds`:
+//
+//   requestedIds  minted by the sender AND ATTEMPTED.
+//   acceptedIds   az reported success.
+//   ambiguousIds  az reported failure and acceptance is UNKNOWN. The CLI can
+//                 fail AFTER IoT Hub accepted the message, so a send failure is
+//                 ambiguous BY CONSTRUCTION and is never recorded as
+//                 definitively not-sent.
+//   observedIds   read back out of Cosmos, including anything a partial poll saw
+//                 before a later abort. Once observed, never discarded.
+//
+// Plus `outcome`, `exitCode` and `uncertain` — and `accountableIds`, the union
+// of accepted, ambiguous and observed, which is the set a downstream ticket must
+// account for. Computing that union downstream out of three fields is how the
+// wrong subset gets acted on, so it is computed here, once.
+//
+// TWO RULES THIS MODULE ENFORCES STRUCTURALLY, because both were violated by
+// the shape it replaces:
+//
+//   1. NO RECORD ASSERTS THAT NOTHING WAS WRITTEN. A run that attempted anything
+//      at all gets a record, and that record's `uncertain`, `ambiguousIds` and
+//      `accountableIds` say what may be in the container. `count: 0` never means
+//      "nothing arrived" on its own — the earlier shape let it read that way,
+//      which is the MG-66 error-as-absence conflation reproduced on the WRITE
+//      side. There is no path here that needs a confirmation to exist: pass
+//      `outcome` instead and the record still builds.
+//   2. `idDivergence` IS WITNESSED, NEVER INFERRED. It is true only when a
+//      document that was ACTUALLY OBSERVED carries an id the sender did not
+//      request (fixture-core's observedIdsDiverge). It is never derived from a
+//      count shortfall: "we asked for three and saw two" is an incomplete
+//      read-back, and calling that divergence would assert a platform renaming
+//      behaviour nobody witnessed, in the one artifact MG-53 and MG-54 parse
+//      mechanically.
+//
+// `confirmed: true` with `uncertain: true` is a legitimate, deliberate
+// combination: the expected set was read back out of the container (the proof
+// holds) AND some message's acceptance was never established by the sender. Both
+// facts are true, and collapsing either into the other loses information a
+// downstream halt turns on.
+// ===========================================================================
+//
 // WHY THE MEASURED TTL AND THE ABSOLUTE INSTANT ARE BOTH HERE. A downstream
 // count that comes back SMALLER than the count recorded here has two possible
 // explanations that call for opposite responses: expected TTL expiry (proceed)
@@ -30,22 +80,6 @@
 // concluding either way. Saying so here is cheaper than a downstream ticket
 // re-deriving it wrong.
 //
-// WHAT THE RECORD SAYS ABOUT A RUN THAT OBSERVED NOTHING. The record is written
-// on failure paths too — a send that aborted partway, a timeout, an auth failure
-// — because documents are, or may be, in the container and MG-53 halts on a
-// source document its recorded set does not account for. On those paths `ids`
-// and `count` are the read-back's own (empty) result and `requestedIds` /
-// `requestedCount` are exactly the bodies az ACCEPTED, never the bodies the run
-// intended. So the set a consumer must account for is `ids` on a confirmed run,
-// and the union of `ids` and `requestedIds` otherwise — with `confirmed` and the
-// `unconfirmed-run` finding saying which case it is looking at.
-//
-// `idDivergence` is a comparison and is therefore only made when a read-back
-// actually saw something. A run that observed nothing has witnessed no platform
-// behaviour to report, and an empty observed set trivially differs from a
-// non-empty requested one — so reporting divergence there would put an
-// unwitnessed claim in the one artifact two tickets consume mechanically.
-//
 // THE CLOCK IS INJECTED so the artifact is byte-reproducible under test: the
 // same inputs and the same clock produce the same bytes, which is what lets a
 // test assert on the whole serialized document rather than field by field.
@@ -60,7 +94,9 @@
 //      `connectionString` to the record is refused by construction — it does not
 //      have to be recognised as credential-shaped first.
 //   2. A CREDENTIAL-SHAPED KEY-NAME scan over what did get allowed.
-//   3. A CREDENTIAL-SHAPED VALUE scan over every string in the record.
+//   3. A CREDENTIAL-SHAPED VALUE scan over every string in the record. This now
+//      covers FOUR id sets rather than one, and the guard walks the record
+//      structurally, so a set added later is scanned without anyone remembering.
 //
 // A hit REFUSES THE WRITE rather than redacting. This is the one place in the
 // tool where redaction would be the wrong answer: a redacted document id is
@@ -90,6 +126,7 @@ import {
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
+  ID_SET_NAMES,
   MESSAGES_PER_RUN,
   RUN_ID_FIELD,
   SYNTHETIC_MARKER,
@@ -98,13 +135,20 @@ import {
   TOOL_NAME,
   TOOL_VERSION,
   exitLabel,
+  mergeIds,
+  observedIdsDiverge,
 } from './fixture-core.mjs';
 
 // Bumped when a key is added, removed or re-meant. MG-53 and MG-54 read this
 // first and refuse a version they were not written against — a silently
 // reshaped record consumed by an older reader is how a deletion gate acts on a
 // field that no longer means what it did.
-export const EVIDENCE_SCHEMA_VERSION = 1;
+//
+// 2: the four id sets, `outcome`, `uncertain`, `attempted` and `accountableIds`.
+// Version 1 carried a single `requestedIds` whose meaning shifted with the code
+// path that built it, which is exactly the ambiguity a mechanical consumer
+// cannot survive.
+export const EVIDENCE_SCHEMA_VERSION = 2;
 export const EVIDENCE_KIND = 'mg67-device-fixture-evidence';
 
 // Written next to the target so the rename is same-filesystem and therefore
@@ -113,6 +157,38 @@ export const EVIDENCE_KIND = 'mg67-device-fixture-evidence';
 export const PARTIAL_SUFFIX = '.partial';
 
 export const partialPathFor = filePath => `${filePath}${PARTIAL_SUFFIX}`;
+
+// ---------------------------------------------------------------------------
+// The outcome name.
+//
+// A STABLE SLUG per exit code, for a consumer that branches on the outcome. It
+// is not a duplicate of `exitLabel`: the label is operator-facing prose and is
+// allowed to be reworded, while these slugs are part of the artifact's schema
+// and change only with a version bump. `exitCode` alone would do for a script,
+// but a number in a JSON file that a human also reads is how the wrong branch
+// gets written; both are recorded.
+//
+// An exit code with no slug is REFUSED rather than recorded as 'unknown': an
+// outcome MG-53 cannot name is an outcome it cannot gate on, and a record it
+// cannot read is worse than a build refusal the operator sees immediately.
+// ---------------------------------------------------------------------------
+export const OUTCOME_NAMES = Object.freeze({
+  [EXIT.OK]: 'confirmed-in-cosmos',
+  [EXIT.USAGE]: 'usage-refusal',
+  [EXIT.SEND_FAILURE]: 'send-failure',
+  [EXIT.TIMEOUT]: 'confirmation-timeout',
+  [EXIT.AUTH]: 'auth-failure',
+  [EXIT.TRANSPORT]: 'transport-abort',
+  [EXIT.MARKER_VIOLATION]: 'marker-violation',
+  [EXIT.AMBIGUOUS]: 'correlation-ambiguity',
+  [EXIT.CONTAINER_DEFINITION]: 'container-definition-refusal',
+  [EXIT.UNEXPECTED_PARTITION]: 'delivered-unexpected-partition',
+  [EXIT.EVIDENCE_UNRECORDED]: 'evidence-unrecorded',
+});
+
+export function outcomeName(exitCode) {
+  return OUTCOME_NAMES[exitCode];
+}
 
 // ---------------------------------------------------------------------------
 // The closed key set (guard 1).
@@ -130,10 +206,13 @@ export const EVIDENCE_RECORD_KEYS = Object.freeze(
     'ticket',
     'tool',
     'toolVersion',
-    // The run.
+    // The run and its outcome.
     'runId',
     'runInstant',
     'confirmed',
+    'uncertain',
+    'attempted',
+    'outcome',
     'exitCode',
     'exitLabel',
     'outcomeReason',
@@ -155,11 +234,22 @@ export const EVIDENCE_RECORD_KEYS = Object.freeze(
     'partitionKeyField',
     'partitionValue',
     'observedPartitionValues',
-    // What was written, as OBSERVED and as REQUESTED.
+    // The four id sets of the evidence-emission contract, plus the union a
+    // downstream ticket must account for, plus the documents this run cannot
+    // claim (kept strictly apart from its own).
+    ...ID_SET_NAMES,
+    'requestedCount',
+    'acceptedCount',
+    'ambiguousCount',
+    'observedCount',
+    'accountableIds',
+    'accountableCount',
+    'anomalousIds',
+    'anomalousCount',
+    // Schema-version-1 names for the OBSERVED set, retained as aliases so a
+    // consumer written against either name reads the same documents.
     'ids',
     'count',
-    'requestedIds',
-    'requestedCount',
     'expectedCount',
     'idDivergence',
     // Retention (HR4).
@@ -237,13 +327,6 @@ function requireNonEmptyString(value, name) {
   return value;
 }
 
-function requireStringArray(value, name) {
-  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || item.trim() === '')) {
-    throw usageRefusal(`${name} must be an array of non-empty strings`);
-  }
-  return [...value];
-}
-
 /**
  * Walk the record and report every credential risk found, as a list of
  * findings naming the PATH and the SHAPE — never the value. Returns [] for a
@@ -311,7 +394,7 @@ export function findCredentialRisks(value, path = '$') {
  * AMBIGUOUS would attribute a bug in this tool to the route.
  *
  * The caller that DOES know translates: send-fixture.mjs maps any refusal to
- * build or write this record, once a send has happened, to
+ * build or write this record, once a send has been attempted, to
  * EXIT.EVIDENCE_UNRECORDED — because at that point documents are (or may be) in
  * the container and USAGE would tell the operator nothing happened.
  */
@@ -323,6 +406,78 @@ export function assertNoCredentialShape(record) {
     `refusing to write the evidence record: ${risks.length} credential-shape risk(s) — ${detail}. ` +
       'The record is not written and the value is not echoed. This artifact is attached to a ticket and read by MG-53 and MG-54; nothing that could be a credential belongs in it.'
   );
+}
+
+// ---------------------------------------------------------------------------
+// Resolving the four id sets.
+//
+// Three accepted input shapes, ONE resolved answer. The ledger is the intended
+// one; the others exist so that no caller is forced to fabricate a shape it does
+// not have, which is how a set gets dropped.
+// ---------------------------------------------------------------------------
+
+function normalizeIdSets(source, name) {
+  if (!isPlainObject(source)) {
+    throw usageRefusal(`${name} must be the snapshot object createRunLedger() returns`);
+  }
+  const sets = {};
+  for (const key of ID_SET_NAMES) {
+    const value = source[key] ?? [];
+    if (!Array.isArray(value)) {
+      throw usageRefusal(
+        `${name}.${key} must be an array of document ids — the evidence-emission contract has four id sets and none of them is optional`
+      );
+    }
+    // Through the tool's one union, so an unusable id is refused here exactly as
+    // it is everywhere else: an id that cannot be named cannot be evidence.
+    sets[key] = mergeIds(value);
+  }
+  // The snapshot's own verdicts travel with it. They are only ever used to make
+  // this record MORE uncertain, never less: a ledger that knows something this
+  // module cannot derive must be able to say so.
+  sets.runId = typeof source.runId === 'string' ? source.runId : null;
+  sets.uncertain = source.uncertain === true;
+  return sets;
+}
+
+/**
+ * The adapter for a caller that has NOT threaded a ledger through — it knows
+ * which ids it attempted and nothing about their acceptance.
+ *
+ * Fail-closed by construction: every attempted id that was not READ BACK is
+ * recorded as AMBIGUOUS, never as accepted and never as not-sent. That
+ * understates acceptance (an id az did report success for lands in the ambiguous
+ * set), and understating is the safe direction: the record says "this may be in
+ * the container", which is the sentence that keeps MG-53 from meeting a document
+ * nothing accounts for. It never says "this was not written".
+ */
+function idSetsFromAttempted({ requestedIds, confirmation }) {
+  const requested = mergeIds(Array.isArray(requestedIds) ? requestedIds : []);
+  const observed = mergeIds(
+    confirmation && Array.isArray(confirmation.observedIds) ? confirmation.observedIds : []
+  );
+  const seen = new Set(observed);
+  return {
+    requestedIds: requested,
+    acceptedIds: [],
+    ambiguousIds: requested.filter(id => !seen.has(id)),
+    observedIds: observed,
+    runId: null,
+    // Nothing extra is claimed here: `uncertain` is derived below from the
+    // ambiguous set and the confirmation, both of which this adapter has.
+    uncertain: false,
+  };
+}
+
+function resolveIdSets({ idSets, ledger, requestedIds, confirmation }) {
+  if (ledger !== undefined && ledger !== null) {
+    if (typeof ledger.snapshot !== 'function') {
+      throw usageRefusal('ledger must be the object createRunLedger() returns');
+    }
+    return normalizeIdSets(ledger.snapshot({ confirmation }), 'the ledger snapshot');
+  }
+  if (idSets !== undefined && idSets !== null) return normalizeIdSets(idSets, 'idSets');
+  return idSetsFromAttempted({ requestedIds, confirmation });
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +496,29 @@ function requireConfirmation(confirmation) {
     }
   }
   return confirmation;
+}
+
+/**
+ * The outcome of a run that never reached a read-back at all, for a caller with
+ * no confirmation to hand.
+ *
+ * It exists so that "the run had no confirmation" is never a reason to skip the
+ * record. A nonzero exit code is required: a run that did not confirm anything
+ * cannot be recorded as confirmed, and there is no shape here that lets it be.
+ */
+function requireOutcome(outcome) {
+  if (!isPlainObject(outcome)) {
+    throw usageRefusal(
+      'with no confirmation, outcome must name the failure: {exitCode, reason}. A run that attempted a send is recorded on EVERY path, so an absent confirmation is never a reason to omit the record'
+    );
+  }
+  if (!Number.isInteger(outcome.exitCode) || outcome.exitCode <= 0) {
+    throw usageRefusal(
+      'outcome.exitCode must be the nonzero code of the failure — a run with no confirmation observed no document and cannot be recorded as confirmed'
+    );
+  }
+  requireNonEmptyString(outcome.reason, 'outcome.reason');
+  return outcome;
 }
 
 function requireDefinition(definition) {
@@ -376,13 +554,6 @@ function requireTarget(target) {
   });
 }
 
-const sameIdSet = (a, b) => {
-  if (a.length !== b.length) return false;
-  const left = [...a].sort();
-  const right = [...b].sort();
-  return left.every((value, index) => value === right[index]);
-};
-
 function instantFrom(millis) {
   if (!Number.isFinite(millis)) {
     throw usageRefusal('the injected clock returned a non-finite instant');
@@ -391,41 +562,81 @@ function instantFrom(millis) {
 }
 
 /**
- * Build the evidence record from a confirmation result and a measured container
- * definition. Pure: it reads no file, no environment variable and no wall clock
- * except the injected one.
+ * Build the evidence record for a run, on ANY outcome.
  *
- * Records what was OBSERVED, never what was hoped for. `ids` and `count` are the
- * documents the read-back actually saw; `requestedIds` are the ids the sender
- * put in the bodies. They can legitimately differ — whether the IoT Hub Cosmos
- * endpoint honours a supplied `id` is platform behaviour no file in this repo
- * pins down — so a divergence is recorded as an OBSERVATION with both lists
- * kept, and is never a failure.
+ * Pure: it reads no file, no environment variable and no wall clock except the
+ * injected one. It records what the run KNOWS, never what it hoped for, and it
+ * has no path that can claim nothing was written (see the contract in the
+ * header).
  *
  * @param {object} options
- * @param {object} options.confirmation the frozen result from confirmArrival().
+ * @param {object} [options.ledger] the run's ledger from createRunLedger(). The
+ *   intended input: it is snapshotted here WITH the confirmation, so a caller
+ *   cannot forget to fold the read-back's ids in.
+ * @param {object} [options.idSets] a ledger snapshot, if the caller took it
+ *   itself. The four sets are taken verbatim, then the confirmation's observed
+ *   ids are merged in regardless — observation is monotonic in every place it
+ *   passes through.
+ * @param {string[]} [options.requestedIds] the fallback for a caller with
+ *   neither: the ids it ATTEMPTED. Adapted fail-closed, see
+ *   idSetsFromAttempted.
+ * @param {object|null} [options.confirmation] the confirmArrival() (or
+ *   abortedConfirmation()) result. May be null for a run that never reached the
+ *   read-back, in which case `outcome` supplies the failure.
+ * @param {{exitCode: number, reason: string}} [options.outcome] required when
+ *   there is no confirmation.
+ * @param {string} [options.runId] required when there is no confirmation to take
+ *   it from.
  * @param {object} options.containerDefinition from parseContainerDefinition().
- * @param {string[]} options.requestedIds the `id` each body ACCEPTED BY az
- *   carried — never the bodies the run merely intended to send. On a partial
- *   send this is the accepted prefix, which is exactly the set that may be in
- *   the container and that MG-53 must account for.
  * @param {{hub: string, account: string, database: string, container: string}} options.target
  * @param {string} [options.deviceId] the durable fixture device.
  * @param {Function} [options.now] injected clock; byte-reproducibility depends on it.
  */
 export function buildEvidenceRecord({
-  confirmation,
+  ledger,
+  idSets,
+  requestedIds,
+  confirmation = null,
+  outcome,
+  runId,
   containerDefinition,
-  requestedIds = [],
   target,
   deviceId = FIXTURE_DEVICE_ID,
   now = Date.now,
 } = {}) {
-  requireConfirmation(confirmation);
+  const hasConfirmation = confirmation !== null && confirmation !== undefined;
+  if (hasConfirmation) requireConfirmation(confirmation);
+  const failure = hasConfirmation ? null : requireOutcome(outcome);
+  // Both given, disagreeing: the confirmation governs, and silently preferring it
+  // would record an outcome the caller did not mean. A record whose exit code is
+  // not the one the caller believed it wrote is unauditable, so it refuses and
+  // says which input governs.
+  if (hasConfirmation && isPlainObject(outcome) && outcome.exitCode !== confirmation.exitCode) {
+    throw usageRefusal(
+      `the confirmation exits ${confirmation.exitCode} but the supplied outcome claims ${JSON.stringify(outcome.exitCode)} — the confirmation governs when one is present, so pass no outcome alongside it rather than one that disagrees with it`
+    );
+  }
   requireDefinition(containerDefinition);
   const targetNames = requireTarget(target);
   requireNonEmptyString(deviceId, 'deviceId');
-  const requested = requireStringArray(requestedIds, 'requestedIds');
+
+  const sets = resolveIdSets({ idSets, ledger, requestedIds, confirmation });
+
+  const recordRunId = requireNonEmptyString(confirmation?.runId ?? sets.runId ?? runId, 'runId');
+  // A ledger belonging to a different run than the confirmation is a wiring bug,
+  // and the record it would produce is the worst kind: internally plausible and
+  // attributing one run's documents to another. MG-54 deletes by these ids.
+  for (const [source, value] of [
+    ['the confirmation', confirmation?.runId],
+    ['the ledger snapshot', sets.runId],
+    ['runId', runId],
+  ]) {
+    if (typeof value === 'string' && value !== recordRunId) {
+      throw usageRefusal(
+        `${source} names a different run than this record does — an id set attributed to the wrong run is a wrong deletion downstream, so no evidence is written from it`
+      );
+    }
+  }
 
   // Measuring one container and sending to another would record a retention and
   // a partition key that do not describe where the documents actually are — a
@@ -439,25 +650,70 @@ export function buildEvidenceRecord({
     );
   }
 
-  const ids = requireStringArray(confirmation.observedIds ?? [], 'confirmation.observedIds');
-  const count = ids.length;
+  const exitCode = hasConfirmation ? confirmation.exitCode : failure.exitCode;
+  const outcomeSlug = outcomeName(exitCode);
+  if (outcomeSlug === undefined) {
+    throw usageRefusal(
+      `exit code ${JSON.stringify(exitCode)} is not one of this tool's declared outcomes — an outcome MG-53 cannot name is one it cannot gate on, so the record is refused rather than written with an unreadable outcome`
+    );
+  }
+
+  // OBSERVATION IS MONOTONIC, enforced here as well as in the ledger and in the
+  // confirmation. Three places, one direction: nothing in this tool may remove an
+  // id from the observed set, and a path added later inherits that by passing
+  // through this line rather than by remembering to.
+  const observedIds = mergeIds(
+    sets.observedIds,
+    hasConfirmation && Array.isArray(confirmation.observedIds) ? confirmation.observedIds : []
+  );
+  const requested = sets.requestedIds;
+  const accepted = sets.acceptedIds;
+  const ambiguous = sets.ambiguousIds;
+  const count = observedIds.length;
 
   // A record must never claim more than the confirmation concluded. The
   // confirmation is the only thing entitled to say a run succeeded, and this
   // module is downstream of it: an inconsistency here is a bug in the caller's
   // wiring, and manufacturing a confirmed record out of it is precisely the
   // false proof this ticket exists to make impossible.
-  const confirmed = confirmation.confirmed === true && confirmation.exitCode === EXIT.OK;
-  if (confirmation.confirmed === true && confirmation.exitCode !== EXIT.OK) {
+  const confirmed = confirmation?.confirmed === true && exitCode === EXIT.OK;
+  if (confirmation?.confirmed === true && exitCode !== EXIT.OK) {
     throw usageRefusal(
-      `the confirmation claims confirmed:true with exit code ${confirmation.exitCode} — a confirmed run exits ${EXIT.OK}, so this result is internally inconsistent and no evidence is written from it`
+      `the confirmation claims confirmed:true with exit code ${exitCode} — a confirmed run exits ${EXIT.OK}, so this result is internally inconsistent and no evidence is written from it`
     );
   }
-  if (confirmed && count !== confirmation.expectedCount) {
+  const expectedCount = confirmation?.expectedCount ?? MESSAGES_PER_RUN;
+  if (confirmed && count !== expectedCount) {
     throw usageRefusal(
-      `the confirmation claims success with ${count} observed document(s) against an expected ${confirmation.expectedCount} — a confirmed run reads back the full expected set, so this result is internally inconsistent and no evidence is written from it`
+      `the confirmation claims success with ${count} observed document(s) against an expected ${expectedCount} — a confirmed run reads back the full expected set, so this result is internally inconsistent and no evidence is written from it`
     );
   }
+
+  // Witnessed, never inferred. fixture-core owns the definition so that the
+  // producer and every consumer of the flag mean the same thing by it.
+  const idDivergence = observedIdsDiverge({ observedIds, requestedIds: requested });
+
+  // The set a downstream ticket must ACCOUNT FOR: everything that is, or may be,
+  // in the container. Computed here rather than left as a union for MG-53 to get
+  // right — an off-by-one-set union is a document nothing accounts for, which is
+  // the halt this artifact exists to prevent.
+  const accountableIds = mergeIds(mergeIds(observedIds, accepted), ambiguous);
+
+  const attempted = requested.length > 0 || accountableIds.length > 0;
+  // Never weakened by an OR of anything: any one of these is sufficient, and the
+  // ledger's own verdict is honoured if it is stricter than what is derivable
+  // here.
+  const uncertain = ambiguous.length > 0 || !confirmed || !hasConfirmation || sets.uncertain;
+
+  // Documents the correlated read-back returned that this run CANNOT claim. Kept
+  // strictly apart from the observed set — recording one as ours would tell
+  // MG-53 that a document it must halt on is accounted for, blinding the
+  // unknown-writer check that halt exists to perform — and recorded rather than
+  // left in a log line, because the runbook's first stop condition is exactly
+  // this and an operator cannot investigate a document nobody named.
+  const anomalousIds = mergeIds(
+    hasConfirmation && Array.isArray(confirmation.anomalousIds) ? confirmation.anomalousIds : []
+  );
 
   const runMillis = now();
   const runInstant = instantFrom(runMillis);
@@ -471,14 +727,6 @@ export function buildEvidenceRecord({
       ? measuredDefaultTtl > 0
       : containerDefinition.ttlExpires === true;
   const expiryInstant = ttlExpires ? instantFrom(runMillis + measuredDefaultTtl * 1000) : null;
-
-  // Only a read-back that SAW something can report a divergence. With nothing
-  // observed — an aborted send, a timeout, an auth failure — the empty observed
-  // set trivially differs from a non-empty requested one, and recording `true`
-  // would assert that the platform renamed documents nobody looked at. `false`
-  // here reads as "no divergence was observed", which `confirmed`, `count` and
-  // the `unconfirmed-run` finding already qualify.
-  const idDivergence = count > 0 && !sameIdSet(ids, requested);
   const ttlDriftFinding = containerDefinition.ttlDriftFinding ?? null;
 
   const findings = [];
@@ -492,17 +740,40 @@ export function buildEvidenceRecord({
       })
     );
   }
-  if (confirmed && idDivergence) {
-    // An observation, NOT a failure: the correlation key is the marker plus the
-    // run id, so a platform that renamed every document still leaves the proof
-    // intact. It is recorded because MG-54 cites ids, and the ids it must cite
-    // are the ones that exist.
+  if (idDivergence) {
+    // An observation, NOT a failure, and recorded on every outcome rather than
+    // only on a confirmed one: the correlation key is the marker plus the run
+    // id, so a platform that renamed every document still leaves the proof
+    // intact — and MG-54 cites ids, which have to be the ids that exist.
     findings.push(
       Object.freeze({
         kind: 'id-divergence',
         measured: count,
         declared: requested.length,
-        message: `the platform assigned document ids that differ from the ${requested.length} the sender requested; both lists are recorded and the OBSERVED ids are the ones that exist in the container`,
+        message: `${observedIds.filter(id => !requested.includes(id)).length} document(s) were OBSERVED under an id the sender did not request; both lists are recorded and the OBSERVED ids are the ones that exist in the container`,
+      })
+    );
+  }
+  if (ambiguous.length > 0) {
+    // The crux of the contract, said out loud in the artifact. A send failure is
+    // ambiguous BY CONSTRUCTION: az can fail after IoT Hub accepted the message,
+    // so these ids may be in the container and must never be read as not-sent.
+    findings.push(
+      Object.freeze({
+        kind: 'ambiguous-acceptance',
+        measured: ambiguous.length,
+        declared: requested.length,
+        message: `${ambiguous.length} of ${requested.length} attempted message(s) have UNKNOWN acceptance — az reported failure, which can happen after IoT Hub took the message, so these ids MAY be in the container and must never be read as evidence that nothing was written`,
+      })
+    );
+  }
+  if (anomalousIds.length > 0) {
+    findings.push(
+      Object.freeze({
+        kind: 'unattributable-documents',
+        measured: anomalousIds.length,
+        declared: count,
+        message: `${anomalousIds.length} document(s) returned by the correlated read-back are NOT attributable to this run and are recorded by id, apart from this run's own — the runbook's first stop condition is any unexpected document in the source containers`,
       })
     );
   }
@@ -522,8 +793,8 @@ export function buildEvidenceRecord({
       Object.freeze({
         kind: 'unconfirmed-run',
         measured: count,
-        declared: confirmation.expectedCount,
-        message: `this run was NOT confirmed (exit ${confirmation.exitCode}, ${exitLabel(confirmation.exitCode)}); the record exists to preserve what was observed and must not be read as proof that the path carried a message`,
+        declared: expectedCount,
+        message: `this run was NOT confirmed (exit ${exitCode}, ${exitLabel(exitCode)}); the record exists to preserve what was observed and what may exist, and must not be read either as proof that the path carried a message or as proof that it did not`,
       })
     );
   }
@@ -535,13 +806,20 @@ export function buildEvidenceRecord({
     tool: TOOL_NAME,
     toolVersion: TOOL_VERSION,
 
-    runId: confirmation.runId,
+    runId: recordRunId,
     runInstant,
     confirmed,
-    exitCode: confirmation.exitCode,
-    exitLabel: exitLabel(confirmation.exitCode),
-    outcomeReason: typeof confirmation.reason === 'string' ? confirmation.reason : '',
-    scope: confirmation.scope ?? null,
+    // True whenever anything was attempted whose acceptance is unknown, or no
+    // confirmation completed. A consumer reading `count: 0` alongside
+    // `uncertain: true` is being told "this run does not know what is in the
+    // container", which is never the same sentence as "nothing is".
+    uncertain,
+    attempted,
+    outcome: outcomeSlug,
+    exitCode,
+    exitLabel: exitLabel(exitCode),
+    outcomeReason: (hasConfirmation ? confirmation.reason : failure.reason) ?? '',
+    scope: (hasConfirmation ? confirmation.scope : null) ?? null,
 
     marker: {
       field: SYNTHETIC_MARKER_FIELD,
@@ -554,14 +832,31 @@ export function buildEvidenceRecord({
     containerName: containerDefinition.containerName ?? null,
     partitionKeyPath: containerDefinition.partitionKeyPath,
     partitionKeyField: containerDefinition.partitionKeyField,
-    partitionValue: confirmation.partitionValue ?? deviceId,
-    observedPartitionValues: [...(confirmation.observedPartitionValues ?? [])],
+    partitionValue: confirmation?.partitionValue ?? deviceId,
+    observedPartitionValues: [...(confirmation?.observedPartitionValues ?? [])],
 
-    ids,
-    count,
+    // The four sets of the evidence-emission contract, each with its own count.
     requestedIds: requested,
     requestedCount: requested.length,
-    expectedCount: confirmation.expectedCount ?? MESSAGES_PER_RUN,
+    acceptedIds: accepted,
+    acceptedCount: accepted.length,
+    ambiguousIds: ambiguous,
+    ambiguousCount: ambiguous.length,
+    observedIds,
+    observedCount: count,
+
+    // Everything that is or may be in the container, unioned once, here.
+    accountableIds,
+    accountableCount: accountableIds.length,
+    // And everything the read-back saw that this run cannot claim.
+    anomalousIds,
+    anomalousCount: anomalousIds.length,
+
+    // Schema-version-1 aliases for the OBSERVED set. Derived from the same
+    // array, so the two names cannot disagree about what was read back.
+    ids: observedIds,
+    count,
+    expectedCount,
     idDivergence,
 
     measuredDefaultTtl,
@@ -577,12 +872,12 @@ export function buildEvidenceRecord({
       : null,
     expiryInstant,
 
-    waitBoundMs: confirmation.waitBoundMs,
-    pollIntervalMs: confirmation.pollIntervalMs ?? null,
-    observedArrivalMs: confirmation.observedArrivalMs ?? null,
-    elapsedMs: confirmation.elapsedMs ?? null,
-    polls: confirmation.polls ?? null,
-    crossPartitionSweepRun: confirmation.crossPartitionSweepRun === true,
+    waitBoundMs: confirmation?.waitBoundMs ?? null,
+    pollIntervalMs: confirmation?.pollIntervalMs ?? null,
+    observedArrivalMs: confirmation?.observedArrivalMs ?? null,
+    elapsedMs: confirmation?.elapsedMs ?? null,
+    polls: confirmation?.polls ?? null,
+    crossPartitionSweepRun: confirmation?.crossPartitionSweepRun === true,
 
     findings,
   };
@@ -591,6 +886,24 @@ export function buildEvidenceRecord({
   // serializes the record (to attach it to a ticket by hand, say) gets the same
   // refusal as one that writes it.
   assertNoCredentialShape(record);
+  // Deep enough to cover every list: Object.freeze is shallow, and an id set a
+  // consumer can mutate is an id set that can lose an id after it was recorded.
+  // `ids` and `observedIds` are deliberately the SAME array — two names for one
+  // set cannot drift if there is only one set.
+  for (const list of [
+    record.requestedIds,
+    record.acceptedIds,
+    record.ambiguousIds,
+    record.observedIds,
+    record.accountableIds,
+    record.anomalousIds,
+    record.observedPartitionValues,
+    record.findings,
+  ]) {
+    Object.freeze(list);
+  }
+  Object.freeze(record.marker);
+  if (record.ttlDriftFinding) Object.freeze(record.ttlDriftFinding);
   return Object.freeze(record);
 }
 
@@ -656,7 +969,13 @@ export async function writeEvidenceRecord(record, filePath, options = {}) {
   return Object.freeze({ path: filePath, bytes: Buffer.byteLength(serialized), record });
 }
 
-/** One operator-facing line, built only from the record's own fields. */
+/**
+ * One operator-facing line, built only from the record's own fields.
+ *
+ * It states the observed count AND the count that may exist. A line that named
+ * only the first reads as "nothing arrived" on every failure path, which is the
+ * sentence this contract exists to stop the tool from saying.
+ */
 export function describeEvidence(record, filePath) {
   const ttl =
     record.measuredDefaultTtl === -1
@@ -664,9 +983,16 @@ export function describeEvidence(record, filePath) {
       : `measured default_ttl ${record.measuredDefaultTtl}s, expires ${record.expiryInstant}`;
   const drift = record.ttlDriftFinding ? ' [TTL DRIFT]' : '';
   const divergence = record.idDivergence ? ' [ID DIVERGENCE]' : '';
+  const anomalies = record.anomalousCount > 0 ? ` [${record.anomalousCount} UNATTRIBUTABLE]` : '';
+  // Only said when the two numbers differ: on a confirmed run they are the same
+  // set, and repeating it would bury the difference where it matters.
+  const accountable =
+    record.accountableCount === record.count
+      ? ''
+      : `, ${record.accountableCount} document(s) are or MAY BE in the container (${record.ambiguousCount} of unknown acceptance)`;
   return (
     `evidence ${filePath}: ${record.confirmed ? 'CONFIRMED' : `NOT CONFIRMED (${record.exitLabel})`} — ` +
-    `${record.count}/${record.expectedCount} document(s) recorded for run ${record.runId} ` +
-    `in ${record.target.database}/${record.target.container}, ${ttl}${drift}${divergence}`
+    `${record.count}/${record.expectedCount} document(s) read back for run ${record.runId} ` +
+    `in ${record.target.database}/${record.target.container}${accountable}, ${ttl}${drift}${divergence}${anomalies}`
   );
 }

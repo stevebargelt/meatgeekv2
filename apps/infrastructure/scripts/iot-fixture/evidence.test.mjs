@@ -27,6 +27,7 @@ import {
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
+  ID_SET_NAMES,
   MESSAGES_PER_RUN,
   RUN_ID_FIELD,
   SYNTHETIC_MARKER,
@@ -35,15 +36,19 @@ import {
   abortedConfirmation,
   buildFixtureMessages,
   confirmArrival,
+  createRunLedger,
+  exitLabel,
 } from './fixture-core.mjs';
 import {
   EVIDENCE_KIND,
   EVIDENCE_RECORD_KEYS,
   EVIDENCE_SCHEMA_VERSION,
+  OUTCOME_NAMES,
   assertNoCredentialShape,
   buildEvidenceRecord,
   describeEvidence,
   findCredentialRisks,
+  outcomeName,
   partialPathFor,
   serializeEvidenceRecord,
   writeEvidenceRecord,
@@ -323,7 +328,10 @@ describe('a record never claims more than the confirmation concluded', () => {
     assert.ok(record.waitBoundMs > 0);
     const finding = record.findings.find(item => item.kind === 'unconfirmed-run');
     assert.ok(finding, 'an unconfirmed run must say so in its own findings');
-    assert.match(finding.message, /must not be read as proof/);
+    // Both directions, deliberately: the finding may not be read as proof the
+    // path carried a message, and may not be read as proof that it did not.
+    assert.match(finding.message, /must not be read either as proof/);
+    assert.match(finding.message, /or as proof that it did not/);
     // The requested ids are still recorded: three messages were sent, and MG-53
     // needs to know that something may yet arrive under those bodies.
     assert.deepEqual(record.requestedIds, requestedIdsOf(messages));
@@ -587,6 +595,469 @@ describe('a run that changed the live system but observed nothing', () => {
   });
 });
 
+describe('the evidence-emission contract: one record, four id sets, every outcome', () => {
+  // These tests assert the CONTRACT rather than the paths that violated it
+  // before it existed. The property is: whatever the run did, there is a record,
+  // and its four id sets are individually correct — requested (attempted),
+  // accepted (az said yes), ambiguous (az said no and acceptance is UNKNOWN),
+  // observed (read back, never discarded). A record that collapses any two of
+  // them is unusable to MG-53 and MG-54, and a run that emits none at all leaves
+  // documents nothing accounts for.
+
+  // The ledger, driven exactly as the sender drives it: request immediately
+  // before the attempt, then exactly one of accept / markAmbiguous.
+  function ledgerAfterSend({ messages, failAt = null, runId = RUN_ID }) {
+    const ledger = createRunLedger({ runId });
+    for (const [index, message] of messages.entries()) {
+      ledger.request(message.body.id);
+      if (failAt !== null && index >= failAt) {
+        // az reported failure. Acceptance is UNKNOWN from here: the CLI can fail
+        // after IoT Hub took the message, so the run stops and every id from the
+        // failure onward is ambiguous rather than not-sent.
+        ledger.markAmbiguous(message.body.id);
+        break;
+      }
+      ledger.accept(message.body.id);
+    }
+    return ledger;
+  }
+
+  const ID_SET_COUNTS = Object.freeze({
+    requestedIds: 'requestedCount',
+    acceptedIds: 'acceptedCount',
+    ambiguousIds: 'ambiguousCount',
+    observedIds: 'observedCount',
+  });
+
+  function assertIdSets(record, expected) {
+    for (const name of ID_SET_NAMES) {
+      assert.deepEqual(record[name], expected[name], `${name} is wrong`);
+      assert.equal(
+        record[ID_SET_COUNTS[name]],
+        expected[name].length,
+        `${ID_SET_COUNTS[name]} must equal ${name}.length`
+      );
+    }
+    // The union a downstream ticket acts on: everything that is, or may be, in
+    // the container. Never a subset of it, and never inferred downstream out of
+    // three fields.
+    for (const id of [...expected.acceptedIds, ...expected.ambiguousIds, ...expected.observedIds]) {
+      assert.ok(record.accountableIds.includes(id), `${id} is missing from accountableIds`);
+    }
+    assert.equal(record.accountableCount, record.accountableIds.length);
+    // The schema-v1 aliases name the OBSERVED set and nothing else.
+    assert.deepEqual(record.ids, record.observedIds);
+    assert.equal(record.count, record.observedCount);
+  }
+
+  it('names a distinct outcome for every exit code the tool can produce', () => {
+    const codes = Object.values(EXIT);
+    const names = codes.map(code => outcomeName(code));
+    for (const [index, name] of names.entries()) {
+      assert.equal(typeof name, 'string', `exit ${codes[index]} has no outcome name`);
+      assert.notEqual(name.trim(), '');
+    }
+    // Distinct, so a consumer branching on the name branches on the outcome. Two
+    // outcomes sharing a name is the same defect as two sharing an exit code.
+    assert.equal(new Set(names).size, codes.length);
+    assert.equal(Object.keys(OUTCOME_NAMES).length, codes.length);
+  });
+
+  it('builds a record for EVERY terminal outcome the tool can reach after a send', async () => {
+    const definition = await cleanDefinition();
+    const messages = sentMessages();
+    // A run that attempted one message and got a failure back: the id set shape
+    // is the same whatever the failure was, which is the point — the outcome
+    // varies, the obligation to record does not.
+    const attempted = messages[0].body.id;
+
+    for (const code of Object.values(EXIT).filter(value => value !== EXIT.OK)) {
+      const ledger = createRunLedger({ runId: RUN_ID });
+      ledger.request(attempted);
+      ledger.markAmbiguous(attempted);
+      const record = buildEvidenceRecord({
+        idSets: ledger.snapshot(),
+        // No confirmation at all: several of these outcomes happen before the
+        // read-back is ever reached, and the absence of a confirmation may never
+        // be a reason to omit the record.
+        outcome: { exitCode: code, reason: `terminal outcome ${exitLabel(code)}` },
+        runId: RUN_ID,
+        containerDefinition: definition,
+        target: TARGET,
+        now: fixedClock(),
+      });
+
+      assert.equal(record.exitCode, code);
+      assert.equal(record.outcome, outcomeName(code));
+      assert.equal(record.exitLabel, exitLabel(code));
+      assert.equal(record.confirmed, false);
+      assert.equal(record.attempted, true);
+      assert.equal(record.uncertain, true, `exit ${code} must be recorded as uncertain`);
+      assertIdSets(record, {
+        requestedIds: [attempted],
+        acceptedIds: [],
+        ambiguousIds: [attempted],
+        observedIds: [],
+      });
+      // Round-trips: the artifact is a program input, not a log line.
+      assert.deepEqual(JSON.parse(serializeEvidenceRecord(record)).accountableIds, [attempted]);
+    }
+  });
+
+  it('builds a confirmed record whose four sets agree, and which is the only certain one', async () => {
+    const messages = sentMessages();
+    const { confirmation } = await successfulConfirmation();
+    const ids = requestedIdsOf(messages);
+    const record = buildEvidenceRecord({
+      ledger: ledgerAfterSend({ messages }),
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    assert.equal(record.confirmed, true);
+    assert.equal(record.exitCode, EXIT.OK);
+    assert.equal(record.outcome, outcomeName(EXIT.OK));
+    // The ONE case where nothing is uncertain: every message was accepted and
+    // every document was read back.
+    assert.equal(record.uncertain, false);
+    assertIdSets(record, {
+      requestedIds: ids,
+      acceptedIds: ids,
+      ambiguousIds: [],
+      observedIds: ids,
+    });
+    assert.equal(
+      record.findings.some(finding => finding.kind === 'ambiguous-acceptance'),
+      false
+    );
+  });
+
+  it('records az failing on message 1 of 3 WITHOUT claiming nothing was written', async () => {
+    // The path that used to emit no artifact at all and tell the operator
+    // "nothing was written". az failed on the FIRST message, so nothing was
+    // accepted — and acceptance is UNKNOWN, not negative: the CLI can fail after
+    // IoT Hub took the message.
+    const messages = sentMessages();
+    const first = messages[0].body.id;
+    const record = buildEvidenceRecord({
+      ledger: ledgerAfterSend({ messages, failAt: 0 }),
+      outcome: {
+        exitCode: EXIT.SEND_FAILURE,
+        reason: 'az reported failure on the first message; acceptance is unknown',
+      },
+      runId: RUN_ID,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    assert.equal(record.exitCode, EXIT.SEND_FAILURE);
+    assert.equal(record.attempted, true);
+    assert.equal(record.uncertain, true);
+    assertIdSets(record, {
+      requestedIds: [first],
+      acceptedIds: [],
+      ambiguousIds: [first],
+      observedIds: [],
+    });
+    // The crux, recorded as a finding rather than left for a reader to infer
+    // from an empty acceptedIds.
+    const finding = record.findings.find(item => item.kind === 'ambiguous-acceptance');
+    assert.ok(finding, 'an unknown acceptance must be recorded as its own finding');
+    assert.match(finding.message, /UNKNOWN acceptance/);
+    assert.match(finding.message, /never be read as evidence that nothing was written/);
+    // And the id is in the set MG-53 accounts for, which is what makes the
+    // difference between a halt it can diagnose and one it cannot.
+    assert.deepEqual(record.accountableIds, [first]);
+    // A count of zero observed documents is never on its own the claim that
+    // nothing arrived: the record says so in three independent fields.
+    assert.equal(record.count, 0);
+    assert.equal(record.accountableCount, 1);
+    assert.equal(record.uncertain, true);
+  });
+
+  it('keeps a document it observed when the run then aborts on auth', async () => {
+    // A read-back saw one document, and the NEXT poll was refused. The auth
+    // failure is new information about the reader, not a retraction of what was
+    // already read — and the id it read is in the container whatever happens
+    // next.
+    const messages = sentMessages();
+    const delivered = messages[0].body;
+    const confirmation = await confirmationFor({
+      script: [{ docs: [delivered] }, { error: forbiddenError() }],
+    });
+    assert.equal(confirmation.exitCode, EXIT.AUTH, 'fixture setup');
+    assert.deepEqual([...confirmation.observedIds], [delivered.id], 'fixture setup');
+
+    const record = buildEvidenceRecord({
+      ledger: ledgerAfterSend({ messages }),
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    assert.equal(record.exitCode, EXIT.AUTH);
+    assert.equal(record.confirmed, false);
+    assert.equal(record.uncertain, true);
+    assertIdSets(record, {
+      requestedIds: requestedIdsOf(messages),
+      acceptedIds: requestedIdsOf(messages),
+      ambiguousIds: [],
+      observedIds: [delivered.id],
+    });
+    // An auth failure is never an absence, and never a timeout.
+    assert.notEqual(record.exitCode, EXIT.TIMEOUT);
+    assert.equal(record.count, 1);
+
+    // And the observed id cannot be lost after the fact: the record's lists are
+    // frozen, so a consumer cannot drop an id the run recorded.
+    assert.throws(() => record.observedIds.pop(), TypeError);
+    assert.throws(() => record.accountableIds.push('invented'), TypeError);
+    assert.deepEqual(record.observedIds, [delivered.id]);
+  });
+
+  it('refuses an outcome that disagrees with the confirmation it was given', async () => {
+    const { confirmation } = await successfulConfirmation();
+    const definition = await cleanDefinition();
+    assert.throws(
+      () =>
+        buildEvidenceRecord({
+          ledger: ledgerAfterSend({ messages: sentMessages() }),
+          confirmation,
+          // A caller believing it recorded a timeout while the confirmation says
+          // otherwise would write an artifact nobody can audit.
+          outcome: { exitCode: EXIT.TIMEOUT, reason: 'disagrees with the confirmation' },
+          containerDefinition: definition,
+          target: TARGET,
+          now: fixedClock(),
+        }),
+      err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+    );
+  });
+
+  it('folds the read-back ids in even when the snapshot was taken before it', async () => {
+    // Observation is monotonic in THREE places — the ledger, the confirmation and
+    // here — so a caller that snapshotted early cannot lose an id by being
+    // early.
+    const messages = sentMessages();
+    const { confirmation } = await successfulConfirmation();
+    const stale = ledgerAfterSend({ messages }).snapshot(); // no confirmation folded in
+    assert.deepEqual([...stale.observedIds], [], 'fixture setup: a stale snapshot saw nothing');
+
+    const record = buildEvidenceRecord({
+      idSets: stale,
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+    assert.deepEqual(record.observedIds, requestedIdsOf(messages));
+    assert.equal(record.confirmed, true);
+  });
+
+  it('refuses a ledger and a confirmation that name different runs', async () => {
+    const { confirmation } = await successfulConfirmation();
+    const otherRun = `${RUN_ID}-other`;
+    assert.throws(
+      () =>
+        buildEvidenceRecord({
+          ledger: ledgerAfterSend({ messages: sentMessages(), runId: otherRun }),
+          confirmation,
+          containerDefinition: DEFINITION_OF_TARGET_CONTAINER,
+          target: TARGET,
+          now: fixedClock(),
+        }),
+      err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+    );
+  });
+
+  it('refuses an outcome that could be mistaken for a success, or that has no name', async () => {
+    const definition = await cleanDefinition();
+    const ledger = createRunLedger({ runId: RUN_ID });
+    ledger.request('mg67-doc-1');
+    ledger.markAmbiguous('mg67-doc-1');
+    const build = extra =>
+      buildEvidenceRecord({
+        idSets: ledger.snapshot(),
+        runId: RUN_ID,
+        containerDefinition: definition,
+        target: TARGET,
+        now: fixedClock(),
+        ...extra,
+      });
+
+    // No confirmation and no outcome: the caller has to say what happened. It
+    // may not omit the record, and it may not leave the outcome blank either.
+    assert.throws(build, err => err instanceof FixtureError && err.exitCode === EXIT.USAGE);
+    for (const outcome of [
+      { exitCode: EXIT.OK, reason: 'a run with no confirmation cannot be confirmed' },
+      { exitCode: -1, reason: 'not an outcome' },
+      { exitCode: EXIT.TIMEOUT },
+      { exitCode: EXIT.TIMEOUT, reason: '   ' },
+    ]) {
+      assert.throws(
+        () => build({ outcome }),
+        err => err instanceof FixtureError && err.exitCode === EXIT.USAGE,
+        `outcome ${JSON.stringify(outcome)} must be refused`
+      );
+    }
+    // An exit code this tool never declares: MG-53 cannot gate on an outcome it
+    // cannot name, so the record is refused rather than written unreadable.
+    assert.throws(
+      () => build({ outcome: { exitCode: 99, reason: 'undeclared' } }),
+      err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+    );
+  });
+
+  it('refuses an id set that is not a set of usable ids', async () => {
+    const definition = await cleanDefinition();
+    for (const broken of [
+      { requestedIds: 'mg67-doc-1' },
+      { requestedIds: ['mg67-doc-1'], acceptedIds: [''] },
+      { requestedIds: ['mg67-doc-1'], ambiguousIds: [null] },
+      { observedIds: [{ id: 'mg67-doc-1' }] },
+    ]) {
+      assert.throws(
+        () =>
+          buildEvidenceRecord({
+            idSets: broken,
+            runId: RUN_ID,
+            outcome: { exitCode: EXIT.SEND_FAILURE, reason: 'send failed' },
+            containerDefinition: definition,
+            target: TARGET,
+            now: fixedClock(),
+          }),
+        err => err instanceof FixtureError && err.exitCode === EXIT.USAGE,
+        `id sets ${JSON.stringify(broken)} must be refused — an id that cannot be named cannot be evidence`
+      );
+    }
+  });
+
+  it('adapts a caller that knows only what it attempted, fail-closed', async () => {
+    // The compatibility path: no ledger, just the ids a caller attempted. Every
+    // one that was not read back is recorded as UNKNOWN acceptance, never as
+    // accepted and never as not-sent.
+    const messages = sentMessages();
+    const confirmation = await confirmationFor({ fallback: { docs: [] } });
+    assert.equal(confirmation.exitCode, EXIT.TIMEOUT, 'fixture setup');
+    const record = buildEvidenceRecord({
+      requestedIds: requestedIdsOf(messages),
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+    assertIdSets(record, {
+      requestedIds: requestedIdsOf(messages),
+      acceptedIds: [],
+      ambiguousIds: requestedIdsOf(messages),
+      observedIds: [],
+    });
+    assert.equal(record.uncertain, true);
+    assert.ok(record.findings.some(finding => finding.kind === 'ambiguous-acceptance'));
+  });
+
+  it('records the documents the read-back could NOT attribute to this run, apart from its own', async () => {
+    // The runbook's first stop condition. A stray document is named in the
+    // artifact — an operator cannot investigate one nobody named — and is kept
+    // strictly out of the observed set, since counting it as ours would tell
+    // MG-53 that a document it must halt on is accounted for.
+    const messages = sentMessages();
+    const stray = { id: 'not-ours-0', [RUN_ID_FIELD]: RUN_ID };
+    const confirmation = await confirmationFor({ fallback: { docs: [stray] } });
+    assert.equal(confirmation.exitCode, EXIT.MARKER_VIOLATION, 'fixture setup');
+
+    const record = buildEvidenceRecord({
+      ledger: ledgerAfterSend({ messages }),
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+    assert.deepEqual(record.anomalousIds, [stray.id]);
+    assert.equal(record.anomalousCount, 1);
+    assert.equal(record.observedIds.includes(stray.id), false);
+    assert.equal(record.accountableIds.includes(stray.id), false);
+    const finding = record.findings.find(item => item.kind === 'unattributable-documents');
+    assert.ok(finding, 'an unattributable document must be recorded as a finding');
+    assert.match(describeEvidence(record, '/tmp/e.json'), /1 UNATTRIBUTABLE/);
+  });
+});
+
+describe('idDivergence is witnessed, never inferred', () => {
+  it('is FALSE for an incomplete read-back whose ids the platform honoured', async () => {
+    // Two of three arrived, under the ids the sender chose. That is an
+    // incomplete read-back — nothing about it witnesses a platform renaming, and
+    // asserting one in the artifact MG-53 and MG-54 parse mechanically would have
+    // a downstream ticket act on a fabricated claim.
+    const messages = sentMessages();
+    const delivered = messages.slice(0, 2).map(message => message.body);
+    const confirmation = await confirmationFor({ fallback: { docs: delivered } });
+    assert.equal(confirmation.exitCode, EXIT.AMBIGUOUS, 'fixture setup');
+
+    const record = buildEvidenceRecord({
+      idSets: {
+        runId: RUN_ID,
+        requestedIds: requestedIdsOf(messages),
+        acceptedIds: requestedIdsOf(messages),
+        ambiguousIds: [],
+        observedIds: [],
+      },
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    assert.equal(record.count, 2);
+    assert.equal(record.requestedCount, MESSAGES_PER_RUN);
+    assert.equal(
+      record.idDivergence,
+      false,
+      'a count shortfall is an incomplete read-back, not a witnessed divergence'
+    );
+    assert.equal(
+      record.findings.some(finding => finding.kind === 'id-divergence'),
+      false
+    );
+    assert.equal(describeEvidence(record, '/tmp/e.json').includes('ID DIVERGENCE'), false);
+  });
+
+  it('is TRUE only when an OBSERVED document carries an id nobody requested', async () => {
+    const messages = sentMessages();
+    // One document arrived under an id of the platform's choosing. Witnessed:
+    // the document exists and its id is not one of ours.
+    const delivered = messages.map((message, index) =>
+      index === 0 ? { ...message.body, id: 'cosmos-assigned-0' } : message.body
+    );
+    const { confirmation } = await successfulConfirmation(delivered);
+    const record = buildEvidenceRecord({
+      ledger: (() => {
+        const ledger = createRunLedger({ runId: RUN_ID });
+        for (const message of messages) {
+          ledger.request(message.body.id);
+          ledger.accept(message.body.id);
+        }
+        return ledger;
+      })(),
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    assert.equal(record.idDivergence, true);
+    assert.ok(record.observedIds.includes('cosmos-assigned-0'));
+    assert.deepEqual(record.requestedIds, requestedIdsOf(messages));
+    const finding = record.findings.find(item => item.kind === 'id-divergence');
+    assert.ok(finding);
+    assert.match(finding.message, /1 document\(s\) were OBSERVED under an id the sender did not/);
+  });
+});
+
 describe('no field of the record can hold a credential', () => {
   it('a clean record trips none of the guards', async () => {
     const record = await buildSuccessRecord({ containerDefinition: await driftDefinition() });
@@ -694,6 +1165,42 @@ describe('no field of the record can hold a credential', () => {
         }),
       err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
     );
+  });
+
+  it('scans all FOUR id sets, not just the one the record used to carry', async () => {
+    // The guard walks the record structurally, so this holds for a set added
+    // later too — but the contract now has four, and each of them is a place a
+    // caller could put a string this module did not author.
+    const definition = await cleanDefinition();
+    const shaped = 'AccountKey=NOT-A-KEY-THIS-IS-A-TEST-FIXTURE-VALUE-ONLY==';
+    for (const name of ID_SET_NAMES) {
+      const idSets = {
+        runId: RUN_ID,
+        requestedIds: ['mg67-doc-1'],
+        acceptedIds: ['mg67-doc-1'],
+        ambiguousIds: [],
+        observedIds: [],
+        [name]: [shaped],
+      };
+      let message = '';
+      try {
+        buildEvidenceRecord({
+          idSets,
+          runId: RUN_ID,
+          outcome: { exitCode: EXIT.SEND_FAILURE, reason: 'send failed' },
+          containerDefinition: definition,
+          target: TARGET,
+          now: fixedClock(),
+        });
+      } catch (err) {
+        assert.ok(err instanceof FixtureError && err.exitCode === EXIT.USAGE);
+        message = err.message;
+      }
+      assert.notEqual(message, '', `a credential-shaped id in ${name} must be refused`);
+      // Names the path, never the value — the refusal is an output path too.
+      assert.ok(message.includes(name), `the refusal must name ${name}`);
+      assert.equal(message.includes(shaped), false, 'the refusal echoed the value');
+    }
   });
 
   it('declares every key the builder emits, and no key it does not', async () => {
