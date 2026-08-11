@@ -30,6 +30,22 @@
 // concluding either way. Saying so here is cheaper than a downstream ticket
 // re-deriving it wrong.
 //
+// WHAT THE RECORD SAYS ABOUT A RUN THAT OBSERVED NOTHING. The record is written
+// on failure paths too — a send that aborted partway, a timeout, an auth failure
+// — because documents are, or may be, in the container and MG-53 halts on a
+// source document its recorded set does not account for. On those paths `ids`
+// and `count` are the read-back's own (empty) result and `requestedIds` /
+// `requestedCount` are exactly the bodies az ACCEPTED, never the bodies the run
+// intended. So the set a consumer must account for is `ids` on a confirmed run,
+// and the union of `ids` and `requestedIds` otherwise — with `confirmed` and the
+// `unconfirmed-run` finding saying which case it is looking at.
+//
+// `idDivergence` is a comparison and is therefore only made when a read-back
+// actually saw something. A run that observed nothing has witnessed no platform
+// behaviour to report, and an empty observed set trivially differs from a
+// non-empty requested one — so reporting divergence there would put an
+// unwitnessed claim in the one artifact two tickets consume mechanically.
+//
 // THE CLOCK IS INJECTED so the artifact is byte-reproducible under test: the
 // same inputs and the same clock produce the same bytes, which is what lets a
 // test assert on the whole serialized document rather than field by field.
@@ -389,7 +405,10 @@ function instantFrom(millis) {
  * @param {object} options
  * @param {object} options.confirmation the frozen result from confirmArrival().
  * @param {object} options.containerDefinition from parseContainerDefinition().
- * @param {string[]} options.requestedIds the `id` each sent body carried.
+ * @param {string[]} options.requestedIds the `id` each body ACCEPTED BY az
+ *   carried — never the bodies the run merely intended to send. On a partial
+ *   send this is the accepted prefix, which is exactly the set that may be in
+ *   the container and that MG-53 must account for.
  * @param {{hub: string, account: string, database: string, container: string}} options.target
  * @param {string} [options.deviceId] the durable fixture device.
  * @param {Function} [options.now] injected clock; byte-reproducibility depends on it.
@@ -453,7 +472,13 @@ export function buildEvidenceRecord({
       : containerDefinition.ttlExpires === true;
   const expiryInstant = ttlExpires ? instantFrom(runMillis + measuredDefaultTtl * 1000) : null;
 
-  const idDivergence = !sameIdSet(ids, requested);
+  // Only a read-back that SAW something can report a divergence. With nothing
+  // observed — an aborted send, a timeout, an auth failure — the empty observed
+  // set trivially differs from a non-empty requested one, and recording `true`
+  // would assert that the platform renamed documents nobody looked at. `false`
+  // here reads as "no divergence was observed", which `confirmed`, `count` and
+  // the `unconfirmed-run` finding already qualify.
+  const idDivergence = count > 0 && !sameIdSet(ids, requested);
   const ttlDriftFinding = containerDefinition.ttlDriftFinding ?? null;
 
   const findings = [];

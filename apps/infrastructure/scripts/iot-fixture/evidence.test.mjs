@@ -32,6 +32,7 @@ import {
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
   TICKET,
+  abortedConfirmation,
   buildFixtureMessages,
   confirmArrival,
 } from './fixture-core.mjs';
@@ -440,6 +441,149 @@ describe('a record never claims more than the confirmation concluded', () => {
         err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
       );
     }
+  });
+});
+
+describe('a run that changed the live system but observed nothing', () => {
+  // The path a partial send takes: az accepted some messages, then failed, so no
+  // read-back was ever attempted. Those messages are on their way to the
+  // container, and a record that does not account for them leaves MG-53 facing a
+  // source document it cannot distinguish from an unknown writer — which is the
+  // condition that halts its whole sequence.
+  const ACCEPTED_PREFIX = 1;
+
+  async function partialSendRecord(overrides = {}) {
+    const messages = sentMessages();
+    const accepted = requestedIdsOf(messages).slice(0, ACCEPTED_PREFIX);
+    const record = buildEvidenceRecord({
+      confirmation: abortedConfirmation({
+        runId: RUN_ID,
+        exitCode: EXIT.SEND_FAILURE,
+        reason: `the send aborted after ${accepted.length} of ${messages.length} message(s); those were accepted by IoT Hub and MAY be in the container, and NO read-back was attempted`,
+        partitionValue: FIXTURE_DEVICE_ID,
+        partitionKeyField: 'deviceId',
+      }),
+      containerDefinition: await cleanDefinition(),
+      requestedIds: accepted,
+      target: TARGET,
+      now: fixedClock(),
+      ...overrides,
+    });
+    return { record, accepted, messages };
+  }
+
+  it('records the ids az already accepted, so nothing it put in flight goes unaccounted for', async () => {
+    const { record, accepted } = await partialSendRecord();
+
+    // requestedIds is the ACCEPTED prefix, never the three the run intended:
+    // recording an id az rejected would send MG-53 hunting a document that does
+    // not exist, and omitting one it accepted is the halt this record prevents.
+    assert.deepEqual(record.requestedIds, accepted);
+    assert.equal(record.requestedCount, ACCEPTED_PREFIX);
+    // Nothing was READ BACK, and the record says so rather than borrowing the
+    // requested ids to look complete.
+    assert.deepEqual(record.ids, []);
+    assert.equal(record.count, 0);
+    assert.equal(record.confirmed, false);
+    assert.equal(record.exitCode, EXIT.SEND_FAILURE);
+    // The shortfall is legible: three were expected, one was accepted, none seen.
+    assert.equal(record.expectedCount, MESSAGES_PER_RUN);
+    assert.equal(record.scope, 'not-attempted');
+    assert.match(record.outcomeReason, /NO read-back was attempted/);
+    const finding = record.findings.find(item => item.kind === 'unconfirmed-run');
+    assert.ok(finding, 'a run nobody confirmed must say so in its own findings');
+
+    // The mechanical property MG-53 depends on: the accepted id survives the
+    // round trip to the artifact, under a key the runbook's field table names.
+    const parsed = JSON.parse(serializeEvidenceRecord(record));
+    assert.deepEqual(parsed.requestedIds, accepted);
+    assert.ok(accepted.every(id => serializeEvidenceRecord(record).includes(id)));
+  });
+
+  it('claims no id divergence when no read-back observed anything', async () => {
+    // A divergence is a comparison against what EXISTS. With nothing observed,
+    // the empty set trivially differs from the requested one — reporting that as
+    // divergence would put a platform behaviour nobody witnessed into the record
+    // two tickets read as a program input.
+    const { record } = await partialSendRecord();
+    assert.equal(record.idDivergence, false);
+    assert.equal(
+      record.findings.some(finding => finding.kind === 'id-divergence'),
+      false
+    );
+
+    // Same for the other two ways a run reaches the record having seen nothing.
+    for (const spec of [{ fallback: { docs: [] } }, { script: [{ error: forbiddenError() }] }]) {
+      const confirmation = await confirmationFor(spec);
+      assert.equal(confirmation.observedCount, 0, 'fixture setup: expected nothing observed');
+      const unobserved = buildEvidenceRecord({
+        confirmation,
+        containerDefinition: await cleanDefinition(),
+        requestedIds: requestedIdsOf(sentMessages()),
+        target: TARGET,
+        now: fixedClock(),
+      });
+      assert.equal(
+        unobserved.idDivergence,
+        false,
+        `exit ${confirmation.exitCode} claimed divergence`
+      );
+    }
+  });
+
+  it('still reports divergence on an unconfirmed run whose read-back DID see documents', async () => {
+    // The guard above must not suppress a real observation. Two of three
+    // documents arrived under ids the platform chose: the run is ambiguous, not
+    // confirmed, and the divergence was genuinely witnessed — MG-54 cites the
+    // ids that exist, and these are they.
+    const messages = sentMessages();
+    const delivered = messages
+      .slice(0, 2)
+      .map((message, index) => ({ ...message.body, id: `cosmos-assigned-${index}` }));
+    const confirmation = await confirmationFor({ fallback: { docs: delivered } });
+    assert.equal(confirmation.exitCode, EXIT.AMBIGUOUS, 'fixture setup');
+
+    const record = buildEvidenceRecord({
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      requestedIds: requestedIdsOf(messages),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    assert.equal(record.confirmed, false);
+    assert.equal(record.idDivergence, true);
+    assert.deepEqual(record.ids, ['cosmos-assigned-0', 'cosmos-assigned-1']);
+    assert.equal(record.count, 2);
+    assert.deepEqual(record.requestedIds, requestedIdsOf(messages));
+  });
+
+  it('holds no credential and writes atomically, exactly like a confirmed record', async () => {
+    // The failure paths are where a record is most likely to be assembled from
+    // error text, so the guard matters here at least as much as on success.
+    const { record } = await partialSendRecord();
+    assert.deepEqual(findCredentialRisks(record), []);
+
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'evidence.json');
+      await writeEvidenceRecord(record, target);
+      assert.deepEqual(await readdir(dir), ['evidence.json']);
+      assert.deepEqual(
+        JSON.parse(await readFile(target, 'utf8')).requestedIds,
+        record.requestedIds
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('summarises itself as NOT CONFIRMED with the send failure named', async () => {
+    const { record } = await partialSendRecord();
+    const line = describeEvidence(record, '/tmp/mg67-evidence.json');
+    assert.match(line, /NOT CONFIRMED \(send failure\)/);
+    assert.match(line, new RegExp(`0/${MESSAGES_PER_RUN}`));
+    assert.equal(line.includes('ID DIVERGENCE'), false);
   });
 });
 
