@@ -1505,6 +1505,91 @@ describe('the confirmation read-back', () => {
     assert.equal(result.uncertain, true);
   });
 
+  // The same rule as "never discards an id it has already observed", applied
+  // WITHIN one page rather than across polls — the instance of the contract that
+  // a per-poll fix does not reach. A page holding two of this run's documents
+  // beside one stray must not report that it observed nothing: those two are in
+  // the container whatever the third one is, MG-53 halts on a source document
+  // its recorded set does not account for, and there an unrecorded document of
+  // ours is indistinguishable from the unknown writer that halt exists to catch.
+  it('keeps the ids of this run’s documents when a stray in the SAME page fails', async () => {
+    const ours = routed(2);
+    const cases = [
+      [
+        'a stray document with no marker',
+        [...ours, ...routed(1, { unmarked: true, idPrefix: 'stray', firstSequence: 3 })],
+        EXIT.MARKER_VIOLATION,
+        ['stray-1'],
+      ],
+      [
+        'a document carrying another run’s id',
+        [...ours, ...routed(1, { runId: 'mg-67-run-other', idPrefix: 'other', firstSequence: 3 })],
+        EXIT.AMBIGUOUS,
+        ['other-1'],
+      ],
+      [
+        // Nothing about an unparseable element makes the documents beside it
+        // less read-back.
+        'an element that is not a document at all',
+        [...ours, 'not-a-document'],
+        EXIT.AMBIGUOUS,
+        [],
+      ],
+    ];
+
+    for (const [context, page, expected, anomalous] of cases) {
+      const { result } = await confirm({ script: [{ docs: page }] });
+      assertFailed(result, expected, context);
+      assert.deepEqual(
+        result.observedIds,
+        ['cosmos-assigned-1', 'cosmos-assigned-2'],
+        `${context}: discarded ids the very same page had read back`
+      );
+      assert.equal(result.observedCount, 2, context);
+      assert.equal(result.uncertain, true, context);
+      // The two sets stay apart in BOTH directions: a document this run cannot
+      // claim is never counted as arrival (which would be a false proof), and is
+      // never dropped either (which would leave MG-53 unable to name it).
+      assert.deepEqual(result.anomalousIds, anomalous, context);
+      for (const id of anomalous) {
+        assert.ok(!result.observedIds.includes(id), `${context}: claimed ${id} as this run's`);
+      }
+    }
+  });
+
+  // A document nobody can name is a stop condition nobody can investigate: the
+  // runbook's first one is "any unexpected document in the source containers".
+  it('names an unattributable document in the operator line and in the reason', async () => {
+    const { result } = await confirm({
+      script: [
+        {
+          docs: [
+            ...routed(2),
+            ...routed(1, {
+              unmarked: true,
+              idPrefix: 'stray',
+              firstSequence: 3,
+              partitionValue: 'somebody-elses-device',
+            }),
+          ],
+        },
+      ],
+    });
+    assertFailed(result, EXIT.MARKER_VIOLATION, 'unmarked document in a page of ours');
+    assert.match(result.reason, /stray-1/);
+    const line = describeConfirmation(result);
+    assert.match(line, /NOT attributable to this run/);
+    assert.match(line, /stray-1/);
+    // And the count in that same line is still the count of OURS, not a total
+    // that quietly includes the stray.
+    assert.match(line, new RegExp(`2/${MESSAGES_PER_RUN} marked documents`));
+    // observedPartitionValues answers "where did OUR documents land" — the
+    // question the unexpected-partition outcome turns on. A stray's partition is
+    // not an answer to it, and letting one in would put a partition this run
+    // never wrote to in the evidence artifact.
+    assert.deepEqual(result.observedPartitionValues, [FIXTURE_DEVICE_ID]);
+  });
+
   // A page that holds the expected count is not a confirmation if an earlier
   // page held ids this one does not: confirming would record an observed set
   // nobody ever read in one piece, and MG-53 checks the source against exactly
@@ -1831,6 +1916,274 @@ describe('the run ledger (the evidence-emission contract)', () => {
   });
 });
 
+// The contract asserted END TO END rather than at either half of it: a REAL
+// confirmation result, produced by driving confirmArrival with the fake reader,
+// folded into a REAL ledger, for EVERY terminal outcome the tool can reach.
+//
+// Asserting the ledger alone (above) proves the rules; asserting a confirmation
+// alone proves the polling. Neither catches a run whose ids are correct in both
+// halves and lost between them, which is the shape every defect this contract
+// answers actually had. So this table is the contract's acceptance: for each
+// outcome, an evidence record must be emitted and each of the four id sets must
+// be individually right.
+describe('every terminal outcome is recordable, with its four id sets intact', () => {
+  const RUN = 'mg-67-run-outcomes';
+  const BOUND = 20_000;
+  const INTERVAL = 5_000;
+  const EMPTY_POLLS_TO_BOUND = 5;
+
+  // The messages a run actually sends, so requestedIds are the real minted ids
+  // rather than a stand-in — divergence is judged against these.
+  const messages = buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId' });
+  const requested = messages.map(message => message.body.id);
+
+  // A document as Cosmos would return it if the platform HONOURED the id the
+  // body carried. Whether it does is behaviour no file in this repo pins down —
+  // which is exactly why both cases are exercised here.
+  const honoured = count =>
+    messages.slice(0, count).map(message => ({ ...message.body, _ts: 1, _etag: '"0"' }));
+
+  // ...and as it would return them if the platform assigned its own ids.
+  const renamed = count =>
+    messages.slice(0, count).map((message, i) => ({
+      ...message.body,
+      id: `cosmos-assigned-${i + 1}`,
+      _ts: 1,
+      _etag: '"0"',
+    }));
+
+  const unmarkedStray = () => {
+    const doc = { ...messages[0].body, id: 'stray-1', [SEQUENCE_FIELD]: 99, _ts: 1 };
+    delete doc[SYNTHETIC_MARKER_FIELD];
+    return doc;
+  };
+
+  // A run that sent everything az would take, then confirmed however the fake
+  // scripts it. `sent` says how many messages got as far as an attempt.
+  const runThrough = async (spec, { sent = MESSAGES_PER_RUN, accept = sent } = {}) => {
+    const run = createRunLedger({ runId: RUN });
+    for (const id of requested.slice(0, sent)) {
+      run.request(id);
+      if (requested.indexOf(id) < accept) run.accept(id);
+      else run.markAmbiguous(id);
+    }
+    const clock = fakeClock();
+    const confirmation = await confirmArrival({
+      reader: fakeReader(spec),
+      runId: RUN,
+      partitionKeyField: 'deviceId',
+      timeoutMs: BOUND,
+      pollIntervalMs: INTERVAL,
+      maxTransportRetries: 0,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+    return { confirmation, snapshot: run.snapshot({ confirmation }) };
+  };
+
+  const empties = Array.from({ length: EMPTY_POLLS_TO_BOUND }, () => ({ docs: [] }));
+
+  it('emits a record for every confirmation outcome, with each id set correct', async () => {
+    const cases = [
+      {
+        context: 'success',
+        spec: { script: [{ docs: honoured(MESSAGES_PER_RUN) }] },
+        exitCode: EXIT.OK,
+        observedIds: requested,
+        uncertain: false,
+        idDivergence: false,
+      },
+      {
+        context: 'success under platform-assigned ids',
+        spec: { script: [{ docs: renamed(MESSAGES_PER_RUN) }] },
+        exitCode: EXIT.OK,
+        observedIds: ['cosmos-assigned-1', 'cosmos-assigned-2', 'cosmos-assigned-3'],
+        uncertain: false,
+        // WITNESSED: a document was read back under an id the run did not choose.
+        idDivergence: true,
+      },
+      {
+        context: 'timeout with nothing found anywhere',
+        spec: { fallback: { docs: [] } },
+        exitCode: EXIT.TIMEOUT,
+        observedIds: [],
+        uncertain: true,
+        // The assertion that matters most here: a run that observed NOTHING has
+        // not witnessed a platform renaming. Inferring divergence from a
+        // shortfall would put a fabricated claim in the one artifact MG-53 and
+        // MG-54 parse mechanically.
+        idDivergence: false,
+      },
+      {
+        context: 'auth failure AFTER a document was already read back',
+        spec: { script: [{ docs: honoured(2) }, { error: forbiddenError() }] },
+        exitCode: EXIT.AUTH,
+        // The two documents poll one read back are IN THE CONTAINER. An auth
+        // failure on poll two is news about the reader, not about them.
+        observedIds: requested.slice(0, 2),
+        uncertain: true,
+        idDivergence: false,
+      },
+      {
+        context: 'transport abort after a document was already read back',
+        spec: { script: [{ docs: honoured(2) }, { error: transportError() }] },
+        exitCode: EXIT.TRANSPORT,
+        observedIds: requested.slice(0, 2),
+        uncertain: true,
+        idDivergence: false,
+      },
+      {
+        context: 'marker violation beside documents of ours',
+        spec: { script: [{ docs: [...honoured(2), unmarkedStray()] }] },
+        exitCode: EXIT.MARKER_VIOLATION,
+        observedIds: requested.slice(0, 2),
+        anomalousIds: ['stray-1'],
+        uncertain: true,
+        idDivergence: false,
+      },
+      {
+        context: 'an incomplete set at the bound',
+        spec: { fallback: { docs: honoured(2) } },
+        exitCode: EXIT.AMBIGUOUS,
+        observedIds: requested.slice(0, 2),
+        uncertain: true,
+        idDivergence: false,
+      },
+      {
+        context: 'delivered under an unexpected partition',
+        spec: { script: [...empties, { docs: renamed(MESSAGES_PER_RUN) }] },
+        exitCode: EXIT.UNEXPECTED_PARTITION,
+        observedIds: ['cosmos-assigned-1', 'cosmos-assigned-2', 'cosmos-assigned-3'],
+        uncertain: true,
+        idDivergence: true,
+      },
+    ];
+
+    for (const expected of cases) {
+      const { confirmation, snapshot } = await runThrough(expected.spec);
+      const context = `${expected.context} (${describeConfirmation(confirmation)})`;
+
+      assert.equal(confirmation.exitCode, expected.exitCode, context);
+      // HR2: the bound actually used is reported on every path, including the
+      // ones that never reached it.
+      assert.equal(confirmation.waitBoundMs, BOUND, context);
+
+      // Every one of these attempted three messages, so every one of them owes
+      // an evidence record. There is no outcome here that may exit without one.
+      assert.equal(mustEmitEvidence(snapshot), true, context);
+
+      assert.deepEqual([...snapshot.requestedIds], requested, `${context}: requestedIds`);
+      assert.deepEqual([...snapshot.acceptedIds], requested, `${context}: acceptedIds`);
+      assert.deepEqual([...snapshot.ambiguousIds], [], `${context}: ambiguousIds`);
+      assert.deepEqual(
+        [...snapshot.observedIds],
+        expected.observedIds,
+        `${context}: observedIds — an id observed is never discarded, and one never observed is never invented`
+      );
+      assert.equal(snapshot.uncertain, expected.uncertain, `${context}: uncertain`);
+      assert.equal(snapshot.idDivergence, expected.idDivergence, `${context}: idDivergence`);
+      assert.deepEqual(
+        [...confirmation.anomalousIds],
+        expected.anomalousIds ?? [],
+        `${context}: anomalousIds`
+      );
+      // The unattributable never leaks into the run's own set.
+      for (const id of expected.anomalousIds ?? []) {
+        assert.ok(!snapshot.observedIds.includes(id), `${context}: claimed ${id} as this run's`);
+      }
+    }
+  });
+
+  // The write side of the same rule. az failing is not the message failing to
+  // arrive, so neither the record nor the line an operator reads may say that
+  // nothing was written — least of all on message 1, where there is the most
+  // temptation to.
+  it('records an az failure as unknown acceptance, on message 1 and mid-run alike', async () => {
+    for (const [context, sent, accept] of [
+      ['az failed on message 1 of 3', 1, 0],
+      ['az failed on message 2 of 3', 2, 1],
+    ]) {
+      const run = createRunLedger({ runId: RUN });
+      for (const id of requested.slice(0, sent)) {
+        run.request(id);
+        if (requested.indexOf(id) < accept) run.accept(id);
+        else run.markAmbiguous(id);
+      }
+      const confirmation = abortedConfirmation({
+        runId: RUN,
+        exitCode: EXIT.SEND_FAILURE,
+        reason: `the send aborted after ${sent} of ${MESSAGES_PER_RUN} message(s)`,
+      });
+      const snapshot = run.snapshot({ confirmation });
+
+      // A record is OWED: something was attempted, so something may be in the
+      // container.
+      assert.equal(mustEmitEvidence(snapshot), true, context);
+      assert.deepEqual([...snapshot.requestedIds], requested.slice(0, sent), context);
+      assert.deepEqual([...snapshot.acceptedIds], requested.slice(0, accept), context);
+      assert.deepEqual([...snapshot.ambiguousIds], requested.slice(accept, sent), context);
+      assert.deepEqual([...snapshot.observedIds], [], context);
+      assert.equal(snapshot.uncertain, true, context);
+      assert.equal(snapshot.idDivergence, false, context);
+      // Never "nothing was written": the honest sentence is that the fate of
+      // those messages is unknown.
+      assert.match(describeIdSets(snapshot), /of UNKNOWN acceptance/, context);
+      assert.match(describeIdSets(snapshot), /NOT established by this run/, context);
+      // And the confirmation it pairs with says a read-back never happened,
+      // rather than reporting an absence.
+      assert.equal(confirmation.scope, 'not-attempted', context);
+      assert.notEqual(confirmation.exitCode, EXIT.TIMEOUT, context);
+    }
+  });
+
+  // The one exemption, and its boundary: a run that refused BEFORE its first
+  // attempt has changed nothing, so it owes no record. One attempt is enough to
+  // owe one.
+  it('exempts only a run that attempted nothing', () => {
+    const untouched = createRunLedger({ runId: RUN }).snapshot();
+    assert.equal(mustEmitEvidence(untouched), false);
+    assert.equal(untouched.attempted, false);
+
+    const attempted = createRunLedger({ runId: RUN });
+    attempted.request(requested[0]);
+    assert.equal(mustEmitEvidence(attempted.snapshot()), true);
+    // Unresolved is unknown, and unknown is never absence.
+    assert.deepEqual([...attempted.snapshot().ambiguousIds], [requested[0]]);
+  });
+
+  // A caller that read documents back and then aborted for some LATER reason
+  // (the evidence write itself failing, say) must be able to build the aborted
+  // result without dropping them — and the result must not then claim that no
+  // read-back was attempted.
+  it('lets an aborted result carry ids that were genuinely read back', () => {
+    const observed = requested.slice(0, 2);
+    const result = abortedConfirmation({
+      runId: RUN,
+      exitCode: EXIT.EVIDENCE_UNRECORDED,
+      reason: 'the evidence artifact could not be written',
+      observedIds: observed,
+    });
+    assert.deepEqual([...result.observedIds], observed);
+    assert.equal(result.observedCount, 2);
+    assert.equal(result.scope, 'aborted-after-read-back');
+    assert.notEqual(result.scope, 'not-attempted');
+    assert.equal(result.confirmed, false);
+    assert.equal(result.uncertain, true);
+    // An id that cannot be named cannot be evidence, here as everywhere else.
+    assert.equal(
+      refusal(() =>
+        abortedConfirmation({
+          runId: RUN,
+          exitCode: EXIT.SEND_FAILURE,
+          reason: 'x',
+          observedIds: [''],
+        })
+      ).exitCode,
+      EXIT.USAGE
+    );
+  });
+});
+
 describe('evaluateReadBack', () => {
   const RUN = 'mg-67-run-evaluate';
   const doc = (extra = {}) => ({
@@ -1856,6 +2209,50 @@ describe('evaluateReadBack', () => {
   it('ignores the properties Cosmos adds', () => {
     const stored = doc({ _ts: 1, _rid: 'r', _etag: '"0"', _self: 'dbs/x' });
     assert.equal(evaluateReadBack([stored], { runId: RUN, expectedCount: 1 }).kind, 'complete');
+  });
+
+  // The pure form of the rule the confirmation depends on: the page is
+  // classified in full before a verdict is chosen, so no single document can
+  // erase what the others prove.
+  it('reports both sets on every kind, and never counts what it cannot attribute', () => {
+    const stray = { ...doc(), id: 'stray-1', [SEQUENCE_FIELD]: 9 };
+    delete stray[SYNTHETIC_MARKER_FIELD];
+    const foreign = { ...doc(), id: 'other-1', [RUN_ID_FIELD]: 'mg-67-run-other' };
+
+    for (const [context, page, kind, ids, anomalousIds] of [
+      ['nothing yet', [], 'empty', [], []],
+      ['one of ours', [doc()], 'partial', ['cosmos-assigned-1'], []],
+      [
+        'an unmarked stray beside ours',
+        [doc(), stray],
+        'unmarked',
+        ['cosmos-assigned-1'],
+        ['stray-1'],
+      ],
+      ['another run beside ours', [doc(), foreign], 'foreign', ['cosmos-assigned-1'], ['other-1']],
+      [
+        'an unparseable element beside ours',
+        [doc(), null],
+        'unreadable',
+        ['cosmos-assigned-1'],
+        [],
+      ],
+    ]) {
+      const verdict = evaluateReadBack(page, { runId: RUN, expectedCount: 3 });
+      assert.equal(verdict.kind, kind, context);
+      assert.deepEqual(verdict.ids, ids, context);
+      assert.deepEqual(verdict.anomalousIds, anomalousIds, context);
+    }
+
+    // PRECEDENCE, stated as a fact rather than left to document order: a page
+    // that cannot be parsed cannot be judged for markers, and a marker violation
+    // outranks a correlation ambiguity because it sends the operator to the
+    // sender rather than to the route.
+    assert.equal(evaluateReadBack([foreign, stray], { runId: RUN }).kind, 'unmarked');
+    assert.equal(evaluateReadBack([stray, null], { runId: RUN }).kind, 'unreadable');
+    // Order within the page changes nothing.
+    assert.equal(evaluateReadBack([stray, foreign], { runId: RUN }).kind, 'unmarked');
+    assert.equal(evaluateReadBack([null, stray], { runId: RUN }).kind, 'unreadable');
   });
 
   it('refuses a caller with no run id rather than judging an uncorrelated page', () => {

@@ -667,7 +667,10 @@ export function isSyntheticDocument(doc, runId) {
 //    union is also why a set that SHRINKS between polls is reported as ambiguity
 //    rather than as a confirmation: if five distinct ids have been observed for a
 //    run that sent three, "the expected count is present right now" is not a
-//    proof anyone should act on.
+//    proof anyone should act on. The same rule applies WITHIN one page:
+//    evaluateReadBack classifies every document before choosing a verdict, so a
+//    single stray document cannot make the tool report that it observed nothing
+//    while this run's documents sit in the container next to it.
 // ---------------------------------------------------------------------------
 
 // Generous on purpose. Routing is asynchronous and nothing in this repo records
@@ -733,10 +736,37 @@ const typeName = value =>
  *   { kind: 'complete', ids }               the expected count, all marked and run-correlated
  *   { kind: ..., exitCode, reason, ids }    a TERMINAL failure
  *
+ * `ids` and `anomalousIds` are returned on EVERY kind, terminal or not — see the
+ * two-set rule below.
+ *
  * Only 'complete' can become an exit 0. 'partial' is not a success and not an
  * error yet: routing is asynchronous and documents trickle in, so an incomplete
  * page mid-wait means keep waiting — but an incomplete page when the bound
  * elapses is AMBIGUOUS, never an absence and never a success.
+ *
+ * THE WHOLE PAGE IS CLASSIFIED BEFORE ANY VERDICT IS CHOSEN, and this is the
+ * evidence-emission contract applied one level down. The earlier shape returned
+ * at the first bad document with `ids: []`, which meant a page holding two of
+ * this run's documents alongside one unmarked stray reported that NOTHING had
+ * been observed — while two documents this run caused sat in the container. That
+ * is the same defect as an auth failure discarding an earlier poll's ids, on a
+ * newly reachable path: a later finding is new information, never a retraction
+ * of what was already read.
+ *
+ * TWO SETS, AND THEY ARE NOT INTERCHANGEABLE — the direction of the error
+ * matters, so the split is deliberate rather than tidy:
+ *
+ *   ids            documents POSITIVELY attributable to this run: a plain
+ *                  object, carrying the synthetic marker, carrying this run's
+ *                  id, and nameable. These are what the evidence record's
+ *                  observedIds are built from, so admitting anything less than
+ *                  positively-ours would tell MG-53 that a document it should
+ *                  halt on is accounted for — blinding the unknown-writer check
+ *                  that halt exists to perform.
+ *   anomalousIds   documents the correlated query returned that are NOT
+ *                  attributable to this run (unmarked, or carrying a foreign
+ *                  run id). Named, because an operator cannot investigate a
+ *                  document nobody named, and NEVER counted as arrival.
  */
 export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PER_RUN } = {}) {
   requireNonEmptyString(runId, 'runId');
@@ -745,93 +775,124 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
   // A reader that answered with something other than a list is UNREADABLE. It is
   // emphatically not "no documents": treating it as an absence is how an error
   // becomes a false negative, which is the MG-66 conflation this tool must not
-  // reproduce.
+  // reproduce. Nothing was legible here, so both sets are genuinely empty.
   if (!Array.isArray(documents)) {
     return {
       kind: 'unreadable',
       exitCode: EXIT.AMBIGUOUS,
       ids: [],
+      anomalousIds: [],
       reason: `the read-back returned ${typeName(documents)} rather than a list of documents — unreadable, which is a failure and not an absence`,
     };
   }
-  if (documents.length === 0) return { kind: 'empty', ids: [] };
+  if (documents.length === 0) return { kind: 'empty', ids: [], anomalousIds: [] };
+
+  const mine = [];
+  const anomalous = [];
+  let illegible = null;
+  let unmarked = null;
+  let foreign = false;
+  let unidentified = false;
+
+  const usableId = doc => (typeof doc.id === 'string' && doc.id.trim() !== '' ? doc.id : null);
 
   for (const doc of documents) {
     if (!isPlainObject(doc)) {
-      return {
-        kind: 'unreadable',
-        exitCode: EXIT.AMBIGUOUS,
-        ids: [],
-        reason: `the read-back returned ${typeName(doc)} where a document was expected — unparseable, so no correlation can be established`,
-      };
+      illegible ??= typeName(doc);
+      continue;
     }
+    const id = usableId(doc);
     // HR3: a document reaching Cosmos without the marker is a defect in the
     // sender, not an acceptable variant. Its own exit code, because "the sender
     // built a body wrong" and "the route did not deliver" call for opposite
     // responses from an operator.
     if (!hasSyntheticMarker(doc)) {
-      return {
-        kind: 'unmarked',
-        exitCode: EXIT.MARKER_VIOLATION,
-        ids: [],
-        reason: `a document correlated to this run carries no ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER} marker — that is a defect in the sender, and an unmarked document must never be counted as proof`,
-      };
+      unmarked ??= id ?? '(a document with no usable id)';
+      if (id) anomalous.push(id);
+      continue;
     }
     // The predicate asked for this run only, so a foreign run id here means the
-    // read-back cannot be trusted to mean what it says. Ambiguity, not success.
+    // read-back cannot be trusted to mean what it says. Ambiguity, not success —
+    // and the document is emphatically not counted as one of ours.
     if (doc[RUN_ID_FIELD] !== runId) {
-      return {
-        kind: 'foreign',
-        exitCode: EXIT.AMBIGUOUS,
-        ids: [],
-        reason: `the read-back returned a document whose ${RUN_ID_FIELD} is not this run's — the correlation cannot be established deterministically`,
-      };
+      foreign = true;
+      if (id) anomalous.push(id);
+      continue;
     }
     // Evidence is recorded BY ID (MG-54 cites them in a destructive
     // authorization). A document that cannot be named cannot be recorded, so it
-    // cannot be counted.
-    if (typeof doc.id !== 'string' || doc.id.trim() === '') {
-      return {
-        kind: 'unidentified',
-        exitCode: EXIT.AMBIGUOUS,
-        ids: [],
-        reason:
-          'the read-back returned a document with no usable id — it could not be recorded as evidence, so it is not counted as arrival',
-      };
+    // cannot be counted — and it cannot be listed as an anomaly either, since
+    // there is nothing to list.
+    if (!id) {
+      unidentified = true;
+      continue;
     }
+    mine.push(doc);
   }
 
   // The ids the read-back ACTUALLY observed. Whether the platform honoured the
   // sender's chosen id is behaviour no file in this repo pins down, so what the
   // sender hoped for is never substituted here.
-  const ids = documents.map(doc => doc.id);
+  const ids = mine.map(doc => doc.id);
+  const anomalousIds = [...new Set(anomalous)];
+  const verdict = fields => ({ ids, anomalousIds, ...fields });
+
+  // PRECEDENCE, most structural first. A page that cannot be parsed cannot be
+  // judged for markers; a marker violation outranks a correlation ambiguity
+  // because it sends the operator to the sender rather than to the route.
+  if (illegible !== null) {
+    return verdict({
+      kind: 'unreadable',
+      exitCode: EXIT.AMBIGUOUS,
+      reason: `the read-back returned ${illegible} where a document was expected — unparseable, so no correlation can be established`,
+    });
+  }
+  if (unmarked !== null) {
+    return verdict({
+      kind: 'unmarked',
+      exitCode: EXIT.MARKER_VIOLATION,
+      reason: `a document correlated to this run (${safeFragment(unmarked)}) carries no ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER} marker — that is a defect in the sender, and an unmarked document must never be counted as proof`,
+    });
+  }
+  if (foreign) {
+    return verdict({
+      kind: 'foreign',
+      exitCode: EXIT.AMBIGUOUS,
+      reason: `the read-back returned a document whose ${RUN_ID_FIELD} is not this run's — the correlation cannot be established deterministically`,
+    });
+  }
+  if (unidentified) {
+    return verdict({
+      kind: 'unidentified',
+      exitCode: EXIT.AMBIGUOUS,
+      reason:
+        'the read-back returned a document with no usable id — it could not be recorded as evidence, so it is not counted as arrival',
+    });
+  }
   if (new Set(ids).size !== ids.length) {
-    return {
+    return verdict({
       kind: 'duplicate-id',
       exitCode: EXIT.AMBIGUOUS,
-      ids,
       reason: `the read-back returned ${ids.length} documents sharing ${new Set(ids).size} id(s) — a duplicate cannot be told from a second arrival`,
-    };
+    });
   }
-  const sequences = documents.map(doc => doc[SEQUENCE_FIELD]);
+  const sequences = mine.map(doc => doc[SEQUENCE_FIELD]);
   if (new Set(sequences).size !== sequences.length) {
-    return {
+    return verdict({
       kind: 'duplicate-sequence',
       exitCode: EXIT.AMBIGUOUS,
-      ids,
       reason: `two documents claim the same ${SEQUENCE_FIELD} within one run — a run-id collision or a redelivery, either way not a deterministic correlation`,
-    };
+    });
   }
-  if (documents.length > expectedCount) {
-    return {
+  if (ids.length > expectedCount) {
+    return verdict({
       kind: 'excess',
       exitCode: EXIT.AMBIGUOUS,
-      ids,
-      reason: `the read-back found ${documents.length} documents for a run that sent ${expectedCount} — more than was sent is as ambiguous as fewer, and MG-53 halts on an unrecorded document`,
-    };
+      reason: `the read-back found ${ids.length} documents for a run that sent ${expectedCount} — more than was sent is as ambiguous as fewer, and MG-53 halts on an unrecorded document`,
+    });
   }
-  if (documents.length < expectedCount) return { kind: 'partial', ids };
-  return { kind: 'complete', ids };
+  if (ids.length < expectedCount) return verdict({ kind: 'partial' });
+  return verdict({ kind: 'complete' });
 }
 
 /**
@@ -885,14 +946,24 @@ export async function confirmArrival({
   // grows (decision 5): no failure path removes an id from it, and every exit
   // path reports it.
   let observedSoFar = [];
+  // The documents the correlated query returned that this run cannot claim. Also
+  // monotonic, and kept strictly apart from the observed set: recording one of
+  // these as ours would tell MG-53 that a document it must halt on is accounted
+  // for. Naming them is what makes the finding actionable.
+  let anomalousSoFar = [];
 
   // Structured ids stay verbatim — they ARE the evidence, and a scrubbed id is
   // useless to MG-53 and MG-54. Only the human-readable `reason` embeds outside
   // text, and it goes through safeFragment.
+  //
+  // Only documents THIS RUN can claim contribute a partition value: the field
+  // answers "where did our documents land", which is the question the
+  // unexpected-partition outcome turns on, and a stray document's partition is
+  // not an answer to it.
   const partitionValuesOf = documents => {
     if (partitionKeyField === null || !Array.isArray(documents)) return [];
     const values = documents
-      .filter(isPlainObject)
+      .filter(doc => isPlainObject(doc) && isSyntheticDocument(doc, runId))
       .map(doc => doc[partitionKeyField])
       .filter(value => typeof value === 'string' && value !== '');
     return [...new Set(values)];
@@ -904,6 +975,7 @@ export async function confirmArrival({
   // 5, and the evidence-emission contract in the module header).
   const result = fields => {
     const observedIds = Object.freeze(mergeIds(observedSoFar, fields.observedIds ?? []));
+    const anomalousIds = Object.freeze(mergeIds(anomalousSoFar, fields.anomalousIds ?? []));
     return Object.freeze({
       confirmed: false,
       runId,
@@ -921,6 +993,11 @@ export async function confirmArrival({
       ...fields,
       observedIds,
       observedCount: observedIds.length,
+      // Never folded into observedIds and never silently dropped: a document
+      // this run cannot claim is a finding in its own right, and the operator
+      // needs it BY ID (the runbook's first stop condition is an unexpected
+      // document in the source containers).
+      anomalousIds,
       polls,
       crossPartitionSweepRun,
       elapsedMs: now() - startedAt,
@@ -989,6 +1066,7 @@ export async function confirmArrival({
       // Recorded BEFORE the branch, so every outcome below — including the ones
       // that abort — reports what this page saw.
       observedSoFar = mergeIds(observedSoFar, verdict.ids);
+      anomalousSoFar = mergeIds(anomalousSoFar, verdict.anomalousIds);
       if (verdict.exitCode) {
         return result({
           exitCode: verdict.exitCode,
@@ -1070,6 +1148,7 @@ export async function confirmArrival({
 
   const sweepVerdict = evaluateReadBack(sweep, { runId, expectedCount });
   observedSoFar = mergeIds(observedSoFar, sweepVerdict.ids);
+  anomalousSoFar = mergeIds(anomalousSoFar, sweepVerdict.anomalousIds);
   if (sweepVerdict.kind === 'empty') {
     return result({
       exitCode: EXIT.TIMEOUT,
@@ -1112,17 +1191,28 @@ export async function confirmArrival({
  * exists to catch. Discarding the ids because the run failed is therefore not a
  * missing nicety, it is the thing that stops the downstream migration.
  *
- * It is not a confirmation and cannot be mistaken for one: `confirmed` is false,
- * no id is observed, and `scope` is 'not-attempted' — the machine-readable
- * signal that nothing was ever read back, as distinct from read back and empty.
- * `polls: 0` and `elapsedMs: 0` say the same thing to a human. The wait bound is
- * carried because every result reports the bound it was configured with, on
- * every path.
+ * It is not a confirmation and cannot be mistaken for one: `confirmed` is false
+ * and `scope` says whether a read-back ever happened — 'not-attempted' is the
+ * machine-readable difference between "read back and found nothing" and "never
+ * read back at all", the first a fact about the route and the second a fact
+ * about the run. `polls: 0` and `elapsedMs: 0` say the same thing to a human.
+ * The wait bound is carried because every result reports the bound it was
+ * configured with, on every path.
+ *
+ * `observedIds` is a parameter, defaulting to none, for the same reason the
+ * confirmation's own accumulator exists: a caller that HAS read documents back
+ * and then aborted for some later reason must be able to build the aborted
+ * result without discarding them. Taking them here makes that structurally
+ * possible rather than dependent on the caller remembering, and a non-empty set
+ * moves `scope` off 'not-attempted' so the record never claims a read-back it
+ * did not perform — or denies one it did.
  */
 export function abortedConfirmation({
   runId,
   exitCode,
   reason,
+  observedIds = [],
+  anomalousIds = [],
   partitionValue = FIXTURE_DEVICE_ID,
   partitionKeyField = null,
   expectedCount = MESSAGES_PER_RUN,
@@ -1142,6 +1232,11 @@ export function abortedConfirmation({
   requirePositiveInteger(timeoutMs, 'timeoutMs');
   requirePositiveInteger(pollIntervalMs, 'pollIntervalMs');
 
+  // Through the same union every other path uses, so an unusable id is refused
+  // here exactly as it would be there.
+  const observed = mergeIds(observedIds);
+  const anomalous = mergeIds(anomalousIds);
+
   return Object.freeze({
     confirmed: false,
     runId,
@@ -1150,11 +1245,14 @@ export function abortedConfirmation({
     pollIntervalMs,
     partitionValue,
     partitionKeyField,
-    observedIds: Object.freeze([]),
-    observedCount: 0,
+    observedIds: Object.freeze(observed),
+    observedCount: observed.length,
+    anomalousIds: Object.freeze(anomalous),
     observedPartitionValues: Object.freeze([]),
     observedArrivalMs: null,
-    scope: 'not-attempted',
+    // 'not-attempted' is a CLAIM — that no read-back happened — so it is only
+    // made when nothing was read back.
+    scope: observed.length > 0 ? 'aborted-after-read-back' : 'not-attempted',
     exitCode,
     reason,
     polls: 0,
@@ -1180,9 +1278,17 @@ export function describeConfirmation(result) {
   // count and a count of zero is exactly what an operator misreads as "nothing
   // was written".
   const uncertain = result.uncertain ? ', container contents UNCERTAIN' : '';
+  // Never merged into the count above: these are documents the read-back saw and
+  // this run cannot claim, which is the runbook's first stop condition and not a
+  // footnote to a success line.
+  const anomalies = result.anomalousIds?.length
+    ? `, ${result.anomalousIds.length} document(s) NOT attributable to this run: ${result.anomalousIds
+        .map(id => safeFragment(id, 40))
+        .join(', ')}`
+    : '';
   return (
     `${exitLabel(result.exitCode)}: ${result.observedCount}/${result.expectedCount} marked documents ` +
-    `for run ${safeFragment(result.runId)} (${result.polls} poll(s), bound ${result.waitBoundMs}ms, ${arrival}${sweep}${uncertain})`
+    `for run ${safeFragment(result.runId)} (${result.polls} poll(s), bound ${result.waitBoundMs}ms, ${arrival}${sweep}${uncertain})${anomalies}`
   );
 }
 
