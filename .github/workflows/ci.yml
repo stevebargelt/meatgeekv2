@@ -93,6 +93,26 @@ jobs:
         # is the fail-open shape run-tests.mjs exists to refuse.
         run: node apps/infrastructure/scripts/cosmos-export/run-tests.mjs --sdk
 
+      - name: MG-67 IoT device fixture sender — real Azure SDK tier
+        # Same split, same reason, different tool. The dependency-free tier of
+        # apps/infrastructure/scripts/iot-fixture runs in
+        # validate-infrastructure, which installs nothing and holds no
+        # credential. These cases take send-fixture.mjs's real
+        # `import('@azure/cosmos')` / `import('@azure/identity')` — they pin the
+        # AAD-only read-back wiring (a real DefaultAzureCredential, and NO key
+        # or connectionString property anywhere in the client options) and the
+        # real identity error classes the AUTH exit code keys off. None of that
+        # can be checked against a fake, and none of it can be checked in a job
+        # that resolves no Azure package. Still offline: a credential is
+        # constructed, never used, and no client method is called.
+        #
+        # Deliberately NOT gated on a matrix leg, for the same reason as the
+        # cosmos-export step above: it re-runs once per project, which is cheap,
+        # and `if: matrix.project == 'api'` would silently stop running the
+        # moment someone edits the matrix — the fail-open shape run-tests.mjs
+        # exists to refuse.
+        run: node apps/infrastructure/scripts/iot-fixture/run-tests.mjs --sdk
+
       - name: Lint ${{ matrix.project }}
         run: npx nx lint ${{ matrix.project }}
 
@@ -444,6 +464,40 @@ jobs:
         # Both tiers go through run-tests.mjs and both are floored; neither can
         # be dropped without turning its step red.
         run: node apps/infrastructure/scripts/cosmos-export/run-tests.mjs
+
+      - name: MG-67 IoT device fixture sender tests
+        # The device -> IoT Hub -> route -> Cosmos path is the only write path
+        # in the product, and this tool is what proves it carries a message. Its
+        # value is entirely in its FAILURE paths — auth, transport, confirmation
+        # timeout, a read-back missing the MG-67 synthetic marker, a partial or
+        # ambiguous read — each asserted here BY EXIT CODE against the local
+        # fake, because exit 0 is contracted to mean one thing only: the
+        # expected marked, run-correlated documents were read back out of the
+        # destination container. A regression that turned any of those into a
+        # success would be invisible in prose and obvious here.
+        #
+        # It belongs in THIS job because the tier reaches no network and needs
+        # no credential — the same property the job as a whole exists to prove,
+        # and which assert-credentialless.sh re-proves at runtime above. Every
+        # client and the `az` spawn are injected, so this tier resolves no Azure
+        # package and never shells out.
+        #
+        # Invoked THROUGH run-tests.mjs, not `node --test` directly: the bare
+        # runner exits 0 when it discovers no test files, so a rename would
+        # leave this step green and empty. The wrapper floors both the file
+        # count and the executed test count — same reasoning as the cosmos-export
+        # step above, in this tool's own directory (cosmos-export's wrapper is
+        # MG-66 scope and carries its own floors; sharing one would couple the
+        # two tools' suite sizes).
+        #
+        # No `npm ci`: this tier is node: built-ins plus its own fake. The other
+        # tier — send-fixture.sdk.test.mjs, which takes the real @azure/cosmos
+        # and @azure/identity imports — CANNOT run here, because that would mean
+        # an install in a job whose dependency-free, credentialless character is
+        # the property it exists to prove. It runs in lint-and-test after that
+        # job's `npm ci`. Both tiers go through run-tests.mjs and both are
+        # floored; neither can be dropped without turning its step red.
+        run: node apps/infrastructure/scripts/iot-fixture/run-tests.mjs
 
       - name: Terraform module tests (every test-bearing module)
         # `terraform test` was not wired into CI at all before MG-23, and when
