@@ -113,6 +113,22 @@ export const EXIT = {
   // partition key, so reporting this as "not delivered" would call a working
   // route broken. Consumed by the confirmation read-back.
   UNEXPECTED_PARTITION: 9,
+  // A send happened — documents are, or may be, in the destination container —
+  // and the evidence recording them could NOT be written.
+  //
+  // Its own code because it is the one outcome where the live system CHANGED and
+  // no record of the change survives, and because the operator's first action is
+  // unlike every other code's: copy the ids off stderr into the ticket, before
+  // diagnosing anything. It must never be reported as USAGE, which means "bad
+  // arguments, nothing live happened" — telling an operator nothing happened
+  // while documents sit in the container is the worst answer this tool can give.
+  //
+  // It DOMINATES the confirmation outcome, including AUTH. An unrecorded
+  // document halts MG-53 whatever the confirmation concluded, and MG-53 cannot
+  // tell one apart from the unknown-writer finding its halt exists to catch. The
+  // confirmation's own outcome and label are still printed on the lines above,
+  // so nothing is lost — only the code the operator scripts against changes.
+  EVIDENCE_UNRECORDED: 10,
 };
 
 const EXIT_LABELS = {
@@ -126,6 +142,7 @@ const EXIT_LABELS = {
   [EXIT.AMBIGUOUS]: 'correlation ambiguity',
   [EXIT.CONTAINER_DEFINITION]: 'container definition refusal',
   [EXIT.UNEXPECTED_PARTITION]: 'delivered, unexpected partition',
+  [EXIT.EVIDENCE_UNRECORDED]: 'evidence unrecorded (documents may be live)',
 };
 
 export function exitLabel(code) {
@@ -367,14 +384,53 @@ export const MESSAGES_PER_RUN = 3;
 // Contract fields a partition key may not land on: overwriting any of them
 // would silently break correlation, which is exactly the failure this tool
 // exists to make impossible.
-const RESERVED_BODY_FIELDS = new Set([
-  'id',
-  'timestamp',
-  'ticket',
-  SYNTHETIC_MARKER_FIELD,
-  RUN_ID_FIELD,
-  SEQUENCE_FIELD,
-]);
+export const RESERVED_BODY_FIELDS = Object.freeze(
+  new Set(['id', 'timestamp', 'ticket', SYNTHETIC_MARKER_FIELD, RUN_ID_FIELD, SEQUENCE_FIELD])
+);
+
+// THE ONE DEFINITION OF A LEGAL PARTITION KEY FIELD, shared with
+// container-definition.mjs so the measurement and the sender cannot disagree
+// about what they will accept.
+//
+// They did disagree once, and the symptom was an exit code that misreported
+// which refusal had occurred: container-definition accepted a hyphenated or
+// digit-leading field, the sender then refused it as EXIT.USAGE ("bad
+// arguments"), and an operator reading that code was told their command line was
+// wrong when the truth was that the measured container has a shape this fixture
+// cannot address. One predicate, two callers, and the refusal now carries the
+// code of whichever caller detected it — EXIT.CONTAINER_DEFINITION for a
+// MEASURED value, since container-definition.mjs checks first and is the only
+// path a live container's shape can enter by.
+//
+// Identifier-shaped is the requirement rather than "any JSON key": the field
+// name is spelled unquoted in the ad-hoc verification queries the runbook hands
+// the operator (SELECT c.<field> ...), and a name needing bracket-quoting there
+// is a name this tool would be guessing the escaping for.
+export const PARTITION_KEY_FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Why this value cannot be the fixture's partition key field, or null if it can.
+ * The returned reason is a fragment a caller embeds in its own refusal, so it
+ * names the problem without claiming an exit code — the caller owns that.
+ *
+ * Returns a reason rather than throwing because the two callers refuse with
+ * different codes, and a shared thrower would have to pick one of them.
+ */
+export function partitionKeyFieldProblem(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return 'it is not a non-empty string';
+  }
+  if (!PARTITION_KEY_FIELD_PATTERN.test(value)) {
+    return (
+      'it is not a single plain field name (letters, digits and underscore, not starting with a digit) — ' +
+      'this fixture writes the partition value as one flat body field and spells that field unquoted in a query'
+    );
+  }
+  if (RESERVED_BODY_FIELDS.has(value)) {
+    return 'it collides with a fixture contract field, so the marker or the run id could not survive it and the correlation would be silently destroyed';
+  }
+  return null;
+}
 
 // IoT Hub system properties, in az's `$.`-prefixed spelling. `$.ct` and `$.ce`
 // are the two that decide whether the routed payload becomes a queryable JSON
@@ -403,25 +459,22 @@ function requireNonEmptyString(value, name) {
 // a `/a/b` path or a raw path with its leading slash fails loudly here instead
 // of producing a body with a property nothing can query.
 function requirePartitionKeyField(value) {
-  requireNonEmptyString(value, 'partitionKeyField');
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
-    // Scrubbed before it is echoed: this is the one value here that came from
-    // OUTSIDE (the measured container definition), and by this line it is
-    // already known NOT to be a plain field name — so it is arbitrary text on a
-    // failure path, which is exactly what HR1 says must not go out unscrubbed.
-    throw new FixtureError(
-      EXIT.USAGE,
-      `partitionKeyField must be a single plain field name, not a path: got "${scrubSecrets(value)}"`
-    );
-  }
-  if (RESERVED_BODY_FIELDS.has(value)) {
-    throw new FixtureError(
-      EXIT.USAGE,
-      `the measured partition key field "${value}" collides with a fixture contract field; ` +
-        'the marker and run id could not survive it, so this refuses rather than sending'
-    );
-  }
-  return value;
+  const problem = partitionKeyFieldProblem(value);
+  if (problem === null) return value;
+  // EXIT.USAGE is correct HERE and only here: by the time a MEASURED value
+  // reaches this function, container-definition.mjs has already applied the same
+  // predicate and refused with EXIT.CONTAINER_DEFINITION, so anything that gets
+  // this far is a caller passing a field no container measured — a
+  // caller-contract bug, detected before anything live happened.
+  //
+  // Scrubbed before it is echoed: this is the one value here that can have come
+  // from OUTSIDE, and by this line it is already known not to be a plain field
+  // name — arbitrary text on a failure path, which is exactly what HR1 says must
+  // not go out unscrubbed.
+  throw new FixtureError(
+    EXIT.USAGE,
+    `partitionKeyField "${scrubSecrets(String(value)).slice(0, 80)}" cannot be used: ${problem}`
+  );
 }
 
 // A fresh correlator per invocation, from crypto.randomUUID. Nothing here reads
@@ -971,6 +1024,71 @@ export async function confirmArrival({
     observedPartitionValues: Object.freeze(landed),
     observedArrivalMs: null,
     reason: `${sweepVerdict.ids.length} of ${expectedCount} document(s) for run ${safeFragment(runId)} were found OUTSIDE the expected partition ${safeFragment(partitionValue)}${landed.length ? ` (under ${landed.map(value => safeFragment(value)).join(', ')})` : ''} — the route delivered, but the partition value the body carried is not the one this run queried, so the run is not confirmed`,
+  });
+}
+
+/**
+ * A confirmation-shaped result for a run that NEVER REACHED the read-back —
+ * today, a send that aborted part-way through.
+ *
+ * It exists so that a partial send is still RECORDABLE. The evidence record is
+ * built from a confirmation result, and a run that put one document into the
+ * container before `az` failed on the next has changed the live system exactly
+ * as much as a confirmed run did, from MG-53's point of view: MG-53 halts on any
+ * source document its recorded set does not account for, and an unrecorded
+ * document is indistinguishable there from the unknown-writer finding that halt
+ * exists to catch. Discarding the ids because the run failed is therefore not a
+ * missing nicety, it is the thing that stops the downstream migration.
+ *
+ * It is not a confirmation and cannot be mistaken for one: `confirmed` is false,
+ * no id is observed, and `scope` is 'not-attempted' — the machine-readable
+ * signal that nothing was ever read back, as distinct from read back and empty.
+ * `polls: 0` and `elapsedMs: 0` say the same thing to a human. The wait bound is
+ * carried because every result reports the bound it was configured with, on
+ * every path.
+ */
+export function abortedConfirmation({
+  runId,
+  exitCode,
+  reason,
+  partitionValue = FIXTURE_DEVICE_ID,
+  partitionKeyField = null,
+  expectedCount = MESSAGES_PER_RUN,
+  timeoutMs = DEFAULT_CONFIRMATION_TIMEOUT_MS,
+  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+} = {}) {
+  requireNonEmptyString(runId, 'runId');
+  requireNonEmptyString(reason, 'reason');
+  if (!Number.isInteger(exitCode) || exitCode <= 0) {
+    throw new FixtureError(
+      EXIT.USAGE,
+      'abortedConfirmation needs the nonzero exit code of the failure that aborted the run — it describes a run that did NOT succeed'
+    );
+  }
+  if (partitionKeyField !== null) requirePartitionKeyField(partitionKeyField);
+  requirePositiveInteger(expectedCount, 'expectedCount');
+  requirePositiveInteger(timeoutMs, 'timeoutMs');
+  requirePositiveInteger(pollIntervalMs, 'pollIntervalMs');
+
+  return Object.freeze({
+    confirmed: false,
+    runId,
+    expectedCount,
+    waitBoundMs: timeoutMs,
+    pollIntervalMs,
+    partitionValue,
+    partitionKeyField,
+    observedIds: Object.freeze([]),
+    observedCount: 0,
+    observedPartitionValues: Object.freeze([]),
+    observedArrivalMs: null,
+    scope: 'not-attempted',
+    exitCode,
+    reason,
+    polls: 0,
+    crossPartitionSweepRun: false,
+    elapsedMs: 0,
+    exitLabel: exitLabel(exitCode),
   });
 }
 

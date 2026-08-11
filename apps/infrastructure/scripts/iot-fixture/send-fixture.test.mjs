@@ -25,7 +25,7 @@
 // the one thing this tier cannot exercise; they live in send-fixture.sdk.test.mjs.
 
 import { strict as assert } from 'node:assert';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -785,8 +785,50 @@ describe('main: every failure class exits with its own code and claims nothing',
       assert.ok(output.includes(HUB), 'output must name the hub');
       assert.match(output, /send failure/);
       assertNoPlantedSecret(output, 'main send-failure output');
-      // Nothing arrived, so nothing is recorded as if it had.
+      // The FIRST message failed, so nothing was accepted and there is nothing
+      // to account for. Absence of a record here is the honest answer.
       assert.deepEqual(await readdir(dir), []);
+    });
+  });
+
+  // The partial send. az accepted message 1 and failed on message 2, so ONE
+  // document is on its way to the live container — and unwinding past the
+  // evidence write would leave it there with nothing accounting for it. MG-53
+  // halts on exactly that, and cannot tell it apart from the unknown writer its
+  // halt exists to catch.
+  it('a partial send RECORDS the ids that already landed before exiting SEND_FAILURE', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }] },
+        spawnSpec: { script: [{ code: 0 }, { code: 1, stderr: LEAKY_AZ_STDERR }] },
+      });
+
+      assert.equal(exitCode, EXIT.SEND_FAILURE);
+      assert.equal(spawn.calls.length, 2, 'the run aborted on the second message');
+
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assert.equal(record.confirmed, false);
+      assert.equal(record.exitCode, EXIT.SEND_FAILURE);
+      // The one message az accepted, recorded by id. This is the whole point.
+      assert.equal(record.requestedIds.length, 1);
+      assert.equal(record.requestedCount, 1);
+      assert.ok(record.requestedIds[0].includes(RUN_ID));
+      // Nothing was read back, and the record says so rather than implying an
+      // absence: no read-back was ever attempted.
+      assert.deepEqual(record.ids, []);
+      assert.equal(record.count, 0);
+      assert.equal(record.scope, 'not-attempted');
+      assert.ok(record.findings.some(f => f.kind === 'unconfirmed-run'));
+      assert.equal(record.expectedCount, MESSAGES_PER_RUN);
+
+      const output = log.all();
+      // The id is in the terminal too, so a run killed before the write still
+      // leaves a record the operator can act on.
+      assert.ok(output.includes(record.requestedIds[0]), 'the sent id must be logged');
+      assert.match(output, /recording what WAS sent/);
+      assertNoPlantedSecret(output, 'main partial-send output');
     });
   });
 
@@ -943,30 +985,140 @@ describe('main: every failure class exits with its own code and claims nothing',
     });
   });
 
-  // A confirmed run whose evidence could not be written is NOT a success: the
-  // documents are in the container and nothing accounts for them, which is
-  // exactly the condition that halts MG-53.
-  it('a confirmed run whose evidence write fails exits nonzero and prints the ids by hand', async () => {
+  // ---- The evidence write itself failing. ---------------------------------
+  //
+  // The live container has changed and nothing recorded it. That is its own exit
+  // code, and specifically NOT usage: telling an operator "bad arguments,
+  // nothing happened" while documents sit in the container is the worst answer
+  // this tool can give, and it is the one MG-53 cannot diagnose.
+  const failingFs = () => ({
+    stat: async () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    },
+    writeFile: async () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    },
+    rename: async () => {},
+    rm: async () => {},
+  });
+
+  it('a CONFIRMED run whose evidence write fails exits EVIDENCE_UNRECORDED, never USAGE', async () => {
     await withTempDir(async dir => {
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-        fs: {
-          stat: async () => {
-            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-          },
-          writeFile: async () => {
-            throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
-          },
-          rename: async () => {},
-          rm: async () => {},
-        },
+        fs: failingFs(),
       });
+
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.USAGE, 'this must never read as "nothing live happened"');
       assert.notEqual(exitCode, EXIT.OK);
+
       const output = log.all();
-      assert.match(output, /WAS confirmed but no evidence was recorded/);
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      assert.match(output, /ARE in/, 'a confirmed run knows the documents exist');
+      assert.match(output, /RECORD THESE IDS BY HAND/);
       assert.ok(output.includes(RUN_ID));
+      // Every observed id is named, because recording them by hand is the
+      // action this exit code exists to demand.
+      for (const doc of deliveredDocuments()) {
+        assert.ok(output.includes(doc.id), `the output must name ${doc.id}`);
+      }
+      assert.match(output, /evidence unrecorded/, 'the exit label is reported');
       assert.deepEqual(await readdir(dir), [], 'no partial artifact is left behind');
+    });
+  });
+
+  // The same collision, reached the way an operator actually reaches it: a
+  // second run pointed at the first run's evidence file. The refusal to
+  // overwrite is correct — that file records documents still in the container —
+  // but the run that hit it has ALSO put documents there.
+  it('a re-run refused for not overwriting still exits EVIDENCE_UNRECORDED, not USAGE', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      await writeFile(evidenceOut, '{"an":"earlier run"}\n', 'utf8');
+
+      const { exitCode, log } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      const output = log.all();
+      assert.match(output, /refusing to overwrite/);
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      // The earlier run's record is intact — refusing to clobber it is the
+      // behaviour that produced this exit code in the first place.
+      assert.equal(await readFile(evidenceOut, 'utf8'), '{"an":"earlier run"}\n');
+    });
+  });
+
+  // The unconfirmed path is where the record matters MOST: without it the
+  // operator cannot tell "delivered but unfindable" from "never delivered", and
+  // the documents are in the container either way. The write failure used to
+  // vanish here entirely.
+  it('an evidence write that fails on an UNCONFIRMED run is never swallowed', async () => {
+    await withTempDir(async dir => {
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        readerSpec: { script: [{ docs: [] }], fallback: { docs: [] } },
+        fs: failingFs(),
+      });
+
+      assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'the send did happen');
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+
+      const output = log.all();
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      assert.match(output, /MAY BE in/, 'an unconfirmed run cannot claim the documents exist');
+      // The confirmation's own outcome is still reported, on the lines above:
+      // the write failure takes the exit code, not the diagnosis.
+      assert.match(output, /confirmation timeout/);
+      for (const doc of deliveredDocuments()) {
+        assert.ok(output.includes(doc.id), `the output must name the sent id ${doc.id}`);
+      }
+    });
+  });
+
+  // Not only the WRITE. A record that cannot be BUILT leaves the documents just
+  // as unaccounted for, and buildEvidenceRecord refuses with USAGE — the one
+  // code that must never describe a run that changed the live system. Reached
+  // here the way it is reachable live: a platform-assigned document id that the
+  // record's own credential-shape guard refuses.
+  it('a record that cannot even be BUILT after a send exits EVIDENCE_UNRECORDED, not USAGE', async () => {
+    await withTempDir(async dir => {
+      const renamed = deliveredDocuments().map((doc, index) => ({
+        ...doc,
+        id: `${'A'.repeat(44)}${index}`,
+      }));
+      const { exitCode, log } = await runMain({
+        evidenceOut: path.join(dir, 'evidence.json'),
+        readerSpec: { script: [{ docs: [] }, { docs: renamed }] },
+      });
+
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.USAGE);
+      const output = log.all();
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      assert.match(output, /credential-shape risk/, 'the reason for the refusal is reported');
+      assert.deepEqual(await readdir(dir), [], 'and nothing half-written is left behind');
+    });
+  });
+
+  it('a partial send whose evidence write ALSO fails exits EVIDENCE_UNRECORDED', async () => {
+    await withTempDir(async dir => {
+      const { exitCode, log } = await runMain({
+        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        readerSpec: { script: [{ docs: [] }] },
+        spawnSpec: { script: [{ code: 0 }, { code: 1 }] },
+        fs: failingFs(),
+      });
+
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      const output = log.all();
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      assert.match(output, /MAY BE in/);
+      assert.ok(output.includes(`${RUN_ID}-1`), 'the id that landed must be named');
     });
   });
 
@@ -996,6 +1148,9 @@ describe('main: every failure class exits with its own code and claims nothing',
       '--evidence-out',
       'default_ttl',
       'confirmed-in-cosmos',
+      // The operator has to be able to look up the one code that means "the
+      // live container changed and nothing recorded it".
+      'evidence unrecorded',
     ]) {
       assert.ok(help.includes(topic), `--help does not mention ${topic}`);
     }

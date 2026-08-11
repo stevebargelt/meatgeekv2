@@ -31,6 +31,7 @@ import {
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
   TICKET,
+  abortedConfirmation,
   buildFixtureMessages,
   classifyError,
   confirmArrival,
@@ -108,9 +109,20 @@ describe('exit vocabulary', () => {
       'AMBIGUOUS',
       'CONTAINER_DEFINITION',
       'UNEXPECTED_PARTITION',
+      'EVIDENCE_UNRECORDED',
     ]) {
       assert.ok(name in EXIT, `no exit code for ${name}`);
     }
+  });
+
+  // The worst answer this tool could give is "nothing happened" while documents
+  // sit in the live container. USAGE means exactly that — bad arguments, no live
+  // effect — so the outcome for "a send happened and no record survived it" must
+  // not be able to collapse into it.
+  it('keeps "documents are live and unrecorded" apart from "nothing happened"', () => {
+    assert.notEqual(EXIT.EVIDENCE_UNRECORDED, EXIT.USAGE);
+    assert.notEqual(exitLabel(EXIT.EVIDENCE_UNRECORDED), exitLabel(EXIT.USAGE));
+    assert.match(exitLabel(EXIT.EVIDENCE_UNRECORDED), /unrecorded/);
   });
 
   it('labels every code, distinctly, and admits when it does not know one', () => {
@@ -1271,6 +1283,63 @@ describe('the confirmation read-back', () => {
 
 // The pure ambiguity rules, readable without a clock. confirmArrival's outcomes
 // above are the contract; these pin the judgements it is built from.
+// A run that aborted mid-send never reaches the read-back, but it HAS changed
+// the live container — and the evidence record is built from a confirmation
+// result. This is the shape that makes such a run recordable without letting it
+// look for one moment like a confirmation.
+describe('the aborted-run result', () => {
+  const aborted = (overrides = {}) =>
+    abortedConfirmation({
+      runId: 'mg-67-run-aborted',
+      exitCode: EXIT.SEND_FAILURE,
+      reason: 'the send aborted after 1 of 3 message(s)',
+      ...overrides,
+    });
+
+  it('is never confirmed and observes nothing, whatever it is asked for', () => {
+    const result = aborted();
+    assert.equal(result.confirmed, false);
+    assert.equal(result.exitCode, EXIT.SEND_FAILURE);
+    assert.deepEqual(result.observedIds, []);
+    assert.equal(result.observedCount, 0);
+    assert.equal(result.observedArrivalMs, null);
+    assert.equal(result.polls, 0);
+    assert.equal(result.crossPartitionSweepRun, false);
+  });
+
+  // 'not-attempted' is the machine-readable difference between "read back and
+  // found nothing" and "never read back at all". MG-53 reading this record has
+  // to be able to tell those apart: the first is a fact about the route, the
+  // second is a fact about the run.
+  it('says explicitly that no read-back was attempted, rather than reporting an absence', () => {
+    assert.equal(aborted().scope, 'not-attempted');
+    assert.notEqual(aborted().exitCode, EXIT.TIMEOUT);
+  });
+
+  it('reports the wait bound it was configured with, like every other result', () => {
+    const result = aborted({ timeoutMs: 4321, pollIntervalMs: 21 });
+    assert.equal(result.waitBoundMs, 4321);
+    assert.equal(result.pollIntervalMs, 21);
+    assert.equal(result.exitLabel, exitLabel(EXIT.SEND_FAILURE));
+  });
+
+  it('refuses to describe a successful run: it exists only for failures', () => {
+    for (const exitCode of [EXIT.OK, -1, 1.5, undefined]) {
+      const err = refusal(() => aborted({ exitCode }), `accepted exit code ${exitCode}`);
+      assert.equal(err.exitCode, EXIT.USAGE);
+    }
+    refusal(() => abortedConfirmation({ exitCode: EXIT.SEND_FAILURE, reason: 'x' }));
+    refusal(() => aborted({ reason: '' }));
+  });
+
+  it('is frozen, so a caller cannot edit an unconfirmed result into a confirmed one', () => {
+    const result = aborted();
+    assert.throws(() => {
+      result.confirmed = true;
+    });
+  });
+});
+
 describe('evaluateReadBack', () => {
   const RUN = 'mg-67-run-evaluate';
   const doc = (extra = {}) => ({

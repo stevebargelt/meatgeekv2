@@ -287,12 +287,17 @@ export function findCredentialRisks(value, path = '$') {
  * Fail-closed gate over a record about to be serialized or written. Throws a
  * FixtureError naming every risk by path and shape.
  *
- * The exit code is EXIT.USAGE deliberately. The exit vocabulary is owned by
- * fixture-core.mjs and declares no evidence-specific class; a record carrying a
- * credential-shaped field is a caller-contract violation detected BEFORE any
- * file exists, which is what USAGE means here ("bad input, nothing the live
- * system did"). It is emphatically not one of the outcome codes — reporting it
- * as TIMEOUT or AMBIGUOUS would attribute a bug in this tool to the route.
+ * The exit code is EXIT.USAGE deliberately, and this module is the wrong place
+ * to decide otherwise: a record carrying a credential-shaped field is a
+ * caller-contract violation detected before any file exists, and this module
+ * cannot know whether the CALLER has already changed the live system. It is
+ * emphatically not one of the outcome codes — reporting it as TIMEOUT or
+ * AMBIGUOUS would attribute a bug in this tool to the route.
+ *
+ * The caller that DOES know translates: send-fixture.mjs maps any refusal to
+ * build or write this record, once a send has happened, to
+ * EXIT.EVIDENCE_UNRECORDED — because at that point documents are (or may be) in
+ * the container and USAGE would tell the operator nothing happened.
  */
 export function assertNoCredentialShape(record) {
   const risks = findCredentialRisks(record);

@@ -53,14 +53,18 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // minTests carries a small margin (roughly 7%) below the honest count, so
 // tightening or consolidating a handful of cases does not turn this red for a
 // reason that has nothing to do with the suite failing to run. Counts at the
-// time of writing: dependency-free 236 tests across 4 files; real-SDK 13 tests
+// time of writing: dependency-free 249 tests across 4 files; real-SDK 13 tests
 // across 1 file.
+//
+// The floor is RAISED when the suite grows and is never lowered to accommodate
+// a rename: a floor below the honest count is a floor that lets a whole
+// describe() block stop running unnoticed.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 220,
+    minTests: 232,
   },
   sdk: {
     label: 'real-SDK',

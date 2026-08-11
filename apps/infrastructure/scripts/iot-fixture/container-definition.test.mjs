@@ -18,7 +18,15 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
-import { EXIT, FixtureError } from './fixture-core.mjs';
+import {
+  EXIT,
+  FIXTURE_DEVICE_ID,
+  FixtureError,
+  RUN_ID_FIELD,
+  SYNTHETIC_MARKER_FIELD,
+  buildFixtureMessages,
+  partitionKeyFieldProblem,
+} from './fixture-core.mjs';
 import {
   DECLARED_DEFAULT_TTL_SECONDS,
   DECLARED_TTL_DAYS,
@@ -300,6 +308,68 @@ describe('the partition key is measured or refused — never assumed', () => {
     for (const [label, mutate] of cases) {
       const err = expectRefusal(await mutateClean(mutate));
       assert.ok(err.message.length > 0, label);
+    }
+  });
+
+  // The measurement and the sender used to hold DIFFERENT ideas of a legal
+  // field: a hyphenated or digit-leading path measured cleanly here and was then
+  // refused downstream as EXIT.USAGE — "bad arguments, nothing live happened" —
+  // when the truth was that the MEASURED container has a shape this fixture
+  // cannot address. Both halves are asserted: the refusal happens, and it
+  // happens with THIS module's code.
+  it('refuses a field the sender could not spell, with the measurement code and never USAGE', async () => {
+    const unusable = [
+      ['hyphenated', '/device-id'],
+      ['leading digit', '/2deviceId'],
+      ['dotted', '/device.id'],
+      ['spaced', '/device id'],
+      // Landing the partition key on a contract field would overwrite the marker
+      // or the run id and silently destroy the correlation.
+      ['reserved: id', '/id'],
+      ['reserved: the marker itself', `/${SYNTHETIC_MARKER_FIELD}`],
+      ['reserved: the run correlator', `/${RUN_ID_FIELD}`],
+      ['reserved: ticket', '/ticket'],
+    ];
+    for (const [label, path] of unusable) {
+      const err = expectRefusal(await mutateClean((doc, r) => (r.partitionKey.paths = [path])));
+      // expectRefusal already asserts CONTAINER_DEFINITION; spelled out again
+      // here because the defect being guarded against was the CODE, not the
+      // presence of a refusal.
+      assert.equal(err.exitCode, EXIT.CONTAINER_DEFINITION, label);
+      assert.notEqual(
+        err.exitCode,
+        EXIT.USAGE,
+        `${label} must not read as "nothing live happened"`
+      );
+    }
+  });
+
+  // The reconciliation itself: one predicate, two callers. A field this module
+  // accepts must be a field the sender can build a body from, and vice versa —
+  // otherwise the two disagree again and the exit code misreports which refusal
+  // occurred.
+  it('accepts exactly the fields the sender can spell', async () => {
+    for (const field of ['deviceId', 'device_id', '_partition', 'DeviceID']) {
+      const definition = parseContainerDefinition(
+        await mutateClean((doc, r) => (r.partitionKey.paths = [`/${field}`]))
+      );
+      assert.equal(definition.partitionKeyField, field);
+      assert.equal(partitionKeyFieldProblem(field), null);
+      // The sender agrees, which is the whole point of sharing the predicate.
+      const [message] = buildFixtureMessages({
+        runId: 'mg-67-run-agreement',
+        partitionKeyField: definition.partitionKeyField,
+        now: () => 0,
+      });
+      assert.equal(message.body[field], FIXTURE_DEVICE_ID);
+    }
+
+    for (const field of ['device-id', '2deviceId', 'id', SYNTHETIC_MARKER_FIELD]) {
+      assert.notEqual(
+        partitionKeyFieldProblem(field),
+        null,
+        `${field} is accepted by the shared predicate but refused by the measurement`
+      );
     }
   });
 

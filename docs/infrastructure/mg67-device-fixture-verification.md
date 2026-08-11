@@ -199,6 +199,15 @@ path**, the tool **refuses** with **exit 8 (container definition refusal)** and
 substitutes nothing. That refusal is correct: a guessed TTL is
 indistinguishable, downstream, from "the write never happened".
 
+**Exit 8 also covers a partition key path this fixture cannot spell** — a
+hierarchical or nested path, or a field name that is not a plain identifier
+(`/device-id`, `/2deviceId`) or that collides with a contract field (`/id`,
+`/syntheticFixture`, `/fixtureRunId`, `/ticket`). It is a fact about the measured
+container, not about your command line, so it is reported as a measurement
+refusal (**exit 8**) and never as a usage error. Halt and report it: the fixture
+writes one flat body field and nothing between the device and Cosmos injects a
+partition key.
+
 You can pipe the document straight in instead of writing a file — pass
 `--container-definition -` and the tool reads stdin.
 
@@ -324,12 +333,16 @@ shell history next to the result. The defaults are the same values (180000 ms /
    `syntheticFixture=MG-67-SYNTHETIC-FIXTURE`, this run's `fixtureRunId`, a
    `fixtureSequence`, `ticket`, the partition field measured in §3 and a
    `timestamp` — and each declaring `$.ct=application/json` and `$.ce=utf-8` as
-   system properties. Any nonzero `az` exit aborts the run (**exit 2**).
+   system properties. Any nonzero `az` exit aborts the run (**exit 2**) — after
+   recording the ids of any message `az` had already accepted.
 4. **Polls** for the full set within the bound. Timeout is **exit 3**, a document
    without the marker is **exit 6**, a partial or ambiguous read is **exit 7**,
    and documents found only outside the expected partition are **exit 9** —
    never conflated, never reported as an absence.
-5. **Writes the evidence artifact** (§7).
+5. **Writes the evidence artifact** (§7) — on every path that sent anything,
+   confirmed or not. If that write cannot happen, the run exits **10** and prints
+   the ids for you to record by hand; it never reports a run that changed the
+   live container as though nothing had happened.
 
 ### There is no credential to supply, and none is accepted
 
@@ -364,6 +377,35 @@ supply a credential by hand, that is stop condition 2 (§9) — halt and report.
 | 7    | correlation ambiguity           | Fewer documents than sent, a duplicate correlator, or an unreadable result. **Stop condition 3 (§9).**                                                                        |
 | 8    | container definition refusal    | §3's document could not be measured. No default was substituted.                                                                                                              |
 | 9    | delivered, unexpected partition | The documents **arrived**, but not under the expected partition. The route works; the partition assumption does not. Report it — do not re-run hoping for a different answer. |
+| 10   | evidence unrecorded             | **A send happened and no record of it survives.** See below — this one needs an action before any diagnosis.                                                                  |
+
+#### Exit 10 — read this before doing anything else
+
+Exit 10 means the live container **changed** and the evidence file could not be
+written or built (a missing directory, a path the tool refused to overwrite, a
+permissions problem). It is deliberately **not** exit 1: exit 1 means "bad
+arguments, nothing live happened", and being told nothing happened while
+documents sit in `temperatures` is the one failure MG-53 cannot diagnose — an
+unrecorded document is indistinguishable there from the unknown-writer finding
+its halt exists to catch.
+
+The tool prints, on stderr, the run id, the marker and **every document id that
+is (or may be) live**, followed by `RECORD THESE IDS BY HAND`. Do exactly that,
+into the ticket, **before** fixing the path and re-running. Then re-run with a
+**new** `--evidence-out` path; the run that failed to record still counts toward
+what the source contains.
+
+Exit 10 **takes precedence over the confirmation's own code**, which is printed
+on the lines immediately above it (`confirmation timeout`, `auth failure`, and so
+on) and is not lost. Recording the ids is the action that has to come first;
+diagnosing the route is the action that comes second.
+
+**A partial send is recorded too.** If `az` accepts message 1 and fails on
+message 2, the run exits **2 (send failure)** — but not before writing an
+evidence artifact naming the id that _did_ go, with `scope: "not-attempted"` (no
+read-back was ever performed) and an `unconfirmed-run` finding. The ids also
+appear on the per-message send lines as they go, so a run killed mid-flight still
+leaves them in your terminal.
 
 ### Running it twice
 
@@ -391,20 +433,20 @@ that drifts is a wrong deletion.
 
 Fields, by their real names:
 
-| Field                                                                                                 | What it carries                                                                                                         |
-| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                    |
-| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                  |
-| `confirmed`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`                                        | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`.                                                     |
-| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                        |
-| `deviceId`                                                                                            | The fixture device.                                                                                                     |
-| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                    |
-| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed.                                                            |
-| **`ids`**, **`count`**                                                                                | **The exact document ids OBSERVED in the read-back, and how many.** This is the list MG-54 cites.                       |
-| `requestedIds`, `requestedCount`, `expectedCount`, `idDivergence`                                     | What the sender asked for, versus what exists. Divergence is an observation, not a failure.                             |
-| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                   |
-| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                |
-| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`. |
+| Field                                                                                                 | What it carries                                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                                                                                  |
+| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                                                                                |
+| `confirmed`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`                                        | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`. `scope` is `expected-partition`, `cross-partition`, or `not-attempted` when the run aborted before any read-back. |
+| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                                                                                      |
+| `deviceId`                                                                                            | The fixture device.                                                                                                                                                                   |
+| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                  |
+| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed.                                                                                                                          |
+| **`ids`**, **`count`**                                                                                | **The exact document ids OBSERVED in the read-back, and how many.** This is the list MG-54 cites.                                                                                     |
+| `requestedIds`, `requestedCount`, `expectedCount`, `idDivergence`                                     | What the sender asked for, versus what exists. Divergence is an observation, not a failure.                                                                                           |
+| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                 |
+| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                              |
+| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`.                                                               |
 
 Two things to read out of it immediately:
 
@@ -424,6 +466,16 @@ Two things to read out of it immediately:
 finding — because a run that sent documents it could not confirm has **left them
 in the container**, and MG-53 halts on a document no record accounts for. A
 non-`confirmed` record is a record of what was observed. **It is not proof.**
+
+That holds for a **partial send** as well: a run whose `az` invocation failed
+part-way still records the ids it managed to send, with `count: 0`, `ids: []`
+and `scope: "not-attempted"` — nothing was read back, and the record says so
+rather than implying an absence. Read such a record as _"these ids may be in the
+container"_, and treat them as accounted-for when MG-53 reconciles the source.
+
+If the record itself cannot be written, the run exits **10** and prints the ids —
+see §6's exit-code table. There is no path on which this tool sends a document
+and then stays silent about it.
 
 ### 7b. What to paste into the ticket
 

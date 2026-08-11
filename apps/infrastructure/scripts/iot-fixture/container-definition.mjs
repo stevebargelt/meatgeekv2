@@ -37,7 +37,7 @@
 // The few fragments that are echoed (a container name, a partition key path) go
 // through the same scrub every other operator-facing line in this tool uses.
 
-import { EXIT, FixtureError, scrubSecrets } from './fixture-core.mjs';
+import { EXIT, FixtureError, partitionKeyFieldProblem, scrubSecrets } from './fixture-core.mjs';
 
 // The DECLARED dev retention, spelled the way apps/infrastructure spells it:
 // environments/dev.tfvars sets temperature_data_ttl_days, main.tf multiplies by
@@ -176,12 +176,18 @@ function readPartitionKey(node) {
     );
   }
   const field = path.slice(1);
-  // Anything outside this set would have to be quoted or escaped to be queried,
-  // and a query this tool built by guessing at the escaping is a correlation it
-  // cannot trust. Refuse instead.
-  if (!/^[A-Za-z0-9_-]+$/.test(field)) {
+  // The SHARED predicate from fixture-core, not a second opinion about what a
+  // legal field is. This module and the sender used to hold slightly different
+  // rules, and the cost was an exit code that misreported the refusal: a
+  // hyphenated or digit-leading path measured cleanly here and was then rejected
+  // by the sender as EXIT.USAGE — "bad arguments, nothing live happened" — when
+  // the truth is that the MEASURED container has a shape this fixture cannot
+  // address. That is this module's refusal to make, and it carries this module's
+  // code (EXIT.CONTAINER_DEFINITION), like every other reading that failed here.
+  const problem = partitionKeyFieldProblem(field);
+  if (problem !== null) {
     throw refusal(
-      `the partition key path ${safeFragment(path)} names a field this tool cannot address unambiguously in a query`
+      `the partition key path ${safeFragment(path)} names a field this fixture cannot use: ${problem}`
     );
   }
   return {
