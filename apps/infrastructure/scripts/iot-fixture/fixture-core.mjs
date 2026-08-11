@@ -39,6 +39,34 @@
 // repoints or deletes no Cosmos resource. fixture-core.test.mjs asserts that
 // mechanically against the source text.
 //
+// THE EVIDENCE-EMISSION CONTRACT (see createRunLedger at the foot of this file).
+// A run that has attempted even one message has CHANGED the live system, and the
+// only artifact any downstream ticket parses is the evidence record. So the
+// contract is stated once here and every path falls out of it rather than being
+// patched into shape one failure at a time:
+//
+//   - Evidence is emitted on EVERY outcome — success, timeout, auth, transport,
+//     marker violation, ambiguity, send failure. Only a run that refused BEFORE
+//     attempting its first send may exit without a record.
+//   - Four id sets, never conflated: requestedIds (minted AND attempted),
+//     acceptedIds (az reported success), ambiguousIds (az reported failure, so
+//     acceptance is UNKNOWN — the CLI can fail after IoT Hub accepted the
+//     message, which makes a send failure ambiguous BY CONSTRUCTION), and
+//     observedIds (read back out of Cosmos, INCLUDING anything seen in a partial
+//     poll before a later abort).
+//   - An id, once observed, is never discarded by a subsequent failure. An auth
+//     failure on poll three does not un-see the two documents poll two read back:
+//     they are in the container, MG-53 halts on a source document its recorded
+//     set does not account for, and there it is indistinguishable from the
+//     unknown-writer finding that halt exists to catch.
+//   - NOTHING may assert that nothing was written once any message was
+//     attempted. "az failed" is not "the message did not arrive"; reporting it as
+//     one is the absence/error conflation this whole tool exists to refuse,
+//     reproduced on the write side.
+//   - `uncertain` is true whenever any id is ambiguous or the run aborted before
+//     a confirmation completed, and it is a field of the record rather than a
+//     tone of voice in a log line.
+//
 // ACCEPTED DEVIATION FROM libs/api-specs TemperatureReading, FLAGGED TO MG-59.
 // spec/components/schemas/temperature.yaml declares `additionalProperties: false`
 // on TemperatureReading, and the bodies this module builds deliberately carry
@@ -621,6 +649,17 @@ export function isSyntheticDocument(doc, runId) {
 //    code the CLI exits with; `confirmed` is true on exactly one path. Argument
 //    errors still throw, because they are a caller-contract bug detected before
 //    a wait exists, and there is no bound to report yet.
+//
+// 5. OBSERVATION IS MONOTONIC, and this is enforced in ONE place — the `result`
+//    builder below unions every exit path against the ids observed so far, so a
+//    path cannot forget to carry them. Per the evidence-emission contract in the
+//    module header: a document read back on poll two is IN THE CONTAINER, and an
+//    auth failure, a transport abort or a marker violation on poll three is new
+//    information about the reader, not a retraction of what it already read. The
+//    union is also why a set that SHRINKS between polls is reported as ambiguity
+//    rather than as a confirmation: if five distinct ids have been observed for a
+//    run that sent three, "the expected count is present right now" is not a
+//    proof anyone should act on.
 // ---------------------------------------------------------------------------
 
 // Generous on purpose. Routing is asynchronous and nothing in this repo records
@@ -834,6 +873,10 @@ export async function confirmArrival({
   let polls = 0;
   let transportFailures = 0;
   let crossPartitionSweepRun = false;
+  // The high-water mark of everything this read-back has ever seen. It only ever
+  // grows (decision 5): no failure path removes an id from it, and every exit
+  // path reports it.
+  let observedSoFar = [];
 
   // Structured ids stay verbatim — they ARE the evidence, and a scrubbed id is
   // useless to MG-53 and MG-54. Only the human-readable `reason` embeds outside
@@ -847,8 +890,13 @@ export async function confirmArrival({
     return [...new Set(values)];
   };
 
-  const result = fields =>
-    Object.freeze({
+  // ONE place decides what a result says about what was observed. Callers below
+  // pass only what is new to their path; the ids are unioned in here, so a path
+  // added later cannot drop them by forgetting to thread them through (decision
+  // 5, and the evidence-emission contract in the module header).
+  const result = fields => {
+    const observedIds = Object.freeze(mergeIds(observedSoFar, fields.observedIds ?? []));
+    return Object.freeze({
       confirmed: false,
       runId,
       expectedCount,
@@ -859,17 +907,22 @@ export async function confirmArrival({
       pollIntervalMs,
       partitionValue,
       partitionKeyField,
-      observedIds: Object.freeze([]),
-      observedCount: 0,
       observedPartitionValues: Object.freeze([]),
       observedArrivalMs: null,
       scope: null,
       ...fields,
+      observedIds,
+      observedCount: observedIds.length,
       polls,
       crossPartitionSweepRun,
       elapsedMs: now() - startedAt,
       exitLabel: exitLabel(fields.exitCode),
+      // Anything short of a completed confirmation leaves the contents of the
+      // container an open question: a timed-out document may still arrive, and an
+      // auth or transport abort says nothing at all about what is there.
+      uncertain: fields.confirmed !== true,
     });
+  };
 
   const queryPage = async scoped =>
     reader.queryDocuments({
@@ -925,23 +978,36 @@ export async function confirmArrival({
 
     if (!failed) {
       const verdict = evaluateReadBack(documents, { runId, expectedCount });
+      // Recorded BEFORE the branch, so every outcome below — including the ones
+      // that abort — reports what this page saw.
+      observedSoFar = mergeIds(observedSoFar, verdict.ids);
       if (verdict.exitCode) {
         return result({
           exitCode: verdict.exitCode,
           scope: 'expected-partition',
-          observedIds: Object.freeze([...verdict.ids]),
-          observedCount: verdict.ids.length,
           observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
           reason: verdict.reason,
         });
       }
       if (verdict.kind === 'complete') {
+        // The count is right in THIS page, but an earlier page returned ids this
+        // one does not. Confirming here would put an id in the evidence record's
+        // observed set that the confirming read did not see, or leave one out
+        // that was genuinely observed — either way MG-53's "the source holds only
+        // the recorded documents" check would be run against a set nobody read in
+        // one piece. Ambiguity, never a success.
+        if (observedSoFar.length > verdict.ids.length) {
+          return result({
+            exitCode: EXIT.AMBIGUOUS,
+            scope: 'expected-partition',
+            observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
+            reason: `${observedSoFar.length} distinct document id(s) have been read back across ${polls} poll(s) for a run that sent ${expectedCount}, and the ${verdict.ids.length} in the latest page are not all of them — an id seen once is never unseen, so this is a correlation ambiguity rather than a confirmation`,
+          });
+        }
         return result({
           confirmed: true,
           exitCode: EXIT.OK,
           scope: 'expected-partition',
-          observedIds: Object.freeze([...verdict.ids]),
-          observedCount: verdict.ids.length,
           observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
           observedArrivalMs: now() - startedAt,
           reason: `read back ${verdict.ids.length} of ${expectedCount} marked, run-correlated document(s) out of the destination container`,
@@ -968,10 +1034,11 @@ export async function confirmArrival({
     return result({
       exitCode: EXIT.AMBIGUOUS,
       scope: 'expected-partition',
-      observedIds: Object.freeze([...lastPartial.ids]),
-      observedCount: lastPartial.ids.length,
       observedPartitionValues: Object.freeze(partitionValuesOf(lastPartialDocuments)),
-      reason: `the ${timeoutMs}ms wait bound elapsed having read back only ${lastPartial.ids.length} of ${expectedCount} documents — an incomplete read-back is a failure, never an absence and never a success`,
+      // Phrased off the accumulated set rather than the last page: if the pages
+      // disagreed, more distinct ids may have been observed than were ever
+      // present at once, and the count an operator acts on is everything seen.
+      reason: `the ${timeoutMs}ms wait bound elapsed having read back ${observedSoFar.length} distinct document(s) and never the expected ${expectedCount} in one page — an incomplete read-back is a failure, never an absence and never a success`,
     });
   }
 
@@ -994,6 +1061,7 @@ export async function confirmArrival({
   }
 
   const sweepVerdict = evaluateReadBack(sweep, { runId, expectedCount });
+  observedSoFar = mergeIds(observedSoFar, sweepVerdict.ids);
   if (sweepVerdict.kind === 'empty') {
     return result({
       exitCode: EXIT.TIMEOUT,
@@ -1005,8 +1073,6 @@ export async function confirmArrival({
     return result({
       exitCode: sweepVerdict.exitCode,
       scope: 'cross-partition',
-      observedIds: Object.freeze([...sweepVerdict.ids]),
-      observedCount: sweepVerdict.ids.length,
       observedPartitionValues: Object.freeze(partitionValuesOf(sweep)),
       reason: sweepVerdict.reason,
     });
@@ -1019,8 +1085,6 @@ export async function confirmArrival({
   return result({
     exitCode: EXIT.UNEXPECTED_PARTITION,
     scope: 'cross-partition',
-    observedIds: Object.freeze([...sweepVerdict.ids]),
-    observedCount: sweepVerdict.ids.length,
     observedPartitionValues: Object.freeze(landed),
     observedArrivalMs: null,
     reason: `${sweepVerdict.ids.length} of ${expectedCount} document(s) for run ${safeFragment(runId)} were found OUTSIDE the expected partition ${safeFragment(partitionValue)}${landed.length ? ` (under ${landed.map(value => safeFragment(value)).join(', ')})` : ''} — the route delivered, but the partition value the body carried is not the one this run queried, so the run is not confirmed`,
@@ -1089,6 +1153,10 @@ export function abortedConfirmation({
     crossPartitionSweepRun: false,
     elapsedMs: 0,
     exitLabel: exitLabel(exitCode),
+    // Always. A run that aborted before it could read anything back knows LESS
+    // about the container than a timeout does, and the record must say so rather
+    // than let an empty observed set read as "nothing arrived".
+    uncertain: true,
   });
 }
 
@@ -1100,8 +1168,246 @@ export function describeConfirmation(result) {
     ? `arrived after ${result.observedArrivalMs}ms`
     : `${result.elapsedMs}ms elapsed`;
   const sweep = result.crossPartitionSweepRun ? ', cross-partition sweep run' : '';
+  // Said out loud on every unconfirmed path, because the line above it is a
+  // count and a count of zero is exactly what an operator misreads as "nothing
+  // was written".
+  const uncertain = result.uncertain ? ', container contents UNCERTAIN' : '';
   return (
     `${exitLabel(result.exitCode)}: ${result.observedCount}/${result.expectedCount} marked documents ` +
-    `for run ${safeFragment(result.runId)} (${result.polls} poll(s), bound ${result.waitBoundMs}ms, ${arrival}${sweep})`
+    `for run ${safeFragment(result.runId)} (${result.polls} poll(s), bound ${result.waitBoundMs}ms, ${arrival}${sweep}${uncertain})`
   );
+}
+
+// ---------------------------------------------------------------------------
+// THE EVIDENCE-EMISSION CONTRACT: four id sets, one definition (see the module
+// header).
+//
+// This ledger exists because the same defect kept turning up on newly reachable
+// paths — a later error discarding ids the tool already knew — and each instance
+// was individually repairable in the place it appeared. That is the shape of a
+// MISSING CONTRACT rather than a bug: what was absent was a single answer to
+// "what does this run know about what it put in the container, and how sure is
+// it?". So the answer lives here, once, and the sender and the evidence record
+// read it rather than each maintaining their own idea of it.
+//
+// THE FOUR SETS ARE NOT INTERCHANGEABLE:
+//
+//   requestedIds  minted by the sender AND ATTEMPTED. An id is requested at the
+//                 moment the attempt begins, never earlier: a message the run
+//                 never got to is not a message that failed, and recording one as
+//                 the other would put an id in the artifact for a document that
+//                 cannot exist.
+//   acceptedIds   az reported success. The message is IoT Hub's problem now.
+//   ambiguousIds  az reported failure — and acceptance is UNKNOWN. This set is
+//                 the crux of the contract. The CLI can fail AFTER the hub
+//                 accepted the message (a non-zero exit on teardown, a killed
+//                 process, a lost response), so a send failure is ambiguous BY
+//                 CONSTRUCTION and must never be recorded as definitively
+//                 not-sent. An unresolved id is folded in here too, fail-closed:
+//                 a fate the sender never recorded is not evidence of absence.
+//   observedIds   READ BACK out of Cosmos, including anything a partial poll saw
+//                 before a later abort. Once observed, never discarded.
+//
+// And `uncertain` is true whenever anything is ambiguous or no confirmation
+// completed — which is what stops a downstream reader treating an empty
+// observedIds as proof the run wrote nothing.
+// ---------------------------------------------------------------------------
+
+// The record's id-set field names, in one place so a consumer (MG-53, MG-54) and
+// a producer cannot disagree about what the artifact is called.
+export const ID_SET_NAMES = Object.freeze([
+  'requestedIds',
+  'acceptedIds',
+  'ambiguousIds',
+  'observedIds',
+]);
+
+/**
+ * Order-preserving union. The ONLY way ids accumulate anywhere in this tool.
+ *
+ * There is deliberately no remove, no replace and no set-difference: every
+ * instance of the defect this contract answers was some code path deciding that
+ * an earlier observation no longer counted.
+ */
+export function mergeIds(existing = [], incoming = []) {
+  const merged = [];
+  const seen = new Set();
+  for (const source of [existing, incoming]) {
+    if (!Array.isArray(source)) {
+      throw new FixtureError(EXIT.USAGE, 'ids must be merged from arrays of strings');
+    }
+    for (const id of source) {
+      if (typeof id !== 'string' || id.trim() === '') {
+        throw new FixtureError(
+          EXIT.USAGE,
+          'refusing to record an unusable document id — an id that cannot be named cannot be evidence'
+        );
+      }
+      if (seen.has(id)) continue;
+      seen.add(id);
+      merged.push(id);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Did the platform assign an id this run did not choose?
+ *
+ * Divergence is a WITNESSED fact about a document that was actually read back:
+ * an observed id that is not one of the requested ones. It is NEVER inferred
+ * from a count shortfall — "we asked for three and saw two" is an incomplete
+ * read-back, and calling that divergence would assert a platform renaming
+ * behaviour nobody observed, in the one artifact MG-53 and MG-54 parse
+ * mechanically. A downstream ticket would then act on a fabricated claim.
+ *
+ * Whether the IoT Hub Cosmos endpoint honours a body's `id` at all is behaviour
+ * no file in this repo pins down, which is exactly why it is recorded as an
+ * observation rather than assumed either way.
+ */
+export function observedIdsDiverge({ observedIds = [], requestedIds = [] } = {}) {
+  const requested = new Set(mergeIds(requestedIds));
+  return mergeIds(observedIds).some(id => !requested.has(id));
+}
+
+const withoutAll = (ids, ...excluded) => {
+  const drop = new Set(excluded.flat());
+  return ids.filter(id => !drop.has(id));
+};
+
+/**
+ * The run's id ledger. One per invocation, threaded through the send and the
+ * confirmation, snapshotted into the evidence record.
+ *
+ * Usage is deliberately narrow, and the ORDER matters: `request(id)` is called
+ * immediately before the attempt for that message, and exactly one of
+ * `accept(id)` / `markAmbiguous(id)` follows it. Anything left unresolved when
+ * the snapshot is taken — because the process died mid-attempt, or because a
+ * caller forgot — is reported as ambiguous, never as not-sent.
+ */
+export function createRunLedger({ runId } = {}) {
+  requireNonEmptyString(runId, 'runId');
+
+  const requested = [];
+  const accepted = [];
+  const ambiguous = [];
+  let observed = [];
+
+  const requireKnown = (id, verb) => {
+    if (typeof id !== 'string' || !requested.includes(id)) {
+      throw new FixtureError(
+        EXIT.USAGE,
+        `cannot ${verb} ${safeFragment(id)}: it was never requested — an id whose attempt was not recorded cannot have an outcome recorded for it`
+      );
+    }
+    if (accepted.includes(id) || ambiguous.includes(id)) {
+      throw new FixtureError(
+        EXIT.USAGE,
+        `the fate of ${safeFragment(id)} is already recorded and is not revisable — a message whose acceptance became unknown never becomes known again`
+      );
+    }
+  };
+
+  return {
+    runId,
+
+    /** An attempt is STARTING for this id. */
+    request(id) {
+      requireNonEmptyString(id, 'requested id');
+      if (requested.includes(id)) {
+        throw new FixtureError(
+          EXIT.USAGE,
+          `${safeFragment(id)} was already requested — a duplicate id would make the run's own record ambiguous`
+        );
+      }
+      requested.push(id);
+      return id;
+    },
+
+    /** az reported success for this id. */
+    accept(id) {
+      requireKnown(id, 'accept');
+      accepted.push(id);
+      return id;
+    },
+
+    /**
+     * az reported FAILURE for this id — which is not the same as "it did not
+     * arrive", and is recorded as the unknown it is.
+     */
+    markAmbiguous(id) {
+      requireKnown(id, 'mark ambiguous');
+      ambiguous.push(id);
+      return id;
+    },
+
+    /** Ids READ BACK out of Cosmos. Monotonic: this only ever adds. */
+    observe(ids) {
+      observed = mergeIds(observed, Array.isArray(ids) ? ids : [ids]);
+      return observed.length;
+    },
+
+    /**
+     * The run's knowledge, frozen. `confirmation` is the confirmArrival (or
+     * abortedConfirmation) result, if the run got that far; its observed ids are
+     * folded in, and its outcome decides half of `uncertain`.
+     */
+    snapshot({ confirmation = null } = {}) {
+      const observedIds = mergeIds(
+        observed,
+        confirmation && Array.isArray(confirmation.observedIds) ? confirmation.observedIds : []
+      );
+      // Fail-closed: unresolved means unknown, and unknown belongs with the
+      // ambiguous. It is never quietly dropped and never counted as not-sent.
+      const ambiguousIds = mergeIds(ambiguous, withoutAll(requested, accepted, ambiguous));
+      const attempted = requested.length > 0;
+      return Object.freeze({
+        runId,
+        requestedIds: Object.freeze([...requested]),
+        acceptedIds: Object.freeze([...accepted]),
+        ambiguousIds: Object.freeze(ambiguousIds),
+        observedIds: Object.freeze(observedIds),
+        attempted,
+        // Witnessed, never inferred: see observedIdsDiverge.
+        idDivergence: observedIdsDiverge({ observedIds, requestedIds: requested }),
+        // Two independent reasons, either sufficient: something was sent whose
+        // acceptance nobody knows, or no confirmation ever completed.
+        uncertain: ambiguousIds.length > 0 || confirmation?.confirmed !== true,
+      });
+    },
+  };
+}
+
+/**
+ * Must this run write an evidence record?
+ *
+ * Yes if it ATTEMPTED anything at all — the record is the only artifact MG-53
+ * and MG-54 parse, and a document nobody recorded halts MG-53 in the one way its
+ * operator cannot diagnose. Only a run that refused before its first attempt
+ * (bad arguments, an unmeasurable container, a failed pre-send read) may exit
+ * without one.
+ */
+export function mustEmitEvidence(snapshot) {
+  return Boolean(snapshot?.attempted);
+}
+
+/**
+ * One operator-facing line for a snapshot, on any path.
+ *
+ * It states the four counts and NEVER claims that nothing was written: with
+ * anything attempted, the honest sentence is "N of unknown acceptance", not
+ * "nothing arrived". Ids themselves are not printed here — they go in the
+ * artifact, which is what a downstream ticket reads.
+ */
+export function describeIdSets(snapshot) {
+  const parts = [
+    `${snapshot.requestedIds.length} attempted`,
+    `${snapshot.acceptedIds.length} accepted by IoT Hub`,
+    `${snapshot.ambiguousIds.length} of UNKNOWN acceptance`,
+    `${snapshot.observedIds.length} read back out of Cosmos`,
+  ];
+  const caveat = snapshot.uncertain
+    ? ' — what the container now holds is NOT established by this run; the recorded ids are what it may hold'
+    : '';
+  return `${parts.join(', ')}${caveat}`;
 }

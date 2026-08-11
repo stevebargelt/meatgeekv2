@@ -24,6 +24,7 @@ import {
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
+  ID_SET_NAMES,
   MESSAGES_PER_RUN,
   RUN_ID_FIELD,
   RUN_ID_PARAMETER,
@@ -35,14 +36,19 @@ import {
   buildFixtureMessages,
   classifyError,
   confirmArrival,
+  createRunLedger,
   describeConfirmation,
   describeError,
+  describeIdSets,
   evaluateReadBack,
   exitLabel,
   formatD2cProperties,
   hasSyntheticMarker,
   isSyntheticDocument,
+  mergeIds,
+  mustEmitEvidence,
   newRunId,
+  observedIdsDiverge,
   scrubChildOutput,
   scrubSecrets,
   toFixtureError,
@@ -1158,6 +1164,11 @@ describe('the confirmation read-back', () => {
       // Fail-closed, asserted structurally: confirmed is true on exactly one
       // path, and only with the full expected count read back.
       assert.equal(result.confirmed, expected === EXIT.OK, context);
+      // The evidence-emission contract, on every terminal outcome: anything
+      // short of a completed confirmation leaves what the container holds an
+      // open question, and the RECORD says so rather than leaving an operator to
+      // infer it from a count of zero.
+      assert.equal(result.uncertain, expected !== EXIT.OK, `${context}: wrong uncertainty`);
       if (result.confirmed) {
         assert.equal(result.observedCount, result.expectedCount, context);
         assert.equal(typeof result.observedArrivalMs, 'number', context);
@@ -1267,6 +1278,85 @@ describe('the confirmation read-back', () => {
     assert.equal(result.waitBoundMs, 1);
   });
 
+  // ---- The evidence-emission contract, inside the read-back. --------------
+  // An id that has been read back is a document that is IN THE CONTAINER. What
+  // fails afterwards is news about the reader, not a retraction of the read, and
+  // MG-53 halts on a source document no artifact accounts for.
+  it('never discards an id it has already observed, whatever fails afterwards', async () => {
+    const cases = [
+      ['an auth failure on the next poll', { error: forbiddenError() }, EXIT.AUTH],
+      ['a transport abort', { error: transportError() }, EXIT.TRANSPORT],
+      [
+        'a marker violation on the next page',
+        {
+          docs: [
+            ...routed(2),
+            ...routed(1, { unmarked: true, idPrefix: 'stray', firstSequence: 3 }),
+          ],
+        },
+        EXIT.MARKER_VIOLATION,
+      ],
+      ['an unreadable page', { docs: 'not-a-list' }, EXIT.AMBIGUOUS],
+      [
+        'a duplicate that cannot be told from a second arrival',
+        { docs: routed(2).concat(routed(2)) },
+        EXIT.AMBIGUOUS,
+      ],
+    ];
+
+    for (const [context, later, expected] of cases) {
+      const { result } = await confirm(
+        { script: [{ docs: routed(2) }, later] },
+        { maxTransportRetries: 0 }
+      );
+      assertFailed(result, expected, context);
+      assert.deepEqual(
+        result.observedIds,
+        ['cosmos-assigned-1', 'cosmos-assigned-2'],
+        `${context}: dropped the ids an earlier poll had already read back`
+      );
+      assert.equal(result.observedCount, 2, context);
+      assert.equal(result.uncertain, true, context);
+    }
+  });
+
+  // The ids the sweep finds are observations too, and an operator whose route
+  // put the documents somewhere unexpected still has to be told which documents.
+  it('carries the ids the cross-partition sweep observed into the result', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const { result } = await confirm({
+      script: [...empties, { docs: routed(MESSAGES_PER_RUN, { partitionValue: 'elsewhere' }) }],
+    });
+    assertFailed(result, EXIT.UNEXPECTED_PARTITION, 'found only cross-partition');
+    assert.deepEqual(result.observedIds, [
+      'cosmos-assigned-1',
+      'cosmos-assigned-2',
+      'cosmos-assigned-3',
+    ]);
+    assert.equal(result.uncertain, true);
+  });
+
+  // A page that holds the expected count is not a confirmation if an earlier
+  // page held ids this one does not: confirming would record an observed set
+  // nobody ever read in one piece, and MG-53 checks the source against exactly
+  // that set.
+  it('refuses to confirm a set that changed under it, and reports every id it saw', async () => {
+    const { result } = await confirm({
+      script: [{ docs: routed(2) }, { docs: routed(MESSAGES_PER_RUN, { idPrefix: 'renamed' }) }],
+    });
+
+    assertFailed(result, EXIT.AMBIGUOUS, 'the complete page omits ids an earlier poll read back');
+    assert.deepEqual(result.observedIds, [
+      'cosmos-assigned-1',
+      'cosmos-assigned-2',
+      'renamed-1',
+      'renamed-2',
+      'renamed-3',
+    ]);
+    assert.equal(result.observedCount, 5);
+    assert.match(result.reason, /never unseen/);
+  });
+
   it('never sleeps past the bound', async () => {
     const { clock, result } = await confirm(
       { fallback: { docs: [] } },
@@ -1337,6 +1427,238 @@ describe('the aborted-run result', () => {
     assert.throws(() => {
       result.confirmed = true;
     });
+  });
+});
+
+// The contract itself, rather than the symptoms it was extracted from. Every
+// defect it answers had the same sentence — a later error discarded ids the tool
+// already knew — so what is asserted here is the RULE: four id sets that are
+// never conflated, an observation that is never retracted, and an unknown that is
+// never recorded as an absence.
+describe('the run ledger (the evidence-emission contract)', () => {
+  const RUN = 'mg-67-run-ledger';
+  const ledger = () => createRunLedger({ runId: RUN });
+  const ids = ['msg-1', 'msg-2', 'msg-3'];
+  const confirmedResult = observedIds => ({ confirmed: true, observedIds });
+
+  it('names the four id sets and keeps them separate', () => {
+    assert.deepEqual(ID_SET_NAMES, ['requestedIds', 'acceptedIds', 'ambiguousIds', 'observedIds']);
+    assert.equal(new Set(ID_SET_NAMES).size, ID_SET_NAMES.length);
+  });
+
+  it('records a full success as attempted, accepted, unambiguous and observed', () => {
+    const run = ledger();
+    for (const id of ids) run.accept(run.request(id));
+    const snapshot = run.snapshot({
+      confirmation: confirmedResult(['cosmos-1', 'cosmos-2', 'cosmos-3']),
+    });
+
+    assert.deepEqual([...snapshot.requestedIds], ids);
+    assert.deepEqual([...snapshot.acceptedIds], ids);
+    assert.deepEqual([...snapshot.ambiguousIds], []);
+    assert.deepEqual([...snapshot.observedIds], ['cosmos-1', 'cosmos-2', 'cosmos-3']);
+    assert.equal(snapshot.attempted, true);
+    // The ONE combination that is certain: nothing unknown was sent, and a
+    // confirmation completed.
+    assert.equal(snapshot.uncertain, false);
+    assert.equal(mustEmitEvidence(snapshot), true);
+  });
+
+  // The crux of the contract. `az` can fail AFTER IoT Hub accepted the message,
+  // so a send failure is ambiguous BY CONSTRUCTION — including on message 1 of 3,
+  // where the old shape told the operator nothing had been written and wrote no
+  // artifact at all.
+  it('records a failure on the FIRST message as unknown acceptance, never as nothing sent', () => {
+    const run = ledger();
+    run.markAmbiguous(run.request(ids[0]));
+    const snapshot = run.snapshot();
+
+    assert.deepEqual([...snapshot.requestedIds], [ids[0]]);
+    assert.deepEqual([...snapshot.acceptedIds], []);
+    assert.deepEqual([...snapshot.ambiguousIds], [ids[0]]);
+    assert.deepEqual([...snapshot.observedIds], []);
+    // Something was attempted, so a record MUST be emitted — an unrecorded
+    // document halts MG-53 in the one way its operator cannot diagnose.
+    assert.equal(snapshot.attempted, true);
+    assert.equal(mustEmitEvidence(snapshot), true);
+    assert.equal(snapshot.uncertain, true);
+    // And the operator-facing line never claims an absence.
+    const line = describeIdSets(snapshot);
+    assert.match(line, /1 of UNKNOWN acceptance/);
+    assert.doesNotMatch(line, /nothing was written|nothing arrived|no document was sent/i);
+  });
+
+  it('records a mid-run abort as accepted-so-far plus one unknown, and nothing else', () => {
+    const run = ledger();
+    run.accept(run.request(ids[0]));
+    run.markAmbiguous(run.request(ids[1]));
+    // ids[2] is never requested: an attempt that never began is not a message
+    // that failed, and recording it would put an id in the artifact for a
+    // document that cannot exist.
+    const snapshot = run.snapshot();
+
+    assert.deepEqual([...snapshot.requestedIds], [ids[0], ids[1]]);
+    assert.deepEqual([...snapshot.acceptedIds], [ids[0]]);
+    assert.deepEqual([...snapshot.ambiguousIds], [ids[1]]);
+    assert.equal(snapshot.uncertain, true);
+  });
+
+  it('folds an unresolved request into the ambiguous set, fail-closed', () => {
+    const run = ledger();
+    run.accept(run.request(ids[0]));
+    run.request(ids[1]); // The process died here; no outcome was ever recorded.
+    const snapshot = run.snapshot();
+
+    assert.deepEqual([...snapshot.ambiguousIds], [ids[1]]);
+    assert.equal(snapshot.uncertain, true);
+  });
+
+  it('is uncertain whenever anything is ambiguous, even behind a confirmation', () => {
+    const run = ledger();
+    run.accept(run.request(ids[0]));
+    run.markAmbiguous(run.request(ids[1]));
+    // Both documents were read back — and one of them was sent by a message
+    // whose acceptance az never established. The run is still uncertain.
+    const snapshot = run.snapshot({ confirmation: confirmedResult(['cosmos-1', 'cosmos-2']) });
+    assert.equal(snapshot.uncertain, true);
+  });
+
+  it('is uncertain when no confirmation completed, however clean the send was', () => {
+    const run = ledger();
+    for (const id of ids) run.accept(run.request(id));
+    for (const confirmation of [
+      null,
+      { confirmed: false, observedIds: [] },
+      abortedConfirmation({ runId: RUN, exitCode: EXIT.SEND_FAILURE, reason: 'aborted' }),
+    ]) {
+      assert.equal(run.snapshot({ confirmation }).uncertain, true);
+    }
+  });
+
+  // The property every one of the patched paths violated in its own way.
+  it('observes monotonically: an id seen once is in every later snapshot', () => {
+    const run = ledger();
+    run.observe(['cosmos-1', 'cosmos-2']);
+    // A later poll that sees less, an abort that sees nothing, a duplicate.
+    run.observe(['cosmos-1']);
+    run.observe([]);
+    const snapshot = run.snapshot({
+      confirmation: { confirmed: false, observedIds: ['cosmos-3'] },
+    });
+
+    assert.deepEqual([...snapshot.observedIds], ['cosmos-1', 'cosmos-2', 'cosmos-3']);
+    assert.equal(run.snapshot().observedIds.length, 2, 'a snapshot mutated the ledger');
+  });
+
+  it('unions in order and refuses an id it could not record', () => {
+    assert.deepEqual(mergeIds(['a', 'b'], ['b', 'c']), ['a', 'b', 'c']);
+    assert.deepEqual(mergeIds(), []);
+    for (const bad of [[''], ['   '], [null], [7], [{}]]) {
+      assert.equal(refusal(() => mergeIds([], bad)).exitCode, EXIT.USAGE);
+    }
+    assert.equal(refusal(() => mergeIds('a', [])).exitCode, EXIT.USAGE);
+  });
+
+  it('refuses to invent, duplicate or revise an outcome', () => {
+    const run = ledger();
+    run.request(ids[0]);
+
+    // An outcome for a message nobody attempted.
+    assert.equal(refusal(() => run.accept('never-requested')).exitCode, EXIT.USAGE);
+    assert.equal(refusal(() => run.markAmbiguous('never-requested')).exitCode, EXIT.USAGE);
+    // A duplicate id would make the run's own record ambiguous.
+    assert.equal(refusal(() => run.request(ids[0])).exitCode, EXIT.USAGE);
+    for (const bad of ['', '   ', null, 7]) {
+      assert.equal(refusal(() => run.request(bad)).exitCode, EXIT.USAGE);
+    }
+    // Unknown acceptance never becomes known again.
+    run.markAmbiguous(ids[0]);
+    assert.equal(refusal(() => run.accept(ids[0])).exitCode, EXIT.USAGE);
+    assert.equal(refusal(() => run.markAmbiguous(ids[0])).exitCode, EXIT.USAGE);
+    assert.equal(refusal(() => createRunLedger()).exitCode, EXIT.USAGE);
+  });
+
+  it('emits no evidence only for a run that attempted nothing', () => {
+    const run = ledger();
+    assert.equal(mustEmitEvidence(run.snapshot()), false);
+    run.request(ids[0]);
+    assert.equal(mustEmitEvidence(run.snapshot()), true);
+    assert.equal(mustEmitEvidence(undefined), false);
+  });
+
+  it('is frozen, so a caller cannot edit an unknown into a known', () => {
+    const run = ledger();
+    run.markAmbiguous(run.request(ids[0]));
+    const snapshot = run.snapshot();
+    assert.throws(() => {
+      snapshot.uncertain = false;
+    });
+    assert.throws(() => {
+      snapshot.ambiguousIds.push('msg-9');
+    });
+  });
+
+  // HR1 applies to all FOUR id sets now, not just the one: the artifact these
+  // feed is the thing MG-53 and MG-54 parse, and it may not carry a credential.
+  it('has no field that could hold a credential', () => {
+    const run = ledger();
+    run.accept(run.request(ids[0]));
+    run.markAmbiguous(run.request(ids[1]));
+    run.observe(['cosmos-1']);
+    const snapshot = run.snapshot();
+    const serialized = JSON.stringify(snapshot);
+
+    for (const key of Object.keys(snapshot)) {
+      assert.doesNotMatch(key, /key|token|secret|password|credential|sig|connection/i, key);
+    }
+    for (const shape of [
+      /AccountKey/i,
+      /SharedAccessKey/i,
+      /Bearer\s/i,
+      /HostName=/i,
+      /\bsig=/i,
+      /eyJ[\w-]+\./,
+    ]) {
+      assert.doesNotMatch(serialized, shape, `${shape} appeared in the snapshot`);
+    }
+    // Nothing in it but the run id and ids the caller put there.
+    assert.deepEqual(JSON.parse(serialized), {
+      runId: RUN,
+      requestedIds: [ids[0], ids[1]],
+      acceptedIds: [ids[0]],
+      ambiguousIds: [ids[1]],
+      observedIds: ['cosmos-1'],
+      attempted: true,
+      idDivergence: true,
+      uncertain: true,
+    });
+  });
+
+  // The other half of the same discipline: a claim in the artifact must have
+  // been witnessed. Divergence says the platform RENAMED a document — an
+  // assertion about live behaviour nobody in this repo has ever observed — so it
+  // is set only when an observed document carries an id this run did not choose.
+  it('flags id divergence only when an OBSERVED id was not one the run requested', () => {
+    // Witnessed: the document that came back is not one of ours by id.
+    assert.equal(observedIdsDiverge({ observedIds: ['cosmos-1'], requestedIds: ['msg-1'] }), true);
+    // The platform honoured the ids: no divergence.
+    assert.equal(observedIdsDiverge({ observedIds: ['msg-1'], requestedIds: ['msg-1'] }), false);
+    // A SHORTFALL is not divergence. Two of three read back is an incomplete
+    // read-back; inferring a renaming from it would put a fabricated claim in
+    // the one artifact MG-53 and MG-54 parse.
+    assert.equal(observedIdsDiverge({ observedIds: ['msg-1', 'msg-2'], requestedIds: ids }), false);
+    // Nothing observed witnesses nothing.
+    assert.equal(observedIdsDiverge({ observedIds: [], requestedIds: ids }), false);
+    assert.equal(observedIdsDiverge(), false);
+
+    // And the same rule through the ledger: a partial read-back of ids the run
+    // did choose is not divergence, however incomplete it is.
+    const run = ledger();
+    for (const id of ids) run.accept(run.request(id));
+    run.observe([ids[0]]);
+    assert.equal(run.snapshot().idDivergence, false);
+    run.observe(['cosmos-9']);
+    assert.equal(run.snapshot().idDivergence, true);
   });
 });
 
