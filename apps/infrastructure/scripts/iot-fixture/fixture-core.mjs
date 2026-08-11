@@ -116,7 +116,15 @@ export const EXIT = {
   OK: 0,
   // Bad or missing arguments. Never used for anything the live system did.
   USAGE: 1,
-  // `az iot device send-d2c-message` itself failed. Nothing was sent.
+  // `az iot device send-d2c-message` itself failed.
+  //
+  // It does NOT mean the message did not arrive, and nothing anywhere may say
+  // that it does. The CLI can fail AFTER IoT Hub accepted the message — a
+  // non-zero exit on teardown, a killed process, a lost response — so a send
+  // failure is ambiguous BY CONSTRUCTION: the ids it covers belong in the
+  // ledger's ambiguousIds, never in an assertion that nothing was written. This
+  // code says "the sender could not establish that the hub took the message",
+  // which is why a run that reaches it still emits an evidence record.
   SEND_FAILURE: 2,
   // The bounded confirmation wait elapsed with the documents not found.
   TIMEOUT: 3,

@@ -819,6 +819,175 @@ describe('isSyntheticDocument', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// THE DOCUMENT CONTRACT MEETS THE EVIDENCE-EMISSION CONTRACT.
+//
+// The ledger's own suite drives it with placeholder ids ('msg-1'). This one
+// drives it with the ids buildFixtureMessages ACTUALLY MINTS, because the join is
+// where the defect the contract answers lives: the artifact MG-53 and MG-54 parse
+// records ids, and an id in it the document contract never minted — or one it
+// minted that a later failure quietly dropped — is a claim about what the live
+// container holds that nobody witnessed.
+//
+// So these assert the CONTRACT, not the symptoms it was extracted from: for every
+// terminal outcome the exit vocabulary can produce after an attempt, a record is
+// required and its four id sets are individually correct.
+// ---------------------------------------------------------------------------
+describe('the document contract under the evidence-emission contract', () => {
+  const RUN = 'mg-67-run-joined';
+  const FIXED_CLOCK = () => Date.parse('2026-08-10T12:00:00.000Z');
+  const built = () =>
+    buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId', now: FIXED_CLOCK });
+  const mintedIds = () => built().map(message => message.messageId);
+
+  // A document as COSMOS hands it back: the body, plus the platform's own
+  // bookkeeping, under whichever id the platform chose. Whether it honours the
+  // sender's `id` is behaviour no file in this repo pins down, so both are
+  // modelled and neither is assumed.
+  const routed = (message, id = message.body.id) => ({ ...message.body, id, _ts: 1786000000 });
+
+  // Enumerated FROM the vocabulary rather than listed by hand: an exit code added
+  // later has to land in one bucket or the other, and this test is where it is
+  // forced to. USAGE and CONTAINER_DEFINITION are the only two refusals that can
+  // precede the first attempt — everything else means the live system was already
+  // touched, and a record is owed.
+  const PRE_ATTEMPT_ONLY = new Set([EXIT.USAGE, EXIT.CONTAINER_DEFINITION]);
+  const POST_ATTEMPT_CODES = Object.values(EXIT).filter(
+    code => code !== EXIT.OK && !PRE_ATTEMPT_ONLY.has(code)
+  );
+
+  it('mints the ids the ledger records as requested, and no others', () => {
+    const messages = built();
+    const run = createRunLedger({ runId: RUN });
+    for (const message of messages) run.accept(run.request(message.messageId));
+    const snapshot = run.snapshot({
+      confirmation: { confirmed: true, observedIds: messages.map(m => m.body.id) },
+    });
+
+    // requestedIds ARE the document contract's minted ids, in send order.
+    assert.deepEqual([...snapshot.requestedIds], [`${RUN}-1`, `${RUN}-2`, `${RUN}-3`]);
+    assert.deepEqual([...snapshot.requestedIds], mintedIds());
+    assert.equal(snapshot.requestedIds.length, MESSAGES_PER_RUN);
+    // The one certain combination, reached only here.
+    assert.equal(snapshot.uncertain, false);
+    assert.equal(snapshot.idDivergence, false);
+    assert.equal(mustEmitEvidence(snapshot), true);
+  });
+
+  // The crux, with real ids: az fails on message 1 of 3. The two messages the run
+  // never reached are not failures and must appear NOWHERE — recording them would
+  // put ids in the artifact for documents that cannot exist — while message 1 is
+  // recorded as the unknown it is, never as proof nothing was written.
+  it('records a failure on message 1 of 3 against that minted id alone', () => {
+    const messages = built();
+    const run = createRunLedger({ runId: RUN });
+    run.markAmbiguous(run.request(messages[0].messageId));
+    const snapshot = run.snapshot();
+
+    assert.deepEqual([...snapshot.requestedIds], [`${RUN}-1`]);
+    assert.deepEqual([...snapshot.acceptedIds], []);
+    assert.deepEqual([...snapshot.ambiguousIds], [`${RUN}-1`]);
+    assert.deepEqual([...snapshot.observedIds], []);
+    assert.equal(snapshot.attempted, true);
+    assert.equal(snapshot.uncertain, true);
+    assert.equal(mustEmitEvidence(snapshot), true);
+
+    const serialized = JSON.stringify(snapshot);
+    for (const unattempted of [`${RUN}-2`, `${RUN}-3`]) {
+      assert.equal(serialized.includes(unattempted), false, `${unattempted} was never attempted`);
+    }
+    // A shortfall is not a renaming: one of three attempted, none observed,
+    // witnesses nothing about the platform's id behaviour.
+    assert.equal(snapshot.idDivergence, false);
+    assert.doesNotMatch(describeIdSets(snapshot), /nothing was (?:sent|written)|nothing arrived/i);
+  });
+
+  // The property every one of the patched paths violated in its own way, asserted
+  // across the WHOLE vocabulary rather than on the one path a reviewer found: a
+  // document read back on an earlier poll is IN the container, and a later auth
+  // failure, transport abort, marker violation or timeout is new information about
+  // the reader — not a retraction of what it already read.
+  it('keeps an observed document through every terminal outcome, and still owes a record', () => {
+    assert.ok(POST_ATTEMPT_CODES.length >= 8, 'the vocabulary lost a post-attempt outcome');
+
+    for (const exitCode of POST_ATTEMPT_CODES) {
+      const messages = built();
+      const run = createRunLedger({ runId: RUN });
+      for (const message of messages) run.accept(run.request(message.messageId));
+      // Poll two read one document back. Then the run aborted with this outcome.
+      run.observe([routed(messages[0], 'cosmos-assigned-1').id]);
+      const snapshot = run.snapshot({
+        confirmation: abortedConfirmation({
+          runId: RUN,
+          exitCode,
+          reason: `aborted with ${exitLabel(exitCode)}`,
+        }),
+      });
+
+      const where = exitLabel(exitCode);
+      assert.deepEqual([...snapshot.observedIds], ['cosmos-assigned-1'], where);
+      assert.deepEqual([...snapshot.requestedIds], mintedIds(), where);
+      assert.deepEqual([...snapshot.acceptedIds], mintedIds(), where);
+      assert.deepEqual([...snapshot.ambiguousIds], [], where);
+      assert.equal(snapshot.uncertain, true, where);
+      assert.equal(mustEmitEvidence(snapshot), true, where);
+      // Witnessed: a document came back under an id this run did not mint.
+      assert.equal(snapshot.idDivergence, true, where);
+    }
+  });
+
+  // Correlation is marker + run id INSIDE the device's partition, and the
+  // sender-chosen id is not the key. A neighbouring run's document is marked and
+  // well-formed and still is not this run's — counting it would make a partial
+  // arrival look complete, which is the one way this tool could exit 0 wrongly.
+  it('correlates on marker and run id, so another run cannot be counted as this one', () => {
+    const [mine] = built();
+    const [theirs] = buildFixtureMessages({
+      runId: newRunId(),
+      partitionKeyField: 'deviceId',
+      now: FIXED_CLOCK,
+    });
+
+    assert.equal(isSyntheticDocument(routed(mine), RUN), true);
+    // Renamed by the platform: still ours.
+    assert.equal(isSyntheticDocument(routed(mine, 'cosmos-assigned-9'), RUN), true);
+    // Marked, same device, same partition — a different run.
+    assert.equal(hasSyntheticMarker(routed(theirs)), true);
+    assert.equal(isSyntheticDocument(routed(theirs), RUN), false);
+    // And an id collision cannot smuggle it in: the id is not the correlator.
+    assert.equal(isSyntheticDocument(routed(theirs, mine.body.id), RUN), false);
+  });
+
+  it('flags divergence only for a minted id the platform actually replaced', () => {
+    const messages = built();
+    const requestedIds = mintedIds();
+
+    // Honoured: the ids that came back are the ones the bodies carried.
+    const honoured = messages.map(message => routed(message).id);
+    assert.equal(observedIdsDiverge({ observedIds: honoured, requestedIds }), false);
+    // Witnessed replacement.
+    assert.equal(observedIdsDiverge({ observedIds: ['cosmos-assigned-1'], requestedIds }), true);
+    // A shortfall is an incomplete read-back and NOTHING else. Inferring a
+    // renaming from it would put a fabricated claim in the one artifact MG-53 and
+    // MG-54 parse mechanically.
+    assert.equal(observedIdsDiverge({ observedIds: honoured.slice(0, 2), requestedIds }), false);
+  });
+
+  // The vocabulary is operator-facing contract text, and it defined SEND_FAILURE
+  // as "Nothing was sent." — the exact claim the contract forbids, stated where an
+  // operator and every later reader of this file would take it as settled.
+  it('defines no exit code as an assertion that nothing was written', async () => {
+    const source = await readSource('./fixture-core.mjs');
+    const vocabulary = source.slice(
+      source.indexOf('export const EXIT = {'),
+      source.indexOf('const EXIT_LABELS')
+    );
+    assert.ok(vocabulary.includes('SEND_FAILURE'), 'the exit vocabulary was not located');
+    assert.doesNotMatch(vocabulary, /failed\.\s*\n?\s*\/\/\s*Nothing was sent\./);
+    assert.match(vocabulary, /ambiguous BY CONSTRUCTION/);
+  });
+});
+
 // The fail-closed confirmation read-back (HR2). Every outcome below is asserted
 // BY EXIT CODE rather than by prose, because the exit code is what the operator
 // and the two downstream tickets act on — and because "fail-closed" asserted in a
