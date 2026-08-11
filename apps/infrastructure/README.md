@@ -167,7 +167,8 @@ change goes: PR → `ci.yml`'s `validate-infrastructure` job runs the
 `terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard
 fixtures → cross-module propagation fixtures → **live host-storage gate
 fixtures (MG-58)** → V1 Cosmos export tool tests (MG-48, `run-tests.mjs`) →
-per-module `terraform test`) → review → merge to `main` →
+dev IoT device fixture tests (MG-67, `iot-fixture/run-tests.mjs`) → per-module
+`terraform test`) → review → merge to `main` →
 `.github/workflows/infra-apply-dev.yml` runs the fail-closed pre-apply secret
 gate and destroy circuit-breaker, applies the exact saved plan, fails the run on
 any drift, and then asserts host storage against the **deployed site** (the live
@@ -307,6 +308,15 @@ nx test infrastructure                         # node scripts/cosmos-export/run-
                                                #   second tier CI runs separately in lint-and-test, after
                                                #   `npm ci` (see the cosmos-export section below) —
                                                #   also picked up by `nx run-many -t test --all`
+                                               # NOT the whole of scripts/: this target runs cosmos-export
+                                               #   ONLY. The MG-67 iot-fixture suites have their own
+                                               #   wrapper and their own two CI steps, and `nx test` does
+                                               #   not reach them — run them directly (below).
+
+# MG-67 iot-fixture, both tiers — run these directly; `nx test infrastructure` does not.
+# Repo-root paths, the same two invocations ci.yml runs.
+node apps/infrastructure/scripts/iot-fixture/run-tests.mjs          # dependency-free tier (no npm ci, no network, no credential)
+node apps/infrastructure/scripts/iot-fixture/run-tests.mjs --sdk    # real-SDK tier — needs `npm ci` first
 ```
 
 Three invocation rules, each of which fails in a different and non-obvious way

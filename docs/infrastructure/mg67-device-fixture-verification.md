@@ -199,6 +199,13 @@ path**, the tool **refuses** with **exit 8 (container definition refusal)** and
 substitutes nothing. That refusal is correct: a guessed TTL is
 indistinguishable, downstream, from "the write never happened".
 
+**Exit 8 also covers a document describing the wrong container.** The tool
+cross-checks the definition's own container name against `--container` and
+refuses a mismatch rather than measuring it — the easy way to hit this is
+reusing a stale `/tmp` definition from another container, which would record a
+retention and a partition key that do not apply to `temperatures`. Re-run the
+`az` command above for the container you are actually sending to.
+
 **Exit 8 also covers a partition key path this fixture cannot spell** — a
 hierarchical or nested path, or a field name that is not a plain identifier
 (`/device-id`, `/2deviceId`) or that collides with a contract field (`/id`,
