@@ -60,6 +60,52 @@
 // downstream halt turns on.
 // ===========================================================================
 //
+// ===========================================================================
+// WHAT THIS RECORD DOES NOT DETECT, SAID IN THE RECORD ITSELF
+//
+// An earlier version of this file described `anomalousIds` as the artifact form
+// of the runbook's FIRST stop condition — "any unexpected document found in the
+// source containers", i.e. a document written by an unknown writer. It is not,
+// and it structurally cannot be.
+//
+// The read-back this tool performs is fixture-core's CONFIRMATION_QUERY:
+//
+//     SELECT * FROM c WHERE c.<RUN_ID_FIELD> = @runId
+//
+// It is FILTERED TO THIS RUN'S OWN CORRELATOR. A document an unknown writer put
+// in the container does not carry this run's freshly minted run id, so it is
+// never returned, so it can never reach `anomalousIds` — on any path, including
+// the cross-partition sweep, which uses the same predicate. `anomalousCount: 0`
+// therefore says NOTHING WHATSOEVER about unknown writers. It is not weak
+// evidence of their absence; it is no evidence at all.
+//
+// A field that claims a detection it cannot perform is worse than an absent
+// one: MG-53 reading a permanently-empty `anomalousIds` as "no unknown writer"
+// and proceeding is a vacuous proof of exactly the kind this ticket exists to
+// eliminate. So the claim is RETRACTED here rather than restated:
+//
+//   * `anomalousIds` keeps its real, narrower meaning — documents the CORRELATED
+//     read-back returned that this run cannot claim. Because the query already
+//     pinned the run id, such a document carries THIS run's correlator while
+//     failing to carry the synthetic marker (a sender-side defect) or while
+//     naming a foreign run (a correlator collision). Both are real, both are
+//     recorded by id because an operator cannot investigate a document nobody
+//     named, and NEITHER is an unknown writer.
+//   * `unknownWriterCheck` is a permanent, explicit `checked: false` declaring
+//     that stop condition 1 is NOT evaluated by this tool and naming what does
+//     evaluate it: the operator's UNFILTERED enumeration of the source
+//     containers, a host-phase step, compared against `accountableIds`. A
+//     mechanical consumer reads that field and knows it must do the enumeration
+//     itself instead of trusting a zero here.
+//
+// THE SCHEMA VERSION DOES NOT BUMP for this. No existing key is removed and none
+// is re-meant: `anomalousIds` always held what it still holds, and only the
+// prose claim attached to it — which no consumer branches on — was wrong.
+// `unknownWriterCheck` is purely additive, and a v2 reader that ignores it is no
+// worse off than it was. The runbook is the thing that told a consumer to gate
+// on `anomalousIds`, and that is where the retraction has to be repeated.
+// ===========================================================================
+//
 // WHY THE MEASURED TTL AND THE ABSOLUTE INSTANT ARE BOTH HERE. A downstream
 // count that comes back SMALLER than the count recorded here has two possible
 // explanations that call for opposite responses: expected TTL expiry (proceed)
@@ -150,6 +196,29 @@ import {
 // cannot survive.
 export const EVIDENCE_SCHEMA_VERSION = 2;
 export const EVIDENCE_KIND = 'mg67-device-fixture-evidence';
+
+// ---------------------------------------------------------------------------
+// The unknown-writer retraction (see the header block).
+//
+// A CONSTANT, not a computed field: there is no input to this tool that could
+// make it true, because nothing this tool does enumerates the container without
+// the run-id predicate. Making it a constant is the point — a field that could
+// flip to `checked: true` would invite a future author to flip it from a
+// filtered read, which is the defect being retracted.
+//
+// It is emitted on EVERY record, confirmed or not, for the same reason the four
+// id sets are: a consumer that has to remember to check for a field's presence
+// is a consumer that will read its absence as a pass.
+// ---------------------------------------------------------------------------
+export const UNKNOWN_WRITER_CHECK = Object.freeze({
+  kind: 'not-performed-by-this-tool',
+  checked: false,
+  by: 'operator-unfiltered-enumeration',
+  message:
+    'Stop condition 1 (any unexpected document found in the source containers, i.e. a document written by an unknown writer) is NOT checked by this tool and is NOT what anomalousIds records. ' +
+    "This tool's read-back is filtered to this run's own correlator, so a document an unknown writer produced is never returned by it and can never appear in anomalousIds; anomalousCount of 0 is therefore no evidence at all about unknown writers, not weak evidence of their absence. " +
+    'Checking stop condition 1 requires an UNFILTERED enumeration of the source containers, which is an operator host-phase step, compared against accountableIds recorded here.',
+});
 
 // Written next to the target so the rename is same-filesystem and therefore
 // atomic. A cross-device rename is not, and a temp directory elsewhere would
@@ -246,6 +315,11 @@ export const EVIDENCE_RECORD_KEYS = Object.freeze(
     'accountableCount',
     'anomalousIds',
     'anomalousCount',
+    // The explicit retraction: stop condition 1 is not checked here, and this
+    // says so mechanically rather than leaving a zero to be misread.
+    'unknownWriterCheck',
+    'checked',
+    'by',
     // Schema-version-1 names for the OBSERVED set, retained as aliases so a
     // consumer written against either name reads the same documents.
     'ids',
@@ -705,12 +779,16 @@ export function buildEvidenceRecord({
   // here.
   const uncertain = ambiguous.length > 0 || !confirmed || !hasConfirmation || sets.uncertain;
 
-  // Documents the correlated read-back returned that this run CANNOT claim. Kept
+  // Documents the CORRELATED read-back returned that this run cannot claim. Kept
   // strictly apart from the observed set — recording one as ours would tell
-  // MG-53 that a document it must halt on is accounted for, blinding the
-  // unknown-writer check that halt exists to perform — and recorded rather than
-  // left in a log line, because the runbook's first stop condition is exactly
-  // this and an operator cannot investigate a document nobody named.
+  // MG-53 that a document it must halt on is accounted for — and recorded rather
+  // than left in a log line, because an operator cannot investigate a document
+  // nobody named.
+  //
+  // NOT the runbook's first stop condition, and deliberately no longer described
+  // as it: the query that produced these already pinned this run's id, so every
+  // id here belongs to a document carrying THIS run's correlator. See the header
+  // block and `unknownWriterCheck` below.
   const anomalousIds = mergeIds(
     hasConfirmation && Array.isArray(confirmation.anomalousIds) ? confirmation.anomalousIds : []
   );
@@ -773,7 +851,12 @@ export function buildEvidenceRecord({
         kind: 'unattributable-documents',
         measured: anomalousIds.length,
         declared: count,
-        message: `${anomalousIds.length} document(s) returned by the correlated read-back are NOT attributable to this run and are recorded by id, apart from this run's own — the runbook's first stop condition is any unexpected document in the source containers`,
+        // Says what it actually detects. The read-back is filtered to this run's
+        // correlator, so these documents carry THIS run's run id and failed the
+        // marker or named a foreign run — a sender-side defect or a correlator
+        // collision, investigable by id. Claiming them as the unknown-writer
+        // stop condition would be a detection this record cannot perform.
+        message: `${anomalousIds.length} document(s) returned by the correlated read-back are NOT attributable to this run and are recorded by id, apart from this run's own. The read-back is filtered to this run's ${RUN_ID_FIELD}, so these carry THIS run's correlator and are a sender-side marker defect or a correlator collision — investigate them by id. They are NOT evidence about an unknown writer: see unknownWriterCheck, and check that stop condition with an unfiltered enumeration.`,
       })
     );
   }
@@ -848,9 +931,14 @@ export function buildEvidenceRecord({
     // Everything that is or may be in the container, unioned once, here.
     accountableIds,
     accountableCount: accountableIds.length,
-    // And everything the read-back saw that this run cannot claim.
+    // And everything the CORRELATED read-back saw that this run cannot claim —
+    // which, because that read-back is filtered to this run's id, is never a
+    // document an unknown writer produced. The next field says so out loud so a
+    // mechanical consumer cannot read `anomalousCount: 0` as a cleared stop
+    // condition.
     anomalousIds,
     anomalousCount: anomalousIds.length,
+    unknownWriterCheck: UNKNOWN_WRITER_CHECK,
 
     // Schema-version-1 aliases for the OBSERVED set. Derived from the same
     // array, so the two names cannot disagree about what was read back.

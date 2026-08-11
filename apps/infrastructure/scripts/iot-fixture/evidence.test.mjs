@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { parseContainerDefinition } from './container-definition.mjs';
 import { fakeClock, fakeReader, forbiddenError } from './fake-azure.mjs';
 import {
+  CONFIRMATION_QUERY,
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
@@ -44,6 +45,7 @@ import {
   EVIDENCE_RECORD_KEYS,
   EVIDENCE_SCHEMA_VERSION,
   OUTCOME_NAMES,
+  UNKNOWN_WRITER_CHECK,
   assertNoCredentialShape,
   buildEvidenceRecord,
   describeEvidence,
@@ -961,10 +963,14 @@ describe('the evidence-emission contract: one record, four id sets, every outcom
   });
 
   it('records the documents the read-back could NOT attribute to this run, apart from its own', async () => {
-    // The runbook's first stop condition. A stray document is named in the
-    // artifact — an operator cannot investigate one nobody named — and is kept
-    // strictly out of the observed set, since counting it as ours would tell
-    // MG-53 that a document it must halt on is accounted for.
+    // A document the CORRELATED read-back returned that this run cannot claim.
+    // Note the stray carries THIS run's correlator and is missing the marker —
+    // it has to, because the query filtered on the run id, which is exactly why
+    // this set is not and cannot be the unknown-writer stop condition (see the
+    // retraction suite below). It is still named in the artifact: an operator
+    // cannot investigate a document nobody named, and it is kept strictly out of
+    // the observed set, since counting it as ours would tell MG-53 that a
+    // document it must halt on is accounted for.
     const messages = sentMessages();
     const stray = { id: 'not-ours-0', [RUN_ID_FIELD]: RUN_ID };
     const confirmation = await confirmationFor({ fallback: { docs: [stray] } });
@@ -984,6 +990,143 @@ describe('the evidence-emission contract: one record, four id sets, every outcom
     const finding = record.findings.find(item => item.kind === 'unattributable-documents');
     assert.ok(finding, 'an unattributable document must be recorded as a finding');
     assert.match(describeEvidence(record, '/tmp/e.json'), /1 UNATTRIBUTABLE/);
+  });
+});
+
+describe('the record retracts the unknown-writer claim it cannot honour', () => {
+  // The defect this suite pins down: `anomalousIds` was DESCRIBED as the artifact
+  // form of the runbook's first stop condition — any unexpected document in the
+  // source containers, i.e. an unknown writer — while the read-back it derives
+  // from filters on this run's own correlator. So it can STRUCTURALLY never
+  // contain such a document, and a permanently-empty `anomalousIds` read by
+  // MG-53 as "no unknown writer" is a vacuous proof of precisely the kind this
+  // ticket exists to eliminate. The claim is retracted, in the artifact MG-53
+  // parses mechanically, and these tests hold the retraction in place.
+
+  // Anchored to the real query rather than to prose. If a later author makes the
+  // read-back unfiltered, this test fails and forces the retraction to be
+  // reconsidered on purpose instead of leaving a stale disclaimer behind.
+  it('is filtered to this run, which is WHY the check is impossible here', () => {
+    assert.match(
+      CONFIRMATION_QUERY,
+      new RegExp(`c\\.${RUN_ID_FIELD}\\s*=\\s*@runId`),
+      'the confirmation query must pin this run id — the retraction below is justified by this predicate'
+    );
+  });
+
+  it('declares the check UNPERFORMED, naming what does perform it', async () => {
+    const parsed = JSON.parse(serializeEvidenceRecord(await buildSuccessRecord()));
+
+    assert.equal(parsed.unknownWriterCheck.checked, false);
+    assert.equal(parsed.unknownWriterCheck.by, 'operator-unfiltered-enumeration');
+    assert.equal(parsed.unknownWriterCheck.kind, 'not-performed-by-this-tool');
+    // The message has to say the two things a consumer would otherwise get
+    // wrong: that the read-back is filtered, and that an unfiltered enumeration
+    // is what checks the stop condition.
+    assert.match(parsed.unknownWriterCheck.message, /filtered/i);
+    assert.match(parsed.unknownWriterCheck.message, /unfiltered enumeration/i);
+    assert.deepEqual(parsed.unknownWriterCheck, { ...UNKNOWN_WRITER_CHECK });
+  });
+
+  // The exact reading that would be wrong. A confirmed run with nothing
+  // anomalous is the COMMON case — every healthy run looks like this — so it is
+  // the case in which a consumer is most likely to mistake the zero for a
+  // cleared stop condition, and the record must contradict that reading on it.
+  it('still declares it unperformed on a clean run, where the zero would mislead', async () => {
+    const record = await buildSuccessRecord();
+    assert.equal(record.anomalousCount, 0, 'fixture setup: the clean run finds nothing anomalous');
+    assert.equal(record.confirmed, true);
+    assert.equal(record.unknownWriterCheck.checked, false);
+  });
+
+  // Present on EVERY outcome, for the same reason the id sets are: a consumer
+  // that has to remember to look for a field will read its absence as a pass.
+  it('carries the declaration on every outcome, not only the confirmed one', async () => {
+    const messages = sentMessages();
+    const timedOut = buildEvidenceRecord({
+      requestedIds: requestedIdsOf(messages),
+      confirmation: await confirmationFor({ fallback: { docs: [] } }),
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+    const aborted = buildEvidenceRecord({
+      confirmation: abortedConfirmation({
+        runId: RUN_ID,
+        exitCode: EXIT.SEND_FAILURE,
+        reason: 'the send aborted before any read-back was attempted',
+        partitionValue: FIXTURE_DEVICE_ID,
+        partitionKeyField: 'deviceId',
+      }),
+      containerDefinition: await cleanDefinition(),
+      requestedIds: requestedIdsOf(messages).slice(0, 1),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    for (const [context, record] of [
+      ['timeout', timedOut],
+      ['aborted send', aborted],
+    ]) {
+      assert.equal(record.exitCode === EXIT.OK, false, `${context}: fixture setup`);
+      assert.equal(record.unknownWriterCheck.checked, false, context);
+      assert.match(record.unknownWriterCheck.message, /unfiltered enumeration/i, context);
+    }
+  });
+
+  // The retraction is only worth anything if the claim is gone from the place it
+  // actually lived: the finding's own prose, which is what an operator reads and
+  // what a consumer greps. A finding that still called itself the stop condition
+  // would make the new field a contradiction rather than a correction.
+  it('does not claim the stop condition in the unattributable finding', async () => {
+    const stray = { id: 'not-ours-0', [RUN_ID_FIELD]: RUN_ID };
+    const record = buildEvidenceRecord({
+      requestedIds: requestedIdsOf(sentMessages()),
+      confirmation: await confirmationFor({ fallback: { docs: [stray] } }),
+      containerDefinition: await cleanDefinition(),
+      target: TARGET,
+      now: fixedClock(),
+    });
+
+    const finding = record.findings.find(item => item.kind === 'unattributable-documents');
+    assert.ok(finding, 'fixture setup: the stray must still be recorded as a finding');
+    // It says what it DOES detect...
+    assert.match(finding.message, new RegExp(RUN_ID_FIELD));
+    // ...and explicitly disclaims what it does not.
+    assert.match(finding.message, /NOT evidence about an unknown writer/);
+    assert.match(finding.message, /unknownWriterCheck/);
+    assert.equal(
+      /first stop condition|unexpected document in the source containers/i.test(finding.message),
+      false,
+      'the finding must not describe itself as the unknown-writer stop condition it cannot detect'
+    );
+  });
+
+  // Nothing anywhere in the serialized artifact may assert the detection. This
+  // is the mechanical version of the rule, so a claim reintroduced under some
+  // other key is caught too.
+  it('asserts the detection nowhere in the serialized artifact', async () => {
+    for (const record of [
+      await buildSuccessRecord(),
+      await buildSuccessRecord({ containerDefinition: await driftDefinition() }),
+    ]) {
+      const serialized = serializeEvidenceRecord(record);
+      const claims = [
+        /first stop condition/i,
+        /stop condition 1 (?:is|was) (?:checked|satisfied|cleared)/i,
+        /no unknown writer/i,
+        /unexpected document in the source containers is/i,
+      ];
+      for (const claim of claims) {
+        assert.equal(
+          claim.test(serialized),
+          false,
+          `the artifact must not claim the unknown-writer detection: ${claim}`
+        );
+      }
+      // The one permitted mention is the retraction, and it is a denial.
+      assert.match(serialized, /is NOT checked by this tool/);
+    }
   });
 });
 
