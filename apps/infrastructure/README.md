@@ -765,8 +765,108 @@ the exit code, so treat it as stable:
 
 ---
 
+## Dev IoT device fixture — device → IoT Hub → route → Cosmos (MG-67)
+
+`scripts/iot-fixture/` is the standing **dev test fixture** for the product's only
+write path. It registers nothing by itself: it sends a fixed set of **3**
+synthetic D2C messages from the durable fixture device
+`meatgeek-v2-dev-synthetic-fixture-device`, then **proves they arrived** by
+reading them back out of the `temperatures` container the `cosmos-storage` route
+targets. Run `node scripts/iot-fixture/send-fixture.mjs --help` for full usage;
+only what `--help` doesn't already cover is captured below.
+
+**The operator procedure is the [MG-67 device-fixture verification
+runbook](../../docs/infrastructure/mg67-device-fixture-verification.md)** —
+device registration, reading the live container definition, the temporary Cosmos
+data-plane role assignment **and its removal**, the live run, the evidence to
+capture, the stop conditions and the rejected proofs. Read it before running
+anything against dev.
+
+**No live Azure run has happened.** The build container holds no credentials, so
+every step in that runbook is unexecuted, and as measured on 2026-08-10 all five
+containers in `meatgeek-v2-dev-db` held **zero documents**. The tests run against
+an injected fake reader and an injected fake spawn — no `az` binary, no Azure
+package, no network. As with the cosmos-export tool, tests split into two tiers by
+**file name alone**: `run-tests.mjs` is the dependency-free tier that runs in the
+credentialless `validate-infrastructure` job, and `run-tests.mjs --sdk` (matching
+`*.sdk.test.mjs`) constructs the **real** `CosmosClient` / `DefaultAzureCredential`
+to prove the auth wiring builds, and so runs in `lint-and-test` after `npm ci`.
+Both wrappers floor the discovered-file and executed-test counts — `node --test`
+exits 0 when it discovers nothing, and a suite that passes by discovering nothing
+is worse than no suite.
+
+**Auth — there is no credential to supply, and none is accepted.** The send is
+`az iot device send-d2c-message`, which addresses the hub and the device **by
+name** and resolves the device key **itself**, server-side, under the operator's
+already-authenticated identity. The tool therefore never reads, holds or can leak
+one: there is **no key, connection-string, SAS or certificate mode at all**, not
+as a fallback and not behind a flag, and every spelling of such a flag is refused
+**by name** before its value is read. The argv handed to `az` is re-scanned
+against the tool's own scrubber before the spawn, so a future edit that grows a
+credential argument fails there rather than at review — that matters because `az`
+persists invocations under `~/.azure` and prints request signatures under
+verbosity, which is disk this repo's redaction posture cannot reach (`--debug`
+and `--verbose` are never passed and are refused if supplied). Child `stderr` is
+scrubbed before any operator-facing line exists. The Cosmos read-back is **AAD-only
+via `DefaultAzureCredential`**; the account runs `local_authentication_enabled =
+false`, so a key mode could not work and could only leak. Data-plane access needs
+an **account-scoped** (`--scope "/"`) Cosmos Built-in Data **Reader** assignment —
+the runbook carries both the create and the matching delete, because `azurerm`
+manages only the two declared `azurerm_cosmosdb_sql_role_assignment` resources and
+will never prune a third.
+
+**Exit codes — the operator contract.** Exit **0 means exactly one thing**: 3
+marker-carrying, run-correlated documents were **read back out of** the
+destination container within an explicit, reported wait bound, and the evidence
+recording them was written. Absence of an error is never success.
+
+| Code | Meaning |
+| ---- | ------- |
+| 0    | confirmed-in-cosmos |
+| 1    | usage error — includes a refused credential-shaped or verbosity flag |
+| 2    | send failure — `az iot device send-d2c-message` itself failed; nothing arrived |
+| 3    | confirmation timeout — the bound elapsed with the documents not found |
+| 4    | auth failure — a 401/403, or a credential that could not be acquired; **never retried**, and it says nothing about whether the route delivered |
+| 5    | transport abort — retries exhausted |
+| 6    | synthetic marker violation — a read-back document lacked the marker; a defect in the sender, not an acceptable variant |
+| 7    | correlation ambiguity — fewer documents than sent, a duplicate run id, an unreadable result. A failure, never an absence |
+| 8    | container definition refusal — the partition key path or `default_ttl` could not be measured. **No default is ever substituted** |
+| 9    | delivered, unexpected partition — the documents arrived, but not under the expected partition. A working route is never reported as broken |
+
+**Safety semantics.**
+
+- The partition key path and the `default_ttl` are **measured** from an
+  `az cosmosdb sql container show` document at runtime (HR4). There is no
+  hardcoded `/deviceId` and no hardcoded retention anywhere in the tool; a
+  measured value that differs from the declared `temperature_data_ttl_days = 7`
+  (604800s) is recorded as a **drift finding**, and the measured number is the one
+  used.
+- A **pre-send read** runs before anything is sent, requiring this run's freshly
+  minted correlator to be absent — that is what makes the proof a *newly
+  identified* document, and it surfaces an unpropagated role assignment while
+  nothing has yet been written that could not then be confirmed.
+- Every document carries `syntheticFixture=MG-67-SYNTHETIC-FIXTURE` plus a unique
+  per-run `fixtureRunId`, so a specific document ties to a specific run.
+- `--evidence-out` writes **one machine-readable JSON record** — the observed
+  document ids and count, the marker, the partition key path, the measured
+  `default_ttl`, the wait bound used, the observed arrival delay and the
+  run/expiry instants. MG-53 and MG-54 read that file as a **program input**; the
+  runbook is prose and must never be the thing they parse. The record has a closed
+  key set and is scanned for credential shapes at build and write time — a hit
+  **refuses the write** rather than redacting. It is written atomically and will
+  not overwrite an existing file without `--overwrite`.
+- A run that cannot confirm still writes a record, carrying an `unconfirmed-run`
+  finding: documents were left in the container and MG-53 halts on a document no
+  record accounts for. It never claims a success the confirmation did not reach.
+- A green hub metric, a green route metric and a green `/api/health/cosmos` are
+  **each rejected as proof** — none of them observes a document (MG-24 and MG-58
+  are the precedents). The tool consults none of them.
+
+---
+
 ## Further Reading
 
 - **[Bootstrap & greenfield acceptance runbook](../../docs/infrastructure/bootstrap-runbook.md)** — the operator procedure
+- **[MG-67 device-fixture verification runbook](../../docs/infrastructure/mg67-device-fixture-verification.md)** — the host-phase procedure for the dev IoT device fixture (device registration, the live run, the temporary data-plane role assignment **and its removal**, the evidence, the stop conditions)
 - **[Terraform setup](../../docs/infrastructure/terraform-setup.md)** — configuration reference
 - **[CI/CD pipeline](../../docs/development/ci-cd.md)** — the authoritative deploy model
