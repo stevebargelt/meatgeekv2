@@ -264,9 +264,23 @@ AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
              could not work even if this tool offered it.
 
              Cosmos DATA-PLANE access is not granted by control-plane RBAC:
-             Subscription Owner alone gets a 403 here. Grant yourself the
-             built-in Data Reader at ACCOUNT scope, CAPTURE THE ASSIGNMENT ID
-             the create returns, and remove it afterwards BY THAT ID:
+             Subscription Owner alone gets a 403 here. CHECK FIRST whether you
+             already hold a suitable account-scope data-plane assignment — if
+             you do, the grant below is SKIPPED ENTIRELY and there is nothing to
+             remove afterwards, because this run created nothing:
+
+               ME=$(az ad signed-in-user show --query id -o tsv)
+               az cosmosdb sql role assignment list \\
+                 --account-name <account> -g <resource-group> -o json \\
+                 | jq -r --arg p "$ME" '[.[] | select(.principalId==$p)
+                     | select((.scope|test("/dbs/"))|not) | .name] | join(" ")'
+
+             NON-EMPTY OUTPUT MEANS SKIP: create nothing, delete nothing, and
+             record the skip. That assignment predates this ticket and is NOT
+             yours to remove — if you believe it is stale, that is a finding to
+             raise, not a step here. ONLY IF THE OUTPUT IS EMPTY, grant yourself
+             the built-in Data Reader at ACCOUNT scope, CAPTURE THE ASSIGNMENT
+             ID the create returns, and remove it afterwards BY THAT ID:
 
                MG67_ROLE_ASSIGNMENT_ID=$(az cosmosdb sql role assignment create \\
                  --account-name <account> -g <resource-group> \\
@@ -1075,9 +1089,118 @@ async function settleRun({
 }
 
 /**
+ * Emit a line, and never throw doing it.
+ *
+ * Used ONLY by the last-resort handler below, whose whole job is to survive a
+ * broken reporting step — and the most likely way that step breaks is the log
+ * itself. `node send-fixture.mjs ... | head -1` closes stdout under a running
+ * process and the next write raises EPIPE; a handler that reported that failure
+ * through the same channel would rethrow from inside its own recovery.
+ */
+function safeLog(log, level, line) {
+  try {
+    log?.[level]?.(line);
+  } catch {
+    // Deliberately swallowed. There is no third channel to report a broken
+    // reporting channel on, and the exit CODE — which is what an operator
+    // scripts against and the only thing that survives a closed stdout — is
+    // still chosen correctly below.
+  }
+}
+
+/**
+ * The exit code for a run whose SETTLEMENT threw — the report, the record or the
+ * final line, after the live work was already done.
+ *
+ * WHY THIS EXISTS. settleRun() used to be called outside main()'s try/catch, so
+ * a throw there escaped as an unhandled rejection and node exited 1. Exit 1 is
+ * USAGE: "bad arguments, nothing live happened". Telling an operator that while
+ * three synthetic documents sit in the source container is the single worst
+ * answer this tool can give — it is the exact sentence MG-53 halts on, and it
+ * would send them looking at their command line instead of at the container.
+ * That path is not hypothetical: emitEvidence() logs its summary line OUTSIDE
+ * its own guard (deliberately — a formatting failure is not an unrecorded run),
+ * and a closed stdout throws there on a fully successful run.
+ *
+ * WHAT IT CHOOSES, and why fail-closed points at 10 rather than at the outcome:
+ *   - The run ATTEMPTED a send → EXIT.EVIDENCE_UNRECORDED. The settlement did
+ *     not complete, so whether the artifact reached disk is UNESTABLISHED, and
+ *     an unestablished recording is treated as no recording. The operator's
+ *     action is the one that code already names: copy the ids off stderr, then
+ *     check whether the artifact exists. Over-reporting an unrecorded run costs
+ *     a look at a file; under-reporting one loses the ids.
+ *   - The run attempted NOTHING → whatever the run had already concluded
+ *     (a usage refusal, an unmeasurable container, a refused pre-send read).
+ *     Exit 1 is honest there: nothing live happened, which is what it means. A
+ *     concluded OK is the one code that cannot stand, since a settlement that
+ *     threw confirmed nothing.
+ */
+function lastResortExit({ err, ledger, confirmation, failure, cfg, device, hub, log }) {
+  // Fail-closed on the snapshot too: if the ledger cannot say what the run
+  // attempted, a minted ledger is assumed to mean a send was.
+  let attempted = ledger !== null;
+  let ids = [];
+  try {
+    const snapshot = ledger ? ledger.snapshot({ confirmation }) : null;
+    if (snapshot) {
+      attempted = Boolean(snapshot.attempted);
+      // mergeIds is binary; nested so the union is the whole accountable set.
+      ids = mergeIds(mergeIds(snapshot.observedIds, snapshot.acceptedIds), snapshot.ambiguousIds);
+    }
+  } catch {
+    // Keep `attempted` as the pessimistic default set above.
+  }
+
+  const concluded = confirmation?.exitCode ?? failure?.exitCode ?? EXIT.AMBIGUOUS;
+  const exitCode = attempted
+    ? EXIT.EVIDENCE_UNRECORDED
+    : concluded === EXIT.OK
+      ? EXIT.AMBIGUOUS
+      : concluded;
+
+  // Even the description is defensive: this handler is the last thing between a
+  // live send and the exit code, and it may not fail to produce one because
+  // formatting a diagnosis went wrong.
+  let why = 'unknown error';
+  try {
+    why = describeError(err);
+  } catch {
+    /* the diagnosis is worth less than the code, and the code is chosen above */
+  }
+  safeLog(
+    log,
+    'error',
+    `${TOOL_NAME}: the run could not be settled — ${why}. Reporting the outcome is what failed, not the send.`
+  );
+  if (attempted) {
+    safeLog(
+      log,
+      'error',
+      `${TOOL_NAME}: ${ids.length} document id(s) from this run ARE or MAY BE in ${cfg ? `${cfg.database}/${cfg.container}` : 'the destination container'}, marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}${ids.length ? `: ${ids.join(', ')}` : ''}`
+    );
+    safeLog(
+      log,
+      'error',
+      `${TOOL_NAME}: RECORD THESE IDS BY HAND against ${TICKET}, then check whether ${cfg?.evidenceOut ? safe(cfg.evidenceOut) : 'the evidence file'} exists — the settlement did not finish, so whether it was written is UNESTABLISHED and is treated here as unwritten. This is NOT "nothing happened".`
+    );
+  }
+  safeLog(
+    log,
+    'error',
+    `${TOOL_NAME}: device ${device} on hub ${hub} — exit ${exitCode} (${exitLabel(exitCode)})`
+  );
+  return exitCode;
+}
+
+/**
  * Wire the whole flow. Every seam a test needs is a parameter: the spawn, the
  * reader construction, the clock, the uuid source, the sleep and the log. The
  * defaults are the only thing the CLI entry point passes.
+ *
+ * IT DOES NOT THROW. Every path — including the settlement that reports and
+ * records the run — is inside a guard, because the one code this tool must never
+ * reach by accident (1, "nothing live happened") is exactly the code an
+ * unhandled rejection produces.
  *
  * @returns {Promise<number>} the process exit code.
  */
@@ -1190,30 +1313,53 @@ export async function main({
   // ---- 6. One exit funnel: report, record, choose the code. ---------------
   // Reached on EVERY outcome, including the ones that threw. Nothing above this
   // line returns except --help, which cannot have attempted a send.
-  if (!confirmation && !failure && ledger) {
-    // Defensive and fail-closed: a run that produced neither a confirmation nor
-    // a failure knows nothing about what it wrote, and the honest report of that
-    // is an ambiguity, not a success.
-    failure = new FixtureError(
-      EXIT.AMBIGUOUS,
-      'the run ended with neither a confirmation nor a failure — nothing established what reached the container, which is a correlation ambiguity and never a success'
-    );
+  //
+  // INSIDE ITS OWN GUARD, and that is the point rather than a precaution. The
+  // settlement runs AFTER the live effect — after documents may already be in
+  // the source container — so a throw here escaping the function would surface
+  // as an unhandled rejection and exit 1, the code that means "nothing live
+  // happened". No path after a send may produce that code.
+  try {
+    if (!confirmation && !failure && ledger) {
+      // Defensive and fail-closed: a run that produced neither a confirmation
+      // nor a failure knows nothing about what it wrote, and the honest report
+      // of that is an ambiguity, not a success.
+      failure = new FixtureError(
+        EXIT.AMBIGUOUS,
+        'the run ended with neither a confirmation nor a failure — nothing established what reached the container, which is a correlation ambiguity and never a success'
+      );
+    }
+    // Awaited, not returned: a returned promise settles outside this try and
+    // would take its rejection with it.
+    return await settleRun({
+      cfg,
+      definition,
+      ledger,
+      confirmation,
+      failure,
+      device,
+      hub,
+      log,
+      now,
+      fs,
+    });
+  } catch (err) {
+    return lastResortExit({ err, ledger, confirmation, failure, cfg, device, hub, log });
   }
-  return settleRun({
-    cfg,
-    definition,
-    ledger,
-    confirmation,
-    failure,
-    device,
-    hub,
-    log,
-    now,
-    fs,
-  });
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
-  process.exitCode = await main({ argv: process.argv.slice(2) });
+  // main() is written not to throw, and this catch is what makes that a property
+  // of the ENTRY POINT rather than a promise about main()'s internals: an
+  // unhandled rejection here exits 1, and 1 means "bad arguments, nothing live
+  // happened". A future edit that grows a throwing path lands on AMBIGUOUS —
+  // "this run established nothing" — which is never a claim that nothing ran.
+  try {
+    const code = await main({ argv: process.argv.slice(2) });
+    process.exitCode = Number.isInteger(code) ? code : EXIT.AMBIGUOUS;
+  } catch (err) {
+    process.exitCode = EXIT.AMBIGUOUS;
+    safeLog(defaultLog, 'error', `${TOOL_NAME}: the run ended abnormally — ${describeError(err)}`);
+  }
 }

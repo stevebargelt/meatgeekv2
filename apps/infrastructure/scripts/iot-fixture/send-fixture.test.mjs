@@ -166,6 +166,31 @@ function recordingLog() {
   };
 }
 
+/**
+ * A log that breaks PERMANENTLY once a line matching `armOn` is written, and
+ * records every line either way.
+ *
+ * Modelled on the real failure rather than an invented one: an operator piping
+ * this tool into `head` closes stdout mid-run, and from that write onwards every
+ * write raises EPIPE — it does not recover. `armOn` picks the moment, so a test
+ * can break the reporting from the settlement onwards while letting the run
+ * itself complete.
+ *
+ * Recording BEFORE throwing is what makes the last-resort path assertable: that
+ * handler reports through a log it already knows may be broken, so its lines
+ * would otherwise vanish along with the failure they describe.
+ */
+function throwingLog({ armOn = () => true } = {}) {
+  const base = recordingLog();
+  let armed = false;
+  const emit = level => line => {
+    base[level](line);
+    if (!armed && armOn(String(line))) armed = true;
+    if (armed) throw Object.assign(new Error('EPIPE: broken pipe'), { code: 'EPIPE' });
+  };
+  return { ...base, info: emit('info'), error: emit('error') };
+}
+
 /** The documents a healthy route delivers for `runId`, built through the real contract. */
 function deliveredDocuments(runId = RUN_ID, overrides = {}) {
   return buildFixtureMessages({
@@ -213,8 +238,8 @@ async function runMain({
   pollIntervalMs = 250,
   evidenceOut,
   fs,
+  log = recordingLog(),
 } = {}) {
-  const log = recordingLog();
   const clock = fakeClock({ start: RUN_MILLIS });
   const reader = fakeReader(readerSpec);
   // The override is for the one case a scripted az cannot express: the spawn
@@ -1604,6 +1629,104 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
 });
 
 // ===========================================================================
+// A throw in the SETTLEMENT — after the live effect — never reports exit 1.
+//
+// Exit 1 is USAGE: "bad arguments, nothing live happened". settleRun() runs
+// after the send, and a throw there used to escape main() as an unhandled
+// rejection, which exits 1. That is the worst answer this tool can give: it
+// tells an operator nothing happened while synthetic documents sit in the
+// source container, and MG-53 halts on exactly those unrecorded documents.
+//
+// Every case here asserts BY EXIT CODE, and drives the throw through the log —
+// the channel the settlement reports on, and the one that really does break in
+// the field (`send-fixture.mjs ... | head -1` closes stdout).
+// ===========================================================================
+
+describe('a settlement that throws after live effect never exits 1', () => {
+  const confirmedRun = { script: [{ docs: [] }, { docs: deliveredDocuments() }] };
+
+  it('a confirmed run whose final line throws exits EVIDENCE_UNRECORDED, not 0 and not 1', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const log = throwingLog({ armOn: line => line.includes('CONFIRMED —') });
+      const { exitCode } = await runMain({ evidenceOut, readerSpec: confirmedRun, log });
+
+      // The record reached disk — the throw is strictly after it — and the tool
+      // STILL refuses to report success, because the settlement that would have
+      // established success did not finish. Fail-closed costs the operator a
+      // look at a file; the other direction loses the ids.
+      assert.deepEqual(await readdir(dir), ['evidence.json']);
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.USAGE, 'never "nothing live happened"');
+      assert.notEqual(exitCode, EXIT.OK, 'an unfinished settlement confirms nothing');
+
+      const output = log.all();
+      assert.match(output, /RECORD THESE IDS BY HAND/);
+      assert.match(output, /UNESTABLISHED/);
+      assert.match(output, new RegExp(`device ${FIXTURE_DEVICE_ID} on hub ${HUB}`));
+      assert.match(output, /exit 10 \(evidence unrecorded/);
+    });
+  });
+
+  it('a send failure whose reporting breaks at the first settlement line exits EVIDENCE_UNRECORDED and names the ids', async () => {
+    await withTempDir(async dir => {
+      // The log dies on the settlement's very first line and stays dead. Nothing
+      // downstream of it can report anything, so the exit code is the only
+      // channel left — and it still has to be honest about a live send.
+      const log = throwingLog({ armOn: line => line.includes("send-d2c-message' exited") });
+      const { exitCode } = await runMain({
+        evidenceOut: path.join(dir, 'evidence.json'),
+        readerSpec: { script: [{ docs: [] }] },
+        spawnSpec: { script: [{ code: 1, stderr: LEAKY_AZ_STDERR }] },
+        log,
+      });
+
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.USAGE);
+      // Nothing was recorded — the throw preceded the write — which is exactly
+      // what the code says. One document is of unknown fate, and it is named.
+      assert.deepEqual(await readdir(dir), []);
+      const output = log.all();
+      const [firstId] = deliveredDocuments().map(doc => doc.id);
+      assert.ok(output.includes(firstId), 'the unrecorded id must be named');
+      assert.equal(/nothing was written/i.test(output), false);
+      assertNoPlantedSecret(output, 'the last-resort path');
+    });
+  });
+
+  it('the handler discriminates: a run that attempted NOTHING keeps its own code', async () => {
+    await withTempDir(async dir => {
+      // A refused pre-send read. The ledger exists (a run id was minted) but no
+      // message was attempted, so nothing is live: AUTH stands, and inflating it
+      // to "documents may be live" would be its own false claim.
+      const { exitCode } = await runMain({
+        evidenceOut: path.join(dir, 'evidence.json'),
+        readerSpec: { script: [{ error: forbiddenError() }] },
+        log: throwingLog({ armOn: line => line.includes('pre-send read') }),
+      });
+      assert.equal(exitCode, EXIT.AUTH);
+      assert.notEqual(exitCode, EXIT.EVIDENCE_UNRECORDED, 'no document may be live');
+      assert.deepEqual(await readdir(dir), []);
+    });
+  });
+
+  it('a usage refusal whose reporting throws still exits 1 — nothing live happened, which is what 1 means', async () => {
+    const { exitCode } = await runMain({
+      argv: ['--evidence-out', ''],
+      readerSpec: { script: [{ docs: [] }] },
+      log: throwingLog(),
+    });
+    assert.equal(exitCode, EXIT.USAGE);
+  });
+
+  it('main() resolves rather than rejecting, whatever the settlement does', async () => {
+    await assert.doesNotReject(() =>
+      runMain({ readerSpec: confirmedRun, log: throwingLog(), evidenceOut: '/proc/nope/e.json' })
+    );
+  });
+});
+
+// ===========================================================================
 // Source-text assertions: properties a behavioural test cannot see the absence
 // of. Comments are stripped first — the header discusses key auth deliberately,
 // and that documentation is worth keeping greppable.
@@ -1644,6 +1767,23 @@ describe('source posture (HR1)', () => {
     // ...and the one auth wiring it does have is the AAD one.
     assert.match(code, /aadCredentials/);
     assert.match(code, /DefaultAzureCredential/);
+  });
+
+  // The behavioural cases above prove the last-resort handler is REACHED today.
+  // This proves it cannot be un-reached by a plausible edit: a bare
+  // `return settleRun(...)` settles its promise outside the try, taking the
+  // rejection with it, and the tests above would still pass while an unhandled
+  // rejection exited 1 in production.
+  it('settles inside the guard: no un-awaited settleRun, and the entry point catches', async () => {
+    const code = stripComments(await readSource('./send-fixture.mjs'));
+    assert.match(code, /return await settleRun\(/, 'settleRun must be awaited inside the try');
+    assert.equal(
+      /return settleRun\(/.test(code),
+      false,
+      'an un-awaited settleRun rejects outside the guard'
+    );
+    assert.match(code, /catch \(err\) \{\s*return lastResortExit\(/);
+    assert.match(code, /process\.exitCode = EXIT\.AMBIGUOUS/, 'the entry point never falls to 1');
   });
 
   it('never hands az a verbosity flag', async () => {
