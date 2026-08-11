@@ -53,9 +53,9 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // minTests carries a small margin (roughly 7%) below the honest count, so
 // tightening or consolidating a handful of cases does not turn this red for a
 // reason that has nothing to do with the suite failing to run. Counts measured
-// at the time of writing: dependency-free 338 tests across 4 files
-// (container-definition 34, evidence 55, fixture-core 126, send-fixture 123);
-// real-SDK 27 tests across 1 file.
+// at the time of writing: dependency-free 387 tests across 4 files
+// (container-definition 34, evidence 70, fixture-core 137, send-fixture 146);
+// real-SDK 38 tests across 1 file.
 //
 // The floor is RAISED when the suite grows and is never lowered to accommodate
 // a rename: a floor below the honest count is a floor that lets a whole
@@ -64,37 +64,67 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // disappear inside it — so raising it is maintenance of the gate, not
 // tightening of it.
 //
-// These floors were last raised when three review fixes landed together, each
-// adding cases this floor now has to keep alive: the cross-partition sweep
-// judging the partition key value IN the returned documents rather than which
-// query found them (so a healthy run is never reported as a partition anomaly),
-// the CLI's settle-and-record step moving inside the guarded region (so no
-// throw after a live send can exit 1, the code reserved for "nothing live
-// happened"), and the evidence record's explicit retraction of the stop
-// condition 1 claim it could not structurally detect. All three are
-// regressions that would read as normal behaviour in prose and are visible
-// only as executed cases.
+// These floors were last raised when a further review cycle landed four fixes,
+// each adding cases this floor now has to keep alive:
+//
+//   - the single exit funnel no longer defaulting to EXIT.OK. Exit 0 now
+//     requires a confirmation that both carries EXIT.OK and says confirmed;
+//     a state the code did not anticipate exits nonzero. That is the ticket's
+//     central invariant, and it was previously inverted at the funnel's last
+//     line by a `?? EXIT.OK` — a fail-OPEN default in the one function whose
+//     entire contract is that exit 0 means one thing.
+//   - the evidence destination being validated BEFORE the first live send, so
+//     an unusable --evidence-out refuses at usage class while nothing live has
+//     happened, rather than after three synthetic documents are already in the
+//     container. The after-the-fact recording path stays as the backstop, so
+//     both the preflight cases and the write-path cases have to keep running.
+//   - a document carrying NO partition key field being its own recorded state
+//     rather than an empty observed-values list. "Landed under a different
+//     key" and "landed under no key" are different facts, the second is the
+//     architect's predicted failure mode for this route, and collapsing them
+//     would make the outcome text state something factually false.
+//   - the retraction of the claim that anomalous ids implement the runbook's
+//     unknown-document stop condition; that condition is the operator's
+//     unfiltered enumeration.
+//
+// Every one of those is a regression that would read as normal behaviour in
+// prose and is visible only as executed cases — which is exactly why the count
+// floor, not just the file floor, is the thing that has to move.
+//
+// The floors before this raise (314 / 25) would have passed a tree with all
+// four fixes reverted, which is the failure mode a floor left behind a grown
+// suite produces: the margin widens until whole blocks fit inside it.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 314,
+    minTests: 360,
   },
   sdk: {
     label: 'real-SDK',
     match: name => name.endsWith(SDK_SUFFIX),
     minFiles: 1,
-    minTests: 25,
+    minTests: 35,
   },
 };
 
-const arg = process.argv[2];
-if (arg !== undefined && arg !== '--sdk') {
-  console.error(`run-tests: unknown argument '${arg}' — expected no argument or --sdk`);
+// Every argument is checked, not just the first. A wrapper whose entire job is
+// refusing to ignore a missing suite must not itself ignore an argument it did
+// not understand: `--sdk --bogus` silently running the SDK tier, or `--sdk`
+// typo'd twice quietly selecting one tier, is the same green-by-absence shape
+// this file exists to refuse — the operator believes they ran something they
+// did not. An unrecognised or surplus argument is a usage failure.
+const args = process.argv.slice(2);
+const unknown = args.filter(value => value !== '--sdk');
+if (unknown.length > 0 || args.length > 1) {
+  const offender = unknown[0] ?? args[1];
+  console.error(
+    `run-tests: unknown argument '${offender}' — expected no argument or exactly --sdk`
+  );
   process.exit(1);
 }
-const tier = arg === '--sdk' ? TIERS.sdk : TIERS.default;
+const tier = args[0] === '--sdk' ? TIERS.sdk : TIERS.default;
 
 const files = readdirSync(DIR).filter(tier.match).sort();
 
