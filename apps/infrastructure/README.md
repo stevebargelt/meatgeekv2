@@ -828,9 +828,11 @@ will never prune a third. **The removal targets the assignment id captured at
 creation time and refuses to guess**: this is a shared live account, your
 principal may already hold a data-plane grant somebody else's work depends on, and
 a delete that finds its target by principal or role shape can revoke **that** one
-instead. The runbook skips the grant entirely if you already hold one, snapshots
-every assignment on the account first, and proves afterwards that exactly one —
-yours — went.
+instead. The runbook snapshots every assignment on the account first and sets a
+single decision variable from that snapshot; **the create path is gated on it**,
+so a principal that already holds a grant creates nothing and therefore has
+nothing to remove, and a shell with no snapshot in scope refuses to grant at all.
+Afterwards it proves that exactly one assignment — yours — went.
 
 **Exit codes — the operator contract.** Exit **0 means exactly one thing**: 3
 marker-carrying, run-correlated documents were **read back out of** the
@@ -848,7 +850,7 @@ recording them was written. Absence of an error is never success.
 | 6    | synthetic marker violation — a read-back document lacked the marker; a defect in the sender, not an acceptable variant                                                                                                                                                                       |
 | 7    | correlation ambiguity — fewer documents than sent, a duplicate run id, an unreadable result. A failure, never an absence                                                                                                                                                                     |
 | 8    | container definition refusal — the partition key path or `default_ttl` could not be measured. **No default is ever substituted**                                                                                                                                                             |
-| 9    | delivered, unexpected partition — the documents arrived, but not under the expected partition. A working route is never reported as broken                                                                                                                                                   |
+| 9    | delivered, unexpected partition — the full set arrived and one or more documents **carry** a partition value other than the expected one. Read off the returned documents, never off which query found them: a full set the cross-partition sweep finds in the **expected** partition is a **confirmation** (exit 0, a timing artefact of the wait bound), and a **partial** cross-partition set is exit 7, not a partition claim. A working route is never reported as broken |
 | 10   | evidence unrecorded — a send happened and the record of it could not be written or built. **Never exit 1**, which means "nothing live happened"; the ids are printed for the operator to record by hand, and this code takes precedence over the confirmation's own (still printed above it) |
 
 **Safety semantics.**
@@ -896,6 +898,16 @@ recording them was written. Absence of an error is never success.
   and MG-54 parse mechanically, makes a downstream ticket act on a fabricated
   claim. Documents the read-back returned that the run cannot claim go to
   `anomalousIds`, kept strictly apart from its own.
+- **The record declares what it does NOT check.** The read-back is filtered to the
+  run's own correlator, so a document written by an **unknown writer** can never
+  appear in any of its id sets — `anomalousIds` included, which means a document
+  carrying this run's correlator but not the marker, and is a **different**
+  finding. `anomalousCount: 0` is therefore no evidence at all about unknown
+  writers, and a permanently-empty field read as a cleared stop condition is the
+  vacuous proof this tool exists to prevent. So the record carries a constant
+  `unknownWriterCheck: { checked: false, by: "operator-unfiltered-enumeration" }`,
+  and the runbook's **unfiltered enumeration** of all five containers is the only
+  thing that checks it.
 - A green hub metric, a green route metric and a green `/api/health/cosmos` are
   **each rejected as proof** — none of them observes a document (MG-24 and MG-58
   are the precedents). The tool consults none of them.
