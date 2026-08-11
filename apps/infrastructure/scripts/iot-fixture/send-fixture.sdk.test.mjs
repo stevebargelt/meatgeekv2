@@ -17,7 +17,7 @@
 // `run-tests.mjs --sdk`, which floors the counts so a rename cannot make this
 // tier vacuously green.
 //
-// WHAT ONLY THIS TIER CAN PROVE. Five things, each of them a way the tool
+// WHAT ONLY THIS TIER CAN PROVE. Six things, each of them a way the tool
 // could be wrong while the whole fake tier stayed green:
 //
 //   1. The option bag createRealReader hands to CosmosClient is one the REAL
@@ -50,6 +50,15 @@
 //      UNRECORDED one, which is the worse of the two failures and the exact
 //      outcome the contract exists to prevent. Only a real error produces the
 //      text that tests that interaction; a hand-written one-line fake does not.
+//   6. THE EXIT FUNNEL'S VOCABULARY AND classifyError AGREE ABOUT REAL ERRORS.
+//      resolveOutcomeCode is fail-closed by construction: a code it does not
+//      recognise becomes UNANTICIPATED rather than being trusted. That is the
+//      right default, and it also means a classifier that answered with a code
+//      outside the vocabulary would be SILENTLY DOWNGRADED — a real 403 exiting
+//      as a correlation ambiguity, sending an operator to diagnose the route
+//      when the answer was an RBAC grant. Whether the two agree can only be
+//      checked against the real error classes, which is this tier's job.
+//      Section 7 below.
 //
 // WHAT DELIBERATELY IS NOT HERE. The per-outcome sweep of the
 // evidence-emission contract — every terminal outcome the tool can reach, its
@@ -59,6 +68,14 @@
 // this tier must not grow a second copy that can drift from it. What is here is
 // the slice reachable only THROUGH a real SDK error: the AUTH and TRANSPORT
 // aborts, and the recording that has to survive them.
+//
+// Likewise the exit funnel's own fall-through cases — a run holding neither a
+// confirmation nor a failure, a confirmation carrying exit 0 without
+// confirmed:true — are the fake tier's ("exit 0 requires positive confirmation,
+// never a fall-through"). They involve no SDK, and section 7 does not restate
+// them; it asks the one question that needs the real packages, which is whether
+// a REAL error can arrive at that funnel wearing a code the funnel does not
+// know.
 //
 // NOTHING HERE MAY CONTACT AZURE. Constructing a client and constructing a
 // credential are both offline; calling any client method is not, and is out of
@@ -80,11 +97,15 @@ import {
   MESSAGES_PER_RUN,
   RUN_ID_PARAMETER,
   SYNTHETIC_MARKER,
+  UNANTICIPATED_OUTCOME_CODE,
   buildFixtureMessages,
   classifyError,
   exitLabel,
+  isKnownExitCode,
+  resolveOutcomeCode,
+  toFixtureError,
 } from './fixture-core.mjs';
-import { createRealReader, endpointFor, main, preflight } from './send-fixture.mjs';
+import { createRealReader, endpointFor, main, preflight, settleRun } from './send-fixture.mjs';
 
 // The real dev target from the brief. Nothing here reaches it; the names are
 // here so a failure message reads like the run an operator would perform.
@@ -1020,4 +1041,224 @@ describe('MG-67 no real SDK error can manufacture a tool-state exit code', () =>
       assert.notEqual(code, EXIT.OK);
     });
   }
+});
+
+// ===========================================================================
+// 7. NO REAL SDK ERROR CAN REACH EXIT 0 — AND NONE IS SILENTLY DOWNGRADED.
+//
+// Section 6 above asks what classifyError ANSWERS for each real error class.
+// This section asks the next question, and it is the one with the operator
+// consequence: what the single exit funnel does with that answer.
+//
+// The funnel is now fail-closed by construction. resolveOutcomeCode owns the
+// only decision that a run exits 0, it requires a confirmation that both
+// carries EXIT.OK and says confirmed:true, and every other shape — including
+// one it was not written to expect — comes back as UNANTICIPATED_OUTCOME_CODE
+// with a sentence naming what was found. There is no `?? EXIT.OK` left in it.
+// That inversion is the ticket's central invariant and the fake tier proves it
+// directly, hand-building each unanticipated state.
+//
+// What the fake tier CANNOT prove is that a real failure still arrives at that
+// funnel wearing a code the funnel recognises. The fail-closed default has a
+// quiet cost: an exit code outside the vocabulary is not trusted, so it is
+// REPLACED. A classifier that grew a case answering with some new code — for a
+// real SDK shape that only exists once the packages are installed — would not
+// fail loudly. Every such run would report a correlation ambiguity, and an
+// operator staring at exit 7 diagnoses the route and the marker while the real
+// answer was a missing RBAC grant on the account. The fake tier builds its
+// errors by hand and so can only ever confirm that the codes IT chose are
+// known; only here does a real @azure/identity or @azure/cosmos error travel
+// classifyError -> toFixtureError -> resolveOutcomeCode -> settleRun end to
+// end.
+//
+// So each real error class is asserted twice over: its code is IN the
+// vocabulary and survives the funnel unchanged (not downgraded), and the funnel
+// returns it nonzero (not success). Both directions matter — an auth failure
+// reported as an ambiguity is the wrong diagnosis, and an auth failure reported
+// as a confirmation is a false proof of the only thing this tool exists to
+// prove.
+//
+// Still offline: no client is constructed and no client method is called. Every
+// error below is instantiated directly from the installed packages.
+// ===========================================================================
+
+describe('MG-67 no real SDK error can reach exit 0 through the funnel', () => {
+  // The same real classes section 6 enumerates. Rebuilt per call so no
+  // assertion can depend on a mutation another made, and deliberately NOT
+  // shared with that section's list: these two sections must be able to
+  // disagree about coverage rather than silently track each other.
+  const REAL_SDK_ERRORS = () => [
+    ['CredentialUnavailableError', new identity.CredentialUnavailableError('no credential')],
+    ['AuthenticationError', new identity.AuthenticationError(401, 'interaction required')],
+    ['AuthenticationRequiredError', new identity.AuthenticationRequiredError({ scopes: [] })],
+    ['AggregateAuthenticationError', leakyRealAuthError()],
+    ['RestError/ECONNRESET', new cosmos.RestError('read ECONNRESET', { code: 'ECONNRESET' })],
+    ['RestError/ETIMEDOUT', new cosmos.RestError('connect ETIMEDOUT', { code: 'ETIMEDOUT' })],
+    ['ErrorResponse/403', Object.assign(new cosmos.ErrorResponse('RBAC denied'), { code: 403 })],
+    [
+      'ErrorResponse/429',
+      Object.assign(new cosmos.ErrorResponse('too many requests'), { code: 429 }),
+    ],
+    ['ErrorResponse/500', Object.assign(new cosmos.ErrorResponse('service error'), { code: 500 })],
+  ];
+
+  /**
+   * Settle a run that holds ONLY this failure — no confirmation, and no ledger.
+   *
+   * That is the real shape of an abort before the send: the pre-send read was
+   * refused, or the reader could never be built. A null ledger means the run
+   * attempted nothing, which is the one case allowed to exit without an
+   * evidence record, so nothing here writes a file and the `fs` seam is never
+   * reached.
+   */
+  const settleWithFailure = async failure => {
+    const log = recordingLog();
+    const exitCode = await settleRun({
+      cfg: {
+        database: DATABASE,
+        container: CONTAINER,
+        device: FIXTURE_DEVICE_ID,
+        timeoutMs: 60_000,
+        pollIntervalMs: 250,
+      },
+      definition: { partitionKeyField: MEASURED_PARTITION_FIELD, measuredDefaultTtl: 604_800 },
+      ledger: null,
+      confirmation: null,
+      failure,
+      device: FIXTURE_DEVICE_ID,
+      hub: HUB,
+      log,
+      now: () => 1_754_000_000_000,
+      fs: {
+        stat: async () => {
+          throw new Error('settleRun must not touch the filesystem for a run with no ledger');
+        },
+        writeFile: async () => {
+          throw new Error('settleRun must not write a record for a run that attempted nothing');
+        },
+        rename: async () => {},
+        rm: async () => {},
+      },
+    });
+    return { exitCode, log };
+  };
+
+  for (const [name, error] of REAL_SDK_ERRORS()) {
+    it(`a real ${name} exits as its own class, never 0 and never a downgrade`, async () => {
+      // 1. The classification, and the property the funnel depends on: the code
+      //    is one this tool's vocabulary minted. This is the assertion that
+      //    catches a classifier grown a case the funnel does not know.
+      const classified = classifyError(error);
+      assert.ok(
+        isKnownExitCode(classified),
+        `${name} classified as ${classified}, which is outside this tool's exit vocabulary — the funnel would replace it with ${UNANTICIPATED_OUTCOME_CODE} (${exitLabel(UNANTICIPATED_OUTCOME_CODE)}) and misreport the diagnosis`
+      );
+      assert.notEqual(classified, EXIT.OK, 'an exception is never a confirmation');
+
+      // 2. Through the wrapper every catch block in the tool goes through.
+      const failure = toFixtureError(error, 'reading the destination container');
+      assert.ok(failure instanceof FixtureError);
+      assert.equal(failure.exitCode, classified, 'the wrapper must not re-map the classification');
+
+      // 3. Through the resolver that owns the exit-0 decision. `unanticipated`
+      //    false is the whole point: the funnel RECOGNISED this failure rather
+      //    than falling back, so the operator gets the auth/transport
+      //    diagnosis instead of a correlation ambiguity.
+      const outcome = resolveOutcomeCode({ confirmation: null, failure });
+      assert.equal(outcome.exitCode, classified, `${name} was downgraded by the funnel`);
+      assert.equal(outcome.unanticipated, false, `${name} reached the funnel's fall-through`);
+      assert.equal(outcome.reason, null);
+
+      // 4. And through the funnel itself, which is what main() returns.
+      const { exitCode, log } = await settleWithFailure(failure);
+      assert.equal(exitCode, classified);
+      assert.notEqual(exitCode, EXIT.OK, `a real ${name} must never settle as success`);
+      assert.ok(
+        exitCode === EXIT.AUTH || exitCode === EXIT.TRANSPORT,
+        `${name} settled as ${exitCode} (${exitLabel(exitCode)})`
+      );
+
+      // 5. HR1 on the settlement path too. The failure message the funnel
+      //    prints is built from the real error's text, and for
+      //    AggregateAuthenticationError that text inlines every inner
+      //    credential's message.
+      const output = log.all();
+      assertNoPlantedSecret(output, `settling a real ${name}`);
+      assert.ok(output.includes(FIXTURE_DEVICE_ID), 'failure output names the device');
+      assert.ok(output.includes(HUB), 'failure output names the hub');
+      assert.ok(output.includes(exitLabel(exitCode)), 'failure output names the outcome');
+    });
+  }
+
+  it('the funnel refuses success for a real error even if one arrives carrying exit 0', async () => {
+    // The direction the vocabulary check cannot cover. A FixtureError built
+    // around a real SDK error but carrying EXIT.OK is not a state this tool
+    // produces — which is exactly why it is worth pinning: "the run aborted
+    // with a failure carrying exit code 0" must be refused rather than
+    // honoured, because a failure IS the evidence that nothing was confirmed.
+    const failure = new FixtureError(EXIT.OK, toFixtureError(leakyRealAuthError(), 'read').message);
+
+    const outcome = resolveOutcomeCode({ confirmation: null, failure });
+    assert.equal(outcome.unanticipated, true);
+    assert.equal(outcome.exitCode, UNANTICIPATED_OUTCOME_CODE);
+    assert.notEqual(outcome.exitCode, EXIT.OK);
+
+    const { exitCode, log } = await settleWithFailure(failure);
+    assert.equal(exitCode, UNANTICIPATED_OUTCOME_CODE);
+    assert.notEqual(exitCode, EXIT.OK, 'exit 0 requires a confirmation, not the absence of one');
+    // The operator is told the tool reached a state it does not understand.
+    // A code with no sentence behind it is unreportable as a defect.
+    assert.ok(
+      log.all().includes('neither') || log.all().includes('exit code 0'),
+      'an unanticipated state must say what was found'
+    );
+    assertNoPlantedSecret(log.all(), 'settling a fabricated exit-0 failure');
+  });
+
+  it('a real SDK failure at the READER does not become a confirmation end to end', async () => {
+    // The same property through main() rather than through the funnel alone, so
+    // nothing between argument parsing and the return can manufacture a 0. The
+    // reader throws a real AggregateAuthenticationError on its FIRST query,
+    // which is the pre-send read: the run aborts having sent nothing, so there
+    // is no evidence record to write and no live document to account for.
+    await withTempDir(async dir => {
+      const log = recordingLog();
+      const spawned = [];
+      const exitCode = await main({
+        argv: [
+          '--hub',
+          HUB,
+          '--account',
+          ACCOUNT,
+          '--database',
+          DATABASE,
+          '--container',
+          CONTAINER,
+          '--container-definition',
+          'container-show-clean.json',
+          '--evidence-out',
+          path.join(dir, 'evidence.json'),
+        ],
+        createReader: async () => ({
+          queryDocuments: async () => {
+            throw leakyRealAuthError();
+          },
+        }),
+        spawn: async (...args) => {
+          spawned.push(args);
+          return { code: 0, stdout: '', stderr: '' };
+        },
+        log,
+        readFileFn: async () => cleanDefinitionText,
+        now: () => 1_754_000_000_000,
+        sleep: async () => {},
+      });
+
+      assert.equal(exitCode, EXIT.AUTH, 'a credential that cannot be acquired is an AUTH refusal');
+      assert.notEqual(exitCode, EXIT.OK);
+      assert.notEqual(exitCode, EXIT.TIMEOUT, 'an auth failure is never an absence');
+      assert.equal(spawned.length, 0, 'a refused pre-send read must send nothing');
+      assertNoPlantedSecret(log.all(), 'an end-to-end AUTH abort');
+    });
+  });
 });
