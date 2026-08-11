@@ -31,6 +31,25 @@
 // surfaced and recorded; it is not a hard failure, because a container that
 // really does hold a different TTL is still a container this proof can traverse.
 //
+// WHERE THIS SITS IN THE EVIDENCE-EMISSION CONTRACT. That contract says an
+// evidence record is emitted on EVERY outcome once any message has been
+// attempted, and that only a run which refused BEFORE its first send may exit
+// without one. This module is on the second side of that line by construction:
+// it is a pure function over text, it is called once to derive the body shape
+// the sender needs, and it therefore cannot run after a live effect. Two
+// obligations follow, and both are asserted by test rather than trusted:
+//
+//   - A caller must never re-measure after a send. Doing so would manufacture
+//     an exit path that had live effect and no evidence record — the one hole
+//     the contract exists to close.
+//   - A measurement is COMPLETE OR ABSENT. Every definition this module returns
+//     carries partitionKeyPath, partitionKeyField and measuredDefaultTtl,
+//     non-null; a reading that could not produce all three throws instead of
+//     returning a partial object. That is what lets the evidence builder — which
+//     refuses a partial definition — be called unconditionally on every
+//     post-send path, including the failure paths, without the refusal itself
+//     becoming the reason a live run went unrecorded.
+//
 // REFUSALS ECHO NOTHING. A container definition is not a credential-bearing
 // document, but the refusals below still never quote the input back: a parse
 // failure reports an offset and a byte count, and a bad value reports its TYPE.

@@ -452,6 +452,81 @@ describe('the declared value exists only to be compared against', () => {
     assert.equal(source.split('86400').length - 1, 1);
   });
 
+  // The evidence-emission contract requires a record on EVERY outcome once a
+  // message has been attempted. The evidence builder refuses a definition that
+  // is missing any of the three fields below, so a partial measurement would
+  // turn a post-send failure into a run with live effect and NO artifact — the
+  // hole the contract closes. This module's half of that guarantee is
+  // complete-or-absent: whatever it returns carries all three, and whatever it
+  // cannot read fully it refuses outright.
+  //
+  // Asserted over every shipped fixture plus every mutation the rest of this
+  // file exercises, so a future reading added to the parser is covered here the
+  // moment its case appears above.
+  it('measures completely or refuses — never a partial definition', async () => {
+    const REQUIRED = ['partitionKeyPath', 'partitionKeyField', 'measuredDefaultTtl'];
+    const documents = [];
+    for (const name of [
+      'container-show-clean.json',
+      'container-show-ttl-drift.json',
+      'container-show-missing-partition-key.json',
+      'container-show-malformed.json',
+    ]) {
+      documents.push(await readFixture(name));
+    }
+    for (const mutate of [
+      (doc, r) => delete r.defaultTtl,
+      (doc, r) => (r.defaultTtl = null),
+      (doc, r) => (r.defaultTtl = -1),
+      (doc, r) => (r.defaultTtl = 0),
+      (doc, r) => (r.defaultTtl = '604800'),
+      (doc, r) => (r.default_ttl = 86400),
+      (doc, r) => delete r.partitionKey,
+      (doc, r) => (r.partitionKey.paths = []),
+      (doc, r) => (r.partitionKey.paths = ['/tenantId', '/deviceId']),
+      (doc, r) => (r.partitionKey.paths = ['/device-id']),
+      (doc, r) => (r.partitionKey.paths = ['/id']),
+      (doc, r) => {
+        delete r.partitionKey.kind;
+        delete r.partitionKey.version;
+      },
+      (doc, r) => {
+        delete r.id;
+        delete doc.name;
+      },
+      doc => (doc.resource = null),
+    ]) {
+      documents.push(await mutateClean(mutate));
+    }
+    documents.push('', '   ', '{"resource": {', JSON.stringify({ status: 'ok' }));
+
+    let measured = 0;
+    let refused = 0;
+    for (const text of documents) {
+      let definition;
+      try {
+        definition = parseContainerDefinition(text);
+      } catch (err) {
+        // A refusal is a refusal of the WHOLE reading: no object escapes for a
+        // caller to read a half-measurement out of.
+        assert.ok(err instanceof FixtureError);
+        assert.equal(err.exitCode, EXIT.CONTAINER_DEFINITION);
+        assert.equal(definition, undefined);
+        refused += 1;
+        continue;
+      }
+      for (const field of REQUIRED) {
+        assert.notEqual(definition[field], undefined, `measured definition lacks ${field}`);
+        assert.notEqual(definition[field], null, `measured definition has a null ${field}`);
+      }
+      measured += 1;
+    }
+    // Both halves of the property were actually exercised — a matrix that only
+    // refused, or only measured, would pass the loop while proving one thing.
+    assert.ok(measured >= 4, `expected several complete measurements, got ${measured}`);
+    assert.ok(refused >= 8, `expected several refusals, got ${refused}`);
+  });
+
   it('measures the same document the same way every time, and mutates nothing', async () => {
     const clean = await readFixture('container-show-clean.json');
     const first = parseContainerDefinition(clean);
