@@ -1122,6 +1122,88 @@ describe('main: every failure class exits with its own code and claims nothing',
     });
   });
 
+  // The invariant the four fixes above share, asserted across EVERY outcome
+  // rather than once per fix.
+  //
+  // Each case below has already handed MESSAGES_PER_RUN documents to IoT Hub by
+  // the time it fails, so each has changed the live system. The individual tests
+  // above pin the exit CODE each one reports; what they do not pin — on four of
+  // the five — is that the documents it caused to exist were RECORDED. That gap
+  // is how the swallowed-write defect (fix 3) got in: the behaviour was right on
+  // the confirmed path and absent on the unconfirmed one, and no test held the
+  // difference. MG-53 halts on a source document its recorded set does not
+  // account for and cannot tell one from the unknown writer that halt exists to
+  // catch, so "the run failed" is never a licence to discard the ids.
+  //
+  // The paired negative assertion matters as much: a record written on a failure
+  // path must never be readable as proof. confirmed stays false and exitCode
+  // stays nonzero, so a downstream reader cannot mistake an accounting artifact
+  // for a traversal.
+  const POST_SEND_FAILURES = [
+    [
+      'a 401 during the confirmation',
+      { script: [{ docs: [] }, { error: authError() }] },
+      EXIT.AUTH,
+    ],
+    [
+      'a 403 during the confirmation',
+      { script: [{ docs: [] }, { error: forbiddenError() }] },
+      EXIT.AUTH,
+    ],
+    [
+      'a transport failure with retries exhausted',
+      { script: [{ docs: [] }], fallback: { error: transportError() } },
+      EXIT.TRANSPORT,
+    ],
+    ['the bound elapsing with nothing found', { script: [{ docs: [] }] }, EXIT.TIMEOUT],
+  ];
+
+  for (const [label, readerSpec, expected] of POST_SEND_FAILURES) {
+    it(`${label} still RECORDS the documents it put in the container`, async () => {
+      await withTempDir(async dir => {
+        const evidenceOut = path.join(dir, 'evidence.json');
+        const { exitCode, spawn } = await runMain({ evidenceOut, readerSpec });
+
+        assert.equal(exitCode, expected);
+        assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'the documents really were sent');
+
+        const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+        assert.equal(
+          record.requestedIds.length,
+          MESSAGES_PER_RUN,
+          'every id this run caused to exist is accounted for'
+        );
+        assert.equal(record.confirmed, false, 'a failure record is never readable as proof');
+        assert.equal(record.exitCode, expected);
+        assert.ok(record.findings.some(f => f.kind === 'unconfirmed-run'));
+      });
+    });
+  }
+
+  it('a marker violation records the run rather than discarding it', async () => {
+    await withTempDir(async dir => {
+      // A document reached the container carrying no marker. That is a defect in
+      // the sender, and it is also three documents in the live container: the
+      // exit code reports the defect, the artifact accounts for the documents.
+      const unmarked = deliveredDocuments().map(doc => {
+        const copy = { ...doc };
+        delete copy[SYNTHETIC_MARKER_FIELD];
+        return copy;
+      });
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const { exitCode } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }, { docs: unmarked }] },
+      });
+
+      assert.equal(exitCode, EXIT.MARKER_VIOLATION);
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assert.equal(record.requestedIds.length, MESSAGES_PER_RUN);
+      assert.equal(record.confirmed, false);
+      assert.equal(record.exitCode, EXIT.MARKER_VIOLATION);
+    });
+  });
+
   it('a usage error still names the device, the hub and the exit label', async () => {
     const log = recordingLog();
     const exitCode = await main({
