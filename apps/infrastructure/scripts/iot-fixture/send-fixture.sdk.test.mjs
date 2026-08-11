@@ -59,6 +59,13 @@
 //      when the answer was an RBAC grant. Whether the two agree can only be
 //      checked against the real error classes, which is this tier's job.
 //      Section 7 below.
+//   7. A WRITE REFUSAL OUTRANKS A REAL DIAGNOSIS AND DESTROYS NOTHING. The
+//      evidence writer refuses an unreadable destination and a concurrent run's
+//      partial rather than writing over either. Those rules are filesystem
+//      logic, proven in the dependency-free tier — but the one path where they
+//      meet a REAL SDK error is a run that already has a diagnosis and live
+//      documents, and there the refusal has to win the exit code, leave the
+//      bytes alone, and not leak the error it is printed beside. Section 8.
 //
 // WHAT DELIBERATELY IS NOT HERE. The per-outcome sweep of the
 // evidence-emission contract — every terminal outcome the tool can reach, its
@@ -83,13 +90,20 @@
 // method, and no test below calls getToken().
 
 import { strict as assert } from 'node:assert';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat as realStat,
+  writeFile as realWriteFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { PARTIAL_SUFFIX, PROBE_SUFFIX } from './evidence.mjs';
+import { PARTIAL_SUFFIX, PROBE_SUFFIX, partialPathFor } from './evidence.mjs';
 import {
   EXIT,
   FIXTURE_DEVICE_ID,
@@ -674,6 +688,7 @@ async function runToReadBackFailure({
   pages = [],
   timeoutMs = 60_000,
   pollIntervalMs = 250,
+  extraArgs = [],
 }) {
   const log = recordingLog();
   let clock = 1_754_000_000_000;
@@ -695,6 +710,7 @@ async function runToReadBackFailure({
       String(timeoutMs),
       '--poll-interval',
       String(pollIntervalMs),
+      ...extraArgs,
     ],
     createReader: async () => readerFailingAfterPreflight({ pages, error }),
     spawn: async () => ({ code: 0, stdout: '', stderr: '' }),
@@ -1259,6 +1275,198 @@ describe('MG-67 no real SDK error can reach exit 0 through the funnel', () => {
       assert.notEqual(exitCode, EXIT.TIMEOUT, 'an auth failure is never an absence');
       assert.equal(spawned.length, 0, 'a refused pre-send read must send nothing');
       assertNoPlantedSecret(log.all(), 'an end-to-end AUTH abort');
+    });
+  });
+});
+
+// ===========================================================================
+// 8. THE EVIDENCE-WRITE INTEGRITY CONTRACT, REACHED THROUGH A REAL SDK FAILURE.
+//
+// Section 5 proves a real SDK failure after the send still gets RECORDED. This
+// section is the case where the recording itself is refused, and it exists
+// because the two contracts meet on exactly one path: a run with live documents,
+// a real error already diagnosed, and a destination the writer must not touch.
+//
+// The write-integrity rules themselves — a stat error is not an absence, a temp
+// path is per-run, --overwrite is not --destroy-anything — are filesystem logic
+// with no SDK in them, and they are proven where they belong, in the
+// dependency-free tier (evidence.test.mjs's writeEvidenceRecord suites and
+// send-fixture.test.mjs's "two runs sharing one --evidence-out cannot publish
+// the wrong run's record" / "--overwrite still refuses a destination another run
+// holds a '.partial' on"). This tier does NOT restate them; a second copy would
+// drift from the first. In particular the per-run temp path rule is absent here
+// on purpose: it takes two concurrent runs to exhibit, neither needs an SDK, and
+// nothing a real error adds would sharpen it.
+//
+// What only this tier can ask is what happens when a refusal lands on top of a
+// real one. Three things, none of them checkable with a hand-written error:
+//
+//   * PRECEDENCE. The run already has a diagnosis — a genuine
+//     AggregateAuthenticationError — and the write refusal has to OUTRANK it.
+//     An operator who reads "auth failure" goes and fixes an RBAC grant; an
+//     operator who reads "evidence unrecorded" writes three document ids down
+//     first, which is the only order that leaves MG-53 able to proceed.
+//   * NON-DESTRUCTION UNDER A REAL FAILURE. The refusal must leave the
+//     destination exactly as it found it. Asserted against a REAL filesystem
+//     here — real writeFile, real rename, real readdir, with only the one stat
+//     the rule is about made to fail — so "nothing was destroyed" is a fact
+//     about bytes on disk rather than about a fake that recorded no call.
+//   * HR1 ON THE NEWEST OUTPUT PATH. The refusal text is the newest
+//     operator-facing output in the tool, and on this path it is printed into
+//     the same stream as a real AggregateAuthenticationError's scrubbed text,
+//     which inlines every inner credential's message. A new sentence is exactly
+//     where a leak gets in.
+//
+// Still offline: `az` is faked, the reader is injected, no client is
+// constructed.
+// ===========================================================================
+
+/**
+ * An fs seam over the REAL filesystem in which one stat — the destination's,
+ * and only after the preflight has passed — fails with a non-ENOENT code.
+ *
+ * This is the interval the destination preflight cannot close: it is a check at
+ * t0 about a write at t1, and the live send happens in between. Everything else
+ * is the real thing, so a guard that failed to hold would actually clobber a
+ * real file and the assertions below would see it.
+ *
+ * @param {object} options
+ * @param {string} options.target the destination whose stat turns unreadable.
+ * @param {string} [options.code] the non-ENOENT failure to raise.
+ * @param {() => Promise<void>} [options.onProbe] runs when the preflight probe is
+ *   written — the seam through which a concurrent run's debris appears mid-run.
+ */
+function unreadableAfterPreflight({ target, code = 'EACCES', onProbe }) {
+  let probed = false;
+  return {
+    stat: async targetPath => {
+      if (targetPath === target && probed) {
+        const err = new Error(`${code}: permission denied, stat '${targetPath}'`);
+        err.code = code;
+        throw err;
+      }
+      return realStat(targetPath);
+    },
+    writeFile: async (targetPath, data, encoding) => {
+      const result = await realWriteFile(targetPath, data, encoding);
+      if (targetPath.endsWith(PROBE_SUFFIX)) {
+        probed = true;
+        if (onProbe) await onProbe();
+      }
+      return result;
+    },
+  };
+}
+
+describe('MG-67 a write refusal outranks a real SDK diagnosis and destroys nothing', () => {
+  it("refuses on a non-ENOENT stat rather than writing, and leaves an earlier run's record byte-identical", async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      // An earlier run's record, which is what a stat read as an absence would
+      // rename straight over while reporting success. It appears AFTER the
+      // preflight cleared the path, so the preflight is not what is under test.
+      const earlier = JSON.stringify({ runId: 'an-earlier-run', observedIds: ['earlier-1'] });
+
+      const { exitCode, log } = await runToReadBackFailure({
+        error: leakyRealAuthError(),
+        evidenceOut,
+        pages: [runId => deliveredDocuments(runId).slice(0, 2)],
+        fs: unreadableAfterPreflight({
+          target: evidenceOut,
+          onProbe: () => realWriteFile(evidenceOut, earlier, 'utf8'),
+        }),
+      });
+
+      // PRECEDENCE. The AUTH diagnosis is real and is on the lines above, but
+      // the code the operator scripts against is the unrecorded one.
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.AUTH, 'an unrecorded run outranks its own diagnosis');
+      assert.notEqual(exitCode, EXIT.USAGE, 'documents are live: this is never "nothing happened"');
+      assert.notEqual(exitCode, EXIT.OK);
+
+      // NON-DESTRUCTION, in bytes.
+      assert.equal(
+        await readFile(evidenceOut, 'utf8'),
+        earlier,
+        "the earlier run's record was destroyed by a stat this tool could not read"
+      );
+      assert.deepEqual(
+        (await readdir(dir)).filter(name => name.endsWith(PARTIAL_SUFFIX)),
+        [],
+        'a refused write left partial debris that could be mistaken for evidence'
+      );
+
+      const output = log.all();
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      // The refusal says WHY, and says it in the words that separate an
+      // unreadable answer from an absence.
+      assert.match(output, /EACCES/);
+      assert.equal(
+        /nothing was written/i.test(output),
+        false,
+        'no output may claim nothing was written once a send has been attempted'
+      );
+      // The ids are still the first thing the operator is handed: two observed,
+      // one merely accepted, and the difference preserved.
+      assert.match(output, /2 document\(s\) ARE in/);
+      assert.match(output, /1 document\(s\) MAY BE in/);
+      for (const id of sentIdsFrom(log)) {
+        assert.ok(output.includes(id), `id ${id} is live and was not named in the refusal`);
+      }
+      // HR1 on the newest output path, with the real error's inlined
+      // credentials in the same stream.
+      assertNoPlantedSecret(output, 'an unreadable-destination refusal');
+    });
+  });
+
+  it('refuses a foreign partial that appears mid-run WITH --overwrite, and touches neither file', async () => {
+    // --overwrite authorises replacing the operator's OWN earlier record. It is
+    // not a force flag, and the run that would be destroyed here is one still
+    // being written — so both records would be believed published and neither
+    // run told otherwise. Asserted here rather than only in the fake tier
+    // because this run carries a real SDK failure and live documents: the
+    // refusal has to survive both without losing the ids or leaking the error.
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const foreign = partialPathFor(evidenceOut, 'mg-67-run-00000000-0000-4000-8000-00000000dead');
+      const theirs = '{"a concurrent run is still writing":';
+
+      const { exitCode, log } = await runToReadBackFailure({
+        error: leakyRealAuthError(),
+        evidenceOut,
+        extraArgs: ['--overwrite'],
+        pages: [runId => deliveredDocuments(runId).slice(0, 2)],
+        fs: {
+          writeFile: async (targetPath, data, encoding) => {
+            const result = await realWriteFile(targetPath, data, encoding);
+            // The other run starts writing while this one is live — after the
+            // preflight cleared the destination.
+            if (targetPath.endsWith(PROBE_SUFFIX)) await realWriteFile(foreign, theirs, 'utf8');
+            return result;
+          },
+        },
+      });
+
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.OK, '--overwrite does not make a destroyed record a success');
+      assert.notEqual(exitCode, EXIT.USAGE);
+      assert.notEqual(exitCode, EXIT.AUTH);
+
+      assert.equal(
+        await readFile(foreign, 'utf8'),
+        theirs,
+        "--overwrite was read as licence to destroy another run's partial"
+      );
+      assert.deepEqual(
+        (await readdir(dir)).sort(),
+        [path.basename(foreign)].sort(),
+        'the refused run left a file behind, or published over the concurrent run'
+      );
+
+      const output = log.all();
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      assert.match(output, /2 document\(s\) ARE in/);
+      assertNoPlantedSecret(output, 'a foreign-partial refusal under --overwrite');
     });
   });
 });
