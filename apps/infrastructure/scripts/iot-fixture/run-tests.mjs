@@ -53,23 +53,33 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // minTests carries a small margin (roughly 7%) below the honest count, so
 // tightening or consolidating a handful of cases does not turn this red for a
 // reason that has nothing to do with the suite failing to run. Counts measured
-// at the time of writing: dependency-free 322 tests across 4 files
-// (container-definition 34, evidence 49, fixture-core 122, send-fixture 117);
+// at the time of writing: dependency-free 338 tests across 4 files
+// (container-definition 34, evidence 55, fixture-core 126, send-fixture 123);
 // real-SDK 27 tests across 1 file.
 //
 // The floor is RAISED when the suite grows and is never lowered to accommodate
 // a rename: a floor below the honest count is a floor that lets a whole
-// describe() block stop running unnoticed. These floors were last raised when
-// the evidence-emission contract landed — every terminal outcome the tool can
-// produce now has to emit a record with its four id sets individually correct
-// (requested, accepted, ambiguous, observed), which is a large block of cases
-// whose disappearance must not be able to hide under a stale floor.
+// describe() block stop running unnoticed. A floor left BEHIND a grown suite is
+// the same failure more quietly — the margin widens until an entire block can
+// disappear inside it — so raising it is maintenance of the gate, not
+// tightening of it.
+//
+// These floors were last raised when three review fixes landed together, each
+// adding cases this floor now has to keep alive: the cross-partition sweep
+// judging the partition key value IN the returned documents rather than which
+// query found them (so a healthy run is never reported as a partition anomaly),
+// the CLI's settle-and-record step moving inside the guarded region (so no
+// throw after a live send can exit 1, the code reserved for "nothing live
+// happened"), and the evidence record's explicit retraction of the stop
+// condition 1 claim it could not structurally detect. All three are
+// regressions that would read as normal behaviour in prose and are visible
+// only as executed cases.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 300,
+    minTests: 314,
   },
   sdk: {
     label: 'real-SDK',
