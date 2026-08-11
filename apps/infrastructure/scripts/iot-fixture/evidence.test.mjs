@@ -48,6 +48,7 @@ import {
   EVIDENCE_RECORD_KEYS,
   EVIDENCE_SCHEMA_VERSION,
   OUTCOME_NAMES,
+  PARTIAL_SUFFIX,
   UNKNOWN_WRITER_CHECK,
   assertNoCredentialShape,
   buildEvidenceRecord,
@@ -55,8 +56,10 @@ import {
   describeDestination,
   describeEvidence,
   findCredentialRisks,
+  foreignPartials,
   outcomeName,
   partialPathFor,
+  partialsForDestination,
   preflightEvidenceDestination,
   probePathFor,
   serializeEvidenceRecord,
@@ -156,6 +159,35 @@ async function buildSuccessRecord(overrides = {}) {
     target: TARGET,
     now: fixedClock(),
     ...overrides.build,
+  });
+}
+
+// A confirmed record for an ARBITRARY run id. Two records built by
+// buildSuccessRecord() share this file's fixed run id, which is exactly the
+// thing the concurrency tests below have to vary: a per-run temp path is
+// indistinguishable from a per-destination one until two run ids differ.
+async function buildRecordForRun(runId, millis = RUN_MILLIS) {
+  const messages = buildFixtureMessages({
+    runId,
+    partitionKeyField: 'deviceId',
+    now: fixedClock(RUN_MILLIS - 5000),
+  });
+  const clock = fakeClock({ start: RUN_MILLIS - 5000 });
+  const confirmation = await confirmArrival({
+    reader: fakeReader({ script: [{ docs: [] }, { docs: messages.map(message => message.body) }] }),
+    runId,
+    partitionKeyField: 'deviceId',
+    partitionValue: FIXTURE_DEVICE_ID,
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+  assert.equal(confirmation.confirmed, true, 'fixture setup: expected a confirmed result');
+  return buildEvidenceRecord({
+    confirmation,
+    containerDefinition: await cleanDefinition(),
+    requestedIds: requestedIdsOf(messages),
+    target: TARGET,
+    now: fixedClock(millis),
   });
 }
 
@@ -1415,9 +1447,11 @@ describe('writing the artifact', () => {
 
       await assert.rejects(
         writeEvidenceRecord(record, target, { fs }),
-        err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+        // NOT usage. This function runs only after the send, so every refusal it
+        // makes describes a run whose documents are in the container.
+        err => err instanceof FixtureError && err.exitCode === EXIT.EVIDENCE_UNRECORDED
       );
-      assert.deepEqual(removed, [partialPathFor(target)]);
+      assert.deepEqual(removed, [partialPathFor(target, record.runId)]);
       assert.deepEqual(await readdir(dir), [], 'a failed write must leave nothing behind');
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1437,7 +1471,7 @@ describe('writing the artifact', () => {
       });
       await assert.rejects(
         writeEvidenceRecord(second, target),
-        err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+        err => err instanceof FixtureError && err.exitCode === EXIT.EVIDENCE_UNRECORDED
       );
       // The earlier run's documents are still in the container; clobbering the
       // record of them manufactures the unrecorded-document condition MG-53
@@ -1476,8 +1510,328 @@ describe('writing the artifact', () => {
     for (const bad of ['', '   ', undefined, null, 42]) {
       await assert.rejects(
         writeEvidenceRecord(record, bad),
-        err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+        err => err instanceof FixtureError && err.exitCode === EXIT.EVIDENCE_UNRECORDED
       );
+    }
+  });
+});
+
+// ===========================================================================
+// THE EVIDENCE-WRITE INTEGRITY CONTRACT.
+//
+// The record is the artifact MG-53 and MG-54 consume mechanically to decide
+// whether to halt a migration. So the writer must never DESTROY a record, never
+// PUBLISH THE WRONG ONE under the right name, and never report success when it
+// has done either. The second is the worse failure of the two: a missing file is
+// detectable downstream, a well-formed file holding another run's ids is not.
+//
+// These tests assert the CONTRACT rather than the three symptoms that exposed
+// it, so a repair that fixes the symptom and reopens the hole elsewhere fails
+// here too.
+// ===========================================================================
+describe('the evidence write never destroys or swaps a record', () => {
+  const OTHER_RUN_ID = 'mg-67-run-00000000-0000-4000-8000-00000000dead';
+
+  // Rule 1. Only ENOENT is an absence.
+  it('refuses a destination whose state cannot be READ, rather than writing over it', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const earlier = await buildSuccessRecord();
+      await writeEvidenceRecord(earlier, target);
+
+      const writes = [];
+      const record = await buildSuccessRecord({ build: { now: fixedClock(RUN_MILLIS + 60_000) } });
+      // The stat fails for a reason that is NOT "no file there". Read as an
+      // absence — which is what a bare `catch {}` does — the write below renames
+      // straight over the earlier run's record and returns success, losing the
+      // only account of documents that are still in the container.
+      const fs = {
+        stat: async () => {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        },
+        writeFile: async file => {
+          writes.push(file);
+        },
+        rename: async () => {
+          throw new Error('the rename must never be reached');
+        },
+        rm: async () => {},
+      };
+
+      await assert.rejects(
+        writeEvidenceRecord(record, target, { fs }),
+        error => error instanceof FixtureError && error.exitCode === EXIT.EVIDENCE_UNRECORDED
+      );
+      assert.deepEqual(
+        writes,
+        [],
+        'nothing may be written on a destination that could not be read'
+      );
+      // The earlier run's record is byte-for-byte intact.
+      assert.equal(await readFile(target, 'utf8'), serializeEvidenceRecord(earlier));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the unreadable path and says the run is unrecorded, without claiming an absence', async () => {
+    const record = await buildSuccessRecord();
+    const fs = {
+      stat: async () => {
+        throw Object.assign(new Error('EIO'), { code: 'EIO' });
+      },
+      readdir: async () => [],
+      writeFile: async () => {},
+      rename: async () => {},
+      rm: async () => {},
+    };
+    await assert.rejects(writeEvidenceRecord(record, '/nope/mg67-evidence.json', { fs }), error => {
+      assert.match(error.message, /cannot determine whether/);
+      assert.match(error.message, /EIO/);
+      assert.match(error.message, /not an absence/);
+      assert.match(error.message, /evidence is NOT recorded/);
+      return true;
+    });
+  });
+
+  // Rule 2. The temp path belongs to the run, not to the destination.
+  it('gives two runs sharing a destination disjoint temp paths', async () => {
+    const target = '/tmp/shared-evidence.json';
+    const mine = partialPathFor(target, RUN_ID);
+    const theirs = partialPathFor(target, OTHER_RUN_ID);
+
+    assert.notEqual(mine, theirs, 'two runs must not share one partial file');
+    assert.ok(mine.startsWith(`${target}.`), 'the partial stays beside the target, for the rename');
+    assert.ok(mine.endsWith(PARTIAL_SUFFIX));
+    assert.ok(mine.includes(RUN_ID), 'the partial is named for the run that owns it');
+  });
+
+  it('refuses to derive a temp path from a run id that is missing or unusable as a filename', async () => {
+    for (const bad of [undefined, null, '', '   ', 42, 'run/../../etc/passwd', 'run id']) {
+      assert.throws(
+        () => partialPathFor('/tmp/mg67-evidence.json', bad),
+        error => error instanceof FixtureError && error.exitCode === EXIT.EVIDENCE_UNRECORDED,
+        `a run id of ${JSON.stringify(bad)} must not silently map onto a shared or traversing path`
+      );
+    }
+  });
+
+  // The interleave itself, ordered by hand and asserted on CONTENT: run A writes
+  // its bytes, run B writes ITS bytes to the partial B would use, then A
+  // renames. With a partial derived from the destination alone those are one
+  // file, so A's rename publishes B's record under A's write and A exits 0 —
+  // a wrong-record-under-the-right-name failure nothing downstream can detect.
+  it("never publishes another run's record under this run's write", async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const runA = await buildRecordForRun(RUN_ID);
+      const runB = await buildRecordForRun(OTHER_RUN_ID, RUN_MILLIS + 60_000);
+      assert.notEqual(runA.runId, runB.runId, 'fixture setup: two DIFFERENT runs');
+      assert.notEqual(
+        serializeEvidenceRecord(runA),
+        serializeEvidenceRecord(runB),
+        'fixture setup: the two runs must be distinguishable on disk'
+      );
+
+      // A real filesystem. The only injection is run B landing in the window
+      // between A's write and A's rename — the window the old naming shared.
+      const fs = {
+        writeFile: async (file, contents) => {
+          await writeFile(file, contents, 'utf8');
+          if (file.endsWith(PARTIAL_SUFFIX)) {
+            // B, mid-flight, writing to the path B derives for itself.
+            await writeFile(
+              partialPathFor(target, runB.runId),
+              serializeEvidenceRecord(runB),
+              'utf8'
+            );
+          }
+        },
+      };
+
+      const written = await writeEvidenceRecord(runA, target, { fs });
+
+      // A reported success, so the file A named must hold A's record. This is
+      // the assertion the old shared-partial naming fails.
+      assert.equal(written.path, target);
+      const onDisk = await readFile(target, 'utf8');
+      assert.equal(onDisk, serializeEvidenceRecord(runA));
+      assert.equal(JSON.parse(onDisk).runId, runA.runId);
+      assert.notEqual(JSON.parse(onDisk).runId, runB.runId);
+      // B's in-flight partial is still B's, untouched by A's rename.
+      assert.equal(
+        await readFile(partialPathFor(target, runB.runId), 'utf8'),
+        serializeEvidenceRecord(runB)
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Rule 3. --overwrite is not --destroy-anything.
+  for (const overwrite of [false, true]) {
+    it(`refuses a destination another run holds a partial on (overwrite: ${overwrite})`, async () => {
+      const dir = await tempDir();
+      try {
+        const target = path.join(dir, 'mg67-evidence.json');
+        const foreignPartial = partialPathFor(target, OTHER_RUN_ID);
+        await writeFile(foreignPartial, '{"a run still writing":', 'utf8');
+
+        const record = await buildSuccessRecord();
+        await assert.rejects(
+          writeEvidenceRecord(record, target, { overwrite }),
+          error => error instanceof FixtureError && error.exitCode === EXIT.EVIDENCE_UNRECORDED
+        );
+        // Untouched: the other run is going to rename this into place, and this
+        // run has no business removing it.
+        assert.equal(await readFile(foreignPartial, 'utf8'), '{"a run still writing":');
+        assert.deepEqual(
+          await readdir(dir),
+          [path.basename(foreignPartial)],
+          'nothing was written and nothing was destroyed'
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("does not treat this run's OWN leftover partial as a foreign one", async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const record = await buildSuccessRecord();
+      // A previous attempt of THIS run died between write and rename. Refusing
+      // here would strand a run's evidence over its own debris, which is the
+      // opposite of the guard's purpose.
+      await writeFile(partialPathFor(target, record.runId), '{"mine, half written":', 'utf8');
+
+      await writeEvidenceRecord(record, target);
+      assert.equal(await readFile(target, 'utf8'), serializeEvidenceRecord(record));
+      assert.deepEqual(await readdir(dir), ['mg67-evidence.json']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a partial with no identifiable owner as foreign', async () => {
+    // The pre-per-run spelling, and anything else a crash left. "I cannot tell
+    // whose this is" is not "it is mine".
+    const found = foreignPartials(
+      ['evidence.json', 'evidence.json.partial', `evidence.json.${RUN_ID}${PARTIAL_SUFFIX}`],
+      'evidence.json',
+      RUN_ID
+    );
+    assert.deepEqual(
+      found.map(partial => partial.name),
+      ['evidence.json.partial']
+    );
+    assert.equal(found[0].owner, null);
+  });
+
+  it('matches only partials belonging to THIS destination', async () => {
+    const entries = [
+      'evidence.json',
+      'evidence.json.preflight',
+      `evidence.json.${RUN_ID}${PARTIAL_SUFFIX}`,
+      `other.json.${RUN_ID}${PARTIAL_SUFFIX}`,
+      'evidence.jsonsomething.partial',
+    ];
+    assert.deepEqual(
+      partialsForDestination(entries, 'evidence.json').map(partial => partial.name),
+      [`evidence.json.${RUN_ID}${PARTIAL_SUFFIX}`],
+      "a sibling destination's partial is not this destination's business"
+    );
+    // With no run id — the preflight's position, before one is minted —
+    // everything found is foreign.
+    assert.equal(foreignPartials(entries, 'evidence.json').length, 1);
+    assert.equal(foreignPartials(entries, 'evidence.json', RUN_ID).length, 0);
+  });
+
+  it('refuses when the destination directory cannot be enumerated at all', async () => {
+    const record = await buildSuccessRecord();
+    const fs = {
+      readdir: async () => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      },
+      stat: async () => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      writeFile: async () => {
+        throw new Error('the write must never be reached');
+      },
+      rename: async () => {},
+      rm: async () => {},
+    };
+    await assert.rejects(writeEvidenceRecord(record, '/tmp/mg67-evidence.json', { fs }), error => {
+      assert.equal(error.exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.match(error.message, /cannot enumerate/);
+      assert.match(error.message, /Refused rather than assumed empty/);
+      return true;
+    });
+  });
+
+  // The rule that outlives these three findings: nothing the write path refuses
+  // may say "nothing live happened", because by the time it runs, something did.
+  it('never refuses with a code that means nothing live happened', async () => {
+    const unreadable = code => async () => {
+      throw Object.assign(new Error(code), { code });
+    };
+    // Each case gets a FRESH directory and sets up only its own condition, so
+    // every refusal here is reached by the reason its label names rather than by
+    // whichever guard the previous case happened to leave armed.
+    const CASES = [
+      ['an unreadable destination', async () => ({ fs: { stat: unreadable('EACCES') } })],
+      ['an unenumerable directory', async () => ({ fs: { readdir: unreadable('EACCES') } })],
+      ['a path that is not a path', async () => ({ at: '' })],
+      [
+        'an existing record',
+        async (target, record) => {
+          await writeEvidenceRecord(record, target);
+          return {};
+        },
+      ],
+      [
+        'a concurrent run, even under overwrite',
+        async target => {
+          await writeFile(partialPathFor(target, OTHER_RUN_ID), '{', 'utf8');
+          return { overwrite: true };
+        },
+      ],
+      [
+        'a record with no usable run id',
+        async (_target, record) => ({ record: { ...record, runId: 'not a filename' } }),
+      ],
+    ];
+
+    for (const [label, setup] of CASES) {
+      const dir = await tempDir();
+      try {
+        const target = path.join(dir, 'mg67-evidence.json');
+        const record = await buildSuccessRecord();
+        const { at = target, record: written = record, ...options } = await setup(target, record);
+        await assert.rejects(
+          writeEvidenceRecord(written, at, options),
+          error => {
+            assert.ok(error instanceof FixtureError, `${label}: expected a FixtureError`);
+            // The rule that outlives these three findings: by the time this
+            // function runs, documents are in the container.
+            assert.notEqual(
+              error.exitCode,
+              EXIT.USAGE,
+              `${label}: must not read as "nothing live"`
+            );
+            assert.notEqual(error.exitCode, EXIT.OK, `${label}: a refusal is never success`);
+            assert.equal(error.exitCode, EXIT.EVIDENCE_UNRECORDED, `${label}: wrong code`);
+            return true;
+          },
+          label
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     }
   });
 });
@@ -1596,19 +1950,96 @@ describe('the evidence destination is proven usable before anything live happens
     const dir = await tempDir();
     try {
       const target = path.join(dir, 'mg67-evidence.json');
-      await writeFile(partialPathFor(target), '{"half":', 'utf8');
+      await writeFile(
+        partialPathFor(target, 'mg-67-run-00000000-0000-4000-8000-00000000dead'),
+        '{"half":',
+        'utf8'
+      );
 
       const err = assertUsageRefusal(
         await refusalOf(preflightEvidenceDestination(target)),
         'a pre-existing partial'
       );
-      // Stricter than the write path deliberately: the rename would destroy a
-      // concurrent run's record, and at preflight time refusing costs nothing.
+      // The rename this preflight prevents would destroy a concurrent run's
+      // record, and at preflight time refusing costs nothing.
       assert.match(err.message, /partial evidence file already exists/);
       assert.match(err.message, /another run is writing this same path/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  // --overwrite is not --destroy-anything.
+  //
+  // The flag authorises replacing the operator's OWN earlier record. Letting it
+  // also bypass this guard lets one run delete a record another run is in the
+  // middle of writing — and both runs still report success, because neither can
+  // see what the other lost.
+  it("refuses a concurrent run's partial under --overwrite as well", async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const foreign = partialPathFor(target, 'mg-67-run-00000000-0000-4000-8000-00000000dead');
+      // The destination ALSO holds an earlier record, so --overwrite is a
+      // legitimate ask here — and still does not license this.
+      await writeFile(target, '{"an":"earlier run"}\n', 'utf8');
+      await writeFile(foreign, '{"a run still writing":', 'utf8');
+
+      const err = assertUsageRefusal(
+        await refusalOf(preflightEvidenceDestination(target, { overwrite: true })),
+        'a foreign partial under overwrite'
+      );
+      assert.match(err.message, /partial evidence file already exists/);
+      assert.match(err.message, /refused with overwrite as well/i);
+      assert.match(err.message, /Nothing has been sent for this run/);
+      // Neither file was touched: a preflight decides, it does not clean up.
+      assert.equal(await readFile(foreign, 'utf8'), '{"a run still writing":');
+      assert.equal(await readFile(target, 'utf8'), '{"an":"earlier run"}\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes a destination holding only the caller's OWN partial", async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      await writeFile(partialPathFor(target, RUN_ID), '{"mine":', 'utf8');
+      // The guard is about OTHER runs. A caller that already minted its run id
+      // and is re-checking its own destination is not a concurrent run.
+      const result = await preflightEvidenceDestination(target, { runId: RUN_ID });
+      assert.equal(result.writable, true);
+      assert.deepEqual(result.partialsFound, []);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a directory it cannot enumerate rather than assuming no run holds it', async () => {
+    // The concurrency guard reads a directory listing, so a listing it cannot
+    // get is a guard it cannot run — and an unrunnable guard must refuse, not
+    // wave the run through. Same discipline as the stat above.
+    const target = '/nope/mg67-evidence.json';
+    const fs = {
+      stat: async where =>
+        where === target
+          ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+          : { isDirectory: () => true },
+      readdir: async () => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      },
+      writeFile: async () => {
+        throw new Error('the probe must not be reached');
+      },
+      rm: async () => {},
+    };
+    const err = assertUsageRefusal(
+      await refusalOf(preflightEvidenceDestination(target, { fs })),
+      'an unenumerable directory'
+    );
+    assert.match(err.message, /cannot enumerate/);
+    assert.match(err.message, /EACCES/);
+    assert.match(err.message, /Refused rather than assumed empty/);
   });
 
   it('refuses a destination it cannot write to, before a single message is sent', async () => {
@@ -1706,7 +2137,10 @@ describe('the evidence destination is proven usable before anything live happens
       });
       await assert.rejects(
         writeEvidenceRecord(record, target),
-        err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+        // The write path's own class: by t1 the send has happened, so this
+        // refusal can never be the "nothing live happened" code the preflight
+        // above legitimately uses at t0.
+        err => err instanceof FixtureError && err.exitCode === EXIT.EVIDENCE_UNRECORDED
       );
       assert.equal(await readFile(target, 'utf8'), serializeEvidenceRecord(other));
     } finally {

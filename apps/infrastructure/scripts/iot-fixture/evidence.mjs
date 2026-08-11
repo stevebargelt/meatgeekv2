@@ -167,6 +167,40 @@
 // `overwrite: true` deliberately.
 //
 // ===========================================================================
+// THE WRITE NEVER DESTROYS A RECORD AND NEVER PUBLISHES THE WRONG ONE.
+//
+// Three rules, because "atomic" alone bought less than it looked like it did.
+// All three describe the same failure — a record that is silently lost or
+// silently swapped while the tool reports success — and a lost or swapped record
+// is worse than a missing one, because MG-53 cannot detect it: it reads a
+// well-formed artifact and reconciles the container against the wrong id set.
+//
+//   1. A STAT ERROR IS NOT AN ABSENCE. Only an explicit ENOENT means "no file
+//      there". Every other stat failure is a refusal, and the tool does not
+//      proceed to write on a destination whose state it could not read. Reading
+//      an unreadable answer as an absence is the MG-66 conflation, and this
+//      module gets no exemption from it for being the one that names it.
+//
+//   2. THE TEMP PATH IS PER RUN, NOT PER DESTINATION. A partial named for the
+//      destination alone is shared by every run pointed at that destination, and
+//      two of them interleave on it: one run's evidence file ends up holding the
+//      OTHER run's record, with both runs exiting 0. The partial is named for
+//      the run that owns it, so two runs cannot collide on it — see
+//      partialPathFor.
+//
+//   3. `overwrite` REPLACES YOUR OWN RECORD; IT DOES NOT DESTROY ANOTHER RUN'S.
+//      A destination carrying a partial from a different run is refused whether
+//      or not the flag is set, at preflight and at write time alike. The flag
+//      exists so an operator can deliberately replace the record of an earlier
+//      run of their own; nothing about it asks to overwrite a run that is still
+//      writing, and a run that did would leave one file where two operators each
+//      believe theirs was published.
+//
+// No refusal the WRITE path makes is usage-class. It runs only after the send,
+// so "bad arguments, nothing live happened" is false on every one of its paths;
+// see evidenceUnrecordedRefusal.
+//
+// ===========================================================================
 // THE DESTINATION IS PROVEN USABLE BEFORE ANYTHING LIVE HAPPENS.
 //
 // Every refusal above is detected at WRITE time, which is AFTER the sender has
@@ -200,8 +234,8 @@
 // exists to catch.
 // ===========================================================================
 
-import { rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname } from 'node:path';
 
 import {
   EXIT,
@@ -262,7 +296,83 @@ export const UNKNOWN_WRITER_CHECK = Object.freeze({
 // silently degrade the one property this write has.
 export const PARTIAL_SUFFIX = '.partial';
 
-export const partialPathFor = filePath => `${filePath}${PARTIAL_SUFFIX}`;
+// The temp path is PER RUN, not per destination.
+//
+// A temp path derived from the destination alone is shared by every run that
+// shares `--evidence-out`, and two such runs interleave on it: A writes its
+// bytes to the one partial, B overwrites them with its own, A renames — and the
+// file named for run A now holds run B's record, with BOTH runs exiting 0. That
+// is a wrong-record-under-the-right-name failure, and it is worse than a missing
+// record because nothing downstream can detect it: MG-53 reads the file, finds a
+// well-formed record with a run id it has no other copy of, and reconciles the
+// container against the wrong id set.
+//
+// Naming the partial for the run that owns it removes the interleave entirely —
+// two runs cannot collide on a path neither can name — and it is what lets the
+// scan below tell "another run is writing this destination right now" from "my
+// own in-flight partial".
+const SAFE_RUN_ID = /^[A-Za-z0-9._-]+$/;
+
+export function partialPathFor(filePath, runId) {
+  if (typeof filePath !== 'string' || filePath.trim() === '') {
+    throw evidenceUnrecordedRefusal('filePath must be a non-empty string');
+  }
+  if (typeof runId !== 'string' || runId.trim() === '') {
+    throw evidenceUnrecordedRefusal(
+      "the evidence temp path is derived from the run id, and no run id was given: two runs sharing a destination would otherwise interleave on one partial file and each could publish the other run's record"
+    );
+  }
+  if (!SAFE_RUN_ID.test(runId)) {
+    // Refused rather than sanitised. Sanitising two distinct run ids can map
+    // them onto ONE path, which is precisely the collision this naming exists to
+    // remove — a quiet re-entry into the defect through the repair.
+    throw evidenceUnrecordedRefusal(
+      `the run id is not usable as a filename component (expected only letters, digits, '.', '_' and '-'), so no per-run temp path could be derived for ${filePath}`
+    );
+  }
+  return `${filePath}.${runId}${PARTIAL_SUFFIX}`;
+}
+
+/**
+ * Every partial belonging to a destination, and which run owns each.
+ *
+ * Enumeration rather than a stat of one known name: the whole point of the
+ * per-run naming above is that this run cannot know another run's path, so the
+ * only way to see a concurrent run holding the destination is to look at the
+ * directory. `owner` is null for a partial whose name carries no run id — the
+ * pre-per-run spelling, or debris — and an unknown owner is treated as foreign,
+ * because "I cannot tell whose this is" is not "it is mine".
+ *
+ * Pure and exported so the matching itself is testable without a filesystem.
+ */
+export function partialsForDestination(entryNames, targetBasename) {
+  const prefix = `${targetBasename}.`;
+  return (Array.isArray(entryNames) ? entryNames : [])
+    .filter(
+      name =>
+        typeof name === 'string' &&
+        name !== targetBasename &&
+        name.startsWith(prefix) &&
+        name.endsWith(PARTIAL_SUFFIX)
+    )
+    .map(name => {
+      const inner = name.slice(prefix.length, name.length - PARTIAL_SUFFIX.length);
+      return { name, owner: inner.length > 0 ? inner : null };
+    });
+}
+
+/**
+ * The partials at a destination that belong to some OTHER run.
+ *
+ * `runId` may be absent — the preflight runs before this tool mints one — and
+ * then every partial is foreign, which is the correct reading: a run that has no
+ * identity yet cannot own anything already on disk.
+ */
+export function foreignPartials(entryNames, targetBasename, runId = null) {
+  return partialsForDestination(entryNames, targetBasename).filter(
+    partial => partial.owner === null || partial.owner !== runId
+  );
+}
 
 // The preflight probe file. A distinct suffix rather than the partial's, so a
 // preflight that dies between the write and the removal cannot leave debris that
@@ -436,6 +546,21 @@ const CREDENTIAL_VALUE_PATTERNS = Object.freeze([
 
 function usageRefusal(message) {
   return new FixtureError(EXIT.USAGE, message);
+}
+
+// The refusal class for everything writeEvidenceRecord() decides.
+//
+// USAGE means "bad arguments, nothing live happened", and writeEvidenceRecord()
+// only ever runs AFTER the sender has put synthetic documents into the live
+// container — so no refusal it makes can honestly carry that code, whatever the
+// reason. Every one of them means the same thing to the operator: documents are
+// (or may be) in the source container and this run's record is not on disk. The
+// caller's settlement funnel independently forces EXIT.EVIDENCE_UNRECORDED on
+// any throw from here; this makes the error carry the truthful code at the point
+// it is raised as well, so a future caller that forgets the funnel cannot
+// resurrect "nothing happened" over a run that changed the live system.
+function evidenceUnrecordedRefusal(message) {
+  return new FixtureError(EXIT.EVIDENCE_UNRECORDED, message);
 }
 
 const isPlainObject = value => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -1118,22 +1243,34 @@ export function serializeEvidenceRecord(record) {
  * usage error — it is EXIT.EVIDENCE_UNRECORDED, with documents in the container
  * that no record accounts for, and the caller owns that translation.
  *
- * Deliberately STRICTER than writeEvidenceRecord() in one respect: a pre-existing
- * `.partial` is refused here. It means either a concurrent run holding the same
- * path, whose record this run's rename would silently destroy, or debris from a
- * crashed one. Both are worth stopping for when stopping is free. The write path
- * does not refuse it, because by then it is not free.
+ * A foreign `.partial` is refused here, and is refused UNDER `overwrite` TOO.
+ * `--overwrite` says "replace the record I wrote earlier"; it does not say
+ * "destroy a record another run is in the middle of writing", and those are
+ * different acts with different consequences. A live partial means a concurrent
+ * run whose rename lands after this one's, so proceeding leaves ONE file where
+ * two runs each believe theirs is recorded — and neither operator is told. The
+ * flag never reaches that case.
  *
  * NOT a substitute for the write-time guards. See the header: this is a check at
  * t0 about a write at t1, and the write-time refusal is the authoritative one.
  *
  * @param {string} filePath the operator-chosen --evidence-out destination.
- * @param {{fs?: object, overwrite?: boolean}} [options] fs is injected so the
- *   read-only and vanished-directory paths are testable without a real one.
+ * @param {{fs?: object, overwrite?: boolean, runId?: string}} [options] fs is a
+ *   PARTIAL override, injected so the read-only and vanished-directory paths are
+ *   testable without a real filesystem; any member it does not define is the
+ *   real one from node:fs/promises. runId, when the caller already has one,
+ *   excludes that run's own partial from the foreign scan; this tool's CLI runs
+ *   the preflight before minting one, and then every partial is foreign.
  * @returns {Promise<object>} what was checked, for the caller to log.
  */
 export async function preflightEvidenceDestination(filePath, options = {}) {
-  const { fs = { writeFile, rm, stat }, overwrite = false } = options;
+  const { overwrite = false, runId = null } = options;
+  // Member-wise override rather than wholesale replacement: a caller injecting a
+  // fake for the members it cares about must not silently lose the directory
+  // enumeration this function's concurrency guard depends on. A guard that
+  // disappears when a test hands over a three-member object is a guard that
+  // passes by not running.
+  const fs = { writeFile, rm, stat, readdir, ...(options.fs ?? {}) };
   if (typeof filePath !== 'string' || filePath.trim() === '') {
     throw usageRefusal(
       'the evidence destination must be a non-empty path: MG-53 and MG-54 read that artifact as a program input, and a run with nowhere to record it is refused before anything is sent'
@@ -1141,7 +1278,7 @@ export async function preflightEvidenceDestination(filePath, options = {}) {
   }
 
   const directory = dirname(filePath);
-  const partialPath = partialPathFor(filePath);
+  const targetName = basename(filePath);
   const probePath = probePathFor(filePath);
 
   // Absent is an answer; anything else is NOT. A stat that fails for a reason
@@ -1186,10 +1323,30 @@ export async function preflightEvidenceDestination(filePath, options = {}) {
     );
   }
 
-  const partialStat = await statOf(partialPath);
-  if (partialStat !== null && !overwrite) {
+  // The concurrency guard. Enumerated, not stat'd: partials are named for the
+  // run that owns them, so this run cannot know another run's path, and a
+  // directory listing is the only thing that can see one.
+  //
+  // NOT gated on `overwrite`. See the doc comment: replacing your own earlier
+  // record is what the flag authorises; destroying a record another run is
+  // writing right now is not, and no flag on this tool asks for it.
+  let entries;
+  try {
+    entries = await fs.readdir(directory);
+  } catch (err) {
+    // Including ENOENT: the directory was just stat'd as an existing directory,
+    // so a listing that says otherwise is a filesystem this preflight cannot
+    // read, not an empty one. An unenumerable directory is refused rather than
+    // read as "no concurrent run here".
     throw usageRefusal(
-      `a partial evidence file already exists at ${partialPath}: either another run is writing this same path right now — in which case this run's rename would destroy its record — or a crashed run left it behind. Remove it, or choose another path. Nothing has been sent for this run.`
+      `cannot enumerate ${directory} to check for a concurrent run's partial evidence file: ${err?.code ?? err?.name ?? 'readdir error'}. Refused rather than assumed empty — a partial this check cannot see is a record this run's rename would destroy. Nothing has been sent for this run.`
+    );
+  }
+  const foreign = foreignPartials(entries, targetName, runId);
+  if (foreign.length > 0) {
+    const names = foreign.map(partial => partial.name).join(', ');
+    throw usageRefusal(
+      `a partial evidence file already exists next to ${filePath}: ${names}. Either another run is writing this same path right now — in which case one of the two records would be lost with both runs reporting success — or a crashed run left it behind. This is refused with overwrite as well: overwrite replaces an earlier record of YOUR OWN, it does not authorise destroying a run that is still writing. Remove it, or choose another path. Nothing has been sent for this run.`
     );
   }
 
@@ -1211,7 +1368,10 @@ export async function preflightEvidenceDestination(filePath, options = {}) {
   return Object.freeze({
     path: filePath,
     directory,
-    partialPath,
+    // What was checked, rather than one path that was stat'd: the partial this
+    // run will write does not exist yet and is not named until the run id is
+    // minted, so the honest report is "the destination held no partial at t0".
+    partialsFound: Object.freeze([]),
     probePath,
     exists: targetStat !== null,
     overwrite,
@@ -1265,34 +1425,95 @@ export function classifyPartitionValues(values = [], expected = null) {
 /**
  * Write the record atomically to `filePath`.
  *
- * Partial-then-rename, so no reader ever sees a half-written document and a
- * failed write leaves no debris that could be mistaken for evidence. Refuses to
- * overwrite an existing file unless `overwrite` is passed: the earlier run's
- * documents are still in the container, and destroying the record of them
- * manufactures the unrecorded-document condition that halts MG-53.
+ * Partial-then-rename through a PER-RUN partial (see partialPathFor), so no
+ * reader ever sees a half-written document, two runs sharing a destination
+ * cannot interleave on one temp file, and a failed write leaves no debris that
+ * could be mistaken for evidence. Refuses to overwrite an existing file unless
+ * `overwrite` is passed: the earlier run's documents are still in the container,
+ * and destroying the record of them manufactures the unrecorded-document
+ * condition that halts MG-53.
  *
- * @param {object} record from buildEvidenceRecord().
+ * THREE REFUSALS, ALL OF THEM NON-DESTRUCTIVE, and none of them USAGE — this
+ * function only ever runs after the send, so see evidenceUnrecordedRefusal:
+ *   - a destination whose state cannot be READ (a stat failing for any reason
+ *     other than ENOENT). An unreadable answer is not an absence, and writing on
+ *     one destroys whatever is actually there while reporting success. This is
+ *     the MG-66 conflation, and it is not permitted against this tool's own
+ *     filesystem either.
+ *   - a destination another run holds a partial on, `overwrite` or not.
+ *   - an existing record, unless `overwrite` says otherwise.
+ *
+ * @param {object} record from buildEvidenceRecord(); its runId names the partial.
  * @param {string} filePath operator-chosen destination.
- * @param {{fs?: object, overwrite?: boolean}} [options] fs is injected so the
- *   rename-failure path is testable without breaking a real filesystem.
+ * @param {{fs?: object, overwrite?: boolean}} [options] fs is a PARTIAL override
+ *   (any member it omits is the real one), injected so the rename-failure path
+ *   is testable without breaking a real filesystem.
  */
 export async function writeEvidenceRecord(record, filePath, options = {}) {
-  const { fs = { writeFile, rename, rm, stat }, overwrite = false } = options;
-  requireNonEmptyString(filePath, 'filePath');
-  const serialized = serializeEvidenceRecord(record);
-  const partialPath = partialPathFor(filePath);
+  const { overwrite = false } = options;
+  const fs = { writeFile, rename, rm, stat, readdir, ...(options.fs ?? {}) };
+  if (typeof filePath !== 'string' || filePath.trim() === '') {
+    throw evidenceUnrecordedRefusal('filePath must be a non-empty string');
+  }
+  // Serialization refuses a record carrying credential-shaped text, and that
+  // refusal is usage-class where it is raised because it describes the RECORD.
+  // Reaching it from here means a live run whose evidence is not on disk, so it
+  // is re-raised in this function's own class rather than escaping as "nothing
+  // happened"; the reason text is preserved verbatim.
+  let serialized;
+  try {
+    serialized = serializeEvidenceRecord(record);
+  } catch (err) {
+    throw err instanceof FixtureError ? evidenceUnrecordedRefusal(err.message) : err;
+  }
+  // Derived from the run, not from the destination. A record with no run id
+  // cannot name a partial and is refused rather than written through a shared
+  // one.
+  const partialPath = partialPathFor(filePath, record?.runId);
+
+  // Absent is an answer; anything else is NOT. A stat that fails for a reason
+  // this function cannot interpret — EACCES, EIO, ELOOP, a filesystem going away
+  // mid-run — used to be swallowed here and read as "nothing there", which then
+  // renamed straight over an earlier run's record and returned success. Losing a
+  // record that MG-53 halts without, silently, while reporting that it was
+  // written, is the worst outcome this function has.
+  const statOf = async target => {
+    try {
+      return await fs.stat(target);
+    } catch (err) {
+      if (err?.code === 'ENOENT') return null;
+      throw evidenceUnrecordedRefusal(
+        `cannot determine whether ${target} exists: ${err?.code ?? err?.name ?? 'stat error'}. Refusing to write on a destination whose state cannot be read — an unreadable answer is not an absence, and writing here could destroy an earlier run's record. This run's documents are in the container and this run's evidence is NOT recorded.`
+      );
+    }
+  };
+
+  // The concurrency guard, unconditional. Reached only when a partial appeared
+  // AFTER the preflight cleared this destination, i.e. while this run was live —
+  // which makes it a genuinely concurrent run rather than stale debris, and
+  // makes silently proceeding a coin toss over which of the two records
+  // survives, with both runs reporting success. `overwrite` does not license
+  // that: it authorises replacing an earlier record of the operator's own, not
+  // destroying one being written now.
+  let entries;
+  try {
+    entries = await fs.readdir(dirname(filePath));
+  } catch (err) {
+    throw evidenceUnrecordedRefusal(
+      `cannot enumerate ${dirname(filePath)} to check for a concurrent run's partial evidence file: ${err?.code ?? err?.name ?? 'readdir error'}. Refused rather than assumed empty. This run's documents are in the container and this run's evidence is NOT recorded.`
+    );
+  }
+  const foreign = foreignPartials(entries, basename(filePath), record?.runId ?? null);
+  if (foreign.length > 0) {
+    throw evidenceUnrecordedRefusal(
+      `another run holds a partial evidence file next to ${filePath}: ${foreign.map(partial => partial.name).join(', ')}. Writing now would leave one file where two runs each believe their record was published, and neither would be told. Refused with overwrite as well. This run's documents are in the container and this run's evidence is NOT recorded.`
+    );
+  }
 
   if (!overwrite) {
-    let existing = null;
-    try {
-      existing = await fs.stat(filePath);
-    } catch {
-      // Absent is the expected case. Any other stat failure (a permission
-      // problem, say) surfaces below when the write itself fails, with the
-      // error that actually describes it.
-    }
+    const existing = await statOf(filePath);
     if (existing) {
-      throw usageRefusal(
+      throw evidenceUnrecordedRefusal(
         `refusing to overwrite the existing evidence file at ${filePath}: it records an earlier run whose documents are still in the container, and MG-53 halts on a document no record accounts for. Choose a new path, or pass overwrite explicitly.`
       );
     }
@@ -1306,7 +1527,7 @@ export async function writeEvidenceRecord(record, filePath, options = {}) {
     // looks enough like evidence to be picked up by hand, and this write is the
     // one that failed.
     await fs.rm(partialPath, { force: true }).catch(() => {});
-    throw usageRefusal(
+    throw evidenceUnrecordedRefusal(
       `failed to write the evidence record to ${filePath}: ${err?.code ?? err?.name ?? 'write error'}. No partial file was left behind, and no evidence was recorded for this run.`
     );
   }
