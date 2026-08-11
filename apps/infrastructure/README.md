@@ -842,15 +842,15 @@ recording them was written. Absence of an error is never success.
 | Code | Meaning                                                                                                                                                                                                                                                                                      |
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    | confirmed-in-cosmos                                                                                                                                                                                                                                                                          |
-| 1    | usage error — includes a refused credential-shaped or verbosity flag                                                                                                                                                                                                                         |
+| 1    | usage error — includes a refused credential-shaped or verbosity flag, and an unusable `--evidence-out` caught by the pre-flight **before anything is sent**                                                                                                                                   |
 | 2    | send failure — `az iot device send-d2c-message` itself failed. **Ambiguous by construction**: `az` can fail after the hub took the message, so every attempted id is recorded first, as accepted or as of **unknown** acceptance — including a failure on message 1 of 3                     |
 | 3    | confirmation timeout — the bound elapsed with the documents not found                                                                                                                                                                                                                        |
 | 4    | auth failure — a 401/403, or a credential that could not be acquired; **never retried**, and it says nothing about whether the route delivered                                                                                                                                               |
 | 5    | transport abort — retries exhausted                                                                                                                                                                                                                                                          |
 | 6    | synthetic marker violation — a read-back document lacked the marker; a defect in the sender, not an acceptable variant                                                                                                                                                                       |
-| 7    | correlation ambiguity — fewer documents than sent, a duplicate run id, an unreadable result. A failure, never an absence                                                                                                                                                                     |
+| 7    | correlation ambiguity — fewer documents than sent, a duplicate run id, an unreadable result. A failure, never an absence. Also the code for a run concluding a state the tool cannot name: **exit 0 requires positive confirmation**, so an unanticipated state exits here rather than defaulting to success |
 | 8    | container definition refusal — the partition key path or `default_ttl` could not be measured. **No default is ever substituted**                                                                                                                                                             |
-| 9    | delivered, unexpected partition — the full set arrived and one or more documents **carry** a partition value other than the expected one. Read off the returned documents, never off which query found them: a full set the cross-partition sweep finds in the **expected** partition is a **confirmation** (exit 0, a timing artefact of the wait bound), and a **partial** cross-partition set is exit 7, not a partition claim. A working route is never reported as broken |
+| 9    | delivered, unexpected partition — the full set arrived and one or more documents do **not carry** the expected partition value. Read off the returned documents, never off which query found them: a full set the cross-partition sweep finds in the **expected** partition is a **confirmation** (exit 0, a timing artefact of the wait bound), and a **partial** cross-partition set is exit 7, not a partition claim. A working route is never reported as broken. "Under a **different** `deviceId`" and "carrying **no** `deviceId` field at all" are stated and recorded separately (the latter is the predicted failure mode here, since nothing between the device and Cosmos injects a partition key) |
 | 10   | evidence unrecorded — a send happened and the record of it could not be written or built. **Never exit 1**, which means "nothing live happened"; the ids are printed for the operator to record by hand, and this code takes precedence over the confirmation's own (still printed above it) |
 
 **Safety semantics.**
@@ -865,6 +865,19 @@ recording them was written. Absence of an error is never success.
   minted correlator to be absent — that is what makes the proof a _newly
   identified_ document, and it surfaces an unpropagated role assignment while
   nothing has yet been written that could not then be confirmed.
+- The **`--evidence-out` destination is pre-flighted** — directory, writability
+  and the no-overwrite rule — **before the first send**, so an unusable path is a
+  usage error (exit 1) while nothing is live, rather than 3 documents in the
+  container the tool then refuses to record. It is re-checked at write time; the
+  pre-flight is an addition to that check, not a replacement for it.
+- **The operator captures the live run's stdout and stderr to files, inspects
+  them for credential shapes, and commits them alongside the evidence artifact**
+  (runbook §7c). This is the **only** evidence that discharges the ticket's
+  no-emission criterion: reading the source proves the tool _cannot_ emit a
+  credential; only a captured run proves it _did not_. The pipeline cannot
+  produce it — it holds no credential and makes no live call. Expect the
+  inspection to hit credential-shaped **key names** followed by `[redacted]`;
+  what it must never hit is a key name followed by a value.
 - Every document carries `syntheticFixture=MG-67-SYNTHETIC-FIXTURE` plus a unique
   per-run `fixtureRunId`, so a specific document ties to a specific run.
 - `--evidence-out` writes **one machine-readable JSON record** — the observed

@@ -505,6 +505,15 @@ ticket alongside the evidence.
 mkdir -p docs/infrastructure/evidence
 EVIDENCE="docs/infrastructure/evidence/mg67-fixture-run-${STAMP}.json"
 
+# CAPTURE the run's output. This is not convenience logging: §7c inspects these
+# two files, and they are the ONLY evidence that can discharge this ticket's
+# credential non-emission criterion ("none is emitted on any output path
+# including failures"). An uncaptured run cannot prove it, and a run you watched
+# scroll past is an uncaptured run. They land in /tmp first and are promoted to
+# the evidence directory only AFTER §7c passes.
+RUN_OUT="/tmp/mg67-run-${STAMP}.stdout.log"
+RUN_ERR="/tmp/mg67-run-${STAMP}.stderr.log"
+
 node apps/infrastructure/scripts/iot-fixture/send-fixture.mjs \
   --hub "$HUB" \
   --device "$DEVICE" \
@@ -514,10 +523,25 @@ node apps/infrastructure/scripts/iot-fixture/send-fixture.mjs \
   --container-definition "/tmp/mg67-${CONTAINER}-${STAMP}.json" \
   --timeout 180000 \
   --poll-interval 5000 \
-  --evidence-out "$EVIDENCE"
+  --evidence-out "$EVIDENCE" \
+  >"$RUN_OUT" 2>"$RUN_ERR"
 RUN_EXIT=$?
 echo "send-fixture exit=$RUN_EXIT"     # RECORD THIS — it is half the proof
+cat "$RUN_OUT" "$RUN_ERR"
 ```
+
+**The two streams are captured to two files, with a redirect rather than a
+`tee` pipeline, on purpose.** Separately, because the criterion is about stdout
+**and** stderr and a merged file cannot show which one a line came from — and
+the failure paths this criterion is really about write to stderr. By redirect,
+because `$?` after a pipeline is the pipeline's status, and `RUN_EXIT` has to be
+the tool's own exit code exactly: it is the half of the proof that says which
+outcome you got. The run waits up to `--timeout`, so nothing prints for a while;
+`tail -f "$RUN_ERR"` in a second terminal if you want to watch it.
+
+**Do not delete these files if the run fails.** A failed run's output is the
+more interesting of the two for §7c — the criterion covers **every** failure
+path, and a clean success exercises almost none of them.
 
 `node .../send-fixture.mjs --help` is the authoritative flag reference; the flags
 above are the complete set you need. `--timeout` and `--poll-interval` are shown
@@ -527,24 +551,32 @@ shell history next to the result. The defaults are the same values (180000 ms /
 
 ### What the tool does, in order — and where it can stop
 
-1. **Measures** the container from §3's document. Refuses on anything it cannot
+1. **Proves `--evidence-out` is usable** — the directory exists, the path is
+   writable, and neither an earlier run's record nor a leftover `.partial` from a
+   crashed run is sitting there — **before anything live happens**. All three are
+   purely local facts, so an unusable destination is a **usage error (exit 1)**
+   while nothing has been sent, rather than three documents in the live container
+   that the tool then refuses to record. The same rules are re-applied at write
+   time (§7a), and that later refusal is still the authoritative one: this is a
+   pre-flight, not a replacement for it.
+2. **Measures** the container from §3's document. Refuses on anything it cannot
    read (**exit 8**); never defaults.
-2. **Reads the container BEFORE sending**, requiring this run's freshly minted
+3. **Reads the container BEFORE sending**, requiring this run's freshly minted
    `fixtureRunId` to be absent. This is what makes the proof a _newly identified_
    document rather than an assumption, and it surfaces a missing/unpropagated
    role assignment (**exit 4**) while **nothing has been sent**.
-3. **Sends 3 D2C messages** via `az iot device send-d2c-message`, each carrying
+4. **Sends 3 D2C messages** via `az iot device send-d2c-message`, each carrying
    `syntheticFixture=MG-67-SYNTHETIC-FIXTURE`, this run's `fixtureRunId`, a
    `fixtureSequence`, `ticket`, the partition field measured in §3 and a
    `timestamp` — and each declaring `$.ct=application/json` and `$.ce=utf-8` as
    system properties. Any nonzero `az` exit aborts the run (**exit 2**) — after
    recording, for every message it attempted, whether `az` accepted it or left
    its acceptance **unknown**.
-4. **Polls** for the full set within the bound, scoped to the fixture device's
+5. **Polls** for the full set within the bound, scoped to the fixture device's
    partition. Timeout is **exit 3**, a document without the marker is **exit 6**,
    and a partial or ambiguous read is **exit 7** — never conflated, never
    reported as an absence.
-5. **Sweeps cross-partition once** if the scoped polls found nothing, before
+6. **Sweeps cross-partition once** if the scoped polls found nothing, before
    reporting any absence — otherwise a document that landed under a partition
    value nobody expected would be reported as "the route didn't deliver". The
    sweep's verdict is read **off the partition value the returned documents
@@ -553,12 +585,21 @@ shell history next to the result. The defaults are the same values (180000 ms /
      arrived during the round trip after the last scoped poll; that is a timing
      artefact of your `--timeout`, not a partition anomaly, and the recorded
      arrival delay says to raise the bound.
-   - full set, one or more carrying a **different** partition value → **exit 9**,
-     naming the values observed and how many went astray.
+   - full set, one or more **not** carrying the expected partition value →
+     **exit 9**. The outcome text distinguishes the two ways that happens, because
+     they are different facts about the route needing different repairs: a
+     document under a **different** `deviceId`, and a document carrying **no
+     `deviceId` field at all** — which is the architect's top-ranked risk here,
+     since nothing between the device and Cosmos injects a partition key, so a
+     body that omits the field produces a document under **no** partition key
+     rather than under some other one. That second case points at the message
+     body the sender built, not at the routing target. Both are recorded
+     separately in `observedPartitionValues`; neither is collapsed into the other
+     or into an empty list (§7a).
    - a **partial** cross-partition set → **exit 7**, not exit 9: with most of the
      run unaccounted for, nothing has established where it landed, and a routing
      diagnosis nobody witnessed must not enter the artifact MG-53 parses.
-6. **Writes the evidence artifact** (§7) — on **every** outcome that attempted a
+7. **Writes the evidence artifact** (§7) — on **every** outcome that attempted a
    send, confirmed or not. If that write cannot happen, the run exits **10** and
    prints the ids for you to record by hand; it never reports a run that changed
    the live container as though nothing had happened.
@@ -587,22 +628,41 @@ supply a credential by hand, that is stop condition 2 (§9) — halt and report.
 | Code | Meaning                         | What it tells you                                                                                                                                                             |
 | ---- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    | confirmed-in-cosmos             | **The only success.** 3 marker-carrying, run-correlated documents were read back out of `temperatures`, and the evidence was written.                                         |
-| 1    | usage error                     | Bad/missing arguments, or a refused credential-shaped flag. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.   |
+| 1    | usage error                     | Bad/missing arguments, a refused credential-shaped flag, or an **unusable `--evidence-out`** caught by the pre-flight. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.   |
 | 2    | send failure                    | `az iot device send-d2c-message` failed. Check `az login` and `az extension add --name azure-iot`.                                                                            |
 | 3    | confirmation timeout            | The bound elapsed with the documents not found. **Not an absence, not a success.**                                                                                            |
 | 4    | auth failure                    | 401/403, or no credential could be acquired. **Says nothing about whether the route delivered.** Usually §4 not propagated.                                                   |
 | 5    | transport abort                 | Retries exhausted on a transport error.                                                                                                                                       |
 | 6    | synthetic marker violation      | A read-back document lacked the marker — a defect in the sender, not an acceptable variant.                                                                                   |
-| 7    | correlation ambiguity           | Fewer documents than sent, a duplicate correlator, or an unreadable result. **Stop condition 3 (§9).**                                                                        |
+| 7    | correlation ambiguity           | Fewer documents than sent, a duplicate correlator, or an unreadable result. Also the code for a run that concluded a state this tool cannot name — see below. **Stop condition 3 (§9).** |
 | 8    | container definition refusal    | §3's document could not be measured. No default was substituted.                                                                                                              |
-| 9    | delivered, unexpected partition | The full set **arrived**, and one or more documents **carry a partition value other than the expected one** — read off the documents, not inferred from which query found them. The route works; the partition assumption does not. Report it with `observedPartitionValues` — do not re-run hoping for a different answer. |
+| 9    | delivered, unexpected partition | The full set **arrived**, and one or more documents do **not carry the expected partition value** — read off the documents, not inferred from which query found them. The route works; the partition assumption does not. "Under a **different** `deviceId`" and "carrying **no** `deviceId` field at all" are stated and recorded separately (§6, §7a). Report it with `observedPartitionValues` — do not re-run hoping for a different answer. |
 | 10   | evidence unrecorded             | **A send happened and no record of it survives.** See below — this one needs an action before any diagnosis.                                                                  |
+
+#### There is no default success — an unnameable outcome exits 7
+
+**Exit 0 requires a confirmation that positively established arrival.** A run
+that concluded neither a confirmation nor a named failure is a state the tool
+does not anticipate, and it exits **7 (correlation ambiguity)** with an explicit
+unanticipated-state line on stderr — never 0. That is the right code rather than
+one of its own: "the run concluded nothing I can name" **is** a failure to
+correlate anything to this run, which is exactly what exit 7 means to a reader.
+
+You should never see it. If you do, it is a defect in the tool and the
+documents may be live: record the ids from the evidence artifact (§7a) or from
+the stderr lines, report it, and **do not read it as a success or as an
+absence**.
 
 #### Exit 10 — read this before doing anything else
 
 Exit 10 means the live container **changed** and the evidence file could not be
-written or built (a missing directory, a path the tool refused to overwrite, a
-permissions problem). It is deliberately **not** exit 1: exit 1 means "bad
+written or built (a permissions problem, a destination that became unusable
+between the pre-flight and the write, a serialization refusal). The pre-flight in
+step 1 of the ordered list above now catches the common causes — a missing
+directory, a path that would clobber an earlier run's record — as **exit 1**
+while nothing has been sent, so exit 10 is rarer than it was. It has not gone
+away: the destination is re-checked at write time, and the window between the
+two checks is real. It is deliberately **not** exit 1: exit 1 means "bad
 arguments, nothing live happened", and being told nothing happened while
 documents sit in `temperatures` is the one failure MG-53 cannot diagnose — an
 unrecorded document is indistinguishable there from the unknown-writer finding
@@ -671,7 +731,7 @@ that first and must refuse a version they were not written against.
 | `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                                                                                                                  |
 | `deviceId`                                                                                            | The fixture device.                                                                                                                                                                                               |
 | `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                                              |
-| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed.                                                                                                                                                      |
+| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed. `observedPartitionValues` records a document carrying **no** partition key field as the reserved token `<no-partition-key-field>`, and one whose value is present but empty or not a string as `<unusable-partition-key-value>` — **recorded states, not an absence**. An empty list would throw away the one fact separating "landed under a different key" from "landed under no key at all", and the second is the predicted failure mode for this route. Neither token is a legal device id this fixture mints. |
 | **the four id sets** — see below                                                                      | `requestedIds`, `acceptedIds`, `ambiguousIds`, `observedIds`, each with its `…Count`.                                                                                                                             |
 | **`accountableIds`**, **`accountableCount`**                                                          | **Everything that is, or MAY BE, in the container** — accepted ∪ ambiguous ∪ observed, unioned once, here. **This is the set MG-53 must account for.**                                                            |
 | `anomalousIds`, `anomalousCount`                                                                      | Documents **the correlated read-back** returned that this run cannot claim — they carry this run's `fixtureRunId` but not the marker, or name a foreign run: a sender defect or a correlator collision. Kept strictly apart from the run's own ids. **This is NOT stop condition 1** — see below.        |
@@ -680,7 +740,7 @@ that first and must refuse a version they were not written against.
 | `expectedCount`, `idDivergence`                                                                       | What the run expected, and whether a **witnessed** observed document carried an id the sender did not request. Divergence is an observation, not a failure — and never inferred from a count shortfall.           |
 | **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                                             |
 | `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                                                          |
-| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `ambiguous-acceptance`, `unattributable-documents`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`.                                       |
+| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `ambiguous-acceptance`, `unattributable-documents`, `partition-landing`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`. `partition-landing` names each landing state separately and appears on a **confirmed** run too: a confirmed run whose documents carry an odd partition value is still confirmed, and the oddity is recorded rather than dropped. |
 
 #### The four id sets are not interchangeable
 
@@ -784,10 +844,14 @@ and then stays silent about it.
 ### 7b. What to paste into the ticket
 
 - The `send-fixture` **exit code** (`$RUN_EXIT`) and the command line you ran.
-- The tool's stdout/stderr lines: the measured container line, the pre-send line,
-  the per-message send lines and the final `CONFIRMED …` line. These are safe by
-  construction — every one is scrubbed, and failure output names the device, the
-  hub, the outcome and the exit label, never a secret.
+- **The captured run log from §6** (`$RUN_OUT` and `$RUN_ERR`), inspected and
+  promoted per **§7c**, which is where the two files go and what has to be true
+  before they go there. They carry the measured container line, the
+  evidence-destination line, the pre-send line, the per-message send lines and
+  the final `CONFIRMED …` line. Every one is scrubbed by construction, and
+  failure output names the device, the hub, the outcome and the exit label,
+  never a secret — **but that is the claim, and §7c is what checks it.** Capture
+  the log even on a failed run; especially on a failed run.
 - The path and content of the evidence artifact from §7a.
 - The registered `deviceId` (from §2a's `list`).
 - The §4 state file (`MG67_ASSIGNMENT_NAME` and the principal), and the §5
@@ -801,6 +865,110 @@ and then stays silent about it.
 - Any `findings` entry, especially `ttl-drift`, `ambiguous-acceptance` and
   `unattributable-documents` — reading the last one as an unknown-writer result
   is the misreading §7a retracts.
+
+### 7c. The captured run log — the credential non-emission proof
+
+This ticket's acceptance says no credential "is emitted on any output path
+including failures". **Reading the source proves the tool is built not to emit
+one; only the captured output of a live run proves it did not.** The pipeline
+cannot produce this evidence — it holds no credential and makes no live call —
+so it is yours, and without it the criterion closes on a code review rather than
+on an observation. That is the substitution §8 exists to reject.
+
+#### Inspect before you commit anything
+
+Run this against **both** captured streams from §6:
+
+```bash
+# Every shape the tool's own scrubber matches, plus the ones this ticket names.
+# The pattern is a SHAPE, not a secret — no value appears in it, which is why it
+# is safe to keep in this document.
+CRED_SHAPES='SharedAccessKey|AccountKey|SharedAccessSignature|BEGIN [A-Z ]*PRIVATE KEY|Bearer [A-Za-z0-9]|[?&](sig|se|skn|sr)=|[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|(key|token|secret|password|credential|sig)[A-Za-z0-9_-]*[=:][^[:space:]]'
+
+grep -nEi "$CRED_SHAPES" "$RUN_OUT" "$RUN_ERR"
+```
+
+**Hits are EXPECTED, and a hit is not by itself a failure.** The scrubber
+replaces a matched value with the literal `[redacted]` and leaves the key name
+standing, so `…key=[redacted]` matches this pattern by design. What you are
+checking is one thing:
+
+> **Every hit's VALUE must be `[redacted]`.** A hit whose value is anything else
+> — a base64 blob, a hex string, a signature, a token, a `Host…=…;…Key=…`
+> connection string — is a live credential in a log file.
+
+Two consequences of the scrubber's design make this sweep readable rather than
+noisy. It over-redacts on purpose (the accepted MG-63 limitation: a
+credential-shaped **key name** always redacts, so a benign
+`partitionKey=deviceId` reads
+`partitionKey=[redacted]`), and it replaces values **whole** — never a prefix,
+never a length, never a hash, because each of those is still a fact about the
+secret. So the expected reading of this grep is a short list of `[redacted]`
+placeholders and nothing else.
+
+#### Second sweep: a credential with no key name in front of it
+
+The pattern above finds a secret by the **name next to it**. A bare blob on its
+own line — a key echoed with no label, a token on a continuation line — has no
+name to match, so run this too:
+
+```bash
+grep -nE '[A-Za-z0-9+]{32,}={0,2}' "$RUN_OUT" "$RUN_ERR"
+```
+
+**Expect this one to be completely empty**, and treat any hit as a finding to
+explain before you promote anything. Nothing this tool prints legitimately
+contains a 32-character unbroken alphanumeric run: the ids it emits are
+uuid-shaped (dashes break the run), the paths contain `/`, the instants contain
+`-` and `:`, and the device, hub, database and container names all contain `-`.
+That is what makes an empty result meaningful here rather than merely likely.
+
+Between them the two sweeps cover a credential that has a name and one that does
+not. Neither is a proof of absence — no grep is — but a leaked credential that
+evades **both** would have to carry no credential-shaped name **and** no
+32-character unbroken run, which no key, token, signature or connection string
+this system handles does.
+
+#### An unexplained hit from either sweep is stop condition 2 — halt, do not commit
+
+That means: a first-sweep hit whose value is **not** `[redacted]`, or **any**
+second-sweep hit you cannot account for. In order:
+
+1. **Do not commit the log**, do not paste it into the ticket, and do not paste
+   the matching line anywhere. Committing it is what turns a transient leak into
+   a permanent one, and this document's own no-credential guarantee with it.
+2. **Halt the procedure.** This is stop condition 2 (§9): "do not ship a weaker
+   variant". Do not scrub it by hand and carry on — a hand-scrubbed log proves
+   nothing about the tool, which is the thing under test.
+3. **Report it** on the ticket, by **file, line number and which stream** — the
+   shape that leaked, never the value.
+4. **Treat the credential as exposed.** It reached a file on your disk, your
+   terminal scrollback and possibly your shell history. If it is device key
+   material, the device is re-creatable: delete and re-register it via §2a
+   rather than rotating by hand.
+5. Delete the captured files once the report is filed.
+
+#### Where the capture goes when it passes
+
+```bash
+# ONLY after BOTH sweeps pass: the first showing nothing but [redacted]
+# placeholders, the second showing nothing at all.
+cp "$RUN_OUT" "docs/infrastructure/evidence/mg67-fixture-run-${STAMP}.stdout.log"
+cp "$RUN_ERR" "docs/infrastructure/evidence/mg67-fixture-run-${STAMP}.stderr.log"
+```
+
+Alongside the machine-readable artifact, under the same `${STAMP}`, so the three
+files of one run sort together and a reader can tell which log belongs to which
+record. Commit them with the artifact and reference them from the ticket.
+
+**Order matters and is not a formality: inspect, then promote.** The reverse —
+commit and then check — is the failure this section exists to prevent, because a
+credential that reaches a commit is in the history whether or not the next
+command deletes it.
+
+**These logs are evidence, not the artifact.** MG-53 and MG-54 parse §7a's JSON
+and must never parse these; prose that drifts is a documentation bug, a
+machine-readable record that drifts is a wrong deletion (§7a).
 
 ---
 
@@ -927,10 +1095,19 @@ violation) mean. If you get either, **do not re-run to get a cleaner number and
 do not reason from counts** — report the exit code, the evidence artifact and the
 tool's output as a finding.
 
-Stop condition 2 has no partial form. If any step here appears to require
-supplying a key, a connection string, a SAS token or a certificate, **stop**. The
-tool is designed so that no such step exists; needing one means something else is
-wrong.
+Stop condition 2 has no partial form, and it is checked in **two** places.
+
+_Before the fact_: if any step here appears to require supplying a key, a
+connection string, a SAS token or a certificate, **stop**. The tool is designed
+so that no such step exists; needing one means something else is wrong.
+
+_After the fact_: **§7c is the observation** — the captured stdout and stderr of
+the live run, swept for credential shapes. It is the only step in this procedure
+that can tell you a credential was emitted rather than that one could have been,
+and it is the only evidence that discharges this ticket's no-emission
+criterion. **Skipping §7c leaves stop condition 2 unchecked, not cleared** — the
+same distinction §9's enumeration draws for stop condition 1. An unexplained hit
+halts the procedure, and the log is not committed.
 
 ---
 
@@ -1001,6 +1178,7 @@ disappear.
 | 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)          | the §4 state file, `MG67_CREATED` either way        | **NOT RUN** |
 | 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                   | the exit code + the command line                    | **NOT RUN** |
 | 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a) | the file path + its contents                        | **NOT RUN** |
+| 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the grep output + the two committed log files | **NOT RUN** |
 | 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                 | all three Data Explorer queries, per container      | **NOT RUN** |
 | 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove  | both §5 proofs: yours gone, before/after diff empty | **NOT RUN** |
 | 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                               | the finding text                                    | **NOT RUN** |
@@ -1009,4 +1187,6 @@ disappear.
 the traversal; lines 5 and 7 are what the downstream tickets and the security
 posture depend on. **Line 6 is the only check of stop condition 1 anywhere in
 this ticket** — no field of the evidence artifact performs it, and the artifact
-says so. A green metric on any of them is not a substitute (§8).
+says so. **Line 5b is the only check of the credential non-emission criterion**:
+the code review says the tool cannot emit a credential, and only a captured live
+run says it did not. A green metric on any of them is not a substitute (§8).
