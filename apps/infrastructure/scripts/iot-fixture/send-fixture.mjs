@@ -298,7 +298,19 @@ EVIDENCE (HR3 — recorded, machine-readable)
                                back out of Cosmos. A failure record is never
                                readable as proof — confirmed stays false — and it
                                never claims that nothing was written.
-  --overwrite                  Replace an existing --evidence-out file.
+  --overwrite                  Replace an existing --evidence-out file — YOUR OWN
+                               earlier record. It is not a force flag: a
+                               destination another run holds a live '.partial' on
+                               is refused WITH --overwrite as well, because
+                               replacing a record you wrote earlier and destroying
+                               one a concurrent run is writing right now are
+                               different acts, and only the first is one this tool
+                               offers. A destination whose state cannot be READ —
+                               a stat failing for any reason other than "no such
+                               file" — is refused too, before and after the send:
+                               an unreadable answer is not an absence, and writing
+                               on one could destroy an earlier run's record while
+                               reporting success.
 
 AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
   Send:      'az iot device send-d2c-message' resolves the device key itself from

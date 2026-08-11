@@ -25,14 +25,22 @@
 // the one thing this tier cannot exercise; they live in send-fixture.sdk.test.mjs.
 
 import { strict as assert } from 'node:assert';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rename as realRename,
+  rm,
+  stat as realStat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { parseContainerDefinition } from './container-definition.mjs';
-import { PARTIAL_SUFFIX, PROBE_SUFFIX } from './evidence.mjs';
+import { PARTIAL_SUFFIX, PROBE_SUFFIX, partialPathFor } from './evidence.mjs';
 import {
   fakeAzSpawn,
   fakeClock,
@@ -240,6 +248,10 @@ async function runMain({
   pollIntervalMs = 250,
   evidenceOut,
   fs,
+  // Injected rather than fixed, so two runs can be driven against ONE
+  // --evidence-out with the distinct run ids two real operators would have. A
+  // shared id would make the interleave tests below pass for the wrong reason.
+  uuid = () => UUID,
   log = recordingLog(),
 } = {}) {
   const clock = fakeClock({ start: RUN_MILLIS });
@@ -272,7 +284,7 @@ async function runMain({
     readFileFn: async () => definitionText,
     now: clock.now,
     sleep: clock.sleep,
-    uuid: () => UUID,
+    uuid,
     ...(fs ? { fs } : {}),
   });
 
@@ -1525,6 +1537,302 @@ describe('main: every failure class exits with its own code and claims nothing',
     assert.match(help, /--role-assignment-id/, 'the removal targets the id, not a name match');
     assert.match(help, /NEVER BY A NAME OR PRINCIPAL MATCH/);
     assert.match(help, /STOP and report rather than guessing/);
+  });
+});
+
+// ===========================================================================
+// THE EVIDENCE-WRITE INTEGRITY CONTRACT.
+//
+// The evidence record is the artifact MG-53 and MG-54 read as a PROGRAM INPUT
+// to decide whether to halt a migration. So the writer's obligation is not only
+// "write the record": it is that it never destroys, corrupts or interleaves
+// one, and never reports success when it has.
+//
+// The suite above covers WHAT the record says. This one covers what the write
+// does to the destination, driven through main() rather than through the
+// evidence module — the module's own guards are tested next door, and the
+// property an operator actually gets depends on this CLI passing them a run id,
+// an overwrite flag and a filesystem that lets them run. Three rules, and each
+// test asserts the RULE rather than the symptom that exposed it:
+//
+//   1. A STAT ERROR IS NOT AN ABSENCE. Only ENOENT means "no file there".
+//      Every other stat failure is a refusal — before the send it is a usage
+//      refusal with nothing live, after the send it is EVIDENCE_UNRECORDED with
+//      the ids on stderr. Reading an unreadable answer as an absence is the
+//      MG-66 conflation, and here it would also silently destroy an earlier
+//      run's record while exiting 0.
+//   2. A TEMP PATH IS PER RUN, NOT PER DESTINATION. Two runs sharing
+//      --evidence-out must not be able to collide on one '.partial', because
+//      the failure that produces is the WRONG RECORD UNDER THE RIGHT NAME:
+//      undetectable downstream, since MG-53 finds a well-formed record and
+//      reconciles the container against the wrong id set.
+//   3. --overwrite DOES NOT MEAN --destroy-anything. It authorises replacing
+//      the operator's OWN earlier record. A live '.partial' from another run is
+//      refused with the flag as well.
+//
+// And the standing rule underneath all three: once documents have been sent, no
+// evidence-write refusal may report an exit code that means nothing live
+// happened.
+// ===========================================================================
+
+describe('the evidence-write integrity contract', () => {
+  const CONFIRMED_READS = runId => ({
+    script: [{ docs: [] }, { docs: deliveredDocuments(runId) }],
+  });
+
+  // A destination whose state cannot be READ. -------------------------------
+
+  it('refuses a destination whose state cannot be READ before sending anything', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const { exitCode, log, spawn, readerCalls } = await runMain({
+        evidenceOut,
+        readerSpec: CONFIRMED_READS(),
+        fs: {
+          // Not ENOENT. The preflight cannot tell from this whether a record is
+          // sitting there, and "I could not read the answer" is not "there is
+          // nothing there".
+          stat: async target =>
+            target === evidenceOut
+              ? Promise.reject(Object.assign(new Error('EIO'), { code: 'EIO' }))
+              : realStat(target),
+        },
+      });
+
+      assert.equal(exitCode, EXIT.USAGE, 'nothing live happened, which is what 1 means');
+      assert.equal(spawn.calls.length, 0, 'no message may be sent onto an unreadable destination');
+      assert.equal(readerCalls.length, 0);
+      assert.match(log.all(), /cannot determine whether/);
+      assert.match(log.all(), /not assumed to be free/);
+    });
+  });
+
+  it('a stat failing for any reason but ENOENT after the send REFUSES rather than writing', async () => {
+    await withTempDir(async dir => {
+      // The destination already holds an earlier run's record. That run's
+      // documents are still in the container, so the bytes below are load-bearing
+      // evidence, not debris — and the whole point of this test is that they are
+      // still there afterwards.
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const earlier = '{"runId":"an earlier run whose documents are still live"}\n';
+      await writeFile(evidenceOut, earlier, 'utf8');
+
+      // t0 the destination reads as absent, so the preflight clears it and the
+      // run goes live; t1 the answer is unreadable. That is the interval the
+      // preflight cannot close, and it is where the swallowed stat did its damage:
+      // it read EIO as "nothing there" and renamed straight over the record above.
+      let live = false;
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut,
+        readerSpec: CONFIRMED_READS(),
+        fs: {
+          stat: async target => {
+            if (target !== evidenceOut) return realStat(target);
+            throw live
+              ? Object.assign(new Error('EIO'), { code: 'EIO' })
+              : Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          },
+          writeFile: async (target, data, encoding) => {
+            const written = await writeFile(target, data, encoding);
+            if (target.endsWith(PROBE_SUFFIX)) live = true;
+            return written;
+          },
+        },
+      });
+
+      assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'this run did go live');
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.OK, 'a destroyed-or-unwritten record is never a success');
+      assert.notEqual(exitCode, EXIT.USAGE, 'documents are in the container by now');
+
+      assert.equal(
+        await readFile(evidenceOut, 'utf8'),
+        earlier,
+        "the earlier run's record was neither overwritten nor truncated"
+      );
+      assert.deepEqual(await readdir(dir), ['evidence.json'], 'and no partial debris was left');
+
+      const output = log.all();
+      assert.match(output, /cannot determine whether/);
+      assert.match(output, /an unreadable answer is not an absence/);
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      assert.match(output, /RECORD THESE IDS BY HAND/);
+      for (const doc of deliveredDocuments()) {
+        assert.ok(output.includes(doc.id), `the output must name ${doc.id}`);
+      }
+    });
+  });
+
+  // Two runs, one destination. ----------------------------------------------
+
+  const UUID_A = '00000000-0000-4000-8000-0000000000aa';
+  const UUID_B = '00000000-0000-4000-8000-0000000000bb';
+  const RUN_A = newRunId(() => UUID_A);
+  const RUN_B = newRunId(() => UUID_B);
+
+  it('names its temp file for the RUN, so two runs cannot collide on one partial', () => {
+    const destination = '/tmp/mg67/evidence.json';
+    const a = partialPathFor(destination, RUN_A);
+    const b = partialPathFor(destination, RUN_B);
+    assert.notEqual(a, b, 'a per-destination temp path is what lets two runs interleave');
+    assert.ok(a.includes(RUN_A) && b.includes(RUN_B), 'each partial names the run that owns it');
+  });
+
+  it("two runs sharing one --evidence-out cannot publish the wrong run's record", async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+
+      // Run A is held at the rename with its partial already on disk — the exact
+      // window in which a shared temp path let a second run overwrite A's bytes
+      // and A then publish B's record under A's name, both runs exiting 0.
+      let releaseRename;
+      const renameGate = new Promise(resolve => {
+        releaseRename = resolve;
+      });
+      let partialOnDisk;
+      const partialWritten = new Promise(resolve => {
+        partialOnDisk = resolve;
+      });
+      const writes = [];
+      const gatedFs = {
+        writeFile: async (target, data, encoding) => {
+          writes.push(target);
+          const written = await writeFile(target, data, encoding);
+          if (target.endsWith(PARTIAL_SUFFIX)) partialOnDisk();
+          return written;
+        },
+        rename: async (from, to) => {
+          await renameGate;
+          return realRename(from, to);
+        },
+      };
+
+      const runA = runMain({
+        evidenceOut,
+        uuid: () => UUID_A,
+        readerSpec: CONFIRMED_READS(RUN_A),
+        fs: gatedFs,
+      });
+      // Raced against A settling, so a run that never reaches its partial fails
+      // this test with an assertion instead of hanging it.
+      await Promise.race([partialWritten, runA]);
+
+      const b = await runMain({
+        evidenceOut,
+        uuid: () => UUID_B,
+        readerSpec: CONFIRMED_READS(RUN_B),
+      });
+
+      releaseRename();
+      const a = await runA;
+
+      assert.equal(b.exitCode, EXIT.USAGE, 'B saw a run holding the destination and stopped');
+      assert.equal(
+        b.spawn.calls.length,
+        0,
+        'and stopped BEFORE putting documents in the container'
+      );
+      assert.match(b.log.all(), /a partial evidence file already exists/);
+      assert.equal(a.exitCode, EXIT.OK, 'A was not disturbed and published its own record');
+
+      const written = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assert.equal(written.runId, RUN_A, 'the file holds the record of the run that wrote it');
+      assert.equal(
+        JSON.stringify(written).includes(RUN_B),
+        false,
+        'no fragment of the other run appears in it'
+      );
+      assert.equal(written.count, MESSAGES_PER_RUN);
+      for (const id of written.observedIds) assert.ok(id.startsWith(RUN_A));
+
+      assert.ok(writes.includes(partialPathFor(evidenceOut, RUN_A)), "A's partial was named for A");
+      assert.equal(
+        writes.includes(`${evidenceOut}${PARTIAL_SUFFIX}`),
+        false,
+        'and never for the destination alone, which is the path both runs would share'
+      );
+      assert.deepEqual(await readdir(dir), ['evidence.json'], 'no partial or probe debris');
+    });
+  });
+
+  // --overwrite is not a force flag. ----------------------------------------
+
+  it("--overwrite still refuses a destination another run holds a '.partial' on", async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const mine = '{"runId":"my own earlier record, which --overwrite may replace"}\n';
+      const theirs = '{"runId":"a concurrent run, still writing"}\n';
+      const foreign = partialPathFor(evidenceOut, RUN_B);
+      await writeFile(evidenceOut, mine, 'utf8');
+      await writeFile(foreign, theirs, 'utf8');
+
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut,
+        argv: ['--overwrite'],
+        readerSpec: CONFIRMED_READS(),
+      });
+
+      assert.equal(exitCode, EXIT.USAGE, 'refused while nothing was live');
+      assert.equal(spawn.calls.length, 0);
+      assert.match(log.all(), /a partial evidence file already exists/);
+      assert.match(log.all(), /refused with overwrite as well/);
+      assert.equal(await readFile(foreign, 'utf8'), theirs, "the other run's partial is untouched");
+      assert.equal(await readFile(evidenceOut, 'utf8'), mine);
+    });
+  });
+
+  it('--overwrite refuses a foreign partial that appears AFTER the preflight, and destroys nothing', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const mine = '{"runId":"my own earlier record"}\n';
+      const theirs = '{"runId":"a concurrent run that started mid-send"}\n';
+      const foreign = partialPathFor(evidenceOut, RUN_B);
+      await writeFile(evidenceOut, mine, 'utf8');
+
+      // The other run appears in the one interval the preflight cannot cover: it
+      // starts after this run's destination check and before this run's write,
+      // which is the interval the live send occupies.
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut,
+        argv: ['--overwrite'],
+        readerSpec: CONFIRMED_READS(),
+        fs: {
+          writeFile: async (target, data, encoding) => {
+            const written = await writeFile(target, data, encoding);
+            if (target.endsWith(PROBE_SUFFIX)) await writeFile(foreign, theirs, 'utf8');
+            return written;
+          },
+        },
+      });
+
+      assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'this run went live');
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.USAGE, 'documents are in the container by now');
+      assert.notEqual(exitCode, EXIT.OK);
+      assert.match(log.all(), /another run holds a partial evidence file/);
+      assert.match(log.all(), /Refused with overwrite as well/);
+      assert.match(log.all(), /RECORD THESE IDS BY HAND/);
+      assert.equal(
+        await readFile(foreign, 'utf8'),
+        theirs,
+        "the concurrent run's in-flight record survived --overwrite"
+      );
+      assert.equal(await readFile(evidenceOut, 'utf8'), mine, 'and so did the earlier record');
+      assert.deepEqual(
+        (await readdir(dir)).sort(),
+        ['evidence.json', path.basename(foreign)].sort(),
+        'this run left no partial of its own behind'
+      );
+    });
+  });
+
+  it('--help says what --overwrite does NOT authorise', async () => {
+    const log = recordingLog();
+    assert.equal(await main({ argv: ['--help'], log }), EXIT.OK);
+    const help = log.all();
+    assert.match(help, /It is not a force flag/);
+    assert.match(help, /refused WITH --overwrite as well/);
+    assert.match(help, /an unreadable answer is not an absence/);
   });
 });
 
