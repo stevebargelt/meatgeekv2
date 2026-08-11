@@ -34,6 +34,7 @@ import {
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
   TICKET,
+  UNANTICIPATED_OUTCOME_CODE,
   abortedConfirmation,
   buildFixtureMessages,
   classifyError,
@@ -46,11 +47,13 @@ import {
   exitLabel,
   formatD2cProperties,
   hasSyntheticMarker,
+  isKnownExitCode,
   isSyntheticDocument,
   mergeIds,
   mustEmitEvidence,
   newRunId,
   observedIdsDiverge,
+  resolveOutcomeCode,
   scrubChildOutput,
   scrubSecrets,
   toFixtureError,
@@ -161,6 +164,117 @@ describe('exit vocabulary', () => {
 
   it('names the ticket, so a marked document ties back to it', () => {
     assert.equal(TICKET, 'MG-67');
+  });
+});
+
+// The invariant this whole tool exists to hold, asserted at the one place that
+// decides it. The funnel it feeds used to default to EXIT.OK when a run held
+// neither a confirmation nor a failure — success as the fall-through for the
+// state the code understood least. These tests exist so that default cannot
+// come back: the property under test is not "the anticipated cases map
+// correctly", it is "NOTHING ELSE CAN REACH ZERO".
+describe('outcome resolution (exit 0 requires positive confirmation)', () => {
+  const confirmedResult = { exitCode: EXIT.OK, confirmed: true };
+
+  it('exits 0 only for a confirmation that both carries OK and says confirmed', () => {
+    const resolved = resolveOutcomeCode({ confirmation: confirmedResult });
+    assert.equal(resolved.exitCode, EXIT.OK);
+    assert.equal(resolved.unanticipated, false);
+    assert.equal(resolved.reason, null);
+  });
+
+  // The heart of it. Every shape below is a state the funnel was not written to
+  // expect — including the two the old default swallowed (nothing at all, and a
+  // failure with no usable code) — and NONE of them may be reported as proof
+  // that a document was read out of Cosmos.
+  it('cannot reach exit 0 from any unanticipated state', () => {
+    const unanticipatedStates = [
+      ['nothing at all', {}],
+      ['undefined arguments', undefined],
+      ['both halves explicitly absent', { confirmation: null, failure: null }],
+      ['a failure with no exit code', { failure: new Error('boom') }],
+      ['a failure carrying exit 0', { failure: { exitCode: EXIT.OK } }],
+      ['a failure carrying a foreign code', { failure: { exitCode: 42 } }],
+      ['a failure carrying a non-numeric code', { failure: { exitCode: '3' } }],
+      ['a confirmation that is not an object', { confirmation: 'confirmed' }],
+      ['a confirmation that is an array', { confirmation: [] }],
+      ['a confirmation with no exit code', { confirmation: { confirmed: true } }],
+      ['a confirmation carrying a foreign code', { confirmation: { exitCode: 99 } }],
+      // OK without confirmed:true is the exact inversion this guards. A half-
+      // populated confirmation must never carry the run to success.
+      ['OK without confirmed:true', { confirmation: { exitCode: EXIT.OK } }],
+      ['OK with confirmed:false', { confirmation: { exitCode: EXIT.OK, confirmed: false } }],
+      [
+        'OK with a truthy non-true confirmed',
+        { confirmation: { exitCode: EXIT.OK, confirmed: 1 } },
+      ],
+      [
+        'confirmed:true alongside a failure code',
+        { confirmation: { exitCode: EXIT.TIMEOUT, confirmed: true } },
+      ],
+    ];
+
+    for (const [context, input] of unanticipatedStates) {
+      const resolved = resolveOutcomeCode(input);
+      assert.notEqual(resolved.exitCode, EXIT.OK, `${context}: reached exit 0`);
+      assert.ok(resolved.exitCode > 0, `${context}: did not exit nonzero`);
+      assert.ok(isKnownExitCode(resolved.exitCode), `${context}: exited with a foreign code`);
+      assert.equal(resolved.exitCode, UNANTICIPATED_OUTCOME_CODE, context);
+      assert.equal(resolved.unanticipated, true, `${context}: not flagged as unanticipated`);
+      // Explicit, not silent: the operator is told what was found and why the
+      // run refused to call it a success.
+      assert.equal(typeof resolved.reason, 'string', context);
+      assert.match(resolved.reason, /read back out of the destination container/, context);
+    }
+  });
+
+  // Whatever the run DID establish still governs. Inverting the default must not
+  // flatten the failure classes into one another — MG-53 and MG-54 branch on
+  // them, and this resolver sits between them and the exit code.
+  it('passes every anticipated failure class through unchanged', () => {
+    for (const code of Object.values(EXIT).filter(value => value !== EXIT.OK)) {
+      const viaConfirmation = resolveOutcomeCode({ confirmation: { exitCode: code } });
+      assert.equal(viaConfirmation.exitCode, code, exitLabel(code));
+      assert.equal(viaConfirmation.unanticipated, false, exitLabel(code));
+
+      const viaFailure = resolveOutcomeCode({ failure: new FixtureError(code, 'aborted') });
+      assert.equal(viaFailure.exitCode, code, exitLabel(code));
+      assert.equal(viaFailure.unanticipated, false, exitLabel(code));
+    }
+  });
+
+  // A confirmation is a verdict about the container; a failure is an abort on
+  // the way to one. When both exist the verdict wins, because it is the one that
+  // actually looked.
+  it('prefers the confirmation over a failure, and never to reach 0', () => {
+    const resolved = resolveOutcomeCode({
+      confirmation: { exitCode: EXIT.UNEXPECTED_PARTITION },
+      failure: new FixtureError(EXIT.TRANSPORT, 'reset'),
+    });
+    assert.equal(resolved.exitCode, EXIT.UNEXPECTED_PARTITION);
+
+    const stillNotOk = resolveOutcomeCode({
+      confirmation: { exitCode: EXIT.OK },
+      failure: new FixtureError(EXIT.TRANSPORT, 'reset'),
+    });
+    assert.notEqual(stillNotOk.exitCode, EXIT.OK);
+  });
+
+  // Source-level, because a reviewer reading the funnel should be able to see
+  // that the fall-through is gone rather than infer it from behaviour.
+  // Comments are stripped first: the resolver's own header QUOTES the inverted
+  // default it replaced, and that quotation is the documentation, not the
+  // defect.
+  it('leaves no `?? EXIT.OK` fall-through in the resolver', async () => {
+    const code = (await readSource('./fixture-core.mjs'))
+      .split('\n')
+      .filter(line => !/^\s*(?:\/\/|\*|\/\*)/.test(line))
+      .join('\n');
+    assert.equal(
+      /\?\?\s*EXIT\.OK/.test(code),
+      false,
+      'a default-to-success fall-through is back in fixture-core.mjs'
+    );
   });
 });
 

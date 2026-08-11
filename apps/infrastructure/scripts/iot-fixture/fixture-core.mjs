@@ -185,6 +185,110 @@ export function exitLabel(code) {
   return EXIT_LABELS[code] ?? 'unknown';
 }
 
+// Every code this tool is permitted to exit with. A value that is not in here
+// did not come from this vocabulary, so nothing may be concluded from it —
+// least of all success.
+const KNOWN_EXIT_CODES = new Set(Object.values(EXIT));
+
+export function isKnownExitCode(code) {
+  return KNOWN_EXIT_CODES.has(code);
+}
+
+// The code an UNANTICIPATED run state exits with.
+//
+// AMBIGUOUS rather than a code of its own, deliberately: "the run concluded
+// nothing I can name" IS a correlation ambiguity — nothing was tied to this run
+// deterministically — and the funnel already reaches for this same code when a
+// run that attempted a send would otherwise report a usage error. Minting an
+// eleventh code would also mean adding a slug to evidence.mjs's closed
+// OUTCOME_NAMES map, which this step does not own; if a distinct code is wanted
+// later, this constant is the single place it changes.
+export const UNANTICIPATED_OUTCOME_CODE = EXIT.AMBIGUOUS;
+
+/**
+ * Resolve a run's exit code from what the run actually established. Pure, and
+ * the ONLY place allowed to decide that a run exits 0.
+ *
+ * THIS EXISTS BECAUSE THE DEFAULT WAS INVERTED. The single exit funnel used to
+ * read `confirmation ? confirmation.exitCode : (failure?.exitCode ?? EXIT.OK)`,
+ * so a run holding neither a confirmation nor a failure — an unanticipated
+ * state by construction, since one of the two is supposed to exist on every
+ * path — fell through to SUCCESS. That is fail-OPEN in the one function whose
+ * entire contract is that exit 0 means exactly one thing: the expected count of
+ * marker-carrying, run-correlated documents was READ BACK OUT of the
+ * destination container. A state the code did not anticipate is the state it
+ * knows least about, and it is the last one that may be reported as proof.
+ *
+ * So the default is inverted back: exit 0 requires POSITIVE CONFIRMATION to
+ * have been established, and everything else — including every shape this
+ * function was not written to expect — is nonzero with an explicit reason the
+ * caller prints. There is no `?? EXIT.OK` anywhere in it, and no path that can
+ * reach EXIT.OK without a confirmation object that both carries EXIT.OK and
+ * says `confirmed: true`.
+ *
+ * Returns { exitCode, unanticipated, reason }. `reason` is null exactly when
+ * the outcome was one this vocabulary anticipated; otherwise it is a sentence
+ * naming what was found, for the caller to log before it exits.
+ */
+export function resolveOutcomeCode({ confirmation, failure } = {}) {
+  const unanticipated = finding => ({
+    exitCode: UNANTICIPATED_OUTCOME_CODE,
+    unanticipated: true,
+    reason:
+      `${finding} — exiting ${UNANTICIPATED_OUTCOME_CODE} (${exitLabel(UNANTICIPATED_OUTCOME_CODE)}) rather than 0. ` +
+      'Exit 0 states that a specific, newly identified document was read back out of the destination container, and this run established no such thing.',
+  });
+  const anticipated = exitCode => ({ exitCode, unanticipated: false, reason: null });
+
+  if (confirmation !== null && confirmation !== undefined) {
+    if (typeof confirmation !== 'object' || Array.isArray(confirmation)) {
+      return unanticipated(`the run produced a confirmation of type ${typeName(confirmation)}`);
+    }
+    const { exitCode, confirmed } = confirmation;
+    if (!isKnownExitCode(exitCode)) {
+      return unanticipated(
+        `the confirmation carried exit code ${safeFragment(String(exitCode), 20)}, which is not in this tool's vocabulary`
+      );
+    }
+    // The two halves of a confirmation must agree. They are set together on
+    // every path in confirmArrival, so a disagreement means a caller built one
+    // by hand or a path was added that half-populates it — either way the run
+    // cannot be read, and the direction that matters is that the OK half alone
+    // never carries the exit.
+    if (exitCode === EXIT.OK && confirmed !== true) {
+      return unanticipated(
+        'the confirmation carried exit 0 without confirmed:true, so nothing established that the documents were read back'
+      );
+    }
+    if (exitCode !== EXIT.OK && confirmed === true) {
+      return unanticipated(
+        `the confirmation claims confirmed:true alongside exit ${exitCode} (${exitLabel(exitCode)}), which is internally inconsistent`
+      );
+    }
+    return anticipated(exitCode);
+  }
+
+  // No confirmation at all: the run never reached a verdict about the container,
+  // so the only honest code is the failure's own — and only if it is one this
+  // vocabulary minted and is not itself success.
+  if (failure !== null && failure !== undefined) {
+    const exitCode = failure.exitCode;
+    if (!isKnownExitCode(exitCode)) {
+      return unanticipated(
+        `the run aborted with a failure carrying exit code ${safeFragment(String(exitCode), 20)}, which is not in this tool's vocabulary`
+      );
+    }
+    if (exitCode === EXIT.OK) {
+      return unanticipated('the run aborted with a failure carrying exit code 0');
+    }
+    return anticipated(exitCode);
+  }
+
+  return unanticipated(
+    'the run produced neither a confirmation nor a failure, so nothing it did is known'
+  );
+}
+
 export class FixtureError extends Error {
   constructor(exitCode, message) {
     super(message);
