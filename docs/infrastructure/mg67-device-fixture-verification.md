@@ -552,13 +552,32 @@ shell history next to the result. The defaults are the same values (180000 ms /
 ### What the tool does, in order — and where it can stop
 
 1. **Proves `--evidence-out` is usable** — the directory exists, the path is
-   writable, and neither an earlier run's record nor a leftover `.partial` from a
-   crashed run is sitting there — **before anything live happens**. All three are
-   purely local facts, so an unusable destination is a **usage error (exit 1)**
-   while nothing has been sent, rather than three documents in the live container
-   that the tool then refuses to record. The same rules are re-applied at write
-   time (§7a), and that later refusal is still the authoritative one: this is a
-   pre-flight, not a replacement for it.
+   writable, and no `.partial` belonging to **another** run is sitting next to it
+   — **before anything live happens**. These are purely local facts, so an
+   unusable destination is a **usage error (exit 1)** while nothing has been sent,
+   rather than three documents in the live container that the tool then refuses to
+   record. The same rules are re-applied at write time (§7a), and that later
+   refusal is still the authoritative one: this is a pre-flight, not a replacement
+   for it.
+
+   Two properties of that check are worth knowing before you read a refusal, both
+   of them the same discipline the rest of the tool applies to Cosmos, turned on
+   its own filesystem:
+
+   - **An unreadable destination is refused, not assumed free.** Only an explicit
+     "no such file" counts as _absent_. A `stat` that fails any other way — a
+     permission error, a dead mount, an I/O error — is a **refusal (exit 1)**, and
+     the message names the code it got. The tool never proceeds to write on a
+     destination it could not read, because "I could not tell" silently becoming
+     "nothing is there" is precisely how a run destroys an earlier run's record
+     while reporting success. Same for the directory listing the concurrency guard
+     depends on: a directory it cannot enumerate is refused, never read as "no
+     concurrent run here".
+   - **The guard is about _another_ run's partial, not your own.** Partial files
+     are named for the run that owns them (§7a), so the check is a directory
+     enumeration rather than a stat of one path — this run cannot know another
+     run's filename in advance, and a listing is the only thing that can see one.
+
 2. **Measures** the container from §3's document. Refuses on anything it cannot
    read (**exit 8**); never defaults.
 3. **Reads the container BEFORE sending**, requiring this run's freshly minted
@@ -706,6 +725,38 @@ because that file records an earlier run whose documents are **still in the
 container**, and destroying the record of them manufactures exactly the
 unrecorded-document condition that halts MG-53.
 
+#### `--overwrite` replaces your own record; it does not defeat the concurrency guard
+
+The flag exists for one situation: you wrote a record earlier, you have decided
+deliberately to replace it, and you accept that the earlier run's documents are
+now accounted for somewhere else. **That is the whole of what it authorises.**
+
+It does **not** authorise destroying a record another run is writing _right now_,
+and no flag on this tool does. So the concurrent-`.partial` refusal stays active
+**with `--overwrite` as well**: a destination that has a foreign `.partial` next
+to it is refused either way, and the message says so. Two things follow, and both
+are worth internalising before you reach for the flag on a failed run:
+
+- **Never point two concurrent runs at the same `--evidence-out`.** Not with
+  `--overwrite`, not without it. If the guard were bypassable, the failure it
+  prevents would not be a missing file — it would be one file, under the name you
+  expect, holding the **other run's record**, with both runs reporting success. A
+  wrong record under the right name is worse than no record: nothing downstream
+  can detect it, and MG-53 would reconcile the source against a run that is not
+  the one whose documents are in the container.
+- **A `.partial` you find is either live or a corpse, and you have to tell them
+  apart.** It is named `<evidence-file>.<fixtureRunId>.partial` (§7a), so read the
+  run id out of the filename first. If a run with that id is still going, **wait
+  for it** — do not delete it. If it belongs to a run you know crashed, delete it
+  deliberately, then re-run. Do not delete one you cannot account for: that is an
+  unknown run whose documents may be in the container, which is a reporting
+  matter (§9), not a cleanup.
+
+If you are re-running after a failure, the answer is almost always a **new**
+`--evidence-out` path rather than `--overwrite`. The failed run's documents may
+well be live (exit 2 and exit 10 both leave that open), and its record is the
+only thing that accounts for them.
+
 ---
 
 ## 7. The evidence to capture, and where it goes
@@ -719,6 +770,18 @@ Two artifacts. They are not interchangeable.
 the ticket. **This file, not this runbook, is what downstream tickets parse** — a
 prose procedure that drifts is a documentation bug; a machine-readable record
 that drifts is a wrong deletion.
+
+**Two neighbouring filenames you may see, and what each means.** The write goes to
+a temporary file first and is renamed into place, so no reader ever sees a
+half-written record:
+
+| Filename                                | What it is                                                                                                                                                                                                                                                            | What to do                                                                                                                                              |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<evidence-file>.<fixtureRunId>.partial` | The temp file for the write, named for the **run that owns it** — not for the destination. That is what makes two runs sharing a destination unable to interleave on one temp path and hand you one run's record under the other's name.                               | Read the run id out of the name. Live run → wait. Known crashed run → delete deliberately, then re-run. Unaccounted-for → §9, report it.                |
+| `<evidence-file>.preflight`              | The zero-byte probe the pre-flight writes and removes to prove the path is actually writable. Removing it is best-effort and deliberately not fatal.                                                                                                                   | Nothing. Delete it if it bothers you; it is not evidence and holds no bytes.                                                                             |
+
+Neither is the artifact. Commit the file at the exact `--evidence-out` path and
+nothing else.
 
 Fields, by their real names. It is **`schemaVersion: 2`**; MG-53 and MG-54 check
 that first and must refuse a version they were not written against.

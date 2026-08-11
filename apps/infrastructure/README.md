@@ -865,11 +865,27 @@ recording them was written. Absence of an error is never success.
   minted correlator to be absent — that is what makes the proof a _newly
   identified_ document, and it surfaces an unpropagated role assignment while
   nothing has yet been written that could not then be confirmed.
-- The **`--evidence-out` destination is pre-flighted** — directory, writability
-  and the no-overwrite rule — **before the first send**, so an unusable path is a
-  usage error (exit 1) while nothing is live, rather than 3 documents in the
-  container the tool then refuses to record. It is re-checked at write time; the
-  pre-flight is an addition to that check, not a replacement for it.
+- The **`--evidence-out` destination is pre-flighted** — directory, writability,
+  the no-overwrite rule and a concurrent-run check — **before the first send**, so
+  an unusable path is a usage error (exit 1) while nothing is live, rather than 3
+  documents in the container the tool then refuses to record. It is re-checked at
+  write time; the pre-flight is an addition to that check, not a replacement for
+  it.
+- **The evidence write never destroys or interleaves a record, and never reports
+  success when it might have.** Three rules, because that record is what MG-53 and
+  MG-54 consume to decide whether to halt a migration. **(1) A stat error is not
+  an absence** — only an explicit `ENOENT` reads as "nothing there"; any other
+  `stat` failure, and a directory that cannot be enumerated, is a refusal, never
+  an assumption that the path is free. That is the same error/absence conflation
+  the MG-66 analysis names, applied to the tool's own filesystem. **(2) The
+  temporary file is named per run, not per destination** —
+  `<evidence-file>.<fixtureRunId>.partial` — so two runs sharing a destination
+  cannot interleave on one temp path and leave one run's record under the other
+  run's name, which is a wrong-record-under-the-right-name failure and therefore
+  undetectable downstream. **(3) `--overwrite` replaces your own prior record; it
+  does not defeat the concurrency guard** — a destination carrying a **foreign**
+  `.partial` is refused with the flag as well as without it. No flag on this tool
+  authorises destroying a record another run is still writing.
 - **The operator captures the live run's stdout and stderr to files, inspects
   them for credential shapes, and commits them alongside the evidence artifact**
   (runbook §7c). This is the **only** evidence that discharges the ticket's
