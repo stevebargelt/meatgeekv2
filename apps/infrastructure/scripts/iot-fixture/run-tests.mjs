@@ -50,12 +50,28 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // would let a deleted or renamed file pass discovery and only maybe trip the
 // count floor, with a message that names the wrong problem.
 //
-// minTests carries a small margin (roughly 7%) below the honest count, so
-// tightening or consolidating a handful of cases does not turn this red for a
-// reason that has nothing to do with the suite failing to run. Counts measured
-// at the time of writing: dependency-free 387 tests across 4 files
-// (container-definition 34, evidence 70, fixture-core 137, send-fixture 146);
-// real-SDK 38 tests across 1 file.
+// minTests carries a margin below the honest count so that consolidating a
+// couple of cases does not turn this red for a reason that has nothing to do
+// with the suite failing to run. Counts measured at the time of writing:
+// dependency-free 409 tests across 4 files (container-definition 34,
+// evidence 85, fixture-core 137, send-fixture 153); real-SDK 40 across 1 file.
+//
+// That margin is FOUR cases on the dependency-free tier and ONE on the much
+// smaller real-SDK tier — a small fixed number, not the ~7% earlier revisions
+// of this file used — and the reason is measured rather than stylistic. This
+// cycle's three evidence-write fixes added 22 executed cases (the tier stood
+// at 387 before them: container-definition 34, evidence 70, fixture-core 137,
+// send-fixture 146). A 7% margin on 409 is 29 — wide enough for all three
+// fixes to be reverted with this gate still reporting a pass, which is the
+// precise failure this file exists to refuse, committed in the file that
+// refuses it. A percentage margin also widens as the suite grows, so it gets
+// worse exactly as there is more to lose.
+//
+// The cost is that consolidating five or more cases turns this red. That is
+// the intended prompt to re-measure and raise the floor deliberately, not a
+// false alarm: a red here says "the count moved, come and say why", which is
+// cheap. The failure in the other direction is a whole review cycle's worth of
+// fail-closed assertions silently ceasing to run.
 //
 // The floor is RAISED when the suite grows and is never lowered to accommodate
 // a rename: a floor below the honest count is a floor that lets a whole
@@ -64,8 +80,33 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // disappear inside it — so raising it is maintenance of the gate, not
 // tightening of it.
 //
-// These floors were last raised when a further review cycle landed four fixes,
-// each adding cases this floor now has to keep alive:
+// These floors were last raised when the evidence-write integrity cycle landed
+// three fixes to the writer MG-53 and MG-54 consume mechanically. Each one is a
+// case where the tool destroyed or misfiled a record while reporting success,
+// and each now has cases this floor has to keep alive:
+//
+//   - a STAT ERROR IS NOT AN ABSENCE. The no-overwrite guard read any stat
+//     failure as "nothing there" and wrote straight over an earlier run's
+//     record. That is the MG-66 error-becomes-absence conflation reproduced
+//     inside the tool built to refuse it, except here it also loses the data
+//     and exits 0. Only ENOENT is an absence now; every other stat failure
+//     refuses before writing.
+//   - the atomic-write TEMP PATH IS PER RUN, NOT PER DESTINATION. Two runs
+//     sharing --evidence-out interleaved on one `.partial` and one run's file
+//     could end up holding the OTHER run's record, both exiting 0 — a wrong
+//     record under the right name, which is worse than a missing one because
+//     nothing downstream can detect it. The partial is named for the run id.
+//   - `--overwrite` DOES NOT MEAN --destroy-anything. It bypassed the
+//     concurrent-`.partial` safeguard and so could destroy a run that was
+//     still writing. The flag replaces the operator's OWN earlier record; a
+//     foreign partial is refused with the flag exactly as without it.
+//
+// The floors before this raise (360 / 35) would have passed a tree with all
+// three of those reverted — and so would a 7%-margin floor of 380, which is
+// why the margin was tightened above at the same time as the count was raised.
+//
+// The raise before that came when a further review cycle landed four fixes,
+// each of which this floor also has to keep alive:
 //
 //   - the single exit funnel no longer defaulting to EXIT.OK. Exit 0 now
 //     requires a confirmation that both carries EXIT.OK and says confirmed;
@@ -89,23 +130,22 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 //
 // Every one of those is a regression that would read as normal behaviour in
 // prose and is visible only as executed cases — which is exactly why the count
-// floor, not just the file floor, is the thing that has to move.
-//
-// The floors before this raise (314 / 25) would have passed a tree with all
-// four fixes reverted, which is the failure mode a floor left behind a grown
-// suite produces: the margin widens until whole blocks fit inside it.
+// floor, not just the file floor, is the thing that has to move. The floors
+// before THAT raise (314 / 25) would likewise have passed a tree with all four
+// fixes reverted: the failure mode a floor left behind a grown suite produces
+// is that the margin widens until whole blocks fit inside it.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 360,
+    minTests: 405,
   },
   sdk: {
     label: 'real-SDK',
     match: name => name.endsWith(SDK_SUFFIX),
     minFiles: 1,
-    minTests: 35,
+    minTests: 39,
   },
 };
 
