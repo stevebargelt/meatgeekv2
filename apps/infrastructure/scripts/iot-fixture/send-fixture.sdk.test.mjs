@@ -17,7 +17,7 @@
 // `run-tests.mjs --sdk`, which floors the counts so a rename cannot make this
 // tier vacuously green.
 //
-// WHAT ONLY THIS TIER CAN PROVE. Three things, each of them a way the tool
+// WHAT ONLY THIS TIER CAN PROVE. Four things, each of them a way the tool
 // could be wrong while the whole fake tier stayed green:
 //
 //   1. The option bag createRealReader hands to CosmosClient is one the REAL
@@ -35,6 +35,19 @@
 //      AggregateAuthenticationError, whose message inlines every inner
 //      credential's message and is therefore a genuine multi-line leak vector
 //      that a one-line fake error does not model (HR1 again).
+//   4. A real SDK failure raised AFTER the send — the read-back, not the
+//      pre-send gate — still leaves the run RECORDED, and the record it leaves
+//      carries no credential the real error inlined. That path is where the
+//      documents are already in the live container, so it is the one where an
+//      unrecorded run halts MG-53 indistinguishably from the unknown writer that
+//      halt exists to catch. The fake tier proves the wiring with hand-written
+//      errors; only this tier proves it against the shapes the SDKs actually
+//      raise, and only this tier can see a real error's own text reach the
+//      artifact on disk. The same section pins that no real SDK error can
+//      classify into a code meaning "nothing happened" (USAGE) or "the record is
+//      missing" (EVIDENCE_UNRECORDED) — those describe the tool's own state, not
+//      the service's, and an SDK error manufacturing one would misreport which
+//      refusal occurred.
 //
 // NOTHING HERE MAY CONTACT AZURE. Constructing a client and constructing a
 // credential are both offline; calling any client method is not, and is out of
@@ -42,10 +55,21 @@
 // method, and no test below calls getToken().
 
 import { strict as assert } from 'node:assert';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-import { EXIT, FixtureError } from './fixture-core.mjs';
-import { createRealReader, endpointFor, preflight } from './send-fixture.mjs';
+import {
+  EXIT,
+  FixtureError,
+  MESSAGES_PER_RUN,
+  SYNTHETIC_MARKER,
+  classifyError,
+  exitLabel,
+} from './fixture-core.mjs';
+import { createRealReader, endpointFor, main, preflight } from './send-fixture.mjs';
 
 // The real dev target from the brief. Nothing here reaches it; the names are
 // here so a failure message reads like the run an operator would perform.
@@ -436,4 +460,307 @@ describe('MG-67 real @azure/cosmos error shapes classify fail-closed', () => {
     assert.equal(err.exitCode, EXIT.AUTH);
     assertNoPlantedSecret(err.message, 'preflight AUTH failure');
   });
+});
+
+// ===========================================================================
+// 5. Real SDK failures AFTER the send — the path where documents are already
+//    live and the record is the only thing that accounts for them.
+//
+// Everything in sections 3 and 4 fails BEFORE anything is written: the reader
+// could not be built, or the pre-send read was refused. Those runs changed
+// nothing, and an exit code is the whole of what the operator needs.
+//
+// This section is the other half. The send has happened, `az` accepted every
+// message, and the read-back is what fails. MG-53 halts on any source document
+// its recorded set does not account for, and cannot tell such a document from
+// the unknown writer that halt exists to catch — so a run that leaves documents
+// in the container and no artifact behind stops the downstream migration in the
+// one way the operator cannot diagnose. The record is therefore written on
+// failing paths too, and the failure to write it has its own exit code.
+//
+// Why it belongs in THIS tier rather than the fake one, which already drives
+// these paths with hand-written errors: the error here is a real
+// AggregateAuthenticationError, whose message inlines every inner credential's
+// message across several lines, and it travels further than any error in the
+// fake tier does — through the confirmation result's `reason`, into the evidence
+// record's `outcomeReason`, and onto DISK. A file is a leak surface a log line
+// is not: it outlives the terminal, and MG-53 and MG-54 read it as a program
+// input. Only the real class produces the text that proves the scrub holds
+// there.
+//
+// Still offline: `az` is an injected fake, the reader is injected, and no client
+// is constructed at all.
+// ===========================================================================
+
+const HUB = 'meatgeek-v2-dev-iothub-259d4bf5b628';
+const FIXTURES_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/** The measured container definition every run below is shaped by. */
+const cleanDefinitionText = await readFile(
+  path.join(FIXTURES_DIR, 'fixtures', 'container-show-clean.json'),
+  'utf8'
+);
+
+function recordingLog() {
+  const info = [];
+  const error = [];
+  return {
+    info: line => info.push(String(line)),
+    error: line => error.push(String(line)),
+    infoLines: info,
+    errorLines: error,
+    all: () => [...info, ...error].join('\n'),
+  };
+}
+
+/**
+ * A reader that answers the pre-send read honestly (nothing carries this run's
+ * freshly minted correlator) and then throws `error` at every read-back poll.
+ *
+ * The split matters: throwing on the FIRST query would abort before the send and
+ * prove nothing about this section. The documents have to be live before the
+ * failure lands.
+ */
+function readerFailingAfterPreflight(error) {
+  let calls = 0;
+  return {
+    queryDocuments: async () => {
+      calls += 1;
+      if (calls === 1) return [];
+      throw error;
+    },
+  };
+}
+
+/** An fs seam whose target directory does not exist, so the write cannot land. */
+function failingFs() {
+  return {
+    stat: async () => {
+      const err = new Error('ENOENT');
+      err.code = 'ENOENT';
+      throw err;
+    },
+    writeFile: async () => {
+      const err = new Error('ENOENT: no such file or directory');
+      err.code = 'ENOENT';
+      throw err;
+    },
+    rename: async () => {},
+    rm: async () => {},
+  };
+}
+
+async function withTempDir(body) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mg67-sdk-'));
+  try {
+    return await body(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Drive main() end to end with `az` faked, the container definition measured
+ * from the real fixture, and the injected reader failing after the send.
+ */
+async function runToReadBackFailure({ error, evidenceOut, fs }) {
+  const log = recordingLog();
+  // Advancing so the wait bound can actually elapse if a test ever needs it to;
+  // nothing here sleeps.
+  let clock = 1_754_000_000_000;
+  const exitCode = await main({
+    argv: [
+      '--hub',
+      HUB,
+      '--account',
+      ACCOUNT,
+      '--database',
+      DATABASE,
+      '--container',
+      CONTAINER,
+      '--container-definition',
+      'container-show-clean.json',
+      '--evidence-out',
+      evidenceOut,
+      '--timeout',
+      '1000',
+      '--poll-interval',
+      '250',
+    ],
+    createReader: async () => readerFailingAfterPreflight(error),
+    spawn: async () => ({ code: 0, stdout: '', stderr: '' }),
+    log,
+    readFileFn: async () => cleanDefinitionText,
+    now: () => (clock += 250),
+    sleep: async () => {},
+    ...(fs ? { fs } : {}),
+  });
+  return { exitCode, log };
+}
+
+/** The ids main() logged as accepted by IoT Hub, read back off its own output. */
+function sentIdsFrom(log) {
+  return log.infoLines.flatMap(line => [...line.matchAll(/\(id ([^)]+)\)/g)].map(m => m[1]));
+}
+
+/**
+ * A real AggregateAuthenticationError carrying planted credentials, built fresh
+ * per test so no assertion can depend on a mutation another made.
+ */
+function leakyRealAuthError() {
+  return new identity.AggregateAuthenticationError(
+    [
+      new identity.CredentialUnavailableError(
+        `EnvironmentCredential: AccountKey=${PLANTED.accountKey}`
+      ),
+      new identity.CredentialUnavailableError(
+        `ManagedIdentityCredential: SharedAccessKey=${PLANTED.deviceKey}`
+      ),
+    ],
+    'DefaultAzureCredential failed to retrieve a token for the read-back'
+  );
+}
+
+describe('MG-67 a real SDK failure after the send still records the run', () => {
+  it('writes the evidence artifact for an UNCONFIRMED run and exits the read-back failure code, not OK', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const { exitCode, log } = await runToReadBackFailure({
+        error: leakyRealAuthError(),
+        evidenceOut,
+      });
+
+      // The read-back failure keeps its own code: the record was written, so
+      // nothing about the recording changes the diagnosis.
+      assert.equal(exitCode, EXIT.AUTH, `expected AUTH, got ${exitCode} (${exitLabel(exitCode)})`);
+      assert.notEqual(exitCode, EXIT.OK, 'an unread-back run is never a success');
+      assert.notEqual(exitCode, EXIT.TIMEOUT, 'an auth failure is never a timeout');
+
+      // The artifact exists, and it records what is LIVE — the ids az accepted —
+      // while claiming nothing was observed.
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assert.equal(record.confirmed, false);
+      assert.equal(record.exitCode, EXIT.AUTH);
+      assert.equal(record.requestedIds.length, MESSAGES_PER_RUN);
+      assert.deepEqual(record.requestedIds, sentIdsFrom(log), 'the record must name what was sent');
+      assert.equal(
+        record.count,
+        0,
+        'nothing was read back, so nothing may be recorded as observed'
+      );
+      assert.deepEqual(record.ids, []);
+      assert.equal(record.marker.value, SYNTHETIC_MARKER);
+    });
+  });
+
+  it('lets no credential the real error inlined reach the artifact on disk or the operator', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const error = leakyRealAuthError();
+      // The premise, asserted rather than assumed: if @azure/identity ever stops
+      // inlining inner messages, this test is no longer exercising the leak
+      // vector it was written for and must be re-derived, not deleted.
+      assert.ok(error.message.includes(PLANTED.accountKey));
+
+      const { exitCode, log } = await runToReadBackFailure({ error, evidenceOut });
+      assert.equal(exitCode, EXIT.AUTH);
+
+      // The raw bytes, not the parsed record: a secret in a key name, a nested
+      // field or a string this tier did not think to look at is still on disk.
+      const raw = await readFile(evidenceOut, 'utf8');
+      assertNoPlantedSecret(raw, 'the evidence artifact');
+      // outcomeReason is the field the real error's text actually travels in, so
+      // the scrub is asserted where it is load-bearing and not only file-wide.
+      assertNoPlantedSecret(JSON.parse(raw).outcomeReason, 'the evidence record outcomeReason');
+      assertNoPlantedSecret(log.all(), 'the operator-facing output of a recorded failure');
+    });
+  });
+
+  it('exits EVIDENCE_UNRECORDED when the record cannot be written, never USAGE and never the read-back code', async () => {
+    await withTempDir(async dir => {
+      const { exitCode, log } = await runToReadBackFailure({
+        error: leakyRealAuthError(),
+        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        fs: failingFs(),
+      });
+
+      // USAGE means "bad arguments, nothing live happened". Three documents are
+      // in the container; reporting that would be the worst answer this tool can
+      // give, and it is the answer this exit code exists to prevent.
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.USAGE);
+      assert.notEqual(exitCode, EXIT.OK);
+      assert.notEqual(
+        exitCode,
+        EXIT.AUTH,
+        'an unrecorded run outranks its own diagnosis: the operator must be sent to the ids first'
+      );
+
+      const output = log.all();
+      assert.match(output, /EVIDENCE NOT RECORDED/);
+      assert.match(output, /MAY BE in/, 'an unconfirmed run cannot claim the documents exist');
+      // The confirmation's own outcome is still on the lines above, so the
+      // diagnosis is not lost — only the code the operator scripts against.
+      // Substring, not a regex: exit labels are prose and one of them already
+      // carries parentheses, so a RegExp built from a label is a trap waiting
+      // for the next label this assertion is pointed at.
+      assert.ok(
+        output.includes(exitLabel(EXIT.AUTH)),
+        'the read-back diagnosis must survive on the lines above'
+      );
+
+      const sent = sentIdsFrom(log);
+      assert.equal(sent.length, MESSAGES_PER_RUN);
+      for (const id of sent) {
+        assert.ok(
+          output.includes(id),
+          `id ${id} is live and was not named in the unrecorded-run output`
+        );
+      }
+      assertNoPlantedSecret(output, 'the unrecorded-run output');
+    });
+  });
+});
+
+describe('MG-67 no real SDK error can manufacture a tool-state exit code', () => {
+  // classifyError answers AUTH or TRANSPORT and nothing else, by design: absence,
+  // timeout, marker violation and ambiguity are conclusions drawn from what was
+  // READ, never from an exception. The codes below describe the tool's own state
+  // rather than the service's — "your arguments were wrong, nothing happened"
+  // and "the live container changed and nothing recorded it" — and an SDK error
+  // that could produce either would misreport which refusal occurred. The set of
+  // real error classes is what only this tier can enumerate.
+  const REAL_SDK_ERRORS = () => [
+    ['CredentialUnavailableError', new identity.CredentialUnavailableError('no credential')],
+    ['AuthenticationError', new identity.AuthenticationError(401, 'interaction required')],
+    [
+      'AggregateAuthenticationError',
+      new identity.AggregateAuthenticationError(
+        [new identity.CredentialUnavailableError('please run az login')],
+        'DefaultAzureCredential failed'
+      ),
+    ],
+    ['RestError/ECONNRESET', new cosmos.RestError('read ECONNRESET', { code: 'ECONNRESET' })],
+    ['RestError/ETIMEDOUT', new cosmos.RestError('connect ETIMEDOUT', { code: 'ETIMEDOUT' })],
+    ['ErrorResponse/403', Object.assign(new cosmos.ErrorResponse('RBAC denied'), { code: 403 })],
+    [
+      'ErrorResponse/429',
+      Object.assign(new cosmos.ErrorResponse('too many requests'), { code: 429 }),
+    ],
+    ['ErrorResponse/500', Object.assign(new cosmos.ErrorResponse('service error'), { code: 500 })],
+  ];
+
+  for (const [name, error] of REAL_SDK_ERRORS()) {
+    it(`a real ${name} classifies as AUTH or TRANSPORT only`, () => {
+      const code = classifyError(error);
+      assert.ok(
+        code === EXIT.AUTH || code === EXIT.TRANSPORT,
+        `${name} classified as ${code} (${exitLabel(code)})`
+      );
+      assert.notEqual(code, EXIT.USAGE, 'a service error must never read as "nothing happened"');
+      assert.notEqual(code, EXIT.EVIDENCE_UNRECORDED, 'that code describes this tool, not Azure');
+      assert.notEqual(code, EXIT.TIMEOUT, 'an exception is never an absence');
+      assert.notEqual(code, EXIT.OK);
+    });
+  }
 });
