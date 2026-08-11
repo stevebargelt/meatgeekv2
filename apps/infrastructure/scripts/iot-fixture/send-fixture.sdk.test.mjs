@@ -17,7 +17,7 @@
 // `run-tests.mjs --sdk`, which floors the counts so a rename cannot make this
 // tier vacuously green.
 //
-// WHAT ONLY THIS TIER CAN PROVE. Four things, each of them a way the tool
+// WHAT ONLY THIS TIER CAN PROVE. Five things, each of them a way the tool
 // could be wrong while the whole fake tier stayed green:
 //
 //   1. The option bag createRealReader hands to CosmosClient is one the REAL
@@ -35,19 +35,30 @@
 //      AggregateAuthenticationError, whose message inlines every inner
 //      credential's message and is therefore a genuine multi-line leak vector
 //      that a one-line fake error does not model (HR1 again).
-//   4. A real SDK failure raised AFTER the send — the read-back, not the
-//      pre-send gate — still leaves the run RECORDED, and the record it leaves
-//      carries no credential the real error inlined. That path is where the
-//      documents are already in the live container, so it is the one where an
-//      unrecorded run halts MG-53 indistinguishably from the unknown writer that
-//      halt exists to catch. The fake tier proves the wiring with hand-written
-//      errors; only this tier proves it against the shapes the SDKs actually
-//      raise, and only this tier can see a real error's own text reach the
-//      artifact on disk. The same section pins that no real SDK error can
-//      classify into a code meaning "nothing happened" (USAGE) or "the record is
-//      missing" (EVIDENCE_UNRECORDED) — those describe the tool's own state, not
-//      the service's, and an SDK error manufacturing one would misreport which
-//      refusal occurred.
+//   4. THE EVIDENCE-EMISSION CONTRACT SURVIVES A REAL SDK FAILURE. A real error
+//      raised AFTER the send — the read-back, not the pre-send gate — still
+//      leaves the run RECORDED, with its four id sets individually correct and
+//      its already-observed documents intact. That path is where the documents
+//      are already in the live container, so it is the one where an unrecorded
+//      run halts MG-53 indistinguishably from the unknown writer that halt
+//      exists to catch. Section 5 below.
+//   5. THE CREDENTIAL GUARD AND THE CONTRACT DO NOT FIGHT EACH OTHER. The
+//      evidence record's guard is FAIL-CLOSED: a credential-shaped value
+//      REFUSES the whole write. A real SDK error's text travels into the
+//      record's `outcomeReason`, so a scrub that let a base64-shaped run
+//      through would not leak — it would turn a run with live documents into an
+//      UNRECORDED one, which is the worse of the two failures and the exact
+//      outcome the contract exists to prevent. Only a real error produces the
+//      text that tests that interaction; a hand-written one-line fake does not.
+//
+// WHAT DELIBERATELY IS NOT HERE. The per-outcome sweep of the
+// evidence-emission contract — every terminal outcome the tool can reach, its
+// four id sets spelled out — lives in the dependency-free tier
+// (send-fixture.test.mjs, "the evidence-emission contract holds on every
+// terminal outcome"), because most of those outcomes involve no SDK at all and
+// this tier must not grow a second copy that can drift from it. What is here is
+// the slice reachable only THROUGH a real SDK error: the AUTH and TRANSPORT
+// aborts, and the recording that has to survive them.
 //
 // NOTHING HERE MAY CONTACT AZURE. Constructing a client and constructing a
 // credential are both offline; calling any client method is not, and is out of
@@ -63,9 +74,12 @@ import { fileURLToPath } from 'node:url';
 
 import {
   EXIT,
+  FIXTURE_DEVICE_ID,
   FixtureError,
   MESSAGES_PER_RUN,
+  RUN_ID_PARAMETER,
   SYNTHETIC_MARKER,
+  buildFixtureMessages,
   classifyError,
   exitLabel,
 } from './fixture-core.mjs';
@@ -463,30 +477,37 @@ describe('MG-67 real @azure/cosmos error shapes classify fail-closed', () => {
 });
 
 // ===========================================================================
-// 5. Real SDK failures AFTER the send — the path where documents are already
-//    live and the record is the only thing that accounts for them.
+// 5. THE EVIDENCE-EMISSION CONTRACT, THROUGH A REAL SDK FAILURE AFTER THE SEND.
 //
 // Everything in sections 3 and 4 fails BEFORE anything is written: the reader
 // could not be built, or the pre-send read was refused. Those runs changed
 // nothing, and an exit code is the whole of what the operator needs.
 //
 // This section is the other half. The send has happened, `az` accepted every
-// message, and the read-back is what fails. MG-53 halts on any source document
-// its recorded set does not account for, and cannot tell such a document from
-// the unknown writer that halt exists to catch — so a run that leaves documents
-// in the container and no artifact behind stops the downstream migration in the
-// one way the operator cannot diagnose. The record is therefore written on
-// failing paths too, and the failure to write it has its own exit code.
+// message, and the read-back is what fails. The contract says there is exactly
+// ONE evidence-emission path and it runs on EVERY outcome, that the record
+// distinguishes four id sets, and that an id once OBSERVED is never discarded by
+// a later failure. MG-53 halts on any source document its recorded set does not
+// account for and cannot tell such a document from the unknown writer that halt
+// exists to catch — so a run that leaves documents in the container and no
+// artifact behind stops the downstream migration in the one way the operator
+// cannot diagnose.
 //
-// Why it belongs in THIS tier rather than the fake one, which already drives
-// these paths with hand-written errors: the error here is a real
-// AggregateAuthenticationError, whose message inlines every inner credential's
-// message across several lines, and it travels further than any error in the
-// fake tier does — through the confirmation result's `reason`, into the evidence
-// record's `outcomeReason`, and onto DISK. A file is a leak surface a log line
-// is not: it outlives the terminal, and MG-53 and MG-54 read it as a program
-// input. Only the real class produces the text that proves the scrub holds
-// there.
+// WHY THESE CASES BELONG IN THIS TIER rather than the fake one, which already
+// sweeps every terminal outcome with hand-written errors:
+//
+//   * The error is a REAL AggregateAuthenticationError or RestError, and it
+//     travels further than any error in the fake tier does — through the
+//     confirmation result's `reason`, into the evidence record's
+//     `outcomeReason`, and onto DISK. A file is a leak surface a log line is
+//     not: it outlives the terminal, and MG-53 and MG-54 read it as a program
+//     input.
+//   * The evidence record's credential guard is FAIL-CLOSED — a
+//     credential-shaped value refuses the entire write. So real error text
+//     reaching `outcomeReason` is not only a leak risk; a scrub that left a
+//     base64-shaped run behind would convert a run with live documents into an
+//     UNRECORDED one. Both halves of that are asserted, and only a real error
+//     produces the multi-line, credential-quoting text that tests it.
 //
 // Still offline: `az` is an injected fake, the reader is injected, and no client
 // is constructed at all.
@@ -501,6 +522,12 @@ const cleanDefinitionText = await readFile(
   'utf8'
 );
 
+// The partition key path container-show-clean.json declares. Written out rather
+// than parsed so that a fixture edited to a different shape breaks these tests
+// loudly instead of quietly rebuilding documents to match it — the tool MEASURES
+// this (HR4); the test asserts against the fixture's known value.
+const MEASURED_PARTITION_FIELD = 'deviceId';
+
 function recordingLog() {
   const info = [];
   const error = [];
@@ -514,20 +541,55 @@ function recordingLog() {
 }
 
 /**
+ * The run id the read-back bound as a query PARAMETER.
+ *
+ * Read out of the query rather than injected through main()'s uuid seam, so the
+ * documents these tests hand back are correlated to the run the tool actually
+ * minted. It doubles as an assertion that the run id never reaches the query as
+ * interpolated text.
+ */
+function runIdFrom(parameters) {
+  const bound = (parameters ?? []).find(parameter => parameter.name === RUN_ID_PARAMETER);
+  assert.ok(
+    typeof bound?.value === 'string' && bound.value !== '',
+    'the read-back must bind this run id as a query parameter'
+  );
+  return bound.value;
+}
+
+/** The documents a healthy route delivers for `runId`, built through the real contract. */
+function deliveredDocuments(runId) {
+  return buildFixtureMessages({
+    runId,
+    partitionKeyField: MEASURED_PARTITION_FIELD,
+    deviceId: FIXTURE_DEVICE_ID,
+    now: () => 1_754_000_000_000,
+  }).map(message => ({ ...message.body, _ts: 1_754_000_000 }));
+}
+
+/**
  * A reader that answers the pre-send read honestly (nothing carries this run's
- * freshly minted correlator) and then throws `error` at every read-back poll.
+ * freshly minted correlator), then serves `pages` to the read-back polls, then
+ * throws `error` at every poll after them.
  *
  * The split matters: throwing on the FIRST query would abort before the send and
  * prove nothing about this section. The documents have to be live before the
- * failure lands.
+ * failure lands. `pages` is how a run gets to OBSERVE something before the abort
+ * — the case the contract exists for.
+ *
+ * @param {object} options
+ * @param {Array<(runId: string) => object[]>} [options.pages] one per poll, in order.
+ * @param {Error} options.error thrown once the pages run out.
  */
-function readerFailingAfterPreflight(error) {
+function readerFailingAfterPreflight({ pages = [], error }) {
   let calls = 0;
   return {
-    queryDocuments: async () => {
+    queryDocuments: async ({ parameters } = {}) => {
       calls += 1;
       if (calls === 1) return [];
-      throw error;
+      const page = pages[calls - 2];
+      if (page === undefined) throw error;
+      return page(runIdFrom(parameters));
     },
   };
 }
@@ -562,11 +624,20 @@ async function withTempDir(body) {
 /**
  * Drive main() end to end with `az` faked, the container definition measured
  * from the real fixture, and the injected reader failing after the send.
+ *
+ * The wait bound is generous by default and the clock is injected, so a run that
+ * needs several polls before its abort reaches the abort rather than the bound;
+ * nothing here sleeps.
  */
-async function runToReadBackFailure({ error, evidenceOut, fs }) {
+async function runToReadBackFailure({
+  error,
+  evidenceOut,
+  fs,
+  pages = [],
+  timeoutMs = 60_000,
+  pollIntervalMs = 250,
+}) {
   const log = recordingLog();
-  // Advancing so the wait bound can actually elapse if a test ever needs it to;
-  // nothing here sleeps.
   let clock = 1_754_000_000_000;
   const exitCode = await main({
     argv: [
@@ -583,11 +654,11 @@ async function runToReadBackFailure({ error, evidenceOut, fs }) {
       '--evidence-out',
       evidenceOut,
       '--timeout',
-      '1000',
+      String(timeoutMs),
       '--poll-interval',
-      '250',
+      String(pollIntervalMs),
     ],
-    createReader: async () => readerFailingAfterPreflight(error),
+    createReader: async () => readerFailingAfterPreflight({ pages, error }),
     spawn: async () => ({ code: 0, stdout: '', stderr: '' }),
     log,
     readFileFn: async () => cleanDefinitionText,
@@ -621,8 +692,78 @@ function leakyRealAuthError() {
   );
 }
 
+/**
+ * The contract's invariants, asserted structurally against a record — the same
+ * checks whatever produced it.
+ *
+ * Written as one helper on purpose. The defect this contract answers appeared
+ * five times on five paths because each path was checked for the symptom it
+ * happened to exhibit; a shared assertion means a new path is either checked
+ * against all of it or not checked at all.
+ */
+function assertContractShape(record, { exit, sets }) {
+  // 1. THE RECORD EXISTS FOR A RUN THAT ATTEMPTED SOMETHING, and names its
+  //    outcome as a code and as a stable slug.
+  assert.equal(record.attempted, true, 'a run that attempted a send is always recorded as such');
+  assert.equal(record.exitCode, exit);
+  assert.equal(record.exitLabel, exitLabel(exit));
+
+  // 2. THE FOUR ID SETS, INDIVIDUALLY. Counts and lists both, so a count that
+  //    drifts from its list is caught rather than trusted.
+  for (const [name, expected] of Object.entries(sets)) {
+    const ids = record[`${name}Ids`];
+    assert.ok(Array.isArray(ids), `${name}Ids must be a list`);
+    assert.equal(ids.length, expected, `${name}Ids`);
+    assert.equal(ids.length, new Set(ids).size, `${name}Ids must not repeat`);
+    assert.equal(record[`${name}Count`], expected, `${name}Count`);
+  }
+
+  // 3. THE UNION A DOWNSTREAM TICKET MUST ACCOUNT FOR — everything that is, or
+  //    may be, in the container. Computed once here rather than left for MG-53
+  //    to assemble out of three fields.
+  assert.deepEqual(
+    [...record.accountableIds].sort(),
+    [...new Set([...record.observedIds, ...record.acceptedIds, ...record.ambiguousIds])].sort(),
+    'accountableIds must be the union of observed, accepted and ambiguous'
+  );
+  assert.equal(record.accountableCount, record.accountableIds.length);
+
+  // 4. CERTAINTY IS NEVER OVERCLAIMED. Nothing short of the full read-back is
+  //    confirmed, and every failing outcome is flagged uncertain.
+  assert.equal(record.confirmed, exit === EXIT.OK, 'only an OK run may be recorded as confirmed');
+  assert.equal(record.uncertain, true, 'a run that did not complete its read-back is uncertain');
+
+  // 5. DIVERGENCE IS WITNESSED, NEVER INFERRED. Every case here observed only
+  //    ids the sender requested — including the ones that observed FEWER than
+  //    they sent, which is a shortfall and not a platform renaming. Asserting
+  //    the latter in the one artifact MG-53 and MG-54 parse mechanically would
+  //    make a downstream ticket act on a claim nobody witnessed.
+  assert.equal(record.idDivergence, false, 'idDivergence must never be inferred from a shortfall');
+  for (const id of record.observedIds) {
+    assert.ok(record.requestedIds.includes(id), `observed id ${id} was never requested`);
+  }
+
+  // 6. The schema-version-1 aliases still name the OBSERVED set, so a consumer
+  //    written against either spelling reads the same documents.
+  assert.deepEqual(record.ids, record.observedIds);
+  assert.equal(record.count, record.observedIds.length);
+  assert.equal(record.expectedCount, MESSAGES_PER_RUN);
+
+  // 7. The synthetic contract and the measured shape are recorded whatever the
+  //    outcome — a failure record MG-53 cannot interpret is not a record.
+  assert.equal(record.marker.value, SYNTHETIC_MARKER);
+  assert.equal(record.partitionKeyField, MEASURED_PARTITION_FIELD);
+  assert.equal(record.measuredDefaultTtl, 604_800);
+  assert.equal(typeof record.runInstant, 'string');
+  assert.equal(
+    typeof record.waitBoundMs,
+    'number',
+    'the wait bound used is reported on every path'
+  );
+}
+
 describe('MG-67 a real SDK failure after the send still records the run', () => {
-  it('writes the evidence artifact for an UNCONFIRMED run and exits the read-back failure code, not OK', async () => {
+  it('an AUTH abort with nothing observed records four correct id sets and exits AUTH, not OK', async () => {
     await withTempDir(async dir => {
       const evidenceOut = path.join(dir, 'evidence.json');
       const { exitCode, log } = await runToReadBackFailure({
@@ -636,20 +777,67 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
       assert.notEqual(exitCode, EXIT.OK, 'an unread-back run is never a success');
       assert.notEqual(exitCode, EXIT.TIMEOUT, 'an auth failure is never a timeout');
 
-      // The artifact exists, and it records what is LIVE — the ids az accepted —
-      // while claiming nothing was observed.
       const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
-      assert.equal(record.confirmed, false);
-      assert.equal(record.exitCode, EXIT.AUTH);
-      assert.equal(record.requestedIds.length, MESSAGES_PER_RUN);
+      // az accepted all three and the read-back saw none of them: three
+      // documents are LIVE and unobserved, which is exactly what the record has
+      // to say and exactly what "nothing was written" would get wrong.
+      assertContractShape(record, {
+        exit: EXIT.AUTH,
+        sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 0 },
+      });
+      assert.equal(record.outcome, 'auth-failure');
       assert.deepEqual(record.requestedIds, sentIdsFrom(log), 'the record must name what was sent');
-      assert.equal(
-        record.count,
-        0,
-        'nothing was read back, so nothing may be recorded as observed'
-      );
-      assert.deepEqual(record.ids, []);
-      assert.equal(record.marker.value, SYNTHETIC_MARKER);
+    });
+  });
+
+  it('keeps ids it already OBSERVED when a real AggregateAuthenticationError aborts the run', async () => {
+    // THE CASE THE CONTRACT EXISTS FOR, against the real error class. Two
+    // documents are read back, and THEN the credential fails. An id once
+    // observed is never discarded by a later failure: the auth abort changes the
+    // outcome, not the history. Dropping them here would tell MG-53 that two
+    // documents in the source container are unaccounted for — indistinguishable,
+    // from where it stands, from the unknown writer it halts on.
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const { exitCode } = await runToReadBackFailure({
+        error: leakyRealAuthError(),
+        evidenceOut,
+        pages: [runId => deliveredDocuments(runId).slice(0, 2)],
+      });
+
+      assert.equal(exitCode, EXIT.AUTH);
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assertContractShape(record, {
+        exit: EXIT.AUTH,
+        sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 2 },
+      });
+      // Named, not merely counted: MG-54 deletes by these ids.
+      assert.deepEqual(record.observedIds, [`${record.runId}-1`, `${record.runId}-2`]);
+      assert.equal(record.accountableCount, 3, 'the third document is live and unobserved');
+    });
+  });
+
+  it('keeps ids it already OBSERVED when a real RestError exhausts the transport budget', async () => {
+    // The same clause on the other abort. TRANSPORT and AUTH are never collapsed
+    // into one another, and neither of them may quietly become an absence.
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const { exitCode } = await runToReadBackFailure({
+        error: new cosmos.RestError('read ECONNRESET', { code: 'ECONNRESET' }),
+        evidenceOut,
+        pages: [runId => deliveredDocuments(runId).slice(0, 1)],
+      });
+
+      assert.equal(exitCode, EXIT.TRANSPORT);
+      assert.notEqual(exitCode, EXIT.AUTH, 'a reset connection is not a credential problem');
+      assert.notEqual(exitCode, EXIT.TIMEOUT, 'retries exhausted is not the bound elapsing');
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assertContractShape(record, {
+        exit: EXIT.TRANSPORT,
+        sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 1 },
+      });
+      assert.equal(record.outcome, 'transport-abort');
+      assert.deepEqual(record.observedIds, [`${record.runId}-1`]);
     });
   });
 
@@ -662,17 +850,58 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
       // vector it was written for and must be re-derived, not deleted.
       assert.ok(error.message.includes(PLANTED.accountKey));
 
-      const { exitCode, log } = await runToReadBackFailure({ error, evidenceOut });
+      const { exitCode, log } = await runToReadBackFailure({
+        error,
+        evidenceOut,
+        pages: [runId => deliveredDocuments(runId).slice(0, 2)],
+      });
       assert.equal(exitCode, EXIT.AUTH);
 
       // The raw bytes, not the parsed record: a secret in a key name, a nested
       // field or a string this tier did not think to look at is still on disk.
       const raw = await readFile(evidenceOut, 'utf8');
       assertNoPlantedSecret(raw, 'the evidence artifact');
+      const record = JSON.parse(raw);
       // outcomeReason is the field the real error's text actually travels in, so
       // the scrub is asserted where it is load-bearing and not only file-wide.
-      assertNoPlantedSecret(JSON.parse(raw).outcomeReason, 'the evidence record outcomeReason');
+      assertNoPlantedSecret(record.outcomeReason, 'the evidence record outcomeReason');
+      // All FOUR id sets, individually: the guard walks the record structurally
+      // and the contract gave it three more lists to walk than it once had.
+      for (const key of ['requestedIds', 'acceptedIds', 'ambiguousIds', 'observedIds']) {
+        assertNoPlantedSecret(record[key].join(' '), `the evidence record ${key}`);
+      }
       assertNoPlantedSecret(log.all(), 'the operator-facing output of a recorded failure');
+    });
+  });
+
+  it('still WRITES the record when the real error reaches it: a fail-closed guard must not unrecord a live run', async () => {
+    // The other half of the guard, and the reason a real error is worth testing
+    // against. assertNoCredentialShape REFUSES the write on a credential-shaped
+    // value — so a scrub that let a base64-shaped run through would not leak, it
+    // would turn a run with two live, observed documents into an UNRECORDED one.
+    // That is the worse of the two failures: the leak is caught above, and this
+    // asserts the record survives the same input.
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      const { exitCode } = await runToReadBackFailure({
+        error: leakyRealAuthError(),
+        evidenceOut,
+        pages: [runId => deliveredDocuments(runId).slice(0, 2)],
+      });
+
+      assert.equal(
+        exitCode,
+        EXIT.AUTH,
+        'the record was written, so the run keeps its own diagnosis rather than becoming EVIDENCE_UNRECORDED'
+      );
+      assert.notEqual(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assert.equal(record.observedCount, 2, 'the documents the run did read back are on disk');
+      assert.notEqual(
+        record.outcomeReason,
+        '',
+        'the diagnosis survives the scrub, in scrubbed form'
+      );
     });
   });
 
@@ -682,6 +911,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
         error: leakyRealAuthError(),
         evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
         fs: failingFs(),
+        pages: [runId => deliveredDocuments(runId).slice(0, 2)],
       });
 
       // USAGE means "bad arguments, nothing live happened". Three documents are
@@ -698,7 +928,17 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
 
       const output = log.all();
       assert.match(output, /EVIDENCE NOT RECORDED/);
-      assert.match(output, /MAY BE in/, 'an unconfirmed run cannot claim the documents exist');
+      // The two id sets are reported SEPARATELY and in the right words: what was
+      // observed is in the container, and what az merely accepted may be. A line
+      // that flattened them would be this tool guessing on the operator's behalf.
+      assert.match(output, /2 document\(s\) ARE in/);
+      assert.match(output, /1 document\(s\) MAY BE in/);
+      // Never the sentence the contract exists to delete.
+      assert.equal(
+        /nothing was written/i.test(output),
+        false,
+        'no output may claim nothing was written once a send has been attempted'
+      );
       // The confirmation's own outcome is still on the lines above, so the
       // diagnosis is not lost — only the code the operator scripts against.
       // Substring, not a regex: exit labels are prose and one of them already
