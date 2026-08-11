@@ -55,6 +55,7 @@ import {
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
   buildFixtureMessages,
+  createRunLedger,
   newRunId,
 } from './fixture-core.mjs';
 import {
@@ -206,6 +207,7 @@ async function runMain({
   definition = 'container-show-clean.json',
   readerSpec = {},
   spawnSpec = {},
+  spawn: spawnOverride,
   createReader,
   timeoutMs = 1000,
   pollIntervalMs = 250,
@@ -215,7 +217,9 @@ async function runMain({
   const log = recordingLog();
   const clock = fakeClock({ start: RUN_MILLIS });
   const reader = fakeReader(readerSpec);
-  const spawn = fakeAzSpawn(spawnSpec);
+  // The override is for the one case a scripted az cannot express: the spawn
+  // itself failing, before any child exists to have an exit code.
+  const spawn = spawnOverride ?? fakeAzSpawn(spawnSpec);
   const definitionText =
     typeof definition === 'string' ? await readFixture(definition) : definition;
   const readerCalls = [];
@@ -459,63 +463,108 @@ describe('sendMessages', () => {
     now: () => RUN_MILLIS,
   });
 
-  it('spawns az once per message, always as an argv array', async () => {
-    const spawn = fakeAzSpawn({});
-    const log = recordingLog();
-    const ids = await sendMessages({
+  const send = (spawn, ledger = createRunLedger({ runId: RUN_ID })) => ({
+    ledger,
+    promise: sendMessages({
       messages,
       hub: HUB,
       device: FIXTURE_DEVICE_ID,
       spawn,
-      log,
-    });
+      ledger,
+      log: recordingLog(),
+    }),
+  });
+
+  it('spawns az once per message, always as an argv array', async () => {
+    const spawn = fakeAzSpawn({});
+    const { ledger, promise } = send(spawn);
+    const ids = await promise;
     assert.equal(spawn.calls.length, MESSAGES_PER_RUN);
     assert.equal(ids.length, MESSAGES_PER_RUN);
     for (const call of spawn.calls) {
       assert.equal(call.command, AZ_COMMAND);
       assert.ok(Array.isArray(call.argv));
     }
+    const snapshot = ledger.snapshot();
+    assert.equal(snapshot.requestedIds.length, MESSAGES_PER_RUN);
+    assert.equal(snapshot.acceptedIds.length, MESSAGES_PER_RUN);
+    assert.deepEqual([...snapshot.ambiguousIds], []);
+  });
+
+  // The ledger is the whole contract, so sending without one is refused rather
+  // than allowed to produce a document the run cannot afterwards account for.
+  it('refuses to send at all without a ledger to account for the attempts', async () => {
+    const spawn = fakeAzSpawn({});
+    await assert.rejects(
+      () =>
+        sendMessages({
+          messages,
+          hub: HUB,
+          device: FIXTURE_DEVICE_ID,
+          spawn,
+          log: recordingLog(),
+        }),
+      err => {
+        assert.equal(err.exitCode, EXIT.USAGE);
+        return true;
+      }
+    );
+    assert.equal(spawn.calls.length, 0, 'nothing may be sent before it can be recorded');
   });
 
   it('aborts the whole run on the first nonzero az exit rather than sending on', async () => {
     const spawn = fakeAzSpawn({ script: [{ code: 0 }, { code: 1, stderr: 'ERROR: nope' }] });
-    const log = recordingLog();
-    const error = await assert.rejects(
-      () => sendMessages({ messages, hub: HUB, device: FIXTURE_DEVICE_ID, spawn, log }),
-      FixtureError
-    );
+    const { ledger, promise } = send(spawn);
+    await assert.rejects(() => promise, FixtureError);
     assert.equal(spawn.calls.length, 2, 'the third message must not be sent after a failure');
-    return error;
+    // Two attempted, and the third was never attempted so it is not recorded as
+    // anything: an id for a message that does not exist would be a fabrication.
+    const snapshot = ledger.snapshot();
+    assert.equal(snapshot.requestedIds.length, 2);
+    assert.equal(snapshot.acceptedIds.length, 1);
+    assert.equal(snapshot.ambiguousIds.length, 1);
+    assert.equal(snapshot.uncertain, true);
   });
 
-  it('names the device, the hub and the outcome when az fails', async () => {
+  // The crux: az exiting nonzero does NOT establish that the hub rejected the
+  // message. The CLI can fail after IoT Hub took it, so the id is UNKNOWN, and
+  // nothing on this path may say it was not written.
+  it('records a failed message as of UNKNOWN acceptance, never as not-sent', async () => {
     const spawn = fakeAzSpawn({ script: [{ code: 3, stderr: LEAKY_AZ_STDERR }] });
-    const log = recordingLog();
-    await assert.rejects(
-      () => sendMessages({ messages, hub: HUB, device: FIXTURE_DEVICE_ID, spawn, log }),
-      err => {
-        assert.equal(err.exitCode, EXIT.SEND_FAILURE);
-        assert.ok(err.message.includes(FIXTURE_DEVICE_ID));
-        assert.ok(err.message.includes(HUB));
-        assertNoPlantedSecret(err.message, 'sendMessages az-failure message');
-        return true;
-      }
-    );
+    const { ledger, promise } = send(spawn);
+    await assert.rejects(promise, err => {
+      assert.equal(err.exitCode, EXIT.SEND_FAILURE);
+      assert.ok(err.message.includes(FIXTURE_DEVICE_ID));
+      assert.ok(err.message.includes(HUB));
+      assert.match(err.message, /UNKNOWN/);
+      assert.equal(
+        /nothing was written|no message had been accepted|was not written/i.test(err.message),
+        false,
+        'an az failure must never be reported as a known absence'
+      );
+      assertNoPlantedSecret(err.message, 'sendMessages az-failure message');
+      return true;
+    });
+    const snapshot = ledger.snapshot();
+    assert.deepEqual([...snapshot.ambiguousIds], [messages[0].body.id]);
+    assert.deepEqual([...snapshot.acceptedIds], []);
   });
 
-  it('reports a spawn failure as a send failure, not as an absence', async () => {
+  it('reports a spawn failure as a send failure of UNKNOWN acceptance, not as an absence', async () => {
     const spawn = async () => {
       throw Object.assign(new Error('spawn az ENOENT'), { code: 'ENOENT' });
     };
-    await assert.rejects(
-      () =>
-        sendMessages({ messages, hub: HUB, device: FIXTURE_DEVICE_ID, spawn, log: recordingLog() }),
-      err => {
-        assert.equal(err.exitCode, EXIT.SEND_FAILURE);
-        assert.match(err.message, /azure-iot/);
-        return true;
-      }
-    );
+    const { ledger, promise } = send(spawn);
+    await assert.rejects(promise, err => {
+      assert.equal(err.exitCode, EXIT.SEND_FAILURE);
+      assert.match(err.message, /azure-iot/);
+      assert.match(err.message, /UNKNOWN/);
+      return true;
+    });
+    // Even a process that may never have run leaves the id UNKNOWN: this tool
+    // cannot tell "never spawned" from "spawned and unreapable", and guessing
+    // the convenient one is how a document goes unaccounted for.
+    assert.equal(ledger.snapshot().ambiguousIds.length, 1);
   });
 });
 
@@ -785,18 +834,34 @@ describe('main: every failure class exits with its own code and claims nothing',
       assert.ok(output.includes(HUB), 'output must name the hub');
       assert.match(output, /send failure/);
       assertNoPlantedSecret(output, 'main send-failure output');
-      // The FIRST message failed, so nothing was accepted and there is nothing
-      // to account for. Absence of a record here is the honest answer.
-      assert.deepEqual(await readdir(dir), []);
+
+      // The FIRST message failed — and that is NOT "nothing was written". az can
+      // exit nonzero after IoT Hub took the message, so message 1 is one
+      // document of unknown fate and the run owes an evidence record for it.
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assert.equal(record.attempted, true);
+      assert.equal(record.uncertain, true);
+      assert.equal(record.requestedCount, 1);
+      assert.deepEqual(record.acceptedIds, []);
+      assert.equal(record.ambiguousCount, 1);
+      assert.deepEqual(record.observedIds, []);
+      assert.equal(record.confirmed, false);
+      assert.equal(record.exitCode, EXIT.SEND_FAILURE);
+      assert.ok(record.findings.some(f => f.kind === 'ambiguous-acceptance'));
+      assert.equal(
+        /nothing was written|no message had been accepted/i.test(output),
+        false,
+        'the run must never assert that nothing was written'
+      );
     });
   });
 
   // The partial send. az accepted message 1 and failed on message 2, so ONE
-  // document is on its way to the live container — and unwinding past the
-  // evidence write would leave it there with nothing accounting for it. MG-53
-  // halts on exactly that, and cannot tell it apart from the unknown writer its
-  // halt exists to catch.
-  it('a partial send RECORDS the ids that already landed before exiting SEND_FAILURE', async () => {
+  // document is on its way to the live container and a SECOND may be — and
+  // unwinding past the evidence write would leave both with nothing accounting
+  // for them. MG-53 halts on exactly that, and cannot tell it apart from the
+  // unknown writer its halt exists to catch.
+  it('a partial send records the accepted id AND the unknown one before exiting SEND_FAILURE', async () => {
     await withTempDir(async dir => {
       const evidenceOut = path.join(dir, 'evidence.json');
       const { exitCode, log, spawn } = await runMain({
@@ -811,23 +876,31 @@ describe('main: every failure class exits with its own code and claims nothing',
       const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
       assert.equal(record.confirmed, false);
       assert.equal(record.exitCode, EXIT.SEND_FAILURE);
-      // The one message az accepted, recorded by id. This is the whole point.
-      assert.equal(record.requestedIds.length, 1);
-      assert.equal(record.requestedCount, 1);
-      assert.ok(record.requestedIds[0].includes(RUN_ID));
+      // Two attempted: one az reported success for, one whose acceptance nobody
+      // knows. The third was never attempted, so no id is recorded for it.
+      assert.equal(record.requestedCount, 2);
+      assert.deepEqual(record.acceptedIds, [`${RUN_ID}-1`]);
+      assert.deepEqual(record.ambiguousIds, [`${RUN_ID}-2`]);
+      // Both must be accounted for downstream, whatever their acceptance.
+      assert.deepEqual(record.accountableIds, [`${RUN_ID}-1`, `${RUN_ID}-2`]);
       // Nothing was read back, and the record says so rather than implying an
       // absence: no read-back was ever attempted.
       assert.deepEqual(record.ids, []);
       assert.equal(record.count, 0);
       assert.equal(record.scope, 'not-attempted');
+      assert.equal(record.uncertain, true);
       assert.ok(record.findings.some(f => f.kind === 'unconfirmed-run'));
+      assert.ok(record.findings.some(f => f.kind === 'ambiguous-acceptance'));
       assert.equal(record.expectedCount, MESSAGES_PER_RUN);
+      // Never inferred from the shortfall: no observed id diverged because no
+      // document was observed at all.
+      assert.equal(record.idDivergence, false);
 
       const output = log.all();
       // The id is in the terminal too, so a run killed before the write still
       // leaves a record the operator can act on.
-      assert.ok(output.includes(record.requestedIds[0]), 'the sent id must be logged');
-      assert.match(output, /recording what WAS sent/);
+      assert.ok(output.includes(`${RUN_ID}-1`), 'the sent id must be logged');
+      assert.match(output, /recording every id this run attempted/);
       assertNoPlantedSecret(output, 'main partial-send output');
     });
   });
@@ -1237,6 +1310,296 @@ describe('main: every failure class exits with its own code and claims nothing',
       assert.ok(help.includes(topic), `--help does not mention ${topic}`);
     }
     assert.equal(help.includes('--debug'), false, '--help must not suggest a verbosity flag');
+  });
+
+  // The temporary Cosmos data-plane grant is a DESTRUCTIVE step on shared live
+  // infrastructure when it is undone: the operator's principal may already hold
+  // a Data Reader assignment somebody else's work depends on, and a
+  // list-and-match removal can delete THAT one instead of the one this run
+  // created. So the instructions must capture the assignment id at creation and
+  // remove exactly it — and must say what to do when the id is not available,
+  // which is stop, not guess.
+  it('--help removes the temporary role assignment BY ID and refuses to guess', async () => {
+    const log = recordingLog();
+    assert.equal(await main({ argv: ['--help'], log }), EXIT.OK);
+    const help = log.all();
+    assert.match(help, /role assignment create/);
+    assert.match(help, /--query id -o tsv/, 'the assignment id must be captured at creation');
+    assert.match(help, /role assignment delete/, 'removal is a documented step, not cleanup');
+    assert.match(help, /--role-assignment-id/, 'the removal targets the id, not a name match');
+    assert.match(help, /NEVER BY A NAME OR PRINCIPAL MATCH/);
+    assert.match(help, /STOP and report rather than guessing/);
+  });
+});
+
+// ===========================================================================
+// THE EVIDENCE-EMISSION CONTRACT.
+//
+// The tests above pin the exit CODE of each outcome one at a time. This suite
+// pins the property they share, across EVERY terminal outcome the tool can
+// produce at once — because the defect it answers was never one path. It was
+// the same sentence on five paths ("a later error discards ids the tool already
+// knew"), each individually repairable where it appeared, which is the signature
+// of a missing contract rather than of five bugs. A per-path test leaves the
+// sixth path to whoever adds it; this table does not.
+//
+// For each outcome: a record EXISTS whenever anything was attempted, and its
+// four id sets are individually correct.
+//
+//   requested  attempted — never an id for a message the run never got to.
+//   accepted   az reported success.
+//   ambiguous  az reported failure, acceptance UNKNOWN. Never "not written".
+//   observed   read back out of Cosmos, and never discarded by a later abort.
+// ===========================================================================
+
+describe('the evidence-emission contract holds on every terminal outcome', () => {
+  const unmarkedDocuments = () =>
+    deliveredDocuments().map(doc => {
+      const copy = { ...doc };
+      delete copy[SYNTHETIC_MARKER_FIELD];
+      return copy;
+    });
+
+  // Every outcome this tool can reach that ATTEMPTED a send. The four counts are
+  // spelled out per case rather than derived, so a change in behaviour has to be
+  // argued for in this table instead of quietly absorbed by a helper.
+  const OUTCOMES = [
+    {
+      label: 'confirmed',
+      readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      exit: EXIT.OK,
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 3 },
+      uncertain: false,
+    },
+    {
+      label: 'az fails on message 1 of 3',
+      readerSpec: { script: [{ docs: [] }] },
+      spawnSpec: { script: [{ code: 1, stderr: LEAKY_AZ_STDERR }] },
+      exit: EXIT.SEND_FAILURE,
+      // ONE attempted, of unknown acceptance. Not "nothing was written".
+      sets: { requested: 1, accepted: 0, ambiguous: 1, observed: 0 },
+    },
+    {
+      label: 'az fails on message 2 of 3',
+      readerSpec: { script: [{ docs: [] }] },
+      spawnSpec: { script: [{ code: 0 }, { code: 1 }] },
+      exit: EXIT.SEND_FAILURE,
+      sets: { requested: 2, accepted: 1, ambiguous: 1, observed: 0 },
+    },
+    {
+      label: 'the spawn itself fails',
+      readerSpec: { script: [{ docs: [] }] },
+      spawn: async () => {
+        throw Object.assign(new Error('spawn az ENOENT'), { code: 'ENOENT' });
+      },
+      exit: EXIT.SEND_FAILURE,
+      sets: { requested: 1, accepted: 0, ambiguous: 1, observed: 0 },
+    },
+    {
+      label: 'the confirmation times out',
+      readerSpec: { script: [{ docs: [] }], fallback: { docs: [] } },
+      exit: EXIT.TIMEOUT,
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 0 },
+    },
+    {
+      label: 'a 401 aborts the confirmation',
+      readerSpec: { script: [{ docs: [] }, { error: authError() }] },
+      exit: EXIT.AUTH,
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 0 },
+    },
+    {
+      // THE CASE THE CONTRACT EXISTS FOR. Two documents are read back, and THEN
+      // the run aborts on a 403. Once an id has been observed it is never
+      // discarded by a subsequent failure — the auth abort changes the outcome,
+      // not the history.
+      label: 'two documents are observed and THEN a 403 aborts the run',
+      readerSpec: {
+        script: [
+          { docs: [] },
+          { docs: deliveredDocuments().slice(0, 2) },
+          { error: forbiddenError() },
+        ],
+      },
+      exit: EXIT.AUTH,
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 2 },
+    },
+    {
+      label: 'a transport failure exhausts its retries',
+      readerSpec: { script: [{ docs: [] }], fallback: { error: transportError() } },
+      exit: EXIT.TRANSPORT,
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 0 },
+    },
+    {
+      label: 'a document comes back without the marker',
+      readerSpec: { script: [{ docs: [] }, { docs: unmarkedDocuments() }] },
+      exit: EXIT.MARKER_VIOLATION,
+      // Observed stays EMPTY: an unmarked document is not one of this run's, and
+      // counting it would tell MG-53 that a document it must halt on is
+      // accounted for.
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 0 },
+    },
+    {
+      label: 'an incomplete read-back at the bound',
+      readerSpec: { script: [{ docs: [] }], fallback: { docs: deliveredDocuments().slice(0, 2) } },
+      exit: EXIT.AMBIGUOUS,
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 2 },
+    },
+    {
+      label: 'the documents land outside the expected partition',
+      readerSpec: {
+        script: [
+          { docs: [] },
+          { docs: [] },
+          { docs: [] },
+          { docs: deliveredDocuments(RUN_ID, { deviceId: 'some-other-partition' }) },
+        ],
+      },
+      timeoutMs: 1,
+      pollIntervalMs: 1,
+      exit: EXIT.UNEXPECTED_PARTITION,
+      sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 3 },
+    },
+  ];
+
+  for (const outcome of OUTCOMES) {
+    it(`${outcome.label}: a record exists and its four id sets are correct`, async () => {
+      await withTempDir(async dir => {
+        const evidenceOut = path.join(dir, 'evidence.json');
+        const { exitCode } = await runMain({
+          evidenceOut,
+          readerSpec: outcome.readerSpec,
+          spawnSpec: outcome.spawnSpec ?? {},
+          ...(outcome.spawn ? { spawn: outcome.spawn } : {}),
+          ...(outcome.timeoutMs ? { timeoutMs: outcome.timeoutMs } : {}),
+          ...(outcome.pollIntervalMs ? { pollIntervalMs: outcome.pollIntervalMs } : {}),
+        });
+        assert.equal(exitCode, outcome.exit, 'the outcome is the one this case set up');
+
+        // 1. THE RECORD EXISTS. Every one of these attempted a send.
+        const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+        assert.equal(record.attempted, true);
+        assert.equal(record.exitCode, outcome.exit);
+
+        // 2. THE FOUR SETS, INDIVIDUALLY.
+        assert.equal(record.requestedCount, outcome.sets.requested, 'requestedIds');
+        assert.equal(record.acceptedCount, outcome.sets.accepted, 'acceptedIds');
+        assert.equal(record.ambiguousCount, outcome.sets.ambiguous, 'ambiguousIds');
+        assert.equal(record.observedCount, outcome.sets.observed, 'observedIds');
+        for (const key of ['requestedIds', 'acceptedIds', 'ambiguousIds', 'observedIds']) {
+          assert.ok(Array.isArray(record[key]), `${key} must be a list`);
+          assert.equal(record[key].length, new Set(record[key]).size, `${key} must not repeat`);
+        }
+        // Everything that is or may be in the container, unioned for MG-53.
+        assert.equal(
+          record.accountableCount,
+          new Set([...record.observedIds, ...record.acceptedIds, ...record.ambiguousIds]).size
+        );
+
+        // 3. CERTAINTY IS NEVER OVERCLAIMED.
+        assert.equal(record.uncertain, outcome.uncertain ?? true);
+        assert.equal(record.confirmed, outcome.exit === EXIT.OK);
+
+        // 4. DIVERGENCE IS WITNESSED, NEVER INFERRED. Every one of these cases
+        // observed only ids the sender requested — including the two that
+        // observed FEWER than they sent, which is a shortfall and not a renaming.
+        assert.equal(record.idDivergence, false);
+      });
+    });
+  }
+
+  // The negative half of rule 1, stated as its own test because it is the
+  // sentence the contract was written to delete: an error is never reported as a
+  // known absence. This is the MG-66 conflation on the WRITE side.
+  it('never asserts that nothing was written, on any outcome that attempted a send', async () => {
+    for (const outcome of OUTCOMES) {
+      await withTempDir(async dir => {
+        const { log } = await runMain({
+          evidenceOut: path.join(dir, 'evidence.json'),
+          readerSpec: outcome.readerSpec,
+          spawnSpec: outcome.spawnSpec ?? {},
+          ...(outcome.spawn ? { spawn: outcome.spawn } : {}),
+          ...(outcome.timeoutMs ? { timeoutMs: outcome.timeoutMs } : {}),
+          ...(outcome.pollIntervalMs ? { pollIntervalMs: outcome.pollIntervalMs } : {}),
+        });
+        const output = log.all();
+        for (const claim of [
+          /nothing was written/i,
+          /no message had been accepted/i,
+          /no document (was|were) written/i,
+        ]) {
+          assert.equal(claim.test(output), false, `${outcome.label} claimed ${claim}`);
+        }
+        assertNoPlantedSecret(output, `${outcome.label} output`);
+      });
+    }
+  });
+
+  // The one case that may exit without a record: a run that refused BEFORE its
+  // first attempt. Here "nothing was written" is a fact about the run rather
+  // than a guess about the hub, and an artifact would be a claim about a
+  // container this run never touched.
+  const PRE_ATTEMPT_REFUSALS = [
+    [
+      'a refused pre-send read',
+      { readerSpec: { script: [{ error: forbiddenError() }] } },
+      EXIT.AUTH,
+    ],
+    [
+      'an unmeasurable container',
+      { definition: 'container-show-malformed.json', readerSpec: { script: [{ docs: [] }] } },
+      EXIT.CONTAINER_DEFINITION,
+    ],
+  ];
+
+  for (const [label, options, expected] of PRE_ATTEMPT_REFUSALS) {
+    it(`${label} exits without a record, having attempted nothing`, async () => {
+      await withTempDir(async dir => {
+        const { exitCode, spawn } = await runMain({
+          evidenceOut: path.join(dir, 'evidence.json'),
+          ...options,
+        });
+        assert.equal(exitCode, expected);
+        assert.equal(spawn.calls.length, 0, 'nothing was attempted');
+        assert.deepEqual(await readdir(dir), [], 'so there is nothing to account for');
+      });
+    });
+  }
+
+  // Observation survives the write failure too: the ids the read-back saw are on
+  // stderr as "ARE in", and the ones only sent are "MAY BE in". Both are named,
+  // and neither is dropped because the other exists.
+  it('an abort after a partial observation still names the observed ids on the unrecorded path', async () => {
+    await withTempDir(async dir => {
+      const { exitCode, log } = await runMain({
+        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        readerSpec: {
+          script: [
+            { docs: [] },
+            { docs: deliveredDocuments().slice(0, 2) },
+            { error: forbiddenError() },
+          ],
+        },
+        fs: {
+          stat: async () => {
+            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          },
+          writeFile: async () => {
+            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          },
+          rename: async () => {},
+          rm: async () => {},
+        },
+      });
+
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      const output = log.all();
+      const [seen1, seen2, unseen] = deliveredDocuments().map(doc => doc.id);
+      assert.match(output, /ARE in/);
+      assert.match(output, /MAY BE in/);
+      for (const id of [seen1, seen2, unseen]) {
+        assert.ok(output.includes(id), `the output must name ${id}`);
+      }
+    });
   });
 });
 

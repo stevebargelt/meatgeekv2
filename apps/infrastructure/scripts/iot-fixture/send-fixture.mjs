@@ -71,16 +71,53 @@
 //   3. It proves the read path works, so a later absence is a fact about the
 //      route rather than about the reader.
 //
-// EVERY DOCUMENT THIS TOOL CAUSES TO EXIST IS RECORDED, INCLUDING ON THE
-// FAILURE PATHS. A partial send — `az` succeeding on message 1 and failing on
-// message 2 — has changed the live system, and the ids it managed to send are
-// written to the evidence artifact BEFORE the run exits nonzero. An evidence
-// write that itself fails after a send has happened is its own exit code (10),
-// never USAGE, and prints the ids so the operator can record them by hand.
-// MG-53 halts on any source document its recorded set does not account for, and
-// cannot tell such a document apart from the unknown-writer finding that halt
-// exists to catch; so "documents landed and nothing recorded them" is the one
-// outcome this tool must never produce quietly.
+// ---------------------------------------------------------------------------
+// THE EVIDENCE-EMISSION CONTRACT. One path, every outcome.
+// ---------------------------------------------------------------------------
+//
+// There is exactly ONE place in this file that emits an evidence record, and it
+// runs on EVERY outcome — confirmed, timeout, auth, transport, marker violation,
+// ambiguity, send failure. No exit path bypasses it. A record is emitted
+// whenever ANY message was ATTEMPTED; only a run that refused before its first
+// attempt (bad arguments, an unmeasurable container, a refused pre-send read)
+// exits without one.
+//
+// That is deliberately not a list of special cases. The same defect kept
+// reappearing on newly reachable paths — a later error discarding ids the tool
+// already knew — and each instance was individually repairable where it
+// appeared. That is a missing contract, not a bug, so the contract lives in
+// fixture-core (createRunLedger, the four id sets) and this file threads ONE
+// ledger through the run and hands it to ONE emitter. A path added later
+// inherits the behaviour by passing through the same funnel rather than by its
+// author remembering to.
+//
+// WHAT THE RUN KNOWS, in four sets that are not interchangeable:
+//   requestedIds  attempted. Recorded at the moment the attempt begins.
+//   acceptedIds   az reported success.
+//   ambiguousIds  az reported FAILURE and acceptance is UNKNOWN — the CLI can
+//                 fail AFTER IoT Hub took the message, so a send failure is
+//                 ambiguous BY CONSTRUCTION.
+//   observedIds   read back out of Cosmos. Monotonic: once observed, never
+//                 discarded by a later failure.
+//
+// TWO THINGS THIS FILE MAY NEVER SAY:
+//   1. That NOTHING WAS WRITTEN, when anything was attempted. "az failed on
+//      message 1 of 3" is not "no document exists"; it is one document of
+//      unknown fate. Reporting the second is an error dressed as a known
+//      absence — the MG-66 conflation, on the write side.
+//   2. That ids DIVERGED, on anything but a witnessed observation. Divergence is
+//      an observed id the sender did not request. It is never inferred from a
+//      count shortfall: asserting a platform renaming nobody saw, in the one
+//      artifact MG-53 and MG-54 parse mechanically, makes a downstream ticket
+//      act on a fabricated claim. fixture-core owns that judgement
+//      (observedIdsDiverge) so producer and consumer cannot disagree.
+//
+// An evidence write that itself fails after a send has happened is its own exit
+// code (10), never USAGE, and prints the ids so the operator can record them by
+// hand. MG-53 halts on any source document its recorded set does not account
+// for, and cannot tell such a document apart from the unknown-writer finding
+// that halt exists to catch; so "documents landed and nothing recorded them" is
+// the one outcome this tool must never produce quietly.
 //
 // EXIT CODES (fixture-core owns the vocabulary; every class is distinct):
 //   0 confirmed-in-cosmos          5 transport abort
@@ -118,11 +155,15 @@ import {
   buildFixtureMessages,
   classifyError,
   confirmArrival,
+  createRunLedger,
   defaultLog,
   describeConfirmation,
   describeError,
+  describeIdSets,
   exitLabel,
   formatD2cProperties,
+  mergeIds,
+  mustEmitEvidence,
   newRunId,
   scrubChildOutput,
   scrubSecrets,
@@ -199,6 +240,15 @@ EVIDENCE (HR3 — recorded, machine-readable)
                                existing file unless --overwrite is passed: that
                                file records an earlier run whose documents are
                                still in the container.
+
+                               WRITTEN ON EVERY OUTCOME, not just on success. Any
+                               run that ATTEMPTED a send emits one, and it carries
+                               four separate id sets: attempted, accepted by IoT
+                               Hub, of UNKNOWN acceptance (az failed, which can
+                               happen after the hub took the message), and read
+                               back out of Cosmos. A failure record is never
+                               readable as proof — confirmed stays false — and it
+                               never claims that nothing was written.
   --overwrite                  Replace an existing --evidence-out file.
 
 AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
@@ -215,13 +265,30 @@ AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
 
              Cosmos DATA-PLANE access is not granted by control-plane RBAC:
              Subscription Owner alone gets a 403 here. Grant yourself the
-             built-in Data Reader at ACCOUNT scope, and REMOVE it afterwards:
+             built-in Data Reader at ACCOUNT scope, CAPTURE THE ASSIGNMENT ID
+             the create returns, and remove it afterwards BY THAT ID:
 
-               az cosmosdb sql role assignment create \\
+               MG67_ROLE_ASSIGNMENT_ID=$(az cosmosdb sql role assignment create \\
                  --account-name <account> -g <resource-group> \\
                  --role-definition-id 00000000-0000-0000-0000-000000000001 \\
                  --principal-id "$(az ad signed-in-user show --query id -o tsv)" \\
-                 --scope "/"
+                 --scope "/" --query id -o tsv)
+               echo "$MG67_ROLE_ASSIGNMENT_ID"   # record this in the ticket NOW
+
+               # ...run this tool... then remove EXACTLY what was created:
+               az cosmosdb sql role assignment delete \\
+                 --account-name <account> -g <resource-group> \\
+                 --role-assignment-id "$MG67_ROLE_ASSIGNMENT_ID" --yes
+
+             REMOVE BY ASSIGNMENT ID, NEVER BY A NAME OR PRINCIPAL MATCH. This
+             account is shared live infrastructure and your principal may
+             already hold a Data Reader assignment somebody else's work depends
+             on; a list-and-match removal can delete THAT one instead of the one
+             this run created, silently revoking access nobody asked you to
+             touch. If the id was not captured, or the delete does not match it,
+             STOP and report rather than guessing at which assignment to remove
+             — a stale extra assignment is a finding to raise, and deleting the
+             wrong one is an outage.
 
              Assignments take a minute or two to propagate. A 401/403 exits ${EXIT.AUTH}
              immediately and is NEVER retried or reported as a timeout or an
@@ -558,80 +625,95 @@ export function realSpawn(command, argv, { timeoutMs = DEFAULT_SEND_TIMEOUT_MS }
 }
 
 /**
- * Send every message in the run, in order. Any nonzero az exit, or any failure
- * to spawn at all, aborts the run as SEND_FAILURE — a partially sent run is not
- * quietly continued, because the confirmation would then look for documents the
- * sender knows were never sent and report the miss as the route's fault.
+ * Send every message in the run, in order, recording each attempt's fate in the
+ * run LEDGER as it happens. Any nonzero az exit, or any failure to spawn at all,
+ * aborts the run as SEND_FAILURE — a partially sent run is not quietly
+ * continued, because the confirmation would then look for documents the sender
+ * knows it never got to send and report the miss as the route's fault.
  *
- * ABORTING DOES NOT DISCARD WHAT ALREADY LANDED. The messages `az` accepted
- * before the failure are on their way to the container, so the ids of those
- * messages ride on the thrown error as `sentIds` and the caller records them
- * before exiting. They are logged per message as they go, too: a run that dies
- * mid-flight leaves the ids in the operator's terminal even if the process is
- * killed before it can write anything. An id this tool caused to exist and did
- * not record is the condition that halts MG-53 — and it halts there
- * indistinguishably from the unknown writer that halt is looking for.
+ * THE LEDGER IS NOT OPTIONAL, and the ORDER around each spawn is the contract:
+ * `request(id)` immediately BEFORE the attempt, then exactly one of `accept(id)`
+ * / `markAmbiguous(id)` after it. There is no way to send a message this run
+ * cannot afterwards account for, because the accounting happens first.
+ *
+ * A FAILED SEND IS AMBIGUOUS, NOT AN ABSENCE. `az` can exit nonzero AFTER IoT
+ * Hub accepted the message — a failure on teardown, a killed process, a lost
+ * response — so the message it failed on is recorded as of UNKNOWN acceptance.
+ * Nothing here, in any message on any path, may tell the operator that nothing
+ * was written: that is an error reported as a known absence, which is the exact
+ * conflation MG-66 exists to prevent, reproduced on the write side.
+ *
+ * Ids are logged per message as they go, too: a run that dies mid-flight leaves
+ * them in the operator's terminal even if the process is killed before it can
+ * write anything. An id this tool caused to exist and did not record is the
+ * condition that halts MG-53 — and it halts there indistinguishably from the
+ * unknown writer that halt is looking for.
  *
  * The child's stdout is DISCARDED and its stderr is scrubbed before it reaches
  * any operator-facing line. Neither the raw argv nor the raw stderr is ever
  * echoed.
+ *
+ * @returns {Promise<string[]>} the ids az reported success for.
  */
 export async function sendMessages({
   messages,
   hub,
   device,
   spawn: spawnFn,
+  ledger,
   sendTimeoutMs = DEFAULT_SEND_TIMEOUT_MS,
   log = defaultLog,
 }) {
-  const sentIds = [];
-
-  // The abort carries the ids already accepted, so the caller can record them.
-  // Built here rather than at each throw site so no future failure class can be
-  // added that forgets them.
-  const abort = message => {
-    const error = new FixtureError(
-      EXIT.SEND_FAILURE,
-      `${message}${
-        sentIds.length
-          ? `. ${sentIds.length} message(s) WERE already accepted by IoT Hub before this failure and may be in the destination container: ${sentIds.join(', ')}`
-          : '. No message had been accepted yet, so nothing was written'
-      }`
+  if (!ledger || typeof ledger.request !== 'function') {
+    throw usageError(
+      'sendMessages needs the run ledger from createRunLedger(): a message may not be attempted before the attempt is recorded, or the run could send a document it cannot account for'
     );
-    // Read by main() to decide whether there is live effect to record. An empty
-    // array means nothing was sent, and nothing is recorded for it.
-    error.sentIds = [...sentIds];
-    return error;
-  };
+  }
 
+  const accepted = [];
   for (const message of messages) {
     const argv = assertArgvIsCredentialFree(buildSendArgv({ hub, device, message }));
+    const id = message.body.id;
+    // BEFORE the spawn. A process killed between here and the outcome leaves an
+    // id the ledger resolves as ambiguous rather than as never-attempted.
+    ledger.request(id);
+
     let outcome;
     try {
       outcome = await spawnFn(AZ_COMMAND, argv, { timeoutMs: sendTimeoutMs });
     } catch (err) {
       // Spawn itself failed — az is not on PATH, or the process could not be
-      // created. Named as a send failure, never as an absence.
-      throw abort(
-        `failed to run '${AZ_COMMAND} iot device send-d2c-message' for device ${safe(device)} on hub ${safe(hub)} (message ${message.sequence} of ${messages.length}): ${describeError(err)}. Is the Azure CLI on PATH, with the azure-iot extension installed ('az extension add --name azure-iot')?`
+      // created. Even here acceptance is recorded as UNKNOWN rather than as
+      // "not sent": this tool cannot see the difference between a process that
+      // never ran and one that ran and could not be reaped, and guessing the
+      // convenient one is how an id goes unaccounted for.
+      ledger.markAmbiguous(id);
+      throw new FixtureError(
+        EXIT.SEND_FAILURE,
+        `failed to run '${AZ_COMMAND} iot device send-d2c-message' for device ${safe(device)} on hub ${safe(hub)} (message ${message.sequence} of ${messages.length}, id ${id}): ${describeError(err)}. Is the Azure CLI on PATH, with the azure-iot extension installed ('az extension add --name azure-iot')? Acceptance of this message is UNKNOWN and it is recorded as such.`
       );
     }
 
     if (outcome?.code !== 0) {
+      ledger.markAmbiguous(id);
       const detail = scrubChildOutput(outcome?.stderr ?? '');
-      throw abort(
-        `'${AZ_COMMAND} iot device send-d2c-message' exited ${outcome?.code} sending message ${message.sequence} of ${messages.length} for device ${safe(device)} on hub ${safe(hub)}${outcome?.signal ? ` (signal ${safe(outcome.signal)})` : ''}` +
-          `${detail ? `\n  az: ${detail.split('\n').join('\n  az: ')}` : ' (az produced no diagnostic output)'}`
+      throw new FixtureError(
+        EXIT.SEND_FAILURE,
+        `'${AZ_COMMAND} iot device send-d2c-message' exited ${outcome?.code} sending message ${message.sequence} of ${messages.length} (id ${id}) for device ${safe(device)} on hub ${safe(hub)}${outcome?.signal ? ` (signal ${safe(outcome.signal)})` : ''}` +
+          `${detail ? `\n  az: ${detail.split('\n').join('\n  az: ')}` : ' (az produced no diagnostic output)'}` +
+          `\n  az reporting failure does NOT establish that IoT Hub rejected the message — the CLI can fail after the hub took it — so this message's acceptance is UNKNOWN and it is recorded as of unknown acceptance, never as not written.`
       );
     }
-    sentIds.push(message.body.id);
+
+    ledger.accept(id);
+    accepted.push(id);
     // The id is on the line, not just the sequence number: this log is the last
     // record of a document that exists if the process dies here.
     log.info(
-      `${TOOL_NAME}: sent message ${message.sequence}/${messages.length} (id ${message.body.id}) from ${device} to hub ${hub}`
+      `${TOOL_NAME}: sent message ${message.sequence}/${messages.length} (id ${id}) from ${device} to hub ${hub}`
     );
   }
-  return sentIds;
+  return accepted;
 }
 
 // ---------------------------------------------------------------------------
@@ -774,57 +856,65 @@ export async function preflight({ reader, runId }) {
 }
 
 /**
- * Write the evidence artifact, or fail in the one way that cannot be mistaken
- * for "nothing happened".
+ * THE ONE EVIDENCE-EMISSION PATH. Every outcome that attempted a send arrives
+ * here, and nothing else in this file writes a record.
  *
- * This is the ONLY place the record is written, and it is reached from two call
- * sites — a run that aborted mid-send, and a run that reached the confirmation
- * (confirmed or not). Both have the same obligation, and the failure they share
- * is the one the exit vocabulary treats specially: documents are, or may be, in
- * the live container and no record of them survives.
+ * It is a single function rather than a call at each exit for the reason the
+ * header gives: the defect this contract answers appeared five separate times on
+ * five separate paths, and a per-path repair leaves the sixth path to be found
+ * by whoever adds it. There is no per-outcome branch here — the ledger already
+ * knows what the run knows, on every path, and this function does the same thing
+ * with it every time.
  *
- * WHY IT THROWS EXIT.EVIDENCE_UNRECORDED RATHER THAN THE OUTCOME'S OWN CODE.
- * Recording is not decoration on the result; it is what makes the run
+ * WHY A WRITE FAILURE TAKES THE EXIT CODE (EXIT.EVIDENCE_UNRECORDED) FROM THE
+ * OUTCOME. Recording is not decoration on the result; it is what makes the run
  * accountable. An unrecorded document halts MG-53 whatever the confirmation
  * concluded, and MG-53 cannot tell it apart from the unknown writer that halt
- * exists to catch. So the write failure sets the exit code on EVERY path,
- * including a confirmed one and including an auth failure — and the
- * confirmation's own outcome and label are printed immediately above, so the
- * operator loses nothing but the code they script against.
+ * exists to catch. So the write failure sets the code on EVERY path, including a
+ * confirmed one and including an auth failure — and the confirmation's own
+ * outcome and label are printed on the lines above, so the operator loses
+ * nothing but the code they script against.
  *
  * BUILDING THE RECORD IS INSIDE THE GUARD, not before it. A record that cannot
  * be BUILT leaves the documents exactly as unaccounted for as one that cannot be
  * written, and buildEvidenceRecord refuses with EXIT.USAGE — which is the code
  * this function exists to keep away from a run that changed the live system.
  *
- * @param {object} options
- * @param {Function} options.buildRecord builds the record; called here so a
- *   refusal to build is classified like a refusal to write.
- * @param {string[]} options.liveIds the ids that exist, or may exist, in the
- *   container. Observed ids where the read-back saw them; otherwise the ids the
- *   sender handed to az.
- * @param {boolean} options.liveIdsObserved true when `liveIds` were READ BACK,
- *   false when they were sent and never confirmed. The operator-facing line says
- *   which, because "these are there" and "these may be there" call for the same
- *   recording and different diagnosis.
+ * @returns {Promise<number>} `outcomeCode` if the record is on disk, otherwise
+ *   EXIT.EVIDENCE_UNRECORDED.
  */
-async function recordEvidence({
-  buildRecord,
-  evidenceOut,
-  overwrite,
-  fs,
+async function emitEvidence({
+  ledger,
+  snapshot,
+  confirmation,
+  definition,
+  cfg,
+  outcomeCode,
   log,
-  runId,
-  liveIds,
-  liveIdsObserved,
-  database,
-  container,
+  now,
+  fs,
 }) {
   let record;
   try {
-    record = buildRecord();
-    await writeEvidenceRecord(record, evidenceOut, {
-      overwrite,
+    record = buildEvidenceRecord({
+      // The LEDGER, not a set of ids assembled here: it is snapshotted against
+      // the confirmation inside the builder, so this call site cannot forget to
+      // fold the read-back's observations in, and cannot narrow the four sets to
+      // whichever one this path happened to have.
+      ledger,
+      confirmation,
+      containerDefinition: definition,
+      target: {
+        hub: cfg.hub,
+        account: cfg.account,
+        database: cfg.database,
+        container: cfg.container,
+      },
+      deviceId: cfg.device,
+      now,
+    });
+    await writeEvidenceRecord(record, cfg.evidenceOut, {
+      overwrite: cfg.overwrite,
       ...(fs ? { fs } : {}),
     });
   } catch (err) {
@@ -832,23 +922,156 @@ async function recordEvidence({
     // existing file this run refused to clobber, both of which the operator can
     // fix and re-run against.
     log.error(`${TOOL_NAME}: ${describeError(err)}`);
-    const ids = liveIds.length ? liveIds.join(', ') : '(none — nothing had been sent)';
-    log.error(
-      `${TOOL_NAME}: EVIDENCE NOT RECORDED — ${liveIds.length} document(s) ${
-        liveIdsObserved ? 'ARE' : 'MAY BE'
-      } in ${database}/${container} from run ${runId}, marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}: ${ids}`
+    const where = `${cfg.database}/${cfg.container} from run ${snapshot.runId}, marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}`;
+    const observed = [...snapshot.observedIds];
+    // Everything that may be there and was not read back. Accepted and ambiguous
+    // alike: az saying "ok" is not an observation either, and the operator's
+    // action for both is the same.
+    const mayExist = mergeIds(snapshot.acceptedIds, snapshot.ambiguousIds).filter(
+      id => !observed.includes(id)
     );
+    log.error(
+      `${TOOL_NAME}: EVIDENCE NOT RECORDED — ${observed.length + mayExist.length} document id(s) from this run are unrecorded`
+    );
+    if (observed.length) {
+      log.error(
+        `${TOOL_NAME}: ${observed.length} document(s) ARE in ${where}: ${observed.join(', ')}`
+      );
+    }
+    if (mayExist.length) {
+      // "MAY BE", never "were not written". Acceptance unknown is not absence.
+      log.error(
+        `${TOOL_NAME}: ${mayExist.length} document(s) MAY BE in ${where} (acceptance not established by a read-back): ${mayExist.join(', ')}`
+      );
+    }
     log.error(
       `${TOOL_NAME}: RECORD THESE IDS BY HAND against ${TICKET} before anything else — MG-53 halts on a source document its recorded set does not account for, and cannot tell one from an unknown writer`
     );
-    throw new FixtureError(
-      EXIT.EVIDENCE_UNRECORDED,
-      `the evidence for run ${runId} could not be written to ${safe(evidenceOut)} and ${liveIds.length} document(s) ${liveIdsObserved ? 'are' : 'may be'} live — this is NOT "nothing happened"`
+    log.error(
+      `${TOOL_NAME}: the evidence for run ${snapshot.runId} could not be written to ${safe(cfg.evidenceOut)} — this is NOT "nothing happened", and the outcome reported above (exit ${outcomeCode}, ${exitLabel(outcomeCode)}) stands as the diagnosis`
     );
+    return EXIT.EVIDENCE_UNRECORDED;
   }
   // Outside the guard: the record is on disk by here, so a failure to FORMAT the
   // summary line is not an unrecorded run and must not be reported as one.
-  log.info(`${TOOL_NAME}: ${describeEvidence(record, evidenceOut)}`);
+  log.info(`${TOOL_NAME}: ${describeEvidence(record, cfg.evidenceOut)}`);
+  return outcomeCode;
+}
+
+/**
+ * The recorded reason for a run that aborted before any read-back.
+ *
+ * SYNTHESIZED FROM THE RUN'S OWN FACTS, never from the failure's message. The
+ * operator-facing diagnosis may quote text the az CHILD produced, and however
+ * carefully that is scrubbed it is still outside text: the evidence record's
+ * credential guard is fail-closed and refuses a record carrying anything
+ * credential-SHAPED, so embedding child output here would turn a diagnosable
+ * send failure into an unrecorded run — the worse outcome of the two, and
+ * exactly the one this contract exists to prevent. The full message is already
+ * on the operator's screen; what the artifact needs is the accounting.
+ */
+function abortReason(snapshot, exitCode) {
+  return (
+    `the run aborted before any read-back: ${exitLabel(exitCode)} (exit ${exitCode}). ` +
+    `${snapshot.requestedIds.length} message(s) attempted, ${snapshot.acceptedIds.length} accepted by IoT Hub, ` +
+    `${snapshot.ambiguousIds.length} of UNKNOWN acceptance — az reporting failure does not establish that the hub rejected a message, ` +
+    'so none of these ids may be read as evidence that nothing was written. No read-back was attempted, so nothing here observed a document. ' +
+    'The operator-facing diagnosis is not embedded in this record: it can quote child-process output, and this artifact carries only what the run itself established.'
+  );
+}
+
+/**
+ * The run's single exit funnel: report the outcome, emit the evidence, choose
+ * the code. Called exactly once, from main(), on every path.
+ *
+ * The reporting happens BEFORE the emission and independently of it, so the
+ * diagnosis is on the operator's screen whatever the write does to the exit
+ * code.
+ */
+async function settleRun({
+  cfg,
+  definition,
+  ledger,
+  confirmation,
+  failure,
+  device,
+  hub,
+  log,
+  now,
+  fs,
+}) {
+  if (confirmation) {
+    const report = line => (confirmation.confirmed ? log.info(line) : log.error(line));
+    report(`${TOOL_NAME}: ${describeConfirmation(confirmation)}`);
+    if (!confirmation.confirmed) report(`${TOOL_NAME}: ${confirmation.reason}`);
+  }
+  if (failure) log.error(`${TOOL_NAME}: ${failure.message}`);
+
+  // A run that never minted a ledger never attempted anything: a usage refusal,
+  // an unmeasurable container, a refused pre-send read. It is the ONLY case that
+  // may exit without a record, and it is the only case where "nothing was
+  // written" is a fact rather than a guess.
+  const snapshot = ledger ? ledger.snapshot({ confirmation }) : null;
+  let exitCode = confirmation ? confirmation.exitCode : (failure?.exitCode ?? EXIT.OK);
+
+  // USAGE means "bad arguments, nothing live happened". A run that attempted a
+  // send cannot honestly report it whatever went wrong afterwards, so the code
+  // becomes the ambiguity it actually is. The original message is already on the
+  // operator's screen, so the diagnosis is not lost — only the misleading code.
+  if (snapshot?.attempted && exitCode === EXIT.USAGE) {
+    log.error(
+      `${TOOL_NAME}: reporting exit ${EXIT.AMBIGUOUS} (${exitLabel(EXIT.AMBIGUOUS)}) rather than a usage error — this run had already attempted a send, and "bad arguments, nothing happened" would be false`
+    );
+    exitCode = EXIT.AMBIGUOUS;
+  }
+
+  if (snapshot && mustEmitEvidence(snapshot)) {
+    log.info(`${TOOL_NAME}: run ${snapshot.runId} — ${describeIdSets(snapshot)}`);
+    if (!confirmation) {
+      log.error(
+        `${TOOL_NAME}: recording every id this run attempted before exiting — a document this tool caused to exist and did not record is what halts MG-53, and halts it indistinguishably from an unknown writer`
+      );
+    }
+    exitCode = await emitEvidence({
+      ledger,
+      snapshot,
+      // A run that never reached the read-back still has a recordable shape. Its
+      // observed ids come from the snapshot rather than from nothing, so a path
+      // that DID observe documents and then aborted keeps them.
+      confirmation:
+        confirmation ??
+        abortedConfirmation({
+          runId: snapshot.runId,
+          exitCode,
+          reason: abortReason(snapshot, exitCode),
+          observedIds: [...snapshot.observedIds],
+          partitionValue: cfg.device,
+          partitionKeyField: definition.partitionKeyField,
+          timeoutMs: cfg.timeoutMs,
+          pollIntervalMs: cfg.pollIntervalMs,
+        }),
+      definition,
+      cfg,
+      outcomeCode: exitCode,
+      log,
+      now,
+      fs,
+    });
+  }
+
+  if (exitCode === EXIT.OK && confirmation?.confirmed) {
+    log.info(
+      `${TOOL_NAME}: CONFIRMED — ${confirmation.observedCount} synthetic document(s) sent from ${device} via hub ${hub} were read back out of ${cfg.database}/${cfg.container}`
+    );
+    return exitCode;
+  }
+  // Names the device, the hub, the outcome and the exit label. Never a secret,
+  // on any path: every fragment here is either built from scrubbed input or
+  // produced by a sibling module under the same obligation.
+  log.error(
+    `${TOOL_NAME}: device ${device} on hub ${hub} — exit ${exitCode} (${exitLabel(exitCode)})`
+  );
+  return exitCode;
 }
 
 /**
@@ -872,8 +1095,17 @@ export async function main({
 } = {}) {
   let device = '(unspecified)';
   let hub = '(unspecified)';
+  // Everything settleRun() needs, assigned as the run establishes it. `ledger`
+  // is the pivot: non-null means a run id was minted and a send may have been
+  // attempted, so an evidence record is owed.
+  let cfg = null;
+  let definition = null;
+  let ledger = null;
+  let confirmation = null;
+  let failure = null;
+
   try {
-    const cfg = parseArgs(argv ?? []);
+    cfg = parseArgs(argv ?? []);
     if (cfg.help) {
       log.info(USAGE);
       return EXIT.OK;
@@ -887,7 +1119,7 @@ export async function main({
       readFileFn,
       stdin,
     });
-    const definition = parseContainerDefinition(definitionText, {
+    definition = parseContainerDefinition(definitionText, {
       expectedContainer: cfg.container,
     });
     log.info(`${TOOL_NAME}: measured ${describeContainerDefinition(definition)}`);
@@ -896,8 +1128,13 @@ export async function main({
       log.error(`${TOOL_NAME}: FINDING — ${definition.ttlDriftFinding.message}`);
     }
 
-    // ---- 2. Mint the run and build the bodies. ---------------------------
+    // ---- 2. Mint the run, its LEDGER and the bodies. ---------------------
+    // The ledger is created before anything can be attempted, and is what makes
+    // the evidence obligation structural rather than remembered: from here on,
+    // every exit passes through settleRun() and settleRun() writes a record for
+    // any run that attempted a send.
     const runId = uuid ? newRunId(uuid) : newRunId();
+    ledger = createRunLedger({ runId });
     const messages = buildFixtureMessages({
       runId,
       partitionKeyField: definition.partitionKeyField,
@@ -920,69 +1157,22 @@ export async function main({
     );
 
     // ---- 4. Send. ---------------------------------------------------------
-    // A partial send is still live effect. The messages az accepted before the
-    // failure are on their way to the container, so they are RECORDED before the
-    // run exits nonzero: unwinding past the evidence write here would leave
-    // documents in the source that no artifact accounts for, which is precisely
-    // what stops MG-53 — and stops it in the one way the operator cannot
-    // diagnose, since an unrecorded document reads there as an unknown writer.
-    let requestedIds;
-    try {
-      requestedIds = await sendMessages({
-        messages,
-        hub: cfg.hub,
-        device: cfg.device,
-        spawn: spawnFn,
-        log,
-      });
-    } catch (err) {
-      const sent = Array.isArray(err?.sentIds) ? err.sentIds : [];
-      if (sent.length === 0) throw err; // Nothing was accepted; nothing to record.
-      log.error(`${TOOL_NAME}: ${describeError(err)}`);
-      log.error(
-        `${TOOL_NAME}: the send aborted after ${sent.length} of ${messages.length} message(s) — recording what WAS sent before exiting`
-      );
-      await recordEvidence({
-        // Built inside the thunk, like the record itself: anything that goes
-        // wrong assembling this is a failure to record a run that already
-        // changed the live system, and must be reported as that.
-        buildRecord: () =>
-          buildEvidenceRecord({
-            confirmation: abortedConfirmation({
-              runId,
-              exitCode: EXIT.SEND_FAILURE,
-              reason: `the send aborted after ${sent.length} of ${messages.length} message(s); those ${sent.length} were accepted by IoT Hub and MAY be in the container, and NO read-back was attempted, so nothing here observed a document`,
-              partitionValue: cfg.device,
-              partitionKeyField: definition.partitionKeyField,
-              timeoutMs: cfg.timeoutMs,
-              pollIntervalMs: cfg.pollIntervalMs,
-            }),
-            containerDefinition: definition,
-            requestedIds: sent,
-            target: {
-              hub: cfg.hub,
-              account: cfg.account,
-              database: cfg.database,
-              container: cfg.container,
-            },
-            deviceId: cfg.device,
-            now,
-          }),
-        evidenceOut: cfg.evidenceOut,
-        overwrite: cfg.overwrite,
-        fs,
-        log,
-        runId,
-        liveIds: sent,
-        liveIdsObserved: false,
-        database: cfg.database,
-        container: cfg.container,
-      });
-      throw err; // Recorded, then reported: exit SEND_FAILURE.
-    }
+    // No try/catch and no per-path recording here. A send that aborts part-way
+    // has already told the ledger which ids it attempted and what became of
+    // each, and settleRun() below writes the record for ANY run that attempted
+    // one. That is the contract: this call site cannot forget, because it has
+    // nothing to remember.
+    await sendMessages({
+      messages,
+      hub: cfg.hub,
+      device: cfg.device,
+      spawn: spawnFn,
+      ledger,
+      log,
+    });
 
     // ---- 5. Confirm, within an explicit reported bound. -------------------
-    const confirmation = await confirmArrival({
+    confirmation = await confirmArrival({
       reader,
       runId,
       partitionValue: cfg.device,
@@ -992,72 +1182,35 @@ export async function main({
       now,
       ...(sleep ? { sleep } : {}),
     });
-    // Bound as a closure rather than lifted off `log`, so a caller whose logger
-    // is a method on an object still gets its own receiver.
-    const report = line => (confirmation.confirmed ? log.info(line) : log.error(line));
-    report(`${TOOL_NAME}: ${describeConfirmation(confirmation)}`);
-    if (!confirmation.confirmed) {
-      report(`${TOOL_NAME}: ${confirmation.reason}`);
-    }
-
-    // ---- 6. Record what was observed, confirmed or not. -------------------
-    // The record is written on FAILURE paths too, and says so in its own
-    // findings: a run that sent documents it could not confirm has left them in
-    // the container, and MG-53 halts on a document no record accounts for. What
-    // it never does is claim a success the confirmation did not conclude —
-    // buildEvidenceRecord refuses to build a confirmed record from a nonzero
-    // result.
-    //
-    // The write failure is NEVER swallowed, on either path. An unconfirmed run
-    // is where the record matters most: without it the operator cannot tell
-    // "delivered but unfindable" from "never delivered", and the documents are
-    // in the container either way.
-    await recordEvidence({
-      buildRecord: () =>
-        buildEvidenceRecord({
-          confirmation,
-          containerDefinition: definition,
-          requestedIds,
-          target: {
-            hub: cfg.hub,
-            account: cfg.account,
-            database: cfg.database,
-            container: cfg.container,
-          },
-          deviceId: cfg.device,
-          now,
-        }),
-      evidenceOut: cfg.evidenceOut,
-      overwrite: cfg.overwrite,
-      fs,
-      log,
-      runId,
-      // What was READ BACK if anything was, otherwise what was sent. Both are
-      // recordable; only the first is known to exist.
-      liveIds: confirmation.observedCount > 0 ? [...confirmation.observedIds] : requestedIds,
-      liveIdsObserved: confirmation.observedCount > 0,
-      database: cfg.database,
-      container: cfg.container,
-    });
-
-    if (confirmation.confirmed) {
-      log.info(
-        `${TOOL_NAME}: CONFIRMED — ${confirmation.observedCount} synthetic document(s) sent from ${cfg.device} via hub ${cfg.hub} were read back out of ${cfg.database}/${cfg.container}`
-      );
-    }
-    return confirmation.exitCode;
   } catch (err) {
-    const error =
+    failure =
       err instanceof FixtureError ? err : new FixtureError(classifyError(err), describeError(err));
-    // Names the device, the hub, the outcome and the exit label. Never a secret,
-    // on any path: `error.message` is either built here from scrubbed fragments
-    // or produced by a sibling module under the same obligation.
-    log.error(`${TOOL_NAME}: ${error.message}`);
-    log.error(
-      `${TOOL_NAME}: device ${device} on hub ${hub} — exit ${error.exitCode} (${exitLabel(error.exitCode)})`
-    );
-    return error.exitCode;
   }
+
+  // ---- 6. One exit funnel: report, record, choose the code. ---------------
+  // Reached on EVERY outcome, including the ones that threw. Nothing above this
+  // line returns except --help, which cannot have attempted a send.
+  if (!confirmation && !failure && ledger) {
+    // Defensive and fail-closed: a run that produced neither a confirmation nor
+    // a failure knows nothing about what it wrote, and the honest report of that
+    // is an ambiguity, not a success.
+    failure = new FixtureError(
+      EXIT.AMBIGUOUS,
+      'the run ended with neither a confirmation nor a failure — nothing established what reached the container, which is a correlation ambiguity and never a success'
+    );
+  }
+  return settleRun({
+    cfg,
+    definition,
+    ledger,
+    confirmation,
+    failure,
+    device,
+    hub,
+    log,
+    now,
+    fs,
+  });
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
