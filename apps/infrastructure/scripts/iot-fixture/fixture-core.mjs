@@ -665,6 +665,18 @@ export function isSyntheticDocument(doc, runId) {
 //    documents this run cannot account for went is not established by the ones
 //    it can.
 //
+//    AND "A DIFFERENT PARTITION VALUE" IS NOT THE ONLY WAY TO MISS THE EXPECTED
+//    ONE. Because the endpoint injects nothing, the architect's top-ranked risk
+//    for this route is a document arriving with NO partition key field at all —
+//    not one arriving under some other value. Those are different facts about
+//    the route and they need different repairs, so they are counted separately,
+//    said separately in the outcome text, and recorded separately in
+//    observedPartitionValues via the reserved tokens below. Collapsing the first
+//    into the second would state something factually false ("carries a deviceId
+//    other than the expected one" about a document carrying no deviceId), and
+//    recording it as an empty list would discard the single fact that tells the
+//    two apart — in the exact case the evidence most needs to capture.
+//
 // 4. EVERY PATH RETURNS A RESULT RATHER THAN THROWING. The wait bound actually
 //    used, the polls issued, the ids observed and the elapsed time are the
 //    evidence this ticket exists to produce, and they are needed MOST on the
@@ -687,6 +699,21 @@ export function isSyntheticDocument(doc, runId) {
 //    single stray document cannot make the tool report that it observed nothing
 //    while this run's documents sit in the container next to it.
 // ---------------------------------------------------------------------------
+
+// RESERVED TOKENS recorded in observedPartitionValues for a document of this
+// run's that carries no usable partition value. They are recorded values, not an
+// absence: a document with no partition key field is its OWN state, and the
+// empty list this used to record threw away the one fact distinguishing "landed
+// under a different key" from "landed under no key at all".
+//
+// They are never confusable with a real partition value in the outcome text,
+// which is composed from the CENSUS COUNTS rather than from this list — so even
+// a document contriving to carry one of these literals as its partition value
+// cannot make the text say something untrue. The angle brackets keep them
+// visibly non-value-shaped for a human reading the artifact, and neither is a
+// legal device id this fixture ever mints.
+export const PARTITION_VALUE_ABSENT = '<no-partition-key-field>';
+export const PARTITION_VALUE_UNUSABLE = '<unusable-partition-key-value>';
 
 // Generous on purpose. Routing is asynchronous and nothing in this repo records
 // how long the dev route actually takes, because no message has ever traversed
@@ -971,41 +998,77 @@ export async function confirmArrival({
   // useless to MG-53 and MG-54. Only the human-readable `reason` embeds outside
   // text, and it goes through safeFragment.
   //
-  // Only documents THIS RUN can claim contribute a partition value: the field
-  // answers "where did our documents land", which is the question the
-  // unexpected-partition outcome turns on, and a stray document's partition is
-  // not an answer to it.
-  const partitionValuesOf = documents => {
-    if (partitionKeyField === null || !Array.isArray(documents)) return [];
-    const values = documents
-      .filter(doc => isPlainObject(doc) && isSyntheticDocument(doc, runId))
-      .map(doc => doc[partitionKeyField])
-      .filter(value => typeof value === 'string' && value !== '');
-    return [...new Set(values)];
-  };
-
   // WHERE this run's documents actually landed, counted off the partition value
   // they CARRY (decision 3). The container partitions on the measured field, so
   // that value is the partition the document is in; which query returned it is a
   // fact about the query.
   //
-  // Strict equality against the value this run queried. A document of ours whose
-  // partition field is missing, empty or not a string counts as NOT in the
-  // expected partition: it is positively not in the partition this run scoped
-  // to, and a document this fixture built always carries the field — so the
-  // fail-closed default cannot cost a healthy run a false anomaly, while the
-  // opposite default would hide a real one.
+  // Only documents THIS RUN can claim are counted: the census answers "where did
+  // OUR documents land", which is the question the unexpected-partition outcome
+  // turns on, and a stray document's partition is not an answer to it.
+  //
+  // FOUR STATES, NOT TWO. Strict equality against the value this run queried
+  // decides `inExpected`; everything else is broken out rather than lumped
+  // together, because the repairs differ and because `absent` is the architect's
+  // top-ranked risk for this route (nothing between the device and Cosmos
+  // injects a partition key — see decision 3):
+  //
+  //   inExpected      carries exactly the value this run scoped to
+  //   differentValue  carries some OTHER usable value — landed under another key
+  //   absent          carries NO partition key field at all — landed under none
+  //   unusable        carries the field, but empty or not a string
+  //
+  // All three of the last are NOT in the expected partition, so `elsewhere` sums
+  // them and a run holding any of them cannot confirm. The fail-closed default
+  // cannot cost a healthy run a false anomaly — a document this fixture built
+  // always carries the field — while the opposite default would hide a real one.
   //
   // Only meaningful once partitionKeyField is known; the caller checks that
   // first, because "we cannot see where they landed" is its own answer and not a
-  // partition finding.
-  const partitionLanding = documents => {
+  // partition finding. With no measured field the census reports the total it
+  // could see and claims nothing else.
+  const partitionCensus = documents => {
     const mine = (Array.isArray(documents) ? documents : []).filter(
       doc => isPlainObject(doc) && isSyntheticDocument(doc, runId)
     );
-    const inExpected = mine.filter(doc => doc[partitionKeyField] === partitionValue).length;
-    return { total: mine.length, inExpected, elsewhere: mine.length - inExpected };
+    const census = {
+      total: mine.length,
+      inExpected: 0,
+      differentValue: 0,
+      absent: 0,
+      unusable: 0,
+      elsewhere: 0,
+      values: [],
+    };
+    if (partitionKeyField === null) return census;
+
+    // Encounter order, deduplicated — including the reserved tokens, so one
+    // recorded token means "at least one document was in that state" exactly as
+    // one recorded value does.
+    const values = new Set();
+    for (const doc of mine) {
+      const present = Object.prototype.hasOwnProperty.call(doc, partitionKeyField);
+      const value = present ? doc[partitionKeyField] : undefined;
+      if (!present || value === undefined || value === null) {
+        census.absent += 1;
+        values.add(PARTITION_VALUE_ABSENT);
+      } else if (typeof value !== 'string' || value === '') {
+        census.unusable += 1;
+        values.add(PARTITION_VALUE_UNUSABLE);
+      } else if (value === partitionValue) {
+        census.inExpected += 1;
+        values.add(value);
+      } else {
+        census.differentValue += 1;
+        values.add(value);
+      }
+    }
+    census.elsewhere = census.differentValue + census.absent + census.unusable;
+    census.values = [...values];
+    return census;
   };
+
+  const partitionValuesOf = documents => partitionCensus(documents).values;
 
   // ONE place decides what a result says about what was observed. Callers below
   // pass only what is new to their path; the ids are unioned in here, so a path
@@ -1033,8 +1096,14 @@ export async function confirmArrival({
       observedCount: observedIds.length,
       // Never folded into observedIds and never silently dropped: a document
       // this run cannot claim is a finding in its own right, and the operator
-      // needs it BY ID (the runbook's first stop condition is an unexpected
-      // document in the source containers).
+      // needs it BY ID to investigate it.
+      //
+      // It is NOT the runbook's first stop condition and must not be described
+      // as one. This read-back is FILTERED to this run's correlator, so a
+      // document an unknown writer produced can never appear here. Stop
+      // condition 1 — any unexpected document in the source containers — is
+      // checked by the operator's UNFILTERED enumeration in the host phase, and
+      // nothing this function returns bears on it either way.
       anomalousIds,
       polls,
       crossPartitionSweepRun,
@@ -1242,8 +1311,8 @@ export async function confirmArrival({
     });
   }
 
-  const landing = partitionLanding(sweep);
-  const landed = partitionValuesOf(sweep);
+  const landing = partitionCensus(sweep);
+  const landed = landing.values;
 
   // Every document is in the partition this run queried. It is a CONFIRMATION —
   // the scoped polls simply missed them by timing, most plainly when the
@@ -1264,12 +1333,47 @@ export async function confirmArrival({
   // off the partition values the documents carry, and counted, so an operator
   // reading it knows how much of the run went astray. An absence here would call
   // a working route broken and send them to debug an endpoint doing its job.
+  //
+  // The three ways to miss the expected partition are stated SEPARATELY, and
+  // only when they actually occurred. Composed from the CENSUS COUNTS rather
+  // than from the recorded value list, so the sentence stays true whatever the
+  // documents carry — and so a document with no partition key field is never
+  // described as carrying a different one, which is what this used to say.
+  const missed = [];
+  if (landing.differentValue) {
+    const others = landed.filter(
+      value =>
+        value !== PARTITION_VALUE_ABSENT &&
+        value !== PARTITION_VALUE_UNUSABLE &&
+        value !== partitionValue
+    );
+    missed.push(
+      `${landing.differentValue} carrying a DIFFERENT ${partitionKeyField} (values observed: ${others
+        .map(value => safeFragment(value))
+        .join(', ')})`
+    );
+  }
+  if (landing.absent) {
+    // The architect's predicted failure mode for this route, and the reason this
+    // state is broken out at all: nothing between the device and Cosmos injects
+    // a partition key, so a body that omits the field produces a document with
+    // NO partition key rather than one under some other key. The two need
+    // different repairs, and only this one points at the message body.
+    missed.push(
+      `${landing.absent} carrying NO ${partitionKeyField} FIELD AT ALL, recorded as ${PARTITION_VALUE_ABSENT} — landed under NO partition key rather than under a different one, which points at the message body the sender built and not at the routing target`
+    );
+  }
+  if (landing.unusable) {
+    missed.push(
+      `${landing.unusable} carrying a ${partitionKeyField} that is present but empty or not a string, recorded as ${PARTITION_VALUE_UNUSABLE}`
+    );
+  }
   return result({
     exitCode: EXIT.UNEXPECTED_PARTITION,
     scope: 'cross-partition',
     observedPartitionValues: Object.freeze(landed),
     observedArrivalMs: null,
-    reason: `${landing.elsewhere} of ${landing.total} document(s) read back for run ${safeFragment(runId)} carry a ${partitionKeyField} other than the expected ${safeFragment(partitionValue)}${landed.length ? ` (values observed: ${landed.map(value => safeFragment(value)).join(', ')})` : ''} — the route delivered, but the partition value the body carried is not the one this run queried, so the run is not confirmed`,
+    reason: `${landing.elsewhere} of ${landing.total} document(s) read back for run ${safeFragment(runId)} are NOT in the expected partition ${safeFragment(partitionValue)}: ${missed.join('; ')} — the route delivered, but the partition the body put them in is not the one this run queried, so the run is not confirmed`,
   });
 }
 
@@ -1373,9 +1477,11 @@ export function describeConfirmation(result) {
   // count and a count of zero is exactly what an operator misreads as "nothing
   // was written".
   const uncertain = result.uncertain ? ', container contents UNCERTAIN' : '';
-  // Never merged into the count above: these are documents the read-back saw and
-  // this run cannot claim, which is the runbook's first stop condition and not a
-  // footnote to a success line.
+  // Never merged into the count above: these are documents the read-back saw
+  // and this run cannot claim, which is a finding in its own right and not a
+  // footnote to a success line. It is NOT the runbook's first stop condition —
+  // that one is the operator's unfiltered enumeration of the source containers,
+  // which this filtered read-back cannot perform.
   const anomalies = result.anomalousIds?.length
     ? `, ${result.anomalousIds.length} document(s) NOT attributable to this run: ${result.anomalousIds
         .map(id => safeFragment(id, 40))

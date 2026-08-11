@@ -26,6 +26,8 @@ import {
   FixtureError,
   ID_SET_NAMES,
   MESSAGES_PER_RUN,
+  PARTITION_VALUE_ABSENT,
+  PARTITION_VALUE_UNUSABLE,
   RUN_ID_FIELD,
   RUN_ID_PARAMETER,
   SEQUENCE_FIELD,
@@ -1017,6 +1019,10 @@ describe('the confirmation read-back', () => {
       partitionValue = FIXTURE_DEVICE_ID,
       unmarked = false,
       firstSequence = 1,
+      // The architect's top-ranked risk for this route: nothing between the
+      // device and Cosmos injects a partition key, so a body that omits the
+      // field produces a stored document with NO partition key at all.
+      omitPartitionKey = false,
     } = {}
   ) =>
     Array.from({ length: count }, (_, i) => {
@@ -1033,6 +1039,7 @@ describe('the confirmation read-back', () => {
         _etag: '"0000-0000"',
       };
       if (unmarked) delete doc[SYNTHETIC_MARKER_FIELD];
+      if (omitPartitionKey) delete doc.deviceId;
       return doc;
     });
 
@@ -1332,6 +1339,129 @@ describe('the confirmation read-back', () => {
     assert.match(result.reason, /some-other-partition/);
     assert.equal(result.observedCount, MESSAGES_PER_RUN);
     assert.deepEqual(result.observedPartitionValues, [FIXTURE_DEVICE_ID, 'some-other-partition']);
+  });
+
+  // LANDING UNDER NO PARTITION KEY IS NOT LANDING UNDER A DIFFERENT ONE. This is
+  // the architect's top-ranked risk for this route — the endpoint injects no
+  // partition key, so a body that omits the field yields a document with none —
+  // which makes it the case the evidence most needs to capture. Reporting it as
+  // "carries a deviceId other than the expected one" states something factually
+  // false about a document that carries no deviceId, and recording an EMPTY
+  // observedPartitionValues throws away the one fact that tells the two apart.
+  it('distinguishes landing under NO partition key from landing under a different one', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const { result } = await confirm({
+      script: [...empties, { docs: routed(MESSAGES_PER_RUN, { omitPartitionKey: true }) }],
+    });
+
+    // Still delivered, still not confirmed, still its own exit code: the route
+    // carried them, so an absence here would send the operator to debug an
+    // endpoint doing its job.
+    assertFailed(result, EXIT.UNEXPECTED_PARTITION, 'documents carrying no partition key');
+    assert.equal(result.observedCount, MESSAGES_PER_RUN);
+
+    // RECORDED, not discarded. The absent state is its own recorded value.
+    assert.deepEqual(result.observedPartitionValues, [PARTITION_VALUE_ABSENT]);
+    assert.notDeepEqual(result.observedPartitionValues, []);
+
+    // And the text says what actually happened, in both directions.
+    assert.match(result.reason, /NO deviceId FIELD AT ALL/);
+    assert.match(result.reason, new RegExp(PARTITION_VALUE_ABSENT));
+    assert.doesNotMatch(
+      result.reason,
+      /DIFFERENT deviceId/,
+      'described a document with no partition key as carrying a different one'
+    );
+    assert.match(result.reason, /3 of 3 document\(s\)/);
+  });
+
+  // A document carrying the field but nothing usable in it is a THIRD state, and
+  // it is neither of the other two. Collapsing it into either would misdescribe
+  // it, and dropping its value from the record — which filtering to non-empty
+  // strings used to do — loses it entirely.
+  it('records a present-but-unusable partition value as its own state', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    for (const [context, badValue] of [
+      ['an empty string', ''],
+      ['a number', 42],
+    ]) {
+      const { result } = await confirm({
+        script: [...empties, { docs: routed(MESSAGES_PER_RUN, { partitionValue: badValue }) }],
+      });
+
+      assertFailed(result, EXIT.UNEXPECTED_PARTITION, context);
+      assert.deepEqual(result.observedPartitionValues, [PARTITION_VALUE_UNUSABLE], context);
+      assert.match(result.reason, /present but empty or not a string/, context);
+      assert.doesNotMatch(result.reason, /NO deviceId FIELD AT ALL/, context);
+    }
+  });
+
+  // A run that misses the expected partition three different ways reports all
+  // three, separately and correctly counted. The counts come from the census
+  // rather than from the recorded value list, so the sentence cannot be made
+  // untrue by what the documents happen to carry.
+  it('counts and names each way of missing the partition separately', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const { result } = await confirm(
+      {
+        script: [
+          ...empties,
+          {
+            docs: [
+              ...routed(1),
+              ...routed(1, {
+                idPrefix: 'elsewhere',
+                firstSequence: 2,
+                partitionValue: 'some-other-partition',
+              }),
+              ...routed(1, { idPrefix: 'keyless', firstSequence: 3, omitPartitionKey: true }),
+              ...routed(1, { idPrefix: 'blank', firstSequence: 4, partitionValue: '' }),
+            ],
+          },
+        ],
+      },
+      { expectedCount: 4 }
+    );
+
+    assertFailed(result, EXIT.UNEXPECTED_PARTITION, 'one of each landing state');
+    assert.equal(result.observedCount, 4);
+    // One in the expected partition, three not — each in its own way.
+    assert.match(result.reason, /3 of 4 document\(s\)/);
+    assert.match(
+      result.reason,
+      /1 carrying a DIFFERENT deviceId \(values observed: some-other-partition\)/
+    );
+    assert.match(result.reason, /1 carrying NO deviceId FIELD AT ALL/);
+    assert.match(result.reason, /1 carrying a deviceId that is present but empty/);
+    // The expected value is never listed among the "different" ones.
+    assert.doesNotMatch(
+      result.reason,
+      new RegExp(`values observed: [^)]*${FIXTURE_DEVICE_ID}`),
+      'listed the EXPECTED partition value as a different one'
+    );
+    assert.deepEqual(result.observedPartitionValues, [
+      FIXTURE_DEVICE_ID,
+      'some-other-partition',
+      PARTITION_VALUE_ABSENT,
+      PARTITION_VALUE_UNUSABLE,
+    ]);
+  });
+
+  // The reserved tokens are recorded values, so they must be distinguishable
+  // from a real one at a glance and must never be mintable by this fixture —
+  // otherwise the record they exist to disambiguate becomes ambiguous itself.
+  it('reserves non-value-shaped tokens that this fixture can never mint', () => {
+    assert.notEqual(PARTITION_VALUE_ABSENT, PARTITION_VALUE_UNUSABLE);
+    for (const token of [PARTITION_VALUE_ABSENT, PARTITION_VALUE_UNUSABLE]) {
+      assert.match(token, /^<.+>$/, 'a reserved token must not look like a partition value');
+      assert.notEqual(token, FIXTURE_DEVICE_ID);
+      assert.equal(
+        buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId' }).some(
+          message => message.body.deviceId === token
+        ),
+        false
+      );
+    }
   });
 
   // An incomplete cross-partition set says where PART of the run is. That is not
@@ -1652,8 +1782,10 @@ describe('the confirmation read-back', () => {
     }
   });
 
-  // A document nobody can name is a stop condition nobody can investigate: the
-  // runbook's first one is "any unexpected document in the source containers".
+  // A document nobody can name is a finding nobody can investigate. It is NOT
+  // the runbook's first stop condition — this read-back is filtered to this
+  // run's correlator, so it can never see an unknown writer's document, and
+  // stop condition 1 is the operator's unfiltered enumeration.
   it('names an unattributable document in the operator line and in the reason', async () => {
     const { result } = await confirm({
       script: [
