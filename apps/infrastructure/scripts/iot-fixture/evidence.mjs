@@ -165,8 +165,43 @@
 // clobbering the record of them manufactures exactly the "unrecorded document"
 // condition that halts MG-53. The operator picks a new path, or passes
 // `overwrite: true` deliberately.
+//
+// ===========================================================================
+// THE DESTINATION IS PROVEN USABLE BEFORE ANYTHING LIVE HAPPENS.
+//
+// Every refusal above is detected at WRITE time, which is AFTER the sender has
+// put synthetic documents into the live container. An unusable --evidence-out
+// path — a directory that does not exist, a read-only mount, a file an earlier
+// run already recorded — therefore used to cost three live documents before the
+// tool refused to record them. That is a real, avoidable harm: the documents
+// stay in the container, MG-53 halts on anything its record does not account
+// for, and the operator is left reconciling by hand.
+//
+// The condition is ENTIRELY LOCAL. Nothing about "can I write this file" needs a
+// message to have been sent, so preflightEvidenceDestination() answers it first,
+// with a purely local filesystem check and NO live effect, and refuses with
+// EXIT.USAGE — the code that means "nothing happened, fix the invocation". The
+// caller runs it before the first send; it is deliberately stricter than the
+// write path, because at preflight time a refusal costs nothing.
+//
+// IT IS NOT A REPLACEMENT FOR THE WRITE-TIME REFUSALS, and must never be turned
+// into one. A preflight is a check at t0 about a write at t1: the directory can
+// be removed, the mount can go read-only, and a concurrent run can take the path
+// in between. So writeEvidenceRecord() keeps every guard it had — the preflight
+// moves the COMMON failure before the live effect, and the write-time refusal
+// remains the thing that is actually authoritative. Two checks, and the later
+// one is the one that decides.
+//
+// The writability probe WRITES AND REMOVES a real file (`.preflight` next to the
+// target), rather than asking the operating system for a permission bit. An
+// access-mode check answers a different question than the write does — it is
+// advisory, it ignores read-only mounts, immutable flags, quotas and ACLs — and
+// answering the easy question here would leave exactly the case this preflight
+// exists to catch.
+// ===========================================================================
 
 import { rename, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 
 import {
   EXIT,
@@ -174,6 +209,8 @@ import {
   FixtureError,
   ID_SET_NAMES,
   MESSAGES_PER_RUN,
+  PARTITION_VALUE_ABSENT,
+  PARTITION_VALUE_UNUSABLE,
   RUN_ID_FIELD,
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
@@ -226,6 +263,15 @@ export const UNKNOWN_WRITER_CHECK = Object.freeze({
 export const PARTIAL_SUFFIX = '.partial';
 
 export const partialPathFor = filePath => `${filePath}${PARTIAL_SUFFIX}`;
+
+// The preflight probe file. A distinct suffix rather than the partial's, so a
+// preflight that dies between the write and the removal cannot leave debris that
+// the write path or a later preflight would read as an in-flight record. Same
+// directory and therefore the same filesystem as the real write, which is the
+// property the probe exists to establish.
+export const PROBE_SUFFIX = '.preflight';
+
+export const probePathFor = filePath => `${filePath}${PROBE_SUFFIX}`;
 
 // ---------------------------------------------------------------------------
 // The outcome name.
@@ -807,6 +853,13 @@ export function buildEvidenceRecord({
   const expiryInstant = ttlExpires ? instantFrom(runMillis + measuredDefaultTtl * 1000) : null;
   const ttlDriftFinding = containerDefinition.ttlDriftFinding ?? null;
 
+  // Where the documents ACTUALLY landed, as the read-back saw it — including
+  // fixture-core's reserved tokens for the two states that are not a value at
+  // all. Hoisted out of the record literal because a finding is derived from it.
+  const partitionValue = confirmation?.partitionValue ?? deviceId;
+  const observedPartitionValues = [...(confirmation?.observedPartitionValues ?? [])];
+  const landing = classifyPartitionValues(observedPartitionValues, partitionValue);
+
   const findings = [];
   if (ttlDriftFinding) {
     findings.push(
@@ -857,6 +910,51 @@ export function buildEvidenceRecord({
         // collision, investigable by id. Claiming them as the unknown-writer
         // stop condition would be a detection this record cannot perform.
         message: `${anomalousIds.length} document(s) returned by the correlated read-back are NOT attributable to this run and are recorded by id, apart from this run's own. The read-back is filtered to this run's ${RUN_ID_FIELD}, so these carry THIS run's correlator and are a sender-side marker defect or a correlator collision — investigate them by id. They are NOT evidence about an unknown writer: see unknownWriterCheck, and check that stop condition with an unfiltered enumeration.`,
+      })
+    );
+  }
+  // The partition the documents landed in, when it is not the one this run
+  // queried. THREE STATES, NEVER FLATTENED INTO ONE: a document carrying a
+  // DIFFERENT value for the partition key field, a document carrying NO such
+  // field at all, and a document whose field is present but unusable. The second
+  // is the architect's predicted failure mode for this route — nothing between
+  // the device and Cosmos injects a partition key, so a body that omits the
+  // field produces a document under NO partition key rather than under some
+  // other one — and it is the state the evidence most needs to capture, because
+  // it points at the message body the sender built rather than at the routing
+  // target. An empty list, or a single "not where we looked" sentence, discards
+  // exactly the fact that tells those two apart.
+  //
+  // A FINDING, NOT A FAILURE: the outcome is already decided by the confirmation
+  // (EXIT.UNEXPECTED_PARTITION on the path that normally produces this), and a
+  // confirmed run whose documents carry an odd partition value is still a
+  // confirmed run whose oddity must be recorded rather than dropped.
+  if (landing.differentValue.length > 0 || landing.absent || landing.unusable) {
+    const states = [];
+    if (landing.differentValue.length > 0) {
+      states.push(
+        `document(s) under a DIFFERENT ${containerDefinition.partitionKeyField} (values observed: ${landing.differentValue.join(', ')})`
+      );
+    }
+    if (landing.absent) {
+      states.push(
+        `document(s) carrying NO ${containerDefinition.partitionKeyField} FIELD AT ALL, recorded as ${PARTITION_VALUE_ABSENT} — landed under NO partition key rather than under a different one, which points at the message body the sender built and not at the routing target`
+      );
+    }
+    if (landing.unusable) {
+      states.push(
+        `document(s) whose ${containerDefinition.partitionKeyField} is present but empty or not a string, recorded as ${PARTITION_VALUE_UNUSABLE}`
+      );
+    }
+    findings.push(
+      Object.freeze({
+        kind: 'partition-landing',
+        // Distinct VALUES, not document counts: the read-back records the set of
+        // partition values it saw, not one entry per document, and inventing a
+        // per-document number here would be a count nobody measured.
+        measured: observedPartitionValues.filter(value => value !== partitionValue).length,
+        declared: observedPartitionValues.length,
+        message: `the read-back for run ${recordRunId} saw partition value(s) other than the expected ${partitionValue}: ${states.join('; ')}. Each state is recorded separately in observedPartitionValues and none is collapsed into another.`,
       })
     );
   }
@@ -915,8 +1013,12 @@ export function buildEvidenceRecord({
     containerName: containerDefinition.containerName ?? null,
     partitionKeyPath: containerDefinition.partitionKeyPath,
     partitionKeyField: containerDefinition.partitionKeyField,
-    partitionValue: confirmation?.partitionValue ?? deviceId,
-    observedPartitionValues: [...(confirmation?.observedPartitionValues ?? [])],
+    partitionValue,
+    // The values the documents actually carried, reserved tokens included. A
+    // document with no partition key field is its own recorded state here — an
+    // empty list would discard the one fact that distinguishes "landed under a
+    // different key" from "landed under no key".
+    observedPartitionValues,
 
     // The four sets of the evidence-emission contract, each with its own count.
     requestedIds: requested,
@@ -1003,6 +1105,161 @@ export function buildEvidenceRecord({
 export function serializeEvidenceRecord(record) {
   assertNoCredentialShape(record);
   return `${JSON.stringify(record, null, 2)}\n`;
+}
+
+/**
+ * Prove the evidence destination is usable BEFORE the caller does anything
+ * live. Purely local: it stats, it writes and removes one probe file, and it
+ * touches nothing else. No live effect, on any path.
+ *
+ * Every refusal is EXIT.USAGE, and that is the point: this runs while nothing
+ * has been sent, so "fix the invocation and run it again" is the whole and true
+ * diagnosis. Once a send has happened, a destination problem is no longer a
+ * usage error — it is EXIT.EVIDENCE_UNRECORDED, with documents in the container
+ * that no record accounts for, and the caller owns that translation.
+ *
+ * Deliberately STRICTER than writeEvidenceRecord() in one respect: a pre-existing
+ * `.partial` is refused here. It means either a concurrent run holding the same
+ * path, whose record this run's rename would silently destroy, or debris from a
+ * crashed one. Both are worth stopping for when stopping is free. The write path
+ * does not refuse it, because by then it is not free.
+ *
+ * NOT a substitute for the write-time guards. See the header: this is a check at
+ * t0 about a write at t1, and the write-time refusal is the authoritative one.
+ *
+ * @param {string} filePath the operator-chosen --evidence-out destination.
+ * @param {{fs?: object, overwrite?: boolean}} [options] fs is injected so the
+ *   read-only and vanished-directory paths are testable without a real one.
+ * @returns {Promise<object>} what was checked, for the caller to log.
+ */
+export async function preflightEvidenceDestination(filePath, options = {}) {
+  const { fs = { writeFile, rm, stat }, overwrite = false } = options;
+  if (typeof filePath !== 'string' || filePath.trim() === '') {
+    throw usageRefusal(
+      'the evidence destination must be a non-empty path: MG-53 and MG-54 read that artifact as a program input, and a run with nowhere to record it is refused before anything is sent'
+    );
+  }
+
+  const directory = dirname(filePath);
+  const partialPath = partialPathFor(filePath);
+  const probePath = probePathFor(filePath);
+
+  // Absent is an answer; anything else is NOT. A stat that fails for a reason
+  // this preflight cannot interpret is refused rather than treated as "no file
+  // there" — reading an unreadable answer as an absence is the conflation this
+  // whole tool exists to avoid, and it applies to its own filesystem too.
+  const statOf = async target => {
+    try {
+      return await fs.stat(target);
+    } catch (err) {
+      if (err?.code === 'ENOENT') return null;
+      throw usageRefusal(
+        `cannot determine whether ${target} exists: ${err?.code ?? err?.name ?? 'stat error'}. An unreadable destination is refused before any message is sent, not assumed to be free.`
+      );
+    }
+  };
+
+  const isDirectory = entry => typeof entry?.isDirectory === 'function' && entry.isDirectory();
+
+  const directoryStat = await statOf(directory);
+  if (directoryStat === null) {
+    throw usageRefusal(
+      `the directory for the evidence file does not exist: ${directory}. Create it, or choose a path under an existing directory — nothing has been sent, so this costs nothing to fix.`
+    );
+  }
+  if (!isDirectory(directoryStat)) {
+    throw usageRefusal(`the evidence file's parent path is not a directory: ${directory}`);
+  }
+
+  const targetStat = await statOf(filePath);
+  if (targetStat !== null && isDirectory(targetStat)) {
+    // Refused even under `overwrite`: the operator asked to replace an earlier
+    // run's record, not to remove a directory, and the rename would fail at
+    // write time anyway — after the documents were already sent.
+    throw usageRefusal(
+      `the evidence destination ${filePath} is a directory, so no record could be written there. This is refused with overwrite as well: overwrite replaces an earlier run's record, and this is not one.`
+    );
+  }
+  if (targetStat !== null && !overwrite) {
+    throw usageRefusal(
+      `an evidence file already exists at ${filePath}: it records an earlier run whose documents are still in the container, and MG-53 halts on a document no record accounts for. Choose a new path, or pass --overwrite deliberately. Nothing has been sent for this run.`
+    );
+  }
+
+  const partialStat = await statOf(partialPath);
+  if (partialStat !== null && !overwrite) {
+    throw usageRefusal(
+      `a partial evidence file already exists at ${partialPath}: either another run is writing this same path right now — in which case this run's rename would destroy its record — or a crashed run left it behind. Remove it, or choose another path. Nothing has been sent for this run.`
+    );
+  }
+
+  // The probe. The only way to establish that the real write will be permitted
+  // is to perform one, on the same filesystem, and remove it.
+  try {
+    await fs.writeFile(probePath, '', 'utf8');
+  } catch (err) {
+    throw usageRefusal(
+      `the evidence destination ${filePath} is not writable: ${err?.code ?? err?.name ?? 'write error'} while probing ${probePath}. Refused before any message was sent, so no synthetic document is in the container from this run.`
+    );
+  } finally {
+    // Best effort, and deliberately not fatal: the probe is empty, it is not
+    // evidence, and failing the run over a leftover byte after the destination
+    // has just been proven writable would refuse a usable path.
+    await fs.rm(probePath, { force: true }).catch(() => {});
+  }
+
+  return Object.freeze({
+    path: filePath,
+    directory,
+    partialPath,
+    probePath,
+    exists: targetStat !== null,
+    overwrite,
+    writable: true,
+  });
+}
+
+/**
+ * One operator-facing line for a passed preflight, built only from its fields.
+ * It says what was proven and, explicitly, what was not: a passing preflight is
+ * not a promise that the write will succeed.
+ */
+export function describeDestination(preflight) {
+  const replacing = preflight.exists
+    ? ' (an existing record WILL BE REPLACED — --overwrite was given)'
+    : '';
+  return (
+    `evidence destination ${preflight.path}: writable, checked before any message was sent${replacing}. ` +
+    'Re-checked at write time; this preflight is not a guarantee.'
+  );
+}
+
+/**
+ * Split recorded partition values into the states they describe.
+ *
+ * `observedPartitionValues` carries reserved tokens from fixture-core for the
+ * two states that are not a value at all, and the difference between them is
+ * load-bearing: a document with NO partition key field landed under no partition
+ * key — the architect's predicted failure mode for this route, since nothing
+ * between the device and Cosmos injects one — while a document under a DIFFERENT
+ * value landed somewhere else entirely. They point at different repairs (the
+ * message body the sender built, versus the routing target), so the record keeps
+ * them apart instead of flattening both into "not where we looked".
+ *
+ * Exported so a downstream consumer branches on this rather than parsing the
+ * outcome sentence.
+ */
+export function classifyPartitionValues(values = [], expected = null) {
+  const list = Array.isArray(values) ? values : [];
+  return Object.freeze({
+    expected: list.filter(value => value === expected),
+    differentValue: list.filter(
+      value =>
+        value !== expected && value !== PARTITION_VALUE_ABSENT && value !== PARTITION_VALUE_UNUSABLE
+    ),
+    absent: list.includes(PARTITION_VALUE_ABSENT),
+    unusable: list.includes(PARTITION_VALUE_UNUSABLE),
+  });
 }
 
 /**

@@ -15,7 +15,7 @@
 // and the artifact is byte-reproducible.
 
 import { strict as assert } from 'node:assert';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -30,7 +30,10 @@ import {
   FixtureError,
   ID_SET_NAMES,
   MESSAGES_PER_RUN,
+  PARTITION_VALUE_ABSENT,
+  PARTITION_VALUE_UNUSABLE,
   RUN_ID_FIELD,
+  SEQUENCE_FIELD,
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
   TICKET,
@@ -48,10 +51,14 @@ import {
   UNKNOWN_WRITER_CHECK,
   assertNoCredentialShape,
   buildEvidenceRecord,
+  classifyPartitionValues,
+  describeDestination,
   describeEvidence,
   findCredentialRisks,
   outcomeName,
   partialPathFor,
+  preflightEvidenceDestination,
+  probePathFor,
   serializeEvidenceRecord,
   writeEvidenceRecord,
 } from './evidence.mjs';
@@ -1472,6 +1479,382 @@ describe('writing the artifact', () => {
         err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
       );
     }
+  });
+});
+
+// The destination is checked BEFORE the sender changes the live system.
+//
+// The failure this block exists to catch is not "the write refused" — the write
+// already refuses correctly, and those tests are above. It is the ORDER: an
+// unusable --evidence-out path used to be discovered only after three synthetic
+// documents were in the live container, leaving documents no record accounts for
+// and MG-53 halting on them. Every refusal here is asserted to be EXIT.USAGE,
+// the code that means "nothing live happened", and asserted to leave the
+// directory exactly as it found it.
+describe('the evidence destination is proven usable before anything live happens', () => {
+  const refusalOf = async promise => {
+    try {
+      await promise;
+    } catch (err) {
+      return err;
+    }
+    return null;
+  };
+
+  const assertUsageRefusal = (err, context) => {
+    assert.ok(err instanceof FixtureError, `${context}: expected a FixtureError, got ${err}`);
+    // USAGE and nothing else. A destination problem found before the send is
+    // "fix the invocation", never one of the outcome codes: reporting it as
+    // TIMEOUT or EVIDENCE_UNRECORDED would tell the operator that documents may
+    // be in the container when none can be.
+    assert.equal(err.exitCode, EXIT.USAGE, `${context}: wrong exit code`);
+    return err;
+  };
+
+  it('passes for a fresh path and leaves the directory exactly as it found it', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const result = await preflightEvidenceDestination(target);
+
+      assert.equal(result.path, target);
+      assert.equal(result.writable, true);
+      assert.equal(result.exists, false);
+      assert.equal(result.directory, dir);
+      assert.equal(result.probePath, probePathFor(target));
+      // The probe is removed: a preflight that left a file behind would be a
+      // live effect of its own, and a `.preflight` sibling sitting next to the
+      // target is exactly the debris a later operator picks up by hand.
+      assert.deepEqual(await readdir(dir), [], 'the preflight left something behind');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an existing record before the send, and does not touch it', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const first = await buildSuccessRecord();
+      await writeEvidenceRecord(first, target);
+
+      const err = assertUsageRefusal(
+        await refusalOf(preflightEvidenceDestination(target)),
+        'an existing record'
+      );
+      // The operator is told, at a point where it is still free to fix, that
+      // nothing was sent for this run.
+      assert.match(err.message, /Nothing has been sent for this run/);
+      assert.equal(await readFile(target, 'utf8'), serializeEvidenceRecord(first));
+
+      // Deliberate overwrite is still possible, and reports what it will replace.
+      const result = await preflightEvidenceDestination(target, { overwrite: true });
+      assert.equal(result.exists, true);
+      assert.match(describeDestination(result), /WILL BE REPLACED/);
+      // Still untouched: a preflight decides, it does not write.
+      assert.equal(await readFile(target, 'utf8'), serializeEvidenceRecord(first));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a directory that does not exist rather than creating one', async () => {
+    const dir = await tempDir();
+    try {
+      const missing = path.join(dir, 'does-not-exist');
+      const err = assertUsageRefusal(
+        await refusalOf(preflightEvidenceDestination(path.join(missing, 'evidence.json'))),
+        'a missing directory'
+      );
+      assert.match(err.message, /directory for the evidence file does not exist/);
+      assert.deepEqual(await readdir(dir), [], 'the preflight created a directory');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a destination that is a directory, with overwrite as well', async () => {
+    const dir = await tempDir();
+    try {
+      // The path the operator gave IS a directory — a plausible slip, and one
+      // whose rename would fail at write time, i.e. after the send.
+      const asDirectory = path.join(dir, 'evidence.json');
+      await mkdir(asDirectory);
+      for (const options of [{}, { overwrite: true }]) {
+        const err = assertUsageRefusal(
+          await refusalOf(preflightEvidenceDestination(asDirectory, options)),
+          `a directory destination with ${JSON.stringify(options)}`
+        );
+        assert.match(err.message, /is a directory/);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a partial left by a crashed or concurrent run', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      await writeFile(partialPathFor(target), '{"half":', 'utf8');
+
+      const err = assertUsageRefusal(
+        await refusalOf(preflightEvidenceDestination(target)),
+        'a pre-existing partial'
+      );
+      // Stricter than the write path deliberately: the rename would destroy a
+      // concurrent run's record, and at preflight time refusing costs nothing.
+      assert.match(err.message, /partial evidence file already exists/);
+      assert.match(err.message, /another run is writing this same path/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a destination it cannot write to, before a single message is sent', async () => {
+    // A read-only mount, as the filesystem reports it. Injected, because a real
+    // one is not creatable in this container and the case is the whole point.
+    const writes = [];
+    const fs = {
+      stat: async () => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      writeFile: async file => {
+        writes.push(file);
+        throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
+      },
+      rm: async () => {},
+    };
+    // The directory has to exist for the probe to be reached, so stat answers
+    // ENOENT only for the file: this fs answers ENOENT for everything, so use a
+    // real directory and only the write fails.
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const err = assertUsageRefusal(
+        await refusalOf(
+          preflightEvidenceDestination(target, {
+            fs: { ...fs, stat: async p => (p === dir ? { isDirectory: () => true } : fs.stat(p)) },
+          })
+        ),
+        'a read-only destination'
+      );
+      assert.match(err.message, /is not writable/);
+      assert.match(err.message, /EROFS/);
+      // The sentence an operator needs: this refusal is not a report about the
+      // container.
+      assert.match(err.message, /no synthetic document is in the container from this run/);
+      assert.deepEqual(writes, [probePathFor(target)]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unreadable destination rather than reading it as absent', async () => {
+    // The tool's own filesystem gets the same discipline as its read-back: an
+    // error is not an absence. A stat that fails for any reason other than
+    // ENOENT is refused, not assumed to mean "the path is free".
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const fs = {
+        stat: async p => {
+          if (p === dir) return { isDirectory: () => true };
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        },
+        writeFile: async () => {
+          throw new Error('the probe must not be reached');
+        },
+        rm: async () => {},
+      };
+      const err = assertUsageRefusal(
+        await refusalOf(preflightEvidenceDestination(target, { fs })),
+        'an unreadable destination'
+      );
+      assert.match(err.message, /cannot determine whether/);
+      assert.match(err.message, /EACCES/);
+      assert.match(err.message, /not assumed to be free/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a path that is not a path', async () => {
+    for (const bad of ['', '   ', undefined, null, 42, {}]) {
+      assertUsageRefusal(
+        await refusalOf(preflightEvidenceDestination(bad)),
+        `the path ${JSON.stringify(bad)}`
+      );
+    }
+  });
+
+  it('is not a promise: the write-time refusal still decides', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      // Passes at t0...
+      assert.equal((await preflightEvidenceDestination(target)).writable, true);
+      // ...and the path is taken at t1, by a concurrent run or by hand.
+      const other = await buildSuccessRecord();
+      await writeEvidenceRecord(other, target);
+
+      // The write-time guard is the authoritative one and MUST still refuse. A
+      // preflight that had been allowed to stand in for it would clobber a
+      // record whose documents are still in the container.
+      const record = await buildSuccessRecord({
+        build: { now: fixedClock(RUN_MILLIS + 60_000) },
+      });
+      await assert.rejects(
+        writeEvidenceRecord(record, target),
+        err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+      );
+      assert.equal(await readFile(target, 'utf8'), serializeEvidenceRecord(other));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('has no live effect and reaches nothing outside the filesystem', async () => {
+    const source = await readLocal('./evidence.mjs');
+    // The preflight's whole justification is that it is purely local: if it
+    // could send, spawn or fetch, running it before the send would be exactly
+    // the harm it exists to prevent. The module-wide assertions above cover the
+    // imports; this pins the claim to the preflight's own contract.
+    assert.match(source, /preflightEvidenceDestination/);
+    assert.equal(/\bspawn\b/.test(source), false, 'evidence.mjs can spawn a process');
+  });
+});
+
+// Where the documents landed is RECORDED, and the states are never flattened.
+//
+// The architect's top-ranked risk for this route is that nothing between the
+// device and Cosmos injects a partition key, so a body missing the field yields
+// a stored document with NO partition key — not one under a different key. The
+// two need different repairs, so the artifact MG-53 and MG-54 parse has to keep
+// them apart. An empty observedPartitionValues discards the distinction entirely.
+describe('the partition the documents landed in', () => {
+  const BOUND = 20_000;
+  const INTERVAL = 5_000;
+  const POLLS_TO_BOUND = 5;
+  const emptyPolls = () => Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+
+  // Documents as COSMOS returns them: the platform assigns the id, and the
+  // partition key is whatever the BODY carried.
+  const routed = ({ partitionValue = FIXTURE_DEVICE_ID, mutate } = {}) =>
+    Array.from({ length: MESSAGES_PER_RUN }, (_, i) => {
+      const doc = {
+        id: `cosmos-assigned-${i + 1}`,
+        deviceId: partitionValue,
+        timestamp: '2026-08-11T08:59:55.000Z',
+        [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
+        [RUN_ID_FIELD]: RUN_ID,
+        [SEQUENCE_FIELD]: i + 1,
+      };
+      if (mutate) mutate(doc);
+      return doc;
+    });
+
+  const recordFor = async documents => {
+    const confirmation = await confirmationFor(
+      { script: [...emptyPolls(), { docs: documents }] },
+      { timeoutMs: BOUND, pollIntervalMs: INTERVAL }
+    );
+    return buildEvidenceRecord({
+      confirmation,
+      containerDefinition: await cleanDefinition(),
+      requestedIds: requestedIdsOf(sentMessages()),
+      target: TARGET,
+      now: fixedClock(),
+    });
+  };
+
+  const partitionFinding = record => record.findings.find(f => f.kind === 'partition-landing');
+
+  it('records "no partition key field at all" as its own state, never as an empty list', async () => {
+    const record = await recordFor(routed({ mutate: doc => delete doc.deviceId }));
+
+    assert.equal(record.exitCode, EXIT.UNEXPECTED_PARTITION);
+    // THE fact this block exists for: the state is recorded, not discarded.
+    assert.deepEqual(record.observedPartitionValues, [PARTITION_VALUE_ABSENT]);
+    assert.notDeepEqual(record.observedPartitionValues, []);
+
+    const finding = partitionFinding(record);
+    assert.ok(finding, 'no partition-landing finding was recorded');
+    assert.match(finding.message, /NO deviceId FIELD AT ALL/);
+    assert.match(finding.message, new RegExp(PARTITION_VALUE_ABSENT));
+    // And it must not state the thing that is factually false about a document
+    // carrying no deviceId at all.
+    assert.doesNotMatch(
+      finding.message,
+      /DIFFERENT deviceId/,
+      'described a document with no partition key as carrying a different one'
+    );
+    // The confirmation's own sentence travels into the record unaltered, so the
+    // two artifacts cannot disagree about what happened.
+    assert.match(record.outcomeReason, /NO deviceId FIELD AT ALL/);
+    // Still parses, still passes the credential guard with the reserved tokens
+    // in it.
+    assert.deepEqual(JSON.parse(serializeEvidenceRecord(record)).observedPartitionValues, [
+      PARTITION_VALUE_ABSENT,
+    ]);
+  });
+
+  it('records a DIFFERENT partition value as a different state, naming the value', async () => {
+    const record = await recordFor(routed({ partitionValue: 'some-other-partition' }));
+
+    assert.equal(record.exitCode, EXIT.UNEXPECTED_PARTITION);
+    assert.deepEqual(record.observedPartitionValues, ['some-other-partition']);
+    const finding = partitionFinding(record);
+    assert.ok(finding, 'no partition-landing finding was recorded');
+    assert.match(finding.message, /DIFFERENT deviceId/);
+    assert.match(finding.message, /some-other-partition/);
+    // The two states are distinguishable in the record, which is the whole
+    // point: this one must not claim the field was missing.
+    assert.doesNotMatch(finding.message, /FIELD AT ALL/);
+    assert.equal(finding.measured, 1);
+  });
+
+  it('records a present-but-unusable value as a third state', async () => {
+    const record = await recordFor(routed({ mutate: doc => (doc.deviceId = '') }));
+
+    assert.deepEqual(record.observedPartitionValues, [PARTITION_VALUE_UNUSABLE]);
+    const finding = partitionFinding(record);
+    assert.ok(finding, 'no partition-landing finding was recorded');
+    assert.match(finding.message, /present but empty or not a string/);
+    assert.doesNotMatch(finding.message, /FIELD AT ALL/);
+  });
+
+  it('records no partition finding for a run that landed where it was sent', async () => {
+    const record = await buildSuccessRecord();
+    assert.equal(record.confirmed, true);
+    assert.deepEqual(record.observedPartitionValues, [FIXTURE_DEVICE_ID]);
+    assert.equal(
+      partitionFinding(record),
+      undefined,
+      'a healthy run was reported as a partition anomaly'
+    );
+  });
+
+  it('splits recorded values into the three states a consumer branches on', () => {
+    const split = classifyPartitionValues(
+      [FIXTURE_DEVICE_ID, 'elsewhere', PARTITION_VALUE_ABSENT, PARTITION_VALUE_UNUSABLE],
+      FIXTURE_DEVICE_ID
+    );
+    assert.deepEqual(split.expected, [FIXTURE_DEVICE_ID]);
+    // The reserved tokens are NOT "a different value": that is the conflation
+    // this classification exists to make impossible downstream.
+    assert.deepEqual(split.differentValue, ['elsewhere']);
+    assert.equal(split.absent, true);
+    assert.equal(split.unusable, true);
+
+    const clean = classifyPartitionValues([FIXTURE_DEVICE_ID], FIXTURE_DEVICE_ID);
+    assert.deepEqual(clean.differentValue, []);
+    assert.equal(clean.absent, false);
+    assert.equal(clean.unusable, false);
+    // Tolerates a confirmation that recorded nothing, without inventing a state.
+    const none = classifyPartitionValues(undefined, FIXTURE_DEVICE_ID);
+    assert.deepEqual(none.expected, []);
+    assert.equal(none.absent, false);
   });
 });
 
