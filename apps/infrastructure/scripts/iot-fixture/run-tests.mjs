@@ -52,26 +52,30 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 //
 // minTests carries a small margin (roughly 7%) below the honest count, so
 // tightening or consolidating a handful of cases does not turn this red for a
-// reason that has nothing to do with the suite failing to run. Counts at the
-// time of writing: dependency-free 259 tests across 4 files (container-definition
-// 33, evidence 34, fixture-core 92, send-fixture 100); real-SDK 24 tests across
-// 1 file.
+// reason that has nothing to do with the suite failing to run. Counts measured
+// at the time of writing: dependency-free 322 tests across 4 files
+// (container-definition 34, evidence 49, fixture-core 122, send-fixture 117);
+// real-SDK 27 tests across 1 file.
 //
 // The floor is RAISED when the suite grows and is never lowered to accommodate
 // a rename: a floor below the honest count is a floor that lets a whole
-// describe() block stop running unnoticed.
+// describe() block stop running unnoticed. These floors were last raised when
+// the evidence-emission contract landed — every terminal outcome the tool can
+// produce now has to emit a record with its four id sets individually correct
+// (requested, accepted, ambiguous, observed), which is a large block of cases
+// whose disappearance must not be able to hide under a stale floor.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 240,
+    minTests: 300,
   },
   sdk: {
     label: 'real-SDK',
     match: name => name.endsWith(SDK_SUFFIX),
     minFiles: 1,
-    minTests: 22,
+    minTests: 25,
   },
 };
 
