@@ -1687,6 +1687,131 @@ describe('the confirmation read-back', () => {
     }
   });
 
+  // THE FAIL-OPEN DEFAULT, CLOSED AT THE PRODUCER END. resolveOutcomeCode is
+  // proven in its own suite never to reach exit 0 from a state it did not
+  // anticipate. What that proof cannot say on its own is whether THIS function
+  // — the only thing that ever hands it a confirmation — can produce a state it
+  // would misread. The two halves are coupled here, because the funnel's
+  // guarantee is worth exactly what the results feeding it are: a path that
+  // returned EXIT.OK with `confirmed` unset, or that set `confirmed` on a set it
+  // never fully read back, would pass every test in the resolver's suite and
+  // still exit 0 on a run that proved nothing.
+  //
+  // Asserted as a BICONDITIONAL rather than as two lists of scenarios: the
+  // funnel says 0 exactly when this function positively confirmed, so a new
+  // outcome added to either side has to satisfy it without this test being
+  // updated to know about it.
+  it('produces no result, on any path, that can resolve to exit 0 without a read-back', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const specs = [
+      ['success', { script: [{ docs: routed(MESSAGES_PER_RUN) }] }],
+      ['success after empty polls', { script: [{ docs: [] }, { docs: routed(MESSAGES_PER_RUN) }] }],
+      ['timeout', { fallback: { docs: [] } }],
+      ['auth on the first poll', { script: [{ error: forbiddenError() }] }],
+      ['auth on the sweep', { script: [...empties, { error: authError() }] }],
+      ['transport, retries exhausted', { fallback: { error: transportError() } }],
+      ['marker violation', { script: [{ docs: routed(1, { unmarked: true }) }] }],
+      ['partial at the bound', { fallback: { docs: routed(MESSAGES_PER_RUN - 1) } }],
+      ['more documents than were sent', { script: [{ docs: routed(MESSAGES_PER_RUN + 1) }] }],
+      ['unreadable page', { script: [{ docs: 'not a list' }] }],
+      ['a foreign run id', { script: [{ docs: routed(1, { runId: 'someone-elses-run' }) }] }],
+      [
+        'delivered under a different partition',
+        {
+          script: [...empties, { docs: routed(MESSAGES_PER_RUN, { partitionValue: 'elsewhere' }) }],
+        },
+      ],
+      [
+        'delivered under no partition key at all',
+        { script: [...empties, { docs: routed(MESSAGES_PER_RUN, { omitPartitionKey: true }) }] },
+      ],
+      ['an incomplete cross-partition sweep', { script: [...empties, { docs: routed(1) }] }],
+    ];
+
+    for (const [context, spec] of specs) {
+      const { result } = await confirm(spec);
+      const resolved = resolveOutcomeCode({ confirmation: result });
+
+      assert.equal(
+        resolved.exitCode === EXIT.OK,
+        result.confirmed === true,
+        `${context}: ${describeConfirmation(result)}`
+      );
+      assert.equal(resolved.exitCode, result.exitCode, context);
+      // Every result this function produces is a shape the funnel RECOGNISES. A
+      // result that tripped the unanticipated branch would still exit nonzero,
+      // but it would mean this function had produced something the vocabulary
+      // cannot name — which is a defect here, not a rescue there.
+      assert.equal(
+        resolved.unanticipated,
+        false,
+        `${context}: the funnel could not name this result`
+      );
+
+      if (resolved.exitCode === EXIT.OK) {
+        // Exit 0 states that the expected count of marked, run-correlated
+        // documents was read back. Asserted off the RESULT rather than off the
+        // scenario name, so a path that learns to confirm without observing
+        // them fails here rather than being described as a success.
+        assert.equal(result.observedCount, result.expectedCount, context);
+        assert.equal(result.observedIds.length, MESSAGES_PER_RUN, context);
+        assert.equal(typeof result.observedArrivalMs, 'number', context);
+        assert.equal(result.uncertain, false, context);
+      } else {
+        assert.ok(resolved.exitCode > 0, `${context}: resolved to a non-positive code`);
+        assert.ok(isKnownExitCode(resolved.exitCode), `${context}: resolved to a foreign code`);
+      }
+
+      // A failure raised alongside a verdict never rescues one and never
+      // upgrades one: the verdict is the half that actually looked in the
+      // container, and it stays the half that decides.
+      assert.equal(
+        resolveOutcomeCode({
+          confirmation: result,
+          failure: new FixtureError(EXIT.TRANSPORT, 'socket hang up'),
+        }).exitCode === EXIT.OK,
+        result.confirmed === true,
+        `${context}: a concurrent failure changed the verdict`
+      );
+    }
+  });
+
+  // A run that never reached the read-back at all is precisely the state the
+  // inverted default swallowed — no confirmation to speak of, and whatever the
+  // sender managed before it aborted. However it is fed to the funnel, and
+  // whether or not it observed documents on the way down, it is never a success.
+  it('produces no ABORTED result that can resolve to exit 0', () => {
+    const aborted = [
+      ['nothing read back', { exitCode: EXIT.SEND_FAILURE, reason: 'az exited nonzero' }],
+      [
+        'documents read back before the abort',
+        {
+          exitCode: EXIT.TRANSPORT,
+          reason: 'socket hang up after two documents were read back',
+          observedIds: ['cosmos-assigned-1', 'cosmos-assigned-2'],
+        },
+      ],
+    ];
+
+    for (const [context, fields] of aborted) {
+      const result = abortedConfirmation({ runId: RUN, ...fields });
+      assert.equal(result.confirmed, false, context);
+      assert.equal(result.uncertain, true, context);
+
+      const failure = new FixtureError(result.exitCode, 'aborted');
+      for (const [shape, input] of [
+        ['as a confirmation', { confirmation: result }],
+        ['alongside its failure', { confirmation: result, failure }],
+        ['as a failure alone', { failure }],
+      ]) {
+        const resolved = resolveOutcomeCode(input);
+        assert.notEqual(resolved.exitCode, EXIT.OK, `${context}, ${shape}: reached exit 0`);
+        assert.equal(resolved.exitCode, result.exitCode, `${context}, ${shape}`);
+        assert.ok(isKnownExitCode(resolved.exitCode), `${context}, ${shape}`);
+      }
+    }
+  });
+
   it('matches on the run id as a bound parameter, and validates the marker itself', async () => {
     const { reader } = await confirm({ script: [{ docs: routed(MESSAGES_PER_RUN) }] });
     const [call] = reader.calls;
