@@ -650,6 +650,21 @@ export function isSyntheticDocument(doc, runId) {
 //    conflating them would report a WORKING route as broken. Hence the single
 //    cross-partition sweep before any absence is reported, and its own exit code.
 //
+//    BUT THE SWEEP ONLY CHANGES WHICH QUERY LOOKED, and that is not a fact about
+//    where anything landed. The partition label is therefore decided by the
+//    partition value the RETURNED DOCUMENTS carry — the container partitions on
+//    that field, so the value in the document IS the partition it is in —
+//    and never by which query happened to find it. The two come apart on an
+//    ordinary healthy run: a document that arrives in the CORRECT partition
+//    during the round trip between the last scoped poll and the sweep is found
+//    only by the sweep, and labelling it a partition anomaly would report a
+//    working route as broken in the very artifact MG-62's post-cutover proof
+//    reads. So a document in the expected partition is a confirmation whichever
+//    query found it, and an INCOMPLETE cross-partition set stays a correlation
+//    ambiguity rather than being upgraded into a partition claim: where the
+//    documents this run cannot account for went is not established by the ones
+//    it can.
+//
 // 4. EVERY PATH RETURNS A RESULT RATHER THAN THROWING. The wait bound actually
 //    used, the polls issued, the ids observed and the elapsed time are the
 //    evidence this ticket exists to produce, and they are needed MOST on the
@@ -969,6 +984,29 @@ export async function confirmArrival({
     return [...new Set(values)];
   };
 
+  // WHERE this run's documents actually landed, counted off the partition value
+  // they CARRY (decision 3). The container partitions on the measured field, so
+  // that value is the partition the document is in; which query returned it is a
+  // fact about the query.
+  //
+  // Strict equality against the value this run queried. A document of ours whose
+  // partition field is missing, empty or not a string counts as NOT in the
+  // expected partition: it is positively not in the partition this run scoped
+  // to, and a document this fixture built always carries the field — so the
+  // fail-closed default cannot cost a healthy run a false anomaly, while the
+  // opposite default would hide a real one.
+  //
+  // Only meaningful once partitionKeyField is known; the caller checks that
+  // first, because "we cannot see where they landed" is its own answer and not a
+  // partition finding.
+  const partitionLanding = documents => {
+    const mine = (Array.isArray(documents) ? documents : []).filter(
+      doc => isPlainObject(doc) && isSyntheticDocument(doc, runId)
+    );
+    const inExpected = mine.filter(doc => doc[partitionKeyField] === partitionValue).length;
+    return { total: mine.length, inExpected, elsewhere: mine.length - inExpected };
+  };
+
   // ONE place decides what a result says about what was observed. Callers below
   // pass only what is new to their path; the ids are unioned in here, so a path
   // added later cannot drop them by forgetting to thread them through (decision
@@ -1033,6 +1071,36 @@ export async function confirmArrival({
       reason: `transport failure reading back run ${safeFragment(runId)} (${budget}) — aborting rather than reporting an absence: ${describeError(err)}`,
     });
 
+  // THE ONE PLACE a complete page becomes a confirmation, shared by the
+  // partition-scoped poll and the sweep. Sharing it is the point: the
+  // monotonicity guard below cannot be present in one caller and missing from
+  // the other, and a confirmation cannot come to mean two different things
+  // depending on which query produced it.
+  const completeResult = ({ verdict, documents, scope, note = '' }) => {
+    // The count is right in THIS page, but an earlier page returned ids this one
+    // does not. Confirming here would put an id in the evidence record's
+    // observed set that the confirming read did not see, or leave one out that
+    // was genuinely observed — either way MG-53's "the source holds only the
+    // recorded documents" check would be run against a set nobody read in one
+    // piece. Ambiguity, never a success.
+    if (observedSoFar.length > verdict.ids.length) {
+      return result({
+        exitCode: EXIT.AMBIGUOUS,
+        scope,
+        observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
+        reason: `${observedSoFar.length} distinct document id(s) have been read back across ${polls} poll(s) for a run that sent ${expectedCount}, and the ${verdict.ids.length} in the latest page are not all of them — an id seen once is never unseen, so this is a correlation ambiguity rather than a confirmation`,
+      });
+    }
+    return result({
+      confirmed: true,
+      exitCode: EXIT.OK,
+      scope,
+      observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
+      observedArrivalMs: now() - startedAt,
+      reason: `read back ${verdict.ids.length} of ${expectedCount} marked, run-correlated document(s) out of the destination container${note}`,
+    });
+  };
+
   let lastPartial = null;
   let lastPartialDocuments = [];
 
@@ -1076,28 +1144,7 @@ export async function confirmArrival({
         });
       }
       if (verdict.kind === 'complete') {
-        // The count is right in THIS page, but an earlier page returned ids this
-        // one does not. Confirming here would put an id in the evidence record's
-        // observed set that the confirming read did not see, or leave one out
-        // that was genuinely observed — either way MG-53's "the source holds only
-        // the recorded documents" check would be run against a set nobody read in
-        // one piece. Ambiguity, never a success.
-        if (observedSoFar.length > verdict.ids.length) {
-          return result({
-            exitCode: EXIT.AMBIGUOUS,
-            scope: 'expected-partition',
-            observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
-            reason: `${observedSoFar.length} distinct document id(s) have been read back across ${polls} poll(s) for a run that sent ${expectedCount}, and the ${verdict.ids.length} in the latest page are not all of them — an id seen once is never unseen, so this is a correlation ambiguity rather than a confirmation`,
-          });
-        }
-        return result({
-          confirmed: true,
-          exitCode: EXIT.OK,
-          scope: 'expected-partition',
-          observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
-          observedArrivalMs: now() - startedAt,
-          reason: `read back ${verdict.ids.length} of ${expectedCount} marked, run-correlated document(s) out of the destination container`,
-        });
+        return completeResult({ verdict, documents, scope: 'expected-partition' });
       }
       if (verdict.kind === 'partial') {
         lastPartial = verdict;
@@ -1165,16 +1212,64 @@ export async function confirmArrival({
     });
   }
 
-  // Delivered — just not where this tool looked first. Reporting this as an
-  // absence would call a working route broken, and would send an operator to
-  // debug an endpoint that is doing its job.
+  // An INCOMPLETE cross-partition set is a correlation ambiguity and is never
+  // upgraded into a partition claim (decision 3). "Delivered, unexpected
+  // partition" is a statement about this run's documents; with some of them
+  // unaccounted for, the sweep has not established where the run landed — only
+  // that part of it is somewhere. Saying more than that would put a routing
+  // diagnosis nobody witnessed into the artifact MG-53 and MG-54 parse.
+  if (sweepVerdict.kind === 'partial') {
+    return result({
+      exitCode: EXIT.AMBIGUOUS,
+      scope: 'cross-partition',
+      observedPartitionValues: Object.freeze(partitionValuesOf(sweep)),
+      reason: `the cross-partition sweep read back ${sweepVerdict.ids.length} of ${expectedCount} document(s) for run ${safeFragment(runId)} after the ${timeoutMs}ms wait bound elapsed — an incomplete set is a correlation ambiguity, never an absence, never a success, and never a partition finding about a run most of whose documents are unaccounted for`,
+    });
+  }
+
+  // The full set is here. WHERE it landed is now read off the documents.
+  //
+  // Without a measured partition key field there is nothing to read it off, and
+  // this tool does not guess: the honest answer is that the documents were found
+  // and their partition could not be established, which is an ambiguity rather
+  // than either a confirmation or a partition finding. (The CLI always supplies
+  // the measured field, so this is a caller that asked for less than it needed.)
+  if (partitionKeyField === null) {
+    return result({
+      exitCode: EXIT.AMBIGUOUS,
+      scope: 'cross-partition',
+      reason: `all ${sweepVerdict.ids.length} document(s) for run ${safeFragment(runId)} were read back by the cross-partition sweep, but no partition key field was supplied, so whether they landed under the expected partition ${safeFragment(partitionValue)} cannot be established — an unestablished partition is an ambiguity, not a confirmation and not a partition finding`,
+    });
+  }
+
+  const landing = partitionLanding(sweep);
   const landed = partitionValuesOf(sweep);
+
+  // Every document is in the partition this run queried. It is a CONFIRMATION —
+  // the scoped polls simply missed them by timing, most plainly when the
+  // documents arrived during the round trip between the last poll and the sweep.
+  // Calling this a partition anomaly would report a healthy route as broken.
+  // The bound is the thing that was wrong, and the recorded arrival delay (past
+  // the bound, on this path) is exactly the calibration that says so.
+  if (landing.elsewhere === 0) {
+    return completeResult({
+      verdict: sweepVerdict,
+      documents: sweep,
+      scope: 'cross-partition',
+      note: ` under the EXPECTED partition ${safeFragment(partitionValue)} — found by the cross-partition sweep rather than by a scoped poll, which is a timing artefact of the ${timeoutMs}ms wait bound and NOT a partition anomaly; raise the bound to observe them in the scoped poll`,
+    });
+  }
+
+  // Delivered — but not, or not entirely, where this tool looked first. Reported
+  // off the partition values the documents carry, and counted, so an operator
+  // reading it knows how much of the run went astray. An absence here would call
+  // a working route broken and send them to debug an endpoint doing its job.
   return result({
     exitCode: EXIT.UNEXPECTED_PARTITION,
     scope: 'cross-partition',
     observedPartitionValues: Object.freeze(landed),
     observedArrivalMs: null,
-    reason: `${sweepVerdict.ids.length} of ${expectedCount} document(s) for run ${safeFragment(runId)} were found OUTSIDE the expected partition ${safeFragment(partitionValue)}${landed.length ? ` (under ${landed.map(value => safeFragment(value)).join(', ')})` : ''} — the route delivered, but the partition value the body carried is not the one this run queried, so the run is not confirmed`,
+    reason: `${landing.elsewhere} of ${landing.total} document(s) read back for run ${safeFragment(runId)} carry a ${partitionKeyField} other than the expected ${safeFragment(partitionValue)}${landed.length ? ` (values observed: ${landed.map(value => safeFragment(value)).join(', ')})` : ''} — the route delivered, but the partition value the body carried is not the one this run queried, so the run is not confirmed`,
   });
 }
 

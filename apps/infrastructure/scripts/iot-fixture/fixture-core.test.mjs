@@ -1274,6 +1274,101 @@ describe('the confirmation read-back', () => {
     assert.equal(reader.calls.length, POLLS_TO_BOUND + 1);
   });
 
+  // THE PARTITION LABEL IS DECIDED BY THE DOCUMENTS, NOT BY WHICH QUERY FOUND
+  // THEM. The sweep only changes which query looked, and a document that arrives
+  // in the CORRECT partition during the round trip between the last scoped poll
+  // and the sweep is found only by the sweep. Reporting that as "found outside
+  // the expected partition" would put a routing anomaly that does not exist into
+  // the evidence artifact — and this is the discriminator MG-62's post-cutover
+  // proof reads, so a false positive here is read as a broken route.
+  it('confirms documents the sweep found IN the expected partition, rather than calling it an anomaly', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const { result, reader } = await confirm({
+      // The sweep returns the full set carrying the EXPECTED partition value:
+      // they arrived after the last scoped poll had already been answered.
+      script: [...empties, { docs: routed(MESSAGES_PER_RUN) }],
+    });
+
+    assert.equal(result.exitCode, EXIT.OK, describeConfirmation(result));
+    assert.equal(result.confirmed, true);
+    assert.notEqual(result.exitCode, EXIT.UNEXPECTED_PARTITION);
+    assert.notEqual(result.exitCode, EXIT.TIMEOUT);
+    assert.equal(result.observedCount, MESSAGES_PER_RUN);
+    assert.deepEqual(result.observedPartitionValues, [FIXTURE_DEVICE_ID]);
+    // The sweep is what found them, and that is recorded — it just is not what
+    // decides the label.
+    assert.equal(result.crossPartitionSweepRun, true);
+    assert.equal(result.scope, 'cross-partition');
+    assert.equal(reader.calls[SWEEP_CALL_INDEX].partitionKey, undefined);
+    assert.equal(result.uncertain, false);
+    // The bound is what was wrong, and the arrival delay past it is the
+    // calibration that says so.
+    assert.equal(result.observedArrivalMs, BOUND);
+    assert.match(result.reason, /NOT a partition anomaly/);
+  });
+
+  it('reports a MIXED landing as an unexpected partition, counted off the documents', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const { result } = await confirm({
+      script: [
+        ...empties,
+        {
+          docs: [
+            ...routed(2),
+            ...routed(1, {
+              idPrefix: 'strayed',
+              firstSequence: 3,
+              partitionValue: 'some-other-partition',
+            }),
+          ],
+        },
+      ],
+    });
+
+    assertFailed(result, EXIT.UNEXPECTED_PARTITION, 'one of three landed elsewhere');
+    // Counted off the partition values the documents carry: an operator has to
+    // know HOW MUCH of the run went astray, not merely that the sweep ran.
+    assert.match(result.reason, /1 of 3 document\(s\)/);
+    assert.match(result.reason, /some-other-partition/);
+    assert.equal(result.observedCount, MESSAGES_PER_RUN);
+    assert.deepEqual(result.observedPartitionValues, [FIXTURE_DEVICE_ID, 'some-other-partition']);
+  });
+
+  // An incomplete cross-partition set says where PART of the run is. That is not
+  // a partition finding about the run, and upgrading it into one would assert a
+  // routing diagnosis nobody witnessed.
+  it('keeps an incomplete cross-partition set AMBIGUOUS, never a partition claim', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    for (const [context, page] of [
+      ['partial, landed elsewhere', routed(2, { partitionValue: 'some-other-partition' })],
+      ['partial, landed in the expected partition', routed(2)],
+    ]) {
+      const { result } = await confirm({ script: [...empties, { docs: page }] });
+      assertFailed(result, EXIT.AMBIGUOUS, context);
+      assert.notEqual(result.exitCode, EXIT.UNEXPECTED_PARTITION, context);
+      assert.notEqual(result.exitCode, EXIT.TIMEOUT, context);
+      assert.equal(result.observedCount, 2, context);
+      assert.equal(result.crossPartitionSweepRun, true, context);
+      assert.match(result.reason, /correlation ambiguity/, context);
+    }
+  });
+
+  // No measured partition key field means nothing to read the landing off. The
+  // tool does not guess in either direction: not a confirmation, and not a
+  // partition finding either.
+  it('refuses to judge the landing at all when no partition key field was measured', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const { result } = await confirm(
+      { script: [...empties, { docs: routed(MESSAGES_PER_RUN) }] },
+      { partitionKeyField: null }
+    );
+
+    assertFailed(result, EXIT.AMBIGUOUS, 'a complete sweep with no partition key field');
+    assert.equal(result.observedCount, MESSAGES_PER_RUN);
+    assert.deepEqual(result.observedPartitionValues, []);
+    assert.match(result.reason, /cannot be established/);
+  });
+
   it('classifies a failure of the sweep itself rather than calling it an absence', async () => {
     const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
     for (const [error, expected] of [
@@ -1952,6 +2047,12 @@ describe('every terminal outcome is recordable, with its four id sets intact', (
       _etag: '"0"',
     }));
 
+  // ...and as it would return them if the body's partition value were not the
+  // one this run queried — the only thing that makes a landing UNEXPECTED. The
+  // sweep having been the query that found a document does not.
+  const landedElsewhere = count =>
+    renamed(count).map(doc => ({ ...doc, deviceId: 'some-other-partition' }));
+
   const unmarkedStray = () => {
     const doc = { ...messages[0].body, id: 'stray-1', [SEQUENCE_FIELD]: 99, _ts: 1 };
     delete doc[SYNTHETIC_MARKER_FIELD];
@@ -2051,10 +2152,22 @@ describe('every terminal outcome is recordable, with its four id sets intact', (
       },
       {
         context: 'delivered under an unexpected partition',
-        spec: { script: [...empties, { docs: renamed(MESSAGES_PER_RUN) }] },
+        spec: { script: [...empties, { docs: landedElsewhere(MESSAGES_PER_RUN) }] },
         exitCode: EXIT.UNEXPECTED_PARTITION,
         observedIds: ['cosmos-assigned-1', 'cosmos-assigned-2', 'cosmos-assigned-3'],
         uncertain: true,
+        idDivergence: true,
+      },
+      {
+        // The same sweep, the same ids, the EXPECTED partition value in the
+        // bodies: a confirmation. What the sweep changes is which query looked,
+        // never where a document is, so this case and the one above it differ by
+        // exactly the field that decides the label.
+        context: 'found by the sweep, in the expected partition',
+        spec: { script: [...empties, { docs: renamed(MESSAGES_PER_RUN) }] },
+        exitCode: EXIT.OK,
+        observedIds: ['cosmos-assigned-1', 'cosmos-assigned-2', 'cosmos-assigned-3'],
+        uncertain: false,
         idDivergence: true,
       },
     ];
