@@ -59,6 +59,29 @@
 // no document and are not consulted here (MG-24 and MG-58 are the precedents for
 // shipping behind a green signal that proved nothing).
 //
+// THE FUNNEL THAT CHOOSES THE CODE CANNOT DEFAULT TO 0. It used to: the single
+// exit funnel read `confirmation ? confirmation.exitCode : (failure?.exitCode ??
+// EXIT.OK)`, so a run holding NEITHER — an unanticipated state by construction,
+// since one of the two exists on every path this file writes — fell through to
+// success. That is the ticket's central invariant inverted at its last line. The
+// decision now lives in fixture-core's resolveOutcomeCode(), which returns 0
+// only for a confirmation that carries both EXIT.OK and confirmed:true, and
+// reports every other shape — including ones it was not written to expect — as
+// an explicit unanticipated outcome with its own nonzero code. settleRun()
+// re-checks the same invariant immediately before returning, so no step added
+// between the resolution and the exit can manufacture a 0 either.
+//
+// THE EVIDENCE DESTINATION IS PROVEN BEFORE THE FIRST SEND. An unusable
+// --evidence-out path is a purely LOCAL fact, knowable at t0, and discovering it
+// after the send means three synthetic documents are in the live container and
+// the tool is only then refusing to record them — the unrecorded-document
+// condition that halts MG-53, manufactured by this tool, for a reason it could
+// have seen for free. So the directory, the writability and the no-overwrite
+// rule are checked first, and a failure there is a usage-class refusal while
+// nothing live has happened. It does NOT replace the after-the-fact recording
+// path below: the preflight is a check at t0 about a write at t1, the interval
+// spans the live send, and the write-time refusal remains the authoritative one.
+//
 // A PRE-FLIGHT READ RUNS BEFORE ANYTHING IS SENT. It serves three purposes and
 // is worth the extra round trip for each of them:
 //   1. HR5 says the proof is a document "not present before the run". The
@@ -136,7 +159,13 @@ import {
   describeContainerDefinition,
   parseContainerDefinition,
 } from './container-definition.mjs';
-import { buildEvidenceRecord, describeEvidence, writeEvidenceRecord } from './evidence.mjs';
+import {
+  buildEvidenceRecord,
+  describeDestination,
+  describeEvidence,
+  preflightEvidenceDestination,
+  writeEvidenceRecord,
+} from './evidence.mjs';
 import {
   CONFIRMATION_QUERY,
   DEFAULT_CONFIRMATION_TIMEOUT_MS,
@@ -151,6 +180,7 @@ import {
   TICKET,
   TOOL_NAME,
   TOOL_VERSION,
+  UNANTICIPATED_OUTCOME_CODE,
   abortedConfirmation,
   buildFixtureMessages,
   classifyError,
@@ -165,6 +195,7 @@ import {
   mergeIds,
   mustEmitEvidence,
   newRunId,
+  resolveOutcomeCode,
   scrubChildOutput,
   scrubSecrets,
 } from './fixture-core.mjs';
@@ -185,21 +216,26 @@ USAGE
                    [--device <id>] [--timeout <ms>] [--poll-interval <ms>] [--overwrite]
 
 WHAT IT DOES, IN ORDER
-  1. Measures the destination container's partition key path and its ACTUAL
+  1. Proves --evidence-out is usable — the directory exists, the path is
+     writable, and no earlier run's record is there to be clobbered — BEFORE
+     anything live happens. An unusable destination is a usage error (exit 1)
+     while nothing has been sent, rather than three documents in the container
+     that this tool then refuses to record.
+  2. Measures the destination container's partition key path and its ACTUAL
      default_ttl from the --container-definition document. Nothing is assumed:
      a document missing either is refused (exit 8), never defaulted.
-  2. Reads the destination container ONCE, before sending, and requires this
+  3. Reads the destination container ONCE, before sending, and requires this
      run's id to be absent. That is what makes the proof a NEWLY identified
      document, and it surfaces a missing data-plane role assignment BEFORE any
      document is written that could not then be confirmed.
-  3. Sends ${MESSAGES_PER_RUN} D2C messages via 'az iot device send-d2c-message', each
+  4. Sends ${MESSAGES_PER_RUN} D2C messages via 'az iot device send-d2c-message', each
      carrying the ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER} marker and this
      run's unique correlator, and each declaring JSON content type and utf-8
      encoding (without those the hub writes an opaque payload, not a queryable
      JSON document).
-  4. Polls the container within an explicit, reported wait bound until the full
+  5. Polls the container within an explicit, reported wait bound until the full
      set is read back. Anything less is a failure with its own exit code.
-  5. Writes the machine-readable evidence artifact MG-53 and MG-54 consume.
+  6. Writes the machine-readable evidence artifact MG-53 and MG-54 consume.
 
 TARGET
   --hub <name>                 IoT hub name, e.g. meatgeek-v2-dev-iothub-259d4bf5b628
@@ -240,6 +276,19 @@ EVIDENCE (HR3 — recorded, machine-readable)
                                existing file unless --overwrite is passed: that
                                file records an earlier run whose documents are
                                still in the container.
+
+                               CHECKED BEFORE THE FIRST SEND. The directory has
+                               to exist, the path has to be writable, and an
+                               existing record (or a leftover '.partial' from a
+                               crashed run) refuses the run outright. All three
+                               are local facts, so they cost nothing to find out
+                               while nothing is live — and finding them out
+                               afterwards would mean documents in the container
+                               with no record of them, which is what MG-53 halts
+                               on. The same rules are re-applied at write time:
+                               the check happens before the send and the write
+                               happens after it, so the write-time refusal is
+                               still the authoritative one.
 
                                WRITTEN ON EVERY OUTCOME, not just on success. Any
                                run that ATTEMPTED a send emits one, and it carries
@@ -1001,8 +1050,21 @@ function abortReason(snapshot, exitCode) {
  * The reporting happens BEFORE the emission and independently of it, so the
  * diagnosis is on the operator's screen whatever the write does to the exit
  * code.
+ *
+ * IT DOES NOT DEFAULT TO SUCCESS, and that is the property this function is
+ * most on the hook for. It used to open with
+ * `confirmation ? confirmation.exitCode : (failure?.exitCode ?? EXIT.OK)`, so a
+ * run carrying neither — a state the code did not anticipate, and therefore the
+ * state it knows least about — exited 0. Exit 0 is this tool's ONE claim: a
+ * specific, newly identified, marker-carrying document was read back out of the
+ * destination container. A state nobody predicted is the last one permitted to
+ * make it. resolveOutcomeCode() now owns the decision and inverts the default;
+ * this function only prints what it says and re-checks the invariant on the way
+ * out.
+ *
+ * Exported for the tests that hand it states main() cannot be made to produce.
  */
-async function settleRun({
+export async function settleRun({
   cfg,
   definition,
   ledger,
@@ -1026,7 +1088,20 @@ async function settleRun({
   // may exit without a record, and it is the only case where "nothing was
   // written" is a fact rather than a guess.
   const snapshot = ledger ? ledger.snapshot({ confirmation }) : null;
-  let exitCode = confirmation ? confirmation.exitCode : (failure?.exitCode ?? EXIT.OK);
+
+  // THE ONLY PLACE A CODE IS CHOSEN, and it is fail-closed by construction:
+  // exit 0 requires a confirmation that both carries EXIT.OK and says
+  // confirmed:true, and every other shape — including any this file was not
+  // written to produce — comes back nonzero with a sentence naming what was
+  // found. There is no `?? EXIT.OK` here any more, and there is not one in
+  // resolveOutcomeCode either.
+  const outcome = resolveOutcomeCode({ confirmation, failure });
+  let exitCode = outcome.exitCode;
+  if (outcome.unanticipated) {
+    // Printed rather than swallowed: an unanticipated state is a defect in this
+    // tool, and an operator who sees only the code cannot report it.
+    log.error(`${TOOL_NAME}: ${outcome.reason}`);
+  }
 
   // USAGE means "bad arguments, nothing live happened". A run that attempted a
   // send cannot honestly report it whatever went wrong afterwards, so the code
@@ -1073,7 +1148,21 @@ async function settleRun({
     });
   }
 
-  if (exitCode === EXIT.OK && confirmation?.confirmed) {
+  // THE LAST LINE, AND DELIBERATELY REDUNDANT WITH resolveOutcomeCode ABOVE.
+  // Between the resolution and this return sits the evidence emission, which
+  // returns a code of its own, and whatever a later edit adds beside it. Nothing
+  // in that gap may manufacture a 0, and re-asserting the invariant here is what
+  // makes that structural rather than a property of the control flow as it
+  // happens to be written today. If this ever fires, resolveOutcomeCode and the
+  // path between them disagree — which is itself an unanticipated state.
+  if (exitCode === EXIT.OK && confirmation?.confirmed !== true) {
+    log.error(
+      `${TOOL_NAME}: refusing to exit 0 — the settlement arrived at success without a confirmation establishing it, and exit 0 states that a specific, newly identified document was read back out of the destination container. Exiting ${UNANTICIPATED_OUTCOME_CODE} (${exitLabel(UNANTICIPATED_OUTCOME_CODE)}) instead.`
+    );
+    exitCode = UNANTICIPATED_OUTCOME_CODE;
+  }
+
+  if (exitCode === EXIT.OK) {
     log.info(
       `${TOOL_NAME}: CONFIRMED — ${confirmation.observedCount} synthetic document(s) sent from ${device} via hub ${hub} were read back out of ${cfg.database}/${cfg.container}`
     );
@@ -1237,7 +1326,26 @@ export async function main({
     device = cfg.device;
     hub = cfg.hub;
 
-    // ---- 1. Measure the container. Nothing is assumed. -------------------
+    // ---- 1. Prove the evidence destination BEFORE anything live. ---------
+    // The cheapest check in the run and the earliest, in that order. Every
+    // reason --evidence-out can be unusable — a mistyped directory, a read-only
+    // path, an earlier run's record sitting there — is knowable now, locally,
+    // with nothing sent. Learning it AFTER the send means MESSAGES_PER_RUN
+    // synthetic documents are in the live container and this tool is only then
+    // refusing to record them, which is the unrecorded-document condition MG-53
+    // halts on and cannot tell apart from an unknown writer.
+    //
+    // Its refusals are usage-class on purpose: at this point exit 1 is exactly
+    // true — bad arguments, nothing live happened — and it is the only point in
+    // the run where that sentence stays true. The write-time guards remain; see
+    // the header for why this does not replace them.
+    const destination = await preflightEvidenceDestination(cfg.evidenceOut, {
+      overwrite: cfg.overwrite,
+      ...(fs ? { fs } : {}),
+    });
+    log.info(`${TOOL_NAME}: ${describeDestination(destination)}`);
+
+    // ---- 2. Measure the container. Nothing is assumed. -------------------
     const definitionText = await readDefinitionText(cfg.containerDefinition, {
       readFileFn,
       stdin,
@@ -1251,7 +1359,7 @@ export async function main({
       log.error(`${TOOL_NAME}: FINDING — ${definition.ttlDriftFinding.message}`);
     }
 
-    // ---- 2. Mint the run, its LEDGER and the bodies. ---------------------
+    // ---- 3. Mint the run, its LEDGER and the bodies. ---------------------
     // The ledger is created before anything can be attempted, and is what makes
     // the evidence obligation structural rather than remembered: from here on,
     // every exit passes through settleRun() and settleRun() writes a record for
@@ -1268,7 +1376,7 @@ export async function main({
       `${TOOL_NAME}: run ${runId} — ${messages.length} message(s) marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}, partition ${definition.partitionKeyPath}=${cfg.device}`
     );
 
-    // ---- 3. Prove the read path BEFORE writing anything. ------------------
+    // ---- 4. Prove the read path BEFORE writing anything. ------------------
     const reader = await createReader({
       endpoint: endpointFor(cfg.account),
       database: cfg.database,
@@ -1279,7 +1387,7 @@ export async function main({
       `${TOOL_NAME}: pre-send read confirms no document carries run ${runId} — anything found after this is newly identified`
     );
 
-    // ---- 4. Send. ---------------------------------------------------------
+    // ---- 5. Send. ---------------------------------------------------------
     // No try/catch and no per-path recording here. A send that aborts part-way
     // has already told the ledger which ids it attempted and what became of
     // each, and settleRun() below writes the record for ANY run that attempted
@@ -1294,7 +1402,7 @@ export async function main({
       log,
     });
 
-    // ---- 5. Confirm, within an explicit reported bound. -------------------
+    // ---- 6. Confirm, within an explicit reported bound. -------------------
     confirmation = await confirmArrival({
       reader,
       runId,
@@ -1310,7 +1418,7 @@ export async function main({
       err instanceof FixtureError ? err : new FixtureError(classifyError(err), describeError(err));
   }
 
-  // ---- 6. One exit funnel: report, record, choose the code. ---------------
+  // ---- 7. One exit funnel: report, record, choose the code. ---------------
   // Reached on EVERY outcome, including the ones that threw. Nothing above this
   // line returns except --help, which cannot have attempted a send.
   //
@@ -1320,15 +1428,14 @@ export async function main({
   // as an unhandled rejection and exit 1, the code that means "nothing live
   // happened". No path after a send may produce that code.
   try {
-    if (!confirmation && !failure && ledger) {
-      // Defensive and fail-closed: a run that produced neither a confirmation
-      // nor a failure knows nothing about what it wrote, and the honest report
-      // of that is an ambiguity, not a success.
-      failure = new FixtureError(
-        EXIT.AMBIGUOUS,
-        'the run ended with neither a confirmation nor a failure — nothing established what reached the container, which is a correlation ambiguity and never a success'
-      );
-    }
+    // Nothing is patched up here. A run holding neither a confirmation nor a
+    // failure used to be repaired at this call site, which left settleRun's own
+    // `?? EXIT.OK` default in place underneath — correct only for as long as
+    // this one guard covered every way of reaching it, and it covered only the
+    // case where a ledger existed. The funnel is fail-closed itself now, so an
+    // unanticipated state is refused where the code is chosen rather than
+    // wherever someone thought to look for it.
+    //
     // Awaited, not returned: a returned promise settles outside this try and
     // would take its rejection with it.
     return await settleRun({

@@ -72,6 +72,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { PARTIAL_SUFFIX, PROBE_SUFFIX } from './evidence.mjs';
 import {
   EXIT,
   FIXTURE_DEVICE_ID,
@@ -594,17 +595,33 @@ function readerFailingAfterPreflight({ pages = [], error }) {
   };
 }
 
-/** An fs seam whose target directory does not exist, so the write cannot land. */
+/**
+ * An fs seam that PASSES the destination preflight and then fails the real
+ * write, so the run goes live and only the recording of it fails.
+ *
+ * The CLI now proves --evidence-out is usable before it sends anything, so an
+ * fs that refuses everything would refuse this run at argument time and never
+ * reach the path under test. The gap this models is the one the preflight
+ * cannot close: it is a check at t0 about a write at t1, and the interval
+ * between them spans the live send.
+ */
 function failingFs() {
+  const absent = () => {
+    const err = new Error('ENOENT');
+    err.code = 'ENOENT';
+    return err;
+  };
   return {
-    stat: async () => {
-      const err = new Error('ENOENT');
-      err.code = 'ENOENT';
-      throw err;
+    // The directory is fine; the target and its '.partial' are absent.
+    stat: async target => {
+      if (target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)) throw absent();
+      return { isDirectory: () => true };
     },
-    writeFile: async () => {
-      const err = new Error('ENOENT: no such file or directory');
-      err.code = 'ENOENT';
+    // The empty preflight probe succeeds; the record write does not.
+    writeFile: async target => {
+      if (target.endsWith(PROBE_SUFFIX)) return;
+      const err = new Error('ENOSPC: no space left on device');
+      err.code = 'ENOSPC';
       throw err;
     },
     rename: async () => {},
@@ -909,7 +926,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
     await withTempDir(async dir => {
       const { exitCode, log } = await runToReadBackFailure({
         error: leakyRealAuthError(),
-        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        evidenceOut: path.join(dir, 'evidence.json'),
         fs: failingFs(),
         pages: [runId => deliveredDocuments(runId).slice(0, 2)],
       });

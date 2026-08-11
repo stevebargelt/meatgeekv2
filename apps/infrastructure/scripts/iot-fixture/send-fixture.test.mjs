@@ -32,6 +32,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { parseContainerDefinition } from './container-definition.mjs';
+import { PARTIAL_SUFFIX, PROBE_SUFFIX } from './evidence.mjs';
 import {
   fakeAzSpawn,
   fakeClock,
@@ -70,6 +71,7 @@ import {
   preflight,
   requireComplete,
   sendMessages,
+  settleRun,
 } from './send-fixture.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1083,18 +1085,167 @@ describe('main: every failure class exits with its own code and claims nothing',
     });
   });
 
+  // ---- The evidence destination, checked BEFORE the first send. -----------
+  //
+  // An unusable --evidence-out path is a purely LOCAL fact. Discovering it after
+  // the send leaves MESSAGES_PER_RUN synthetic documents in the live container
+  // with nothing recording them — the condition MG-53 halts on, manufactured by
+  // this tool, for a reason it could have seen for free before anything went
+  // live. Each case below asserts the two things that matter together: the exit
+  // is usage-class, and the spawn was NEVER called.
+
+  const REFUSED_DESTINATIONS = [
+    [
+      'a directory that does not exist',
+      dir => path.join(dir, 'nope', 'evidence.json'),
+      /directory for the evidence file does not exist/,
+    ],
+    ['a path that is itself a directory', dir => dir, /is a directory/],
+  ];
+
+  for (const [label, pathFor, expectedMessage] of REFUSED_DESTINATIONS) {
+    it(`refuses ${label} before a single message is sent`, async () => {
+      await withTempDir(async dir => {
+        const { exitCode, log, spawn, readerCalls } = await runMain({
+          evidenceOut: pathFor(dir),
+          readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+        });
+
+        assert.equal(exitCode, EXIT.USAGE, 'nothing live happened, which is what 1 means');
+        assert.equal(spawn.calls.length, 0, 'no message may be sent for an unrecordable run');
+        assert.equal(readerCalls.length, 0, 'the refusal precedes even the reader construction');
+        assert.match(log.all(), expectedMessage);
+        assert.match(log.all(), /usage error/);
+      });
+    });
+  }
+
+  it('refuses an UNWRITABLE destination before a single message is sent', async () => {
+    await withTempDir(async dir => {
+      // The probe write is the only way to establish that the real write will be
+      // permitted: a stat cannot tell a read-only mount from a writable one.
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut: path.join(dir, 'evidence.json'),
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+        fs: {
+          stat: async target =>
+            target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)
+              ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+              : { isDirectory: () => true },
+          writeFile: async () => {
+            throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+          },
+          rename: async () => {},
+          rm: async () => {},
+        },
+      });
+
+      assert.equal(exitCode, EXIT.USAGE);
+      assert.equal(spawn.calls.length, 0);
+      assert.match(log.all(), /is not writable/);
+      assert.match(log.all(), /no synthetic document is in the container from this run/);
+    });
+  });
+
+  it("refuses to clobber an earlier run's record before a single message is sent", async () => {
+    await withTempDir(async dir => {
+      // The refusal is right — that file records documents STILL in the
+      // container — and the whole point of making it early is that this run does
+      // not add three more before saying so.
+      const evidenceOut = path.join(dir, 'evidence.json');
+      await writeFile(evidenceOut, '{"an":"earlier run"}\n', 'utf8');
+
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+
+      assert.equal(exitCode, EXIT.USAGE);
+      assert.equal(spawn.calls.length, 0, 'no documents were added to the ones that file records');
+      assert.match(log.all(), /an evidence file already exists/);
+      assert.match(log.all(), /Nothing has been sent for this run/);
+      assert.equal(await readFile(evidenceOut, 'utf8'), '{"an":"earlier run"}\n');
+      assert.deepEqual(await readdir(dir), ['evidence.json'], 'and no probe debris is left');
+    });
+  });
+
+  it("refuses a leftover '.partial' before a single message is sent", async () => {
+    await withTempDir(async dir => {
+      // Either a run is writing this path right now — and this run's rename
+      // would destroy its record — or a crashed run left it. Both are reasons to
+      // stop, and both are knowable before anything is live.
+      const evidenceOut = path.join(dir, 'evidence.json');
+      await writeFile(`${evidenceOut}${PARTIAL_SUFFIX}`, '{"partial":true}\n', 'utf8');
+
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+
+      assert.equal(exitCode, EXIT.USAGE);
+      assert.equal(spawn.calls.length, 0);
+      assert.match(log.all(), /a partial evidence file already exists/);
+    });
+  });
+
+  it('--overwrite passes the preflight and the run proceeds to a confirmed exit', async () => {
+    await withTempDir(async dir => {
+      const evidenceOut = path.join(dir, 'evidence.json');
+      await writeFile(evidenceOut, '{"an":"earlier run"}\n', 'utf8');
+
+      const { exitCode, log, spawn } = await runMain({
+        evidenceOut,
+        argv: ['--overwrite'],
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+
+      assert.equal(exitCode, EXIT.OK);
+      assert.equal(spawn.calls.length, MESSAGES_PER_RUN);
+      // The operator asked for the replacement, and is told it is happening.
+      assert.match(log.all(), /an existing record WILL BE REPLACED/);
+      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      assert.equal(record.runId, RUN_ID);
+      assert.deepEqual(await readdir(dir), ['evidence.json'], 'no probe or partial debris');
+    });
+  });
+
+  it('reports what the preflight proved, and that it is not a guarantee', async () => {
+    await withTempDir(async dir => {
+      const { log } = await runMain({
+        evidenceOut: path.join(dir, 'evidence.json'),
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+      assert.match(log.all(), /writable, checked before any message was sent/);
+      // Said out loud, because the write-time refusal below is what actually
+      // holds the line and a reader who thinks otherwise will delete it.
+      assert.match(log.all(), /this preflight is not a guarantee/);
+    });
+  });
+
   // ---- The evidence write itself failing. ---------------------------------
+  //
+  // THE BACKSTOP, and still authoritative. The preflight above is a check at t0
+  // about a write at t1, and the interval between them spans the live send: a
+  // disk that fills, a volume that unmounts, a permission that changes, or a
+  // parallel run that creates the same file all land here, after the documents
+  // exist. So every case below passes the preflight and then fails the write.
   //
   // The live container has changed and nothing recorded it. That is its own exit
   // code, and specifically NOT usage: telling an operator "bad arguments,
   // nothing happened" while documents sit in the container is the worst answer
   // this tool can give, and it is the one MG-53 cannot diagnose.
   const failingFs = () => ({
-    stat: async () => {
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    },
-    writeFile: async () => {
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    // The directory is fine and the target is absent — so the preflight passes
+    // and the run goes live...
+    stat: async target =>
+      target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)
+        ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+        : { isDirectory: () => true },
+    // ...and only the REAL write fails. The empty probe still succeeds, which is
+    // exactly the t0/t1 gap the preflight cannot close.
+    writeFile: async target => {
+      if (target.endsWith(PROBE_SUFFIX)) return;
+      throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
     },
     rename: async () => {},
     rm: async () => {},
@@ -1103,7 +1254,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a CONFIRMED run whose evidence write fails exits EVIDENCE_UNRECORDED, never USAGE', async () => {
     await withTempDir(async dir => {
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        evidenceOut: path.join(dir, 'evidence.json'),
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
         fs: failingFs(),
       });
@@ -1127,27 +1278,47 @@ describe('main: every failure class exits with its own code and claims nothing',
     });
   });
 
-  // The same collision, reached the way an operator actually reaches it: a
-  // second run pointed at the first run's evidence file. The refusal to
-  // overwrite is correct — that file records documents still in the container —
-  // but the run that hit it has ALSO put documents there.
-  it('a re-run refused for not overwriting still exits EVIDENCE_UNRECORDED, not USAGE', async () => {
+  // The same collision, reached the one way the preflight CANNOT catch: the file
+  // appears between the check and the write, because a second operator started a
+  // run against the same path in the interval — and that interval spans the
+  // live send. The refusal to overwrite is still correct, and the run that hit
+  // it has ALSO put documents in the container by now, so the code is 10 rather
+  // than the 1 the preflight would have reported a moment earlier.
+  it('a record that appears AFTER the preflight still exits EVIDENCE_UNRECORDED, not USAGE', async () => {
     await withTempDir(async dir => {
       const evidenceOut = path.join(dir, 'evidence.json');
-      await writeFile(evidenceOut, '{"an":"earlier run"}\n', 'utf8');
+      let preflightPassed = false;
+      const raceyFs = {
+        stat: async target => {
+          if (!target.endsWith('.json') && !target.endsWith(PARTIAL_SUFFIX)) {
+            return { isDirectory: () => true };
+          }
+          if (target === evidenceOut && preflightPassed) return { isDirectory: () => false };
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        },
+        writeFile: async target => {
+          if (target.endsWith(PROBE_SUFFIX)) {
+            preflightPassed = true;
+            return;
+          }
+        },
+        rename: async () => {},
+        rm: async () => {},
+      };
 
-      const { exitCode, log } = await runMain({
+      const { exitCode, log, spawn } = await runMain({
         evidenceOut,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+        fs: raceyFs,
       });
 
+      assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'this run did go live');
       assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      assert.notEqual(exitCode, EXIT.USAGE, 'documents are in the container by now');
       const output = log.all();
       assert.match(output, /refusing to overwrite/);
       assert.match(output, /EVIDENCE NOT RECORDED/);
-      // The earlier run's record is intact — refusing to clobber it is the
-      // behaviour that produced this exit code in the first place.
-      assert.equal(await readFile(evidenceOut, 'utf8'), '{"an":"earlier run"}\n');
+      assert.match(output, /RECORD THESE IDS BY HAND/);
     });
   });
 
@@ -1158,7 +1329,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('an evidence write that fails on an UNCONFIRMED run is never swallowed', async () => {
     await withTempDir(async dir => {
       const { exitCode, log, spawn } = await runMain({
-        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        evidenceOut: path.join(dir, 'evidence.json'),
         readerSpec: { script: [{ docs: [] }], fallback: { docs: [] } },
         fs: failingFs(),
       });
@@ -1206,7 +1377,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a partial send whose evidence write ALSO fails exits EVIDENCE_UNRECORDED', async () => {
     await withTempDir(async dir => {
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        evidenceOut: path.join(dir, 'evidence.json'),
         readerSpec: { script: [{ docs: [] }] },
         spawnSpec: { script: [{ code: 0 }, { code: 1 }] },
         fs: failingFs(),
@@ -1596,7 +1767,7 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
   it('an abort after a partial observation still names the observed ids on the unrecorded path', async () => {
     await withTempDir(async dir => {
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'nonexistent-directory', 'evidence.json'),
+        evidenceOut: path.join(dir, 'evidence.json'),
         readerSpec: {
           script: [
             { docs: [] },
@@ -1604,12 +1775,16 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
             { error: forbiddenError() },
           ],
         },
+        // Passes the destination preflight and then fails the real write, so
+        // this exercises the backstop rather than the check that precedes it.
         fs: {
-          stat: async () => {
-            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-          },
-          writeFile: async () => {
-            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          stat: async target =>
+            target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)
+              ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+              : { isDirectory: () => true },
+          writeFile: async target => {
+            if (target.endsWith(PROBE_SUFFIX)) return;
+            throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
           },
           rename: async () => {},
           rm: async () => {},
@@ -1727,6 +1902,164 @@ describe('a settlement that throws after live effect never exits 1', () => {
 });
 
 // ===========================================================================
+// THE EXIT FUNNEL CANNOT DEFAULT TO 0.
+//
+// settleRun() used to open with
+//   `confirmation ? confirmation.exitCode : (failure?.exitCode ?? EXIT.OK)`
+// so a run holding NEITHER a confirmation nor a failure exited 0. Every path
+// main() writes today produces one of the two, which is exactly why that
+// default was invisible: it was reachable only from a state the code did not
+// anticipate, and a state nobody anticipated is the one the tool knows least
+// about. Exit 0 is this tool's single claim — a specific, newly identified,
+// marker-carrying document was READ BACK OUT of the destination container — and
+// it may not be made by fall-through.
+//
+// So these tests go at the funnel DIRECTLY rather than through main(): the
+// point is precisely that main() cannot be made to produce these states today,
+// and the guard has to hold for the edit that makes it able to. Each case
+// asserts BY EXIT CODE.
+// ===========================================================================
+
+describe('exit 0 requires positive confirmation, never a fall-through', () => {
+  const CFG = Object.freeze({
+    device: FIXTURE_DEVICE_ID,
+    hub: HUB,
+    account: ACCOUNT,
+    database: DATABASE,
+    container: CONTAINER,
+    evidenceOut: 'unused.json',
+    timeoutMs: 1000,
+    pollIntervalMs: 250,
+    overwrite: false,
+  });
+
+  // No ledger: nothing was attempted, so nothing is owed a record and the code
+  // is the only thing under test.
+  const settle = ({ confirmation = null, failure = null, log }) =>
+    settleRun({
+      cfg: CFG,
+      definition: null,
+      ledger: null,
+      confirmation,
+      failure,
+      device: CFG.device,
+      hub: CFG.hub,
+      log,
+      now: () => RUN_MILLIS,
+      fs: undefined,
+    });
+
+  // Every shape that is NOT "a confirmation carrying exit 0 and confirmed:true".
+  // The list is deliberately broader than anything main() builds — half of these
+  // are states only a future edit or a hand-rolled caller can produce, and those
+  // are the ones the old default let through.
+  const NOT_A_CONFIRMED_RUN = [
+    ['neither a confirmation nor a failure', {}],
+    [
+      'a confirmation carrying exit 0 but confirmed:false',
+      { confirmation: { exitCode: EXIT.OK, confirmed: false } },
+    ],
+    [
+      'a confirmation carrying exit 0 with confirmed absent',
+      { confirmation: { exitCode: EXIT.OK } },
+    ],
+    [
+      'a confirmation carrying exit 0 with confirmed:"true" (a string)',
+      { confirmation: { exitCode: EXIT.OK, confirmed: 'true' } },
+    ],
+    [
+      'a confirmation carrying an exit code outside the vocabulary',
+      { confirmation: { exitCode: 99, confirmed: false } },
+    ],
+    ['a confirmation carrying no exit code at all', { confirmation: { confirmed: true } }],
+    [
+      'a confirmation claiming confirmed:true alongside a nonzero code',
+      { confirmation: { exitCode: EXIT.TIMEOUT, confirmed: true } },
+    ],
+    ['a confirmation that is not an object', { confirmation: 'confirmed!' }],
+    ['a confirmation that is an array', { confirmation: [] }],
+    [
+      'a failure carrying exit code 0',
+      { failure: new FixtureError(EXIT.OK, 'a failure that claims success') },
+    ],
+    [
+      'a failure carrying an exit code outside the vocabulary',
+      { failure: new FixtureError(42, 'off-vocabulary') },
+    ],
+  ];
+
+  for (const [label, state] of NOT_A_CONFIRMED_RUN) {
+    it(`${label} cannot reach exit 0`, async () => {
+      const log = recordingLog();
+      const exitCode = await settle({ ...state, log });
+
+      assert.notEqual(
+        exitCode,
+        EXIT.OK,
+        'exit 0 states a document was read back; this established none'
+      );
+      assert.ok(exitCode > 0, `expected a nonzero code, got ${exitCode}`);
+      // Not merely nonzero: it is a code from this tool's own vocabulary, so an
+      // operator scripting against it reads something meaningful.
+      assert.ok(
+        Object.values(EXIT).includes(exitCode),
+        `${exitCode} is not in the tool's exit vocabulary`
+      );
+      // The failure output still names the device, the hub and the exit label on
+      // this path as on every other (HR1's reporting contract).
+      const output = log.all();
+      assert.match(output, new RegExp(`device ${FIXTURE_DEVICE_ID} on hub ${HUB}`));
+      assert.match(output, /exit \d+ \(/);
+      assert.equal(/CONFIRMED —/.test(output), false, 'nothing here may read as a traversal');
+      assertNoPlantedSecret(output, `${label} output`);
+    });
+  }
+
+  // The unanticipated states are additionally REPORTED, not merely refused. An
+  // unanticipated state is a defect in this tool, and an operator who sees only
+  // a bare exit code cannot report one.
+  it('says what it found when the state is one the code did not anticipate', async () => {
+    const log = recordingLog();
+    const exitCode = await settle({ confirmation: { exitCode: EXIT.OK, confirmed: false }, log });
+    assert.equal(exitCode, EXIT.AMBIGUOUS, 'the unanticipated-state code');
+    assert.match(log.all(), /without confirmed:true/);
+    assert.match(log.all(), /rather than 0/);
+  });
+
+  // The positive control. Without it the suite above would pass just as well
+  // against a funnel that never returns 0 at all, which would be a different
+  // defect and not an improvement.
+  it('a genuine confirmation still exits 0 and says what was proven', async () => {
+    const log = recordingLog();
+    const exitCode = await settle({
+      confirmation: {
+        exitCode: EXIT.OK,
+        confirmed: true,
+        observedCount: MESSAGES_PER_RUN,
+        reason: 'read back',
+      },
+      log,
+    });
+    assert.equal(exitCode, EXIT.OK);
+    assert.match(log.all(), /CONFIRMED —/);
+    assert.match(log.all(), new RegExp(`${DATABASE}/${CONTAINER}`));
+  });
+
+  // ...and end to end, so the two halves are known to agree: the one path that
+  // really does read documents back out of the container is still the one path
+  // that exits 0.
+  it('and end to end, only a real read-back exits 0', async () => {
+    await withTempDir(async dir => {
+      const { exitCode } = await runMain({
+        evidenceOut: path.join(dir, 'evidence.json'),
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+      assert.equal(exitCode, EXIT.OK);
+    });
+  });
+});
+
+// ===========================================================================
 // Source-text assertions: properties a behavioural test cannot see the absence
 // of. Comments are stripped first — the header discusses key auth deliberately,
 // and that documentation is worth keeping greppable.
@@ -1784,6 +2117,48 @@ describe('source posture (HR1)', () => {
     );
     assert.match(code, /catch \(err\) \{\s*return lastResortExit\(/);
     assert.match(code, /process\.exitCode = EXIT\.AMBIGUOUS/, 'the entry point never falls to 1');
+  });
+
+  // The behavioural suite above proves the funnel refuses today's unanticipated
+  // states. This proves the DEFAULT that produced them cannot come back by a
+  // plausible edit: `?? EXIT.OK` and a ternary falling to EXIT.OK are the two
+  // spellings that were actually there, and neither is legitimate anywhere in
+  // this file — the only code path permitted to yield 0 goes through
+  // resolveOutcomeCode.
+  it('has no fall-through to EXIT.OK anywhere, in any spelling', async () => {
+    const code = stripComments(await readSource('./send-fixture.mjs'));
+    for (const pattern of [/\?\?\s*EXIT\.OK/, /:\s*EXIT\.OK\s*[;,)]/, /\|\|\s*EXIT\.OK/]) {
+      assert.equal(
+        pattern.test(code),
+        false,
+        `send-fixture.mjs defaults to success via ${pattern}`
+      );
+    }
+    assert.match(code, /resolveOutcomeCode\(\{ confirmation, failure \}\)/);
+    // ...and the redundant last-line re-check, which is what makes exit 0
+    // impossible to manufacture in the gap between the resolution and the return.
+    assert.match(code, /exitCode === EXIT\.OK && confirmation\?\.confirmed !== true/);
+  });
+
+  // The destination check must sit BEFORE the send in the source, not merely
+  // behave that way in the cases this suite happens to cover. A future edit that
+  // moves it below sendMessages() reintroduces exactly the defect: documents in
+  // the container, and only then a refusal to record them.
+  it('checks the evidence destination before it spawns anything', async () => {
+    const code = stripComments(await readSource('./send-fixture.mjs'));
+    const body = /export async function main\([\s\S]*$/.exec(code)?.[0] ?? '';
+    assert.ok(body, 'main() not found');
+    const preflightAt = body.indexOf('preflightEvidenceDestination(');
+    const sendAt = body.indexOf('await sendMessages(');
+    assert.ok(preflightAt !== -1, 'main() does not check the evidence destination');
+    assert.ok(sendAt !== -1, 'main() does not send');
+    assert.ok(
+      preflightAt < sendAt,
+      'the evidence destination must be proven before any message is sent'
+    );
+    // The backstop is still there. The preflight is a check at t0 about a write
+    // at t1 and never replaces the write-time refusal.
+    assert.match(code, /writeEvidenceRecord\(/);
   });
 
   it('never hands az a verbosity flag', async () => {
