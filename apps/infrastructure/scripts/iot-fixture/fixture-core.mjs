@@ -522,3 +522,468 @@ export function isSyntheticDocument(doc, runId) {
   if (!hasSyntheticMarker(doc)) return false;
   return doc[RUN_ID_FIELD] === runId;
 }
+
+// ---------------------------------------------------------------------------
+// The fail-closed confirmation read-back (HR2).
+//
+// This is the part of the tool that decides whether a run SUCCEEDED, so it is
+// written to be structurally incapable of the one failure this ticket exists to
+// refuse: exiting 0 without a specific, newly identified, marker-carrying
+// document having been READ BACK OUT of the destination container. A green hub
+// metric, a green route metric and a green /api/health/cosmos observe no
+// document and are not offered here as proof of anything (MG-24 and MG-58 are
+// the precedents for shipping behind a green signal that proved nothing).
+//
+// FOUR DESIGN DECISIONS WORTH THE WORDS.
+//
+// 1. THE READER IS INJECTED and this module constructs no client. Client
+//    construction needs @azure/cosmos and @azure/identity, which the
+//    credentialless validate-infrastructure CI job does not install; keeping the
+//    seam here means every outcome below — including the ones no live hub can be
+//    made to produce on demand — is reachable in a test with no network, no
+//    package and no credential. The adapter lives at the CLI edge (step 6).
+//
+// 2. THE PREDICATE MATCHES ON THE RUN ID ALONE, not on marker AND run id, even
+//    though the correlation key is both. If the query filtered on the marker,
+//    the marker check would be tautological: the service would filter out
+//    exactly the documents the check exists to catch, and MARKER VIOLATION would
+//    be an outcome only the fake could ever produce. So the read-back asks for
+//    this run's documents and then VALIDATES the marker itself, in code. A
+//    document carrying this run's id without the marker is a defect in the
+//    sender (HR3) and fails the run.
+//
+// 3. NOTHING BETWEEN THE DEVICE AND COSMOS INJECTS A PARTITION KEY. The IoT Hub
+//    cosmos-storage endpoint declares none, so the document body is the only
+//    source of the partition value, and a body whose partition field the
+//    container does not recognise would land somewhere other than where this
+//    tool looks first. "Delivered under an unexpected partition" and "not
+//    delivered" are therefore genuinely different findings about the route, and
+//    conflating them would report a WORKING route as broken. Hence the single
+//    cross-partition sweep before any absence is reported, and its own exit code.
+//
+// 4. EVERY PATH RETURNS A RESULT RATHER THAN THROWING. The wait bound actually
+//    used, the polls issued, the ids observed and the elapsed time are the
+//    evidence this ticket exists to produce, and they are needed MOST on the
+//    failure paths — a thrown error would drop them. The result carries the exit
+//    code the CLI exits with; `confirmed` is true on exactly one path. Argument
+//    errors still throw, because they are a caller-contract bug detected before
+//    a wait exists, and there is no bound to report yet.
+// ---------------------------------------------------------------------------
+
+// Generous on purpose. Routing is asynchronous and nothing in this repo records
+// how long the dev route actually takes, because no message has ever traversed
+// it — so the FIRST live run's observed arrival delay is the calibration every
+// later ticket inherits (it is recorded in the evidence artifact). The bound is
+// a parameter, is reported on every path, and is never infinite: an elapsed
+// bound exits nonzero.
+export const DEFAULT_CONFIRMATION_TIMEOUT_MS = 180_000;
+export const DEFAULT_POLL_INTERVAL_MS = 5_000;
+// Retries across the whole wait, for TRANSPORT failures only. An auth failure is
+// never retried at all.
+export const DEFAULT_TRANSPORT_RETRIES = 3;
+
+// Built from a MODULE CONSTANT, never from measured or operator-supplied text:
+// the only value that varies is the run id, and it travels as a bound parameter
+// rather than as interpolated SQL. `SELECT *` is deliberate — the marker, the id
+// and the partition value all have to be inspected, and a projection that
+// dropped one would hide the failure it was meant to surface.
+export const CONFIRMATION_QUERY = `SELECT * FROM c WHERE c.${RUN_ID_FIELD} = @runId`;
+export const RUN_ID_PARAMETER = '@runId';
+
+const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function requirePositiveInteger(value, name) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new FixtureError(
+      EXIT.USAGE,
+      `${name} must be a positive integer (got ${safeFragment(value)}) — an unbounded or unreportable wait is not a wait`
+    );
+  }
+  return value;
+}
+
+function requireReader(reader) {
+  if (!reader || typeof reader.queryDocuments !== 'function') {
+    throw new FixtureError(
+      EXIT.USAGE,
+      'a reader exposing queryDocuments() must be injected; this module constructs no Cosmos client'
+    );
+  }
+  return reader;
+}
+
+// Any fragment that came from OUTSIDE this module — a document id, a partition
+// value the platform stored, a rejected argument — before it is embedded in an
+// operator-facing line. HR1 applies on every path, including the ones carrying
+// data this tool believes is its own.
+function safeFragment(value, max = 80) {
+  return scrubSecrets(typeof value === 'string' ? value : String(value)).slice(0, max);
+}
+
+const typeName = value =>
+  value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value;
+
+/**
+ * Judge one read-back page. Pure, and separated from the polling so the
+ * ambiguity rules can be read (and tested) without a clock.
+ *
+ * Returns one of:
+ *   { kind: 'empty' }                       nothing yet — keep polling
+ *   { kind: 'partial', ids }                some arrived — keep polling, not yet a verdict
+ *   { kind: 'complete', ids }               the expected count, all marked and run-correlated
+ *   { kind: ..., exitCode, reason, ids }    a TERMINAL failure
+ *
+ * Only 'complete' can become an exit 0. 'partial' is not a success and not an
+ * error yet: routing is asynchronous and documents trickle in, so an incomplete
+ * page mid-wait means keep waiting — but an incomplete page when the bound
+ * elapses is AMBIGUOUS, never an absence and never a success.
+ */
+export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PER_RUN } = {}) {
+  requireNonEmptyString(runId, 'runId');
+  requirePositiveInteger(expectedCount, 'expectedCount');
+
+  // A reader that answered with something other than a list is UNREADABLE. It is
+  // emphatically not "no documents": treating it as an absence is how an error
+  // becomes a false negative, which is the MG-66 conflation this tool must not
+  // reproduce.
+  if (!Array.isArray(documents)) {
+    return {
+      kind: 'unreadable',
+      exitCode: EXIT.AMBIGUOUS,
+      ids: [],
+      reason: `the read-back returned ${typeName(documents)} rather than a list of documents — unreadable, which is a failure and not an absence`,
+    };
+  }
+  if (documents.length === 0) return { kind: 'empty', ids: [] };
+
+  for (const doc of documents) {
+    if (!isPlainObject(doc)) {
+      return {
+        kind: 'unreadable',
+        exitCode: EXIT.AMBIGUOUS,
+        ids: [],
+        reason: `the read-back returned ${typeName(doc)} where a document was expected — unparseable, so no correlation can be established`,
+      };
+    }
+    // HR3: a document reaching Cosmos without the marker is a defect in the
+    // sender, not an acceptable variant. Its own exit code, because "the sender
+    // built a body wrong" and "the route did not deliver" call for opposite
+    // responses from an operator.
+    if (!hasSyntheticMarker(doc)) {
+      return {
+        kind: 'unmarked',
+        exitCode: EXIT.MARKER_VIOLATION,
+        ids: [],
+        reason: `a document correlated to this run carries no ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER} marker — that is a defect in the sender, and an unmarked document must never be counted as proof`,
+      };
+    }
+    // The predicate asked for this run only, so a foreign run id here means the
+    // read-back cannot be trusted to mean what it says. Ambiguity, not success.
+    if (doc[RUN_ID_FIELD] !== runId) {
+      return {
+        kind: 'foreign',
+        exitCode: EXIT.AMBIGUOUS,
+        ids: [],
+        reason: `the read-back returned a document whose ${RUN_ID_FIELD} is not this run's — the correlation cannot be established deterministically`,
+      };
+    }
+    // Evidence is recorded BY ID (MG-54 cites them in a destructive
+    // authorization). A document that cannot be named cannot be recorded, so it
+    // cannot be counted.
+    if (typeof doc.id !== 'string' || doc.id.trim() === '') {
+      return {
+        kind: 'unidentified',
+        exitCode: EXIT.AMBIGUOUS,
+        ids: [],
+        reason:
+          'the read-back returned a document with no usable id — it could not be recorded as evidence, so it is not counted as arrival',
+      };
+    }
+  }
+
+  // The ids the read-back ACTUALLY observed. Whether the platform honoured the
+  // sender's chosen id is behaviour no file in this repo pins down, so what the
+  // sender hoped for is never substituted here.
+  const ids = documents.map(doc => doc.id);
+  if (new Set(ids).size !== ids.length) {
+    return {
+      kind: 'duplicate-id',
+      exitCode: EXIT.AMBIGUOUS,
+      ids,
+      reason: `the read-back returned ${ids.length} documents sharing ${new Set(ids).size} id(s) — a duplicate cannot be told from a second arrival`,
+    };
+  }
+  const sequences = documents.map(doc => doc[SEQUENCE_FIELD]);
+  if (new Set(sequences).size !== sequences.length) {
+    return {
+      kind: 'duplicate-sequence',
+      exitCode: EXIT.AMBIGUOUS,
+      ids,
+      reason: `two documents claim the same ${SEQUENCE_FIELD} within one run — a run-id collision or a redelivery, either way not a deterministic correlation`,
+    };
+  }
+  if (documents.length > expectedCount) {
+    return {
+      kind: 'excess',
+      exitCode: EXIT.AMBIGUOUS,
+      ids,
+      reason: `the read-back found ${documents.length} documents for a run that sent ${expectedCount} — more than was sent is as ambiguous as fewer, and MG-53 halts on an unrecorded document`,
+    };
+  }
+  if (documents.length < expectedCount) return { kind: 'partial', ids };
+  return { kind: 'complete', ids };
+}
+
+/**
+ * Poll the destination container until this run's documents are read back, or
+ * until a failure class is established. Never sleeps for longer than the bound,
+ * never retries an auth failure, and never returns confirmed:true for anything
+ * short of the expected count of marked, run-correlated documents.
+ *
+ * @param {object} options
+ * @param {{queryDocuments: Function}} options.reader injected; see decision 1.
+ * @param {string} options.runId this invocation's correlator.
+ * @param {string} [options.partitionValue] the value the bodies carry under the
+ *   container's partition key field — the fixture device by default.
+ * @param {string|null} [options.partitionKeyField] reporting only: when given,
+ *   the sweep records which partition the documents actually landed under.
+ * @param {Function} [options.now] injected clock, so tests do not sleep.
+ * @param {Function} [options.sleep] injected wait, likewise.
+ * @returns {Promise<object>} a frozen result carrying, on EVERY path, the exit
+ *   code, its label, the wait bound actually used, the polls issued, the ids
+ *   observed and the elapsed time.
+ */
+export async function confirmArrival({
+  reader,
+  runId,
+  partitionValue = FIXTURE_DEVICE_ID,
+  partitionKeyField = null,
+  expectedCount = MESSAGES_PER_RUN,
+  timeoutMs = DEFAULT_CONFIRMATION_TIMEOUT_MS,
+  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+  maxTransportRetries = DEFAULT_TRANSPORT_RETRIES,
+  now = Date.now,
+  sleep = defaultSleep,
+} = {}) {
+  requireReader(reader);
+  requireNonEmptyString(runId, 'runId');
+  requireNonEmptyString(partitionValue, 'partitionValue');
+  if (partitionKeyField !== null) requirePartitionKeyField(partitionKeyField);
+  requirePositiveInteger(expectedCount, 'expectedCount');
+  requirePositiveInteger(timeoutMs, 'timeoutMs');
+  requirePositiveInteger(pollIntervalMs, 'pollIntervalMs');
+  if (!Number.isInteger(maxTransportRetries) || maxTransportRetries < 0) {
+    throw new FixtureError(EXIT.USAGE, 'maxTransportRetries must be a non-negative integer');
+  }
+
+  const startedAt = now();
+  const deadline = startedAt + timeoutMs;
+  let polls = 0;
+  let transportFailures = 0;
+  let crossPartitionSweepRun = false;
+
+  // Structured ids stay verbatim — they ARE the evidence, and a scrubbed id is
+  // useless to MG-53 and MG-54. Only the human-readable `reason` embeds outside
+  // text, and it goes through safeFragment.
+  const partitionValuesOf = documents => {
+    if (partitionKeyField === null || !Array.isArray(documents)) return [];
+    const values = documents
+      .filter(isPlainObject)
+      .map(doc => doc[partitionKeyField])
+      .filter(value => typeof value === 'string' && value !== '');
+    return [...new Set(values)];
+  };
+
+  const result = fields =>
+    Object.freeze({
+      confirmed: false,
+      runId,
+      expectedCount,
+      // The bound ACTUALLY used, on every path, success or failure. An operator
+      // reading a timeout has to be able to see what it timed out against, and
+      // the evidence artifact records it as the calibration for later tickets.
+      waitBoundMs: timeoutMs,
+      pollIntervalMs,
+      partitionValue,
+      partitionKeyField,
+      observedIds: Object.freeze([]),
+      observedCount: 0,
+      observedPartitionValues: Object.freeze([]),
+      observedArrivalMs: null,
+      scope: null,
+      ...fields,
+      polls,
+      crossPartitionSweepRun,
+      elapsedMs: now() - startedAt,
+      exitLabel: exitLabel(fields.exitCode),
+    });
+
+  const queryPage = async scoped =>
+    reader.queryDocuments({
+      query: CONFIRMATION_QUERY,
+      parameters: [{ name: RUN_ID_PARAMETER, value: runId }],
+      // Absent partitionKey IS the cross-partition sweep. The distinction
+      // carries its own exit code, so it is expressed in the request rather
+      // than filtered afterwards.
+      ...(scoped ? { partitionKey: partitionValue } : {}),
+    });
+
+  const authResult = (err, scope) =>
+    result({
+      exitCode: EXIT.AUTH,
+      scope,
+      reason: `auth failure reading back run ${safeFragment(runId)} — this says NOTHING about whether the route delivered, and is never reported as a timeout or an absence: ${describeError(err)}`,
+    });
+
+  const transportResult = (err, scope, budget) =>
+    result({
+      exitCode: EXIT.TRANSPORT,
+      scope,
+      reason: `transport failure reading back run ${safeFragment(runId)} (${budget}) — aborting rather than reporting an absence: ${describeError(err)}`,
+    });
+
+  let lastPartial = null;
+  let lastPartialDocuments = [];
+
+  // ---- Phase 1: the bounded, partition-scoped wait. ----------------------
+  for (;;) {
+    polls += 1;
+    let documents = null;
+    let failed = false;
+    try {
+      documents = await queryPage(true);
+    } catch (err) {
+      failed = true;
+      // An auth failure exits IMMEDIATELY: no retry, no further poll, and never
+      // the timeout or absence code. A principal whose data-plane role
+      // assignment has not propagated is the single most likely failure of the
+      // live run, and telling that operator "the route did not deliver" would
+      // send them to rebuild working infrastructure.
+      if (classifyError(err) === EXIT.AUTH) return authResult(err, 'expected-partition');
+      transportFailures += 1;
+      if (transportFailures > maxTransportRetries) {
+        return transportResult(
+          err,
+          'expected-partition',
+          `${transportFailures} failure(s) against a budget of ${maxTransportRetries}: retries exhausted`
+        );
+      }
+    }
+
+    if (!failed) {
+      const verdict = evaluateReadBack(documents, { runId, expectedCount });
+      if (verdict.exitCode) {
+        return result({
+          exitCode: verdict.exitCode,
+          scope: 'expected-partition',
+          observedIds: Object.freeze([...verdict.ids]),
+          observedCount: verdict.ids.length,
+          observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
+          reason: verdict.reason,
+        });
+      }
+      if (verdict.kind === 'complete') {
+        return result({
+          confirmed: true,
+          exitCode: EXIT.OK,
+          scope: 'expected-partition',
+          observedIds: Object.freeze([...verdict.ids]),
+          observedCount: verdict.ids.length,
+          observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
+          observedArrivalMs: now() - startedAt,
+          reason: `read back ${verdict.ids.length} of ${expectedCount} marked, run-correlated document(s) out of the destination container`,
+        });
+      }
+      if (verdict.kind === 'partial') {
+        lastPartial = verdict;
+        lastPartialDocuments = documents;
+      }
+    }
+
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(pollIntervalMs, remaining));
+  }
+
+  // ---- Phase 2: the bound elapsed. --------------------------------------
+  // An incomplete set is NOT an absence: the documents that did arrive prove the
+  // route carried something, and the ones that did not are unaccounted for. Both
+  // facts are reported, and neither is a success. No sweep here — these landed
+  // under the expected partition, so where the rest went is a different question
+  // than the one the sweep answers.
+  if (lastPartial) {
+    return result({
+      exitCode: EXIT.AMBIGUOUS,
+      scope: 'expected-partition',
+      observedIds: Object.freeze([...lastPartial.ids]),
+      observedCount: lastPartial.ids.length,
+      observedPartitionValues: Object.freeze(partitionValuesOf(lastPartialDocuments)),
+      reason: `the ${timeoutMs}ms wait bound elapsed having read back only ${lastPartial.ids.length} of ${expectedCount} documents — an incomplete read-back is a failure, never an absence and never a success`,
+    });
+  }
+
+  // Nothing under the expected partition. Before ANY absence is reported, one
+  // cross-partition sweep: see decision 3. It gets a single attempt — the bound
+  // has already elapsed, so there is no budget left to retry within, and an
+  // unreadable sweep is a failure rather than a licence to call it absent.
+  crossPartitionSweepRun = true;
+  let sweep;
+  try {
+    sweep = await queryPage(false);
+  } catch (err) {
+    if (classifyError(err) === EXIT.AUTH) return authResult(err, 'cross-partition');
+    transportFailures += 1;
+    return transportResult(
+      err,
+      'cross-partition',
+      'the cross-partition sweep gets a single attempt, since the wait bound has already elapsed'
+    );
+  }
+
+  const sweepVerdict = evaluateReadBack(sweep, { runId, expectedCount });
+  if (sweepVerdict.kind === 'empty') {
+    return result({
+      exitCode: EXIT.TIMEOUT,
+      scope: 'cross-partition',
+      reason: `no document carrying run ${safeFragment(runId)} was read back within the ${timeoutMs}ms wait bound, under the expected partition or any other — a timeout is a failure, not an absence to be explained away`,
+    });
+  }
+  if (sweepVerdict.exitCode) {
+    return result({
+      exitCode: sweepVerdict.exitCode,
+      scope: 'cross-partition',
+      observedIds: Object.freeze([...sweepVerdict.ids]),
+      observedCount: sweepVerdict.ids.length,
+      observedPartitionValues: Object.freeze(partitionValuesOf(sweep)),
+      reason: sweepVerdict.reason,
+    });
+  }
+
+  // Delivered — just not where this tool looked first. Reporting this as an
+  // absence would call a working route broken, and would send an operator to
+  // debug an endpoint that is doing its job.
+  const landed = partitionValuesOf(sweep);
+  return result({
+    exitCode: EXIT.UNEXPECTED_PARTITION,
+    scope: 'cross-partition',
+    observedIds: Object.freeze([...sweepVerdict.ids]),
+    observedCount: sweepVerdict.ids.length,
+    observedPartitionValues: Object.freeze(landed),
+    observedArrivalMs: null,
+    reason: `${sweepVerdict.ids.length} of ${expectedCount} document(s) for run ${safeFragment(runId)} were found OUTSIDE the expected partition ${safeFragment(partitionValue)}${landed.length ? ` (under ${landed.map(value => safeFragment(value)).join(', ')})` : ''} — the route delivered, but the partition value the body carried is not the one this run queried, so the run is not confirmed`,
+  });
+}
+
+// One operator-facing line for any confirmation result. Built only from the
+// result's own fields, and it names the wait bound on every path so a timeout
+// cannot be read without seeing what it timed out against.
+export function describeConfirmation(result) {
+  const arrival = result.confirmed
+    ? `arrived after ${result.observedArrivalMs}ms`
+    : `${result.elapsedMs}ms elapsed`;
+  const sweep = result.crossPartitionSweepRun ? ', cross-partition sweep run' : '';
+  return (
+    `${exitLabel(result.exitCode)}: ${result.observedCount}/${result.expectedCount} marked documents ` +
+    `for run ${safeFragment(result.runId)} (${result.polls} poll(s), bound ${result.waitBoundMs}ms, ${arrival}${sweep})`
+  );
+}

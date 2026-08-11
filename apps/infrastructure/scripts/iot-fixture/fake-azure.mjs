@@ -61,6 +61,33 @@ function mutationGuard(name) {
   };
 }
 
+// A clock the confirmation read-back is injected with, so a bounded wait is
+// testable in microseconds and NO TEST EVER SLEEPS.
+//
+// `sleep` advances the clock by exactly what it was asked to wait, which is what
+// makes a 180-second bound terminate instantly while still exercising the real
+// deadline arithmetic — a fake that ignored the requested duration would let a
+// loop that waits too long, or not at all, pass. `sleeps` records every wait so
+// a test can assert the polling cadence, and `advance` lets a test move time
+// without a wait (arrival that happens between polls).
+export function fakeClock({ start = Date.parse('2026-08-10T12:00:00.000Z') } = {}) {
+  let current = start;
+  const sleeps = [];
+  return {
+    sleeps,
+    start,
+    now: () => current,
+    sleep: async ms => {
+      sleeps.push(ms);
+      current += ms;
+    },
+    advance: ms => {
+      current += ms;
+    },
+    elapsed: () => current - start,
+  };
+}
+
 // Documents with no marker knowledge on purpose: the synthetic marker contract
 // belongs to fixture-core, and a fake that minted valid marked documents by
 // default would make the marker-violation path impossible to see.

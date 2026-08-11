@@ -14,21 +14,29 @@ import { describe, it } from 'node:test';
 
 import {
   CHILD_OUTPUT_MAX_LINES,
+  CONFIRMATION_QUERY,
   D2C_CONTENT_ENCODING,
   D2C_CONTENT_TYPE,
   D2C_SYSTEM_PROPERTIES,
+  DEFAULT_CONFIRMATION_TIMEOUT_MS,
+  DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_TRANSPORT_RETRIES,
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
   MESSAGES_PER_RUN,
   RUN_ID_FIELD,
+  RUN_ID_PARAMETER,
   SEQUENCE_FIELD,
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
   TICKET,
   buildFixtureMessages,
   classifyError,
+  confirmArrival,
+  describeConfirmation,
   describeError,
+  evaluateReadBack,
   exitLabel,
   formatD2cProperties,
   hasSyntheticMarker,
@@ -39,10 +47,12 @@ import {
   toFixtureError,
 } from './fixture-core.mjs';
 import {
+  FakeAzureError,
   authError,
   credentialUnavailableError,
   docs,
   fakeAzSpawn,
+  fakeClock,
   fakeCosmosClient,
   fakeReader,
   forbiddenError,
@@ -788,6 +798,510 @@ describe('isSyntheticDocument', () => {
       const err = refusal(() => isSyntheticDocument(marked(), bad), String(bad));
       assert.equal(err.exitCode, EXIT.USAGE);
     }
+  });
+});
+
+// The fail-closed confirmation read-back (HR2). Every outcome below is asserted
+// BY EXIT CODE rather than by prose, because the exit code is what the operator
+// and the two downstream tickets act on — and because "fail-closed" asserted in a
+// comment is exactly the kind of claim this repo has shipped behind before.
+//
+// Nothing here sleeps: the clock and the wait are injected, so a 20-second bound
+// elapses in microseconds while the real deadline arithmetic still runs.
+describe('the confirmation read-back', () => {
+  const RUN = 'mg-67-run-confirm';
+  const BOUND = 20_000;
+  const INTERVAL = 5_000;
+  // With this bound and interval the loop polls at 0, 5s, 10s, 15s and 20s, so a
+  // wait that never finds anything issues five partition-scoped polls and then
+  // exactly one cross-partition sweep.
+  const POLLS_TO_BOUND = 5;
+  const SWEEP_CALL_INDEX = POLLS_TO_BOUND;
+
+  // Documents as COSMOS returns them, not as the sender built them: the id
+  // prefix is deliberately not the sender's, since whether the platform honours
+  // a supplied id is behaviour no file in this repo pins down. What the
+  // read-back reports must be what it OBSERVED.
+  const routed = (
+    count,
+    {
+      runId = RUN,
+      idPrefix = 'cosmos-assigned',
+      partitionValue = FIXTURE_DEVICE_ID,
+      unmarked = false,
+      firstSequence = 1,
+    } = {}
+  ) =>
+    Array.from({ length: count }, (_, i) => {
+      const doc = {
+        id: `${idPrefix}-${i + 1}`,
+        deviceId: partitionValue,
+        timestamp: '2026-08-10T12:00:00.000Z',
+        [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
+        [RUN_ID_FIELD]: runId,
+        [SEQUENCE_FIELD]: firstSequence + i,
+        // The properties Cosmos adds. They must not disturb the correlation.
+        _ts: 1_786_000_000,
+        _rid: 'fixture-rid',
+        _etag: '"0000-0000"',
+      };
+      if (unmarked) delete doc[SYNTHETIC_MARKER_FIELD];
+      return doc;
+    });
+
+  const confirm = async (spec, overrides = {}) => {
+    const clock = fakeClock();
+    const reader = fakeReader(spec);
+    const result = await confirmArrival({
+      reader,
+      runId: RUN,
+      partitionKeyField: 'deviceId',
+      timeoutMs: BOUND,
+      pollIntervalMs: INTERVAL,
+      now: clock.now,
+      sleep: clock.sleep,
+      ...overrides,
+    });
+    return { result, reader, clock };
+  };
+
+  const asyncRefusal = async (fn, context = '') => {
+    try {
+      await fn();
+    } catch (err) {
+      assert.ok(err instanceof FixtureError, `${context}: threw ${err?.name}, not a FixtureError`);
+      return err;
+    }
+    return assert.fail(`${context}: expected a FixtureError, nothing was thrown`);
+  };
+
+  // Every non-success outcome must be nonzero AND distinct from every other
+  // outcome's code, so this is asserted on each scenario rather than once.
+  const assertFailed = (result, expected, context) => {
+    assert.equal(result.exitCode, expected, `${context}: ${describeConfirmation(result)}`);
+    assert.equal(result.confirmed, false, `${context}: reported confirmed on a failure`);
+    assert.notEqual(result.exitCode, EXIT.OK, context);
+    for (const other of [
+      EXIT.TIMEOUT,
+      EXIT.AUTH,
+      EXIT.TRANSPORT,
+      EXIT.MARKER_VIOLATION,
+      EXIT.AMBIGUOUS,
+      EXIT.UNEXPECTED_PARTITION,
+    ]) {
+      if (other !== expected) assert.notEqual(result.exitCode, other, `${context} collided`);
+    }
+  };
+
+  it('confirms only when the expected count is read back, and reports the delay', async () => {
+    const { result, reader, clock } = await confirm({
+      script: [{ docs: [] }, { docs: [] }, { docs: routed(MESSAGES_PER_RUN) }],
+    });
+
+    assert.equal(result.exitCode, EXIT.OK);
+    assert.equal(result.confirmed, true);
+    assert.equal(result.observedCount, MESSAGES_PER_RUN);
+    // Routing is asynchronous, so the delay is the calibration the first live
+    // run hands to every later ticket. Two empty polls at a 5s cadence.
+    assert.equal(result.observedArrivalMs, 2 * INTERVAL);
+    assert.equal(result.polls, 3);
+    assert.equal(reader.calls.length, 3);
+    assert.deepEqual(clock.sleeps, [INTERVAL, INTERVAL]);
+    assert.equal(result.crossPartitionSweepRun, false);
+    assert.equal(result.scope, 'expected-partition');
+  });
+
+  it('reports the ids the read-back OBSERVED, not the ones the sender hoped for', async () => {
+    const requested = buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId' }).map(
+      message => message.body.id
+    );
+    const { result } = await confirm({ script: [{ docs: routed(MESSAGES_PER_RUN) }] });
+
+    assert.deepEqual(result.observedIds, [
+      'cosmos-assigned-1',
+      'cosmos-assigned-2',
+      'cosmos-assigned-3',
+    ]);
+    for (const id of requested) {
+      assert.equal(result.observedIds.includes(id), false, `reported the requested id ${id}`);
+    }
+    assert.deepEqual(result.observedPartitionValues, [FIXTURE_DEVICE_ID]);
+  });
+
+  it('exits TIMEOUT when the bound elapses with nothing found anywhere', async () => {
+    const startedWall = Date.now();
+    const { result, reader, clock } = await confirm({ fallback: { docs: [] } });
+
+    assertFailed(result, EXIT.TIMEOUT, 'nothing within the bound');
+    assert.equal(result.observedCount, 0);
+    assert.equal(result.polls, POLLS_TO_BOUND);
+    // The absence is only reported AFTER the cross-partition sweep came back
+    // empty too — see the unexpected-partition case below.
+    assert.equal(result.crossPartitionSweepRun, true);
+    assert.equal(reader.calls.length, POLLS_TO_BOUND + 1);
+    assert.equal(result.elapsedMs, BOUND);
+    assert.equal(clock.elapsed(), BOUND);
+    // The bound elapsed on the injected clock, not on the wall clock: no test
+    // sleeps, which is what keeps a 180s production default testable at all.
+    assert.ok(Date.now() - startedWall < 1_000, 'the test actually waited');
+  });
+
+  it('exits AUTH immediately on a 403, with no further poll and no timeout code', async () => {
+    const { result, reader, clock } = await confirm({
+      script: [{ error: forbiddenError() }],
+      fallback: { docs: routed(MESSAGES_PER_RUN) },
+    });
+
+    assertFailed(result, EXIT.AUTH, 'a 403 on the first poll');
+    // The single most likely failure of the live run is a data-plane role
+    // assignment that has not propagated. Telling that operator "the route did
+    // not deliver" would send them to rebuild working infrastructure.
+    assert.equal(reader.calls.length, 1, 'polled again after an auth failure');
+    assert.deepEqual(clock.sleeps, []);
+    assert.equal(result.elapsedMs, 0);
+    assert.equal(result.crossPartitionSweepRun, false);
+    assert.match(result.reason, /NOTHING about whether the route delivered/);
+  });
+
+  it('exits AUTH on a 401 and on a credential that could not be acquired', async () => {
+    for (const error of [authError(), credentialUnavailableError()]) {
+      const { result, reader } = await confirm({ script: [{ error }] });
+      assertFailed(result, EXIT.AUTH, error.name);
+      assert.equal(reader.calls.length, 1);
+    }
+  });
+
+  it('exits TRANSPORT once retries are exhausted, rather than waiting out the bound', async () => {
+    const { result, reader } = await confirm(
+      { fallback: { error: transportError() } },
+      { maxTransportRetries: 1 }
+    );
+
+    assertFailed(result, EXIT.TRANSPORT, 'transport retries exhausted');
+    assert.equal(reader.calls.length, 2, 'retry budget not honoured');
+    // It ABORTS. A transport failure that quietly burned the rest of the bound
+    // would be reported as an absence, which is the conflation this refuses.
+    assert.ok(result.elapsedMs < BOUND, 'kept polling past the retry budget');
+    assert.equal(result.crossPartitionSweepRun, false);
+  });
+
+  it('retries a transport failure inside the budget and can still confirm', async () => {
+    const { result, reader } = await confirm({
+      script: [{ error: transportError() }, { docs: routed(MESSAGES_PER_RUN) }],
+    });
+
+    assert.equal(result.exitCode, EXIT.OK);
+    assert.equal(result.confirmed, true);
+    assert.equal(reader.calls.length, 2);
+    assert.equal(result.observedArrivalMs, INTERVAL);
+  });
+
+  it('exits MARKER VIOLATION for a document read back without the marker', async () => {
+    for (const [context, page] of [
+      ['every document unmarked', routed(MESSAGES_PER_RUN, { unmarked: true })],
+      [
+        'one document unmarked',
+        [...routed(2), ...routed(1, { unmarked: true, idPrefix: 'stray', firstSequence: 3 })],
+      ],
+    ]) {
+      const { result, reader, clock } = await confirm({ script: [{ docs: page }] });
+      assertFailed(result, EXIT.MARKER_VIOLATION, context);
+      // A defect in the sender, established on the first page — there is nothing
+      // to wait for.
+      assert.equal(reader.calls.length, 1, context);
+      assert.deepEqual(clock.sleeps, [], context);
+      assert.match(result.reason, /defect in the sender/);
+    }
+  });
+
+  it('exits AMBIGUOUS for a partial set at the bound, and never TIMEOUT', async () => {
+    const { result, reader } = await confirm({ fallback: { docs: routed(2) } });
+
+    assertFailed(result, EXIT.AMBIGUOUS, '2 of 3 at the bound');
+    assert.equal(result.observedCount, 2);
+    assert.equal(result.expectedCount, MESSAGES_PER_RUN);
+    assert.deepEqual(result.observedIds, ['cosmos-assigned-1', 'cosmos-assigned-2']);
+    assert.equal(result.polls, POLLS_TO_BOUND);
+    // Documents DID arrive under the expected partition, so the sweep would
+    // answer a question nobody asked.
+    assert.equal(result.crossPartitionSweepRun, false);
+    assert.equal(reader.calls.length, POLLS_TO_BOUND);
+  });
+
+  it('keeps waiting on a partial set while the bound still has room', async () => {
+    const { result } = await confirm({
+      script: [{ docs: routed(1) }, { docs: routed(2) }, { docs: routed(MESSAGES_PER_RUN) }],
+    });
+    assert.equal(result.exitCode, EXIT.OK);
+    assert.equal(result.observedCount, MESSAGES_PER_RUN);
+    assert.equal(result.observedArrivalMs, 2 * INTERVAL);
+  });
+
+  it('exits AMBIGUOUS for every unreadable or non-deterministic read-back', async () => {
+    const one = routed(1)[0];
+    const cases = [
+      ['duplicate documents', [one, { ...one }]],
+      ['a duplicate sequence under different ids', [one, { ...one, id: 'cosmos-assigned-9' }]],
+      ['more documents than were sent', routed(MESSAGES_PER_RUN + 1)],
+      ['a foreign run id in the page', [...routed(2), ...routed(1, { runId: 'mg-67-run-other' })]],
+      ['a document with no usable id', [{ ...one, id: '' }]],
+      ['a document that is not an object', [one, 'not-a-document']],
+      ['a null where a document was expected', [null]],
+      ['a reader that answered with something other than a list', 'not-a-list'],
+    ];
+
+    for (const [context, page] of cases) {
+      const { result } = await confirm({ script: [{ docs: page }] });
+      assertFailed(result, EXIT.AMBIGUOUS, context);
+      // Each of these is a FAILURE, never an absence and never a success.
+      assert.notEqual(result.exitCode, EXIT.TIMEOUT, context);
+      assert.ok(result.reason.length > 0, context);
+    }
+  });
+
+  it('distinguishes delivered-under-an-unexpected-partition from not delivered', async () => {
+    const { result, reader } = await confirm({
+      script: [
+        ...Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] })),
+        { docs: routed(MESSAGES_PER_RUN, { partitionValue: 'some-other-partition' }) },
+      ],
+      fallback: { docs: [] },
+    });
+
+    // Nothing between the device and Cosmos injects a partition key, so the body
+    // is the only source of one. Reporting this as an absence would call a
+    // WORKING route broken.
+    assertFailed(result, EXIT.UNEXPECTED_PARTITION, 'found only cross-partition');
+    assert.notEqual(result.exitCode, EXIT.TIMEOUT);
+    assert.equal(result.observedCount, MESSAGES_PER_RUN);
+    assert.deepEqual(result.observedPartitionValues, ['some-other-partition']);
+    // The operator needs to be told WHERE they landed, or the finding is not
+    // actionable — this is the whole reason the sweep exists.
+    assert.match(result.reason, /some-other-partition/);
+    assert.match(result.reason, new RegExp(FIXTURE_DEVICE_ID));
+    assert.equal(result.crossPartitionSweepRun, true);
+    // Scoped first, swept once — and the sweep is what an omitted partitionKey
+    // means on the wire.
+    assert.equal(reader.calls[0].partitionKey, FIXTURE_DEVICE_ID);
+    assert.equal(reader.calls[SWEEP_CALL_INDEX].partitionKey, undefined);
+    assert.equal(reader.calls.length, POLLS_TO_BOUND + 1);
+  });
+
+  it('classifies a failure of the sweep itself rather than calling it an absence', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    for (const [error, expected] of [
+      [forbiddenError(), EXIT.AUTH],
+      [transportError(), EXIT.TRANSPORT],
+    ]) {
+      const { result } = await confirm({ script: [...empties, { error }] });
+      assertFailed(result, expected, `sweep failed with ${error.name}`);
+      assert.equal(result.scope, 'cross-partition');
+      assert.equal(result.crossPartitionSweepRun, true);
+    }
+  });
+
+  it('reports an unmarked document found by the sweep as a marker violation', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const { result } = await confirm({
+      script: [...empties, { docs: routed(MESSAGES_PER_RUN, { unmarked: true }) }],
+    });
+    assertFailed(result, EXIT.MARKER_VIOLATION, 'unmarked documents found cross-partition');
+  });
+
+  // The single assertion that has to hold on every path: an operator reading a
+  // timeout must be able to see what it timed out against, and the evidence
+  // artifact records the bound as the calibration for later tickets.
+  it('reports the wait bound actually used on every path, success or failure', async () => {
+    const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
+    const paths = [
+      ['success', { script: [{ docs: routed(MESSAGES_PER_RUN) }] }, EXIT.OK],
+      ['timeout', { fallback: { docs: [] } }, EXIT.TIMEOUT],
+      ['auth', { script: [{ error: forbiddenError() }] }, EXIT.AUTH],
+      ['transport', { fallback: { error: transportError() } }, EXIT.TRANSPORT],
+      [
+        'marker violation',
+        { script: [{ docs: routed(1, { unmarked: true }) }] },
+        EXIT.MARKER_VIOLATION,
+      ],
+      ['ambiguous', { script: [{ docs: routed(MESSAGES_PER_RUN + 1) }] }, EXIT.AMBIGUOUS],
+      [
+        'unexpected partition',
+        {
+          script: [...empties, { docs: routed(MESSAGES_PER_RUN, { partitionValue: 'elsewhere' }) }],
+        },
+        EXIT.UNEXPECTED_PARTITION,
+      ],
+    ];
+
+    for (const [context, spec, expected] of paths) {
+      const { result } = await confirm(spec);
+      assert.equal(result.exitCode, expected, context);
+      assert.equal(result.waitBoundMs, BOUND, `${context}: the bound is missing from the result`);
+      assert.equal(result.pollIntervalMs, INTERVAL, context);
+      assert.ok(result.polls > 0, `${context}: reported no poll at all`);
+      assert.equal(typeof result.elapsedMs, 'number', context);
+      assert.equal(result.runId, RUN, context);
+      assert.equal(exitLabel(result.exitCode), result.exitLabel, context);
+      assert.match(describeConfirmation(result), new RegExp(`bound ${BOUND}ms`), context);
+      // Fail-closed, asserted structurally: confirmed is true on exactly one
+      // path, and only with the full expected count read back.
+      assert.equal(result.confirmed, expected === EXIT.OK, context);
+      if (result.confirmed) {
+        assert.equal(result.observedCount, result.expectedCount, context);
+        assert.equal(typeof result.observedArrivalMs, 'number', context);
+      } else {
+        assert.ok(result.exitCode > 0, context);
+        assert.equal(result.observedArrivalMs, null, context);
+      }
+    }
+  });
+
+  it('matches on the run id as a bound parameter, and validates the marker itself', async () => {
+    const { reader } = await confirm({ script: [{ docs: routed(MESSAGES_PER_RUN) }] });
+    const [call] = reader.calls;
+
+    assert.equal(call.query, CONFIRMATION_QUERY);
+    assert.deepEqual(call.parameters, [{ name: RUN_ID_PARAMETER, value: RUN }]);
+    // The run id travels as a parameter, never interpolated into the SQL.
+    assert.equal(call.query.includes(RUN), false);
+    assert.ok(call.query.includes(RUN_ID_FIELD));
+    // And the predicate deliberately does NOT filter on the marker: if it did,
+    // the service would filter out exactly the documents the marker check exists
+    // to catch, and MARKER VIOLATION would be an outcome only a fake could
+    // produce.
+    assert.equal(call.query.includes(SYNTHETIC_MARKER_FIELD), false);
+    assert.equal(call.query.includes(SYNTHETIC_MARKER), false);
+  });
+
+  it('scrubs a credential out of a read-back failure, on the failure path', async () => {
+    const leaky = new FakeAzureError(
+      'connect failed AccountEndpoint=https://x.documents.azure.com/;AccountKey=not-a-real-account-key-0000==',
+      { statusCode: 500, name: 'RestError' }
+    );
+    const { result } = await confirm({ fallback: { error: leaky } }, { maxTransportRetries: 0 });
+
+    assertFailed(result, EXIT.TRANSPORT, 'a leaky transport error');
+    for (const text of [result.reason, describeConfirmation(result)]) {
+      assert.doesNotMatch(text, /not-a-real-account-key/);
+    }
+    assert.match(result.reason, /\[redacted\]/);
+    // The outcome is still named, so the operator learns something.
+    assert.match(result.reason, /retries exhausted/);
+  });
+
+  it('refuses an unbounded, unusable or absent wait rather than starting one', async () => {
+    const usage = async (overrides, context) => {
+      const err = await asyncRefusal(
+        () =>
+          confirmArrival({
+            reader: fakeReader(),
+            runId: RUN,
+            timeoutMs: BOUND,
+            pollIntervalMs: INTERVAL,
+            now: () => 0,
+            sleep: async () => {},
+            ...overrides,
+          }),
+        context
+      );
+      assert.equal(err.exitCode, EXIT.USAGE, context);
+    };
+
+    await usage({ reader: undefined }, 'no reader');
+    await usage({ reader: {} }, 'a reader with no queryDocuments');
+    for (const bad of ['', '   ', null, 7]) {
+      await usage({ runId: bad }, `runId ${String(bad)}`);
+      await usage({ partitionValue: bad }, `partitionValue ${String(bad)}`);
+    }
+    for (const bad of [0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN, '5000', null]) {
+      await usage({ timeoutMs: bad }, `timeoutMs ${String(bad)}`);
+      await usage({ pollIntervalMs: bad }, `pollIntervalMs ${String(bad)}`);
+      await usage({ expectedCount: bad }, `expectedCount ${String(bad)}`);
+    }
+    await usage({ maxTransportRetries: -1 }, 'a negative retry budget');
+    // The partition key field is measured, not assumed: a raw path here would
+    // build a query nothing can answer.
+    await usage({ partitionKeyField: '/deviceId' }, 'a partition key path');
+  });
+
+  it('defaults to a bound that is explicit, finite and generous', () => {
+    for (const value of [
+      DEFAULT_CONFIRMATION_TIMEOUT_MS,
+      DEFAULT_POLL_INTERVAL_MS,
+      DEFAULT_TRANSPORT_RETRIES,
+    ]) {
+      assert.ok(Number.isInteger(value), `${value} is not an integer`);
+      assert.ok(Number.isFinite(value));
+    }
+    assert.ok(DEFAULT_CONFIRMATION_TIMEOUT_MS > 0);
+    assert.ok(DEFAULT_POLL_INTERVAL_MS > 0);
+    assert.ok(DEFAULT_POLL_INTERVAL_MS < DEFAULT_CONFIRMATION_TIMEOUT_MS);
+    assert.ok(DEFAULT_TRANSPORT_RETRIES >= 1);
+  });
+
+  // A bound smaller than the interval is a legal, if odd, operator choice. It
+  // must still poll, still sweep before reporting an absence, and still not
+  // overrun: the wait is clamped to the bound, not to the cadence.
+  it('clamps the cadence to a bound smaller than the poll interval', async () => {
+    const { result, reader, clock } = await confirm(
+      { fallback: { docs: [] } },
+      { timeoutMs: 1, pollIntervalMs: INTERVAL }
+    );
+    assertFailed(result, EXIT.TIMEOUT, 'a one-millisecond bound');
+    assert.deepEqual(clock.sleeps, [1], 'slept for the interval rather than the bound');
+    assert.equal(result.polls, 2);
+    assert.equal(result.elapsedMs, 1);
+    assert.equal(reader.calls.length, 3, 'the sweep still ran before reporting an absence');
+    assert.equal(result.waitBoundMs, 1);
+  });
+
+  it('never sleeps past the bound', async () => {
+    const { clock, result } = await confirm(
+      { fallback: { docs: [] } },
+      { timeoutMs: 12_000, pollIntervalMs: INTERVAL }
+    );
+    assert.equal(
+      clock.sleeps.reduce((sum, ms) => sum + ms, 0),
+      12_000
+    );
+    assert.deepEqual(clock.sleeps, [5_000, 5_000, 2_000]);
+    assert.equal(result.elapsedMs, 12_000);
+  });
+});
+
+// The pure ambiguity rules, readable without a clock. confirmArrival's outcomes
+// above are the contract; these pin the judgements it is built from.
+describe('evaluateReadBack', () => {
+  const RUN = 'mg-67-run-evaluate';
+  const doc = (extra = {}) => ({
+    id: 'cosmos-assigned-1',
+    deviceId: FIXTURE_DEVICE_ID,
+    [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
+    [RUN_ID_FIELD]: RUN,
+    [SEQUENCE_FIELD]: 1,
+    ...extra,
+  });
+
+  it('separates empty, partial and complete, and only complete can be a success', () => {
+    assert.equal(evaluateReadBack([], { runId: RUN }).kind, 'empty');
+    const partial = evaluateReadBack([doc()], { runId: RUN, expectedCount: 3 });
+    assert.equal(partial.kind, 'partial');
+    // Not yet a verdict: routing is asynchronous and documents trickle in.
+    assert.equal(partial.exitCode, undefined);
+    const complete = evaluateReadBack([doc()], { runId: RUN, expectedCount: 1 });
+    assert.equal(complete.kind, 'complete');
+    assert.deepEqual(complete.ids, ['cosmos-assigned-1']);
+  });
+
+  it('ignores the properties Cosmos adds', () => {
+    const stored = doc({ _ts: 1, _rid: 'r', _etag: '"0"', _self: 'dbs/x' });
+    assert.equal(evaluateReadBack([stored], { runId: RUN, expectedCount: 1 }).kind, 'complete');
+  });
+
+  it('refuses a caller with no run id rather than judging an uncorrelated page', () => {
+    const err = refusal(() => evaluateReadBack([doc()], { runId: '' }));
+    assert.equal(err.exitCode, EXIT.USAGE);
+    assert.equal(refusal(() => evaluateReadBack([doc()])).exitCode, EXIT.USAGE);
   });
 });
 
