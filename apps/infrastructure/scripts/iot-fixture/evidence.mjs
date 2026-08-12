@@ -158,8 +158,9 @@
 // here in a way it would not be there.
 //
 // WRITES ARE ATOMIC AND NON-DESTRUCTIVE. The record is written to a sibling
-// `.partial` file and renamed into place, so no reader ever sees a half-written
-// document; a failed write removes the partial rather than leaving debris that
+// `.partial` file and published by exclusive create, so no reader ever sees a
+// half-written document and no two concurrent runs can both publish over one
+// destination; a failed write removes the partial rather than leaving debris that
 // looks like evidence. An EXISTING file at the target path is REFUSED rather
 // than overwritten: the earlier run's documents are still in the container, and
 // clobbering the record of them manufactures exactly the "unrecorded document"
@@ -169,7 +170,7 @@
 // ===========================================================================
 // THE WRITE NEVER DESTROYS A RECORD AND NEVER PUBLISHES THE WRONG ONE.
 //
-// Three rules, because "atomic" alone bought less than it looked like it did.
+// Four rules, because "atomic" alone bought less than it looked like it did.
 // All three describe the same failure — a record that is silently lost or
 // silently swapped while the tool reports success — and a lost or swapped record
 // is worse than a missing one, because MG-53 cannot detect it: it reads a
@@ -195,6 +196,21 @@
 //      run of their own; nothing about it asks to overwrite a run that is still
 //      writing, and a run that did would leave one file where two operators each
 //      believe theirs was published.
+//
+//   4. THE DESTINATION IS TAKEN BY EXCLUSION, NOT BY CHECKING. Rules 1-3 are
+//      all check-then-act: they read the destination and then, later, write it,
+//      with nothing holding it in between. Two genuinely concurrent runs
+//      therefore never see each other at all — both read a free destination,
+//      both proceed, and one record is destroyed by the other's publication
+//      with BOTH runs exiting 0. No amount of extra checking closes that
+//      window; a check-then-act has it by construction. Publication is
+//      therefore an EXCLUSIVE CREATE (link(), which fails EEXIST atomically),
+//      so the filesystem adjudicates the collision and the losing run is told,
+//      nonzero. `overwrite` goes through the same exclusion: it CLAIMS the
+//      record it replaces by moving it aside under a per-run name first, and
+//      restores it by the same exclusive primitive if the publication then
+//      fails. The checks in rules 1-3 are kept for the refusal text they can
+//      give that a bare EEXIST cannot, and are not the thing that decides.
 //
 // No refusal the WRITE path makes is usage-class. It runs only after the send,
 // so "bad arguments, nothing live happened" is false on every one of its paths;
@@ -234,7 +250,7 @@
 // exists to catch.
 // ===========================================================================
 
-import { readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { link, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 
 import {
@@ -372,6 +388,24 @@ export function foreignPartials(entryNames, targetBasename, runId = null) {
   return partialsForDestination(entryNames, targetBasename).filter(
     partial => partial.owner === null || partial.owner !== runId
   );
+}
+
+// Where `--overwrite` parks the record it is replacing, so the replacement is a
+// CLAIM rather than a clobber (see writeEvidenceRecord). Per run, and a distinct
+// suffix from the partial's, so a superseded record is never mistaken for an
+// in-flight one by partialsForDestination() above.
+export const SUPERSEDED_SUFFIX = '.superseded';
+
+export function supersededPathFor(filePath, runId) {
+  if (typeof filePath !== 'string' || filePath.trim() === '') {
+    throw evidenceUnrecordedRefusal('filePath must be a non-empty string');
+  }
+  if (typeof runId !== 'string' || !SAFE_RUN_ID.test(runId)) {
+    throw evidenceUnrecordedRefusal(
+      `no per-run superseded path could be derived for ${filePath}: the run id is missing or is not usable as a filename component`
+    );
+  }
+  return `${filePath}.${runId}${SUPERSEDED_SUFFIX}`;
 }
 
 // The preflight probe file. A distinct suffix rather than the partial's, so a
@@ -1425,15 +1459,18 @@ export function classifyPartitionValues(values = [], expected = null) {
 /**
  * Write the record atomically to `filePath`.
  *
- * Partial-then-rename through a PER-RUN partial (see partialPathFor), so no
- * reader ever sees a half-written document, two runs sharing a destination
- * cannot interleave on one temp file, and a failed write leaves no debris that
+ * Write a PER-RUN partial (see partialPathFor), then publish it by EXCLUSIVE
+ * CREATE at the destination — link(), which fails EEXIST if anything is there.
+ * So no reader ever sees a half-written document, two runs sharing a
+ * destination cannot interleave on one temp file, two CONCURRENT runs cannot
+ * both publish (the filesystem picks one and the loser exits nonzero rather
+ * than being silently overwritten), and a failed write leaves no debris that
  * could be mistaken for evidence. Refuses to overwrite an existing file unless
  * `overwrite` is passed: the earlier run's documents are still in the container,
  * and destroying the record of them manufactures the unrecorded-document
  * condition that halts MG-53.
  *
- * THREE REFUSALS, ALL OF THEM NON-DESTRUCTIVE, and none of them USAGE — this
+ * FOUR REFUSALS, ALL OF THEM NON-DESTRUCTIVE, and none of them USAGE — this
  * function only ever runs after the send, so see evidenceUnrecordedRefusal:
  *   - a destination whose state cannot be READ (a stat failing for any reason
  *     other than ENOENT). An unreadable answer is not an absence, and writing on
@@ -1442,6 +1479,8 @@ export function classifyPartitionValues(values = [], expected = null) {
  *     filesystem either.
  *   - a destination another run holds a partial on, `overwrite` or not.
  *   - an existing record, unless `overwrite` says otherwise.
+ *   - a destination a CONCURRENT run claimed while this one was working, which
+ *     only the exclusive publication below can detect, `overwrite` or not.
  *
  * @param {object} record from buildEvidenceRecord(); its runId names the partial.
  * @param {string} filePath operator-chosen destination.
@@ -1451,7 +1490,7 @@ export function classifyPartitionValues(values = [], expected = null) {
  */
 export async function writeEvidenceRecord(record, filePath, options = {}) {
   const { overwrite = false } = options;
-  const fs = { writeFile, rename, rm, stat, readdir, ...(options.fs ?? {}) };
+  const fs = { writeFile, rename, rm, stat, readdir, link, ...(options.fs ?? {}) };
   if (typeof filePath !== 'string' || filePath.trim() === '') {
     throw evidenceUnrecordedRefusal('filePath must be a non-empty string');
   }
@@ -1519,17 +1558,115 @@ export async function writeEvidenceRecord(record, filePath, options = {}) {
     }
   }
 
+  // =========================================================================
+  // PUBLICATION IS AN EXCLUSIVE CREATE, NOT A CLOBBER.
+  //
+  // Every guard above is a check-then-act: it READS the destination's state,
+  // and then, later, WRITES. Nothing holds the destination in between. Two
+  // genuinely concurrent runs therefore never observe each other — each reads a
+  // free destination, each proceeds — and the second publication silently
+  // destroys the first run's record while BOTH runs exit 0. That is the exact
+  // false-success this tool exists to make impossible, in the one artifact
+  // MG-53 and MG-54 parse to decide whether to halt a migration.
+  //
+  // A wider or later check cannot fix it. Any check-then-act has the window by
+  // construction, and narrowing it just makes the loss rarer and harder to
+  // attribute. The fix is EXCLUSION: the filesystem adjudicates the collision
+  // atomically, instead of this function inspecting and then acting.
+  //
+  // link() is that exclusion, and it is the publication at the same time. It
+  // gives the fully-written partial a second name at the destination and FAILS
+  // WITH EEXIST if any file is already there — one atomic operation, so of two
+  // concurrent runs exactly one can win it and the loser is TOLD, nonzero,
+  // rather than silently overwritten. It also keeps the atomic-publication
+  // property the rename had: the destination appears complete or not at all,
+  // because it is a second name for bytes that were written in full before the
+  // name existed.
+  //
+  // The guards above are deliberately KEPT and are deliberately NOT
+  // authoritative. They turn the common cases into a refusal that names what is
+  // actually wrong — an earlier run's record, a concurrent run's partial, a
+  // destination that cannot be read — instead of a bare EEXIST. This is the
+  // same two-layer shape as the preflight: the earlier check is for the
+  // operator, the later one decides.
+  // =========================================================================
+  let supersededPath = null;
   try {
     await fs.writeFile(partialPath, serialized, 'utf8');
-    await fs.rename(partialPath, filePath);
+
+    if (overwrite) {
+      // `--overwrite` must not reintroduce the clobber this block removes. A
+      // deliberate replacement of the operator's OWN prior record still must not
+      // be able to interleave with a concurrent run's publication.
+      //
+      // So the prior record is CLAIMED first — moved aside under a per-run name
+      // — and that rename is itself adjudicated by the filesystem: of two
+      // concurrent overwriting runs exactly one moves the file and the other is
+      // told ENOENT. Both then fall through to the link below, where exactly one
+      // can still win. Neither can destroy a record the other published.
+      const candidate = supersededPathFor(filePath, record?.runId);
+      try {
+        await fs.rename(filePath, candidate);
+        supersededPath = candidate;
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err;
+        // Nothing to supersede — the destination is already free. The link below
+        // remains the only thing that decides whether this run gets it.
+      }
+    }
+
+    try {
+      await fs.link(partialPath, filePath);
+    } catch (err) {
+      if (err?.code === 'EEXIST') {
+        throw evidenceUnrecordedRefusal(
+          `the evidence destination ${filePath} was claimed by another run between this run's checks and its write, and this run refused rather than replacing it: publishing here would destroy a record that run believes it published, with both runs reporting success. Refused with overwrite as well. This run's documents are in the container and this run's evidence is NOT recorded.`
+        );
+      }
+      throw err;
+    }
   } catch (err) {
     // No partial is left behind. A `.partial` file lying next to the target
     // looks enough like evidence to be picked up by hand, and this write is the
     // one that failed.
     await fs.rm(partialPath, { force: true }).catch(() => {});
+
+    // A failed overwrite must leave the operator's prior record where it was.
+    // Restoring it uses the SAME exclusive primitive rather than a rename: if
+    // another run published in the interval, that run's record is the one at the
+    // destination and must not be clobbered by this one's rollback. Then the
+    // prior record stays under its superseded name and the refusal says so,
+    // because a record this function moved and could not put back is not
+    // something the operator may be left to discover.
+    let stranded = null;
+    if (supersededPath !== null) {
+      try {
+        await fs.link(supersededPath, filePath);
+        await fs.rm(supersededPath, { force: true }).catch(() => {});
+      } catch {
+        stranded = supersededPath;
+      }
+    }
+    const strandedNote =
+      stranded === null
+        ? ''
+        : ` The record previously at ${filePath} was moved aside and could NOT be restored, because another run now holds that path; it is at ${stranded} and must be dealt with by hand.`;
+
+    if (err instanceof FixtureError) {
+      throw stranded === null ? err : evidenceUnrecordedRefusal(`${err.message}${strandedNote}`);
+    }
     throw evidenceUnrecordedRefusal(
-      `failed to write the evidence record to ${filePath}: ${err?.code ?? err?.name ?? 'write error'}. No partial file was left behind, and no evidence was recorded for this run.`
+      `failed to write the evidence record to ${filePath}: ${err?.code ?? err?.name ?? 'write error'}. No partial file was left behind, and no evidence was recorded for this run.${strandedNote}`
     );
+  }
+
+  // Published. The partial is now a redundant second name for the same bytes,
+  // and the superseded record is the one `overwrite` was invoked to replace. A
+  // removal that fails leaves recoverable, correctly-named debris and does NOT
+  // unpublish a record that is already on disk, so it is not an error here.
+  await fs.rm(partialPath, { force: true }).catch(() => {});
+  if (supersededPath !== null) {
+    await fs.rm(supersededPath, { force: true }).catch(() => {});
   }
 
   return Object.freeze({ path: filePath, bytes: Buffer.byteLength(serialized), record });

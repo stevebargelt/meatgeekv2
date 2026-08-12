@@ -15,7 +15,15 @@
 // and the artifact is byte-reproducible.
 
 import { strict as assert } from 'node:assert';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  link as realLink,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -49,6 +57,7 @@ import {
   EVIDENCE_SCHEMA_VERSION,
   OUTCOME_NAMES,
   PARTIAL_SUFFIX,
+  SUPERSEDED_SUFFIX,
   UNKNOWN_WRITER_CHECK,
   assertNoCredentialShape,
   buildEvidenceRecord,
@@ -1436,7 +1445,10 @@ describe('writing the artifact', () => {
           throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
         },
         writeFile: async (file, contents) => writeFile(file, contents, 'utf8'),
-        rename: async () => {
+        // The PUBLICATION step, which is now an exclusive create rather than a
+        // rename. A failure here is not EEXIST — it is the filesystem refusing
+        // for some other reason — and it must still leave nothing behind.
+        link: async () => {
           throw Object.assign(new Error('EXDEV'), { code: 'EXDEV' });
         },
         rm: async (file, options) => {
@@ -1832,6 +1844,324 @@ describe('the evidence write never destroys or swaps a record', () => {
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
+    }
+  });
+});
+
+// Rule 4. The destination is taken by EXCLUSION, not by checking.
+//
+// Every test above drives ONE writer past a destination whose state it inspects.
+// That is check-then-act, and check-then-act has a window by construction: two
+// genuinely concurrent runs each read a free destination, each proceed, and one
+// record is destroyed by the other's publication with BOTH runs exiting 0. In
+// the artifact MG-53 and MG-54 parse to decide whether to halt a migration, that
+// is silent data destruction reported as success.
+//
+// So these tests do not measure the window — a test that merely made the gap
+// smaller would pass against the defect. They run writers that are genuinely
+// simultaneous AT THE PUBLICATION ITSELF, held there by a barrier that does not
+// release until every one of them has arrived, and they demand the invariant
+// exclusion gives and narrowing cannot: EXACTLY ONE SUCCESS, every other writer
+// refused explicitly and nonzero, never two successes.
+describe('two concurrent runs cannot both publish to one destination', () => {
+  const RUN_A = 'mg-67-run-00000000-0000-4000-8000-0000000000aa';
+  const RUN_B = 'mg-67-run-00000000-0000-4000-8000-0000000000bb';
+  const PRIOR_RUN = 'mg-67-run-00000000-0000-4000-8000-00000000pr01'.replace('pr01', '0f01');
+
+  // Releases only once EVERY writer has arrived, so the publications are truly
+  // concurrent rather than merely close together. A writer that never arrives
+  // hangs the test, which is the correct failure: it means the code did not
+  // reach the publication at all.
+  function meetingPoint(count) {
+    let arrived = 0;
+    let open;
+    const gate = new Promise(resolve => {
+      open = resolve;
+    });
+    return async () => {
+      arrived += 1;
+      if (arrived >= count) open();
+      await gate;
+    };
+  }
+
+  const settleAll = promises => Promise.allSettled(promises);
+
+  function splitOutcomes(outcomes) {
+    return {
+      published: outcomes.filter(outcome => outcome.status === 'fulfilled'),
+      refused: outcomes.filter(outcome => outcome.status === 'rejected').map(o => o.reason),
+    };
+  }
+
+  function assertRefusal(error, label) {
+    assert.ok(error instanceof FixtureError, `${label}: expected a FixtureError`);
+    assert.equal(error.exitCode, EXIT.EVIDENCE_UNRECORDED, `${label}: wrong exit code`);
+    assert.notEqual(error.exitCode, EXIT.OK, `${label}: a refusal is never a success`);
+    assert.notEqual(error.exitCode, EXIT.USAGE, `${label}: documents are in the container by now`);
+  }
+
+  it('publishes exactly one record and refuses the other, explicitly and nonzero', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const a = await buildRecordForRun(RUN_A);
+      const b = await buildRecordForRun(RUN_B, RUN_MILLIS + 1000);
+
+      // Ordered log of what each writer did, so the test can prove the
+      // exclusion happened at the publication and NOT at one of the checks.
+      const trace = [];
+      const meet = meetingPoint(2);
+      const fs = {
+        writeFile: async (file, contents) => {
+          trace.push(`write:${path.basename(file)}`);
+          return writeFile(file, contents, 'utf8');
+        },
+        link: async (from, to) => {
+          await meet();
+          trace.push(`link:${path.basename(from)}`);
+          return realLink(from, to);
+        },
+      };
+
+      const { published, refused } = splitOutcomes(
+        await settleAll([
+          writeEvidenceRecord(a, target, { fs }),
+          writeEvidenceRecord(b, target, { fs }),
+        ])
+      );
+
+      assert.equal(published.length, 1, 'exactly one run may publish');
+      assert.equal(refused.length, 1, 'and the other must be TOLD, not silently overwritten');
+      assertRefusal(refused[0], 'the losing run');
+      assert.match(
+        refused[0].message,
+        /claimed by another run/,
+        'the refusal must come from the exclusive publication, not from a check'
+      );
+
+      // Both writers got all the way to the publication before either published:
+      // every check-then-act guard passed for BOTH of them, which is precisely
+      // the situation in which checking cannot help and only exclusion can.
+      const firstLink = trace.findIndex(entry => entry.startsWith('link:'));
+      const partialWrites = trace
+        .slice(0, firstLink)
+        .filter(entry => entry.endsWith(PARTIAL_SUFFIX)).length;
+      assert.equal(partialWrites, 2, 'both runs passed every guard before either published');
+
+      // The file holds ONE complete record — the winner's, whole, never a blend.
+      const written = JSON.parse(await readFile(target, 'utf8'));
+      assert.equal(written.runId, published[0].value.record.runId);
+      assert.equal(written.count, MESSAGES_PER_RUN);
+      const loserRunId = written.runId === RUN_A ? RUN_B : RUN_A;
+      assert.equal(
+        JSON.stringify(written).includes(loserRunId),
+        false,
+        'no fragment of the refused run appears in the published record'
+      );
+      assert.deepEqual(await readdir(dir), ['mg67-evidence.json'], 'and no debris is left');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The load-bearing test. Every check-then-act guard is BLINDED — stat always
+  // answers "nothing there", the directory always enumerates empty — so not one
+  // of them can refuse anything. If the exclusion lived in the checks, both runs
+  // would publish here and one record would be lost. It lives in the filesystem,
+  // so exactly one still does.
+  it('still admits exactly one run when every check-then-act guard is blinded', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const a = await buildRecordForRun(RUN_A);
+      const b = await buildRecordForRun(RUN_B, RUN_MILLIS + 1000);
+
+      const meet = meetingPoint(2);
+      const blinded = {
+        stat: async () => {
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        },
+        readdir: async () => [],
+        link: async (from, to) => {
+          await meet();
+          return realLink(from, to);
+        },
+      };
+
+      const { published, refused } = splitOutcomes(
+        await settleAll([
+          writeEvidenceRecord(a, target, { fs: blinded }),
+          writeEvidenceRecord(b, target, { fs: blinded }),
+        ])
+      );
+
+      assert.equal(published.length, 1, 'the filesystem adjudicates, not the checks');
+      assert.equal(refused.length, 1);
+      assertRefusal(refused[0], 'the losing run with the guards blinded');
+      assert.match(refused[0].message, /claimed by another run/);
+
+      const written = JSON.parse(await readFile(target, 'utf8'));
+      assert.equal(written.runId, published[0].value.record.runId);
+      assert.deepEqual(await readdir(dir), ['mg67-evidence.json']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('admits exactly one of FIVE simultaneous runs, and refuses the other four', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      const runIds = ['a1', 'b2', 'c3', 'd4', 'e5'].map(
+        suffix => `mg-67-run-00000000-0000-4000-8000-0000000000${suffix}`
+      );
+      const records = [];
+      for (const [index, runId] of runIds.entries()) {
+        records.push(await buildRecordForRun(runId, RUN_MILLIS + index * 1000));
+      }
+
+      const meet = meetingPoint(records.length);
+      const fs = {
+        link: async (from, to) => {
+          await meet();
+          return realLink(from, to);
+        },
+      };
+
+      const { published, refused } = splitOutcomes(
+        await settleAll(records.map(record => writeEvidenceRecord(record, target, { fs })))
+      );
+
+      assert.equal(published.length, 1, 'one destination admits one record, at any concurrency');
+      assert.equal(refused.length, 4);
+      for (const [index, error] of refused.entries()) assertRefusal(error, `refused run ${index}`);
+      assert.deepEqual(await readdir(dir), ['mg67-evidence.json'], 'four partials cleaned up');
+      const written = JSON.parse(await readFile(target, 'utf8'));
+      assert.equal(written.runId, published[0].value.record.runId);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // `--overwrite` is the path the fix could most easily have missed. It exists
+  // to replace the operator's OWN earlier record, and doing that by clobbering
+  // would put the race straight back: two overwriting runs would each destroy
+  // the other's publication and both report success. It goes through the same
+  // exclusion, so it cannot.
+  it('holds the same exclusion under --overwrite, which is not a force flag', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      // The operator's own earlier record, which --overwrite may legitimately
+      // replace — but only ONCE, and only by a run that says so.
+      await writeEvidenceRecord(await buildRecordForRun(PRIOR_RUN), target);
+
+      const a = await buildRecordForRun(RUN_A);
+      const b = await buildRecordForRun(RUN_B, RUN_MILLIS + 1000);
+      const meet = meetingPoint(2);
+      const fs = {
+        link: async (from, to) => {
+          await meet();
+          return realLink(from, to);
+        },
+      };
+
+      const { published, refused } = splitOutcomes(
+        await settleAll([
+          writeEvidenceRecord(a, target, { fs, overwrite: true }),
+          writeEvidenceRecord(b, target, { fs, overwrite: true }),
+        ])
+      );
+
+      assert.equal(published.length, 1, 'two overwriting runs cannot both replace the record');
+      assert.equal(refused.length, 1, 'and the loser is told, rather than silently discarded');
+      assertRefusal(refused[0], 'the losing overwriting run');
+
+      const written = JSON.parse(await readFile(target, 'utf8'));
+      assert.equal(written.runId, published[0].value.record.runId);
+      assert.ok([RUN_A, RUN_B].includes(written.runId), 'the published record is a real one');
+
+      // Whichever run claimed the prior record, it is either gone (replaced, as
+      // --overwrite asks) or still on disk under its superseded name AND named
+      // in the refusal. What it may never be is silently lost.
+      const remaining = (await readdir(dir)).sort();
+      const stranded = remaining.find(name => name.endsWith(SUPERSEDED_SUFFIX));
+      if (stranded) {
+        assert.match(
+          refused[0].message,
+          /could NOT be restored/,
+          'a record moved aside and not put back must be reported, never left to be discovered'
+        );
+        assert.ok(refused[0].message.includes(stranded), 'and named by path');
+        assert.equal(
+          JSON.parse(await readFile(path.join(dir, stranded), 'utf8')).runId,
+          PRIOR_RUN,
+          'the stranded file holds the prior record, intact'
+        );
+      } else {
+        assert.deepEqual(remaining, ['mg67-evidence.json'], 'no debris when the claimer won');
+      }
+      assert.equal(
+        remaining.some(name => name.endsWith(PARTIAL_SUFFIX)),
+        false,
+        'and neither run left a partial behind'
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The rollback uses the exclusive primitive too. An overwriting run that
+  // claimed the prior record and then failed to publish must not put it back
+  // over a record some other run has since published.
+  it('never restores a superseded record over another run publication', async () => {
+    const dir = await tempDir();
+    try {
+      const target = path.join(dir, 'mg67-evidence.json');
+      await writeEvidenceRecord(await buildRecordForRun(PRIOR_RUN), target);
+      const winner = await buildRecordForRun(RUN_B, RUN_MILLIS + 1000);
+      const record = await buildRecordForRun(RUN_A);
+
+      // This run claims the prior record, then finds the destination taken: a
+      // second run published in the interval. Its rollback must lose.
+      let claimed = false;
+      const fs = {
+        link: async (from, to) => {
+          if (!claimed) {
+            claimed = true;
+            // The concurrent run publishes right here, in the interval between
+            // this run's claim and this run's publication. Its directory scan is
+            // blinded so it behaves like a run that started before this one's
+            // partial appeared — the check-then-act guard is not what is under
+            // test here, the rollback is.
+            await writeEvidenceRecord(winner, target, { fs: { readdir: async () => [] } });
+          }
+          return realLink(from, to);
+        },
+      };
+
+      await assert.rejects(writeEvidenceRecord(record, target, { fs, overwrite: true }), error => {
+        assertRefusal(error, 'the run whose destination was taken mid-write');
+        assert.match(error.message, /claimed by another run/);
+        assert.match(error.message, /could NOT be restored/);
+        return true;
+      });
+
+      assert.equal(
+        JSON.parse(await readFile(target, 'utf8')).runId,
+        RUN_B,
+        "the concurrent run's published record was not clobbered by the rollback"
+      );
+      const stranded = (await readdir(dir)).find(name => name.endsWith(SUPERSEDED_SUFFIX));
+      assert.ok(stranded, 'and the prior record it could not restore is still on disk');
+      assert.equal(
+        JSON.parse(await readFile(path.join(dir, stranded), 'utf8')).runId,
+        PRIOR_RUN,
+        'intact, under its superseded name'
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

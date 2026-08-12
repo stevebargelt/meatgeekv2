@@ -26,10 +26,10 @@
 
 import { strict as assert } from 'node:assert';
 import {
+  link as realLink,
   mkdtemp,
   readFile,
   readdir,
-  rename as realRename,
   rm,
   stat as realStat,
   writeFile,
@@ -1682,12 +1682,12 @@ describe('the evidence-write integrity contract', () => {
     await withTempDir(async dir => {
       const evidenceOut = path.join(dir, 'evidence.json');
 
-      // Run A is held at the rename with its partial already on disk — the exact
-      // window in which a shared temp path let a second run overwrite A's bytes
-      // and A then publish B's record under A's name, both runs exiting 0.
-      let releaseRename;
-      const renameGate = new Promise(resolve => {
-        releaseRename = resolve;
+      // Run A is held at the publication with its partial already on disk — the
+      // exact window in which a shared temp path let a second run overwrite A's
+      // bytes and A then publish B's record under A's name, both runs exiting 0.
+      let releasePublish;
+      const publishGate = new Promise(resolve => {
+        releasePublish = resolve;
       });
       let partialOnDisk;
       const partialWritten = new Promise(resolve => {
@@ -1701,9 +1701,9 @@ describe('the evidence-write integrity contract', () => {
           if (target.endsWith(PARTIAL_SUFFIX)) partialOnDisk();
           return written;
         },
-        rename: async (from, to) => {
-          await renameGate;
-          return realRename(from, to);
+        link: async (from, to) => {
+          await publishGate;
+          return realLink(from, to);
         },
       };
 
@@ -1723,7 +1723,7 @@ describe('the evidence-write integrity contract', () => {
         readerSpec: CONFIRMED_READS(RUN_B),
       });
 
-      releaseRename();
+      releasePublish();
       const a = await runA;
 
       assert.equal(b.exitCode, EXIT.USAGE, 'B saw a run holding the destination and stopped');
