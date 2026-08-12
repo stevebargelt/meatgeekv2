@@ -561,6 +561,65 @@ describe('scrubChildOutput', () => {
   });
 });
 
+// FIX 1 (MG-67 redesign): the credential leak that fired stop-condition 2 was a
+// path interpolated into an operator-facing line WITHOUT the scrubber. The fix at
+// the call sites (evidence.mjs / send-fixture.mjs) is to route every path-bearing
+// message through scrubSecrets; these tests pin the PRIMITIVE that fix relies on.
+// A filesystem path is attacker- or accident-supplied text, and a credential
+// shape can hide in either a DIRECTORY component or the FILENAME — the operator
+// picks the evidence destination, so both are untrusted. They are asserted
+// SEPARATELY because they are two distinct injection sites on one path.
+//
+// Every string below is a synthetic non-credential built to match the SHAPES the
+// scrubber keys on; none is or ever was a real secret (HR1).
+describe('scrubSecrets on credential-shaped path components', () => {
+  const FAKE_ACCOUNT_KEY = 'not-a-real-account-key-0000AAAAbbbbCCCC==';
+  const FAKE_SAS_SIG = 'not-a-real-signature-0000';
+
+  it('redacts a credential shape hidden in a DIRECTORY component', () => {
+    // The credential shape sits in a mid-path directory, with a legitimate file
+    // name trailing it — exactly the reproduction the redesign cites.
+    for (const path of [
+      `/tmp/AccountKey=${FAKE_ACCOUNT_KEY}/evidence.json`,
+      `/var/out/SharedAccessKey=${FAKE_ACCOUNT_KEY}/run/e.json`,
+      `/data/?sig=${FAKE_SAS_SIG}/evidence.json`,
+    ]) {
+      const out = scrubSecrets(path);
+      assert.doesNotMatch(out, /not-a-real-(account-key|signature)/, path);
+      assert.match(out, /\[redacted\]/, path);
+    }
+  });
+
+  it('redacts a credential shape hidden in the FILENAME component', () => {
+    for (const path of [
+      `/var/out/evidence-AccountKey=${FAKE_ACCOUNT_KEY}.json`,
+      `/tmp/run-SharedAccessKey=${FAKE_ACCOUNT_KEY}.json`,
+      `/data/dump-sig=${FAKE_SAS_SIG}.json`,
+    ]) {
+      const out = scrubSecrets(path);
+      assert.doesNotMatch(out, /not-a-real-(account-key|signature)/, path);
+      assert.match(out, /\[redacted\]/, path);
+    }
+  });
+
+  it('fails closed to end of line, so no path text trailing the shape escapes', () => {
+    // Consumption runs to the newline (the MG-63 posture, deliberately kept): the
+    // rest of the path is over-redacted rather than parsed for where the value
+    // ends. Over-redacting an operator's path is the acceptable cost; leaking a
+    // fragment out of it is not.
+    const out = scrubSecrets(`/tmp/AccountKey=${FAKE_ACCOUNT_KEY}/evidence-run-abc.json`);
+    assert.doesNotMatch(out, /evidence-run-abc/);
+    assert.match(out, /AccountKey=\[redacted\]/);
+  });
+
+  it('leaves an ordinary evidence path untouched, so a real path stays legible', () => {
+    // The scrubber must not swallow a benign destination — an operator has to be
+    // able to read back where the artifact landed.
+    const path = '/home/operator/mg67-evidence/run-2026-08-12/evidence.json';
+    assert.equal(scrubSecrets(path), path);
+  });
+});
+
 describe('the fake Cosmos reader', () => {
   it('records the parameterised query and the partition it was scoped to', async () => {
     const reader = fakeReader({ script: [{ docs: docs('temp', 2) }] });
