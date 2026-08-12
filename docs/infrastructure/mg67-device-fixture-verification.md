@@ -684,63 +684,81 @@ supply a credential by hand, that is stop condition 2 (§9) — halt and report.
 The five names you pass (`--hub`, `--device`, `--account`, `--database`,
 `--container`) are each validated against a **per-field allowlist** — a value is
 accepted only if it satisfies **its own field's rule**, and the tool applies a
-**different** rule to each because the five name the same thing to nobody. Each
-rule is pinned to **what this fixture actually needs**, not to the widest string
-Azure would accept. A value that fails is refused with a **usage error (exit 1)**
-_before_ its value is read, sent, logged or written anywhere.
+**different** rule to each because the five name the same thing to nobody. Every
+rule is pinned to **what this fixture actually addresses**, not to the widest
+string Azure would legally accept: this tool talks to **one** dev hub, **one**
+durable dev device, **one** dev Cosmos account, and **plain-identifier** dev
+databases and containers (`meatgeek-v2-dev-db`, `temperatures`) — nothing here
+ever names an arbitrary Cosmos resource. A value that fails is refused with a
+**usage error (exit 1)** _before_ its value is read, sent, logged or written
+anywhere.
 
 What each field validates, exactly:
 
-| Flag          | Accepts                                                                                | Rejects (among other things)                                                       |
-| ------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `--device`    | letters, digits and **interior hyphens** only, ≤128 chars — a plain identifier         | **dots (so a JWT), whitespace, and every connection-string separator** — see below |
-| `--hub`       | letters, digits and hyphens, 3–50 chars, no leading/trailing hyphen (IoT Hub rule)     | dots, `/`, `;`, `:` and other separators                                           |
-| `--account`   | **lowercase** letters, digits and hyphens, 3–44 chars (Cosmos account rule)            | uppercase, dots, separators                                                        |
-| `--database`  | any Cosmos id: ≤255 chars, no `/ \ # ?`, no control chars, no trailing whitespace      | `/`, `\`, `#`, `?`                                                                  |
-| `--container` | same Cosmos id rule as `--database` — **dots ARE legal here** (e.g. `a01.store.west`)   | `/`, `\`, `#`, `?`                                                                  |
+| Flag          | Accepts                                                                                  | Rejects (among other things)                                               |
+| ------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `--device`    | letters, digits and **interior hyphens** only, ≤128 chars — a plain identifier           | **dots (so a JWT), whitespace, and every connection-string separator**     |
+| `--hub`       | letters, digits and hyphens, 3–50 chars, no leading/trailing hyphen (IoT Hub rule)       | dots, `/`, `;`, `:` and other separators                                   |
+| `--account`   | **lowercase** letters, digits and hyphens, 3–44 chars, no leading/trailing hyphen        | uppercase, **dots**, `/`, `;`, `:` and other separators                    |
+| `--database`  | letters, digits and **interior hyphens** only, ≤128 chars — a plain identifier           | **dots (so a JWT), whitespace, and every connection-string separator**     |
+| `--container` | letters, digits and **interior hyphens** only, ≤128 chars — a plain identifier           | **dots (so a JWT), whitespace, and every connection-string separator**     |
 
-Two things follow:
+The `--database` and `--container` rules are the **same** plain-identifier rule as
+`--device` — deliberately, and this is a **correction** from an earlier revision of
+this runbook.
 
-- **`--device` is pinned deliberately below the Azure-legal device set.** Azure's
-  device registry would accept a device id containing dots — and therefore would
-  accept a **JWT** (three dot-separated base64url segments) as a legal device id.
-  This tool does not, because `--device` names a **fixture device whose name the
-  tool itself chooses** (it defaults to `FIXTURE_DEVICE_ID` and needs nothing
-  wider than a simple identifier). Rejecting dots means **a JWT is refused in the
-  `--device` slot by construction** — refused _before_ that text could be logged,
-  passed to the `az` argv, or (because `deviceId` is the container's partition
-  key) **embedded in a Cosmos document body**. That is the specific hazard this
-  narrowing closes. The dotted-name case that Cosmos ids legitimately need
-  (`analytics01.eventstore1.replicaWest`) lives only in `--database` / `--container`
-  above, and is **not** a reason the device rule is permissive — the two do not
-  share a rule.
+- **All five names are pinned below the Azure-legal set, for one reason.** Azure's
+  device registry would accept a device id containing dots, and a Cosmos database
+  or container id may legally contain dots and most punctuation up to 255 chars —
+  so Azure would accept a **JWT** (three dot-separated base64url segments), or the
+  dotted id `analytics01.eventstore1.replicaWest`, in the `--device`, `--database`
+  or `--container` slot. **This tool accepts none of them**, because it addresses
+  only the fixed set of plain-identifier resources named above and needs nothing
+  wider. Rejecting dots means **a JWT — and any separator-bearing credential — is
+  refused in every one of these slots by construction**, refused _before_ that text
+  could be logged, passed to the `az` argv, embedded in a Cosmos document body
+  (`deviceId` is the container's partition key), **or written into the evidence
+  record**. That is the specific hazard this narrowing closes.
+- **An earlier revision carved the dotted Cosmos id back in — that was wrong, and
+  it is retracted here.** Widening `--database`/`--container` to the full
+  Azure-legal id set to accept `analytics01.eventstore1.replicaWest` protected a
+  case **this fixture will never encounter**, and it was the exact hole a security
+  review then reported: a credential-shaped value accepted in the database and
+  container slots, reaching operator output and the evidence target. The rule is
+  now scoped to this tool's genuine need, per field, for all five names alike.
 - **A rejection never echoes what you typed.** The message names the **flag** and
   the **rule it broke**, never the offending value — so an operator who mistyped a
   name learns the rule, and an operator who pasted a secret into a name field does
   not see it reflected back onto the terminal, into shell history, or into any
   captured log. The value the tool goes on to log and send is a **validated** one.
+- **Validation and sanitization are two independent defenses; both are applied.**
+  Passing its own field's allowlist is the first. As a second, independent defense,
+  **every accepted name is also routed through the tool's scrubber** before it
+  reaches an operator-facing log line, the `az` argv, a document body, or the
+  evidence record — the same posture already applied to path-bearing output. A
+  value that somehow satisfied a naming rule and still carried a credential shape
+  is scrubbed on the way out; a value that carries no such shape passes through
+  unchanged.
 
 **What this does and does not claim.** A recognisable credential _shape_ — a JWT,
 a connection string, a SAS token — no longer passes **any** of these five slots: a
-connection string carries `/` and `;`, which every rule rejects, and a JWT carries
-dots, which the `--device`, `--hub` and `--account` rules reject. What a naming
-rule still cannot tell apart is an **opaque token already shaped like a legal id**
-— for instance a 32-character hex key passed as `--container`, which is a legal
-Cosmos container id. That residue does **not** apply to `--device` (a dot-free key
-long enough to be a JWT is not a JWT, and a JWT is refused regardless), and it does
-not matter anywhere, because **the tool never accepts, holds, or requires a
-credential at all**: `az` resolves the device key itself under your identity and
-the read-back is AAD-only, so there is no credential input for the tool to screen
-in the first place. **Do not paste a secret into a name field** — this is the exact
-hazard stop condition 2 (§9) exists for: if a step ever seems to want a credential
-where a name belongs, halt and report.
+connection string carries `/` and `;`, and a JWT carries dots, and **every one of
+the five rules rejects all of those**. What a naming rule still cannot tell apart is
+an **opaque token already shaped like a legal narrow name** — a plain-identifier-
+shaped token with no dots or separators. This tool does **not** claim to catch that,
+and it does not need to: **the tool never accepts, holds, or requires a credential
+at all** — `az` resolves the device key itself under your identity and the read-back
+is AAD-only, so there is no credential input for the tool to screen in the first
+place. **Do not paste a secret into a name field** — this is the exact hazard stop
+condition 2 (§9) exists for: if a step ever seems to want a credential where a name
+belongs, halt and report.
 
 ### Exit codes — the operator contract
 
 | Code | Meaning                         | What it tells you                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ---- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0    | confirmed-in-cosmos             | **The only success.** 3 marker-carrying, run-correlated documents were read back out of `temperatures`, and the evidence was written.                                                                                                                                                                                                                                                                                                            |
-| 1    | usage error                     | Bad/missing arguments, a refused credential-bearing flag (`--key`, `--connection-string`, `--sas`, …), a **name that fails its per-field rule** (each of the five is validated against its own rule, as narrow as the field needs — a JWT in `--device` fails here; the value is not echoed back), or an **unusable or reused `--evidence-out`** caught by the reservation. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.                                                                    |
+| 1    | usage error                     | Bad/missing arguments, a refused credential-bearing flag (`--key`, `--connection-string`, `--sas`, …), a **name that fails its per-field rule** (each of the five is validated against its own rule, as narrow as the field needs — a JWT or any dotted/separator-bearing value in `--device`, `--database` or `--container` fails here; the value is not echoed back), or an **unusable or reused `--evidence-out`** caught by the reservation. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.                                                                    |
 | 2    | send failure                    | `az iot device send-d2c-message` failed. Check `az login` and `az extension add --name azure-iot`.                                                                                                                                                                                                                                                                                                                                               |
 | 3    | confirmation timeout            | The bound elapsed with the documents not found. **Not an absence, not a success.**                                                                                                                                                                                                                                                                                                                                                               |
 | 4    | auth failure                    | 401/403, or no credential could be acquired. **Says nothing about whether the route delivered.** Usually §4 not propagated.                                                                                                                                                                                                                                                                                                                      |

@@ -814,21 +814,31 @@ one: there is **no key, connection-string, SAS or certificate mode at all**, not
 as a fallback and not behind a flag, and every spelling of such a flag is refused
 **by name** before its value is read. The five resource names (`--hub`,
 `--device`, `--account`, `--database`, `--container`) are each validated against a
-**per-field allowlist**, every rule as narrow as that field actually needs rather
-than as wide as Azure permits — and a rejection names the **flag and the rule,
-never the value typed**, so no unvalidated argv text reaches a log, the `az` argv,
-a document body or the evidence record. `--device` in particular is pinned **below
-the Azure-legal device set** (letters, digits and interior hyphens — **no dots**),
-because it names a fixture device the tool itself chooses; that rejects a **JWT**
-in the `--device` slot **by construction**, before it could be logged, passed to
-`az`, or — `deviceId` being the container partition key — embedded in a Cosmos
-document body. Connection strings and JWTs are refused in every slot on their `/`,
-`;` and dots. What a naming rule still cannot tell apart is an **opaque token
-already shaped like a legal id** (e.g. a dot-free 32-char key passed as
-`--container`, a legal Cosmos id) — a residue that does **not** apply to `--device`
-and that does not matter anywhere, because the tool never accepts, holds or
-requires a credential, so there is no credential input to screen. The argv handed
-to `az` is re-scanned
+**per-field allowlist**, every rule as narrow as that field actually **addresses**
+rather than as wide as Azure permits — the tool talks to one dev hub, one durable
+dev device, one dev account and plain-identifier dev databases and containers, and
+each rule is pinned to exactly that — and a rejection names the **flag and the
+rule, never the value typed**, so no unvalidated argv text reaches a log, the `az`
+argv, a document body or the evidence record. All five are pinned **below the
+Azure-legal set**: `--device`, `--database` and `--container` alike accept only
+letters, digits and interior hyphens (**no dots**), because the fixture names only
+plain-identifier resources. That rejects a **JWT** — and any dotted or
+separator-bearing credential — in every one of those slots **by construction**,
+before it could be logged, passed to `az`, embedded in a Cosmos document body
+(`deviceId` is the container partition key), **or written into the evidence
+record**. (An earlier revision wrongly widened `--database`/`--container` to the
+full Azure-legal Cosmos id set — dots and punctuation allowed — to accept a value
+like `analytics01.eventstore1.replicaWest`; that protected a case this fixture
+never encounters and was the exact hole a security review then reported, so it is
+corrected: all five are narrow now.) Connection strings and JWTs are refused in
+every slot on their `/`, `;` and dots. What a naming rule still cannot tell apart is
+an **opaque token already shaped like a legal narrow name** (a dot-free,
+separator-free plain identifier) — a residue the tool does not claim to catch and
+that does not matter anywhere, because the tool never accepts, holds or requires a
+credential, so there is no credential input to screen. As an **independent second
+defense**, every accepted name is also routed through the scrubber before it
+reaches operator output, the `az` argv, a document body or the evidence record. The
+argv handed to `az` is additionally re-scanned
 against the tool's own scrubber before the spawn, so a future edit that grows a
 credential argument fails there rather than at review — that matters because `az`
 persists invocations under `~/.azure` and prints request signatures under
