@@ -8,7 +8,11 @@
 //     --database meatgeek-v2-dev-db \
 //     --container temperatures \
 //     --container-definition ./temperatures.json \
-//     --evidence-out ./mg67-evidence.json
+//     --evidence-out ./mg67-evidence/
+//
+// --evidence-out names a DIRECTORY (it must already exist); the tool writes a
+// per-run, immutable JSON file into it whose name is derived from the run's
+// unique id. There is no --overwrite: two runs never name the same file.
 //
 // This is the ONLY file in the tool that touches a credential boundary or a
 // child process. Every decision it makes — what a fixture document is, what the
@@ -553,6 +557,18 @@ function requireName(value, flag) {
   if (!AZURE_NAME.test(value)) {
     throw usageError(
       `${flag} must be a plain Azure resource name (letters, digits, '.', '_', '-'), got '${safe(value)}'`
+    );
+  }
+  // Validate-then-use, never use-then-validate. AZURE_NAME's character class
+  // permits '.', so a JWT-shaped value (three dotted base64url segments) passes
+  // it — and hub/device names are echoed on info and failure lines before the
+  // pre-spawn assertArgvIsCredentialFree() gate would catch them. Reject a
+  // credential-shaped name HERE, at validation, using the tool's OWN scrubber as
+  // the arbiter so the two can never disagree, so no later code path can emit
+  // it. The offending value is refused unread and is never echoed.
+  if (scrubSecrets(value) !== value) {
+    throw usageError(
+      `${flag} is refused: the value is credential-shaped (it matches the tool's own secret scrubber) and is rejected before it can be used or logged. A hub or device is a plain Azure resource name, never a token. The value is not echoed.`
     );
   }
   return value;

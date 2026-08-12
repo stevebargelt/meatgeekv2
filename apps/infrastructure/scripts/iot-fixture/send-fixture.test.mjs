@@ -67,6 +67,7 @@ import {
   buildFixtureMessages,
   createRunLedger,
   newRunId,
+  scrubSecrets,
 } from './fixture-core.mjs';
 import {
   AZ_COMMAND,
@@ -417,6 +418,55 @@ describe('argument parsing', () => {
       assert.equal(error.exitCode, EXIT.USAGE);
     }
   });
+
+  // A JWT is three dotted base64url segments, and AZURE_NAME's character class
+  // permits '.', so a SHORT one (each segment past the scrubber's 10-char floor,
+  // the whole thing inside AZURE_NAME's 128-char limit) sails past the plain-name
+  // check — exactly the value the change request reproduced with. It is refused
+  // on its credential SHAPE instead, at validation, which runs BEFORE main()
+  // emits a single line: validate-then-use, not use-then-validate.
+  const SHORT_JWT = 'aaaaaaaaaaa.bbbbbbbbbbb.ccccccccccc';
+  it('SHORT_JWT is a JWT the plain-name check accepts but the scrubber rewrites', () => {
+    // Guards the two premises the tests below rest on, so a future tweak to
+    // either regex that lets this value straight through cannot pass silently.
+    assert.match(SHORT_JWT, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+    assert.notEqual(scrubSecrets(SHORT_JWT), SHORT_JWT);
+  });
+
+  for (const flag of ['hub', 'device']) {
+    it(`refuses a JWT-shaped --${flag} on its credential shape, without echoing it`, () => {
+      const cfg = { ...parseArgs([...BASE_ARGV, '--evidence-out', 'e.json']), [flag]: SHORT_JWT };
+      const error = refusal(() => requireComplete(cfg));
+      assert.equal(error.exitCode, EXIT.USAGE);
+      assert.match(error.message, /credential-shaped/);
+      assert.equal(
+        error.message.includes(SHORT_JWT),
+        false,
+        'the credential-shaped name was echoed in the refusal'
+      );
+    });
+  }
+
+  // The whole point of moving the check ahead of first use: no operator-facing
+  // line — info OR error, success path OR the rejection path itself — may carry
+  // the value. Driven through main() so the assertion covers every line the run
+  // would actually print.
+  for (const flag of ['--hub', '--device']) {
+    it(`main() emits no log line carrying a JWT-shaped ${flag}, on the rejection path`, async () => {
+      const log = recordingLog();
+      const { exitCode } = await runMain({
+        argv: [flag, SHORT_JWT],
+        evidenceOut: 'unused-dir',
+        log,
+      });
+      assert.equal(exitCode, EXIT.USAGE);
+      assert.equal(
+        log.all().includes(SHORT_JWT),
+        false,
+        `a JWT-shaped ${flag} reached an operator log line`
+      );
+    });
+  }
 
   it('derives the Cosmos endpoint from the account name alone', () => {
     assert.equal(endpointFor(ACCOUNT), `https://${ACCOUNT}.documents.azure.com:443/`);
@@ -894,9 +944,9 @@ describe('HR1: a credential-shaped evidence path never reaches operator output',
   // directory name and one scrub run. The scrubber keys off the `AccountKey=`
   // NAME, not the value, and consumes to the end of the line: the value is gone
   // whole regardless of its length.
-  const PLANTED_PATH_KEY = Buffer.from(
-    'mg67-path-secret-only-never-a-real-account-key'
-  ).toString('base64url');
+  const PLANTED_PATH_KEY = Buffer.from('mg67-path-secret-only-never-a-real-account-key').toString(
+    'base64url'
+  );
   const credSegment = `AccountKey=${PLANTED_PATH_KEY}`;
 
   // A publication that fails AFTER the send (the reservation's write+rename probe
