@@ -188,18 +188,43 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // before THAT raise (314 / 25) would likewise have passed a tree with all four
 // fixes reverted: the failure mode a floor left behind a grown suite produces
 // is that the margin widens until whole blocks fit inside it.
+//
+// RE-MEASURED AGAIN when the DEVICE-ID validation NARROWING integrated. The
+// operator authorised tightening the per-type allowlist below Azure's legal
+// maximum for the names this tool actually chooses: --device is pinned to the
+// declared fixture constant (dots rejected outright, JWT-shaped input rejected
+// by construction, not merely by credential-shape recognition), and --hub,
+// --account, --database and --container are constrained to what this fixture
+// needs to address rather than to the widest id Azure permits. That closed the
+// finding the prior cycle had DOCUMENTED rather than fixed: a JWT is a legal
+// IoT Hub device id, so the allowlist accepted it, and it then reached the log,
+// the az argv and — deviceId being the partition key — the Cosmos body. The
+// narrowing added a both-directions case per type (the legal value this tool
+// uses is accepted; the credential/JWT-shaped value is REFUSED) and, most
+// pointedly, the explicit JWT-in-the---device-slot case that is the finding
+// being closed. That carried fixture-core 199 -> 206 (the rule engine) and
+// send-fixture 188 -> 194 (the wiring), moving the tier from 502 to 515. The
+// floor is RAISED to 510 to match — leaving it at 497 would let the entire
+// device-id-narrowing block stop running inside the old margin, the exact
+// failure this file exists to refuse, and this block is the one closing a
+// security finding, so it is precisely what must not silently cease to run.
+// The real-SDK tier grew alongside it (the AAD-only read-back wiring gained
+// coverage), measured at 44; its floor is RAISED to 43 (margin one, as before).
+// Honest counts, measured on the integrated tree: dependency-free 515
+// (fixture-core 206, container-definition 34, evidence 81, send-fixture 194);
+// real-SDK 44 across 1 file.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 497,
+    minTests: 510,
   },
   sdk: {
     label: 'real-SDK',
     match: name => name.endsWith(SDK_SUFFIX),
     minFiles: 1,
-    minTests: 39,
+    minTests: 43,
   },
 };
 
