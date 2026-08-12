@@ -1417,6 +1417,150 @@ describe('no field of the record can hold a credential', () => {
   });
 });
 
+describe('the hub, account, database and container names are sanitized into the record', () => {
+  // The account/database/container defense has two INDEPENDENT halves: the CLI
+  // refuses a credential-shaped name before anything is sent, and this record
+  // sanitizes whatever name it is handed regardless. This block is the SECOND
+  // half. The hole it closes is a carve-out an earlier cycle carried that ACCEPTED
+  // a dotted, credential-shaped value in the database and container name slots —
+  // a value this fixture never legitimately addresses. Now every one of the four
+  // names runs through the tool's scrubber before it reaches the artifact MG-53
+  // and MG-54 parse, so even a caller that bypassed the CLI's validation cannot
+  // land a credential-shaped name in it.
+  //
+  // Transparently-not-a-credential strings SHAPED like one, each spelling out what
+  // it stands for, so a diff-wide grep for real secrets finds nothing to verify —
+  // the same discipline as the block above.
+  const DOTTED = 'notaheader-testfixture.notapayload-testfixture.notasignature-testfixture';
+  const BEARER = 'Bearer not-a-real-bearer-token-test-fixture-value-only';
+  const CONN = 'HostName=notahub.example.invalid;SharedAccessKey=NOT-A-KEY-TEST-FIXTURE-ONLY=';
+  const SHAPED = { dotted: DOTTED, bearer: BEARER, connString: CONN };
+
+  // A measured definition with NO container name, so a shaped --container value
+  // does not first trip the wrong-container refusal before the sanitization this
+  // block tests can run.
+  const NO_NAME_DEFINITION = Object.freeze({
+    partitionKeyPath: '/deviceId',
+    partitionKeyField: 'deviceId',
+    measuredDefaultTtl: 604800,
+    declaredDefaultTtl: 604800,
+    ttlExpires: true,
+    ttlDriftFinding: null,
+  });
+
+  it('records the real dev names verbatim — a well-formed name is never touched', async () => {
+    const record = await buildSuccessRecord();
+    assert.equal(record.target.hub, TARGET.hub);
+    assert.equal(record.target.account, TARGET.account);
+    assert.equal(record.target.database, TARGET.database);
+    assert.equal(record.target.container, TARGET.container);
+    assert.equal(record.deviceId, FIXTURE_DEVICE_ID);
+    assert.deepEqual(findCredentialRisks(record), []);
+  });
+
+  it('sanitizes the exact dotted case the earlier carve-out wrongly accepted, in database AND container', async () => {
+    for (const field of ['database', 'container']) {
+      const { confirmation } = await successfulConfirmation();
+      const record = buildEvidenceRecord({
+        confirmation,
+        containerDefinition: NO_NAME_DEFINITION,
+        requestedIds: [],
+        target: { ...TARGET, [field]: DOTTED },
+        now: fixedClock(),
+      });
+      // Redacted to a token, not carried through: the record builds AND the
+      // dotted value is gone from every rendering of it.
+      assert.equal(record.target[field], '[redacted]', `--${field} was not sanitized`);
+      assert.equal(
+        serializeEvidenceRecord(record).includes(DOTTED),
+        false,
+        `a dotted --${field} leaked into the serialized record`
+      );
+      assert.deepEqual(findCredentialRisks(record), []);
+    }
+  });
+
+  for (const field of ['account', 'database', 'container']) {
+    for (const [shape, value] of Object.entries(SHAPED)) {
+      it(`never lets a ${shape}-shaped --${field} reach the serialized record`, async () => {
+        const { confirmation } = await successfulConfirmation();
+        let record = null;
+        let threw = null;
+        try {
+          record = buildEvidenceRecord({
+            confirmation,
+            containerDefinition: NO_NAME_DEFINITION,
+            requestedIds: [],
+            target: { ...TARGET, [field]: value },
+            now: fixedClock(),
+          });
+        } catch (err) {
+          threw = err;
+        }
+        if (record !== null) {
+          // Sanitized and built: the secret is gone and the record is clean.
+          assert.equal(
+            serializeEvidenceRecord(record).includes(value),
+            false,
+            `a ${shape}-shaped --${field} leaked into the serialized record`
+          );
+          assert.deepEqual(findCredentialRisks(record), []);
+        } else {
+          // Or refused before any write — fail-closed, and the refusal names no
+          // secret. Either outcome keeps the value out of the artifact.
+          assert.ok(
+            threw instanceof FixtureError && threw.exitCode === EXIT.USAGE,
+            `a ${shape}-shaped --${field} must be refused with a USAGE code`
+          );
+          assert.equal(threw.message.includes(value), false, 'the refusal echoed the value');
+        }
+      });
+    }
+  }
+
+  it('sanitizes a credential-shaped device name into the record too', async () => {
+    // deviceId defaults to the durable fixture constant, but a caller may pass one;
+    // it lands in the record AND is the partition-value fallback, so it takes the
+    // same scrub. The dotted shape is redacted to a token and the record builds.
+    const { confirmation } = await successfulConfirmation();
+    const record = buildEvidenceRecord({
+      confirmation,
+      containerDefinition: NO_NAME_DEFINITION,
+      requestedIds: [],
+      target: TARGET,
+      deviceId: DOTTED,
+      now: fixedClock(),
+    });
+    assert.equal(record.deviceId, '[redacted]');
+    assert.equal(serializeEvidenceRecord(record).includes(DOTTED), false);
+    assert.deepEqual(findCredentialRisks(record), []);
+  });
+
+  it('scrubs a credential-shaped measured container name out of the wrong-container refusal', async () => {
+    // The wrong-container refusal interpolates the MEASURED container name; a
+    // credential-shaped one must not reach that operator-facing message either.
+    const { confirmation } = await successfulConfirmation();
+    let message = '';
+    try {
+      buildEvidenceRecord({
+        confirmation,
+        containerDefinition: { ...NO_NAME_DEFINITION, containerName: DOTTED },
+        requestedIds: [],
+        target: TARGET,
+        now: fixedClock(),
+      });
+    } catch (err) {
+      message = err.message;
+    }
+    assert.notEqual(message, '', 'a definition measuring a different container must be refused');
+    assert.equal(message.includes(DOTTED), false, 'the refusal leaked the measured container name');
+    assert.ok(
+      message.includes('[redacted]'),
+      'the measured name should be scrubbed in the message'
+    );
+  });
+});
+
 describe('writing the artifact into the reserved destination', () => {
   it('publishes the record atomically into the path it reserved, leaving no partial behind', async () => {
     const dir = await tempDir();

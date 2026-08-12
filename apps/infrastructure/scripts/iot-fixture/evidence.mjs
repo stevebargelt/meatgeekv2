@@ -224,6 +224,20 @@
 // through the tool's scrubber (safePath → scrubSecrets), on the success path as
 // well as every failure path. The scrubber posture was always the contract; a
 // raw path interpolation is the defect class, not any single call site.
+//
+// THE SAME POSTURE COVERS THE HUB, ACCOUNT, DATABASE AND CONTAINER NAMES.
+//
+// Those four names are operator-supplied and land twice: in operator-facing lines
+// and in the evidence record MG-53/MG-54 parse. They run through the tool's
+// scrubber (safeName → scrubSecrets) before either — this is the SANITIZATION
+// half of the account/database/container defense. The refusal half — rejecting a
+// credential-shaped name before anything is sent — lives at the CLI's argument
+// boundary; validation and sanitization are independent defenses, and this record
+// carries the second UNCONDITIONALLY, so a caller that bypassed the first still
+// cannot land a credential-shaped name here. A well-formed dev name is unchanged
+// by the scrub; a JWT-/connection-string-shaped one is redacted to a token the
+// closed-key-set guard then accepts, and a bare-key-shaped one the scrub does not
+// reach is still caught and REFUSED by assertNoCredentialShape before any write.
 // ===========================================================================
 
 import { rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -255,6 +269,12 @@ import {
 // every failure path. This is the ONE helper the whole module routes paths
 // through, so a new call site cannot forget.
 const safePath = value => scrubSecrets(typeof value === 'string' ? value : String(value));
+
+// The hub, account, database and container names take the SAME scrub as a path
+// before they reach an operator-facing line or the evidence record. Same helper
+// shape as safePath, named for what it guards so a call site cannot confuse the
+// two. A dev name passes through unchanged; a credential-shaped one is redacted.
+const safeName = value => scrubSecrets(typeof value === 'string' ? value : String(value));
 
 // Bumped when a key is added, removed or re-meant. MG-53 and MG-54 read this
 // first and refuse a version they were not written against — a silently
@@ -755,11 +775,16 @@ function requireTarget(target) {
   // for the documents it is checking, and MG-54 has to know what it is
   // authorised to delete FROM. These are names only — no endpoint carries a
   // credential, and the closed key set has no room for one.
+  //
+  // Each name is validated non-empty and then SCRUBBED before it is stored, so a
+  // credential-shaped name that slipped past the CLI's argument validation cannot
+  // reach the record or any error message this module builds from these values.
+  // A real dev name is unchanged; a JWT-/connection-string-shaped one is redacted.
   return Object.freeze({
-    hub: requireNonEmptyString(target.hub, 'target.hub'),
-    account: requireNonEmptyString(target.account, 'target.account'),
-    database: requireNonEmptyString(target.database, 'target.database'),
-    container: requireNonEmptyString(target.container, 'target.container'),
+    hub: safeName(requireNonEmptyString(target.hub, 'target.hub')),
+    account: safeName(requireNonEmptyString(target.account, 'target.account')),
+    database: safeName(requireNonEmptyString(target.database, 'target.database')),
+    container: safeName(requireNonEmptyString(target.container, 'target.container')),
   });
 }
 
@@ -827,7 +852,10 @@ export function buildEvidenceRecord({
   }
   requireDefinition(containerDefinition);
   const targetNames = requireTarget(target);
-  requireNonEmptyString(deviceId, 'deviceId');
+  // Scrubbed once and reused everywhere the device name lands: the record AND the
+  // partition-value fallback below, so a credential-shaped device name cannot
+  // reach either surface unsanitized.
+  const safeDeviceId = safeName(requireNonEmptyString(deviceId, 'deviceId'));
 
   const sets = resolveIdSets({ idSets, ledger, requestedIds, confirmation });
 
@@ -850,12 +878,16 @@ export function buildEvidenceRecord({
   // Measuring one container and sending to another would record a retention and
   // a partition key that do not describe where the documents actually are — a
   // wrong record is worse than no record, so it refuses.
-  if (
-    typeof containerDefinition.containerName === 'string' &&
-    containerDefinition.containerName !== targetNames.container
-  ) {
+  // The measured container name is compared to the (already scrubbed) target
+  // name after being scrubbed itself, so a credential-shaped name on either side
+  // is redacted before it can reach this refusal's operator-facing message.
+  const measuredContainerName =
+    typeof containerDefinition.containerName === 'string'
+      ? safeName(containerDefinition.containerName)
+      : null;
+  if (measuredContainerName !== null && measuredContainerName !== targetNames.container) {
     throw usageRefusal(
-      `the measured definition describes container "${containerDefinition.containerName}" but the run targeted "${targetNames.container}" — recording a retention and a partition key measured from a different container would misdescribe where these documents are`
+      `the measured definition describes container "${measuredContainerName}" but the run targeted "${targetNames.container}" — recording a retention and a partition key measured from a different container would misdescribe where these documents are`
     );
   }
 
@@ -945,7 +977,7 @@ export function buildEvidenceRecord({
   // Where the documents ACTUALLY landed, as the read-back saw it — including
   // fixture-core's reserved tokens for the two states that are not a value at
   // all. Hoisted out of the record literal because a finding is derived from it.
-  const partitionValue = confirmation?.partitionValue ?? deviceId;
+  const partitionValue = confirmation?.partitionValue ?? safeDeviceId;
   const observedPartitionValues = [...(confirmation?.observedPartitionValues ?? [])];
   const landing = classifyPartitionValues(observedPartitionValues, partitionValue);
 
@@ -1096,10 +1128,10 @@ export function buildEvidenceRecord({
       value: SYNTHETIC_MARKER,
       runIdField: RUN_ID_FIELD,
     },
-    deviceId,
+    deviceId: safeDeviceId,
 
     target: targetNames,
-    containerName: containerDefinition.containerName ?? null,
+    containerName: measuredContainerName,
     partitionKeyPath: containerDefinition.partitionKeyPath,
     partitionKeyField: containerDefinition.partitionKeyField,
     partitionValue,
