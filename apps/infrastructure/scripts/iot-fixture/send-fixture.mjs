@@ -258,7 +258,12 @@ WHAT IT DOES, IN ORDER
 
 TARGET
   --hub <name>                 IoT hub name, e.g. meatgeek-v2-dev-iothub-259d4bf5b628
-  --device <id>                Device id. Default: ${FIXTURE_DEVICE_ID}
+  --device <id>                Pinned to the one declared durable fixture,
+                               ${FIXTURE_DEVICE_ID}. That is the
+                               ONLY accepted value; any other — including an
+                               opaque credential-shaped string — is refused. Points
+                               at a different device only via a code change (by
+                               design: the fixture is durable and singular).
   --account <name>             Cosmos account name; the endpoint is derived as
                                https://<name>.documents.azure.com:443/
   --database <id>              e.g. meatgeek-v2-dev-db
@@ -332,12 +337,15 @@ AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
   device, one dev Cosmos account, one dev database and its containers, every one
   a plain identifier; so each rule is pinned to that need and a dotted,
   JWT-shaped or separator-bearing value is refused in EVERY slot BY CONSTRUCTION:
-    --device    letters, digits and interior hyphens only, no leading/trailing
-                hyphen, at most 128 chars. Dots are rejected, so a JWT (three
-                dot-separated segments) and every separator-bearing credential
-                cannot pass — before that text can be logged, passed to az, or
-                (deviceId being the container partition key) embedded in a Cosmos
-                document body. Pinned far below the Azure-legal device id.
+    --device    PINNED to the single declared fixture id (see TARGET above): the
+                only accepted value is ${FIXTURE_DEVICE_ID}, and
+                every other value — an opaque 32-char alphanumeric secret that a
+                charset rule could never tell from a legal id INCLUDED — is refused
+                before that text can be logged, passed to az, or (deviceId being
+                the container partition key) embedded in a Cosmos document body.
+                A charset cannot separate a secret from an id when both are plain
+                alphanumerics; the pin needs no such distinction, because it
+                accepts nothing but the fixture's own name.
     --hub       letters, digits and hyphens, no leading/trailing hyphen (IoT Hub
                 name rule).
     --account   lowercase letters, digits and hyphens, no leading/trailing

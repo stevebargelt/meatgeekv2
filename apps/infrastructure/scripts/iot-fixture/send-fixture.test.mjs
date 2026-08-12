@@ -455,6 +455,21 @@ describe('argument parsing', () => {
   // some future edit let it past, the scrubber would still rewrite it before it
   // reached a log line, the az argv or the evidence record.
   const SHORT_JWT = 'aaaaaaaaaaa.bbbbbbbbbbb.ccccccccccc';
+  // An OPAQUE 32-character alphanumeric value: exactly the shape a device key
+  // takes, and — the whole point of the pin — INDISTINGUISHABLE by any charset
+  // rule from a 32-character alphanumeric device id. It clears DEVICE_ID_CHARSET
+  // (letters and digits only, no dot, no separator) and yet is NOT the declared
+  // fixture, so only the pin refuses it. It is obviously synthetic (a self-
+  // describing prefix, not random base64) so it is not itself a committed
+  // credential shape, but it stands in for one the charset can never catch. This
+  // is the residual case the operator flagged: the pin is the only defense that
+  // reaches it, because narrowing the pattern cannot.
+  const OPAQUE_32_ALNUM = ('mg67opaqueDeviceToken' + 'x'.repeat(11));
+  it('OPAQUE_32_ALNUM is a 32-char alphanumeric value the charset accepts but the fixture pin must refuse', () => {
+    assert.equal(OPAQUE_32_ALNUM.length, 32);
+    assert.match(OPAQUE_32_ALNUM, /^[A-Za-z0-9]+$/);
+    assert.notEqual(OPAQUE_32_ALNUM, FIXTURE_DEVICE_ID);
+  });
   it('SHORT_JWT is credential-SHAPED (the scrubber rewrites it) AND dotted (every name rule refuses it)', () => {
     assert.notEqual(scrubSecrets(SHORT_JWT), SHORT_JWT);
   });
@@ -482,14 +497,22 @@ describe('argument parsing', () => {
     {
       option: '--device',
       field: 'device',
-      // --device names a FIXTURE DEVICE WHOSE NAME THIS TOOL CHOOSES, so the rule
-      // is pinned FAR BELOW the Azure-legal device set: letters, digits and
-      // interior hyphens only. A DOT is refused outright so a JWT — three
-      // dot-separated segments — cannot pass in the --device slot, before it can be
-      // logged, passed to az, or (deviceId being the container partition key)
-      // embedded in a document body.
-      legal: [FIXTURE_DEVICE_ID, 'dev-fixture-v2-probe1'],
-      illegal: [SHORT_JWT, CONNECTION_STRING, 'dev-fixture.v2', 'a/b', 'a;b', 'a:b', 'a#b', 'has space', 'under_score', 'x'.repeat(129)],
+      // --device is PINNED to the one declared durable fixture, not merely charset-
+      // constrained (operator-required correction, MG-67 — this closes the last
+      // item in the credential-handling family). A charset rule cannot separate a
+      // 32-char opaque secret from a 32-char legal device id: there is no
+      // difference to detect. So the ONLY accepted --device value is the declared
+      // constant; EVERY other value is refused before it can be logged, passed to
+      // az, or (deviceId being the container partition key) embedded in a document
+      // body. That makes "opaque credential accepted as a device name" structurally
+      // unreachable rather than mitigated. Note the illegal set: OPAQUE_32_ALNUM is
+      // charset-legal yet refused (only the pin catches it), and
+      // 'dev-fixture-v2-probe1' — a perfectly well-formed device id — is refused
+      // too, because it is not THIS fixture. Accepted tradeoff, on the record:
+      // addressing a different device now requires a code change; intended, the
+      // fixture is durable and singular and MG-62 reuses this exact name.
+      legal: [FIXTURE_DEVICE_ID],
+      illegal: [OPAQUE_32_ALNUM, 'dev-fixture-v2-probe1', SHORT_JWT, CONNECTION_STRING, 'dev-fixture.v2', 'a/b', 'a;b', 'a:b', 'a#b', 'has space', 'under_score', 'x'.repeat(129)],
     },
     {
       option: '--account',
@@ -604,6 +627,11 @@ describe('argument parsing', () => {
   // --evidence-out directory, so the value cannot have been passed to az, embedded
   // in a document body, or written to the evidence target.
   for (const [option, value] of [
+    // The --device opaque case is the load-bearing one the operator flagged: a
+    // 32-char alphanumeric value the charset would accept, refused only by the
+    // pin, and proven here to reach NO az argv, NO evidence file and NO log line —
+    // including on this refusal path itself.
+    ['--device', OPAQUE_32_ALNUM],
     ['--account', COSMOS_CONNECTION_STRING],
     ['--database', DOTTED_COSMOS_ID],
     ['--container', COSMOS_CONNECTION_STRING],
