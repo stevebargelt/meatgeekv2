@@ -790,6 +790,24 @@ export function buildFixtureMessages({
 } = {}) {
   requireNonEmptyString(runId, 'runId');
   requireNonEmptyString(deviceId, 'deviceId');
+  // Defense in depth for the redesign's FIX 2: the device id becomes the
+  // PARTITION VALUE in every body this builds, so it is text that reaches a
+  // document body, an az argv and the evidence record. The CLI validates
+  // cfg.device against the per-resource allowlist (deviceIdProblem) before it
+  // ever gets here, but the body-construction site enforces the same allowlist
+  // too, so "no unvalidated text reaches a document body" is structural rather
+  // than dependent on the CLI remembering — the posture the rest of this tool
+  // takes. It is the allowlist, never the removed credential-SHAPE heuristic:
+  // a credential-shaped device id fails deviceIdProblem on its separators. The
+  // reason names the RULE and never echoes the value (FIX 2), so nothing
+  // untrusted lands on this failure line.
+  const deviceProblem = deviceIdProblem(deviceId);
+  if (deviceProblem !== null) {
+    throw new FixtureError(
+      EXIT.USAGE,
+      `fixture device id cannot be used as a partition value: ${deviceProblem}`
+    );
+  }
   requirePartitionKeyField(partitionKeyField);
 
   return Array.from({ length: MESSAGES_PER_RUN }, (_, index) => {

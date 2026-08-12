@@ -908,6 +908,32 @@ describe('the synthetic document contract', () => {
     }
     assert.equal(refusal(() => buildFixtureMessages()).exitCode, EXIT.USAGE);
   });
+
+  // FIX 2 defense in depth: the device id is written as the partition VALUE in
+  // every body, so the body-construction site enforces the per-resource
+  // allowlist too — a credential-shaped device id can never be laundered into a
+  // document body even if a future caller forgot to validate it first. The
+  // rejection uses the allowlist (deviceIdProblem), NOT the removed
+  // credential-shape heuristic, and never echoes the rejected value.
+  it('refuses a device id that fails the IoT Hub allowlist, without echoing it', () => {
+    const shaped = [
+      'HostName=h.azure-devices.net;DeviceId=d;SharedAccessKey=not-a-real-key-0000',
+      'AccountEndpoint=https://x.documents.azure.com/;AccountKey=not-a-real-key-0000==',
+      'has/a/slash',
+      `x${'y'.repeat(200)}`, // over 128 chars
+    ];
+    for (const bad of shaped) {
+      const err = refusal(() => build({ deviceId: bad }), `accepted ${bad.slice(0, 20)}`);
+      assert.equal(err.exitCode, EXIT.USAGE);
+      // The rejected value never appears on the failure line (FIX 2).
+      assert.doesNotMatch(err.message, /not-a-real-key|SharedAccessKey=[^[]|AccountKey=[^[]/);
+    }
+    // The dotted-id false positive the OLD scrubber gate produced does NOT recur
+    // here: a legal id with dots builds without complaint (device ids permit
+    // dots), and the default fixture device id is legal and still builds.
+    assert.doesNotThrow(() => build({ deviceId: 'grill.sensor.01' }));
+    assert.doesNotThrow(() => build());
+  });
 });
 
 describe('isSyntheticDocument', () => {
