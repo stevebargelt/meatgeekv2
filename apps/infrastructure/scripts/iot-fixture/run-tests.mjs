@@ -53,10 +53,10 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // minTests carries a margin below the honest count so that consolidating a
 // couple of cases does not turn this red for a reason that has nothing to do
 // with the suite failing to run. Counts measured at the time of writing, after
-// the per-run-ownership redesign integrated (see the re-measure note below for
-// the breakdown and why it moved): dependency-free 406 tests across 4 files
-// (container-definition 34, evidence 81, fixture-core 141, send-fixture 150);
-// real-SDK 40 across 1 file.
+// the per-run-ownership redesign AND the FIX-1 argv-ordering cycle integrated
+// (see the re-measure note below for the breakdown and why it moved):
+// dependency-free 411 tests across 4 files (container-definition 34, evidence
+// 81, fixture-core 141, send-fixture 155); real-SDK 40 across 1 file.
 //
 // That margin is FOUR cases on the dependency-free tier and ONE on the much
 // smaller real-SDK tier — a small fixed number, not the ~7% earlier revisions
@@ -106,9 +106,18 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // never reaches operator output" block) are among what carried send-fixture's
 // honest count up as step 6 rebuilt. This floor is RE-MEASURED against the
 // integrated tree, not an estimate: the earlier note here read send-fixture at
-// 147, which was a pre-rebuild projection; the real rebuilt suite reports 150.
-// Honest default-tier count, measured on the integrated tree: 406
-// (fixture-core 141, container-definition 34, evidence 81, send-fixture 150).
+// 147, which was a pre-rebuild projection; the real rebuilt suite reported 150.
+//
+// RE-MEASURED AGAIN when the FIX-1 argv-ordering cycle integrated. That cycle
+// moved the credential-shape rejection of a JWT-shaped --hub/--device to
+// requireName(), BEFORE any log line can echo the value, and pinned it with an
+// adversarial block (a JWT-shaped --hub and a JWT-shaped --device each emit no
+// log line carrying the value, on the rejection path itself). Those cases
+// carried send-fixture from 150 to 155 and the tier from 406 to 411. The floor
+// is RAISED to match — leaving it at 402 would let the whole FIX-1 block stop
+// running inside a nine-case margin, the exact failure this file refuses.
+// Honest default-tier count, measured on the integrated tree: 411
+// (fixture-core 141, container-definition 34, evidence 81, send-fixture 155).
 //
 // The raise before that came when the evidence-write integrity cycle landed
 // three fixes to the writer MG-53 and MG-54 consume mechanically. Each one is a
@@ -169,7 +178,7 @@ const TIERS = {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 402,
+    minTests: 407,
   },
   sdk: {
     label: 'real-SDK',
