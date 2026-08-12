@@ -532,12 +532,36 @@ RUN_EXIT=$?
 echo "send-fixture exit=$RUN_EXIT"     # RECORD THIS — it is half the proof
 cat "$RUN_OUT" "$RUN_ERR"
 
-# The tool named the file inside $EVIDENCE_DIR from the run's unique id and
-# printed the exact path ("evidence destination reserved for run ...", and the
-# summary line at the end). Capture it for §7c:
-EVIDENCE=$(ls -1t "$EVIDENCE_DIR"/mg67-fixture-evidence-*.json | head -1)
-echo "evidence artifact: $EVIDENCE"
+# Capture THIS run's artifact by its correlation id — NEVER by "the newest
+# matching file". The file name is derived from the run id, and a `ls -1t | head`
+# would hand you a DIFFERENT, concurrent run's artifact whenever two fixtures
+# overlap against this directory (which the tool explicitly supports). The tool
+# prints the run id on its reservation line, early and on every path that reached
+# a send:
+#
+#   iot-fixture: evidence destination reserved for run <runId>: <path> (...)
+#
+# Read that id back out of THIS run's own stdout and rebuild the SAME derived name
+# the tool used (mg67-fixture-evidence-<runId>.json). Tying the capture to the run
+# id is what makes it impossible to pick up another run's file.
+RUN_ID=$(sed -n 's/.*evidence destination reserved for run \([^:]*\):.*/\1/p' "$RUN_OUT" | head -1)
+if [ -z "$RUN_ID" ]; then
+  echo "STOP: could not read this run's correlation id from $RUN_OUT."
+  echo "      Do NOT fall back to selecting the newest evidence file — under an"
+  echo "      overlapping run that captures the WRONG artifact. Re-inspect the"
+  echo "      captured stdout for the 'evidence destination reserved for run' line."
+  EVIDENCE=
+else
+  EVIDENCE="$EVIDENCE_DIR/mg67-fixture-evidence-${RUN_ID}.json"
+  echo "run id: $RUN_ID"
+  echo "evidence artifact: $EVIDENCE"
+fi
 ```
+
+`$RUN_ID` is `mg-67-run-<uuid>`; it carries no `:` and no `.`, so the `sed`
+capture is exact and the scrubber never touches it. `$RUN_ID` also names the two
+promoted log files in §7c, so all three files of one run carry the same
+correlation id and belong to it unambiguously — see §7c.
 
 **The two streams are captured to two files, with a redirect rather than a
 `tee` pipeline, on purpose.** Separately, because the criterion is about stdout
@@ -655,12 +679,49 @@ passes through the tool's scrubber before any operator-facing line exists.
 **Do not work around any of this.** If a run fails in a way that tempts you to
 supply a credential by hand, that is stop condition 2 (§9) — halt and report.
 
+#### Name validation is an allowlist — and it is NOT a credential detector
+
+The five names you pass (`--hub`, `--device`, `--account`, `--database`,
+`--container`) are each validated against the **actual Azure naming rule for that
+resource type** — an **allowlist**, so a value is accepted only if it is a legal
+name of its own kind (the IoT Hub name, the device id, the Cosmos account name,
+the database id and the container id have **different** charset and length rules,
+and the tool applies each its own). A value that fails is refused with a **usage
+error (exit 1)** _before_ its value is read, sent, logged or written anywhere.
+
+Two things follow, and the second is a limitation stated here **honestly** rather
+than glossed over:
+
+- **A rejection never echoes what you typed.** The message names the **flag** and
+  the **rule it broke**, never the offending value — so an operator who mistyped a
+  name learns the rule, and an operator who pasted a secret into a name field does
+  not see it reflected back onto the terminal, into shell history, or into any
+  captured log. The value the tool goes on to log and send is a **validated** one.
+- **This screening rejects credentials only as a side effect, and cannot be
+  relied on to.** A connection string fails every rule on its `/` and `;`
+  separators, and a JWT fails the IoT Hub and Cosmos-account rules on its dots —
+  so those shapes are refused **by construction**, not by any attempt to
+  recognise a secret. But a secret shaped like a **legal** name is invisible to a
+  naming rule: **a 32-character device key pasted as `--device` is
+  indistinguishable from a 32-character device id**, and the tool accepts it. The
+  tool does **not** claim to catch a credential someone types into a name field,
+  and this runbook does not either.
+
+  The guarantee the tool actually makes is narrower and true: **it never accepts,
+  holds, or requires a credential.** `az` resolves the device key itself under
+  your identity and the read-back is AAD-only, so there is no credential input for
+  the tool to screen in the first place. **Do not paste a secret into a name
+  field** — nothing downstream will notice you did, and the value would flow on
+  into the `az` argv, the document body and the evidence record. This is the exact
+  hazard stop condition 2 (§9) exists for: if a step ever seems to want a
+  credential where a name belongs, halt and report.
+
 ### Exit codes — the operator contract
 
 | Code | Meaning                         | What it tells you                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ---- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0    | confirmed-in-cosmos             | **The only success.** 3 marker-carrying, run-correlated documents were read back out of `temperatures`, and the evidence was written.                                                                                                                                                                                                                                                                                                            |
-| 1    | usage error                     | Bad/missing arguments, a refused credential-shaped flag, or an **unusable or reused `--evidence-out`** caught by the reservation. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.                                                                                                                                                                                                |
+| 1    | usage error                     | Bad/missing arguments, a refused credential-bearing flag (`--key`, `--connection-string`, `--sas`, …), a **name that fails its Azure resource-type rule** (the value is not echoed back), or an **unusable or reused `--evidence-out`** caught by the reservation. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.                                                                    |
 | 2    | send failure                    | `az iot device send-d2c-message` failed. Check `az login` and `az extension add --name azure-iot`.                                                                                                                                                                                                                                                                                                                                               |
 | 3    | confirmation timeout            | The bound elapsed with the documents not found. **Not an absence, not a success.**                                                                                                                                                                                                                                                                                                                                                               |
 | 4    | auth failure                    | 401/403, or no credential could be acquired. **Says nothing about whether the route delivered.** Usually §4 not propagated.                                                                                                                                                                                                                                                                                                                      |
@@ -1020,14 +1081,18 @@ second-sweep hit you cannot account for. In order:
 
 ```bash
 # ONLY after BOTH sweeps pass: the first showing nothing but [redacted]
-# placeholders, the second showing nothing at all.
-cp "$RUN_OUT" "docs/infrastructure/evidence/mg67-fixture-run-${STAMP}.stdout.log"
-cp "$RUN_ERR" "docs/infrastructure/evidence/mg67-fixture-run-${STAMP}.stderr.log"
+# placeholders, the second showing nothing at all. Named for THIS run's
+# correlation id ($RUN_ID, from §6) — the same id the artifact's name derives
+# from — so the three files belong to this run unambiguously and cannot be
+# confused with an overlapping run's logs.
+test -n "$RUN_ID" || { echo "STOP: \$RUN_ID is unset (see §6); do not promote logs under a guessed name."; }
+cp "$RUN_OUT" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stdout.log"
+cp "$RUN_ERR" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stderr.log"
 ```
 
-Alongside the machine-readable artifact, under the same `${STAMP}`, so the three
-files of one run sort together and a reader can tell which log belongs to which
-record. Commit them with the artifact and reference them from the ticket.
+Alongside the machine-readable artifact and named for the **same run id**, so the
+three files of one run sort together and a reader can tell which log belongs to
+which record. Commit them with the artifact and reference them from the ticket.
 
 **Order matters and is not a formality: inspect, then promote.** The reverse —
 commit and then check — is the failure this section exists to prevent, because a
