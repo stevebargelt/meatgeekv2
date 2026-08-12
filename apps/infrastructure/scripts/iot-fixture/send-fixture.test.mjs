@@ -26,6 +26,7 @@
 
 import { strict as assert } from 'node:assert';
 import {
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -865,6 +866,110 @@ describe('main: the confirmed path', () => {
       assert.ok(record.ttlDriftFinding);
       assert.equal(record.measuredDefaultTtl, record.ttlDriftFinding.measured);
       assert.notEqual(record.measuredDefaultTtl, record.declaredDefaultTtl);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HR1, the raw-path-interpolation defect class.
+//
+// --evidence-out is operator-supplied text, and the tool names the reserved
+// destination on operator-facing lines on EVERY path: the reservation success
+// line, the CONFIRMED-evidence line, and the failure lines that tell an operator
+// where the record was or was not written. A path component shaped like a
+// credential — a hostile working directory, or an accident — must be scrubbed on
+// ALL of them, success lines included, not just the error paths. The regression
+// this class caused was exactly a success line interpolating the path raw.
+//
+// Two operator-supplied positions are exercised separately, because they are
+// different accidents: a credential-shaped DIRECTORY component nested inside the
+// path, and a credential-shaped FINAL (filename-position) component of the path.
+// The scrubber redacts an `AccountKey=` run to the end of the line, so in both
+// the value never survives into a log line.
+// ---------------------------------------------------------------------------
+describe('HR1: a credential-shaped evidence path never reaches operator output', () => {
+  // Built at runtime (never a source literal, the same posture as PLANTED) so
+  // this file trips no credential-in-source check of its own. base64url gives a
+  // filesystem-safe single path segment — no '/', no whitespace — that is one
+  // directory name and one scrub run. The scrubber keys off the `AccountKey=`
+  // NAME, not the value, and consumes to the end of the line: the value is gone
+  // whole regardless of its length.
+  const PLANTED_PATH_KEY = Buffer.from(
+    'mg67-path-secret-only-never-a-real-account-key'
+  ).toString('base64url');
+  const credSegment = `AccountKey=${PLANTED_PATH_KEY}`;
+
+  // A publication that fails AFTER the send (the reservation's write+rename probe
+  // and exclusive create still use the real fs and succeed; only the record's
+  // partial→target rename fails), so the failure line that names the path is
+  // emitted with live documents already in the container.
+  const publicationFailsFs = () => ({
+    rename: async (from, to) => {
+      if (from.endsWith('.probe-src') || to.endsWith('.probe-dst')) return realRename(from, to);
+      throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+    },
+  });
+
+  const assertPathSecretAbsent = log => {
+    const output = log.all();
+    assert.equal(
+      output.includes(PLANTED_PATH_KEY),
+      false,
+      'the credential-shaped path component reached operator output'
+    );
+    // Guard against a false pass: the destination WAS named (so the assertion
+    // above is meaningful) and the scrubber DID fire on it.
+    assert.match(output, /evidence destination reserved for run/);
+    assert.match(output, /AccountKey=\[redacted\]/);
+  };
+
+  it('scrubs a credential-shaped DIRECTORY component on the success path', async () => {
+    await withTempDir(async base => {
+      const evidenceOut = path.join(base, credSegment, 'evidence');
+      await mkdir(evidenceOut, { recursive: true });
+      const { exitCode, log } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+      assert.equal(exitCode, EXIT.OK);
+      // The CONFIRMED-evidence line is a success line that names the path.
+      assert.match(log.all(), /CONFIRMED/);
+      assertPathSecretAbsent(log);
+    });
+  });
+
+  it('scrubs a credential-shaped FINAL (filename-position) path component on the success path', async () => {
+    await withTempDir(async base => {
+      const evidenceOut = path.join(base, credSegment);
+      await mkdir(evidenceOut, { recursive: true });
+      const { exitCode, log } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+      assert.equal(exitCode, EXIT.OK);
+      assert.match(log.all(), /CONFIRMED/);
+      assertPathSecretAbsent(log);
+    });
+  });
+
+  it('scrubs the credential-shaped path on the FAILURE line too (write fails after the send)', async () => {
+    await withTempDir(async base => {
+      const evidenceOut = path.join(base, credSegment);
+      await mkdir(evidenceOut, { recursive: true });
+      const { exitCode, log } = await runMain({
+        evidenceOut,
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+        fs: publicationFailsFs(),
+      });
+      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+      const output = log.all();
+      assert.equal(
+        output.includes(PLANTED_PATH_KEY),
+        false,
+        'the credential-shaped path reached the failure line'
+      );
+      // The failure line DID name where the record could not be written — scrubbed.
+      assert.match(output, /could not be written to .*AccountKey=\[redacted\]/);
     });
   });
 });
