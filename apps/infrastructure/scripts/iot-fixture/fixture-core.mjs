@@ -584,24 +584,30 @@ export function partitionKeyFieldProblem(value) {
 //   - FALSE NEGATIVE: a 32-character opaque secret matches no scrubber pattern,
 //     so it was accepted unchanged and then embedded in logs, the az argv and
 //     the document body.
-//   - FALSE POSITIVE: the scrubber's JWT pattern matches the LEGAL Cosmos id
-//     `analytics01.eventstore1.replicaWest` (Cosmos ids permit dots), so a valid
-//     container name was refused before anything could be measured or sent.
+//   - FALSE POSITIVE: the scrubber's JWT pattern matches a dotted string, so a
+//     value shaped like `analytics01.eventstore1.replicaWest` was refused before
+//     anything could be measured or sent.
 //
 // Detecting a secret by shape cannot be patched into correctness, and one
 // heuristic across five resource types with materially different naming rules is
 // what produced both failures together. So this is an ALLOWLIST: a value is
-// accepted only if it satisfies its own type's documented rule. Credential
-// material fails BY CONSTRUCTION rather than by pattern recognition — a JWT
-// fails the IoT Hub name rule on its dots, a connection string fails every rule
-// on its '/' and ';' separators.
+// accepted only if it satisfies its own type's rule. Credential material fails BY
+// CONSTRUCTION rather than by pattern recognition — a JWT fails on its dots, a
+// connection string fails every rule on its '/' and ';' separators.
 //
 // SCOPE, PER FIELD (operator-authorized correction, MG-67): each rule is as
-// narrow as the value it names actually needs, NOT as wide as Azure permits.
-// The device rule in particular is pinned far below the Azure-legal identity set
-// (letters, digits, interior hyphens — no dots), so a JWT and every
-// separator-bearing credential are refused in the --device slot BY CONSTRUCTION,
-// before that text can be logged, passed to az, or embedded in a document body.
+// narrow as the value it names actually needs, NOT as wide as Azure permits. All
+// five are pinned below the Azure-legal ceiling to what THIS FIXTURE addresses —
+// one dev hub, one fixture device it names itself, one dev Cosmos account, one
+// dev database (meatgeek-v2-dev-db) and the dev containers (temperatures et al.),
+// every one a plain identifier. The device, database and container rules in
+// particular admit only letters, digits and interior hyphens (no dots), so a JWT
+// and every separator-bearing credential are refused in the --device, --database
+// and --container slots BY CONSTRUCTION, before that text can be logged, passed
+// to az, embedded in a document body, or written to the evidence record. The
+// dotted-id case an earlier cycle carved out as legal is NO LONGER accepted in
+// any slot: this fixture never addresses a dotted Cosmos resource, so admitting
+// one only reopened the hole a security review then reported.
 //
 // What remains genuinely undetectable is narrow and stated plainly rather than
 // overclaimed: an OPAQUE string already shaped like a legal name — a 32-char
@@ -617,8 +623,10 @@ export function partitionKeyFieldProblem(value) {
 // rejected value (FIX 2): a caller can refuse without putting untrusted argv
 // text on any output line. The scrubber's JWT pattern stays as-is — it is the
 // accepted over-redaction posture for ERROR OUTPUT (MG-63), and it is no longer
-// the arbiter of a name's legality, so its false positive on a dotted id no
-// longer refuses a valid container.
+// the arbiter of a name's legality. Validation and scrubbing are independent
+// defenses: a name that clears its allowlist here is STILL routed through the
+// scrubber on every operator-facing path and into the evidence record at the CLI
+// and evidence edges, so neither defense depends on the other.
 // ---------------------------------------------------------------------------
 
 // IoT Hub name — Microsoft.Devices/IotHubs. Length 3-50; alphanumerics and
@@ -655,10 +663,12 @@ export function iotHubNameProblem(value) {
 // legal maximum closes that finding while over-refusing nothing this fixture will
 // ever legitimately be asked to name (a fixture device is a simple identifier).
 //
-// The dotted-name case the redesign correctly protects belongs to Cosmos
-// DATABASE and CONTAINER ids (analytics01.eventstore1.replicaWest) and lives in
-// cosmosResourceIdProblem below — it is NOT a reason to keep the device rule
-// permissive, and the two deliberately do not share a rule.
+// The database and container rules in cosmosResourceIdProblem below are pinned
+// the SAME way, and for the same reason: this fixture addresses only plain-
+// identifier Cosmos ids (meatgeek-v2-dev-db, temperatures), so a dotted id such
+// as analytics01.eventstore1.replicaWest is refused there too. The three rules
+// share the same charset intent but stay separate functions so each names its
+// own resource type in its refusal.
 // https://learn.microsoft.com/azure/iot-hub/iot-hub-devguide-identity-registry
 const DEVICE_ID_CHARSET = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 export function deviceIdProblem(value) {
@@ -691,22 +701,40 @@ export function cosmosAccountNameProblem(value) {
   return null;
 }
 
-// Cosmos DB resource id (database and container). At most 255 characters; may
-// not contain '/', '\', '#' or '?'; may not end with whitespace. Dots ARE
-// permitted, so a legal id such as `analytics01.eventstore1.replicaWest` is
-// accepted — the exact value the old scrubber-shape gate wrongly refused. A
-// connection string fails on its '/'.
+// Cosmos DB database and container id. Azure PERMITS up to 255 characters with
+// dots and most punctuation — but this fixture addresses ONE known dev database
+// (meatgeek-v2-dev-db) and the five known dev containers (devices, temperatures,
+// cooks, users, recipes), every one a plain identifier. So the rule is pinned FAR
+// BELOW the Azure-legal id set (operator-authorized correction, MG-67), exactly
+// as the device, account and hub rules are: ASCII letters, digits and interior
+// hyphens only, no leading or trailing hyphen, at most 128 characters.
+//
+// The load-bearing consequence is that a DOT is rejected outright, so a JWT
+// (three dot-separated segments) and the dotted id
+// `analytics01.eventstore1.replicaWest` — both LEGAL Cosmos ids — are refused in
+// the --database and --container slots BY CONSTRUCTION, along with every
+// separator-bearing credential. That matters because these operator-supplied
+// values reach unsanitized operator output, the az argv and the evidence record;
+// a credential-shaped value must never travel any of those paths.
+//
+// An earlier cycle carved the dotted id OUT as an accepted value to avoid an
+// over-refusal finding. That carve-out was wrong: it protected a case this
+// fixture will never address, and it was the exact hole a security review then
+// reported — credential-shaped input accepted in the database and container name
+// slots. Removed here. The rule is scoped to this tool's genuine need, not to
+// what Cosmos legally permits. The reason names the RULE and NEVER echoes the
+// value (FIX 2).
 // https://learn.microsoft.com/rest/api/cosmos-db/databases
-const COSMOS_ID_FORBIDDEN = /[\/\\#?]/;
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const COSMOS_LOCAL_ID_CHARSET = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 function cosmosResourceIdProblem(value, noun) {
   if (typeof value !== 'string' || value.trim() === '') return 'it is not a non-empty string';
-  if (value.length > 255) return `a Cosmos ${noun} id must be at most 255 characters long`;
-  if (CONTROL_CHARS.test(value)) return `a Cosmos ${noun} id may not contain a control character`;
-  if (COSMOS_ID_FORBIDDEN.test(value)) {
-    return `a Cosmos ${noun} id may not contain '/', '\\', '#' or '?'`;
+  if (value.length > 128) return `a Cosmos ${noun} id must be at most 128 characters long`;
+  if (!COSMOS_LOCAL_ID_CHARSET.test(value)) {
+    return (
+      `a Cosmos ${noun} id may contain only letters, digits and interior hyphens — a dot (so a JWT), ` +
+      'whitespace and connection-string separators are rejected, below the Azure-legal id set'
+    );
   }
-  if (/\s$/.test(value)) return `a Cosmos ${noun} id may not end with whitespace`;
   return null;
 }
 export function cosmosDatabaseIdProblem(value) {

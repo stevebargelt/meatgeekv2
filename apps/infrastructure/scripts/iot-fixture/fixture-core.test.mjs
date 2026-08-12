@@ -930,10 +930,10 @@ describe('the synthetic document contract', () => {
     }
     // The device rule is pinned below the Azure-legal set (MG-67 correction), so
     // a DOTTED device id — a JWT is exactly this shape — is refused here BY
-    // CONSTRUCTION rather than laundered into a body as a partition value. This
-    // is not the old scrubber-shape false positive (that gate wrongly refused
-    // dotted COSMOS ids too; the Cosmos rules below still accept them): it is a
-    // deliberately narrow DEVICE rule.
+    // CONSTRUCTION rather than laundered into a body as a partition value. The
+    // database and container rules are pinned the same way (this fixture addresses
+    // only plain-identifier Cosmos ids), so a dotted id is refused in those slots
+    // too — no slot admits one.
     assert.equal(refusal(() => build({ deviceId: 'grill.sensor.01' })).exitCode, EXIT.USAGE);
     // The default fixture device id is a plain identifier and still builds.
     assert.doesNotThrow(() => build());
@@ -2928,11 +2928,14 @@ describe('module boundaries', () => {
 });
 
 // The operator-authorized redesign (MG-67): the five operator-supplied names are
-// validated against the ACTUAL Azure naming rules for THEIR resource type — an
-// ALLOWLIST — rather than against a single credential-SHAPE heuristic that failed
-// in both directions (it accepted a name-shaped secret and refused a legal dotted
-// Cosmos id). Both directions are covered FOR EACH of the five types, separately,
-// because an over-refusal is as much a defect as an under-refusal here.
+// validated against an ALLOWLIST scoped to what THIS FIXTURE actually addresses —
+// one dev hub, one fixture device, one dev Cosmos account, one dev database and
+// the dev containers, every one a plain identifier — rather than against a single
+// credential-SHAPE heuristic, and rather than against the wider Azure-legal
+// ceiling. Every slot (device, database, container included) admits only letters,
+// digits and interior hyphens, so a dotted/JWT/connection-string value is refused
+// by construction. Both directions are covered FOR EACH of the five types,
+// separately, because an over-refusal is as much a defect as an under-refusal.
 describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => {
   // Every string below is a synthetic non-credential, hand-built to match the
   // SHAPES an operator might paste into a name field. None is or ever was a real
@@ -3018,15 +3021,27 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
       name: 'Cosmos database id',
       kind: RESOURCE_NAME_KINDS.COSMOS_DATABASE,
       fn: cosmosDatabaseIdProblem,
-      // Dots ARE legal — the exact value the old scrubber-shape gate wrongly refused.
-      legal: ['meatgeek-v2-dev-db', 'analytics01.eventstore1.replicaWest', 'a'],
+      // The one dev database this fixture addresses, plus plain identifiers. The
+      // rule is pinned FAR below the Azure-legal id set (MG-67 correction):
+      // letters, digits and interior hyphens only — no dots.
+      legal: ['meatgeek-v2-dev-db', 'a', 'db01'],
+      // The dotted id an earlier cycle wrongly accepted is refused here now — a
+      // dot rejects it (and any JWT / connection string / SAS) by construction.
       illegal: [
+        JWT_SHAPED,
         CONNECTION_STRING,
+        DEVICE_CONN,
+        SAS_TOKEN,
+        'analytics01.eventstore1.replicaWest',
+        'has.dot',
         'has/slash',
         'back\\slash',
         'hash#tag',
         'quest?ion',
         'trailing ',
+        'under_score',
+        '-leadhyphen',
+        'trailhyphen-',
         'nul\u0000byte',
       ],
     },
@@ -3034,14 +3049,23 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
       name: 'Cosmos container id',
       kind: RESOURCE_NAME_KINDS.COSMOS_CONTAINER,
       fn: cosmosContainerIdProblem,
-      legal: ['temperatures', 'analytics01.eventstore1.replicaWest', 'a'],
+      // Every dev container this fixture could address — all plain identifiers.
+      legal: ['temperatures', 'devices', 'cooks', 'users', 'recipes', 'a'],
       illegal: [
+        JWT_SHAPED,
         CONNECTION_STRING,
+        DEVICE_CONN,
+        SAS_TOKEN,
+        'analytics01.eventstore1.replicaWest',
+        'has.dot',
         'has/slash',
         'back\\slash',
         'hash#tag',
         'quest?ion',
         'trailing ',
+        'under_score',
+        '-leadhyphen',
+        'trailhyphen-',
         'nul\u0000byte',
       ],
     },
@@ -3073,17 +3097,22 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
     });
   }
 
-  it('accepts the dotted Cosmos id the old scrubber-shape gate wrongly refused (false-positive fix)', () => {
+  it('refuses a dotted Cosmos id in EVERY slot — the carve-out that reopened the finding is gone (MG-67 correction)', () => {
     const dotted = 'analytics01.eventstore1.replicaWest';
-    // The dotted-name case belongs to Cosmos DATABASE and CONTAINER ids only.
-    assert.equal(cosmosDatabaseIdProblem(dotted), null);
-    assert.equal(cosmosContainerIdProblem(dotted), null);
-    // Still refused for the kinds whose rules genuinely forbid dots — and the
-    // DEVICE rule is now one of them (MG-67 correction): the dotted case is NOT a
-    // reason to keep the device permissive, and the rules deliberately differ.
+    // An earlier cycle accepted this value for --database and --container to avoid
+    // an over-refusal finding. That carve-out was the hole a security review then
+    // reported: credential-shaped input accepted in the database and container
+    // name slots. This fixture never addresses a dotted Cosmos resource, so the
+    // dotted case is refused in every slot now — no rule keeps it.
+    assert.ok(cosmosDatabaseIdProblem(dotted), 'database rule now refuses a dotted id');
+    assert.ok(cosmosContainerIdProblem(dotted), 'container rule now refuses a dotted id');
     assert.ok(iotHubNameProblem(dotted));
     assert.ok(cosmosAccountNameProblem(dotted));
     assert.ok(deviceIdProblem(dotted));
+    // And none of the refusals echoes the rejected value (FIX 2).
+    for (const problem of [cosmosDatabaseIdProblem(dotted), cosmosContainerIdProblem(dotted)]) {
+      assert.equal(problem.includes(dotted), false, 'reason must not echo the rejected value');
+    }
   });
 
   it('refuses a JWT-shaped value in the --device slot (finding closed, MG-67)', () => {
@@ -3106,9 +3135,39 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
       resourceNameProblem(RESOURCE_NAME_KINDS.DEVICE, JWT_SHAPED),
       'the dispatcher refuses it too'
     );
-    // The same value is a LEGAL Cosmos container/database id — the per-type rules
-    // must stay separate, which is the point the correction preserves.
-    assert.equal(cosmosContainerIdProblem(JWT_SHAPED), null);
+    // And a JWT is refused in the --database and --container slots too now: those
+    // rules are pinned to this fixture's plain-identifier need, so the dots that
+    // make it a JWT reject it there as well (MG-67 correction — no slot admits a
+    // credential shape).
+    assert.ok(cosmosContainerIdProblem(JWT_SHAPED), 'container rule refuses a JWT');
+    assert.ok(cosmosDatabaseIdProblem(JWT_SHAPED), 'database rule refuses a JWT');
+  });
+
+  it('--account, --database and --container: known dev values accepted, credential shapes refused before any use (finding closed, MG-67)', () => {
+    // The second half of the security finding, per field: the exact dev values
+    // this fixture uses clear their rule, and every recognizable credential shape
+    // is refused BEFORE it could be logged, passed to az, embedded in a body, or
+    // written to the evidence record. The dispatcher agrees with each checker, and
+    // no refusal echoes the rejected value (FIX 2).
+    const known = {
+      [RESOURCE_NAME_KINDS.COSMOS_ACCOUNT]: 'mgv2-dev-f640e19ae7ab',
+      [RESOURCE_NAME_KINDS.COSMOS_DATABASE]: 'meatgeek-v2-dev-db',
+      [RESOURCE_NAME_KINDS.COSMOS_CONTAINER]: 'temperatures',
+    };
+    for (const [kind, value] of Object.entries(known)) {
+      assert.equal(resourceNameProblem(kind, value), null, `${kind} must accept its dev value`);
+    }
+    const shapes = [JWT_SHAPED, CONNECTION_STRING, DEVICE_CONN, SAS_TOKEN];
+    for (const kind of Object.keys(known)) {
+      for (const shape of shapes) {
+        const reason = resourceNameProblem(kind, shape);
+        assert.ok(
+          typeof reason === 'string' && reason.length > 0,
+          `${kind} must refuse ${shape.slice(0, 12)}…`
+        );
+        assert.equal(reason.includes(shape), false, 'reason must not echo the rejected value');
+      }
+    }
   });
 
   it('accepts a plain opaque name-shaped string but rejects a recognizable credential shape (honest limitation, narrowed)', () => {
