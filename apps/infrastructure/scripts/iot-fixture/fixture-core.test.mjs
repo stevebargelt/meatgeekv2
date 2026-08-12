@@ -28,6 +28,7 @@ import {
   MESSAGES_PER_RUN,
   PARTITION_VALUE_ABSENT,
   PARTITION_VALUE_UNUSABLE,
+  RESOURCE_NAME_KINDS,
   RUN_ID_FIELD,
   RUN_ID_PARAMETER,
   SEQUENCE_FIELD,
@@ -39,14 +40,19 @@ import {
   buildFixtureMessages,
   classifyError,
   confirmArrival,
+  cosmosAccountNameProblem,
+  cosmosContainerIdProblem,
+  cosmosDatabaseIdProblem,
   createRunLedger,
   describeConfirmation,
   describeError,
   describeIdSets,
+  deviceIdProblem,
   evaluateReadBack,
   exitLabel,
   formatD2cProperties,
   hasSyntheticMarker,
+  iotHubNameProblem,
   isKnownExitCode,
   isSyntheticDocument,
   mergeIds,
@@ -54,6 +60,7 @@ import {
   newRunId,
   observedIdsDiverge,
   resolveOutcomeCode,
+  resourceNameProblem,
   scrubChildOutput,
   scrubSecrets,
   toFixtureError,
@@ -2887,5 +2894,181 @@ describe('module boundaries', () => {
     // here as a finding, deliberately not fixed by a verification ticket.
     assert.match(source, /data-pusher/);
     assert.match(source, /buildPublishProperties/);
+  });
+});
+
+// The operator-authorized redesign (MG-67): the five operator-supplied names are
+// validated against the ACTUAL Azure naming rules for THEIR resource type — an
+// ALLOWLIST — rather than against a single credential-SHAPE heuristic that failed
+// in both directions (it accepted a name-shaped secret and refused a legal dotted
+// Cosmos id). Both directions are covered FOR EACH of the five types, separately,
+// because an over-refusal is as much a defect as an under-refusal here.
+describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => {
+  // Every string below is a synthetic non-credential, hand-built to match the
+  // SHAPES an operator might paste into a name field. None is or ever was a real
+  // secret, and no real credential belongs in this repository on any path (HR1) —
+  // the same convention the scrubbing suite above follows. The point is only that
+  // an allowlist refuses these by construction, on their separators.
+  const JWT_SHAPED =
+    'eyJmYWtlIjoidGVzdCJ9.eyJub3RfYV9yZWFsX3Rva2VuIjp0cnVlfQ.not-a-real-signature-0000';
+  const CONNECTION_STRING =
+    'AccountEndpoint=https://acct.documents.azure.com:443/;AccountKey=not-a-real-account-key-0000==;';
+  const DEVICE_CONN =
+    'HostName=hub.azure-devices.net;DeviceId=d1;SharedAccessKey=not-a-real-shared-access-key-0000';
+  const SAS_TOKEN =
+    'SharedAccessSignature sr=hub.azure-devices.net&sig=not-a-real-signature-0000&se=1700000000&skn=owner';
+
+  const cases = [
+    {
+      name: 'IoT Hub name',
+      kind: RESOURCE_NAME_KINDS.IOT_HUB,
+      fn: iotHubNameProblem,
+      legal: ['meatgeek-v2-dev-iothub-259d4bf5b628', 'abc', 'a1b'],
+      // Dots (a JWT) and separators (any connection string / SAS) both fail here.
+      illegal: [
+        JWT_SHAPED,
+        CONNECTION_STRING,
+        DEVICE_CONN,
+        SAS_TOKEN,
+        'ab',
+        '-lead',
+        'trail-',
+        'has.dot',
+      ],
+    },
+    {
+      name: 'device id',
+      kind: RESOURCE_NAME_KINDS.DEVICE,
+      fn: deviceIdProblem,
+      // The durable fixture device, plus a string exercising the full legal
+      // punctuation set the IoT Hub identity registry permits.
+      legal: ['meatgeek-v2-dev-synthetic-fixture-device', 'dev-01', "id.with+all%_#*?!(),:=@$'ok"],
+      // NOT JWT_SHAPED: a base64url JWT is charset-legal as a device id — the
+      // honest limitation asserted separately below. Separators still fail.
+      illegal: [CONNECTION_STRING, DEVICE_CONN, SAS_TOKEN, 'has/slash', 'has space', 'semi;colon'],
+    },
+    {
+      name: 'Cosmos account name',
+      kind: RESOURCE_NAME_KINDS.COSMOS_ACCOUNT,
+      fn: cosmosAccountNameProblem,
+      legal: ['mgv2-dev-f640e19ae7ab', 'abc', 'a1b'],
+      // Uppercase and dots both fail, so a JWT and every connection string fail.
+      illegal: [
+        JWT_SHAPED,
+        CONNECTION_STRING,
+        DEVICE_CONN,
+        SAS_TOKEN,
+        'HasUpper',
+        'has.dot',
+        '-lead',
+        'trail-',
+        'ab',
+      ],
+    },
+    {
+      name: 'Cosmos database id',
+      kind: RESOURCE_NAME_KINDS.COSMOS_DATABASE,
+      fn: cosmosDatabaseIdProblem,
+      // Dots ARE legal — the exact value the old scrubber-shape gate wrongly refused.
+      legal: ['meatgeek-v2-dev-db', 'analytics01.eventstore1.replicaWest', 'a'],
+      illegal: [
+        CONNECTION_STRING,
+        'has/slash',
+        'back\\slash',
+        'hash#tag',
+        'quest?ion',
+        'trailing ',
+        'nul\u0000byte',
+      ],
+    },
+    {
+      name: 'Cosmos container id',
+      kind: RESOURCE_NAME_KINDS.COSMOS_CONTAINER,
+      fn: cosmosContainerIdProblem,
+      legal: ['temperatures', 'analytics01.eventstore1.replicaWest', 'a'],
+      illegal: [
+        CONNECTION_STRING,
+        'has/slash',
+        'back\\slash',
+        'hash#tag',
+        'quest?ion',
+        'trailing ',
+        'nul\u0000byte',
+      ],
+    },
+  ];
+
+  for (const c of cases) {
+    describe(c.name, () => {
+      for (const value of c.legal) {
+        it(`accepts a legal value: ${JSON.stringify(value)}`, () => {
+          assert.equal(c.fn(value), null);
+          // The dispatcher routes to the same checker.
+          assert.equal(resourceNameProblem(c.kind, value), null);
+        });
+      }
+      for (const value of c.illegal) {
+        it(`refuses credential-shaped or malformed input: ${JSON.stringify(value)}`, () => {
+          const reason = c.fn(value);
+          assert.ok(
+            typeof reason === 'string' && reason.length > 0,
+            `${JSON.stringify(value)} must be refused`
+          );
+          // FIX 2: the reason names the RULE and NEVER echoes the value, so the
+          // CLI can refuse a credential-shaped argument without emitting it.
+          assert.equal(reason.includes(value), false, 'reason must not echo the rejected value');
+          // The dispatcher agrees with the direct checker.
+          assert.equal(resourceNameProblem(c.kind, value), reason);
+        });
+      }
+    });
+  }
+
+  it('accepts the dotted Cosmos id the old scrubber-shape gate wrongly refused (false-positive fix)', () => {
+    const dotted = 'analytics01.eventstore1.replicaWest';
+    assert.equal(cosmosDatabaseIdProblem(dotted), null);
+    assert.equal(cosmosContainerIdProblem(dotted), null);
+    // Still refused for the kinds whose rules genuinely forbid dots.
+    assert.ok(iotHubNameProblem(dotted));
+    assert.ok(cosmosAccountNameProblem(dotted));
+  });
+
+  it('does NOT claim to detect a secret shaped like a legal name (honest limitation, FIX 3)', () => {
+    // A 32-char opaque key is indistinguishable from a 32-char device id by any
+    // naming rule, so it is ACCEPTED. The guarantee is that the tool never
+    // accepts, holds or requires a credential — az resolves the device key under
+    // the caller's identity — not that it recognises one pasted into a name
+    // field. The runbook states this plainly rather than implying detection.
+    const secretShapedLikeADeviceId = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+    assert.equal(deviceIdProblem(secretShapedLikeADeviceId), null);
+  });
+
+  it('refuses empty, whitespace-only and non-string input for every kind', () => {
+    for (const kind of Object.values(RESOURCE_NAME_KINDS)) {
+      for (const bad of ['', '   ', null, undefined, 42, {}, []]) {
+        assert.ok(resourceNameProblem(kind, bad), `${kind} must refuse ${JSON.stringify(bad)}`);
+      }
+    }
+  });
+
+  it('resourceNameProblem throws EXIT.USAGE on an unknown kind and never echoes a credential', () => {
+    let err;
+    try {
+      resourceNameProblem('not-a-kind', CONNECTION_STRING);
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err instanceof FixtureError, 'unknown kind must throw a FixtureError');
+    assert.equal(err.exitCode, EXIT.USAGE);
+    assert.equal(err.message.includes(CONNECTION_STRING), false, 'must not echo the value');
+  });
+
+  it('every reason is a short fixed rule sentence, so none can smuggle a value out (FIX 2 backstop)', () => {
+    for (const c of cases) {
+      for (const value of c.illegal) {
+        const reason = c.fn(value);
+        assert.ok(reason.length < 200, `${c.name} reason unexpectedly long: ${reason}`);
+      }
+    }
   });
 });

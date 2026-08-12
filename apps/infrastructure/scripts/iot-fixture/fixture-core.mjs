@@ -572,6 +572,156 @@ export function partitionKeyFieldProblem(value) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Per-resource-type name validation (operator-authorized redesign, MG-67).
+//
+// The five operator-supplied names — the IoT Hub, the device, the Cosmos
+// account, the database and the container — are validated against the ACTUAL
+// Azure naming rules for THAT resource type. This REPLACES a single
+// credential-SHAPE heuristic (`scrubSecrets(value) !== value`) that failed in
+// both directions at once:
+//
+//   - FALSE NEGATIVE: a 32-character opaque secret matches no scrubber pattern,
+//     so it was accepted unchanged and then embedded in logs, the az argv and
+//     the document body.
+//   - FALSE POSITIVE: the scrubber's JWT pattern matches the LEGAL Cosmos id
+//     `analytics01.eventstore1.replicaWest` (Cosmos ids permit dots), so a valid
+//     container name was refused before anything could be measured or sent.
+//
+// Detecting a secret by shape cannot be patched into correctness, and one
+// heuristic across five resource types with materially different naming rules is
+// what produced both failures together. So this is an ALLOWLIST: a value is
+// accepted only if it satisfies its own type's documented rule. Credential
+// material fails BY CONSTRUCTION rather than by pattern recognition — a JWT
+// fails the IoT Hub name rule on its dots, a connection string fails every rule
+// on its '/' and ';' separators.
+//
+// HONEST LIMITATION (stated in the runbook, FIX 3): this is NOT a credential
+// detector. A secret shaped like a LEGAL resource name — a 32-character key
+// passed as --device, indistinguishable from a 32-character device id — is not
+// detectable by naming rules, and this tool does not claim to catch it. The
+// operator-facing guarantee is narrower and true: the tool never accepts, holds
+// or requires a credential (az resolves the device key itself under the caller's
+// identity), so no key is ever passed in.
+//
+// Every checker returns a reason fragment naming the RULE, and NEVER echoes the
+// rejected value (FIX 2): a caller can refuse without putting untrusted argv
+// text on any output line. The scrubber's JWT pattern stays as-is — it is the
+// accepted over-redaction posture for ERROR OUTPUT (MG-63), and it is no longer
+// the arbiter of a name's legality, so its false positive on a dotted id no
+// longer refuses a valid container.
+// ---------------------------------------------------------------------------
+
+// IoT Hub name — Microsoft.Devices/IotHubs. Length 3-50; alphanumerics and
+// hyphens; must not start or end with a hyphen.
+// https://learn.microsoft.com/azure/azure-resource-manager/management/resource-name-rules#microsoftdevices
+export function iotHubNameProblem(value) {
+  if (typeof value !== 'string' || value.trim() === '') return 'it is not a non-empty string';
+  if (value.length < 3 || value.length > 50) {
+    return 'an IoT Hub name must be 3 to 50 characters long';
+  }
+  if (!/^[A-Za-z0-9-]+$/.test(value)) {
+    return "an IoT Hub name may contain only letters, digits and hyphens — a JWT's dots and a connection string's separators are rejected here";
+  }
+  if (value.startsWith('-') || value.endsWith('-')) {
+    return 'an IoT Hub name may not start or end with a hyphen';
+  }
+  return null;
+}
+
+// IoT Hub device registration id — the device identity registry. Up to 128
+// characters, case-sensitive, ASCII 7-bit alphanumerics plus -.+%_#*?!(),:=@$' .
+// Notably NO '/', ';' or whitespace, so a connection string or SAS token fails
+// on its separators.
+// https://learn.microsoft.com/azure/iot-hub/iot-hub-devguide-identity-registry
+const DEVICE_ID_CHARSET = /^[A-Za-z0-9.+%_#*?!(),:=@$'-]+$/;
+export function deviceIdProblem(value) {
+  if (typeof value !== 'string' || value.trim() === '') return 'it is not a non-empty string';
+  if (value.length > 128) return 'a device id must be at most 128 characters long';
+  if (!DEVICE_ID_CHARSET.test(value)) {
+    return "a device id may contain only ASCII alphanumerics and -.+%_#*?!(),:=@$' — a connection string's '/' or ';' is rejected here";
+  }
+  return null;
+}
+
+// Cosmos DB account name — Microsoft.DocumentDB/databaseAccounts. Length 3-44;
+// lowercase letters, digits and hyphens; must not start or end with a hyphen.
+// Uppercase, dots and connection-string separators all fail.
+// https://learn.microsoft.com/azure/azure-resource-manager/management/resource-name-rules#microsoftdocumentdb
+export function cosmosAccountNameProblem(value) {
+  if (typeof value !== 'string' || value.trim() === '') return 'it is not a non-empty string';
+  if (value.length < 3 || value.length > 44) {
+    return 'a Cosmos account name must be 3 to 44 characters long';
+  }
+  if (!/^[a-z0-9-]+$/.test(value)) {
+    return 'a Cosmos account name may contain only lowercase letters, digits and hyphens';
+  }
+  if (value.startsWith('-') || value.endsWith('-')) {
+    return 'a Cosmos account name may not start or end with a hyphen';
+  }
+  return null;
+}
+
+// Cosmos DB resource id (database and container). At most 255 characters; may
+// not contain '/', '\', '#' or '?'; may not end with whitespace. Dots ARE
+// permitted, so a legal id such as `analytics01.eventstore1.replicaWest` is
+// accepted — the exact value the old scrubber-shape gate wrongly refused. A
+// connection string fails on its '/'.
+// https://learn.microsoft.com/rest/api/cosmos-db/databases
+const COSMOS_ID_FORBIDDEN = /[\/\\#?]/;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+function cosmosResourceIdProblem(value, noun) {
+  if (typeof value !== 'string' || value.trim() === '') return 'it is not a non-empty string';
+  if (value.length > 255) return `a Cosmos ${noun} id must be at most 255 characters long`;
+  if (CONTROL_CHARS.test(value)) return `a Cosmos ${noun} id may not contain a control character`;
+  if (COSMOS_ID_FORBIDDEN.test(value)) {
+    return `a Cosmos ${noun} id may not contain '/', '\\', '#' or '?'`;
+  }
+  if (/\s$/.test(value)) return `a Cosmos ${noun} id may not end with whitespace`;
+  return null;
+}
+export function cosmosDatabaseIdProblem(value) {
+  return cosmosResourceIdProblem(value, 'database');
+}
+export function cosmosContainerIdProblem(value) {
+  return cosmosResourceIdProblem(value, 'container');
+}
+
+// The five kinds, keyed so the CLI maps a flag to a kind rather than to a
+// function. Frozen: the set of things this tool names is closed.
+export const RESOURCE_NAME_KINDS = Object.freeze({
+  IOT_HUB: 'iot-hub',
+  DEVICE: 'device',
+  COSMOS_ACCOUNT: 'cosmos-account',
+  COSMOS_DATABASE: 'cosmos-database',
+  COSMOS_CONTAINER: 'cosmos-container',
+});
+
+const RESOURCE_NAME_CHECKERS = Object.freeze({
+  [RESOURCE_NAME_KINDS.IOT_HUB]: iotHubNameProblem,
+  [RESOURCE_NAME_KINDS.DEVICE]: deviceIdProblem,
+  [RESOURCE_NAME_KINDS.COSMOS_ACCOUNT]: cosmosAccountNameProblem,
+  [RESOURCE_NAME_KINDS.COSMOS_DATABASE]: cosmosDatabaseIdProblem,
+  [RESOURCE_NAME_KINDS.COSMOS_CONTAINER]: cosmosContainerIdProblem,
+});
+
+/**
+ * Why this value cannot be a name of the given kind, or null if it satisfies
+ * that kind's Azure naming rule. Mirrors partitionKeyFieldProblem: it returns a
+ * reason a caller embeds in its own refusal, and it NEVER echoes the value — so
+ * the CLI can reject a credential-shaped argument without emitting it. The
+ * caller owns the exit code (EXIT.USAGE) and the flag name.
+ *
+ * Throws only on a programmer error: a kind this closed registry does not know.
+ */
+export function resourceNameProblem(kind, value) {
+  const checker = RESOURCE_NAME_CHECKERS[kind];
+  if (!checker) {
+    throw new FixtureError(EXIT.USAGE, `unknown resource kind '${safeFragment(String(kind))}'`);
+  }
+  return checker(value);
+}
+
 // IoT Hub system properties, in az's `$.`-prefixed spelling. `$.ct` and `$.ce`
 // are the two that decide whether the routed payload becomes a queryable JSON
 // document or an opaque blob (see the finding in the module header). `$.mid`
