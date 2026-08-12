@@ -609,15 +609,36 @@ export function partitionKeyFieldProblem(value) {
 // any slot: this fixture never addresses a dotted Cosmos resource, so admitting
 // one only reopened the hole a security review then reported.
 //
-// What remains genuinely undetectable is narrow and stated plainly rather than
-// overclaimed: an OPAQUE string already shaped like a legal name — a 32-char
-// hex key indistinguishable from a 32-char identifier — is accepted, because no
-// naming rule can tell them apart. That residue does not matter here, because the
-// tool never accepts, holds or requires a credential at all: az resolves the
-// device key itself under the caller's identity, so no key is ever passed in.
-// A recognizable credential SHAPE (a JWT, a connection string, a SAS token) no
-// longer slips through the device field, which is the finding this correction
-// closes.
+// THE DEVICE FIELD IS PINNED, NOT MERELY CHARSET-CONSTRAINED (operator-required,
+// MG-67 — this closes the last item in the credential-handling family). A
+// charset rule cannot separate a 32-char opaque secret from a 32-char legal
+// device id: there is no difference to detect, so narrowing the pattern further
+// was correctly rejected. Instead, --device accepts ONLY the one declared
+// durable fixture (FIXTURE_DEVICE_ID). Every other value — including an opaque
+// alphanumeric string that satisfies the charset — is refused BEFORE it can be
+// logged, passed to the az argv, embedded in a document body, or written to the
+// evidence record. This makes "an opaque credential accepted as a device name"
+// STRUCTURALLY UNREACHABLE rather than mitigated: no value but the fixture's own
+// name is accepted at all, so the allowlist never has to tell a secret from an
+// id — it never sees one. Accepted, on-the-record tradeoff: pointing the tool at
+// a different device now requires a code change. That is intended — the ticket
+// defines a DURABLE, singular fixture and MG-62 reuses this exact device, so
+// nothing in the sequence needs an arbitrary device name.
+//
+// The other four fields (hub, account, database, container) stay charset-
+// validated rather than pinned, and this is deliberate: the hub and account
+// names carry infra-assigned random suffixes a legitimate resource replacement
+// changes, and the database/container are operator-supplied to match the
+// MEASURED container, so a literal pin there would hardcode a deployment
+// identity and break on a legal infra change. Their residue — an OPAQUE string
+// already shaped like a legal name, e.g. a 32-char hex key indistinguishable
+// from a 32-char identifier — is accepted, because no naming rule can tell them
+// apart. That residue does not matter, because the tool never accepts, holds or
+// requires a credential at all: az resolves the device key itself under the
+// caller's identity, so no key is ever passed in. A recognizable credential
+// SHAPE (a JWT, a connection string, a SAS token) still fails every field's
+// rule by construction. Only the DEVICE field, the one the security review
+// flagged, is hardened all the way to a pin.
 //
 // Every checker returns a reason fragment naming the RULE, and NEVER echoes the
 // rejected value (FIX 2): a caller can refuse without putting untrusted argv
@@ -648,27 +669,36 @@ export function iotHubNameProblem(value) {
 
 // IoT Hub device registration id — the device identity registry PERMITS up to
 // 128 characters of ASCII alphanumerics plus -.+%_#*?!(),:=@$' . But this tool
-// does NOT need that width: --device names a FIXTURE DEVICE WHOSE NAME THIS TOOL
-// CHOOSES (FIXTURE_DEVICE_ID), reused verbatim by MG-62. So the rule is
-// constrained FAR BELOW the Azure-legal set, on purpose (operator-authorized
-// correction, MG-67): a plain identifier of ASCII letters, digits and interior
-// hyphens, at most 128 characters, no leading or trailing hyphen.
+// does NOT need that width, and in fact needs no width at all: --device names the
+// ONE FIXTURE DEVICE WHOSE NAME THIS TOOL CHOOSES (FIXTURE_DEVICE_ID), reused
+// verbatim by MG-62. So this rule is PINNED, not merely narrowed (operator-
+// required correction, MG-67): the only accepted --device value is that declared
+// constant.
 //
-// The load-bearing consequence is that a DOT is rejected outright, so a
-// JWT — three dot-separated base64url segments — cannot pass in the device slot
-// BY CONSTRUCTION. That matters because the device id is logged, passed to the az
-// argv, and — since it is the container's partition key — embedded in the Cosmos
-// document body; a JWT is a legal Azure device id but must never travel any of
-// those paths. Validating against this tool's actual need instead of Azure's
-// legal maximum closes that finding while over-refusing nothing this fixture will
-// ever legitimately be asked to name (a fixture device is a simple identifier).
+// Why a pin and not a tighter charset. A 32-character opaque alphanumeric secret
+// is indistinguishable from a 32-character alphanumeric device id — there is no
+// character-class rule that separates them, because there is no difference to
+// detect. So the charset check below still runs first (it gives a precise reason
+// for genuinely malformed input, and rejects a JWT / connection string / SAS on
+// its separators BY CONSTRUCTION without ever echoing the value), and THEN the
+// pin refuses everything that is not the fixture's own name. The load-bearing
+// consequence: an opaque credential can never be accepted as a device name,
+// because no value other than the fixture's name is accepted at all. That is the
+// only thing that makes "opaque credential accepted as a device name"
+// structurally unreachable — the device id is logged, passed to the az argv, and
+// (as the container's partition key) embedded in the Cosmos document body, and
+// none of those paths may ever carry an unpinned value.
 //
-// The database and container rules in cosmosResourceIdProblem below are pinned
-// the SAME way, and for the same reason: this fixture addresses only plain-
-// identifier Cosmos ids (meatgeek-v2-dev-db, temperatures), so a dotted id such
-// as analytics01.eventstore1.replicaWest is refused there too. The three rules
-// share the same charset intent but stay separate functions so each names its
-// own resource type in its refusal.
+// Accepted tradeoff, on the record: addressing a different device now requires a
+// code change. Intended — the fixture is durable and singular by design.
+//
+// The database and container rules in cosmosResourceIdProblem below stay CHARSET-
+// constrained rather than pinned, because those are operator-supplied to match
+// the measured container and the account/hub names carry infra-assigned suffixes;
+// see the SCOPE PER FIELD note above. They still reject a dotted id such as
+// analytics01.eventstore1.replicaWest and every separator-bearing credential by
+// construction. Each rule stays a separate function so it names its own resource
+// type in its refusal.
 // https://learn.microsoft.com/azure/iot-hub/iot-hub-devguide-identity-registry
 const DEVICE_ID_CHARSET = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 export function deviceIdProblem(value) {
@@ -678,6 +708,16 @@ export function deviceIdProblem(value) {
     return (
       'a fixture device id may contain only letters, digits and interior hyphens — a dot (so a JWT), ' +
       'whitespace and connection-string separators are rejected, below the Azure-legal device set'
+    );
+  }
+  // THE PIN. Anything charset-legal but not the declared fixture — an opaque
+  // 32-char secret shaped exactly like an id included — is refused here. The
+  // reason names the rule and NEVER echoes the value (FIX 2), so a refused
+  // credential appears on no output line, not even this refusal path.
+  if (value !== FIXTURE_DEVICE_ID) {
+    return (
+      'this tool addresses only its own declared durable fixture device, so --device ' +
+      'accepts no other value; an opaque or credential-shaped string is never accepted'
     );
   }
   return null;

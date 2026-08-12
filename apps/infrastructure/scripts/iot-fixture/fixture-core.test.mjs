@@ -931,12 +931,23 @@ describe('the synthetic document contract', () => {
     // The device rule is pinned below the Azure-legal set (MG-67 correction), so
     // a DOTTED device id — a JWT is exactly this shape — is refused here BY
     // CONSTRUCTION rather than laundered into a body as a partition value. The
-    // database and container rules are pinned the same way (this fixture addresses
-    // only plain-identifier Cosmos ids), so a dotted id is refused in those slots
-    // too — no slot admits one.
+    // database and container rules reject a dotted id the same way.
     assert.equal(refusal(() => build({ deviceId: 'grill.sensor.01' })).exitCode, EXIT.USAGE);
-    // The default fixture device id is a plain identifier and still builds.
+    // And the DEVICE field is pinned, so an opaque 32-char alphanumeric that
+    // clears the charset is still refused at the body-construction site — it can
+    // never be laundered into a document body as a partition value — and the
+    // refusal never echoes it (FIX 2).
+    const opaque = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+    const opaqueErr = refusal(() => build({ deviceId: opaque }));
+    assert.equal(opaqueErr.exitCode, EXIT.USAGE);
+    assert.equal(
+      opaqueErr.message.includes(opaque),
+      false,
+      'opaque device value must not be echoed'
+    );
+    // The default fixture device id is the pinned name and still builds.
     assert.doesNotThrow(() => build());
+    assert.doesNotThrow(() => build({ deviceId: FIXTURE_DEVICE_ID }));
   });
 });
 
@@ -2973,17 +2984,19 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
       name: 'device id',
       kind: RESOURCE_NAME_KINDS.DEVICE,
       fn: deviceIdProblem,
-      // The durable fixture device, plus a couple of plain identifiers. The rule
-      // is pinned FAR below the Azure-legal identity charset (MG-67 correction):
-      // letters, digits and interior hyphens only — no dots, no other
-      // punctuation — because a fixture device is a simple identifier this tool
-      // itself names.
-      legal: ['meatgeek-v2-dev-synthetic-fixture-device', 'dev-01', 'probe1'],
-      // JWT_SHAPED IS refused now — the finding this correction closes: a JWT is
-      // a legal Azure device id, but the device value is logged, passed to az and
-      // embedded in the document body, so it must never pass. Dots reject it by
-      // construction, along with every separator-bearing credential, whitespace,
-      // and the old full-punctuation set the registry would otherwise allow.
+      // PINNED, not merely charset-constrained (operator-required, MG-67): the
+      // ONLY legal --device value is the one declared durable fixture. A charset
+      // rule cannot separate a 32-char opaque secret from a 32-char device id, so
+      // the field accepts nothing but the fixture's own name — every other value
+      // is refused, which is what makes an opaque credential structurally
+      // unaddressable here.
+      legal: ['meatgeek-v2-dev-synthetic-fixture-device'],
+      // Everything that is not the fixture is refused now. That includes a JWT
+      // (dots), every connection string / SAS (separators) — the shapes an
+      // earlier cycle closed — AND plain identifiers like 'dev-01' or an opaque
+      // 32-char alphanumeric that clear the charset but are still not the
+      // fixture. The device value is logged, passed to az and embedded in the
+      // document body, so nothing but the pinned name may pass.
       illegal: [
         JWT_SHAPED,
         CONNECTION_STRING,
@@ -2997,6 +3010,10 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
         'under_score',
         '-leadhyphen',
         'trailhyphen-',
+        // Charset-legal but NOT the fixture — refused by the pin, not the charset.
+        'dev-01',
+        'probe1',
+        'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6',
       ],
     },
     {
@@ -3170,22 +3187,48 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
     }
   });
 
-  it('accepts a plain opaque name-shaped string but rejects a recognizable credential shape (honest limitation, narrowed)', () => {
-    // Narrowed, per-field statement (MG-67 correction). A recognizable credential
-    // SHAPE — a JWT, a connection string, a SAS token — no longer passes the
-    // device rule. What remains genuinely undetectable is only an OPAQUE string
-    // already shaped like a plain identifier: a 32-char hex key is
-    // indistinguishable from a 32-char device id by any naming rule, so it is
-    // ACCEPTED. That residue is harmless because the tool never accepts, holds or
-    // requires a credential at all — az resolves the device key under the
-    // caller's identity — so no key is ever passed in. The runbook states this
-    // per field rather than implying broad detection.
+  it('--device is PINNED: an opaque name-shaped string is refused, and appears on no output path including the refusal itself (finding closed, MG-67)', () => {
+    // The last item in the credential-handling family. Narrowing the charset
+    // could never close this: a 32-char opaque secret is indistinguishable from a
+    // 32-char device id, so the device field is pinned to the ONE declared
+    // fixture. An opaque alphanumeric that clears the charset is therefore
+    // REFUSED, not accepted.
     const opaqueNameShaped = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
-    assert.equal(deviceIdProblem(opaqueNameShaped), null);
-    // But the recognizable shapes ARE refused now.
+    const opaqueProblem = deviceIdProblem(opaqueNameShaped);
+    assert.ok(
+      typeof opaqueProblem === 'string' && opaqueProblem.length > 0,
+      'an opaque credential-shaped device value must now be refused by the pin'
+    );
+    // And the refused value never appears in the reason — no log line, no argv,
+    // no body, no evidence record can carry it, including this refusal path (FIX 2).
+    assert.equal(
+      opaqueProblem.includes(opaqueNameShaped),
+      false,
+      'the refusal must not echo the rejected value'
+    );
+    assert.equal(
+      resourceNameProblem(RESOURCE_NAME_KINDS.DEVICE, opaqueNameShaped),
+      opaqueProblem,
+      'the dispatcher refuses the opaque value too'
+    );
+    // The declared fixture name is the one value that IS accepted.
+    assert.equal(deviceIdProblem(FIXTURE_DEVICE_ID), null);
+    assert.equal(resourceNameProblem(RESOURCE_NAME_KINDS.DEVICE, FIXTURE_DEVICE_ID), null);
+    // The recognizable credential shapes remain refused (on the charset, before
+    // the pin), and the JWT-as-device case from prior cycles still holds.
     for (const shaped of [JWT_SHAPED, CONNECTION_STRING, DEVICE_CONN, SAS_TOKEN]) {
-      assert.ok(deviceIdProblem(shaped), `device rule must refuse ${shaped.slice(0, 12)}…`);
+      const problem = deviceIdProblem(shaped);
+      assert.ok(problem, `device rule must refuse ${shaped.slice(0, 12)}…`);
+      assert.equal(problem.includes(shaped), false, 'a refused shape is never echoed either');
     }
+    // The residue that remains genuinely undetectable now lives ONLY in the
+    // charset-only fields (account/database/container), never in --device: an
+    // opaque identifier-shaped string is accepted there, because those names are
+    // operator-supplied to match the measured resource and cannot be pinned to a
+    // literal. Harmless, because the tool never accepts, holds or requires a
+    // credential at all — az resolves the device key under the caller's identity.
+    assert.equal(cosmosContainerIdProblem(opaqueNameShaped), null);
+    assert.equal(cosmosDatabaseIdProblem(opaqueNameShaped), null);
   });
 
   it('refuses empty, whitespace-only and non-string input for every kind', () => {
