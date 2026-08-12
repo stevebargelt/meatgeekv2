@@ -502,8 +502,11 @@ ticket alongside the evidence.
 ## 6. The live run
 
 ```bash
-mkdir -p docs/infrastructure/evidence
-EVIDENCE="docs/infrastructure/evidence/mg67-fixture-run-${STAMP}.json"
+# --evidence-out is a DIRECTORY. The tool derives the file name inside it from
+# the run's own unique id (mg67-fixture-evidence-<runId>.json), so every run
+# exclusively owns one immutable artifact and two runs can never collide.
+EVIDENCE_DIR="docs/infrastructure/evidence"
+mkdir -p "$EVIDENCE_DIR"
 
 # CAPTURE the run's output. This is not convenience logging: §7c inspects these
 # two files, and they are the ONLY evidence that can discharge this ticket's
@@ -523,11 +526,17 @@ node apps/infrastructure/scripts/iot-fixture/send-fixture.mjs \
   --container-definition "/tmp/mg67-${CONTAINER}-${STAMP}.json" \
   --timeout 180000 \
   --poll-interval 5000 \
-  --evidence-out "$EVIDENCE" \
+  --evidence-out "$EVIDENCE_DIR" \
   >"$RUN_OUT" 2>"$RUN_ERR"
 RUN_EXIT=$?
 echo "send-fixture exit=$RUN_EXIT"     # RECORD THIS — it is half the proof
 cat "$RUN_OUT" "$RUN_ERR"
+
+# The tool named the file inside $EVIDENCE_DIR from the run's unique id and
+# printed the exact path ("evidence destination reserved for run ...", and the
+# summary line at the end). Capture it for §7c:
+EVIDENCE=$(ls -1t "$EVIDENCE_DIR"/mg67-fixture-evidence-*.json | head -1)
+echo "evidence artifact: $EVIDENCE"
 ```
 
 **The two streams are captured to two files, with a redirect rather than a
@@ -551,32 +560,36 @@ shell history next to the result. The defaults are the same values (180000 ms /
 
 ### What the tool does, in order — and where it can stop
 
-1. **Proves `--evidence-out` is usable** — the directory exists, the path is
-   writable, and no `.partial` belonging to **another** run is sitting next to it
-   — **before anything live happens**. These are purely local facts, so an
-   unusable destination is a **usage error (exit 1)** while nothing has been sent,
+1. **Reserves this run's evidence file** inside the `--evidence-out` **directory**
+   — **before anything live happens**. `--evidence-out` names a directory; the
+   tool derives the file name from this run's own unique id
+   (`mg67-fixture-evidence-<runId>.json`), so **every run exclusively owns one
+   destination** and two runs can never name the same file. The reservation proves
+   the directory exists and is usable, exercises the **actual** publication
+   primitive (a write and a rename, with disposable probe files) so a directory
+   that cannot support it is caught now rather than after the send, and then
+   **atomically claims** the derived file. All of that is purely local, so an
+   unusable directory — or a **reused** destination, i.e. that exact derived file
+   already existing — is a **usage error (exit 1)** while nothing has been sent,
    rather than three documents in the live container that the tool then refuses to
-   record. The same rules are re-applied at write time (§7a), and that later
-   refusal is still the authoritative one: this is a pre-flight, not a replacement
-   for it.
+   record.
 
-   Two properties of that check are worth knowing before you read a refusal, both
-   of them the same discipline the rest of the tool applies to Cosmos, turned on
-   its own filesystem:
-
-   - **An unreadable destination is refused, not assumed free.** Only an explicit
+   Two properties worth knowing before you read a refusal, both the same
+   discipline the rest of the tool applies to Cosmos, turned on its own
+   filesystem:
+   - **An unreadable directory is refused, not assumed free.** Only an explicit
      "no such file" counts as _absent_. A `stat` that fails any other way — a
      permission error, a dead mount, an I/O error — is a **refusal (exit 1)**, and
-     the message names the code it got. The tool never proceeds to write on a
+     the message names the code it got. The tool never proceeds to send onto a
      destination it could not read, because "I could not tell" silently becoming
-     "nothing is there" is precisely how a run destroys an earlier run's record
-     while reporting success. Same for the directory listing the concurrency guard
-     depends on: a directory it cannot enumerate is refused, never read as "no
-     concurrent run here".
-   - **The guard is about _another_ run's partial, not your own.** Partial files
-     are named for the run that owns them (§7a), so the check is a directory
-     enumeration rather than a stat of one path — this run cannot know another
-     run's filename in advance, and a listing is the only thing that can see one.
+     "nothing is there" is precisely the error-as-absence conflation this tool
+     exists to refuse.
+   - **Evidence artifacts are immutable and per-run.** There is **no `--overwrite`
+     flag and no mode that replaces a record** — a file already at the derived
+     name means a genuinely reused destination and the run refuses to start.
+     Because the name is derived from a unique run id, two runs cannot collide, so
+     there is nothing to coordinate: **you may run overlapping fixtures against the
+     same `--evidence-out` directory freely** — they own different files.
 
 2. **Measures** the container from §3's document. Refuses on anything it cannot
    read (**exit 8**); never defaults.
@@ -644,19 +657,19 @@ supply a credential by hand, that is stop condition 2 (§9) — halt and report.
 
 ### Exit codes — the operator contract
 
-| Code | Meaning                         | What it tells you                                                                                                                                                             |
-| ---- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | confirmed-in-cosmos             | **The only success.** 3 marker-carrying, run-correlated documents were read back out of `temperatures`, and the evidence was written.                                         |
-| 1    | usage error                     | Bad/missing arguments, a refused credential-shaped flag, or an **unusable `--evidence-out`** caught by the pre-flight. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.   |
-| 2    | send failure                    | `az iot device send-d2c-message` failed. Check `az login` and `az extension add --name azure-iot`.                                                                            |
-| 3    | confirmation timeout            | The bound elapsed with the documents not found. **Not an absence, not a success.**                                                                                            |
-| 4    | auth failure                    | 401/403, or no credential could be acquired. **Says nothing about whether the route delivered.** Usually §4 not propagated.                                                   |
-| 5    | transport abort                 | Retries exhausted on a transport error.                                                                                                                                       |
-| 6    | synthetic marker violation      | A read-back document lacked the marker — a defect in the sender, not an acceptable variant.                                                                                   |
-| 7    | correlation ambiguity           | Fewer documents than sent, a duplicate correlator, or an unreadable result. Also the code for a run that concluded a state this tool cannot name — see below. **Stop condition 3 (§9).** |
-| 8    | container definition refusal    | §3's document could not be measured. No default was substituted.                                                                                                              |
+| Code | Meaning                         | What it tells you                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0    | confirmed-in-cosmos             | **The only success.** 3 marker-carrying, run-correlated documents were read back out of `temperatures`, and the evidence was written.                                                                                                                                                                                                                                                                                                            |
+| 1    | usage error                     | Bad/missing arguments, a refused credential-shaped flag, or an **unusable or reused `--evidence-out`** caught by the reservation. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1.                                                                                                                                                                                                |
+| 2    | send failure                    | `az iot device send-d2c-message` failed. Check `az login` and `az extension add --name azure-iot`.                                                                                                                                                                                                                                                                                                                                               |
+| 3    | confirmation timeout            | The bound elapsed with the documents not found. **Not an absence, not a success.**                                                                                                                                                                                                                                                                                                                                                               |
+| 4    | auth failure                    | 401/403, or no credential could be acquired. **Says nothing about whether the route delivered.** Usually §4 not propagated.                                                                                                                                                                                                                                                                                                                      |
+| 5    | transport abort                 | Retries exhausted on a transport error.                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 6    | synthetic marker violation      | A read-back document lacked the marker — a defect in the sender, not an acceptable variant.                                                                                                                                                                                                                                                                                                                                                      |
+| 7    | correlation ambiguity           | Fewer documents than sent, a duplicate correlator, or an unreadable result. Also the code for a run that concluded a state this tool cannot name — see below. **Stop condition 3 (§9).**                                                                                                                                                                                                                                                         |
+| 8    | container definition refusal    | §3's document could not be measured. No default was substituted.                                                                                                                                                                                                                                                                                                                                                                                 |
 | 9    | delivered, unexpected partition | The full set **arrived**, and one or more documents do **not carry the expected partition value** — read off the documents, not inferred from which query found them. The route works; the partition assumption does not. "Under a **different** `deviceId`" and "carrying **no** `deviceId` field at all" are stated and recorded separately (§6, §7a). Report it with `observedPartitionValues` — do not re-run hoping for a different answer. |
-| 10   | evidence unrecorded             | **A send happened and no record of it survives.** See below — this one needs an action before any diagnosis.                                                                  |
+| 10   | evidence unrecorded             | **A send happened and no record of it survives.** See below — this one needs an action before any diagnosis.                                                                                                                                                                                                                                                                                                                                     |
 
 #### There is no default success — an unnameable outcome exits 7
 
@@ -676,12 +689,12 @@ absence**.
 
 Exit 10 means the live container **changed** and the evidence file could not be
 written or built (a permissions problem, a destination that became unusable
-between the pre-flight and the write, a serialization refusal). The pre-flight in
-step 1 of the ordered list above now catches the common causes — a missing
-directory, a path that would clobber an earlier run's record — as **exit 1**
-while nothing has been sent, so exit 10 is rarer than it was. It has not gone
-away: the destination is re-checked at write time, and the window between the
-two checks is real. It is deliberately **not** exit 1: exit 1 means "bad
+between the reservation and the write, a serialization refusal). The reservation
+in step 1 of the ordered list above catches the common causes — a missing or
+unusable directory, a reused destination — as **exit 1** while nothing has been
+sent, so exit 10 is rarer than it was. It has not gone away: the run owns its
+reserved file, but the publication write itself can still fail (a full disk, an
+unmounted volume) after the send. It is deliberately **not** exit 1: exit 1 means "bad
 arguments, nothing live happened", and being told nothing happened while
 documents sit in `temperatures` is the one failure MG-53 cannot diagnose — an
 unrecorded document is indistinguishable there from the unknown-writer finding
@@ -689,9 +702,10 @@ its halt exists to catch.
 
 The tool prints, on stderr, the run id, the marker and **every document id that
 is (or may be) live**, followed by `RECORD THESE IDS BY HAND`. Do exactly that,
-into the ticket, **before** fixing the path and re-running. Then re-run with a
-**new** `--evidence-out` path; the run that failed to record still counts toward
-what the source contains.
+into the ticket, **before** re-running. A re-run against the **same
+`--evidence-out` directory** just works — it mints a fresh run id and names a
+fresh file — and the run that failed to record still counts toward what the
+source contains.
 
 Exit 10 **takes precedence over the confirmation's own code**, which is printed
 on the lines immediately above it (`confirmation timeout`, `auth failure`, and so
@@ -719,43 +733,33 @@ mid-flight leaves them in your terminal even if it never reached the artifact.
 
 Each invocation mints a **new** `fixtureRunId` and a fresh set of message ids, and
 reads no state a prior run wrote. Two runs therefore produce two independently
-identified document sets. Use a **new** `--evidence-out` path each time: the tool
-refuses to overwrite an existing evidence file unless you pass `--overwrite`,
-because that file records an earlier run whose documents are **still in the
-container**, and destroying the record of them manufactures exactly the
-unrecorded-document condition that halts MG-53.
+identified document sets. **Point every run at the same `--evidence-out`
+directory** and let the tool name the files: the file name is derived from the
+run's unique id, so two runs can never collide, and there is nothing to
+coordinate.
 
-#### `--overwrite` replaces your own record; it does not defeat the concurrency guard
+#### Evidence artifacts are immutable and per-run
 
-The flag exists for one situation: you wrote a record earlier, you have decided
-deliberately to replace it, and you accept that the earlier run's documents are
-now accounted for somewhere else. **That is the whole of what it authorises.**
+There is **no `--overwrite` flag and no mode that replaces a record**. Each run
+exclusively owns one file, whose name is derived from its unique id, and that file
+is claimed by an atomic reservation **before the send**. A file already at that
+derived name is a genuinely reused destination and the run refuses to start
+(**exit 1**, nothing sent). This is deliberate: a committed evidence record
+accounts for documents that are **still in the container**, and there is no
+supported way to destroy it.
 
-It does **not** authorise destroying a record another run is writing _right now_,
-and no flag on this tool does. So the concurrent-`.partial` refusal stays active
-**with `--overwrite` as well**: a destination that has a foreign `.partial` next
-to it is refused either way, and the message says so. Two things follow, and both
-are worth internalising before you reach for the flag on a failed run:
+Two consequences worth internalising:
 
-- **Never point two concurrent runs at the same `--evidence-out`.** Not with
-  `--overwrite`, not without it. If the guard were bypassable, the failure it
-  prevents would not be a missing file — it would be one file, under the name you
-  expect, holding the **other run's record**, with both runs reporting success. A
-  wrong record under the right name is worse than no record: nothing downstream
-  can detect it, and MG-53 would reconcile the source against a run that is not
-  the one whose documents are in the container.
-- **A `.partial` you find is either live or a corpse, and you have to tell them
-  apart.** It is named `<evidence-file>.<fixtureRunId>.partial` (§7a), so read the
-  run id out of the filename first. If a run with that id is still going, **wait
-  for it** — do not delete it. If it belongs to a run you know crashed, delete it
-  deliberately, then re-run. Do not delete one you cannot account for: that is an
-  unknown run whose documents may be in the container, which is a reporting
-  matter (§9), not a cleanup.
-
-If you are re-running after a failure, the answer is almost always a **new**
-`--evidence-out` path rather than `--overwrite`. The failed run's documents may
-well be live (exit 2 and exit 10 both leave that open), and its record is the
-only thing that accounts for them.
+- **Overlapping runs are fine — and never share a destination.** Because the file
+  name is derived from a unique run id, two concurrent runs against the same
+  `--evidence-out` directory own **different** files. There is no shared-writer
+  coordination to get wrong, no `.partial` interleave, and no way for one run's
+  record to end up under another run's name.
+- **Re-running after a failure just works.** Point the re-run at the same
+  directory; it mints a fresh run id and names a fresh file. The failed run's
+  documents may well be live (exit 2 and exit 10 both leave that open), and its
+  record — under its own run-id-named file — is the only thing that accounts for
+  them, so leave it in place.
 
 ---
 
@@ -765,45 +769,46 @@ Two artifacts. They are not interchangeable.
 
 ### 7a. The machine-readable artifact — the one MG-53 and MG-54 consume
 
-`--evidence-out` writes **one JSON document**, atomically. Commit it at
-`docs/infrastructure/evidence/mg67-fixture-run-<UTC>.json` and reference it from
-the ticket. **This file, not this runbook, is what downstream tickets parse** — a
-prose procedure that drifts is a documentation bug; a machine-readable record
-that drifts is a wrong deletion.
+`--evidence-out` is a **directory**; the tool writes **one JSON document** into it,
+named `mg67-fixture-evidence-<fixtureRunId>.json`, atomically. Commit that exact
+file (the run printed its path — see §6) and reference it from the ticket. **This
+file, not this runbook, is what downstream tickets parse** — a prose procedure
+that drifts is a documentation bug; a machine-readable record that drifts is a
+wrong deletion.
 
-**Two neighbouring filenames you may see, and what each means.** The write goes to
-a temporary file first and is renamed into place, so no reader ever sees a
-half-written record:
+**A neighbouring filename you may see.** The write goes to a per-run temporary file
+first and is renamed into place over the run's own reservation, so no reader ever
+sees a half-written record:
 
-| Filename                                | What it is                                                                                                                                                                                                                                                            | What to do                                                                                                                                              |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<evidence-file>.<fixtureRunId>.partial` | The temp file for the write, named for the **run that owns it** — not for the destination. That is what makes two runs sharing a destination unable to interleave on one temp path and hand you one run's record under the other's name.                               | Read the run id out of the name. Live run → wait. Known crashed run → delete deliberately, then re-run. Unaccounted-for → §9, report it.                |
-| `<evidence-file>.preflight`              | The zero-byte probe the pre-flight writes and removes to prove the path is actually writable. Removing it is best-effort and deliberately not fatal.                                                                                                                   | Nothing. Delete it if it bothers you; it is not evidence and holds no bytes.                                                                             |
+| Filename                                                         | What it is                                                                                                                                                                       | What to do                                                                                                                                          |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mg67-fixture-evidence-<fixtureRunId>.json.<runId>.partial`      | The per-run temp file for the write. It exists only for the instant between writing the record and renaming it into place; a failed write removes it rather than leaving debris. | Nothing in a normal run. If one lingers, read the run id out of the name: known crashed run → delete deliberately; unaccounted-for → §9, report it. |
+| `mg67-fixture-evidence-<fixtureRunId>.json` (**empty, 0 bytes**) | A reservation whose run reserved a destination and then wrote nothing (a refused pre-send read, an interrupted settlement). The tool removes it on exit; a leftover is inert.    | Nothing. It is not a record (an empty file is not valid JSON). Delete it if it bothers you.                                                         |
 
-Neither is the artifact. Commit the file at the exact `--evidence-out` path and
-nothing else.
+The committed artifact is the **non-empty** JSON file named for the run. Commit
+that and nothing else.
 
 Fields, by their real names. It is **`schemaVersion: 2`**; MG-53 and MG-54 check
 that first and must refuse a version they were not written against.
 
-| Field                                                                                                 | What it carries                                                                                                                                                                                                   |
-| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                                                                                                              |
-| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                                                                                                            |
-| `confirmed`, `uncertain`, `attempted`, `outcome`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`   | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`. `outcome` is the stable slug to branch on. `scope` is `expected-partition`, `cross-partition`, `aborted-after-read-back` or `not-attempted`, and says which read found the documents — **not** where they landed. `scope: cross-partition` with `exitCode: 0` is a confirmed run whose documents the sweep found in the **expected** partition; where they landed is `observedPartitionValues`. |
-| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                                                                                                                  |
-| `deviceId`                                                                                            | The fixture device.                                                                                                                                                                                               |
-| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                                              |
+| Field                                                                                                 | What it carries                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `confirmed`, `uncertain`, `attempted`, `outcome`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`   | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`. `outcome` is the stable slug to branch on. `scope` is `expected-partition`, `cross-partition`, `aborted-after-read-back` or `not-attempted`, and says which read found the documents — **not** where they landed. `scope: cross-partition` with `exitCode: 0` is a confirmed run whose documents the sweep found in the **expected** partition; where they landed is `observedPartitionValues`.                                                                                                              |
+| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `deviceId`                                                                                            | The fixture device.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed. `observedPartitionValues` records a document carrying **no** partition key field as the reserved token `<no-partition-key-field>`, and one whose value is present but empty or not a string as `<unusable-partition-key-value>` — **recorded states, not an absence**. An empty list would throw away the one fact separating "landed under a different key" from "landed under no key at all", and the second is the predicted failure mode for this route. Neither token is a legal device id this fixture mints. |
-| **the four id sets** — see below                                                                      | `requestedIds`, `acceptedIds`, `ambiguousIds`, `observedIds`, each with its `…Count`.                                                                                                                             |
-| **`accountableIds`**, **`accountableCount`**                                                          | **Everything that is, or MAY BE, in the container** — accepted ∪ ambiguous ∪ observed, unioned once, here. **This is the set MG-53 must account for.**                                                            |
-| `anomalousIds`, `anomalousCount`                                                                      | Documents **the correlated read-back** returned that this run cannot claim — they carry this run's `fixtureRunId` but not the marker, or name a foreign run: a sender defect or a correlator collision. Kept strictly apart from the run's own ids. **This is NOT stop condition 1** — see below.        |
-| **`unknownWriterCheck`**                                                                              | A constant `checked: false`, `by: "operator-unfiltered-enumeration"`. The record saying **in itself** that stop condition 1 is not evaluated by this tool, and naming what does evaluate it (§9).                 |
-| **`ids`**, **`count`**                                                                                | Schema-v1 aliases for `observedIds` / `observedCount` — the same array, so they cannot disagree. **This is the list MG-54 cites for disposal.**                                                                   |
-| `expectedCount`, `idDivergence`                                                                       | What the run expected, and whether a **witnessed** observed document carried an id the sender did not request. Divergence is an observation, not a failure — and never inferred from a count shortfall.           |
-| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                                             |
-| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                                                          |
-| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `ambiguous-acceptance`, `unattributable-documents`, `partition-landing`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`. `partition-landing` names each landing state separately and appears on a **confirmed** run too: a confirmed run whose documents carry an odd partition value is still confirmed, and the oddity is recorded rather than dropped. |
+| **the four id sets** — see below                                                                      | `requestedIds`, `acceptedIds`, `ambiguousIds`, `observedIds`, each with its `…Count`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| **`accountableIds`**, **`accountableCount`**                                                          | **Everything that is, or MAY BE, in the container** — accepted ∪ ambiguous ∪ observed, unioned once, here. **This is the set MG-53 must account for.**                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `anomalousIds`, `anomalousCount`                                                                      | Documents **the correlated read-back** returned that this run cannot claim — they carry this run's `fixtureRunId` but not the marker, or name a foreign run: a sender defect or a correlator collision. Kept strictly apart from the run's own ids. **This is NOT stop condition 1** — see below.                                                                                                                                                                                                                                                                                |
+| **`unknownWriterCheck`**                                                                              | A constant `checked: false`, `by: "operator-unfiltered-enumeration"`. The record saying **in itself** that stop condition 1 is not evaluated by this tool, and naming what does evaluate it (§9).                                                                                                                                                                                                                                                                                                                                                                                |
+| **`ids`**, **`count`**                                                                                | Schema-v1 aliases for `observedIds` / `observedCount` — the same array, so they cannot disagree. **This is the list MG-54 cites for disposal.**                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `expectedCount`, `idDivergence`                                                                       | What the run expected, and whether a **witnessed** observed document carried an id the sender did not request. Divergence is an observation, not a failure — and never inferred from a count shortfall.                                                                                                                                                                                                                                                                                                                                                                          |
+| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `ambiguous-acceptance`, `unattributable-documents`, `partition-landing`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`. `partition-landing` names each landing state separately and appears on a **confirmed** run too: a confirmed run whose documents carry an odd partition value is still confirmed, and the oddity is recorded rather than dropped.                                                                                                                                                |
 
 #### The four id sets are not interchangeable
 
@@ -1220,31 +1225,31 @@ disappear.
 
 ## 11. Sequencing and related tickets
 
-| Ticket            | Relationship                                                                                                                                                                                                                                                                                                                        |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **MG-53**         | Reads this run's evidence artifact as a **program input**. It confirms the source contains **only** these recorded documents before creating anything; any unmarked or unrecorded document halts its sequence. **It must run §9's unfiltered enumeration itself** — the artifact's `unknownWriterCheck.checked` is a constant `false`, and `anomalousCount: 0` is not an unknown-writer clearance (§7a).                                                                            |
-| **MG-54**         | Its destructive authorization explicitly covers disposing of these documents, **citing the `ids` and `count` recorded here**.                                                                                                                                                                                                       |
-| **MG-62**         | Reuses this device for its post-cutover proof. Must **re-run §2a and re-check** that the device exists (§2c) — a hub replacement empties the registry silently. Should size its confirmation wait from this run's `observedArrivalMs`.                                                                                              |
-| **MG-59**         | Adds Cosmos persistence to the business API / `libs/azure-client`. Explicitly out of scope here. The fixture body deviates from `libs/api-specs` `TemperatureReading` (`additionalProperties: false`) by carrying the marker fields; that is an accepted **fixture-only** deviation flagged to MG-59, and the schema is not edited. |
-| **MG-66**         | Owns `scripts/cosmos-export/` and its absence-handling semantics — untouched here. The narrow-scope data-plane role gap noted in §4 is its.                                                                                                                                                                                         |
-| **MG-63**         | The known, accepted over-redaction limitation in the existing scrubber. **Not reopened and not "fixed" here.**                                                                                                                                                                                                                      |
-| **MG-58 / MG-24** | The green-signal precedents §8 exists because of.                                                                                                                                                                                                                                                                                   |
+| Ticket            | Relationship                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **MG-53**         | Reads this run's evidence artifact as a **program input**. It confirms the source contains **only** these recorded documents before creating anything; any unmarked or unrecorded document halts its sequence. **It must run §9's unfiltered enumeration itself** — the artifact's `unknownWriterCheck.checked` is a constant `false`, and `anomalousCount: 0` is not an unknown-writer clearance (§7a). |
+| **MG-54**         | Its destructive authorization explicitly covers disposing of these documents, **citing the `ids` and `count` recorded here**.                                                                                                                                                                                                                                                                            |
+| **MG-62**         | Reuses this device for its post-cutover proof. Must **re-run §2a and re-check** that the device exists (§2c) — a hub replacement empties the registry silently. Should size its confirmation wait from this run's `observedArrivalMs`.                                                                                                                                                                   |
+| **MG-59**         | Adds Cosmos persistence to the business API / `libs/azure-client`. Explicitly out of scope here. The fixture body deviates from `libs/api-specs` `TemperatureReading` (`additionalProperties: false`) by carrying the marker fields; that is an accepted **fixture-only** deviation flagged to MG-59, and the schema is not edited.                                                                      |
+| **MG-66**         | Owns `scripts/cosmos-export/` and its absence-handling semantics — untouched here. The narrow-scope data-plane role gap noted in §4 is its.                                                                                                                                                                                                                                                              |
+| **MG-63**         | The known, accepted over-redaction limitation in the existing scrubber. **Not reopened and not "fixed" here.**                                                                                                                                                                                                                                                                                           |
+| **MG-58 / MG-24** | The green-signal precedents §8 exists because of.                                                                                                                                                                                                                                                                                                                                                        |
 
 ---
 
 ## 12. Sign-off checklist
 
-| #   | Item                                                                                                                                                  | Evidence to record                                  | State       |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------- |
-| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                                                               | the `deviceId` + `status` row                       | **NOT RUN** |
-| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                                                                | the `jq` output                                     | **NOT RUN** |
-| 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)          | the §4 state file, `MG67_CREATED` either way        | **NOT RUN** |
-| 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                   | the exit code + the command line                    | **NOT RUN** |
-| 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a) | the file path + its contents                        | **NOT RUN** |
-| 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the grep output + the two committed log files | **NOT RUN** |
-| 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                 | all three Data Explorer queries, per container      | **NOT RUN** |
-| 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove  | both §5 proofs: yours gone, before/after diff empty | **NOT RUN** |
-| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                               | the finding text                                    | **NOT RUN** |
+| #   | Item                                                                                                                                                             | Evidence to record                                  | State       |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------- |
+| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                                                                          | the `deviceId` + `status` row                       | **NOT RUN** |
+| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                                                                           | the `jq` output                                     | **NOT RUN** |
+| 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)                     | the §4 state file, `MG67_CREATED` either way        | **NOT RUN** |
+| 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                              | the exit code + the command line                    | **NOT RUN** |
+| 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a)            | the file path + its contents                        | **NOT RUN** |
+| 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the grep output + the two committed log files       | **NOT RUN** |
+| 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                            | all three Data Explorer queries, per container      | **NOT RUN** |
+| 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove             | both §5 proofs: yours gone, before/after diff empty | **NOT RUN** |
+| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                                          | the finding text                                    | **NOT RUN** |
 
 **MG-67 closes when every line above is recorded — and not before.** Line 4 is
 the traversal; lines 5 and 7 are what the downstream tickets and the security

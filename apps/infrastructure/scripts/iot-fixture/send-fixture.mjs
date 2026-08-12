@@ -71,16 +71,18 @@
 // re-checks the same invariant immediately before returning, so no step added
 // between the resolution and the exit can manufacture a 0 either.
 //
-// THE EVIDENCE DESTINATION IS PROVEN BEFORE THE FIRST SEND. An unusable
-// --evidence-out path is a purely LOCAL fact, knowable at t0, and discovering it
-// after the send means three synthetic documents are in the live container and
-// the tool is only then refusing to record them — the unrecorded-document
-// condition that halts MG-53, manufactured by this tool, for a reason it could
-// have seen for free. So the directory, the writability and the no-overwrite
-// rule are checked first, and a failure there is a usage-class refusal while
-// nothing live has happened. It does NOT replace the after-the-fact recording
-// path below: the preflight is a check at t0 about a write at t1, the interval
-// spans the live send, and the write-time refusal remains the authoritative one.
+// THE EVIDENCE DESTINATION IS RESERVED BEFORE THE FIRST SEND. --evidence-out is
+// a DIRECTORY, and every run exclusively owns one file inside it whose name is
+// derived from the run's unique id — so two runs can never name the same file and
+// there is nothing to coordinate. The reservation proves the directory usable and
+// the publication primitive available, and atomically claims the derived file,
+// ALL before anything live happens. An unusable directory or a reused destination
+// is a usage-class refusal while nothing live has happened; discovering it after
+// the send would leave synthetic documents in the live container that the tool is
+// only then refusing to record — the unrecorded-document condition that halts
+// MG-53, for a reason it could have seen for free. Because the run OWNS its
+// destination, the after-the-send write needs no concurrency dance and there is
+// no flag that could replace an existing record.
 //
 // A PRE-FLIGHT READ RUNS BEFORE ANYTHING IS SENT. It serves three purposes and
 // is worth the extra round trip for each of them:
@@ -161,9 +163,10 @@ import {
 } from './container-definition.mjs';
 import {
   buildEvidenceRecord,
-  describeDestination,
   describeEvidence,
-  preflightEvidenceDestination,
+  describeReservation,
+  releaseReservation,
+  reserveEvidenceDestination,
   writeEvidenceRecord,
 } from './evidence.mjs';
 import {
@@ -212,18 +215,21 @@ durable dev fixture device and PROVE they were read back out of Cosmos.
 
 USAGE
   send-fixture.mjs --hub <name> --account <name> --database <id> --container <id>
-                   --container-definition <path|-> --evidence-out <path>
-                   [--device <id>] [--timeout <ms>] [--poll-interval <ms>] [--overwrite]
+                   --container-definition <path|-> --evidence-out <dir>
+                   [--device <id>] [--timeout <ms>] [--poll-interval <ms>]
 
 WHAT IT DOES, IN ORDER
-  1. Proves --evidence-out is usable — the directory exists, the path is
-     writable, and no earlier run's record is there to be clobbered — BEFORE
-     anything live happens. An unusable destination is a usage error (exit 1)
-     while nothing has been sent, rather than three documents in the container
-     that this tool then refuses to record.
-  2. Measures the destination container's partition key path and its ACTUAL
+  1. Measures the destination container's partition key path and its ACTUAL
      default_ttl from the --container-definition document. Nothing is assumed:
      a document missing either is refused (exit 8), never defaulted.
+  2. RESERVES this run's evidence file inside --evidence-out — a per-run,
+     immutable artifact whose name is derived from this run's unique id — BEFORE
+     anything live happens. The reservation proves the directory usable and the
+     publication primitive available, and atomically claims the file. A reused
+     destination or an unusable directory is a usage error (exit 1) while nothing
+     has been sent, rather than documents in the container this tool then refuses
+     to record. Two runs never share a destination, so there is nothing to
+     coordinate and no flag that could replace an existing record.
   3. Reads the destination container ONCE, before sending, and requires this
      run's id to be absent. That is what makes the proof a NEWLY identified
      document, and it surfaces a missing data-plane role assignment BEFORE any
@@ -267,28 +273,27 @@ WAIT (HR2 — bounded, reported, and never infinite)
   --poll-interval <ms>         Poll cadence within the bound. Default ${DEFAULT_POLL_INTERVAL_MS}.
 
 EVIDENCE (HR3 — recorded, machine-readable)
-  --evidence-out <path>        Required. One JSON document carrying the observed
-                               document ids and their count, the marker, the run
-                               id, the partition key path and value, the MEASURED
-                               default_ttl with the declared value and any drift,
-                               the wait bound used, the observed arrival delay and
-                               the run/expiry instants. Refuses to overwrite an
-                               existing file unless --overwrite is passed: that
-                               file records an earlier run whose documents are
-                               still in the container.
+  --evidence-out <dir>         Required. A DIRECTORY the tool writes a per-run,
+                               IMMUTABLE JSON artifact into. The file name is
+                               DERIVED from this run's unique id, so every run
+                               exclusively owns one destination — two runs can
+                               never name the same file, overlapping runs are
+                               fully supported, and there is nothing to coordinate.
+                               The artifact carries the observed document ids and
+                               their count, the marker, the run id, the partition
+                               key path and value, the MEASURED default_ttl with
+                               the declared value and any drift, the wait bound
+                               used, the observed arrival delay and the
+                               run/expiry instants.
 
-                               CHECKED BEFORE THE FIRST SEND. The directory has
-                               to exist, the path has to be writable, and an
-                               existing record (or a leftover '.partial' from a
-                               crashed run) refuses the run outright. All three
-                               are local facts, so they cost nothing to find out
-                               while nothing is live — and finding them out
-                               afterwards would mean documents in the container
-                               with no record of them, which is what MG-53 halts
-                               on. The same rules are re-applied at write time:
-                               the check happens before the send and the write
-                               happens after it, so the write-time refusal is
-                               still the authoritative one.
+                               RESERVED BEFORE THE FIRST SEND. The directory has
+                               to exist and the publication primitive has to work
+                               there, and the derived file is atomically claimed —
+                               all BEFORE anything live happens. A reused
+                               destination (a file already at the derived name)
+                               fails outright, usage-class, while nothing is live.
+                               There is NO flag that replaces an existing record:
+                               an evidence artifact is immutable and per-run.
 
                                WRITTEN ON EVERY OUTCOME, not just on success. Any
                                run that ATTEMPTED a send emits one, and it carries
@@ -298,19 +303,6 @@ EVIDENCE (HR3 — recorded, machine-readable)
                                back out of Cosmos. A failure record is never
                                readable as proof — confirmed stays false — and it
                                never claims that nothing was written.
-  --overwrite                  Replace an existing --evidence-out file — YOUR OWN
-                               earlier record. It is not a force flag: a
-                               destination another run holds a live '.partial' on
-                               is refused WITH --overwrite as well, because
-                               replacing a record you wrote earlier and destroying
-                               one a concurrent run is writing right now are
-                               different acts, and only the first is one this tool
-                               offers. A destination whose state cannot be READ —
-                               a stat failing for any reason other than "no such
-                               file" — is refused too, before and after the send:
-                               an unreadable answer is not an absence, and writing
-                               on one could destroy an earlier run's record while
-                               reporting success.
 
 AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
   Send:      'az iot device send-d2c-message' resolves the device key itself from
@@ -468,7 +460,6 @@ export function parseArgs(argv) {
     timeoutMs: DEFAULT_CONFIRMATION_TIMEOUT_MS,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
     evidenceOut: null,
-    overwrite: false,
     help: false,
   };
 
@@ -538,9 +529,6 @@ export function parseArgs(argv) {
       case '--evidence-out':
         cfg.evidenceOut = value;
         break;
-      case '--overwrite':
-        cfg.overwrite = true;
-        break;
       case '--help':
       case '-h':
         cfg.help = true;
@@ -583,7 +571,7 @@ export function requireComplete(cfg) {
   }
   if (typeof cfg.evidenceOut !== 'string' || cfg.evidenceOut.trim() === '') {
     throw usageError(
-      '--evidence-out <path> is required: MG-53 and MG-54 read this artifact as a program input, and an unrecorded run leaves documents in the container that no record accounts for'
+      '--evidence-out <dir> is required: it names a DIRECTORY the tool writes a per-run, immutable artifact into. MG-53 and MG-54 read that artifact as a program input, and an unrecorded run leaves documents in the container that no record accounts for'
     );
   }
   return cfg;
@@ -961,6 +949,7 @@ export async function preflight({ reader, runId }) {
 async function emitEvidence({
   ledger,
   snapshot,
+  reservation,
   confirmation,
   definition,
   cfg,
@@ -988,8 +977,7 @@ async function emitEvidence({
       deviceId: cfg.device,
       now,
     });
-    await writeEvidenceRecord(record, cfg.evidenceOut, {
-      overwrite: cfg.overwrite,
+    await writeEvidenceRecord(record, reservation, {
       ...(fs ? { fs } : {}),
     });
   } catch (err) {
@@ -1023,13 +1011,13 @@ async function emitEvidence({
       `${TOOL_NAME}: RECORD THESE IDS BY HAND against ${TICKET} before anything else — MG-53 halts on a source document its recorded set does not account for, and cannot tell one from an unknown writer`
     );
     log.error(
-      `${TOOL_NAME}: the evidence for run ${snapshot.runId} could not be written to ${safe(cfg.evidenceOut)} — this is NOT "nothing happened", and the outcome reported above (exit ${outcomeCode}, ${exitLabel(outcomeCode)}) stands as the diagnosis`
+      `${TOOL_NAME}: the evidence for run ${snapshot.runId} could not be written to ${safe(reservation?.path ?? cfg.evidenceOut)} — this is NOT "nothing happened", and the outcome reported above (exit ${outcomeCode}, ${exitLabel(outcomeCode)}) stands as the diagnosis`
     );
     return EXIT.EVIDENCE_UNRECORDED;
   }
   // Outside the guard: the record is on disk by here, so a failure to FORMAT the
   // summary line is not an unrecorded run and must not be reported as one.
-  log.info(`${TOOL_NAME}: ${describeEvidence(record, cfg.evidenceOut)}`);
+  log.info(`${TOOL_NAME}: ${describeEvidence(record, reservation.path)}`);
   return outcomeCode;
 }
 
@@ -1080,6 +1068,7 @@ export async function settleRun({
   cfg,
   definition,
   ledger,
+  reservation,
   confirmation,
   failure,
   device,
@@ -1088,105 +1077,119 @@ export async function settleRun({
   now,
   fs,
 }) {
-  if (confirmation) {
-    const report = line => (confirmation.confirmed ? log.info(line) : log.error(line));
-    report(`${TOOL_NAME}: ${describeConfirmation(confirmation)}`);
-    if (!confirmation.confirmed) report(`${TOOL_NAME}: ${confirmation.reason}`);
-  }
-  if (failure) log.error(`${TOOL_NAME}: ${failure.message}`);
-
-  // A run that never minted a ledger never attempted anything: a usage refusal,
-  // an unmeasurable container, a refused pre-send read. It is the ONLY case that
-  // may exit without a record, and it is the only case where "nothing was
-  // written" is a fact rather than a guess.
-  const snapshot = ledger ? ledger.snapshot({ confirmation }) : null;
-
-  // THE ONLY PLACE A CODE IS CHOSEN, and it is fail-closed by construction:
-  // exit 0 requires a confirmation that both carries EXIT.OK and says
-  // confirmed:true, and every other shape — including any this file was not
-  // written to produce — comes back nonzero with a sentence naming what was
-  // found. There is no `?? EXIT.OK` here any more, and there is not one in
-  // resolveOutcomeCode either.
-  const outcome = resolveOutcomeCode({ confirmation, failure });
-  let exitCode = outcome.exitCode;
-  if (outcome.unanticipated) {
-    // Printed rather than swallowed: an unanticipated state is a defect in this
-    // tool, and an operator who sees only the code cannot report it.
-    log.error(`${TOOL_NAME}: ${outcome.reason}`);
-  }
-
-  // USAGE means "bad arguments, nothing live happened". A run that attempted a
-  // send cannot honestly report it whatever went wrong afterwards, so the code
-  // becomes the ambiguity it actually is. The original message is already on the
-  // operator's screen, so the diagnosis is not lost — only the misleading code.
-  if (snapshot?.attempted && exitCode === EXIT.USAGE) {
-    log.error(
-      `${TOOL_NAME}: reporting exit ${EXIT.AMBIGUOUS} (${exitLabel(EXIT.AMBIGUOUS)}) rather than a usage error — this run had already attempted a send, and "bad arguments, nothing happened" would be false`
-    );
-    exitCode = EXIT.AMBIGUOUS;
-  }
-
-  if (snapshot && mustEmitEvidence(snapshot)) {
-    log.info(`${TOOL_NAME}: run ${snapshot.runId} — ${describeIdSets(snapshot)}`);
-    if (!confirmation) {
-      log.error(
-        `${TOOL_NAME}: recording every id this run attempted before exiting — a document this tool caused to exist and did not record is what halts MG-53, and halts it indistinguishably from an unknown writer`
-      );
+  try {
+    if (confirmation) {
+      const report = line => (confirmation.confirmed ? log.info(line) : log.error(line));
+      report(`${TOOL_NAME}: ${describeConfirmation(confirmation)}`);
+      if (!confirmation.confirmed) report(`${TOOL_NAME}: ${confirmation.reason}`);
     }
-    exitCode = await emitEvidence({
-      ledger,
-      snapshot,
-      // A run that never reached the read-back still has a recordable shape. Its
-      // observed ids come from the snapshot rather than from nothing, so a path
-      // that DID observe documents and then aborted keeps them.
-      confirmation:
-        confirmation ??
-        abortedConfirmation({
-          runId: snapshot.runId,
-          exitCode,
-          reason: abortReason(snapshot, exitCode),
-          observedIds: [...snapshot.observedIds],
-          partitionValue: cfg.device,
-          partitionKeyField: definition.partitionKeyField,
-          timeoutMs: cfg.timeoutMs,
-          pollIntervalMs: cfg.pollIntervalMs,
-        }),
-      definition,
-      cfg,
-      outcomeCode: exitCode,
-      log,
-      now,
-      fs,
-    });
-  }
+    if (failure) log.error(`${TOOL_NAME}: ${failure.message}`);
 
-  // THE LAST LINE, AND DELIBERATELY REDUNDANT WITH resolveOutcomeCode ABOVE.
-  // Between the resolution and this return sits the evidence emission, which
-  // returns a code of its own, and whatever a later edit adds beside it. Nothing
-  // in that gap may manufacture a 0, and re-asserting the invariant here is what
-  // makes that structural rather than a property of the control flow as it
-  // happens to be written today. If this ever fires, resolveOutcomeCode and the
-  // path between them disagree — which is itself an unanticipated state.
-  if (exitCode === EXIT.OK && confirmation?.confirmed !== true) {
+    // A run that never minted a ledger never attempted anything: a usage refusal,
+    // an unmeasurable container, a refused pre-send read. It is the ONLY case that
+    // may exit without a record, and it is the only case where "nothing was
+    // written" is a fact rather than a guess.
+    const snapshot = ledger ? ledger.snapshot({ confirmation }) : null;
+
+    // THE ONLY PLACE A CODE IS CHOSEN, and it is fail-closed by construction:
+    // exit 0 requires a confirmation that both carries EXIT.OK and says
+    // confirmed:true, and every other shape — including any this file was not
+    // written to produce — comes back nonzero with a sentence naming what was
+    // found. There is no `?? EXIT.OK` here any more, and there is not one in
+    // resolveOutcomeCode either.
+    const outcome = resolveOutcomeCode({ confirmation, failure });
+    let exitCode = outcome.exitCode;
+    if (outcome.unanticipated) {
+      // Printed rather than swallowed: an unanticipated state is a defect in this
+      // tool, and an operator who sees only the code cannot report it.
+      log.error(`${TOOL_NAME}: ${outcome.reason}`);
+    }
+
+    // USAGE means "bad arguments, nothing live happened". A run that attempted a
+    // send cannot honestly report it whatever went wrong afterwards, so the code
+    // becomes the ambiguity it actually is. The original message is already on the
+    // operator's screen, so the diagnosis is not lost — only the misleading code.
+    if (snapshot?.attempted && exitCode === EXIT.USAGE) {
+      log.error(
+        `${TOOL_NAME}: reporting exit ${EXIT.AMBIGUOUS} (${exitLabel(EXIT.AMBIGUOUS)}) rather than a usage error — this run had already attempted a send, and "bad arguments, nothing happened" would be false`
+      );
+      exitCode = EXIT.AMBIGUOUS;
+    }
+
+    if (snapshot && mustEmitEvidence(snapshot)) {
+      log.info(`${TOOL_NAME}: run ${snapshot.runId} — ${describeIdSets(snapshot)}`);
+      if (!confirmation) {
+        log.error(
+          `${TOOL_NAME}: recording every id this run attempted before exiting — a document this tool caused to exist and did not record is what halts MG-53, and halts it indistinguishably from an unknown writer`
+        );
+      }
+      exitCode = await emitEvidence({
+        ledger,
+        snapshot,
+        reservation,
+        // A run that never reached the read-back still has a recordable shape. Its
+        // observed ids come from the snapshot rather than from nothing, so a path
+        // that DID observe documents and then aborted keeps them.
+        confirmation:
+          confirmation ??
+          abortedConfirmation({
+            runId: snapshot.runId,
+            exitCode,
+            reason: abortReason(snapshot, exitCode),
+            observedIds: [...snapshot.observedIds],
+            partitionValue: cfg.device,
+            partitionKeyField: definition.partitionKeyField,
+            timeoutMs: cfg.timeoutMs,
+            pollIntervalMs: cfg.pollIntervalMs,
+          }),
+        definition,
+        cfg,
+        outcomeCode: exitCode,
+        log,
+        now,
+        fs,
+      });
+    }
+
+    // THE LAST LINE, AND DELIBERATELY REDUNDANT WITH resolveOutcomeCode ABOVE.
+    // Between the resolution and this return sits the evidence emission, which
+    // returns a code of its own, and whatever a later edit adds beside it. Nothing
+    // in that gap may manufacture a 0, and re-asserting the invariant here is what
+    // makes that structural rather than a property of the control flow as it
+    // happens to be written today. If this ever fires, resolveOutcomeCode and the
+    // path between them disagree — which is itself an unanticipated state.
+    if (exitCode === EXIT.OK && confirmation?.confirmed !== true) {
+      log.error(
+        `${TOOL_NAME}: refusing to exit 0 — the settlement arrived at success without a confirmation establishing it, and exit 0 states that a specific, newly identified document was read back out of the destination container. Exiting ${UNANTICIPATED_OUTCOME_CODE} (${exitLabel(UNANTICIPATED_OUTCOME_CODE)}) instead.`
+      );
+      exitCode = UNANTICIPATED_OUTCOME_CODE;
+    }
+
+    if (exitCode === EXIT.OK) {
+      log.info(
+        `${TOOL_NAME}: CONFIRMED — ${confirmation.observedCount} synthetic document(s) sent from ${device} via hub ${hub} were read back out of ${cfg.database}/${cfg.container}`
+      );
+      return exitCode;
+    }
+    // Names the device, the hub, the outcome and the exit label. Never a secret,
+    // on any path: every fragment here is either built from scrubbed input or
+    // produced by a sibling module under the same obligation.
     log.error(
-      `${TOOL_NAME}: refusing to exit 0 — the settlement arrived at success without a confirmation establishing it, and exit 0 states that a specific, newly identified document was read back out of the destination container. Exiting ${UNANTICIPATED_OUTCOME_CODE} (${exitLabel(UNANTICIPATED_OUTCOME_CODE)}) instead.`
-    );
-    exitCode = UNANTICIPATED_OUTCOME_CODE;
-  }
-
-  if (exitCode === EXIT.OK) {
-    log.info(
-      `${TOOL_NAME}: CONFIRMED — ${confirmation.observedCount} synthetic document(s) sent from ${device} via hub ${hub} were read back out of ${cfg.database}/${cfg.container}`
+      `${TOOL_NAME}: device ${device} on hub ${hub} — exit ${exitCode} (${exitLabel(exitCode)})`
     );
     return exitCode;
+  } finally {
+    // Release the reservation's placeholder — but ONLY if it is still the empty
+    // file the reservation created. A published record is non-empty and is left
+    // untouched, so this is safe on EVERY path: the confirmed run keeps its
+    // record, while a run that reserved and then wrote nothing (a refused
+    // pre-send read, or a settlement whose logging threw before the write) leaves
+    // no zero-byte file a consumer could mistake for an empty evidence record.
+    // Best-effort, and never changes the exit code.
+    if (reservation) {
+      await releaseReservation(reservation, fs ? { fs } : {}).catch(() => {});
+    }
   }
-  // Names the device, the hub, the outcome and the exit label. Never a secret,
-  // on any path: every fragment here is either built from scrubbed input or
-  // produced by a sibling module under the same obligation.
-  log.error(
-    `${TOOL_NAME}: device ${device} on hub ${hub} — exit ${exitCode} (${exitLabel(exitCode)})`
-  );
-  return exitCode;
 }
 
 /**
@@ -1236,7 +1239,17 @@ function safeLog(log, level, line) {
  *     concluded OK is the one code that cannot stand, since a settlement that
  *     threw confirmed nothing.
  */
-function lastResortExit({ err, ledger, confirmation, failure, cfg, device, hub, log }) {
+function lastResortExit({
+  err,
+  ledger,
+  reservation,
+  confirmation,
+  failure,
+  cfg,
+  device,
+  hub,
+  log,
+}) {
   // Fail-closed on the snapshot too: if the ledger cannot say what the run
   // attempted, a minted ledger is assumed to mean a send was.
   let attempted = ledger !== null;
@@ -1282,7 +1295,7 @@ function lastResortExit({ err, ledger, confirmation, failure, cfg, device, hub, 
     safeLog(
       log,
       'error',
-      `${TOOL_NAME}: RECORD THESE IDS BY HAND against ${TICKET}, then check whether ${cfg?.evidenceOut ? safe(cfg.evidenceOut) : 'the evidence file'} exists — the settlement did not finish, so whether it was written is UNESTABLISHED and is treated here as unwritten. This is NOT "nothing happened".`
+      `${TOOL_NAME}: RECORD THESE IDS BY HAND against ${TICKET}, then check whether ${reservation?.path ? safe(reservation.path) : cfg?.evidenceOut ? `the run's file under ${safe(cfg.evidenceOut)}` : 'the evidence file'} exists — the settlement did not finish, so whether it was written is UNESTABLISHED and is treated here as unwritten. This is NOT "nothing happened".`
     );
   }
   safeLog(
@@ -1325,6 +1338,7 @@ export async function main({
   let cfg = null;
   let definition = null;
   let ledger = null;
+  let reservation = null;
   let confirmation = null;
   let failure = null;
 
@@ -1338,26 +1352,7 @@ export async function main({
     device = cfg.device;
     hub = cfg.hub;
 
-    // ---- 1. Prove the evidence destination BEFORE anything live. ---------
-    // The cheapest check in the run and the earliest, in that order. Every
-    // reason --evidence-out can be unusable — a mistyped directory, a read-only
-    // path, an earlier run's record sitting there — is knowable now, locally,
-    // with nothing sent. Learning it AFTER the send means MESSAGES_PER_RUN
-    // synthetic documents are in the live container and this tool is only then
-    // refusing to record them, which is the unrecorded-document condition MG-53
-    // halts on and cannot tell apart from an unknown writer.
-    //
-    // Its refusals are usage-class on purpose: at this point exit 1 is exactly
-    // true — bad arguments, nothing live happened — and it is the only point in
-    // the run where that sentence stays true. The write-time guards remain; see
-    // the header for why this does not replace them.
-    const destination = await preflightEvidenceDestination(cfg.evidenceOut, {
-      overwrite: cfg.overwrite,
-      ...(fs ? { fs } : {}),
-    });
-    log.info(`${TOOL_NAME}: ${describeDestination(destination)}`);
-
-    // ---- 2. Measure the container. Nothing is assumed. -------------------
+    // ---- 1. Measure the container. Nothing is assumed. -------------------
     const definitionText = await readDefinitionText(cfg.containerDefinition, {
       readFileFn,
       stdin,
@@ -1371,12 +1366,25 @@ export async function main({
       log.error(`${TOOL_NAME}: FINDING — ${definition.ttlDriftFinding.message}`);
     }
 
-    // ---- 3. Mint the run, its LEDGER and the bodies. ---------------------
+    // ---- 2. Mint the run and RESERVE its destination BEFORE anything live. -
+    // Every run exclusively owns one destination: --evidence-out is a directory,
+    // and the file name is derived from this run's unique id, so no two runs can
+    // name the same file and there is nothing to coordinate. The reservation
+    // atomically claims that file — proving the directory usable and the
+    // publication primitive available — BEFORE a single message is sent. A reused
+    // destination fails here, usage-class, while nothing is live; learning it
+    // AFTER the send would leave documents in the container this tool then
+    // refused to record, the unrecorded-document condition MG-53 halts on and
+    // cannot tell apart from an unknown writer.
+    const runId = uuid ? newRunId(uuid) : newRunId();
+    reservation = await reserveEvidenceDestination(cfg.evidenceOut, runId, fs ? { fs } : {});
+    log.info(`${TOOL_NAME}: ${describeReservation(reservation)}`);
+
+    // ---- 3. The run's LEDGER and the bodies. ----------------------------
     // The ledger is created before anything can be attempted, and is what makes
     // the evidence obligation structural rather than remembered: from here on,
     // every exit passes through settleRun() and settleRun() writes a record for
-    // any run that attempted a send.
-    const runId = uuid ? newRunId(uuid) : newRunId();
+    // any run that attempted a send into the destination reserved above.
     ledger = createRunLedger({ runId });
     const messages = buildFixtureMessages({
       runId,
@@ -1454,6 +1462,7 @@ export async function main({
       cfg,
       definition,
       ledger,
+      reservation,
       confirmation,
       failure,
       device,
@@ -1463,7 +1472,17 @@ export async function main({
       fs,
     });
   } catch (err) {
-    return lastResortExit({ err, ledger, confirmation, failure, cfg, device, hub, log });
+    return lastResortExit({
+      err,
+      ledger,
+      reservation,
+      confirmation,
+      failure,
+      cfg,
+      device,
+      hub,
+      log,
+    });
   }
 }
 

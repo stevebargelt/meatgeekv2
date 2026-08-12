@@ -26,10 +26,10 @@
 
 import { strict as assert } from 'node:assert';
 import {
-  link as realLink,
   mkdtemp,
   readFile,
   readdir,
+  rename as realRename,
   rm,
   stat as realStat,
   writeFile,
@@ -40,7 +40,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { parseContainerDefinition } from './container-definition.mjs';
-import { PARTIAL_SUFFIX, PROBE_SUFFIX, partialPathFor } from './evidence.mjs';
+import { PARTIAL_SUFFIX, evidenceFileName, partialPathFor } from './evidence.mjs';
 import {
   fakeAzSpawn,
   fakeClock,
@@ -93,6 +93,11 @@ const CONTAINER = 'temperatures';
 const UUID = '00000000-0000-4000-8000-000000000001';
 const RUN_ID = newRunId(() => UUID);
 const RUN_MILLIS = Date.parse('2026-08-11T09:00:00.000Z');
+
+// Per-run ownership: --evidence-out is a DIRECTORY, and the file the tool writes
+// inside it is DERIVED from the run id. Tests pass a directory and read the
+// derived file back.
+const evidenceFileIn = (dir, runId = RUN_ID) => path.join(dir, evidenceFileName(runId));
 
 // ---------------------------------------------------------------------------
 // Secrets that must never come back out.
@@ -295,12 +300,13 @@ async function runMain({
 
 describe('argument parsing', () => {
   it('defaults the device to the durable fixture and the wait to a bounded value', () => {
-    const cfg = parseArgs([...BASE_ARGV, '--evidence-out', 'e.json']);
+    const cfg = parseArgs([...BASE_ARGV, '--evidence-out', 'out-dir']);
     assert.equal(cfg.device, FIXTURE_DEVICE_ID);
     assert.equal(cfg.hub, HUB);
     assert.ok(Number.isInteger(cfg.timeoutMs) && cfg.timeoutMs > 0);
     assert.ok(Number.isInteger(cfg.pollIntervalMs) && cfg.pollIntervalMs > 0);
-    assert.equal(cfg.overwrite, false);
+    // There is no overwrite mode: evidence artifacts are immutable and per-run.
+    assert.equal('overwrite' in cfg, false);
   });
 
   it('accepts --flag=value as well as --flag value, and - for stdin', () => {
@@ -311,11 +317,17 @@ describe('argument parsing', () => {
       `--container=${CONTAINER}`,
       '--container-definition',
       '-',
-      '--evidence-out=e.json',
-      '--overwrite',
+      '--evidence-out=out-dir',
     ]);
     assert.equal(cfg.containerDefinition, '-');
-    assert.equal(cfg.overwrite, true);
+    assert.equal(cfg.evidenceOut, 'out-dir');
+  });
+
+  it('rejects --overwrite: there is no mode that replaces an evidence artifact', () => {
+    assert.throws(
+      () => parseArgs([...BASE_ARGV, '--evidence-out', 'out-dir', '--overwrite']),
+      err => err instanceof FixtureError && err.exitCode === EXIT.USAGE
+    );
   });
 
   // HR1: there is no credential mode at all, so every spelling of one is refused
@@ -741,7 +753,7 @@ describe('the pre-send read (HR5: newly identified)', () => {
 describe('main: the confirmed path', () => {
   it('exits 0 and writes an evidence file whose observed id count matches', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode, log, spawn } = await runMain({
         evidenceOut,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
@@ -750,7 +762,7 @@ describe('main: the confirmed path', () => {
       assert.equal(exitCode, EXIT.OK);
       assert.equal(spawn.calls.length, MESSAGES_PER_RUN);
 
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
       assert.equal(record.confirmed, true);
       assert.equal(record.exitCode, EXIT.OK);
       assert.equal(record.count, MESSAGES_PER_RUN);
@@ -766,7 +778,7 @@ describe('main: the confirmed path', () => {
       assert.match(log.all(), /CONFIRMED/);
 
       // No debris beside the artifact.
-      assert.deepEqual(await readdir(dir), ['evidence.json']);
+      assert.deepEqual(await readdir(dir), [evidenceFileName(RUN_ID)]);
     });
   });
 
@@ -788,7 +800,7 @@ describe('main: the confirmed path', () => {
       const clock = fakeClock({ start: RUN_MILLIS });
 
       const exitCode = await main({
-        argv: [...BASE_ARGV, '--evidence-out', path.join(dir, 'e.json'), '--timeout', '1000'],
+        argv: [...BASE_ARGV, '--evidence-out', dir, '--timeout', '1000'],
         createReader: async () => wrapped,
         spawn: spy,
         log: recordingLog(),
@@ -820,7 +832,7 @@ describe('main: the confirmed path', () => {
           '--container-definition',
           '-',
           '--evidence-out',
-          path.join(dir, 'e.json'),
+          dir,
           '--timeout',
           '1000',
         ],
@@ -841,7 +853,7 @@ describe('main: the confirmed path', () => {
 
   it('surfaces measured TTL drift as a finding and records it, without failing the run', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode, log } = await runMain({
         evidenceOut,
         definition: 'container-show-ttl-drift.json',
@@ -849,7 +861,7 @@ describe('main: the confirmed path', () => {
       });
       assert.equal(exitCode, EXIT.OK);
       assert.match(log.all(), /FINDING/);
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
       assert.ok(record.ttlDriftFinding);
       assert.equal(record.measuredDefaultTtl, record.ttlDriftFinding.measured);
       assert.notEqual(record.measuredDefaultTtl, record.declaredDefaultTtl);
@@ -860,7 +872,7 @@ describe('main: the confirmed path', () => {
 describe('main: every failure class exits with its own code and claims nothing', () => {
   it('a nonzero az exit maps to SEND_FAILURE and leaks nothing the child printed', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode, log } = await runMain({
         evidenceOut,
         readerSpec: { script: [{ docs: [] }] },
@@ -877,7 +889,7 @@ describe('main: every failure class exits with its own code and claims nothing',
       // The FIRST message failed — and that is NOT "nothing was written". az can
       // exit nonzero after IoT Hub took the message, so message 1 is one
       // document of unknown fate and the run owes an evidence record for it.
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
       assert.equal(record.attempted, true);
       assert.equal(record.uncertain, true);
       assert.equal(record.requestedCount, 1);
@@ -902,7 +914,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   // unknown writer its halt exists to catch.
   it('a partial send records the accepted id AND the unknown one before exiting SEND_FAILURE', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode, log, spawn } = await runMain({
         evidenceOut,
         readerSpec: { script: [{ docs: [] }] },
@@ -912,7 +924,7 @@ describe('main: every failure class exits with its own code and claims nothing',
       assert.equal(exitCode, EXIT.SEND_FAILURE);
       assert.equal(spawn.calls.length, 2, 'the run aborted on the second message');
 
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
       assert.equal(record.confirmed, false);
       assert.equal(record.exitCode, EXIT.SEND_FAILURE);
       // Two attempted: one az reported success for, one whose acceptance nobody
@@ -946,7 +958,7 @@ describe('main: every failure class exits with its own code and claims nothing',
 
   it('a successful send followed by a timeout exits TIMEOUT and records an UNCONFIRMED run', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode, spawn } = await runMain({
         evidenceOut,
         readerSpec: { script: [{ docs: [] }], fallback: { docs: [] } },
@@ -955,7 +967,7 @@ describe('main: every failure class exits with its own code and claims nothing',
       assert.equal(exitCode, EXIT.TIMEOUT);
       assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'the send did happen');
 
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
       assert.equal(record.confirmed, false);
       assert.equal(record.exitCode, EXIT.TIMEOUT);
       assert.equal(record.count, 0);
@@ -976,7 +988,7 @@ describe('main: every failure class exits with its own code and claims nothing',
         return copy;
       });
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: unmarked }] },
       });
       assert.equal(exitCode, EXIT.MARKER_VIOLATION);
@@ -987,7 +999,7 @@ describe('main: every failure class exits with its own code and claims nothing',
     await withTempDir(async dir => {
       const partial = deliveredDocuments().slice(0, 2);
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }], fallback: { docs: partial } },
       });
       assert.equal(exitCode, EXIT.AMBIGUOUS);
@@ -998,7 +1010,7 @@ describe('main: every failure class exits with its own code and claims nothing',
     await withTempDir(async dir => {
       const elsewhere = deliveredDocuments(RUN_ID, { deviceId: 'some-other-partition' });
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         timeoutMs: 1,
         pollIntervalMs: 1,
         // preflight, poll, poll, then the single cross-partition sweep.
@@ -1011,7 +1023,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a 403 on the pre-send read exits AUTH and sends NOTHING', async () => {
     await withTempDir(async dir => {
       const { exitCode, log, spawn } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ error: forbiddenError() }] },
       });
       assert.equal(exitCode, EXIT.AUTH);
@@ -1024,7 +1036,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a 401 during the confirmation exits AUTH immediately, not TIMEOUT', async () => {
     await withTempDir(async dir => {
       const { exitCode, reader } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { error: authError() }] },
       });
       assert.equal(exitCode, EXIT.AUTH);
@@ -1035,7 +1047,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a transport failure with retries exhausted exits TRANSPORT, never an absence', async () => {
     await withTempDir(async dir => {
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }], fallback: { error: transportError() } },
       });
       assert.equal(exitCode, EXIT.TRANSPORT);
@@ -1045,7 +1057,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a container definition missing its partition key exits CONTAINER_DEFINITION and sends nothing', async () => {
     await withTempDir(async dir => {
       const { exitCode, spawn } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         definition: 'container-show-missing-partition-key.json',
         readerSpec: { script: [{ docs: [] }] },
       });
@@ -1057,7 +1069,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a malformed container definition exits CONTAINER_DEFINITION rather than assuming a shape', async () => {
     await withTempDir(async dir => {
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         definition: 'container-show-malformed.json',
         readerSpec: { script: [{ docs: [] }] },
       });
@@ -1070,7 +1082,7 @@ describe('main: every failure class exits with its own code and claims nothing',
       const clock = fakeClock({ start: RUN_MILLIS });
       const spawn = fakeAzSpawn({});
       const exitCode = await main({
-        argv: [...BASE_ARGV, '--evidence-out', path.join(dir, 'e.json')],
+        argv: [...BASE_ARGV, '--evidence-out', dir],
         createReader: async () => fakeReader({}),
         spawn,
         log: recordingLog(),
@@ -1089,7 +1101,7 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('measuring the wrong container is refused rather than recorded', async () => {
     await withTempDir(async dir => {
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         argv: ['--container', 'sessions'],
         readerSpec: { script: [{ docs: [] }] },
       });
@@ -1097,27 +1109,30 @@ describe('main: every failure class exits with its own code and claims nothing',
     });
   });
 
-  // ---- The evidence destination, checked BEFORE the first send. -----------
+  // ---- The evidence destination, RESERVED before the first send. ----------
   //
-  // An unusable --evidence-out path is a purely LOCAL fact. Discovering it after
-  // the send leaves MESSAGES_PER_RUN synthetic documents in the live container
-  // with nothing recording them — the condition MG-53 halts on, manufactured by
-  // this tool, for a reason it could have seen for free before anything went
-  // live. Each case below asserts the two things that matter together: the exit
-  // is usage-class, and the spawn was NEVER called.
+  // --evidence-out is a DIRECTORY, and the file the tool writes is DERIVED from
+  // the run id. An unusable directory or a reused destination is a purely LOCAL
+  // fact, refused BEFORE anything live. Each case asserts the two things that
+  // matter together: the exit is usage-class, and the spawn was NEVER called.
 
   const REFUSED_DESTINATIONS = [
     [
       'a directory that does not exist',
-      dir => path.join(dir, 'nope', 'evidence.json'),
-      /directory for the evidence file does not exist/,
+      dir => path.join(dir, 'nope'),
+      /evidence directory does not exist/,
     ],
-    ['a path that is itself a directory', dir => dir, /is a directory/],
+    [
+      'a destination that is a file, not a directory',
+      dir => path.join(dir, 'a-file'),
+      /not a directory/,
+    ],
   ];
 
   for (const [label, pathFor, expectedMessage] of REFUSED_DESTINATIONS) {
     it(`refuses ${label} before a single message is sent`, async () => {
       await withTempDir(async dir => {
+        if (label.includes('file')) await writeFile(pathFor(dir), 'x', 'utf8');
         const { exitCode, log, spawn, readerCalls } = await runMain({
           evidenceOut: pathFor(dir),
           readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
@@ -1132,18 +1147,14 @@ describe('main: every failure class exits with its own code and claims nothing',
     });
   }
 
-  it('refuses an UNWRITABLE destination before a single message is sent', async () => {
+  it('refuses an UNWRITABLE directory before a single message is sent', async () => {
     await withTempDir(async dir => {
-      // The probe write is the only way to establish that the real write will be
-      // permitted: a stat cannot tell a read-only mount from a writable one.
+      // The primitive probe (write + rename) is the only way to establish the
+      // real write will be permitted: a stat cannot tell a read-only mount apart.
       const { exitCode, log, spawn } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
         fs: {
-          stat: async target =>
-            target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)
-              ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
-              : { isDirectory: () => true },
           writeFile: async () => {
             throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
           },
@@ -1154,121 +1165,76 @@ describe('main: every failure class exits with its own code and claims nothing',
 
       assert.equal(exitCode, EXIT.USAGE);
       assert.equal(spawn.calls.length, 0);
-      assert.match(log.all(), /is not writable/);
+      assert.match(log.all(), /cannot support the publication primitive/);
       assert.match(log.all(), /no synthetic document is in the container from this run/);
     });
   });
 
-  it("refuses to clobber an earlier run's record before a single message is sent", async () => {
+  it('refuses a REUSED destination — the derived file already exists — before the send', async () => {
     await withTempDir(async dir => {
-      // The refusal is right — that file records documents STILL in the
-      // container — and the whole point of making it early is that this run does
-      // not add three more before saying so.
-      const evidenceOut = path.join(dir, 'evidence.json');
-      await writeFile(evidenceOut, '{"an":"earlier run"}\n', 'utf8');
+      // The run's file name is derived from its id, so a file already at that name
+      // is a genuinely reused destination. Its bytes are load-bearing evidence of
+      // an earlier run whose documents are still in the container, and this run
+      // does not add three more before refusing. Evidence is immutable and
+      // per-run: there is no flag that replaces it.
+      const derived = evidenceFileIn(dir);
+      await writeFile(derived, '{"an":"earlier run"}\n', 'utf8');
 
       const { exitCode, log, spawn } = await runMain({
-        evidenceOut,
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
       });
 
       assert.equal(exitCode, EXIT.USAGE);
       assert.equal(spawn.calls.length, 0, 'no documents were added to the ones that file records');
-      assert.match(log.all(), /an evidence file already exists/);
+      assert.match(log.all(), /already exists/);
       assert.match(log.all(), /Nothing has been sent for this run/);
-      assert.equal(await readFile(evidenceOut, 'utf8'), '{"an":"earlier run"}\n');
-      assert.deepEqual(await readdir(dir), ['evidence.json'], 'and no probe debris is left');
+      assert.equal(await readFile(derived, 'utf8'), '{"an":"earlier run"}\n');
     });
   });
 
-  it("refuses a leftover '.partial' before a single message is sent", async () => {
-    await withTempDir(async dir => {
-      // Either a run is writing this path right now — and this run's rename
-      // would destroy its record — or a crashed run left it. Both are reasons to
-      // stop, and both are knowable before anything is live.
-      const evidenceOut = path.join(dir, 'evidence.json');
-      await writeFile(`${evidenceOut}${PARTIAL_SUFFIX}`, '{"partial":true}\n', 'utf8');
-
-      const { exitCode, log, spawn } = await runMain({
-        evidenceOut,
-        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-      });
-
-      assert.equal(exitCode, EXIT.USAGE);
-      assert.equal(spawn.calls.length, 0);
-      assert.match(log.all(), /a partial evidence file already exists/);
-    });
-  });
-
-  it('--overwrite passes the preflight and the run proceeds to a confirmed exit', async () => {
-    await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
-      await writeFile(evidenceOut, '{"an":"earlier run"}\n', 'utf8');
-
-      const { exitCode, log, spawn } = await runMain({
-        evidenceOut,
-        argv: ['--overwrite'],
-        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-      });
-
-      assert.equal(exitCode, EXIT.OK);
-      assert.equal(spawn.calls.length, MESSAGES_PER_RUN);
-      // The operator asked for the replacement, and is told it is happening.
-      assert.match(log.all(), /an existing record WILL BE REPLACED/);
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
-      assert.equal(record.runId, RUN_ID);
-      assert.deepEqual(await readdir(dir), ['evidence.json'], 'no probe or partial debris');
-    });
-  });
-
-  it('reports what the preflight proved, and that it is not a guarantee', async () => {
+  it('reports the reserved per-run destination', async () => {
     await withTempDir(async dir => {
       const { log } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
       });
-      assert.match(log.all(), /writable, checked before any message was sent/);
-      // Said out loud, because the write-time refusal below is what actually
-      // holds the line and a reader who thinks otherwise will delete it.
-      assert.match(log.all(), /this preflight is not a guarantee/);
+      assert.match(log.all(), /evidence destination reserved for run/);
+      assert.match(log.all(), /per-run, immutable/);
     });
   });
 
-  // ---- The evidence write itself failing. ---------------------------------
+  // ---- The evidence write itself failing, AFTER the send. -----------------
   //
-  // THE BACKSTOP, and still authoritative. The preflight above is a check at t0
-  // about a write at t1, and the interval between them spans the live send: a
-  // disk that fills, a volume that unmounts, a permission that changes, or a
-  // parallel run that creates the same file all land here, after the documents
-  // exist. So every case below passes the preflight and then fails the write.
+  // The reservation above runs before the send; this is the backstop after it.
+  // A disk that fills, a volume that unmounts or a permission that changes
+  // between the reservation and the publication all land here, after the
+  // documents exist. The live container has changed and nothing recorded it:
+  // that is EVIDENCE_UNRECORDED, and specifically NOT usage.
   //
-  // The live container has changed and nothing recorded it. That is its own exit
-  // code, and specifically NOT usage: telling an operator "bad arguments,
-  // nothing happened" while documents sit in the container is the worst answer
-  // this tool can give, and it is the one MG-53 cannot diagnose.
-  const failingFs = () => ({
-    // The directory is fine and the target is absent — so the preflight passes
-    // and the run goes live...
-    stat: async target =>
-      target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)
-        ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
-        : { isDirectory: () => true },
-    // ...and only the REAL write fails. The empty probe still succeeds, which is
-    // exactly the t0/t1 gap the preflight cannot close.
-    writeFile: async target => {
-      if (target.endsWith(PROBE_SUFFIX)) return;
+  // The reservation (directory stat, primitive probe, exclusive create) uses the
+  // real filesystem and succeeds; only the record PUBLICATION — the rename of the
+  // per-run partial onto the reserved path — fails.
+  const failingWriteFs = () => ({
+    rename: async (from, to) => {
+      if (from.endsWith('.probe-src') || to.endsWith('.probe-dst')) return realRename(from, to);
       throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
     },
-    rename: async () => {},
-    rm: async () => {},
   });
+
+  const noPartialLeft = async dir =>
+    assert.equal(
+      (await readdir(dir)).filter(name => name.endsWith(PARTIAL_SUFFIX)).length,
+      0,
+      'no partial artifact is left behind'
+    );
 
   it('a CONFIRMED run whose evidence write fails exits EVIDENCE_UNRECORDED, never USAGE', async () => {
     await withTempDir(async dir => {
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-        fs: failingFs(),
+        fs: failingWriteFs(),
       });
 
       assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
@@ -1280,70 +1246,20 @@ describe('main: every failure class exits with its own code and claims nothing',
       assert.match(output, /ARE in/, 'a confirmed run knows the documents exist');
       assert.match(output, /RECORD THESE IDS BY HAND/);
       assert.ok(output.includes(RUN_ID));
-      // Every observed id is named, because recording them by hand is the
-      // action this exit code exists to demand.
       for (const doc of deliveredDocuments()) {
         assert.ok(output.includes(doc.id), `the output must name ${doc.id}`);
       }
       assert.match(output, /evidence unrecorded/, 'the exit label is reported');
-      assert.deepEqual(await readdir(dir), [], 'no partial artifact is left behind');
+      await noPartialLeft(dir);
     });
   });
 
-  // The same collision, reached the one way the preflight CANNOT catch: the file
-  // appears between the check and the write, because a second operator started a
-  // run against the same path in the interval — and that interval spans the
-  // live send. The refusal to overwrite is still correct, and the run that hit
-  // it has ALSO put documents in the container by now, so the code is 10 rather
-  // than the 1 the preflight would have reported a moment earlier.
-  it('a record that appears AFTER the preflight still exits EVIDENCE_UNRECORDED, not USAGE', async () => {
-    await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
-      let preflightPassed = false;
-      const raceyFs = {
-        stat: async target => {
-          if (!target.endsWith('.json') && !target.endsWith(PARTIAL_SUFFIX)) {
-            return { isDirectory: () => true };
-          }
-          if (target === evidenceOut && preflightPassed) return { isDirectory: () => false };
-          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-        },
-        writeFile: async target => {
-          if (target.endsWith(PROBE_SUFFIX)) {
-            preflightPassed = true;
-            return;
-          }
-        },
-        rename: async () => {},
-        rm: async () => {},
-      };
-
-      const { exitCode, log, spawn } = await runMain({
-        evidenceOut,
-        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-        fs: raceyFs,
-      });
-
-      assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'this run did go live');
-      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
-      assert.notEqual(exitCode, EXIT.USAGE, 'documents are in the container by now');
-      const output = log.all();
-      assert.match(output, /refusing to overwrite/);
-      assert.match(output, /EVIDENCE NOT RECORDED/);
-      assert.match(output, /RECORD THESE IDS BY HAND/);
-    });
-  });
-
-  // The unconfirmed path is where the record matters MOST: without it the
-  // operator cannot tell "delivered but unfindable" from "never delivered", and
-  // the documents are in the container either way. The write failure used to
-  // vanish here entirely.
   it('an evidence write that fails on an UNCONFIRMED run is never swallowed', async () => {
     await withTempDir(async dir => {
       const { exitCode, log, spawn } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }], fallback: { docs: [] } },
-        fs: failingFs(),
+        fs: failingWriteFs(),
       });
 
       assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'the send did happen');
@@ -1352,8 +1268,6 @@ describe('main: every failure class exits with its own code and claims nothing',
       const output = log.all();
       assert.match(output, /EVIDENCE NOT RECORDED/);
       assert.match(output, /MAY BE in/, 'an unconfirmed run cannot claim the documents exist');
-      // The confirmation's own outcome is still reported, on the lines above:
-      // the write failure takes the exit code, not the diagnosis.
       assert.match(output, /confirmation timeout/);
       for (const doc of deliveredDocuments()) {
         assert.ok(output.includes(doc.id), `the output must name the sent id ${doc.id}`);
@@ -1361,11 +1275,6 @@ describe('main: every failure class exits with its own code and claims nothing',
     });
   });
 
-  // Not only the WRITE. A record that cannot be BUILT leaves the documents just
-  // as unaccounted for, and buildEvidenceRecord refuses with USAGE — the one
-  // code that must never describe a run that changed the live system. Reached
-  // here the way it is reachable live: a platform-assigned document id that the
-  // record's own credential-shape guard refuses.
   it('a record that cannot even be BUILT after a send exits EVIDENCE_UNRECORDED, not USAGE', async () => {
     await withTempDir(async dir => {
       const renamed = deliveredDocuments().map((doc, index) => ({
@@ -1373,7 +1282,7 @@ describe('main: every failure class exits with its own code and claims nothing',
         id: `${'A'.repeat(44)}${index}`,
       }));
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: renamed }] },
       });
 
@@ -1382,17 +1291,17 @@ describe('main: every failure class exits with its own code and claims nothing',
       const output = log.all();
       assert.match(output, /EVIDENCE NOT RECORDED/);
       assert.match(output, /credential-shape risk/, 'the reason for the refusal is reported');
-      assert.deepEqual(await readdir(dir), [], 'and nothing half-written is left behind');
+      await noPartialLeft(dir);
     });
   });
 
   it('a partial send whose evidence write ALSO fails exits EVIDENCE_UNRECORDED', async () => {
     await withTempDir(async dir => {
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }] },
         spawnSpec: { script: [{ code: 0 }, { code: 1 }] },
-        fs: failingFs(),
+        fs: failingWriteFs(),
       });
 
       assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
@@ -1442,13 +1351,13 @@ describe('main: every failure class exits with its own code and claims nothing',
   for (const [label, readerSpec, expected] of POST_SEND_FAILURES) {
     it(`${label} still RECORDS the documents it put in the container`, async () => {
       await withTempDir(async dir => {
-        const evidenceOut = path.join(dir, 'evidence.json');
+        const evidenceOut = dir;
         const { exitCode, spawn } = await runMain({ evidenceOut, readerSpec });
 
         assert.equal(exitCode, expected);
         assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'the documents really were sent');
 
-        const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+        const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
         assert.equal(
           record.requestedIds.length,
           MESSAGES_PER_RUN,
@@ -1471,14 +1380,14 @@ describe('main: every failure class exits with its own code and claims nothing',
         delete copy[SYNTHETIC_MARKER_FIELD];
         return copy;
       });
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode } = await runMain({
         evidenceOut,
         readerSpec: { script: [{ docs: [] }, { docs: unmarked }] },
       });
 
       assert.equal(exitCode, EXIT.MARKER_VIOLATION);
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
       assert.equal(record.requestedIds.length, MESSAGES_PER_RUN);
       assert.equal(record.confirmed, false);
       assert.equal(record.exitCode, EXIT.MARKER_VIOLATION);
@@ -1541,38 +1450,14 @@ describe('main: every failure class exits with its own code and claims nothing',
 });
 
 // ===========================================================================
-// THE EVIDENCE-WRITE INTEGRITY CONTRACT.
+// THE EVIDENCE-WRITE INTEGRITY CONTRACT, under per-run ownership.
 //
-// The evidence record is the artifact MG-53 and MG-54 read as a PROGRAM INPUT
-// to decide whether to halt a migration. So the writer's obligation is not only
-// "write the record": it is that it never destroys, corrupts or interleaves
-// one, and never reports success when it has.
-//
-// The suite above covers WHAT the record says. This one covers what the write
-// does to the destination, driven through main() rather than through the
-// evidence module — the module's own guards are tested next door, and the
-// property an operator actually gets depends on this CLI passing them a run id,
-// an overwrite flag and a filesystem that lets them run. Three rules, and each
-// test asserts the RULE rather than the symptom that exposed it:
-//
-//   1. A STAT ERROR IS NOT AN ABSENCE. Only ENOENT means "no file there".
-//      Every other stat failure is a refusal — before the send it is a usage
-//      refusal with nothing live, after the send it is EVIDENCE_UNRECORDED with
-//      the ids on stderr. Reading an unreadable answer as an absence is the
-//      MG-66 conflation, and here it would also silently destroy an earlier
-//      run's record while exiting 0.
-//   2. A TEMP PATH IS PER RUN, NOT PER DESTINATION. Two runs sharing
-//      --evidence-out must not be able to collide on one '.partial', because
-//      the failure that produces is the WRONG RECORD UNDER THE RIGHT NAME:
-//      undetectable downstream, since MG-53 finds a well-formed record and
-//      reconciles the container against the wrong id set.
-//   3. --overwrite DOES NOT MEAN --destroy-anything. It authorises replacing
-//      the operator's OWN earlier record. A live '.partial' from another run is
-//      refused with the flag as well.
-//
-// And the standing rule underneath all three: once documents have been sent, no
-// evidence-write refusal may report an exit code that means nothing live
-// happened.
+// The evidence record is the artifact MG-53 and MG-54 read as a PROGRAM INPUT to
+// decide whether to halt a migration. Every run exclusively owns one destination:
+// --evidence-out is a DIRECTORY and the file name is DERIVED from the run id, so
+// two runs can never name the same file and there is nothing to coordinate. These
+// tests, driven through main(), pin that the CLI reserves before the send, that a
+// stat error is never read as an absence, and that no run touches another's file.
 // ===========================================================================
 
 describe('the evidence-write integrity contract', () => {
@@ -1580,20 +1465,22 @@ describe('the evidence-write integrity contract', () => {
     script: [{ docs: [] }, { docs: deliveredDocuments(runId) }],
   });
 
-  // A destination whose state cannot be READ. -------------------------------
+  const UUID_A = '00000000-0000-4000-8000-0000000000aa';
+  const UUID_B = '00000000-0000-4000-8000-0000000000bb';
+  const RUN_A = newRunId(() => UUID_A);
+  const RUN_B = newRunId(() => UUID_B);
 
-  it('refuses a destination whose state cannot be READ before sending anything', async () => {
+  // A STAT ERROR IS NOT AN ABSENCE. Only ENOENT means "not there"; every other
+  // stat failure is a refusal, before the send, with nothing live. Reading an
+  // unreadable answer as an absence is the MG-66 conflation.
+  it('refuses a directory whose state cannot be READ before sending anything', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
       const { exitCode, log, spawn, readerCalls } = await runMain({
-        evidenceOut,
+        evidenceOut: dir,
         readerSpec: CONFIRMED_READS(),
         fs: {
-          // Not ENOENT. The preflight cannot tell from this whether a record is
-          // sitting there, and "I could not read the answer" is not "there is
-          // nothing there".
           stat: async target =>
-            target === evidenceOut
+            target === dir
               ? Promise.reject(Object.assign(new Error('EIO'), { code: 'EIO' }))
               : realStat(target),
         },
@@ -1607,232 +1494,45 @@ describe('the evidence-write integrity contract', () => {
     });
   });
 
-  it('a stat failing for any reason but ENOENT after the send REFUSES rather than writing', async () => {
-    await withTempDir(async dir => {
-      // The destination already holds an earlier run's record. That run's
-      // documents are still in the container, so the bytes below are load-bearing
-      // evidence, not debris — and the whole point of this test is that they are
-      // still there afterwards.
-      const evidenceOut = path.join(dir, 'evidence.json');
-      const earlier = '{"runId":"an earlier run whose documents are still live"}\n';
-      await writeFile(evidenceOut, earlier, 'utf8');
-
-      // t0 the destination reads as absent, so the preflight clears it and the
-      // run goes live; t1 the answer is unreadable. That is the interval the
-      // preflight cannot close, and it is where the swallowed stat did its damage:
-      // it read EIO as "nothing there" and renamed straight over the record above.
-      let live = false;
-      const { exitCode, log, spawn } = await runMain({
-        evidenceOut,
-        readerSpec: CONFIRMED_READS(),
-        fs: {
-          stat: async target => {
-            if (target !== evidenceOut) return realStat(target);
-            throw live
-              ? Object.assign(new Error('EIO'), { code: 'EIO' })
-              : Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-          },
-          writeFile: async (target, data, encoding) => {
-            const written = await writeFile(target, data, encoding);
-            if (target.endsWith(PROBE_SUFFIX)) live = true;
-            return written;
-          },
-        },
-      });
-
-      assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'this run did go live');
-      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
-      assert.notEqual(exitCode, EXIT.OK, 'a destroyed-or-unwritten record is never a success');
-      assert.notEqual(exitCode, EXIT.USAGE, 'documents are in the container by now');
-
-      assert.equal(
-        await readFile(evidenceOut, 'utf8'),
-        earlier,
-        "the earlier run's record was neither overwritten nor truncated"
-      );
-      assert.deepEqual(await readdir(dir), ['evidence.json'], 'and no partial debris was left');
-
-      const output = log.all();
-      assert.match(output, /cannot determine whether/);
-      assert.match(output, /an unreadable answer is not an absence/);
-      assert.match(output, /EVIDENCE NOT RECORDED/);
-      assert.match(output, /RECORD THESE IDS BY HAND/);
-      for (const doc of deliveredDocuments()) {
-        assert.ok(output.includes(doc.id), `the output must name ${doc.id}`);
-      }
-    });
-  });
-
-  // Two runs, one destination. ----------------------------------------------
-
-  const UUID_A = '00000000-0000-4000-8000-0000000000aa';
-  const UUID_B = '00000000-0000-4000-8000-0000000000bb';
-  const RUN_A = newRunId(() => UUID_A);
-  const RUN_B = newRunId(() => UUID_B);
-
+  // A TEMP PATH IS PER RUN. Two runs sharing --evidence-out derive different file
+  // names, so they cannot collide on a partial — the wrong-record-under-the-right
+  // -name failure the shared-file model risked cannot arise.
   it('names its temp file for the RUN, so two runs cannot collide on one partial', () => {
-    const destination = '/tmp/mg67/evidence.json';
-    const a = partialPathFor(destination, RUN_A);
-    const b = partialPathFor(destination, RUN_B);
-    assert.notEqual(a, b, 'a per-destination temp path is what lets two runs interleave');
+    const a = partialPathFor(path.join('/tmp/mg67', evidenceFileName(RUN_A)), RUN_A);
+    const b = partialPathFor(path.join('/tmp/mg67', evidenceFileName(RUN_B)), RUN_B);
+    assert.notEqual(a, b, 'two runs must not share one partial file');
     assert.ok(a.includes(RUN_A) && b.includes(RUN_B), 'each partial names the run that owns it');
   });
 
-  it("two runs sharing one --evidence-out cannot publish the wrong run's record", async () => {
+  it('two runs sharing one --evidence-out directory own two independent files', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
-
-      // Run A is held at the publication with its partial already on disk — the
-      // exact window in which a shared temp path let a second run overwrite A's
-      // bytes and A then publish B's record under A's name, both runs exiting 0.
-      let releasePublish;
-      const publishGate = new Promise(resolve => {
-        releasePublish = resolve;
-      });
-      let partialOnDisk;
-      const partialWritten = new Promise(resolve => {
-        partialOnDisk = resolve;
-      });
-      const writes = [];
-      const gatedFs = {
-        writeFile: async (target, data, encoding) => {
-          writes.push(target);
-          const written = await writeFile(target, data, encoding);
-          if (target.endsWith(PARTIAL_SUFFIX)) partialOnDisk();
-          return written;
-        },
-        link: async (from, to) => {
-          await publishGate;
-          return realLink(from, to);
-        },
-      };
-
-      const runA = runMain({
-        evidenceOut,
+      const a = await runMain({
+        evidenceOut: dir,
         uuid: () => UUID_A,
         readerSpec: CONFIRMED_READS(RUN_A),
-        fs: gatedFs,
       });
-      // Raced against A settling, so a run that never reaches its partial fails
-      // this test with an assertion instead of hanging it.
-      await Promise.race([partialWritten, runA]);
-
       const b = await runMain({
-        evidenceOut,
+        evidenceOut: dir,
         uuid: () => UUID_B,
         readerSpec: CONFIRMED_READS(RUN_B),
       });
 
-      releasePublish();
-      const a = await runA;
+      assert.equal(a.exitCode, EXIT.OK);
+      assert.equal(b.exitCode, EXIT.OK);
 
-      assert.equal(b.exitCode, EXIT.USAGE, 'B saw a run holding the destination and stopped');
-      assert.equal(
-        b.spawn.calls.length,
-        0,
-        'and stopped BEFORE putting documents in the container'
-      );
-      assert.match(b.log.all(), /a partial evidence file already exists/);
-      assert.equal(a.exitCode, EXIT.OK, 'A was not disturbed and published its own record');
-
-      const written = JSON.parse(await readFile(evidenceOut, 'utf8'));
-      assert.equal(written.runId, RUN_A, 'the file holds the record of the run that wrote it');
-      assert.equal(
-        JSON.stringify(written).includes(RUN_B),
-        false,
-        'no fragment of the other run appears in it'
-      );
-      assert.equal(written.count, MESSAGES_PER_RUN);
-      for (const id of written.observedIds) assert.ok(id.startsWith(RUN_A));
-
-      assert.ok(writes.includes(partialPathFor(evidenceOut, RUN_A)), "A's partial was named for A");
-      assert.equal(
-        writes.includes(`${evidenceOut}${PARTIAL_SUFFIX}`),
-        false,
-        'and never for the destination alone, which is the path both runs would share'
-      );
-      assert.deepEqual(await readdir(dir), ['evidence.json'], 'no partial or probe debris');
-    });
-  });
-
-  // --overwrite is not a force flag. ----------------------------------------
-
-  it("--overwrite still refuses a destination another run holds a '.partial' on", async () => {
-    await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
-      const mine = '{"runId":"my own earlier record, which --overwrite may replace"}\n';
-      const theirs = '{"runId":"a concurrent run, still writing"}\n';
-      const foreign = partialPathFor(evidenceOut, RUN_B);
-      await writeFile(evidenceOut, mine, 'utf8');
-      await writeFile(foreign, theirs, 'utf8');
-
-      const { exitCode, log, spawn } = await runMain({
-        evidenceOut,
-        argv: ['--overwrite'],
-        readerSpec: CONFIRMED_READS(),
-      });
-
-      assert.equal(exitCode, EXIT.USAGE, 'refused while nothing was live');
-      assert.equal(spawn.calls.length, 0);
-      assert.match(log.all(), /a partial evidence file already exists/);
-      assert.match(log.all(), /refused with overwrite as well/);
-      assert.equal(await readFile(foreign, 'utf8'), theirs, "the other run's partial is untouched");
-      assert.equal(await readFile(evidenceOut, 'utf8'), mine);
-    });
-  });
-
-  it('--overwrite refuses a foreign partial that appears AFTER the preflight, and destroys nothing', async () => {
-    await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
-      const mine = '{"runId":"my own earlier record"}\n';
-      const theirs = '{"runId":"a concurrent run that started mid-send"}\n';
-      const foreign = partialPathFor(evidenceOut, RUN_B);
-      await writeFile(evidenceOut, mine, 'utf8');
-
-      // The other run appears in the one interval the preflight cannot cover: it
-      // starts after this run's destination check and before this run's write,
-      // which is the interval the live send occupies.
-      const { exitCode, log, spawn } = await runMain({
-        evidenceOut,
-        argv: ['--overwrite'],
-        readerSpec: CONFIRMED_READS(),
-        fs: {
-          writeFile: async (target, data, encoding) => {
-            const written = await writeFile(target, data, encoding);
-            if (target.endsWith(PROBE_SUFFIX)) await writeFile(foreign, theirs, 'utf8');
-            return written;
-          },
-        },
-      });
-
-      assert.equal(spawn.calls.length, MESSAGES_PER_RUN, 'this run went live');
-      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
-      assert.notEqual(exitCode, EXIT.USAGE, 'documents are in the container by now');
-      assert.notEqual(exitCode, EXIT.OK);
-      assert.match(log.all(), /another run holds a partial evidence file/);
-      assert.match(log.all(), /Refused with overwrite as well/);
-      assert.match(log.all(), /RECORD THESE IDS BY HAND/);
-      assert.equal(
-        await readFile(foreign, 'utf8'),
-        theirs,
-        "the concurrent run's in-flight record survived --overwrite"
-      );
-      assert.equal(await readFile(evidenceOut, 'utf8'), mine, 'and so did the earlier record');
+      const recA = JSON.parse(await readFile(evidenceFileIn(dir, RUN_A), 'utf8'));
+      const recB = JSON.parse(await readFile(evidenceFileIn(dir, RUN_B), 'utf8'));
+      assert.equal(recA.runId, RUN_A);
+      assert.equal(recB.runId, RUN_B);
+      // Neither file holds a fragment of the other run: no swap, no blend.
+      assert.equal(JSON.stringify(recA).includes(RUN_B), false);
+      assert.equal(JSON.stringify(recB).includes(RUN_A), false);
       assert.deepEqual(
         (await readdir(dir)).sort(),
-        ['evidence.json', path.basename(foreign)].sort(),
-        'this run left no partial of its own behind'
+        [evidenceFileName(RUN_A), evidenceFileName(RUN_B)].sort(),
+        'two runs, two files, and no partial or probe debris'
       );
     });
-  });
-
-  it('--help says what --overwrite does NOT authorise', async () => {
-    const log = recordingLog();
-    assert.equal(await main({ argv: ['--help'], log }), EXIT.OK);
-    const help = log.all();
-    assert.match(help, /It is not a force flag/);
-    assert.match(help, /refused WITH --overwrite as well/);
-    assert.match(help, /an unreadable answer is not an absence/);
   });
 });
 
@@ -1968,7 +1668,7 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
   for (const outcome of OUTCOMES) {
     it(`${outcome.label}: a record exists and its four id sets are correct`, async () => {
       await withTempDir(async dir => {
-        const evidenceOut = path.join(dir, 'evidence.json');
+        const evidenceOut = dir;
         const { exitCode } = await runMain({
           evidenceOut,
           readerSpec: outcome.readerSpec,
@@ -1980,7 +1680,7 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
         assert.equal(exitCode, outcome.exit, 'the outcome is the one this case set up');
 
         // 1. THE RECORD EXISTS. Every one of these attempted a send.
-        const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+        const record = JSON.parse(await readFile(evidenceFileIn(evidenceOut), 'utf8'));
         assert.equal(record.attempted, true);
         assert.equal(record.exitCode, outcome.exit);
 
@@ -2018,7 +1718,7 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
     for (const outcome of OUTCOMES) {
       await withTempDir(async dir => {
         const { log } = await runMain({
-          evidenceOut: path.join(dir, 'evidence.json'),
+          evidenceOut: dir,
           readerSpec: outcome.readerSpec,
           spawnSpec: outcome.spawnSpec ?? {},
           ...(outcome.spawn ? { spawn: outcome.spawn } : {}),
@@ -2059,7 +1759,7 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
     it(`${label} exits without a record, having attempted nothing`, async () => {
       await withTempDir(async dir => {
         const { exitCode, spawn } = await runMain({
-          evidenceOut: path.join(dir, 'evidence.json'),
+          evidenceOut: dir,
           ...options,
         });
         assert.equal(exitCode, expected);
@@ -2075,7 +1775,7 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
   it('an abort after a partial observation still names the observed ids on the unrecorded path', async () => {
     await withTempDir(async dir => {
       const { exitCode, log } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: {
           script: [
             { docs: [] },
@@ -2083,19 +1783,16 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
             { error: forbiddenError() },
           ],
         },
-        // Passes the destination preflight and then fails the real write, so
-        // this exercises the backstop rather than the check that precedes it.
+        // The reservation succeeds (real filesystem) and then the record
+        // PUBLICATION fails, so this exercises the after-the-send backstop rather
+        // than the reservation that precedes it.
         fs: {
-          stat: async target =>
-            target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)
-              ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
-              : { isDirectory: () => true },
-          writeFile: async target => {
-            if (target.endsWith(PROBE_SUFFIX)) return;
+          rename: async (from, to) => {
+            if (from.endsWith('.probe-src') || to.endsWith('.probe-dst')) {
+              return realRename(from, to);
+            }
             throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
           },
-          rename: async () => {},
-          rm: async () => {},
         },
       });
 
@@ -2130,7 +1827,7 @@ describe('a settlement that throws after live effect never exits 1', () => {
 
   it('a confirmed run whose final line throws exits EVIDENCE_UNRECORDED, not 0 and not 1', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const log = throwingLog({ armOn: line => line.includes('CONFIRMED —') });
       const { exitCode } = await runMain({ evidenceOut, readerSpec: confirmedRun, log });
 
@@ -2138,7 +1835,7 @@ describe('a settlement that throws after live effect never exits 1', () => {
       // STILL refuses to report success, because the settlement that would have
       // established success did not finish. Fail-closed costs the operator a
       // look at a file; the other direction loses the ids.
-      assert.deepEqual(await readdir(dir), ['evidence.json']);
+      assert.deepEqual(await readdir(dir), [evidenceFileName(RUN_ID)]);
       assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
       assert.notEqual(exitCode, EXIT.USAGE, 'never "nothing live happened"');
       assert.notEqual(exitCode, EXIT.OK, 'an unfinished settlement confirms nothing');
@@ -2158,7 +1855,7 @@ describe('a settlement that throws after live effect never exits 1', () => {
       // channel left — and it still has to be honest about a live send.
       const log = throwingLog({ armOn: line => line.includes("send-d2c-message' exited") });
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }] },
         spawnSpec: { script: [{ code: 1, stderr: LEAKY_AZ_STDERR }] },
         log,
@@ -2183,7 +1880,7 @@ describe('a settlement that throws after live effect never exits 1', () => {
       // message was attempted, so nothing is live: AUTH stands, and inflating it
       // to "documents may be live" would be its own false claim.
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ error: forbiddenError() }] },
         log: throwingLog({ armOn: line => line.includes('pre-send read') }),
       });
@@ -2235,10 +1932,9 @@ describe('exit 0 requires positive confirmation, never a fall-through', () => {
     account: ACCOUNT,
     database: DATABASE,
     container: CONTAINER,
-    evidenceOut: 'unused.json',
+    evidenceOut: 'unused-dir',
     timeoutMs: 1000,
     pollIntervalMs: 250,
-    overwrite: false,
   });
 
   // No ledger: nothing was attempted, so nothing is owed a record and the code
@@ -2359,7 +2055,7 @@ describe('exit 0 requires positive confirmation, never a fall-through', () => {
   it('and end to end, only a real read-back exits 0', async () => {
     await withTempDir(async dir => {
       const { exitCode } = await runMain({
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
       });
       assert.equal(exitCode, EXIT.OK);
@@ -2448,24 +2144,23 @@ describe('source posture (HR1)', () => {
     assert.match(code, /exitCode === EXIT\.OK && confirmation\?\.confirmed !== true/);
   });
 
-  // The destination check must sit BEFORE the send in the source, not merely
-  // behave that way in the cases this suite happens to cover. A future edit that
-  // moves it below sendMessages() reintroduces exactly the defect: documents in
-  // the container, and only then a refusal to record them.
-  it('checks the evidence destination before it spawns anything', async () => {
+  // The destination RESERVATION must sit BEFORE the send in the source, not
+  // merely behave that way in the cases this suite happens to cover. A future
+  // edit that moves it below sendMessages() reintroduces exactly the defect:
+  // documents in the container, and only then a refusal to record them.
+  it('reserves the evidence destination before it spawns anything', async () => {
     const code = stripComments(await readSource('./send-fixture.mjs'));
     const body = /export async function main\([\s\S]*$/.exec(code)?.[0] ?? '';
     assert.ok(body, 'main() not found');
-    const preflightAt = body.indexOf('preflightEvidenceDestination(');
+    const reserveAt = body.indexOf('reserveEvidenceDestination(');
     const sendAt = body.indexOf('await sendMessages(');
-    assert.ok(preflightAt !== -1, 'main() does not check the evidence destination');
+    assert.ok(reserveAt !== -1, 'main() does not reserve the evidence destination');
     assert.ok(sendAt !== -1, 'main() does not send');
     assert.ok(
-      preflightAt < sendAt,
-      'the evidence destination must be proven before any message is sent'
+      reserveAt < sendAt,
+      'the evidence destination must be reserved before any message is sent'
     );
-    // The backstop is still there. The preflight is a check at t0 about a write
-    // at t1 and never replaces the write-time refusal.
+    // The write publishes into the reserved destination after the send.
     assert.match(code, /writeEvidenceRecord\(/);
   });
 
@@ -2562,7 +2257,7 @@ describe('the measured shape is what is used (HR4)', () => {
 
     await withTempDir(async dir => {
       const { exitCode, spawn, reader } = await runMain({
-        evidenceOut: path.join(dir, 'e.json'),
+        evidenceOut: dir,
         readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
       });
       assert.equal(exitCode, EXIT.OK);

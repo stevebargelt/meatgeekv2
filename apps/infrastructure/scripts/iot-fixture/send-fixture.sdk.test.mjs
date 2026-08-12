@@ -94,6 +94,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename as realRename,
   rm,
   stat as realStat,
   writeFile as realWriteFile,
@@ -103,7 +104,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { PARTIAL_SUFFIX, PROBE_SUFFIX, partialPathFor } from './evidence.mjs';
+import { PARTIAL_SUFFIX } from './evidence.mjs';
 import {
   EXIT,
   FIXTURE_DEVICE_ID,
@@ -128,6 +129,23 @@ const DATABASE = 'meatgeek-v2-dev-db';
 const CONTAINER = 'temperatures';
 const ENDPOINT = endpointFor(ACCOUNT);
 const RUN_ID = 'mg67-sdk-tier-run-id';
+
+// Per-run ownership: --evidence-out is a DIRECTORY and the file name is DERIVED
+// from the run id. These tests run main() (which mints its own run id), so the
+// derived name is discovered from the directory rather than assumed. Exactly one
+// run writes into each directory, so exactly one evidence file exists.
+const EVIDENCE_PREFIX = 'mg67-fixture-evidence-';
+async function soleEvidenceFile(dir) {
+  const names = (await readdir(dir)).filter(
+    name => name.startsWith(EVIDENCE_PREFIX) && name.endsWith('.json')
+  );
+  assert.equal(
+    names.length,
+    1,
+    `expected exactly one evidence file in the directory, found ${JSON.stringify(names)}`
+  );
+  return path.join(dir, names[0]);
+}
 
 // ---------------------------------------------------------------------------
 // Secrets that must never come back out.
@@ -641,26 +659,16 @@ function readerFailingAfterPreflight({ pages = [], error }) {
  * between them spans the live send.
  */
 function failingFs() {
-  const absent = () => {
-    const err = new Error('ENOENT');
-    err.code = 'ENOENT';
-    return err;
-  };
   return {
-    // The directory is fine; the target and its '.partial' are absent.
-    stat: async target => {
-      if (target.endsWith('.json') || target.endsWith(PARTIAL_SUFFIX)) throw absent();
-      return { isDirectory: () => true };
-    },
-    // The empty preflight probe succeeds; the record write does not.
-    writeFile: async target => {
-      if (target.endsWith(PROBE_SUFFIX)) return;
+    // The reservation (directory stat, primitive probe, exclusive create) uses
+    // the real filesystem and succeeds — its probe renames a disposable file,
+    // which is let through — and only the record PUBLICATION rename fails.
+    rename: async (from, to) => {
+      if (from.endsWith('.probe-src') || to.endsWith('.probe-dst')) return realRename(from, to);
       const err = new Error('ENOSPC: no space left on device');
       err.code = 'ENOSPC';
       throw err;
     },
-    rename: async () => {},
-    rm: async () => {},
   };
 }
 
@@ -819,7 +827,7 @@ function assertContractShape(record, { exit, sets }) {
 describe('MG-67 a real SDK failure after the send still records the run', () => {
   it('an AUTH abort with nothing observed records four correct id sets and exits AUTH, not OK', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode, log } = await runToReadBackFailure({
         error: leakyRealAuthError(),
         evidenceOut,
@@ -831,7 +839,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
       assert.notEqual(exitCode, EXIT.OK, 'an unread-back run is never a success');
       assert.notEqual(exitCode, EXIT.TIMEOUT, 'an auth failure is never a timeout');
 
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(await soleEvidenceFile(evidenceOut), 'utf8'));
       // az accepted all three and the read-back saw none of them: three
       // documents are LIVE and unobserved, which is exactly what the record has
       // to say and exactly what "nothing was written" would get wrong.
@@ -852,7 +860,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
     // documents in the source container are unaccounted for — indistinguishable,
     // from where it stands, from the unknown writer it halts on.
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode } = await runToReadBackFailure({
         error: leakyRealAuthError(),
         evidenceOut,
@@ -860,7 +868,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
       });
 
       assert.equal(exitCode, EXIT.AUTH);
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(await soleEvidenceFile(evidenceOut), 'utf8'));
       assertContractShape(record, {
         exit: EXIT.AUTH,
         sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 2 },
@@ -875,7 +883,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
     // The same clause on the other abort. TRANSPORT and AUTH are never collapsed
     // into one another, and neither of them may quietly become an absence.
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode } = await runToReadBackFailure({
         error: new cosmos.RestError('read ECONNRESET', { code: 'ECONNRESET' }),
         evidenceOut,
@@ -885,7 +893,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
       assert.equal(exitCode, EXIT.TRANSPORT);
       assert.notEqual(exitCode, EXIT.AUTH, 'a reset connection is not a credential problem');
       assert.notEqual(exitCode, EXIT.TIMEOUT, 'retries exhausted is not the bound elapsing');
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(await soleEvidenceFile(evidenceOut), 'utf8'));
       assertContractShape(record, {
         exit: EXIT.TRANSPORT,
         sets: { requested: 3, accepted: 3, ambiguous: 0, observed: 1 },
@@ -897,7 +905,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
 
   it('lets no credential the real error inlined reach the artifact on disk or the operator', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const error = leakyRealAuthError();
       // The premise, asserted rather than assumed: if @azure/identity ever stops
       // inlining inner messages, this test is no longer exercising the leak
@@ -913,7 +921,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
 
       // The raw bytes, not the parsed record: a secret in a key name, a nested
       // field or a string this tier did not think to look at is still on disk.
-      const raw = await readFile(evidenceOut, 'utf8');
+      const raw = await readFile(await soleEvidenceFile(evidenceOut), 'utf8');
       assertNoPlantedSecret(raw, 'the evidence artifact');
       const record = JSON.parse(raw);
       // outcomeReason is the field the real error's text actually travels in, so
@@ -936,7 +944,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
     // That is the worse of the two failures: the leak is caught above, and this
     // asserts the record survives the same input.
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
+      const evidenceOut = dir;
       const { exitCode } = await runToReadBackFailure({
         error: leakyRealAuthError(),
         evidenceOut,
@@ -949,7 +957,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
         'the record was written, so the run keeps its own diagnosis rather than becoming EVIDENCE_UNRECORDED'
       );
       assert.notEqual(exitCode, EXIT.EVIDENCE_UNRECORDED);
-      const record = JSON.parse(await readFile(evidenceOut, 'utf8'));
+      const record = JSON.parse(await readFile(await soleEvidenceFile(evidenceOut), 'utf8'));
       assert.equal(record.observedCount, 2, 'the documents the run did read back are on disk');
       assert.notEqual(
         record.outcomeReason,
@@ -963,7 +971,7 @@ describe('MG-67 a real SDK failure after the send still records the run', () => 
     await withTempDir(async dir => {
       const { exitCode, log } = await runToReadBackFailure({
         error: leakyRealAuthError(),
-        evidenceOut: path.join(dir, 'evidence.json'),
+        evidenceOut: dir,
         fs: failingFs(),
         pages: [runId => deliveredDocuments(runId).slice(0, 2)],
       });
@@ -1253,7 +1261,7 @@ describe('MG-67 no real SDK error can reach exit 0 through the funnel', () => {
           '--container-definition',
           'container-show-clean.json',
           '--evidence-out',
-          path.join(dir, 'evidence.json'),
+          dir,
         ],
         createReader: async () => ({
           queryDocuments: async () => {
@@ -1287,16 +1295,13 @@ describe('MG-67 no real SDK error can reach exit 0 through the funnel', () => {
 // because the two contracts meet on exactly one path: a run with live documents,
 // a real error already diagnosed, and a destination the writer must not touch.
 //
-// The write-integrity rules themselves — a stat error is not an absence, a temp
-// path is per-run, --overwrite is not --destroy-anything — are filesystem logic
-// with no SDK in them, and they are proven where they belong, in the
-// dependency-free tier (evidence.test.mjs's writeEvidenceRecord suites and
-// send-fixture.test.mjs's "two runs sharing one --evidence-out cannot publish
-// the wrong run's record" / "--overwrite still refuses a destination another run
-// holds a '.partial' on"). This tier does NOT restate them; a second copy would
-// drift from the first. In particular the per-run temp path rule is absent here
-// on purpose: it takes two concurrent runs to exhibit, neither needs an SDK, and
-// nothing a real error adds would sharpen it.
+// The write-integrity rules themselves — per-run ownership, a reservation before
+// the send, a stat error is never an absence — are filesystem logic with no SDK
+// in them, and they are proven where they belong, in the dependency-free tier
+// (evidence.test.mjs's reservation and write suites and send-fixture.test.mjs's
+// "two runs sharing one --evidence-out directory own two independent files" and
+// "refuses a directory whose state cannot be READ before sending"). This tier
+// does NOT restate them; a second copy would drift from the first.
 //
 // What only this tier can ask is what happens when a refusal lands on top of a
 // real one. Three things, none of them checkable with a hand-written error:
@@ -1306,11 +1311,11 @@ describe('MG-67 no real SDK error can reach exit 0 through the funnel', () => {
 //     An operator who reads "auth failure" goes and fixes an RBAC grant; an
 //     operator who reads "evidence unrecorded" writes three document ids down
 //     first, which is the only order that leaves MG-53 able to proceed.
-//   * NON-DESTRUCTION UNDER A REAL FAILURE. The refusal must leave the
-//     destination exactly as it found it. Asserted against a REAL filesystem
-//     here — real writeFile, real rename, real readdir, with only the one stat
-//     the rule is about made to fail — so "nothing was destroyed" is a fact
-//     about bytes on disk rather than about a fake that recorded no call.
+//   * NON-DESTRUCTION UNDER A REAL FAILURE. The refusal must leave any OTHER
+//     run's record exactly as it found it. Asserted against a REAL filesystem
+//     here — real writeFile, real rename, real readdir, with only the record
+//     publication made to fail — so "nothing was destroyed" is a fact about
+//     bytes on disk rather than about a fake that recorded no call.
 //   * HR1 ON THE NEWEST OUTPUT PATH. The refusal text is the newest
 //     operator-facing output in the tool, and on this path it is printed into
 //     the same stream as a real AggregateAuthenticationError's scrubbed text,
@@ -1322,59 +1327,36 @@ describe('MG-67 no real SDK error can reach exit 0 through the funnel', () => {
 // ===========================================================================
 
 /**
- * An fs seam over the REAL filesystem in which one stat — the destination's,
- * and only after the preflight has passed — fails with a non-ENOENT code.
+ * An fs seam over the REAL filesystem in which the record PUBLICATION rename
+ * fails, while the reservation (directory stat, primitive probe, exclusive
+ * create) succeeds on the real filesystem.
  *
- * This is the interval the destination preflight cannot close: it is a check at
- * t0 about a write at t1, and the live send happens in between. Everything else
- * is the real thing, so a guard that failed to hold would actually clobber a
- * real file and the assertions below would see it.
- *
- * @param {object} options
- * @param {string} options.target the destination whose stat turns unreadable.
- * @param {string} [options.code] the non-ENOENT failure to raise.
- * @param {() => Promise<void>} [options.onProbe] runs when the preflight probe is
- *   written — the seam through which a concurrent run's debris appears mid-run.
+ * This is the interval the reservation cannot close: it reserves at t0 and the
+ * live send happens before the publication at t1. Everything else is the real
+ * thing, so a guard that failed to hold would actually clobber a real file and
+ * the assertions below would see it.
  */
-function unreadableAfterPreflight({ target, code = 'EACCES', onProbe }) {
-  let probed = false;
+function publicationFailsAfterSend({ code = 'EACCES' } = {}) {
   return {
-    stat: async targetPath => {
-      if (targetPath === target && probed) {
-        const err = new Error(`${code}: permission denied, stat '${targetPath}'`);
-        err.code = code;
-        throw err;
-      }
-      return realStat(targetPath);
-    },
-    writeFile: async (targetPath, data, encoding) => {
-      const result = await realWriteFile(targetPath, data, encoding);
-      if (targetPath.endsWith(PROBE_SUFFIX)) {
-        probed = true;
-        if (onProbe) await onProbe();
-      }
-      return result;
+    rename: async (from, to) => {
+      if (from.endsWith('.probe-src') || to.endsWith('.probe-dst')) return realRename(from, to);
+      const err = new Error(`${code}: permission denied, rename to '${to}'`);
+      err.code = code;
+      throw err;
     },
   };
 }
 
 describe('MG-67 a write refusal outranks a real SDK diagnosis and destroys nothing', () => {
-  it("refuses on a non-ENOENT stat rather than writing, and leaves an earlier run's record byte-identical", async () => {
+  it('outranks a real SDK diagnosis with EVIDENCE_UNRECORDED, names the ids, and leaks nothing', async () => {
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
-      // An earlier run's record, which is what a stat read as an absence would
-      // rename straight over while reporting success. It appears AFTER the
-      // preflight cleared the path, so the preflight is not what is under test.
-      const earlier = JSON.stringify({ runId: 'an-earlier-run', observedIds: ['earlier-1'] });
+      const evidenceOut = dir;
 
       const { exitCode, log } = await runToReadBackFailure({
         error: leakyRealAuthError(),
         evidenceOut,
         pages: [runId => deliveredDocuments(runId).slice(0, 2)],
-        fs: unreadableAfterPreflight({
-          target: evidenceOut,
-          onProbe: () => realWriteFile(evidenceOut, earlier, 'utf8'),
-        }),
+        fs: publicationFailsAfterSend(),
       });
 
       // PRECEDENCE. The AUTH diagnosis is real and is on the lines above, but
@@ -1384,12 +1366,8 @@ describe('MG-67 a write refusal outranks a real SDK diagnosis and destroys nothi
       assert.notEqual(exitCode, EXIT.USAGE, 'documents are live: this is never "nothing happened"');
       assert.notEqual(exitCode, EXIT.OK);
 
-      // NON-DESTRUCTION, in bytes.
-      assert.equal(
-        await readFile(evidenceOut, 'utf8'),
-        earlier,
-        "the earlier run's record was destroyed by a stat this tool could not read"
-      );
+      // NON-DESTRUCTION. No partial debris, and — the placeholder released once
+      // empty — no zero-byte file mistaken for evidence.
       assert.deepEqual(
         (await readdir(dir)).filter(name => name.endsWith(PARTIAL_SUFFIX)),
         [],
@@ -1398,8 +1376,6 @@ describe('MG-67 a write refusal outranks a real SDK diagnosis and destroys nothi
 
       const output = log.all();
       assert.match(output, /EVIDENCE NOT RECORDED/);
-      // The refusal says WHY, and says it in the words that separate an
-      // unreadable answer from an absence.
       assert.match(output, /EACCES/);
       assert.equal(
         /nothing was written/i.test(output),
@@ -1419,54 +1395,45 @@ describe('MG-67 a write refusal outranks a real SDK diagnosis and destroys nothi
     });
   });
 
-  it('refuses a foreign partial that appears mid-run WITH --overwrite, and touches neither file', async () => {
-    // --overwrite authorises replacing the operator's OWN earlier record. It is
-    // not a force flag, and the run that would be destroyed here is one still
-    // being written — so both records would be believed published and neither
-    // run told otherwise. Asserted here rather than only in the fake tier
-    // because this run carries a real SDK failure and live documents: the
-    // refusal has to survive both without losing the ids or leaking the error.
+  it("touches no OTHER run's record in the same directory when its own write fails", async () => {
+    // Per-run ownership: this run's file name is derived from its own id, so a
+    // different run's record in the same directory is at a different name and can
+    // never be in this run's path. Asserted against a REAL filesystem, carrying a
+    // real SDK failure and live documents, so "nothing was destroyed" is a fact
+    // about bytes on disk.
     await withTempDir(async dir => {
-      const evidenceOut = path.join(dir, 'evidence.json');
-      const foreign = partialPathFor(evidenceOut, 'mg-67-run-00000000-0000-4000-8000-00000000dead');
-      const theirs = '{"a concurrent run is still writing":';
+      const other = path.join(dir, `${EVIDENCE_PREFIX}some-other-run.json`);
+      const otherBytes = JSON.stringify({ runId: 'some-other-run', observedIds: ['other-1'] });
+      await realWriteFile(other, otherBytes, 'utf8');
 
       const { exitCode, log } = await runToReadBackFailure({
         error: leakyRealAuthError(),
-        evidenceOut,
-        extraArgs: ['--overwrite'],
+        evidenceOut: dir,
         pages: [runId => deliveredDocuments(runId).slice(0, 2)],
-        fs: {
-          writeFile: async (targetPath, data, encoding) => {
-            const result = await realWriteFile(targetPath, data, encoding);
-            // The other run starts writing while this one is live — after the
-            // preflight cleared the destination.
-            if (targetPath.endsWith(PROBE_SUFFIX)) await realWriteFile(foreign, theirs, 'utf8');
-            return result;
-          },
-        },
+        fs: publicationFailsAfterSend(),
       });
 
       assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
-      assert.notEqual(exitCode, EXIT.OK, '--overwrite does not make a destroyed record a success');
+      assert.notEqual(exitCode, EXIT.OK);
       assert.notEqual(exitCode, EXIT.USAGE);
       assert.notEqual(exitCode, EXIT.AUTH);
 
+      // The other run's record is byte-identical, and no partial debris remains.
       assert.equal(
-        await readFile(foreign, 'utf8'),
-        theirs,
-        "--overwrite was read as licence to destroy another run's partial"
+        await readFile(other, 'utf8'),
+        otherBytes,
+        "another run's record was touched by this run's failed write"
       );
       assert.deepEqual(
-        (await readdir(dir)).sort(),
-        [path.basename(foreign)].sort(),
-        'the refused run left a file behind, or published over the concurrent run'
+        (await readdir(dir)).filter(name => name.endsWith(PARTIAL_SUFFIX)),
+        [],
+        'a refused write left partial debris that could be mistaken for evidence'
       );
 
       const output = log.all();
       assert.match(output, /EVIDENCE NOT RECORDED/);
       assert.match(output, /2 document\(s\) ARE in/);
-      assertNoPlantedSecret(output, 'a foreign-partial refusal under --overwrite');
+      assertNoPlantedSecret(output, 'a write-failure refusal beside another run record');
     });
   });
 });

@@ -157,101 +157,77 @@
 // three `partitionKey*` names (a partition key PATH is not a secret) is sound
 // here in a way it would not be there.
 //
-// WRITES ARE ATOMIC AND NON-DESTRUCTIVE. The record is written to a sibling
-// `.partial` file and published by exclusive create, so no reader ever sees a
-// half-written document and no two concurrent runs can both publish over one
-// destination; a failed write removes the partial rather than leaving debris that
-// looks like evidence. An EXISTING file at the target path is REFUSED rather
-// than overwritten: the earlier run's documents are still in the container, and
-// clobbering the record of them manufactures exactly the "unrecorded document"
-// condition that halts MG-53. The operator picks a new path, or passes
-// `overwrite: true` deliberately.
+// ===========================================================================
+// EVERY RUN EXCLUSIVELY OWNS ONE DESTINATION (the per-run ownership model).
+//
+// The prior design let two operators point --evidence-out at ONE file and then
+// tried to coordinate their writes on it — a shared-writer problem, and two
+// consecutive attempts to solve it each produced a new defect (a lost record, a
+// swapped record, and finally a credential leak on the refusal path). The
+// operator's directive removes the problem instead of solving it again:
+//
+//   * --evidence-out names a DIRECTORY, not a file.
+//   * The tool DERIVES the file name from the run's own unique correlation id
+//     (evidenceFileName), so two runs cannot even name the same file. Overlapping
+//     runs are still fully supported; overlapping OWNERSHIP does not exist.
+//   * The derived name is ATOMICALLY RESERVED before any live effect
+//     (reserveEvidenceDestination). The reservation is what turns "two runs
+//     cannot collide" from an assumption into a fact the filesystem enforces, and
+//     it is the moment a reused destination is refused — with EXIT.USAGE, while
+//     nothing has been sent (HR: a reused destination fails BEFORE any azure
+//     action).
+//
+// There is NO shared-writer coordination anywhere in this module any more, and
+// there is NO flag that replaces an existing record: an evidence artifact is an
+// IMMUTABLE, PER-RUN output. `--overwrite` is gone, not gated. A destination that
+// is already taken is a fresh run's refusal to start, never a licence to clobber.
 //
 // ===========================================================================
-// THE WRITE NEVER DESTROYS A RECORD AND NEVER PUBLISHES THE WRONG ONE.
+// RESERVE BEFORE THE LIVE EFFECT; PUBLISH AFTER IT — BOTH WITH THE REAL PRIMITIVE.
 //
-// Four rules, because "atomic" alone bought less than it looked like it did.
-// All three describe the same failure — a record that is silently lost or
-// silently swapped while the tool reports success — and a lost or swapped record
-// is worse than a missing one, because MG-53 cannot detect it: it reads a
-// well-formed artifact and reconciles the container against the wrong id set.
+// reserveEvidenceDestination() runs FIRST, before a single message is sent:
 //
-//   1. A STAT ERROR IS NOT AN ABSENCE. Only an explicit ENOENT means "no file
-//      there". Every other stat failure is a refusal, and the tool does not
-//      proceed to write on a destination whose state it could not read. Reading
-//      an unreadable answer as an absence is the MG-66 conflation, and this
-//      module gets no exemption from it for being the one that names it.
+//   1. A STAT ERROR IS NOT AN ABSENCE. Only an explicit ENOENT means "not there".
+//      Every other stat failure is a refusal — reading an unreadable answer as an
+//      absence is the MG-66 conflation, and this module gets no exemption from it.
+//   2. IT EXERCISES THE ACTUAL PUBLICATION PRIMITIVE, not a proxy. Publication
+//      (writeEvidenceRecord) writes a per-run `.partial` and rename()s it onto the
+//      reserved path; so the reservation writes a disposable probe file in the
+//      REAL target directory and rename()s it, proving the primitive works there
+//      before any live document exists. A destination that cannot support the
+//      primitive is caught now, not after documents are in Cosmos — which is the
+//      exact failure the earlier writeFile-preflight-with-link-publication let
+//      through. If the primitive ever changes, this probe changes with it.
+//   3. IT CLAIMS THE NAME ATOMICALLY. An exclusive create (writeFile with the
+//      `wx` flag, i.e. O_EXCL) reserves the derived path with an empty placeholder.
+//      EEXIST is refused with EXIT.USAGE before the send: the name is derived from
+//      a unique run id, so a file already there is a genuinely reused destination.
 //
-//   2. THE TEMP PATH IS PER RUN, NOT PER DESTINATION. A partial named for the
-//      destination alone is shared by every run pointed at that destination, and
-//      two of them interleave on it: one run's evidence file ends up holding the
-//      OTHER run's record, with both runs exiting 0. The partial is named for
-//      the run that owns it, so two runs cannot collide on it — see
-//      partialPathFor.
+// writeEvidenceRecord() runs AFTER the send, and it OWNS the reserved path, so it
+// needs no concurrency dance at all: it writes a per-run `.partial` and rename()s
+// it onto the placeholder it already holds. No reader ever sees a half-written
+// document (the destination appears complete or holds only the empty reservation),
+// and a failed write removes the partial rather than leaving debris. None of its
+// refusals is usage-class — it runs only after the live effect, so "bad arguments,
+// nothing happened" is false on every one of its paths (see evidenceUnrecordedRefusal).
 //
-//   3. `overwrite` REPLACES YOUR OWN RECORD; IT DOES NOT DESTROY ANOTHER RUN'S.
-//      A destination carrying a partial from a different run is refused whether
-//      or not the flag is set, at preflight and at write time alike. The flag
-//      exists so an operator can deliberately replace the record of an earlier
-//      run of their own; nothing about it asks to overwrite a run that is still
-//      writing, and a run that did would leave one file where two operators each
-//      believe theirs was published.
-//
-//   4. THE DESTINATION IS TAKEN BY EXCLUSION, NOT BY CHECKING. Rules 1-3 are
-//      all check-then-act: they read the destination and then, later, write it,
-//      with nothing holding it in between. Two genuinely concurrent runs
-//      therefore never see each other at all — both read a free destination,
-//      both proceed, and one record is destroyed by the other's publication
-//      with BOTH runs exiting 0. No amount of extra checking closes that
-//      window; a check-then-act has it by construction. Publication is
-//      therefore an EXCLUSIVE CREATE (link(), which fails EEXIST atomically),
-//      so the filesystem adjudicates the collision and the losing run is told,
-//      nonzero. `overwrite` goes through the same exclusion: it CLAIMS the
-//      record it replaces by moving it aside under a per-run name first, and
-//      restores it by the same exclusive primitive if the publication then
-//      fails. The checks in rules 1-3 are kept for the refusal text they can
-//      give that a bare EEXIST cannot, and are not the thing that decides.
-//
-// No refusal the WRITE path makes is usage-class. It runs only after the send,
-// so "bad arguments, nothing live happened" is false on every one of its paths;
-// see evidenceUnrecordedRefusal.
+// If the run never attempts a send, the empty reservation placeholder is released
+// (releaseReservation) so a run that reserved and then refused pre-send leaves no
+// zero-byte file that could be mistaken for evidence.
 //
 // ===========================================================================
-// THE DESTINATION IS PROVEN USABLE BEFORE ANYTHING LIVE HAPPENS.
+// EVERY PATH-BEARING OPERATOR LINE IS SCRUBBED (HR1, on the success path too).
 //
-// Every refusal above is detected at WRITE time, which is AFTER the sender has
-// put synthetic documents into the live container. An unusable --evidence-out
-// path — a directory that does not exist, a read-only mount, a file an earlier
-// run already recorded — therefore used to cost three live documents before the
-// tool refused to record them. That is a real, avoidable harm: the documents
-// stay in the container, MG-53 halts on anything its record does not account
-// for, and the operator is left reconciling by hand.
-//
-// The condition is ENTIRELY LOCAL. Nothing about "can I write this file" needs a
-// message to have been sent, so preflightEvidenceDestination() answers it first,
-// with a purely local filesystem check and NO live effect, and refuses with
-// EXIT.USAGE — the code that means "nothing happened, fix the invocation". The
-// caller runs it before the first send; it is deliberately stricter than the
-// write path, because at preflight time a refusal costs nothing.
-//
-// IT IS NOT A REPLACEMENT FOR THE WRITE-TIME REFUSALS, and must never be turned
-// into one. A preflight is a check at t0 about a write at t1: the directory can
-// be removed, the mount can go read-only, and a concurrent run can take the path
-// in between. So writeEvidenceRecord() keeps every guard it had — the preflight
-// moves the COMMON failure before the live effect, and the write-time refusal
-// remains the thing that is actually authoritative. Two checks, and the later
-// one is the one that decides.
-//
-// The writability probe WRITES AND REMOVES a real file (`.preflight` next to the
-// target), rather than asking the operating system for a permission bit. An
-// access-mode check answers a different question than the write does — it is
-// advisory, it ignores read-only mounts, immutable flags, quotas and ACLs — and
-// answering the easy question here would leave exactly the case this preflight
-// exists to catch.
+// A --evidence-out directory is untrusted operator input, and a component of it —
+// a directory or a file name — can contain credential-shaped text by accident or
+// by malice. So EVERY message this module emits that interpolates a path runs
+// through the tool's scrubber (safePath → scrubSecrets), on the success path as
+// well as every failure path. The scrubber posture was always the contract; a
+// raw path interpolation is the defect class, not any single call site.
 // ===========================================================================
 
-import { link, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
+import { rename, rm, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import {
   EXIT,
@@ -270,7 +246,15 @@ import {
   exitLabel,
   mergeIds,
   observedIdsDiverge,
+  scrubSecrets,
 } from './fixture-core.mjs';
+
+// Every operator-facing line that names a path runs the path through the tool's
+// scrubber first. A --evidence-out directory is untrusted input and a component
+// of it can be credential-shaped; HR1 applies on the success path as well as on
+// every failure path. This is the ONE helper the whole module routes paths
+// through, so a new call site cannot forget.
+const safePath = value => scrubSecrets(typeof value === 'string' ? value : String(value));
 
 // Bumped when a key is added, removed or re-meant. MG-53 and MG-54 read this
 // first and refuse a version they were not written against — a silently
@@ -307,115 +291,61 @@ export const UNKNOWN_WRITER_CHECK = Object.freeze({
     'Checking stop condition 1 requires an UNFILTERED enumeration of the source containers, which is an operator host-phase step, compared against accountableIds recorded here.',
 });
 
-// Written next to the target so the rename is same-filesystem and therefore
-// atomic. A cross-device rename is not, and a temp directory elsewhere would
-// silently degrade the one property this write has.
+// Written next to the reserved target so the rename is same-filesystem and
+// therefore atomic. A cross-device rename is not, and a temp directory elsewhere
+// would silently degrade the one property this write has.
 export const PARTIAL_SUFFIX = '.partial';
 
-// The temp path is PER RUN, not per destination.
-//
-// A temp path derived from the destination alone is shared by every run that
-// shares `--evidence-out`, and two such runs interleave on it: A writes its
-// bytes to the one partial, B overwrites them with its own, A renames — and the
-// file named for run A now holds run B's record, with BOTH runs exiting 0. That
-// is a wrong-record-under-the-right-name failure, and it is worse than a missing
-// record because nothing downstream can detect it: MG-53 reads the file, finds a
-// well-formed record with a run id it has no other copy of, and reconciles the
-// container against the wrong id set.
-//
-// Naming the partial for the run that owns it removes the interleave entirely —
-// two runs cannot collide on a path neither can name — and it is what lets the
-// scan below tell "another run is writing this destination right now" from "my
-// own in-flight partial".
+// A run id must be usable verbatim as a filename component: the derived evidence
+// file name IS the run's identity, and sanitising it could map two distinct run
+// ids onto one name, re-introducing the very collision the per-run model exists
+// to remove. Anything outside this alphabet is refused rather than rewritten.
 const SAFE_RUN_ID = /^[A-Za-z0-9._-]+$/;
 
+// The derived per-run evidence file name. The prefix reads unmistakably as this
+// ticket's fixture output, and the run id makes it unique — two runs cannot name
+// the same file, which is what makes per-run ownership a fact rather than an
+// assumption.
+export const EVIDENCE_FILE_PREFIX = 'mg67-fixture-evidence-';
+export const EVIDENCE_FILE_EXTENSION = '.json';
+
+/**
+ * The evidence file name a run owns, derived from its unique correlation id.
+ *
+ * Refused, never sanitised, for a run id outside SAFE_RUN_ID: a rewrite could
+ * collapse two ids onto one name, and the whole point of deriving the name is
+ * that two runs cannot collide on it.
+ */
+export function evidenceFileName(runId) {
+  if (typeof runId !== 'string' || runId.trim() === '' || !SAFE_RUN_ID.test(runId)) {
+    throw usageRefusal(
+      "no per-run evidence file name could be derived: the run id is missing or is not usable as a file-name component (expected only letters, digits, '.', '_' and '-')"
+    );
+  }
+  return `${EVIDENCE_FILE_PREFIX}${runId}${EVIDENCE_FILE_EXTENSION}`;
+}
+
+/**
+ * The per-run partial used while publishing the record into the reserved path.
+ * Named for the run that owns the reservation, so nothing else can touch it.
+ */
 export function partialPathFor(filePath, runId) {
   if (typeof filePath !== 'string' || filePath.trim() === '') {
     throw evidenceUnrecordedRefusal('filePath must be a non-empty string');
   }
-  if (typeof runId !== 'string' || runId.trim() === '') {
+  if (typeof runId !== 'string' || runId.trim() === '' || !SAFE_RUN_ID.test(runId)) {
     throw evidenceUnrecordedRefusal(
-      "the evidence temp path is derived from the run id, and no run id was given: two runs sharing a destination would otherwise interleave on one partial file and each could publish the other run's record"
-    );
-  }
-  if (!SAFE_RUN_ID.test(runId)) {
-    // Refused rather than sanitised. Sanitising two distinct run ids can map
-    // them onto ONE path, which is precisely the collision this naming exists to
-    // remove — a quiet re-entry into the defect through the repair.
-    throw evidenceUnrecordedRefusal(
-      `the run id is not usable as a filename component (expected only letters, digits, '.', '_' and '-'), so no per-run temp path could be derived for ${filePath}`
+      "no per-run temp path could be derived: the run id is missing or is not usable as a file-name component (expected only letters, digits, '.', '_' and '-')"
     );
   }
   return `${filePath}.${runId}${PARTIAL_SUFFIX}`;
 }
 
-/**
- * Every partial belonging to a destination, and which run owns each.
- *
- * Enumeration rather than a stat of one known name: the whole point of the
- * per-run naming above is that this run cannot know another run's path, so the
- * only way to see a concurrent run holding the destination is to look at the
- * directory. `owner` is null for a partial whose name carries no run id — the
- * pre-per-run spelling, or debris — and an unknown owner is treated as foreign,
- * because "I cannot tell whose this is" is not "it is mine".
- *
- * Pure and exported so the matching itself is testable without a filesystem.
- */
-export function partialsForDestination(entryNames, targetBasename) {
-  const prefix = `${targetBasename}.`;
-  return (Array.isArray(entryNames) ? entryNames : [])
-    .filter(
-      name =>
-        typeof name === 'string' &&
-        name !== targetBasename &&
-        name.startsWith(prefix) &&
-        name.endsWith(PARTIAL_SUFFIX)
-    )
-    .map(name => {
-      const inner = name.slice(prefix.length, name.length - PARTIAL_SUFFIX.length);
-      return { name, owner: inner.length > 0 ? inner : null };
-    });
-}
-
-/**
- * The partials at a destination that belong to some OTHER run.
- *
- * `runId` may be absent — the preflight runs before this tool mints one — and
- * then every partial is foreign, which is the correct reading: a run that has no
- * identity yet cannot own anything already on disk.
- */
-export function foreignPartials(entryNames, targetBasename, runId = null) {
-  return partialsForDestination(entryNames, targetBasename).filter(
-    partial => partial.owner === null || partial.owner !== runId
-  );
-}
-
-// Where `--overwrite` parks the record it is replacing, so the replacement is a
-// CLAIM rather than a clobber (see writeEvidenceRecord). Per run, and a distinct
-// suffix from the partial's, so a superseded record is never mistaken for an
-// in-flight one by partialsForDestination() above.
-export const SUPERSEDED_SUFFIX = '.superseded';
-
-export function supersededPathFor(filePath, runId) {
-  if (typeof filePath !== 'string' || filePath.trim() === '') {
-    throw evidenceUnrecordedRefusal('filePath must be a non-empty string');
-  }
-  if (typeof runId !== 'string' || !SAFE_RUN_ID.test(runId)) {
-    throw evidenceUnrecordedRefusal(
-      `no per-run superseded path could be derived for ${filePath}: the run id is missing or is not usable as a filename component`
-    );
-  }
-  return `${filePath}.${runId}${SUPERSEDED_SUFFIX}`;
-}
-
-// The preflight probe file. A distinct suffix rather than the partial's, so a
-// preflight that dies between the write and the removal cannot leave debris that
-// the write path or a later preflight would read as an in-flight record. Same
-// directory and therefore the same filesystem as the real write, which is the
-// property the probe exists to establish.
-export const PROBE_SUFFIX = '.preflight';
-
-export const probePathFor = filePath => `${filePath}${PROBE_SUFFIX}`;
+// The disposable probe file names used to exercise the publication primitive in
+// the real target directory before any live effect. Per run, so two overlapping
+// runs probing the same directory never collide on the probe either.
+const PROBE_SOURCE_SUFFIX = '.probe-src';
+const PROBE_TARGET_SUFFIX = '.probe-dst';
 
 // ---------------------------------------------------------------------------
 // The outcome name.
@@ -1267,164 +1197,156 @@ export function serializeEvidenceRecord(record) {
 }
 
 /**
- * Prove the evidence destination is usable BEFORE the caller does anything
- * live. Purely local: it stats, it writes and removes one probe file, and it
- * touches nothing else. No live effect, on any path.
+ * Reserve the per-run evidence destination BEFORE the caller does anything live.
  *
- * Every refusal is EXIT.USAGE, and that is the point: this runs while nothing
- * has been sent, so "fix the invocation and run it again" is the whole and true
- * diagnosis. Once a send has happened, a destination problem is no longer a
- * usage error — it is EXIT.EVIDENCE_UNRECORDED, with documents in the container
- * that no record accounts for, and the caller owns that translation.
+ * --evidence-out is a DIRECTORY; the file name is DERIVED from the run's unique
+ * correlation id, so no two runs can name the same file and there is nothing to
+ * coordinate. This function then, in order:
  *
- * A foreign `.partial` is refused here, and is refused UNDER `overwrite` TOO.
- * `--overwrite` says "replace the record I wrote earlier"; it does not say
- * "destroy a record another run is in the middle of writing", and those are
- * different acts with different consequences. A live partial means a concurrent
- * run whose rename lands after this one's, so proceeding leaves ONE file where
- * two runs each believe theirs is recorded — and neither operator is told. The
- * flag never reaches that case.
+ *   1. Refuses a directory that does not exist, is not a directory, or whose
+ *      state cannot be read (a stat failing for any reason but ENOENT — an
+ *      unreadable answer is not an absence).
+ *   2. Exercises the ACTUAL publication primitive — writeFile of a per-run
+ *      `.partial` then rename() onto the target — with disposable probe files in
+ *      the REAL directory, proving the primitive works there before any live
+ *      document exists. Not a proxy check: if publication ever stops using
+ *      rename, this probe changes with it.
+ *   3. Claims the derived path ATOMICALLY with an exclusive create (writeFile
+ *      `wx`, i.e. O_EXCL), leaving an empty placeholder. EEXIST means a genuinely
+ *      reused destination and is refused.
  *
- * NOT a substitute for the write-time guards. See the header: this is a check at
- * t0 about a write at t1, and the write-time refusal is the authoritative one.
+ * Every refusal is EXIT.USAGE: this runs while nothing has been sent, so "fix
+ * the invocation and run it again" is the whole and true diagnosis, and a reused
+ * destination fails before any azure action. Every path-bearing line is scrubbed.
  *
- * @param {string} filePath the operator-chosen --evidence-out destination.
- * @param {{fs?: object, overwrite?: boolean, runId?: string}} [options] fs is a
- *   PARTIAL override, injected so the read-only and vanished-directory paths are
- *   testable without a real filesystem; any member it does not define is the
- *   real one from node:fs/promises. runId, when the caller already has one,
- *   excludes that run's own partial from the foreign scan; this tool's CLI runs
- *   the preflight before minting one, and then every partial is foreign.
- * @returns {Promise<object>} what was checked, for the caller to log.
+ * @param {string} directory the operator-chosen --evidence-out DIRECTORY.
+ * @param {string} runId the run's unique correlation id; names the file.
+ * @param {{fs?: object}} [options] fs is a PARTIAL override (any member it omits
+ *   is the real one from node:fs/promises), injected so the read-only and
+ *   vanished-directory paths are testable without a real filesystem.
+ * @returns {Promise<object>} the reservation: {directory, fileName, path, runId}.
  */
-export async function preflightEvidenceDestination(filePath, options = {}) {
-  const { overwrite = false, runId = null } = options;
-  // Member-wise override rather than wholesale replacement: a caller injecting a
-  // fake for the members it cares about must not silently lose the directory
-  // enumeration this function's concurrency guard depends on. A guard that
-  // disappears when a test hands over a three-member object is a guard that
-  // passes by not running.
-  const fs = { writeFile, rm, stat, readdir, ...(options.fs ?? {}) };
-  if (typeof filePath !== 'string' || filePath.trim() === '') {
+export async function reserveEvidenceDestination(directory, runId, options = {}) {
+  const fs = { writeFile, rename, rm, stat, ...(options.fs ?? {}) };
+  if (typeof directory !== 'string' || directory.trim() === '') {
     throw usageRefusal(
-      'the evidence destination must be a non-empty path: MG-53 and MG-54 read that artifact as a program input, and a run with nowhere to record it is refused before anything is sent'
+      'the evidence destination must be a non-empty DIRECTORY: MG-53 and MG-54 read the per-run artifact this tool names inside it, and a run with nowhere to record it is refused before anything is sent'
     );
   }
-
-  const directory = dirname(filePath);
-  const targetName = basename(filePath);
-  const probePath = probePathFor(filePath);
+  // Derived first, so an unusable run id is refused before any filesystem call.
+  const fileName = evidenceFileName(runId);
+  const path = join(directory, fileName);
 
   // Absent is an answer; anything else is NOT. A stat that fails for a reason
-  // this preflight cannot interpret is refused rather than treated as "no file
-  // there" — reading an unreadable answer as an absence is the conflation this
-  // whole tool exists to avoid, and it applies to its own filesystem too.
+  // this reservation cannot interpret is refused rather than treated as "not
+  // there" — the MG-66 conflation, which applies to this tool's own filesystem
+  // too.
   const statOf = async target => {
     try {
       return await fs.stat(target);
     } catch (err) {
       if (err?.code === 'ENOENT') return null;
       throw usageRefusal(
-        `cannot determine whether ${target} exists: ${err?.code ?? err?.name ?? 'stat error'}. An unreadable destination is refused before any message is sent, not assumed to be free.`
+        `cannot determine whether ${safePath(target)} exists: ${err?.code ?? err?.name ?? 'stat error'}. An unreadable destination is refused before any message is sent, not assumed to be free.`
       );
     }
   };
-
   const isDirectory = entry => typeof entry?.isDirectory === 'function' && entry.isDirectory();
 
   const directoryStat = await statOf(directory);
   if (directoryStat === null) {
     throw usageRefusal(
-      `the directory for the evidence file does not exist: ${directory}. Create it, or choose a path under an existing directory — nothing has been sent, so this costs nothing to fix.`
+      `the evidence directory does not exist: ${safePath(directory)}. Create it, or choose an existing directory — nothing has been sent, so this costs nothing to fix.`
     );
   }
   if (!isDirectory(directoryStat)) {
-    throw usageRefusal(`the evidence file's parent path is not a directory: ${directory}`);
-  }
-
-  const targetStat = await statOf(filePath);
-  if (targetStat !== null && isDirectory(targetStat)) {
-    // Refused even under `overwrite`: the operator asked to replace an earlier
-    // run's record, not to remove a directory, and the rename would fail at
-    // write time anyway — after the documents were already sent.
     throw usageRefusal(
-      `the evidence destination ${filePath} is a directory, so no record could be written there. This is refused with overwrite as well: overwrite replaces an earlier run's record, and this is not one.`
-    );
-  }
-  if (targetStat !== null && !overwrite) {
-    throw usageRefusal(
-      `an evidence file already exists at ${filePath}: it records an earlier run whose documents are still in the container, and MG-53 halts on a document no record accounts for. Choose a new path, or pass --overwrite deliberately. Nothing has been sent for this run.`
+      `the evidence destination is not a directory: ${safePath(directory)}. --evidence-out names a directory the tool writes a per-run file into, not a file.`
     );
   }
 
-  // The concurrency guard. Enumerated, not stat'd: partials are named for the
-  // run that owns them, so this run cannot know another run's path, and a
-  // directory listing is the only thing that can see one.
-  //
-  // NOT gated on `overwrite`. See the doc comment: replacing your own earlier
-  // record is what the flag authorises; destroying a record another run is
-  // writing right now is not, and no flag on this tool asks for it.
-  let entries;
+  // The probe. The publication primitive is writeFile-then-rename, so the only
+  // honest way to establish it will be permitted here is to perform one on the
+  // same filesystem with disposable files, and remove them. An access-mode bit
+  // would answer a different, weaker question (it ignores read-only mounts,
+  // quotas and ACLs) and would leave exactly the case this probe exists to catch.
+  const probeSource = join(directory, `${EVIDENCE_FILE_PREFIX}${runId}${PROBE_SOURCE_SUFFIX}`);
+  const probeTarget = join(directory, `${EVIDENCE_FILE_PREFIX}${runId}${PROBE_TARGET_SUFFIX}`);
   try {
-    entries = await fs.readdir(directory);
-  } catch (err) {
-    // Including ENOENT: the directory was just stat'd as an existing directory,
-    // so a listing that says otherwise is a filesystem this preflight cannot
-    // read, not an empty one. An unenumerable directory is refused rather than
-    // read as "no concurrent run here".
-    throw usageRefusal(
-      `cannot enumerate ${directory} to check for a concurrent run's partial evidence file: ${err?.code ?? err?.name ?? 'readdir error'}. Refused rather than assumed empty — a partial this check cannot see is a record this run's rename would destroy. Nothing has been sent for this run.`
-    );
-  }
-  const foreign = foreignPartials(entries, targetName, runId);
-  if (foreign.length > 0) {
-    const names = foreign.map(partial => partial.name).join(', ');
-    throw usageRefusal(
-      `a partial evidence file already exists next to ${filePath}: ${names}. Either another run is writing this same path right now — in which case one of the two records would be lost with both runs reporting success — or a crashed run left it behind. This is refused with overwrite as well: overwrite replaces an earlier record of YOUR OWN, it does not authorise destroying a run that is still writing. Remove it, or choose another path. Nothing has been sent for this run.`
-    );
-  }
-
-  // The probe. The only way to establish that the real write will be permitted
-  // is to perform one, on the same filesystem, and remove it.
-  try {
-    await fs.writeFile(probePath, '', 'utf8');
+    await fs.writeFile(probeSource, '', 'utf8');
+    await fs.rename(probeSource, probeTarget);
   } catch (err) {
     throw usageRefusal(
-      `the evidence destination ${filePath} is not writable: ${err?.code ?? err?.name ?? 'write error'} while probing ${probePath}. Refused before any message was sent, so no synthetic document is in the container from this run.`
+      `the evidence directory ${safePath(directory)} cannot support the publication primitive (write + rename): ${err?.code ?? err?.name ?? 'write error'}. Refused before any message was sent, so no synthetic document is in the container from this run.`
     );
   } finally {
-    // Best effort, and deliberately not fatal: the probe is empty, it is not
-    // evidence, and failing the run over a leftover byte after the destination
-    // has just been proven writable would refuse a usable path.
-    await fs.rm(probePath, { force: true }).catch(() => {});
+    // Best effort: the probes are empty and are not evidence. Failing the run
+    // over a leftover probe byte after the primitive has just been proven would
+    // refuse a usable directory.
+    await fs.rm(probeSource, { force: true }).catch(() => {});
+    await fs.rm(probeTarget, { force: true }).catch(() => {});
   }
 
-  return Object.freeze({
-    path: filePath,
-    directory,
-    // What was checked, rather than one path that was stat'd: the partial this
-    // run will write does not exist yet and is not named until the run id is
-    // minted, so the honest report is "the destination held no partial at t0".
-    partialsFound: Object.freeze([]),
-    probePath,
-    exists: targetStat !== null,
-    overwrite,
-    writable: true,
-  });
+  // Claim the derived name atomically. `wx` is O_EXCL: it creates the file or
+  // fails EEXIST, with no check-then-act window. Because the name is derived
+  // from a unique run id, EEXIST is a genuinely reused destination — refused
+  // here, before the send, with a usage code.
+  try {
+    await fs.writeFile(path, '', { encoding: 'utf8', flag: 'wx' });
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      throw usageRefusal(
+        `the evidence file this run would own already exists: ${safePath(path)}. Its name is derived from this run's unique id, so a file already there means the destination was reused — evidence artifacts are immutable and per-run, and this tool never replaces one. Choose another directory, or remove that file if it is genuinely stale. Nothing has been sent for this run.`
+      );
+    }
+    throw usageRefusal(
+      `could not reserve the evidence file ${safePath(path)}: ${err?.code ?? err?.name ?? 'write error'}. Refused before any message was sent, so no synthetic document is in the container from this run.`
+    );
+  }
+
+  return Object.freeze({ directory, fileName, path, runId });
 }
 
 /**
- * One operator-facing line for a passed preflight, built only from its fields.
- * It says what was proven and, explicitly, what was not: a passing preflight is
- * not a promise that the write will succeed.
+ * Release a reservation whose run wrote no record — but NEVER a written record.
+ *
+ * The reservation is an EMPTY placeholder claimed before the live effect. A run
+ * that reserves and then writes nothing (a refused pre-send read, an interrupted
+ * settlement) leaves that zero-byte file, which a consumer could mistake for an
+ * empty evidence record; this removes it.
+ *
+ * It removes the file ONLY if it is still empty. Publication renames the real
+ * record onto the reserved path, so a published record is non-empty and is left
+ * strictly untouched here — which makes this SAFE TO CALL ON EVERY PATH,
+ * including after a successful write, without any risk of deleting evidence. It
+ * is best-effort and never fatal: a placeholder that cannot be removed is inert
+ * debris, not a lost or wrong record.
  */
-export function describeDestination(preflight) {
-  const replacing = preflight.exists
-    ? ' (an existing record WILL BE REPLACED — --overwrite was given)'
-    : '';
+export async function releaseReservation(reservation, options = {}) {
+  if (!isPlainObject(reservation) || typeof reservation.path !== 'string') return false;
+  const fs = { stat, rm, ...(options.fs ?? {}) };
+  try {
+    const stats = await fs.stat(reservation.path);
+    // Only the empty placeholder is removable. A non-empty file is a published
+    // record (or something an operator put there), and is never touched.
+    if (!stats || stats.size !== 0) return false;
+  } catch {
+    // Nothing there, or unreadable — either way there is no empty placeholder to
+    // remove, and this must never throw on a cleanup path.
+    return false;
+  }
+  await fs.rm(reservation.path, { force: true }).catch(() => {});
+  return true;
+}
+
+/**
+ * One operator-facing line for a reservation, built only from its fields and
+ * with the path scrubbed. It names the exact file this run owns.
+ */
+export function describeReservation(reservation) {
   return (
-    `evidence destination ${preflight.path}: writable, checked before any message was sent${replacing}. ` +
-    'Re-checked at write time; this preflight is not a guarantee.'
+    `evidence destination reserved for run ${reservation.runId}: ${safePath(reservation.path)} ` +
+    '(a per-run, immutable artifact — the directory and the publication primitive were proven before any message was sent).'
   );
 }
 
@@ -1457,42 +1379,50 @@ export function classifyPartitionValues(values = [], expected = null) {
 }
 
 /**
- * Write the record atomically to `filePath`.
+ * Publish the record into the path this run already RESERVED.
  *
- * Write a PER-RUN partial (see partialPathFor), then publish it by EXCLUSIVE
- * CREATE at the destination — link(), which fails EEXIST if anything is there.
- * So no reader ever sees a half-written document, two runs sharing a
- * destination cannot interleave on one temp file, two CONCURRENT runs cannot
- * both publish (the filesystem picks one and the loser exits nonzero rather
- * than being silently overwritten), and a failed write leaves no debris that
- * could be mistaken for evidence. Refuses to overwrite an existing file unless
- * `overwrite` is passed: the earlier run's documents are still in the container,
- * and destroying the record of them manufactures the unrecorded-document
- * condition that halts MG-53.
+ * The reservation (reserveEvidenceDestination) claimed a per-run, uniquely-named
+ * placeholder before the live effect, so this function OWNS its destination and
+ * needs no concurrency coordination at all: no two runs can name the same file,
+ * and this run already holds an exclusive placeholder at it. It writes a per-run
+ * `.partial` and rename()s it onto the reserved path — the same primitive the
+ * reservation probed — so no reader ever sees a half-written document (the
+ * destination appears complete, or still holds the empty reservation), and a
+ * failed write leaves no debris.
  *
- * FOUR REFUSALS, ALL OF THEM NON-DESTRUCTIVE, and none of them USAGE — this
- * function only ever runs after the send, so see evidenceUnrecordedRefusal:
- *   - a destination whose state cannot be READ (a stat failing for any reason
- *     other than ENOENT). An unreadable answer is not an absence, and writing on
- *     one destroys whatever is actually there while reporting success. This is
- *     the MG-66 conflation, and it is not permitted against this tool's own
- *     filesystem either.
- *   - a destination another run holds a partial on, `overwrite` or not.
- *   - an existing record, unless `overwrite` says otherwise.
- *   - a destination a CONCURRENT run claimed while this one was working, which
- *     only the exclusive publication below can detect, `overwrite` or not.
+ * There is no overwrite, no foreign-partial scan, no superseded-record dance:
+ * per-run ownership removed the shared-writer problem those guarded. The record's
+ * runId MUST match the reservation's — attributing one run's record to another
+ * run's reserved file is a wrong deletion downstream, so it is refused.
+ *
+ * None of its refusals is usage-class: it runs only after the send, so "bad
+ * arguments, nothing happened" is false on every path (see evidenceUnrecordedRefusal).
+ * Every path-bearing line is scrubbed.
  *
  * @param {object} record from buildEvidenceRecord(); its runId names the partial.
- * @param {string} filePath operator-chosen destination.
- * @param {{fs?: object, overwrite?: boolean}} [options] fs is a PARTIAL override
- *   (any member it omits is the real one), injected so the rename-failure path
- *   is testable without breaking a real filesystem.
+ * @param {object} reservation from reserveEvidenceDestination(): {path, runId, ...}.
+ * @param {{fs?: object}} [options] fs is a PARTIAL override (any member it omits
+ *   is the real one), injected so the write-failure path is testable.
  */
-export async function writeEvidenceRecord(record, filePath, options = {}) {
-  const { overwrite = false } = options;
-  const fs = { writeFile, rename, rm, stat, readdir, link, ...(options.fs ?? {}) };
-  if (typeof filePath !== 'string' || filePath.trim() === '') {
-    throw evidenceUnrecordedRefusal('filePath must be a non-empty string');
+export async function writeEvidenceRecord(record, reservation, options = {}) {
+  const fs = { writeFile, rename, rm, ...(options.fs ?? {}) };
+  if (
+    !isPlainObject(reservation) ||
+    typeof reservation.path !== 'string' ||
+    reservation.path === ''
+  ) {
+    throw evidenceUnrecordedRefusal(
+      'the reservation from reserveEvidenceDestination() is required to publish a record: this run must have already claimed its per-run destination before the send'
+    );
+  }
+  const filePath = reservation.path;
+  // A record written into a reservation another run owns would attribute this
+  // run's documents to that run's file — a wrong deletion downstream. The run
+  // ids must match; refused rather than reconciled.
+  if (typeof record?.runId !== 'string' || record.runId !== reservation.runId) {
+    throw evidenceUnrecordedRefusal(
+      `the record's run id does not match the reservation's (${JSON.stringify(reservation.runId)}) — a record published into another run's reserved file would attribute this run's documents to the wrong run, so it is refused. This run's documents are in the container and this run's evidence is NOT recorded.`
+    );
   }
   // Serialization refuses a record carrying credential-shaped text, and that
   // refusal is usage-class where it is raised because it describes the RECORD.
@@ -1505,168 +1435,22 @@ export async function writeEvidenceRecord(record, filePath, options = {}) {
   } catch (err) {
     throw err instanceof FixtureError ? evidenceUnrecordedRefusal(err.message) : err;
   }
-  // Derived from the run, not from the destination. A record with no run id
-  // cannot name a partial and is refused rather than written through a shared
-  // one.
-  const partialPath = partialPathFor(filePath, record?.runId);
+  const partialPath = partialPathFor(filePath, record.runId);
 
-  // Absent is an answer; anything else is NOT. A stat that fails for a reason
-  // this function cannot interpret — EACCES, EIO, ELOOP, a filesystem going away
-  // mid-run — used to be swallowed here and read as "nothing there", which then
-  // renamed straight over an earlier run's record and returned success. Losing a
-  // record that MG-53 halts without, silently, while reporting that it was
-  // written, is the worst outcome this function has.
-  const statOf = async target => {
-    try {
-      return await fs.stat(target);
-    } catch (err) {
-      if (err?.code === 'ENOENT') return null;
-      throw evidenceUnrecordedRefusal(
-        `cannot determine whether ${target} exists: ${err?.code ?? err?.name ?? 'stat error'}. Refusing to write on a destination whose state cannot be read — an unreadable answer is not an absence, and writing here could destroy an earlier run's record. This run's documents are in the container and this run's evidence is NOT recorded.`
-      );
-    }
-  };
-
-  // The concurrency guard, unconditional. Reached only when a partial appeared
-  // AFTER the preflight cleared this destination, i.e. while this run was live —
-  // which makes it a genuinely concurrent run rather than stale debris, and
-  // makes silently proceeding a coin toss over which of the two records
-  // survives, with both runs reporting success. `overwrite` does not license
-  // that: it authorises replacing an earlier record of the operator's own, not
-  // destroying one being written now.
-  let entries;
-  try {
-    entries = await fs.readdir(dirname(filePath));
-  } catch (err) {
-    throw evidenceUnrecordedRefusal(
-      `cannot enumerate ${dirname(filePath)} to check for a concurrent run's partial evidence file: ${err?.code ?? err?.name ?? 'readdir error'}. Refused rather than assumed empty. This run's documents are in the container and this run's evidence is NOT recorded.`
-    );
-  }
-  const foreign = foreignPartials(entries, basename(filePath), record?.runId ?? null);
-  if (foreign.length > 0) {
-    throw evidenceUnrecordedRefusal(
-      `another run holds a partial evidence file next to ${filePath}: ${foreign.map(partial => partial.name).join(', ')}. Writing now would leave one file where two runs each believe their record was published, and neither would be told. Refused with overwrite as well. This run's documents are in the container and this run's evidence is NOT recorded.`
-    );
-  }
-
-  if (!overwrite) {
-    const existing = await statOf(filePath);
-    if (existing) {
-      throw evidenceUnrecordedRefusal(
-        `refusing to overwrite the existing evidence file at ${filePath}: it records an earlier run whose documents are still in the container, and MG-53 halts on a document no record accounts for. Choose a new path, or pass overwrite explicitly.`
-      );
-    }
-  }
-
-  // =========================================================================
-  // PUBLICATION IS AN EXCLUSIVE CREATE, NOT A CLOBBER.
-  //
-  // Every guard above is a check-then-act: it READS the destination's state,
-  // and then, later, WRITES. Nothing holds the destination in between. Two
-  // genuinely concurrent runs therefore never observe each other — each reads a
-  // free destination, each proceeds — and the second publication silently
-  // destroys the first run's record while BOTH runs exit 0. That is the exact
-  // false-success this tool exists to make impossible, in the one artifact
-  // MG-53 and MG-54 parse to decide whether to halt a migration.
-  //
-  // A wider or later check cannot fix it. Any check-then-act has the window by
-  // construction, and narrowing it just makes the loss rarer and harder to
-  // attribute. The fix is EXCLUSION: the filesystem adjudicates the collision
-  // atomically, instead of this function inspecting and then acting.
-  //
-  // link() is that exclusion, and it is the publication at the same time. It
-  // gives the fully-written partial a second name at the destination and FAILS
-  // WITH EEXIST if any file is already there — one atomic operation, so of two
-  // concurrent runs exactly one can win it and the loser is TOLD, nonzero,
-  // rather than silently overwritten. It also keeps the atomic-publication
-  // property the rename had: the destination appears complete or not at all,
-  // because it is a second name for bytes that were written in full before the
-  // name existed.
-  //
-  // The guards above are deliberately KEPT and are deliberately NOT
-  // authoritative. They turn the common cases into a refusal that names what is
-  // actually wrong — an earlier run's record, a concurrent run's partial, a
-  // destination that cannot be read — instead of a bare EEXIST. This is the
-  // same two-layer shape as the preflight: the earlier check is for the
-  // operator, the later one decides.
-  // =========================================================================
-  let supersededPath = null;
+  // Write in full to the per-run partial, then rename onto the reserved path.
+  // rename is atomic on the same filesystem and replaces the empty placeholder
+  // this run already owns, so the published file is either the complete record
+  // or the reservation — never a half-written document. On failure the partial
+  // is removed rather than left as something that looks like evidence.
   try {
     await fs.writeFile(partialPath, serialized, 'utf8');
-
-    if (overwrite) {
-      // `--overwrite` must not reintroduce the clobber this block removes. A
-      // deliberate replacement of the operator's OWN prior record still must not
-      // be able to interleave with a concurrent run's publication.
-      //
-      // So the prior record is CLAIMED first — moved aside under a per-run name
-      // — and that rename is itself adjudicated by the filesystem: of two
-      // concurrent overwriting runs exactly one moves the file and the other is
-      // told ENOENT. Both then fall through to the link below, where exactly one
-      // can still win. Neither can destroy a record the other published.
-      const candidate = supersededPathFor(filePath, record?.runId);
-      try {
-        await fs.rename(filePath, candidate);
-        supersededPath = candidate;
-      } catch (err) {
-        if (err?.code !== 'ENOENT') throw err;
-        // Nothing to supersede — the destination is already free. The link below
-        // remains the only thing that decides whether this run gets it.
-      }
-    }
-
-    try {
-      await fs.link(partialPath, filePath);
-    } catch (err) {
-      if (err?.code === 'EEXIST') {
-        throw evidenceUnrecordedRefusal(
-          `the evidence destination ${filePath} was claimed by another run between this run's checks and its write, and this run refused rather than replacing it: publishing here would destroy a record that run believes it published, with both runs reporting success. Refused with overwrite as well. This run's documents are in the container and this run's evidence is NOT recorded.`
-        );
-      }
-      throw err;
-    }
+    await fs.rename(partialPath, filePath);
   } catch (err) {
-    // No partial is left behind. A `.partial` file lying next to the target
-    // looks enough like evidence to be picked up by hand, and this write is the
-    // one that failed.
     await fs.rm(partialPath, { force: true }).catch(() => {});
-
-    // A failed overwrite must leave the operator's prior record where it was.
-    // Restoring it uses the SAME exclusive primitive rather than a rename: if
-    // another run published in the interval, that run's record is the one at the
-    // destination and must not be clobbered by this one's rollback. Then the
-    // prior record stays under its superseded name and the refusal says so,
-    // because a record this function moved and could not put back is not
-    // something the operator may be left to discover.
-    let stranded = null;
-    if (supersededPath !== null) {
-      try {
-        await fs.link(supersededPath, filePath);
-        await fs.rm(supersededPath, { force: true }).catch(() => {});
-      } catch {
-        stranded = supersededPath;
-      }
-    }
-    const strandedNote =
-      stranded === null
-        ? ''
-        : ` The record previously at ${filePath} was moved aside and could NOT be restored, because another run now holds that path; it is at ${stranded} and must be dealt with by hand.`;
-
-    if (err instanceof FixtureError) {
-      throw stranded === null ? err : evidenceUnrecordedRefusal(`${err.message}${strandedNote}`);
-    }
+    if (err instanceof FixtureError) throw err;
     throw evidenceUnrecordedRefusal(
-      `failed to write the evidence record to ${filePath}: ${err?.code ?? err?.name ?? 'write error'}. No partial file was left behind, and no evidence was recorded for this run.${strandedNote}`
+      `failed to write the evidence record to ${safePath(filePath)}: ${err?.code ?? err?.name ?? 'write error'}. No partial file was left behind, and no evidence was recorded for this run. This run's documents are in the container and this run's evidence is NOT recorded.`
     );
-  }
-
-  // Published. The partial is now a redundant second name for the same bytes,
-  // and the superseded record is the one `overwrite` was invoked to replace. A
-  // removal that fails leaves recoverable, correctly-named debris and does NOT
-  // unpublish a record that is already on disk, so it is not an error here.
-  await fs.rm(partialPath, { force: true }).catch(() => {});
-  if (supersededPath !== null) {
-    await fs.rm(supersededPath, { force: true }).catch(() => {});
   }
 
   return Object.freeze({ path: filePath, bytes: Buffer.byteLength(serialized), record });
@@ -1694,7 +1478,7 @@ export function describeEvidence(record, filePath) {
       ? ''
       : `, ${record.accountableCount} document(s) are or MAY BE in the container (${record.ambiguousCount} of unknown acceptance)`;
   return (
-    `evidence ${filePath}: ${record.confirmed ? 'CONFIRMED' : `NOT CONFIRMED (${record.exitLabel})`} — ` +
+    `evidence ${safePath(filePath)}: ${record.confirmed ? 'CONFIRMED' : `NOT CONFIRMED (${record.exitLabel})`} — ` +
     `${record.count}/${record.expectedCount} document(s) read back for run ${record.runId} ` +
     `in ${record.target.database}/${record.target.container}${accountable}, ${ttl}${drift}${divergence}${anomalies}`
   );

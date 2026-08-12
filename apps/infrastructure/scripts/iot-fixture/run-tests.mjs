@@ -80,23 +80,25 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // disappear inside it — so raising it is maintenance of the gate, not
 // tightening of it.
 //
-// These floors were last raised when the evidence writer's PUBLICATION was
-// changed from check-then-act to EXCLUSION. Every guard in front of the write
-// read the destination and then, later, wrote it; nothing held the destination
-// in between, so two genuinely concurrent runs never observed each other, both
-// exited 0, and one run's record was destroyed by the other's rename. That is
-// silent data destruction reported as success, in the one artifact MG-53 and
-// MG-54 parse to decide whether to halt a migration. Publication is now an
-// exclusive create the filesystem adjudicates — of two concurrent runs exactly
-// one wins and the loser is TOLD, nonzero — and `--overwrite` claims the prior
-// record before the same exclusive step rather than clobbering through it.
-//
-// The five cases that pin it are the reason this floor moved from 405 to 410:
-// they are what distinguishes "the race is closed by exclusion" from "the race
-// window was narrowed", and a narrowed window is indistinguishable from a
-// closed one in prose. Left at 405 against an honest 414, this gate would
-// report a pass on a tree with the entire exclusion fix reverted — the failure
-// this file exists to refuse, in the cycle that fixed it.
+// This floor was RE-MEASURED (down, deliberately) when the evidence destination
+// was redesigned to PER-RUN OWNERSHIP. The prior design let two operators point
+// --evidence-out at one FILE and tried to coordinate their writes on it — a
+// shared-writer problem whose repairs kept producing new defects, and finally a
+// credential leak on a refusal path. The operator's directive removed the
+// problem instead of solving it again: --evidence-out is now a DIRECTORY, the
+// file name is DERIVED from the run's unique id (so two runs cannot name the same
+// file), and the destination is RESERVED before the send. There is no shared-file
+// coordination and no `--overwrite`, so the whole class of shared-writer /
+// exclusive-publication / superseded-record concurrency tests that pinned the old
+// model is GONE — legitimately, because the code it tested is gone. Lowering the
+// floor here is a re-measure of a genuinely smaller honest count, not a margin
+// widened to hide a dropped block: the concurrency behaviour it protected does
+// not exist to be silently reverted. The per-run tests that replaced it (a
+// reservation before the send, a stat error that is never an absence, two runs
+// owning two independent files, and the FIX-1 adversarial credential-in-path
+// scrub) are what this count now keeps alive. Honest default-tier count at this
+// re-measure: 403 (fixture-core 141, container-definition 34, evidence 81,
+// send-fixture 147).
 //
 // The raise before that came when the evidence-write integrity cycle landed
 // three fixes to the writer MG-53 and MG-54 consume mechanically. Each one is a
@@ -157,7 +159,7 @@ const TIERS = {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 410,
+    minTests: 398,
   },
   sdk: {
     label: 'real-SDK',
