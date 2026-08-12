@@ -814,29 +814,45 @@ one: there is **no key, connection-string, SAS or certificate mode at all**, not
 as a fallback and not behind a flag, and every spelling of such a flag is refused
 **by name** before its value is read. The five resource names (`--hub`,
 `--device`, `--account`, `--database`, `--container`) are each validated against a
-**per-field allowlist**, every rule as narrow as that field actually **addresses**
+**per-field rule**, every rule as narrow as that field actually **addresses**
 rather than as wide as Azure permits — the tool talks to one dev hub, one durable
-dev device, one dev account and plain-identifier dev databases and containers, and
-each rule is pinned to exactly that — and a rejection names the **flag and the
-rule, never the value typed**, so no unvalidated argv text reaches a log, the `az`
-argv, a document body or the evidence record. All five are pinned **below the
-Azure-legal set**: `--device`, `--database` and `--container` alike accept only
-letters, digits and interior hyphens (**no dots**), because the fixture names only
-plain-identifier resources. That rejects a **JWT** — and any dotted or
-separator-bearing credential — in every one of those slots **by construction**,
-before it could be logged, passed to `az`, embedded in a Cosmos document body
-(`deviceId` is the container partition key), **or written into the evidence
-record**. (An earlier revision wrongly widened `--database`/`--container` to the
-full Azure-legal Cosmos id set — dots and punctuation allowed — to accept a value
-like `analytics01.eventstore1.replicaWest`; that protected a case this fixture
-never encounters and was the exact hole a security review then reported, so it is
-corrected: all five are narrow now.) Connection strings and JWTs are refused in
-every slot on their `/`, `;` and dots. What a naming rule still cannot tell apart is
-an **opaque token already shaped like a legal narrow name** (a dot-free,
-separator-free plain identifier) — a residue the tool does not claim to catch and
-that does not matter anywhere, because the tool never accepts, holds or requires a
-credential, so there is no credential input to screen. As an **independent second
-defense**, every accepted name is also routed through the scrubber before it
+dev device it names itself, one dev account and plain-identifier dev databases and
+containers — and a rejection names the **flag and the rule, never the value
+typed**, so no unvalidated argv text reaches a log, the `az` argv, a document body
+or the evidence record. **`--device` is the strongest: it is PINNED to the one
+declared fixture constant `FIXTURE_DEVICE_ID`
+(`meatgeek-v2-dev-synthetic-fixture-device`) — the only accepted value.** A charset
+rule cannot separate a 32-character opaque secret from a 32-character legal device
+id, because there is no difference to detect; so rather than narrow the pattern the
+tool refuses **every value but the fixture's own name**, which makes "an opaque
+credential accepted as a device name" **structurally unreachable rather than
+mitigated** — the device id is the one name that flows into the `az` argv, the
+operator log **and** the document body (it is the container partition key), so it is
+the one that must never carry an unpinned value. **Accepted tradeoff, on the
+record:** pointing the tool at a different device now requires a code change; that
+is intended, since the fixture is durable and singular and MG-62 reuses this exact
+device. The other four (`--hub`, `--account`, `--database`, `--container`) stay
+**charset-constrained** rather than pinned — the hub/account names carry
+infra-assigned random suffixes a legal replacement changes, and database/container
+are operator-supplied to match the **measured** container, so a literal pin there
+would hardcode a deployment identity and break on a legal infra change. Those four
+accept only letters, digits and interior hyphens (**no dots**), so a **JWT** — and
+any dotted or separator-bearing credential — is rejected in every one of those slots
+**by construction**, before it could be logged, passed to `az`, embedded in a Cosmos
+document body, **or written into the evidence record**. (An earlier revision wrongly
+widened `--database`/`--container` to the full Azure-legal Cosmos id set — dots and
+punctuation allowed — to accept a value like `analytics01.eventstore1.replicaWest`,
+**and** left `--device` as a charset rule; the first protected a case this fixture
+never encounters and the second left an opaque credential acceptable as a device
+name — both were the holes a security review reported, so both are corrected:
+`--device` is pinned and the other four are narrow.) Connection strings and JWTs are
+refused in every slot on their `/`, `;` and dots. What a _charset_ rule still cannot
+tell apart is an **opaque token already shaped like a legal narrow name** (a
+dot-free, separator-free plain identifier) — for `--device` that residue is caught
+anyway by the pin, and for the other four it does not matter anywhere, because the
+tool never accepts, holds or requires a credential, so there is no credential input
+to screen. As an **independent second defense**, every accepted name is also routed
+through the scrubber before it
 reaches operator output, the `az` argv, a document body or the evidence record. The
 argv handed to `az` is additionally re-scanned
 against the tool's own scrubber before the spawn, so a future edit that grows a
@@ -868,7 +884,7 @@ recording them was written. Absence of an error is never success.
 | Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    | confirmed-in-cosmos                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| 1    | usage error — includes a refused credential-bearing or verbosity flag, a **name that fails its per-field rule** (each of the five is validated against its own rule, as narrow as the field needs — a JWT in `--device` fails here; the value is not echoed back), and an unusable or reused `--evidence-out` directory caught by the per-run **reservation before anything is sent** (`--evidence-out` is a directory; the tool names an immutable per-run file inside it — there is no `--overwrite`)                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 1    | usage error — includes a refused credential-bearing or verbosity flag, a **name that fails its field's rule** (`--device` is **pinned** — any value but `FIXTURE_DEVICE_ID`, including a valid-charset opaque token, fails here; the other four are charset-constrained, so a JWT or separator-bearing value in `--hub`/`--account`/`--database`/`--container` fails here; the value is not echoed back), and an unusable or reused `--evidence-out` directory caught by the per-run **reservation before anything is sent** (`--evidence-out` is a directory; the tool names an immutable per-run file inside it — there is no `--overwrite`)                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 2    | send failure — `az iot device send-d2c-message` itself failed. **Ambiguous by construction**: `az` can fail after the hub took the message, so every attempted id is recorded first, as accepted or as of **unknown** acceptance — including a failure on message 1 of 3                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 3    | confirmation timeout — the bound elapsed with the documents not found                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | 4    | auth failure — a 401/403, or a credential that could not be acquired; **never retried**, and it says nothing about whether the route delivered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
