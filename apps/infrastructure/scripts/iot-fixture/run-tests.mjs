@@ -240,21 +240,46 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // this file exists to refuse, and a security-closing block is precisely the one
 // that must not silently cease to run. The real-SDK tier grew alongside it to
 // 54; its floor is RAISED to 53 (margin one, as before).
-// Honest counts, measured on the integrated tree: dependency-free 567
-// (fixture-core 226, container-definition 36, evidence 94, send-fixture 211);
-// real-SDK 54 across 1 file.
+// RE-MEASURED AGAIN when the --device PINNING cycle integrated. The operator's
+// requested change closed the last member of the credential-handling family: a
+// 32-character opaque credential is indistinguishable from a 32-character legal
+// device id by any character-class rule, so no charset can separate them. The
+// fix is structural rather than pattern-based — --device is now pinned to the
+// declared FIXTURE_DEVICE_ID constant and refuses any other value BEFORE it can
+// be logged, passed to az argv, embedded in a document body or written to the
+// evidence record; an opaque credential can no longer be accepted as a device
+// name because no value other than the fixture's own name is accepted at all.
+// Redaction on the refusal path stands independently (a refused value still
+// appears in the refusal line, so validation and scrubbing remain two defenses).
+// That closing added the fixture-name-accepted / opaque-32-char-refused /
+// JWT-in---device-slot cases in fixture-core (the rule engine) and send-fixture
+// (the wiring, including the assertion that the refused value reaches no log
+// line, no az argv, no body and no evidence record on the refusal path itself),
+// which is why fixture-core moved 226 -> 227, send-fixture 211 -> 214 and
+// evidence 94 -> 99 (the record now round-trips the pinned deviceId through the
+// no-credential-field assertions), carrying the tier from 567 to 576. The floor
+// is RAISED to 571 to match — leaving it at 562 would let the entire pinning
+// block be reverted with this gate still reporting a pass, the exact failure
+// this file exists to refuse, and this block is the one that makes a live
+// security finding structurally UNREACHABLE, so it is precisely what must not
+// silently cease to run. The real-SDK tier grew alongside it to 55 (the AAD-only
+// read-back wiring gained a case); its floor is RAISED to 54 (margin one, as
+// before).
+// Honest counts, measured on the integrated tree: dependency-free 576
+// (fixture-core 227, container-definition 36, evidence 99, send-fixture 214);
+// real-SDK 55 across 1 file.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 562,
+    minTests: 571,
   },
   sdk: {
     label: 'real-SDK',
     match: name => name.endsWith(SDK_SUFFIX),
     minFiles: 1,
-    minTests: 53,
+    minTests: 54,
   },
 };
 
