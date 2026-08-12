@@ -928,10 +928,14 @@ describe('the synthetic document contract', () => {
       // The rejected value never appears on the failure line (FIX 2).
       assert.doesNotMatch(err.message, /not-a-real-key|SharedAccessKey=[^[]|AccountKey=[^[]/);
     }
-    // The dotted-id false positive the OLD scrubber gate produced does NOT recur
-    // here: a legal id with dots builds without complaint (device ids permit
-    // dots), and the default fixture device id is legal and still builds.
-    assert.doesNotThrow(() => build({ deviceId: 'grill.sensor.01' }));
+    // The device rule is pinned below the Azure-legal set (MG-67 correction), so
+    // a DOTTED device id — a JWT is exactly this shape — is refused here BY
+    // CONSTRUCTION rather than laundered into a body as a partition value. This
+    // is not the old scrubber-shape false positive (that gate wrongly refused
+    // dotted COSMOS ids too; the Cosmos rules below still accept them): it is a
+    // deliberately narrow DEVICE rule.
+    assert.equal(refusal(() => build({ deviceId: 'grill.sensor.01' })).exitCode, EXIT.USAGE);
+    // The default fixture device id is a plain identifier and still builds.
     assert.doesNotThrow(() => build());
   });
 });
@@ -2966,12 +2970,31 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
       name: 'device id',
       kind: RESOURCE_NAME_KINDS.DEVICE,
       fn: deviceIdProblem,
-      // The durable fixture device, plus a string exercising the full legal
-      // punctuation set the IoT Hub identity registry permits.
-      legal: ['meatgeek-v2-dev-synthetic-fixture-device', 'dev-01', "id.with+all%_#*?!(),:=@$'ok"],
-      // NOT JWT_SHAPED: a base64url JWT is charset-legal as a device id — the
-      // honest limitation asserted separately below. Separators still fail.
-      illegal: [CONNECTION_STRING, DEVICE_CONN, SAS_TOKEN, 'has/slash', 'has space', 'semi;colon'],
+      // The durable fixture device, plus a couple of plain identifiers. The rule
+      // is pinned FAR below the Azure-legal identity charset (MG-67 correction):
+      // letters, digits and interior hyphens only — no dots, no other
+      // punctuation — because a fixture device is a simple identifier this tool
+      // itself names.
+      legal: ['meatgeek-v2-dev-synthetic-fixture-device', 'dev-01', 'probe1'],
+      // JWT_SHAPED IS refused now — the finding this correction closes: a JWT is
+      // a legal Azure device id, but the device value is logged, passed to az and
+      // embedded in the document body, so it must never pass. Dots reject it by
+      // construction, along with every separator-bearing credential, whitespace,
+      // and the old full-punctuation set the registry would otherwise allow.
+      illegal: [
+        JWT_SHAPED,
+        CONNECTION_STRING,
+        DEVICE_CONN,
+        SAS_TOKEN,
+        'has/slash',
+        'has space',
+        'semi;colon',
+        'has.dot',
+        "id.with+all%_#*?!(),:=@$'ok",
+        'under_score',
+        '-leadhyphen',
+        'trailhyphen-',
+      ],
     },
     {
       name: 'Cosmos account name',
@@ -3052,21 +3075,58 @@ describe('per-resource-type name validation (allowlist, MG-67 redesign)', () => 
 
   it('accepts the dotted Cosmos id the old scrubber-shape gate wrongly refused (false-positive fix)', () => {
     const dotted = 'analytics01.eventstore1.replicaWest';
+    // The dotted-name case belongs to Cosmos DATABASE and CONTAINER ids only.
     assert.equal(cosmosDatabaseIdProblem(dotted), null);
     assert.equal(cosmosContainerIdProblem(dotted), null);
-    // Still refused for the kinds whose rules genuinely forbid dots.
+    // Still refused for the kinds whose rules genuinely forbid dots — and the
+    // DEVICE rule is now one of them (MG-67 correction): the dotted case is NOT a
+    // reason to keep the device permissive, and the rules deliberately differ.
     assert.ok(iotHubNameProblem(dotted));
     assert.ok(cosmosAccountNameProblem(dotted));
+    assert.ok(deviceIdProblem(dotted));
   });
 
-  it('does NOT claim to detect a secret shaped like a legal name (honest limitation, FIX 3)', () => {
-    // A 32-char opaque key is indistinguishable from a 32-char device id by any
-    // naming rule, so it is ACCEPTED. The guarantee is that the tool never
-    // accepts, holds or requires a credential — az resolves the device key under
-    // the caller's identity — not that it recognises one pasted into a name
-    // field. The runbook states this plainly rather than implying detection.
-    const secretShapedLikeADeviceId = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
-    assert.equal(deviceIdProblem(secretShapedLikeADeviceId), null);
+  it('refuses a JWT-shaped value in the --device slot (finding closed, MG-67)', () => {
+    // The finding being closed: a JWT is a legal Azure device id, and the device
+    // value is logged, passed to az and — as the container's partition key —
+    // embedded in the Cosmos document body. It must be refused BEFORE any of
+    // that. Dots reject it by construction; the reason names the rule and never
+    // echoes the value (FIX 2).
+    const jwtProblem = deviceIdProblem(JWT_SHAPED);
+    assert.ok(
+      typeof jwtProblem === 'string' && jwtProblem.length > 0,
+      'a JWT must be refused as a device'
+    );
+    assert.equal(
+      jwtProblem.includes(JWT_SHAPED),
+      false,
+      'the JWT must not be echoed in the reason'
+    );
+    assert.ok(
+      resourceNameProblem(RESOURCE_NAME_KINDS.DEVICE, JWT_SHAPED),
+      'the dispatcher refuses it too'
+    );
+    // The same value is a LEGAL Cosmos container/database id — the per-type rules
+    // must stay separate, which is the point the correction preserves.
+    assert.equal(cosmosContainerIdProblem(JWT_SHAPED), null);
+  });
+
+  it('accepts a plain opaque name-shaped string but rejects a recognizable credential shape (honest limitation, narrowed)', () => {
+    // Narrowed, per-field statement (MG-67 correction). A recognizable credential
+    // SHAPE — a JWT, a connection string, a SAS token — no longer passes the
+    // device rule. What remains genuinely undetectable is only an OPAQUE string
+    // already shaped like a plain identifier: a 32-char hex key is
+    // indistinguishable from a 32-char device id by any naming rule, so it is
+    // ACCEPTED. That residue is harmless because the tool never accepts, holds or
+    // requires a credential at all — az resolves the device key under the
+    // caller's identity — so no key is ever passed in. The runbook states this
+    // per field rather than implying broad detection.
+    const opaqueNameShaped = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+    assert.equal(deviceIdProblem(opaqueNameShaped), null);
+    // But the recognizable shapes ARE refused now.
+    for (const shaped of [JWT_SHAPED, CONNECTION_STRING, DEVICE_CONN, SAS_TOKEN]) {
+      assert.ok(deviceIdProblem(shaped), `device rule must refuse ${shaped.slice(0, 12)}…`);
+    }
   });
 
   it('refuses empty, whitespace-only and non-string input for every kind', () => {

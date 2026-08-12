@@ -596,13 +596,22 @@ export function partitionKeyFieldProblem(value) {
 // fails the IoT Hub name rule on its dots, a connection string fails every rule
 // on its '/' and ';' separators.
 //
-// HONEST LIMITATION (stated in the runbook, FIX 3): this is NOT a credential
-// detector. A secret shaped like a LEGAL resource name — a 32-character key
-// passed as --device, indistinguishable from a 32-character device id — is not
-// detectable by naming rules, and this tool does not claim to catch it. The
-// operator-facing guarantee is narrower and true: the tool never accepts, holds
-// or requires a credential (az resolves the device key itself under the caller's
-// identity), so no key is ever passed in.
+// SCOPE, PER FIELD (operator-authorized correction, MG-67): each rule is as
+// narrow as the value it names actually needs, NOT as wide as Azure permits.
+// The device rule in particular is pinned far below the Azure-legal identity set
+// (letters, digits, interior hyphens — no dots), so a JWT and every
+// separator-bearing credential are refused in the --device slot BY CONSTRUCTION,
+// before that text can be logged, passed to az, or embedded in a document body.
+//
+// What remains genuinely undetectable is narrow and stated plainly rather than
+// overclaimed: an OPAQUE string already shaped like a legal name — a 32-char
+// hex key indistinguishable from a 32-char identifier — is accepted, because no
+// naming rule can tell them apart. That residue does not matter here, because the
+// tool never accepts, holds or requires a credential at all: az resolves the
+// device key itself under the caller's identity, so no key is ever passed in.
+// A recognizable credential SHAPE (a JWT, a connection string, a SAS token) no
+// longer slips through the device field, which is the finding this correction
+// closes.
 //
 // Every checker returns a reason fragment naming the RULE, and NEVER echoes the
 // rejected value (FIX 2): a caller can refuse without putting untrusted argv
@@ -629,17 +638,37 @@ export function iotHubNameProblem(value) {
   return null;
 }
 
-// IoT Hub device registration id — the device identity registry. Up to 128
-// characters, case-sensitive, ASCII 7-bit alphanumerics plus -.+%_#*?!(),:=@$' .
-// Notably NO '/', ';' or whitespace, so a connection string or SAS token fails
-// on its separators.
+// IoT Hub device registration id — the device identity registry PERMITS up to
+// 128 characters of ASCII alphanumerics plus -.+%_#*?!(),:=@$' . But this tool
+// does NOT need that width: --device names a FIXTURE DEVICE WHOSE NAME THIS TOOL
+// CHOOSES (FIXTURE_DEVICE_ID), reused verbatim by MG-62. So the rule is
+// constrained FAR BELOW the Azure-legal set, on purpose (operator-authorized
+// correction, MG-67): a plain identifier of ASCII letters, digits and interior
+// hyphens, at most 128 characters, no leading or trailing hyphen.
+//
+// The load-bearing consequence is that a DOT is rejected outright, so a
+// JWT — three dot-separated base64url segments — cannot pass in the device slot
+// BY CONSTRUCTION. That matters because the device id is logged, passed to the az
+// argv, and — since it is the container's partition key — embedded in the Cosmos
+// document body; a JWT is a legal Azure device id but must never travel any of
+// those paths. Validating against this tool's actual need instead of Azure's
+// legal maximum closes that finding while over-refusing nothing this fixture will
+// ever legitimately be asked to name (a fixture device is a simple identifier).
+//
+// The dotted-name case the redesign correctly protects belongs to Cosmos
+// DATABASE and CONTAINER ids (analytics01.eventstore1.replicaWest) and lives in
+// cosmosResourceIdProblem below — it is NOT a reason to keep the device rule
+// permissive, and the two deliberately do not share a rule.
 // https://learn.microsoft.com/azure/iot-hub/iot-hub-devguide-identity-registry
-const DEVICE_ID_CHARSET = /^[A-Za-z0-9.+%_#*?!(),:=@$'-]+$/;
+const DEVICE_ID_CHARSET = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 export function deviceIdProblem(value) {
   if (typeof value !== 'string' || value.trim() === '') return 'it is not a non-empty string';
   if (value.length > 128) return 'a device id must be at most 128 characters long';
   if (!DEVICE_ID_CHARSET.test(value)) {
-    return "a device id may contain only ASCII alphanumerics and -.+%_#*?!(),:=@$' — a connection string's '/' or ';' is rejected here";
+    return (
+      'a fixture device id may contain only letters, digits and interior hyphens — a dot (so a JWT), ' +
+      'whitespace and connection-string separators are rejected, below the Azure-legal device set'
+    );
   }
   return null;
 }
