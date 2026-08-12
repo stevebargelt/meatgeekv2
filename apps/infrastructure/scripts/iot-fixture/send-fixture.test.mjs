@@ -467,9 +467,15 @@ describe('argument parsing', () => {
     {
       option: '--device',
       field: 'device',
-      // Device ids permit -.+%_#*?!(),:=@$' but NOT '/', ';' or whitespace.
-      legal: [FIXTURE_DEVICE_ID, "dev-fixture.v2:probe#1"],
-      illegal: [CONNECTION_STRING, 'a/b', 'a;b', 'x'.repeat(129)],
+      // --device names a FIXTURE DEVICE WHOSE NAME THIS TOOL CHOOSES, so the rule
+      // is pinned FAR BELOW the Azure-legal device set (operator-authorized
+      // correction, MG-67): letters, digits and interior hyphens only. Azure would
+      // legally permit -.+%_#*?!(),:=@$' , but this tool needs none of it, and a
+      // DOT is refused outright so a JWT — three dot-separated segments — cannot
+      // pass in the --device slot, before it can be logged, passed to az, or
+      // (deviceId being the container partition key) embedded in a document body.
+      legal: [FIXTURE_DEVICE_ID, 'dev-fixture-v2-probe1'],
+      illegal: [SHORT_JWT, CONNECTION_STRING, 'dev-fixture.v2', 'a/b', 'a;b', 'a:b', 'a#b', 'has space', 'under_score', 'x'.repeat(129)],
     },
     {
       option: '--account',
@@ -516,14 +522,32 @@ describe('argument parsing', () => {
     }
   }
 
-  // FIX 3 — the HONEST LIMITATION, demonstrated rather than asserted in prose.
-  // Naming rules cannot detect a secret shaped like a LEGAL name: a base64url
-  // token with no '/' or ';' is a legal device id AND a legal Cosmos id, so it is
-  // ACCEPTED. The tool does not claim to screen it; the guarantee is only that no
-  // credential is ever ACCEPTED AS ONE, held, or required.
-  it('accepts a JWT-shaped value as a device id — the tool is not a credential detector (FIX 3)', () => {
-    assert.doesNotThrow(() => requireComplete(completeCfg({ device: SHORT_JWT })));
+  // FIX 3 (operator-authorized correction, MG-67) — the finding being CLOSED.
+  // A JWT is a LEGAL IoT Hub device id (device ids permit the base64url charset and
+  // dots), so under the old Azure-legal rule it was ACCEPTED as --device, then
+  // logged, passed to the az argv, and — deviceId being the container partition
+  // key — embedded in the Cosmos document body. The device rule is now pinned
+  // below the Azure-legal set, so a JWT in the --device slot is REFUSED by
+  // construction (its dots), before it can travel any of those paths. This is the
+  // explicit JWT-as-device case the correction requires.
+  it('REFUSES a JWT-shaped value in the --device slot, before it is logged/sent/embedded (FIX 3)', () => {
+    const error = refusal(() => requireComplete(completeCfg({ device: SHORT_JWT })));
+    assert.equal(error.exitCode, EXIT.USAGE);
+    assert.match(error.message, /not a valid Azure resource name/);
+    assert.equal(
+      error.message.includes(SHORT_JWT),
+      false,
+      'the rejected device value was echoed in the refusal'
+    );
+    assertNoPlantedSecret(error.message, 'requireComplete(--device JWT)');
   });
+  // The dotted-id case the redesign correctly protects belongs to Cosmos
+  // CONTAINER/DATABASE ids (analytics01.eventstore1.replicaWest), NOT to device
+  // ids — the two rules are deliberately separate. A JWT-shaped value is still
+  // ACCEPTED as a container id, because dots are legal there. That is the honest
+  // residue the tool does not overclaim about: naming rules screen credential
+  // SHAPES, and the guarantee is that no credential is ever accepted AS ONE, held
+  // or required (az resolves the device key under the caller's identity).
   it('accepts a JWT-shaped value as a Cosmos container id — dots are legal there (FIX 3)', () => {
     assert.doesNotThrow(() => requireComplete(completeCfg({ container: SHORT_JWT })));
   });
@@ -638,16 +662,23 @@ describe('the az invocation shape (HR1)', () => {
     assert.deepEqual(assertArgvIsCredentialFree(argv), argv);
   });
 
-  // No accept-then-reject: a name requireComplete validated per-type must not be
-  // refused at the spawn gate by the secret-shape heuristic. A device id may
-  // legally carry dots, and the gate now judges the name slots by the SAME
-  // per-type rules — so a dotted device id (the shape the old heuristic wrongly
-  // caught) survives to the spawn it was validated for.
-  it('does not refuse a legal dotted device id at the --device-id slot', () => {
+  // Defence in depth: the spawn gate judges the two name slots by the SAME
+  // per-type rules requireComplete applied, so a dotted (JWT-shaped) device id is
+  // refused HERE too — a dotted device can never reach the az argv even if a
+  // future caller bypasses requireComplete. (The dotted-id-is-legal case belongs
+  // to Cosmos container/database ids, which never enter this send argv; it is
+  // exercised in the requireComplete suite above.) The rejected value is not
+  // echoed.
+  it('refuses a dotted (JWT-shaped) device id at the --device-id slot', () => {
     const dottedDevice = 'edge.fixture.mg67-probe';
     const dottedArgv = buildSendArgv({ hub: HUB, device: dottedDevice, message });
-    assert.deepEqual(assertArgvIsCredentialFree(dottedArgv), dottedArgv);
-    assert.equal(dottedArgv[dottedArgv.indexOf('--device-id') + 1], dottedDevice);
+    const error = refusal(() => assertArgvIsCredentialFree(dottedArgv));
+    assert.equal(error.exitCode, EXIT.USAGE);
+    assert.equal(
+      error.message.includes(dottedDevice),
+      false,
+      'the rejected device value was echoed at the spawn gate'
+    );
   });
 
   // The other direction still holds: a non-name element that IS credential-shaped

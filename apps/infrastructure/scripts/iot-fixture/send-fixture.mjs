@@ -326,17 +326,28 @@ AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
              --connection-string, --sas, --certificate and every neighbouring
              spelling.
 
-  NAME VALIDATION, AND ITS HONEST LIMITATION. The five names you pass (--hub,
-  --device, --account, --database, --container) are each validated against the
-  ACTUAL Azure naming rule for that resource type — an allowlist, so a value is
-  accepted only if it is a legal name of its kind. That rejects connection
-  strings and JWTs by construction (on their '/', ';' and dots), NOT by trying to
-  recognise a secret. This is NOT a credential detector: a secret shaped like a
-  LEGAL name — a 32-character key passed as --device, indistinguishable from a
-  32-character device id — cannot be told apart from a real name and is NOT
-  screened out. The guarantee this tool makes is the narrower true one: it never
-  accepts, holds or requires a credential, because az resolves the device key
-  itself and the read-back is AAD-only. Do not paste a secret into a name field.
+  NAME VALIDATION, PER FIELD. The five names you pass are each validated against
+  an allowlist as narrow as that field actually needs — NOT as wide as Azure
+  permits:
+    --device    a fixture device THIS TOOL names: letters, digits and interior
+                hyphens only. Dots are rejected, so a JWT (three dot-separated
+                segments) and every separator-bearing credential are refused in
+                this slot BY CONSTRUCTION — before that text can be logged, passed
+                to az, or (deviceId being the container partition key) embedded in
+                a Cosmos document body. Pinned far below the Azure-legal device id.
+    --hub       letters, digits and hyphens (IoT Hub name rule).
+    --account   lowercase letters, digits and hyphens (Cosmos account rule).
+    --database
+    --container Cosmos id rule: dots ARE legal here (e.g. a01.store.west), only
+                '/ \\ # ?' are forbidden.
+  HONEST LIMITATION, stated per field so it is not overclaimed either way: a
+  recognisable credential SHAPE (a JWT, a connection string, a SAS token) no
+  longer passes a NAME slot. What naming rules still cannot tell apart is an
+  OPAQUE token already shaped like a legal identifier — a 32-char key that is also
+  a legal --hub/--account/--database/--container id. That residue does not matter,
+  because the tool never accepts, holds or requires a credential at all: az
+  resolves the device key itself and the read-back is AAD-only. Do not paste a
+  secret into a name field.
   Read-back: Azure Entra ID via DefaultAzureCredential, and ONLY that. The dev
              account runs local_authentication_enabled = false, so key auth
              could not work even if this tool offered it.
@@ -687,9 +698,12 @@ export function buildSendArgv({ hub, device, message }) {
  * operator-supplied NAME immediately after its flag (--hub-name, --device-id),
  * and those two names were already validated per-type by requireComplete. They
  * are re-checked HERE with the SAME per-type rules rather than by secret shape —
- * so a name the tool already accepted (a legal dotted device id among them, the
- * value the old shape heuristic wrongly refused) can never be rejected at the
- * spawn it was validated for. Every OTHER element is tool-authored — the fixed
+ * so a name the tool already accepted can never be rejected at the spawn it was
+ * validated for, even a legal opaque-looking identifier a broad secret-shape
+ * heuristic might have flagged. (The device rule is pinned below the Azure-legal
+ * set — no dots — so a JWT is refused by BOTH gates; the dotted-id case that IS
+ * legal belongs to Cosmos container/database ids, which never enter this send
+ * argv.) Every OTHER element is tool-authored — the fixed
  * literals, the synthetic JSON body, the system-property string — and is never a
  * legal Azure name, so a credential SHAPE there is a real defect (a future edit
  * interpolating a secret into --data or --properties) and is refused by the
