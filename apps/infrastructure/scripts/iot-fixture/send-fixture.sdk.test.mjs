@@ -1437,3 +1437,202 @@ describe('MG-67 a write refusal outranks a real SDK diagnosis and destroys nothi
     });
   });
 });
+
+// ===========================================================================
+// 9. THE PER-TYPE NAME ALLOWLIST STANDS IN FRONT OF THE REAL SDK.
+//    (Operator-authorized MG-67 correction — the reopened finding, closed here.)
+//
+// THE FINDING. A JWT is a LEGAL IoT Hub device id: the identity registry
+// permits the dot-separated base64url characters a JWT is built from. So the
+// PREVIOUS device rule — derived from Azure's documented maximum — accepted a
+// JWT in the --device slot, after which it would be logged, passed to the az
+// argv, and (deviceId being the container's partition key) embedded in the
+// Cosmos document BODY. fixture-core's device rule is now pinned FAR below the
+// Azure-legal set: letters, digits and interior hyphens only, DOTS REJECTED, so
+// a JWT cannot pass by construction. The fake tier proves that rule directly,
+// both directions, per type. This is the slice only the real-SDK tier can add.
+//
+// WHY IT BELONGS HERE AND NOWHERE ELSE. The claim is not "the rule rejects a
+// JWT" — that is arithmetic on a regexp, and the fake tier owns it. The claim is
+// ORDERING against the REAL SDK: the refusal lands BEFORE createRealReader
+// constructs a real @azure/cosmos CosmosClient, BEFORE the real credential is
+// built, BEFORE any az spawn, and BEFORE the deviceId reaches a document body.
+// A fake createReader could pass this test while the real one had already been
+// constructed by the time the gate fired; only a probe wrapping the REAL
+// createRealReader proves the real client was never reached. requireComplete
+// runs at send-fixture.mjs:1459, ahead of createReader (1508) and
+// buildFixtureMessages (1497) — this section is the executable proof of that
+// ordering against the installed SDK, not a re-read of the source.
+//
+// Still offline: createRealReader's construction is offline (section 1 pins
+// that), the probe below substitutes a non-network reader so no client method
+// is ever called, and every refused case aborts before construction entirely.
+// ===========================================================================
+
+// Credential-shaped --device values, BUILT AT RUNTIME from self-describing
+// plaintext (HR1: no credential shape is committed, tests included; a diff-wide
+// grep for credential shapes is part of acceptance). None is a real secret; each
+// carries a SHAPE the device rule must reject, and the point is that it is
+// rejected before it can be logged, sent or embedded.
+const REFUSED_DEVICE_SHAPES = [
+  [
+    'a JWT (three dot-separated base64url segments)',
+    ['header', 'payload', 'signature']
+      .map(seg => Buffer.from(`mg67-sdk-not-a-real-jwt-${seg}`).toString('base64url'))
+      .join('.'),
+  ],
+  ['a dotted name (dots are illegal in the device slot)', 'fixture.device.west'],
+  [
+    'a connection-string-shaped value (its = and ; are illegal in the device slot)',
+    // The SHAPE is what the device rule rejects (the = and ; separators). Built
+    // at runtime from plaintext and spelling no real credential field name, so
+    // the source commits no connection-string literal — same HR1 discipline as
+    // the JWT case and PLANTED above.
+    ['Endpoint', 'Id', 'Secret']
+      .map(part => `${part}=${Buffer.from(`mg67-sdk-not-a-real-${part}`).toString('base64url')}`)
+      .join(';'),
+  ],
+];
+
+/**
+ * A createReader that WRAPS the real createRealReader — so a construction it
+ * lets through is a genuine @azure/cosmos client — records that it happened, and
+ * then substitutes a non-network reader so main() proceeds no further than
+ * proving the real SDK was reached. For a refused --device this factory is never
+ * invoked at all, which is exactly what `constructed` being empty asserts.
+ */
+function realReaderProbe(constructed) {
+  return async options => {
+    const realReader = await createRealReader(options);
+    assert.equal(typeof realReader.queryDocuments, 'function');
+    constructed.push({ options, realReader });
+    return {
+      queryDocuments: async () => {
+        // The sdk tier never contacts Azure; abort the run right after the real
+        // client was constructed, before the pre-send read could reach a socket.
+        throw new FixtureError(EXIT.TRANSPORT, 'sdk-tier sentinel: no network in this tier');
+      },
+    };
+  };
+}
+
+async function runWithDevice(device, { dir }) {
+  const log = recordingLog();
+  const constructed = [];
+  const spawned = [];
+  const exitCode = await main({
+    argv: [
+      '--hub',
+      HUB,
+      '--account',
+      ACCOUNT,
+      '--database',
+      DATABASE,
+      '--container',
+      CONTAINER,
+      '--container-definition',
+      'container-show-clean.json',
+      '--evidence-out',
+      dir,
+      '--device',
+      device,
+    ],
+    createReader: realReaderProbe(constructed),
+    spawn: async (...args) => {
+      spawned.push(args);
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    log,
+    readFileFn: async () => cleanDefinitionText,
+    now: () => 1_754_000_000_000,
+    sleep: async () => {},
+  });
+  return { exitCode, log, constructed, spawned };
+}
+
+describe('MG-67 a JWT-shaped --device never reaches the real SDK, the az argv, or a document body', () => {
+  for (const [label, device] of REFUSED_DEVICE_SHAPES) {
+    it(`refuses ${label} with USAGE before the real client is constructed or anything is sent`, async () => {
+      await withTempDir(async dir => {
+        const { exitCode, log, constructed, spawned } = await runWithDevice(device, { dir });
+
+        // 1. USAGE — a naming refusal, "nothing live happened". Never a
+        //    confirmation, never mistaken for a transport or timeout outcome.
+        assert.equal(
+          exitCode,
+          EXIT.USAGE,
+          `expected USAGE, got ${exitCode} (${exitLabel(exitCode)})`
+        );
+        assert.notEqual(exitCode, EXIT.OK, 'a refused device is never a confirmation');
+
+        // 2. THE REAL SDK WAS NEVER REACHED. The probe wraps the real
+        //    createRealReader; its never being invoked is the proof that no real
+        //    @azure/cosmos client and no real credential were constructed for a
+        //    value the gate should have refused first.
+        assert.equal(
+          constructed.length,
+          0,
+          'the real Cosmos client was constructed for a device the gate must refuse first'
+        );
+        // 3. NOTHING WAS SENT. The gate is ahead of the az spawn.
+        assert.equal(spawned.length, 0, 'az was spawned for a refused device');
+
+        // 4. THE REJECTED VALUE NEVER LEAKED. Not to a log line, not into a
+        //    partition/body line (buildFixtureMessages is never reached), not
+        //    into an az argv this test could observe. A rejection names the flag
+        //    and the rule, never the value (send-fixture.mjs FIX 2).
+        const output = log.all();
+        assert.equal(
+          output.includes(device),
+          false,
+          'the rejected --device value was echoed back onto operator output'
+        );
+        assert.match(output, /--device is not a valid Azure resource name/);
+        assert.match(output, /The value is not echoed/);
+        // No document/partition line was ever built for it.
+        assert.equal(
+          /partition .*=/.test(output),
+          false,
+          'a partition line was built for a device that should never reach the body'
+        );
+
+        // 5. NO EVIDENCE ARTIFACT. A run refused at argument time attempted
+        //    nothing and owes no record; a file here would be a phantom run.
+        const evidence = (await readdir(dir)).filter(
+          name => name.startsWith(EVIDENCE_PREFIX) && name.endsWith('.json')
+        );
+        assert.deepEqual(evidence, [], 'a refused-at-argument run wrote an evidence artifact');
+      });
+    });
+  }
+
+  it('lets the legitimate fixture device through to REAL @azure/cosmos construction (the accepted direction)', async () => {
+    // The other direction, at the same boundary: the value this tool actually
+    // uses is NOT over-refused. FIXTURE_DEVICE_ID passes requireComplete, reaches
+    // the partition/body line spelled with it, and reaches a genuine
+    // createRealReader construction — proving the narrowed rule closes the JWT
+    // finding without refusing the one device name the fixture will ever carry.
+    // The run then aborts on the sentinel (no network), so no client method runs.
+    await withTempDir(async dir => {
+      const { exitCode, log, constructed, spawned } = await runWithDevice(FIXTURE_DEVICE_ID, {
+        dir,
+      });
+
+      assert.notEqual(exitCode, EXIT.USAGE, 'the legitimate fixture device must not be refused');
+      assert.equal(
+        constructed.length,
+        1,
+        'validation passed but the real Cosmos client was never constructed'
+      );
+      assert.equal(constructed[0].options.endpoint, ENDPOINT, 'the real client got the dev endpoint');
+      // It reached the body/partition build, spelled with the legal device.
+      assert.ok(
+        log.all().includes(FIXTURE_DEVICE_ID),
+        'the accepted device never reached the run it was valid for'
+      );
+      // The sentinel aborts at the PRE-SEND read, so still nothing was sent.
+      assert.equal(spawned.length, 0, 'the sdk-tier sentinel must abort before the send');
+      assert.equal(exitCode, EXIT.TRANSPORT, 'the sentinel abort keeps its own transport code');
+    });
+  });
+});
