@@ -52,9 +52,11 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 //
 // minTests carries a margin below the honest count so that consolidating a
 // couple of cases does not turn this red for a reason that has nothing to do
-// with the suite failing to run. Counts measured at the time of writing:
-// dependency-free 414 tests across 4 files (container-definition 34,
-// evidence 90, fixture-core 137, send-fixture 153); real-SDK 40 across 1 file.
+// with the suite failing to run. Counts measured at the time of writing, after
+// the per-run-ownership redesign integrated (see the re-measure note below for
+// the breakdown and why it moved): dependency-free 406 tests across 4 files
+// (container-definition 34, evidence 81, fixture-core 141, send-fixture 150);
+// real-SDK 40 across 1 file.
 //
 // That margin is FOUR cases on the dependency-free tier and ONE on the much
 // smaller real-SDK tier — a small fixed number, not the ~7% earlier revisions
@@ -96,9 +98,17 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // not exist to be silently reverted. The per-run tests that replaced it (a
 // reservation before the send, a stat error that is never an absence, two runs
 // owning two independent files, and the FIX-1 adversarial credential-in-path
-// scrub) are what this count now keeps alive. Honest default-tier count at this
-// re-measure: 403 (fixture-core 141, container-definition 34, evidence 81,
-// send-fixture 147).
+// scrub — a credential-shaped DIRECTORY component and a credential-shaped
+// FILENAME component, each on the success line AND the failure line) are what
+// this count now keeps alive. Routing EVERY path-bearing operator line through
+// the scrubber, not just the failure lines, is the FIX-1 regression class, and
+// the cases that pin it (in send-fixture's "a credential-shaped evidence path
+// never reaches operator output" block) are among what carried send-fixture's
+// honest count up as step 6 rebuilt. This floor is RE-MEASURED against the
+// integrated tree, not an estimate: the earlier note here read send-fixture at
+// 147, which was a pre-rebuild projection; the real rebuilt suite reports 150.
+// Honest default-tier count, measured on the integrated tree: 406
+// (fixture-core 141, container-definition 34, evidence 81, send-fixture 150).
 //
 // The raise before that came when the evidence-write integrity cycle landed
 // three fixes to the writer MG-53 and MG-54 consume mechanically. Each one is a
@@ -159,7 +169,7 @@ const TIERS = {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 398,
+    minTests: 402,
   },
   sdk: {
     label: 'real-SDK',
