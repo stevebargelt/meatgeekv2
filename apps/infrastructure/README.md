@@ -865,12 +865,18 @@ recording them was written. Absence of an error is never success.
   minted correlator to be absent — that is what makes the proof a _newly
   identified_ document, and it surfaces an unpropagated role assignment while
   nothing has yet been written that could not then be confirmed.
-- The **`--evidence-out` destination is pre-flighted** — directory, writability,
-  the no-overwrite rule and a concurrent-run check — **before the first send**, so
-  an unusable path is a usage error (exit 1) while nothing is live, rather than 3
-  documents in the container the tool then refuses to record. It is re-checked at
-  write time; the pre-flight is an addition to that check, not a replacement for
-  it.
+- **`--evidence-out` is a DIRECTORY, and every run exclusively owns one immutable
+  file inside it.** The tool derives the file name from the run's own unique id
+  (`mg67-fixture-evidence-<fixtureRunId>.json`), so two runs can never derive the
+  same name — **overlapping runs are fully supported and never share a
+  destination, and there is nothing to coordinate.** That derived file is
+  **RESERVED before the first send**: the reservation proves the directory usable,
+  **exercises the actual publication primitive** (a write-then-rename, with
+  disposable probe files, so a directory that cannot support it is caught **now**
+  rather than after documents are live), and **atomically claims** the derived
+  name. A reused destination (the derived file already exists) or an unusable
+  directory is a usage error (exit 1) while nothing is live, rather than 3
+  documents in the container the tool then refuses to record.
 - **The evidence write never destroys or interleaves a record, and never reports
   success when it might have.** Three rules, because that record is what MG-53 and
   MG-54 consume to decide whether to halt a migration. **(1) A stat error is not
@@ -878,14 +884,15 @@ recording them was written. Absence of an error is never success.
   `stat` failure, and a directory that cannot be enumerated, is a refusal, never
   an assumption that the path is free. That is the same error/absence conflation
   the MG-66 analysis names, applied to the tool's own filesystem. **(2) The
-  temporary file is named per run, not per destination** —
-  `<evidence-file>.<fixtureRunId>.partial` — so two runs sharing a destination
-  cannot interleave on one temp path and leave one run's record under the other
-  run's name, which is a wrong-record-under-the-right-name failure and therefore
-  undetectable downstream. **(3) `--overwrite` replaces your own prior record; it
-  does not defeat the concurrency guard** — a destination carrying a **foreign**
-  `.partial` is refused with the flag as well as without it. No flag on this tool
-  authorises destroying a record another run is still writing.
+  publication is a per-run temp file written then renamed onto the run's OWN
+  reserved path** — `<evidence-file>.<fixtureRunId>.partial` — and because each
+  run owns a distinct derived file, there is **no shared-writer coordination to
+  get wrong** and no way for one run's record to land under another run's name.
+  **(3) Evidence artifacts are immutable and per-run: there is no `--overwrite`
+  and no mode that replaces a record.** A destination whose derived file already
+  exists is a genuinely reused destination and the run **refuses to start** (exit
+  1, nothing sent) — the reservation catches it before any live effect. No flag on
+  this tool authorises destroying a committed record.
 - **The operator captures the live run's stdout and stderr to files, inspects
   them for credential shapes, and commits them alongside the evidence artifact**
   (runbook §7c). This is the **only** evidence that discharges the ticket's
@@ -896,14 +903,16 @@ recording them was written. Absence of an error is never success.
   what it must never hit is a key name followed by a value.
 - Every document carries `syntheticFixture=MG-67-SYNTHETIC-FIXTURE` plus a unique
   per-run `fixtureRunId`, so a specific document ties to a specific run.
-- `--evidence-out` writes **one machine-readable JSON record** — the observed
+- The tool writes **one machine-readable JSON record** into the `--evidence-out`
+  directory, at the run's own derived file name — the observed
   document ids and count, the marker, the partition key path, the measured
   `default_ttl`, the wait bound used, the observed arrival delay and the
   run/expiry instants. MG-53 and MG-54 read that file as a **program input**; the
   runbook is prose and must never be the thing they parse. The record has a closed
   key set and is scanned for credential shapes at build and write time — a hit
-  **refuses the write** rather than redacting. It is written atomically and will
-  not overwrite an existing file without `--overwrite`.
+  **refuses the write** rather than redacting. It is written atomically to the
+  per-run file the reservation claimed; there is **no `--overwrite`** and no way to
+  replace a committed record.
 - **The evidence-emission contract: one path, every outcome.** A record is written
   on **every** outcome that attempted a send — timeout, auth, transport, marker
   violation, ambiguity, send failure — carrying an `unconfirmed-run` finding; only
