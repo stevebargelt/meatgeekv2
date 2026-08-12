@@ -257,6 +257,7 @@ import {
   TICKET,
   TOOL_NAME,
   TOOL_VERSION,
+  deviceIdProblem,
   exitLabel,
   mergeIds,
   observedIdsDiverge,
@@ -852,10 +853,35 @@ export function buildEvidenceRecord({
   }
   requireDefinition(containerDefinition);
   const targetNames = requireTarget(target);
+  // deviceId is PINNED to the one declared durable fixture (MG-67), not merely
+  // scrubbed. The security review enumerated FOUR surfaces on which an opaque
+  // credential accepted as a device name must be unreachable — a log line, the az
+  // argv, the document body, and THIS evidence record — and each has to be closed
+  // independently. The CLI (send-fixture) already refuses a non-fixture --device
+  // before anything is sent; this is the second, independent half, so a caller
+  // that bypassed the CLI still cannot land an arbitrary device name (an opaque
+  // 32-char id-shaped secret included) in the artifact MG-53 and MG-54 parse.
+  //
+  // deviceIdProblem() is fixture-core's single source of truth for a legal device
+  // value: it runs the charset rule first (so a JWT / connection string / SAS
+  // fails on its separators) and THEN the pin (so an opaque, charset-legal secret
+  // is refused too, because no character rule can tell it from an id). It NEVER
+  // echoes the value, so a credential-shaped deviceId cannot leak on THIS refusal
+  // path either. The accepted value is ALSO run through the scrubber below,
+  // keeping validation and sanitization independent defenses — neither depends on
+  // the other (the pinned constant passes the scrub unchanged).
+  const requestedDeviceId = requireNonEmptyString(deviceId, 'deviceId');
+  const deviceProblem = deviceIdProblem(requestedDeviceId);
+  if (deviceProblem !== null) {
+    throw usageRefusal(
+      `deviceId must be the declared durable fixture device — ${deviceProblem}. No other device name is recorded, and the rejected value is not echoed on this path.`
+    );
+  }
   // Scrubbed once and reused everywhere the device name lands: the record AND the
-  // partition-value fallback below, so a credential-shaped device name cannot
-  // reach either surface unsanitized.
-  const safeDeviceId = safeName(requireNonEmptyString(deviceId, 'deviceId'));
+  // partition-value fallback below. The value is already pinned to the clean
+  // fixture constant, so the scrub is a no-op here — kept as the independent
+  // second defense so a future change to the pin cannot silently drop it.
+  const safeDeviceId = safeName(requestedDeviceId);
 
   const sets = resolveIdSets({ idSets, ledger, requestedIds, confirmation });
 

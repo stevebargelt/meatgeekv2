@@ -1518,23 +1518,71 @@ describe('the hub, account, database and container names are sanitized into the 
     }
   }
 
-  it('sanitizes a credential-shaped device name into the record too', async () => {
-    // deviceId defaults to the durable fixture constant, but a caller may pass one;
-    // it lands in the record AND is the partition-value fallback, so it takes the
-    // same scrub. The dotted shape is redacted to a token and the record builds.
+  it('accepts the one declared fixture device in the deviceId slot', async () => {
+    // The pin's positive case: the fixture's own name builds a record and lands
+    // in it verbatim. deviceId also defaults to this constant, so the common
+    // caller (no deviceId argument) travels the same accepted path.
     const { confirmation } = await successfulConfirmation();
     const record = buildEvidenceRecord({
       confirmation,
       containerDefinition: NO_NAME_DEFINITION,
       requestedIds: [],
       target: TARGET,
-      deviceId: DOTTED,
+      deviceId: FIXTURE_DEVICE_ID,
       now: fixedClock(),
     });
-    assert.equal(record.deviceId, '[redacted]');
-    assert.equal(serializeEvidenceRecord(record).includes(DOTTED), false);
+    assert.equal(record.deviceId, FIXTURE_DEVICE_ID);
     assert.deepEqual(findCredentialRisks(record), []);
   });
+
+  // deviceId is PINNED, not merely scrubbed (operator-required, MG-67). Unlike
+  // the account/database/container names — which stay open-ended to match the
+  // measured container and infra-assigned suffixes, and so are only sanitized —
+  // the device is the ONE surface the security review flagged, and this fixture
+  // addresses exactly one declared device. So every non-fixture value is REFUSED
+  // at the evidence-record edge too, independently of the CLI: no record is
+  // built, and the rejected value appears in NO log line, NO serialized record,
+  // and NOT on the refusal path itself. This is the load-bearing case the review
+  // named: an OPAQUE, charset-legal secret is indistinguishable from a device id,
+  // so only a pin — not a tighter pattern — makes it structurally unreachable.
+  const OPAQUE_32 = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6'; // 32 alphanumerics; NOT a real secret
+  const NON_FIXTURE_DEVICES = {
+    'an opaque 32-char alphanumeric string': OPAQUE_32,
+    'a JWT-shaped value': DOTTED,
+    'a bearer token': BEARER,
+    'a connection string': CONN,
+    'a different but legal device id': 'some-other-device',
+  };
+  for (const [shape, value] of Object.entries(NON_FIXTURE_DEVICES)) {
+    it(`REFUSES ${shape} in the deviceId slot and leaks it nowhere`, async () => {
+      const { confirmation } = await successfulConfirmation();
+      let record = null;
+      let threw = null;
+      try {
+        record = buildEvidenceRecord({
+          confirmation,
+          containerDefinition: NO_NAME_DEFINITION,
+          requestedIds: [],
+          target: TARGET,
+          deviceId: value,
+          now: fixedClock(),
+        });
+      } catch (err) {
+        threw = err;
+      }
+      assert.equal(record, null, `a non-fixture deviceId (${shape}) must build no record`);
+      assert.ok(
+        threw instanceof FixtureError && threw.exitCode === EXIT.USAGE,
+        `a non-fixture deviceId (${shape}) must be refused with a USAGE code`
+      );
+      // The refusal path itself must not carry the rejected value.
+      assert.equal(
+        threw.message.includes(value),
+        false,
+        `the refusal echoed the rejected deviceId (${shape})`
+      );
+    });
+  }
 
   it('scrubs a credential-shaped measured container name out of the wrong-container refusal', async () => {
     // The wrong-container refusal interpolates the MEASURED container name; a
