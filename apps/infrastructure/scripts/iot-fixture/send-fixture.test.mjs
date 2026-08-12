@@ -419,52 +419,133 @@ describe('argument parsing', () => {
     }
   });
 
-  // A JWT is three dotted base64url segments, and AZURE_NAME's character class
-  // permits '.', so a SHORT one (each segment past the scrubber's 10-char floor,
-  // the whole thing inside AZURE_NAME's 128-char limit) sails past the plain-name
-  // check — exactly the value the change request reproduced with. It is refused
-  // on its credential SHAPE instead, at validation, which runs BEFORE main()
-  // emits a single line: validate-then-use, not use-then-validate.
+  // ------------------------------------------------------------------------
+  // Per-resource-type name validation (operator-authorized redesign, FIX 1/2/3).
+  //
+  // The single credential-SHAPE heuristic (scrubSecrets(value) !== value, applied
+  // uniformly to all five names) was replaced by a per-type ALLOWLIST: each name
+  // is validated against the ACTUAL Azure rule for its resource type. The old
+  // heuristic failed in BOTH directions — it accepted a 32-char opaque key (which
+  // matches no scrubber pattern) and refused the LEGAL dotted Cosmos id
+  // `analytics01.eventstore1.replicaWest` (Cosmos ids permit dots). Both
+  // directions are covered below, for EACH of the five types separately.
+  // ------------------------------------------------------------------------
+
+  const completeCfg = overrides => ({
+    ...parseArgs([...BASE_ARGV, '--evidence-out', 'e.json']),
+    ...overrides,
+  });
+
+  // SHORT_JWT is genuinely credential-SHAPED — the scrubber rewrites it — which
+  // is exactly why the removed uniform heuristic refused it for ALL five names,
+  // including the two for which it is a perfectly legal id. That over-refusal is
+  // the FALSE POSITIVE the redesign removes.
   const SHORT_JWT = 'aaaaaaaaaaa.bbbbbbbbbbb.ccccccccccc';
-  it('SHORT_JWT is a JWT the plain-name check accepts but the scrubber rewrites', () => {
-    // Guards the two premises the tests below rest on, so a future tweak to
-    // either regex that lets this value straight through cannot pass silently.
-    assert.match(SHORT_JWT, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+  it('SHORT_JWT is credential-SHAPED, which is why the old uniform heuristic refused it everywhere', () => {
     assert.notEqual(scrubSecrets(SHORT_JWT), SHORT_JWT);
   });
 
-  for (const flag of ['hub', 'device']) {
-    it(`refuses a JWT-shaped --${flag} on its credential shape, without echoing it`, () => {
-      const cfg = { ...parseArgs([...BASE_ARGV, '--evidence-out', 'e.json']), [flag]: SHORT_JWT };
-      const error = refusal(() => requireComplete(cfg));
-      assert.equal(error.exitCode, EXIT.USAGE);
-      assert.match(error.message, /credential-shaped/);
-      assert.equal(
-        error.message.includes(SHORT_JWT),
-        false,
-        'the credential-shaped name was echoed in the refusal'
-      );
-    });
+  // An IoT Hub connection string reliably fails the hub/device/account rules on
+  // its ';' separators, its uppercase and its dots. It does NOT necessarily fail
+  // the Cosmos id rule — Cosmos ids permit ';', '=' and '.', forbidding only
+  // '/ \\ # ?' — so a Cosmos connection string (with '/' from its https:// URL)
+  // is used for the Cosmos types instead. Both embed a planted key, so the
+  // no-echo assertions below are load-bearing. (That a ';'-only connection string
+  // is a LEGAL Cosmos id is the honest limitation of naming-rule validation, not
+  // a gap this tool patches — see FIX 3.)
+  const CONNECTION_STRING = `HostName=${HUB}.azure-devices.net;SharedAccessKeyName=iothubowner;SharedAccessKey=${PLANTED.deviceKey}`;
+  const COSMOS_CONNECTION_STRING = `AccountEndpoint=https://${ACCOUNT}.documents.azure.com:443/;AccountKey=${PLANTED.deviceKey}==;`;
+
+  const NAME_CASES = [
+    {
+      option: '--hub',
+      field: 'hub',
+      // A JWT's dots and a connection string's separators both fail the hub rule.
+      legal: ['meatgeek-v2-dev-iothub-259d4bf5b628', 'abc'],
+      illegal: [SHORT_JWT, CONNECTION_STRING, 'has space', 'under_score'],
+    },
+    {
+      option: '--device',
+      field: 'device',
+      // Device ids permit -.+%_#*?!(),:=@$' but NOT '/', ';' or whitespace.
+      legal: [FIXTURE_DEVICE_ID, "dev-fixture.v2:probe#1"],
+      illegal: [CONNECTION_STRING, 'a/b', 'a;b', 'x'.repeat(129)],
+    },
+    {
+      option: '--account',
+      field: 'account',
+      legal: ['mgv2-dev-f640e19ae7ab', 'abc'],
+      illegal: [SHORT_JWT, CONNECTION_STRING, 'HasUpperCase', 'ab'],
+    },
+    {
+      option: '--database',
+      field: 'database',
+      // The dotted Cosmos id is explicitly accepted — the value the old gate wrongly refused.
+      legal: ['meatgeek-v2-dev-db', 'analytics01.eventstore1.replicaWest'],
+      illegal: [COSMOS_CONNECTION_STRING, 'a/b', 'a#b', 'a?b'],
+    },
+    {
+      option: '--container',
+      field: 'container',
+      legal: ['temperatures', 'analytics01.eventstore1.replicaWest'],
+      illegal: [COSMOS_CONNECTION_STRING, 'a/b', 'a\\b', 'a#b'],
+    },
+  ];
+
+  for (const { option, field, legal, illegal } of NAME_CASES) {
+    for (const value of legal) {
+      it(`accepts a legal ${option} name (${value})`, () => {
+        assert.doesNotThrow(() => requireComplete(completeCfg({ [field]: value })));
+      });
+    }
+    for (const value of illegal) {
+      // FIX 2: the rejected value is NEVER reflected back onto the terminal — the
+      // per-type checkers name the RULE, not the input, so a pasted credential
+      // does not appear in the refusal.
+      it(`refuses an illegal/credential-shaped ${option} without echoing it`, () => {
+        const error = refusal(() => requireComplete(completeCfg({ [field]: value })));
+        assert.equal(error.exitCode, EXIT.USAGE);
+        assert.match(error.message, /not a valid Azure resource name/);
+        assert.equal(
+          error.message.includes(value),
+          false,
+          `the rejected ${option} value was echoed in the refusal`
+        );
+        assertNoPlantedSecret(error.message, `requireComplete(${option})`);
+      });
+    }
   }
 
-  // The whole point of moving the check ahead of first use: no operator-facing
-  // line — info OR error, success path OR the rejection path itself — may carry
-  // the value. Driven through main() so the assertion covers every line the run
-  // would actually print.
-  for (const flag of ['--hub', '--device']) {
-    it(`main() emits no log line carrying a JWT-shaped ${flag}, on the rejection path`, async () => {
+  // FIX 3 — the HONEST LIMITATION, demonstrated rather than asserted in prose.
+  // Naming rules cannot detect a secret shaped like a LEGAL name: a base64url
+  // token with no '/' or ';' is a legal device id AND a legal Cosmos id, so it is
+  // ACCEPTED. The tool does not claim to screen it; the guarantee is only that no
+  // credential is ever ACCEPTED AS ONE, held, or required.
+  it('accepts a JWT-shaped value as a device id — the tool is not a credential detector (FIX 3)', () => {
+    assert.doesNotThrow(() => requireComplete(completeCfg({ device: SHORT_JWT })));
+  });
+  it('accepts a JWT-shaped value as a Cosmos container id — dots are legal there (FIX 3)', () => {
+    assert.doesNotThrow(() => requireComplete(completeCfg({ container: SHORT_JWT })));
+  });
+
+  // Driven through main() so the assertion covers every line a real run prints,
+  // not just the thrown message: no operator-facing line — info OR error — may
+  // carry a rejected name, on the rejection path (FIX 2, validate-then-use).
+  for (const [option, value] of [
+    ['--hub', SHORT_JWT],
+    ['--device', CONNECTION_STRING],
+    ['--container', COSMOS_CONNECTION_STRING],
+  ]) {
+    it(`main() emits no log line carrying a rejected ${option}, on the rejection path`, async () => {
       const log = recordingLog();
-      const { exitCode } = await runMain({
-        argv: [flag, SHORT_JWT],
-        evidenceOut: 'unused-dir',
-        log,
-      });
+      const { exitCode } = await runMain({ argv: [option, value], evidenceOut: 'unused-dir', log });
       assert.equal(exitCode, EXIT.USAGE);
       assert.equal(
-        log.all().includes(SHORT_JWT),
+        log.all().includes(value),
         false,
-        `a JWT-shaped ${flag} reached an operator log line`
+        `a rejected ${option} reached an operator log line`
       );
+      assertNoPlantedSecret(log.all(), `main(${option})`);
     });
   }
 
@@ -555,6 +636,27 @@ describe('the az invocation shape (HR1)', () => {
 
   it('passes a clean argv through unchanged', () => {
     assert.deepEqual(assertArgvIsCredentialFree(argv), argv);
+  });
+
+  // No accept-then-reject: a name requireComplete validated per-type must not be
+  // refused at the spawn gate by the secret-shape heuristic. A device id may
+  // legally carry dots, and the gate now judges the name slots by the SAME
+  // per-type rules — so a dotted device id (the shape the old heuristic wrongly
+  // caught) survives to the spawn it was validated for.
+  it('does not refuse a legal dotted device id at the --device-id slot', () => {
+    const dottedDevice = 'edge.fixture.mg67-probe';
+    const dottedArgv = buildSendArgv({ hub: HUB, device: dottedDevice, message });
+    assert.deepEqual(assertArgvIsCredentialFree(dottedArgv), dottedArgv);
+    assert.equal(dottedArgv[dottedArgv.indexOf('--device-id') + 1], dottedDevice);
+  });
+
+  // The other direction still holds: a non-name element that IS credential-shaped
+  // is refused, because everything outside the two name slots is tool-authored
+  // and never a legal Azure name.
+  it('still refuses a credential shape planted in a non-name (tool-authored) slot', () => {
+    const error = refusal(() => assertArgvIsCredentialFree([...argv, `--data=Bearer ${PLANTED.jwt}`]));
+    assert.equal(error.exitCode, EXIT.USAGE);
+    assertNoPlantedSecret(error.message, 'assertArgvIsCredentialFree(non-name slot)');
   });
 });
 

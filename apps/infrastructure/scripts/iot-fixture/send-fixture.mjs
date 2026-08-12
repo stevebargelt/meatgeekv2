@@ -35,11 +35,18 @@
 // local_authentication_enabled = false, and the read-back is AAD-only), so the
 // only thing a key path could add here is an exposure.
 //
-// NOTHING CREDENTIAL-SHAPED IS ACCEPTED. Every spelling of a credential flag is
-// refused BY NAME with a usage error, and the argv handed to az is scanned
-// against the tool's own scrubber before the spawn: if any element is
-// credential-shaped, the send refuses rather than proceeding. A future edit that
-// grows a key argument fails there instead of at a review.
+// NO CREDENTIAL MODE, AND NAMES ARE ALLOWLISTED PER TYPE. Every spelling of a
+// credential flag is refused BY NAME with a usage error. The five operator
+// names are each validated against the ACTUAL Azure naming rule for their
+// resource type (an allowlist — accepted only if legal for that kind), which
+// rejects a connection string or a JWT on its separators/dots BY CONSTRUCTION
+// rather than by trying to recognise a secret. That is NOT a credential
+// detector, and this tool does not claim to be one (see the honest limitation in
+// --help): the guarantee is that no credential is ever accepted, held or
+// required. The argv handed to az is scanned once more before the spawn — the
+// name slots by the same per-type rules, every other (tool-authored) element by
+// the tool's own scrubber — so a future edit that grows a key argument or
+// interpolates a secret into the body fails there instead of at a review.
 //
 // THE INVOCATION SHAPE IS PART OF THE CONTRACT, not just this tool's own output.
 // az persists invocations under ~/.azure and prints request signatures under
@@ -181,6 +188,7 @@ import {
   FIXTURE_DEVICE_ID,
   FixtureError,
   MESSAGES_PER_RUN,
+  RESOURCE_NAME_KINDS,
   RUN_ID_PARAMETER,
   SYNTHETIC_MARKER,
   SYNTHETIC_MARKER_FIELD,
@@ -203,6 +211,7 @@ import {
   mustEmitEvidence,
   newRunId,
   resolveOutcomeCode,
+  resourceNameProblem,
   scrubChildOutput,
   scrubSecrets,
 } from './fixture-core.mjs';
@@ -316,6 +325,18 @@ AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
              or logs a device key, and refuses --key, --device-key, --login,
              --connection-string, --sas, --certificate and every neighbouring
              spelling.
+
+  NAME VALIDATION, AND ITS HONEST LIMITATION. The five names you pass (--hub,
+  --device, --account, --database, --container) are each validated against the
+  ACTUAL Azure naming rule for that resource type — an allowlist, so a value is
+  accepted only if it is a legal name of its kind. That rejects connection
+  strings and JWTs by construction (on their '/', ';' and dots), NOT by trying to
+  recognise a secret. This is NOT a credential detector: a secret shaped like a
+  LEGAL name — a 32-character key passed as --device, indistinguishable from a
+  32-character device id — cannot be told apart from a real name and is NOT
+  screened out. The guarantee this tool makes is the narrower true one: it never
+  accepts, holds or requires a credential, because az resolves the device key
+  itself and the read-back is AAD-only. Do not paste a secret into a name field.
   Read-back: Azure Entra ID via DefaultAzureCredential, and ONLY that. The dev
              account runs local_authentication_enabled = false, so key auth
              could not work even if this tool offered it.
@@ -544,42 +565,69 @@ export function parseArgs(argv) {
   return cfg;
 }
 
-// Names that go onto an az command line and into the evidence record. Refused
-// rather than escaped: an Azure resource name is a short, boring token, and
-// anything else here is either a typo or an attempt to smuggle a second
-// argument into the child's argv.
-const AZURE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-
-function requireName(value, flag) {
+// ---------------------------------------------------------------------------
+// Per-resource-type name validation (operator-authorized redesign, MG-67).
+//
+// The five operator-supplied names go onto an az command line, into the Cosmos
+// read-back and into the evidence record. Each is validated against the ACTUAL
+// Azure naming rule for THAT resource type — fixture-core owns the rules, cites
+// the Microsoft docs, and exposes them through resourceNameProblem(kind, value).
+// This is an ALLOWLIST: a value is accepted ONLY if it satisfies its own type's
+// rule.
+//
+// It REPLACES the previous single credential-SHAPE heuristic
+// (`scrubSecrets(value) !== value`, applied uniformly to all five names) that
+// failed in both directions at once:
+//
+//   - FALSE NEGATIVE: a 32-character opaque key matched no scrubber pattern, so
+//     it was accepted unchanged and then embedded in logs, the az argv and the
+//     document body.
+//   - FALSE POSITIVE: the scrubber's JWT pattern matches the LEGAL Cosmos id
+//     `analytics01.eventstore1.replicaWest` (Cosmos ids permit dots), so a valid
+//     container name was refused before anything could be measured or sent.
+//
+// Detecting a secret by SHAPE cannot be patched into correctness, and applying
+// one heuristic across five materially different naming rules is what produced
+// both failures together. With per-type allowlists, credential material fails BY
+// CONSTRUCTION: a connection string carries '/' and ';', which every one of the
+// five rules rejects; a JWT carries dots, which the IoT Hub and Cosmos-account
+// rules reject.
+//
+// HONEST LIMITATION (FIX 3 — stated plainly in --help and in the runbook): this
+// is NOT a credential detector. A secret shaped like a LEGAL name — a
+// 32-character key passed as --device, indistinguishable from a 32-character
+// device id — is not detectable by naming rules, and this tool does not claim to
+// catch it. The operator-facing guarantee is narrower and true: the tool never
+// accepts, holds or requires a credential (az resolves the device key itself
+// under the caller's identity, and the read-back is AAD-only), so no key is ever
+// passed in to begin with.
+//
+// FIX 2 — NEVER ECHO RAW INPUT. A rejection names the FLAG and the RULE, never
+// the rejected value: resourceNameProblem() returns a reason fragment that does
+// not contain the input, so no unvalidated argv text reaches a log line, the az
+// argv, a document body or the evidence record. Combined with validate-then-use
+// ordering (requireComplete runs before main() emits any line or builds any
+// argv), the value main() goes on to log and send is a VALIDATED one.
+function requireResourceName(value, flag, kind) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw usageError(`${flag} is required`);
   }
-  if (!AZURE_NAME.test(value)) {
-    throw usageError(
-      `${flag} must be a plain Azure resource name (letters, digits, '.', '_', '-'), got '${safe(value)}'`
-    );
-  }
-  // Validate-then-use, never use-then-validate. AZURE_NAME's character class
-  // permits '.', so a JWT-shaped value (three dotted base64url segments) passes
-  // it — and hub/device names are echoed on info and failure lines before the
-  // pre-spawn assertArgvIsCredentialFree() gate would catch them. Reject a
-  // credential-shaped name HERE, at validation, using the tool's OWN scrubber as
-  // the arbiter so the two can never disagree, so no later code path can emit
-  // it. The offending value is refused unread and is never echoed.
-  if (scrubSecrets(value) !== value) {
-    throw usageError(
-      `${flag} is refused: the value is credential-shaped (it matches the tool's own secret scrubber) and is rejected before it can be used or logged. A hub or device is a plain Azure resource name, never a token. The value is not echoed.`
-    );
+  const problem = resourceNameProblem(kind, value);
+  if (problem !== null) {
+    // The offending value is NOT echoed: `problem` names the rule, not the input
+    // (FIX 2). An operator who mistyped a name learns the rule; an operator who
+    // pasted a credential does not see it reflected back onto their terminal.
+    throw usageError(`${flag} is not a valid Azure resource name: ${problem}. The value is not echoed.`);
   }
   return value;
 }
 
 export function requireComplete(cfg) {
-  requireName(cfg.hub, '--hub');
-  requireName(cfg.device, '--device');
-  requireName(cfg.account, '--account');
-  requireName(cfg.database, '--database');
-  requireName(cfg.container, '--container');
+  requireResourceName(cfg.hub, '--hub', RESOURCE_NAME_KINDS.IOT_HUB);
+  requireResourceName(cfg.device, '--device', RESOURCE_NAME_KINDS.DEVICE);
+  requireResourceName(cfg.account, '--account', RESOURCE_NAME_KINDS.COSMOS_ACCOUNT);
+  requireResourceName(cfg.database, '--database', RESOURCE_NAME_KINDS.COSMOS_DATABASE);
+  requireResourceName(cfg.container, '--container', RESOURCE_NAME_KINDS.COSMOS_CONTAINER);
   if (typeof cfg.containerDefinition !== 'string' || cfg.containerDefinition.trim() === '') {
     throw usageError(
       '--container-definition <path|-> is required: the partition key and the default_ttl are MEASURED from the live container, never assumed (HR4)'
@@ -635,11 +683,27 @@ export function buildSendArgv({ hub, device, message }) {
  * credential argument, or a verbosity flag, fails at this line instead of at a
  * review.
  *
- * Credential shape is judged by the tool's OWN scrubber: an element the scrubber
- * would rewrite is by definition credential-shaped, so the two can never drift
- * apart. The offending value is never echoed.
+ * TWO KINDS OF ELEMENT, TWO KINDS OF CHECK. buildSendArgv places each
+ * operator-supplied NAME immediately after its flag (--hub-name, --device-id),
+ * and those two names were already validated per-type by requireComplete. They
+ * are re-checked HERE with the SAME per-type rules rather than by secret shape —
+ * so a name the tool already accepted (a legal dotted device id among them, the
+ * value the old shape heuristic wrongly refused) can never be rejected at the
+ * spawn it was validated for. Every OTHER element is tool-authored — the fixed
+ * literals, the synthetic JSON body, the system-property string — and is never a
+ * legal Azure name, so a credential SHAPE there is a real defect (a future edit
+ * interpolating a secret into --data or --properties) and is refused by the
+ * tool's own scrubber. Neither branch ever echoes the offending value.
  */
 export function assertArgvIsCredentialFree(argv) {
+  // The value slots that carry an operator-supplied name, mapped to the kind
+  // whose rule judges them. Absent flags (index -1) simply contribute no slot.
+  const namePositions = new Map();
+  const hubIndex = argv.indexOf('--hub-name');
+  if (hubIndex !== -1) namePositions.set(hubIndex + 1, RESOURCE_NAME_KINDS.IOT_HUB);
+  const deviceIndex = argv.indexOf('--device-id');
+  if (deviceIndex !== -1) namePositions.set(deviceIndex + 1, RESOURCE_NAME_KINDS.DEVICE);
+
   argv.forEach((element, index) => {
     if (typeof element !== 'string') {
       throw usageError(`refusing to spawn az: argument ${index} is not a string`);
@@ -654,6 +718,20 @@ export function assertArgvIsCredentialFree(argv) {
         `refusing to spawn az: the argv carries ${element}, and this tool has no credential mode`
       );
     }
+
+    const nameKind = namePositions.get(index);
+    if (nameKind !== undefined) {
+      // A validated NAME slot: judged by its type's Azure rule, never by secret
+      // shape, so the gate cannot refuse a name requireComplete already accepted.
+      const problem = resourceNameProblem(nameKind, element);
+      if (problem !== null) {
+        throw usageError(
+          `refusing to spawn az: the ${nameKind} argument is not a valid Azure resource name (${problem}). The value is not echoed.`
+        );
+      }
+      return;
+    }
+
     if (scrubSecrets(element) !== element) {
       throw usageError(
         `refusing to spawn az: argument ${index} is credential-shaped and would be written to ~/.azure and to 'ps' where nothing can redact it. The value is not echoed.`
