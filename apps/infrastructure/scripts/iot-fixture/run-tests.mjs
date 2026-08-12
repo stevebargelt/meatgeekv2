@@ -53,12 +53,12 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // minTests carries a margin below the honest count so that consolidating a
 // couple of cases does not turn this red for a reason that has nothing to do
 // with the suite failing to run. Counts measured at the time of writing, after
-// the per-run-ownership redesign AND the FIX-1 argv-ordering cycle integrated
-// (see the re-measure note below for the breakdown and why it moved):
-// dependency-free 411 tests across 4 files (container-definition 34, evidence
-// 81, fixture-core 141, send-fixture 155); real-SDK 40 across 1 file.
+// the per-resource-type allowlist-validation REDESIGN integrated (see the
+// newest re-measure note below for the breakdown and why it moved):
+// dependency-free 502 tests across 4 files (container-definition 34, evidence
+// 81, fixture-core 199, send-fixture 188); real-SDK 40 across 1 file.
 //
-// That margin is FOUR cases on the dependency-free tier and ONE on the much
+// That margin is FIVE cases on the dependency-free tier and ONE on the much
 // smaller real-SDK tier — a small fixed number, not the ~7% earlier revisions
 // of this file used — and the reason is measured rather than stylistic. An
 // earlier evidence-write cycle's three fixes added 22 executed cases (the tier
@@ -108,16 +108,31 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // integrated tree, not an estimate: the earlier note here read send-fixture at
 // 147, which was a pre-rebuild projection; the real rebuilt suite reported 150.
 //
-// RE-MEASURED AGAIN when the FIX-1 argv-ordering cycle integrated. That cycle
-// moved the credential-shape rejection of a JWT-shaped --hub/--device to
-// requireName(), BEFORE any log line can echo the value, and pinned it with an
-// adversarial block (a JWT-shaped --hub and a JWT-shaped --device each emit no
-// log line carrying the value, on the rejection path itself). Those cases
-// carried send-fixture from 150 to 155 and the tier from 406 to 411. The floor
-// is RAISED to match — leaving it at 402 would let the whole FIX-1 block stop
-// running inside a nine-case margin, the exact failure this file refuses.
-// Honest default-tier count, measured on the integrated tree: 411
-// (fixture-core 141, container-definition 34, evidence 81, send-fixture 155).
+// RE-MEASURED AGAIN when the per-resource-type allowlist-validation REDESIGN
+// integrated. The operator authorised replacing the shared credential-SHAPE
+// gate — one `scrubSecrets(value) !== value` heuristic applied to all five
+// names — with per-type ALLOWLIST validation: each of the IoT Hub name, the
+// device id, the Cosmos account, database and container id is checked against
+// its OWN documented Azure naming rule, and a value is accepted only if it
+// satisfies that rule (credential material fails by construction, not by
+// pattern recognition). The heuristic that the prior FIX-1 argv-ordering cycle
+// wired into requireName() is GONE with it, and so is the false-positive that
+// refused a legal dotted Cosmos id. In its place the redesign added a legal-id
+// and a credential-shaped case for EACH of the five types, in both fixture-core
+// (the rule engine) and send-fixture (the wiring), which is why the tier moved
+// so far in one cycle: fixture-core 141 -> 199 and send-fixture 155 -> 188,
+// carrying the tier from 411 to 502. The floor is RAISED to 497 to match —
+// leaving it at 407 would let the entire allowlist block (and the FIX-2
+// validated-value-only output cases beside it) stop running inside a
+// ninety-case margin, the exact failure this file exists to refuse. Honest
+// default-tier count, measured on the integrated tree: 502 (fixture-core 199,
+// container-definition 34, evidence 81, send-fixture 188).
+//
+// The raise before this came when the FIX-1 argv-ordering cycle integrated. That
+// cycle moved a credential-shape rejection of a JWT-shaped --hub/--device ahead
+// of any log line — the heuristic the redesign above has since REPLACED with
+// per-type allowlist validation. It carried the tier from 406 to 411; those
+// cases are gone now, absorbed into the per-type rules that superseded them.
 //
 // The raise before that came when the evidence-write integrity cycle landed
 // three fixes to the writer MG-53 and MG-54 consume mechanically. Each one is a
@@ -178,7 +193,7 @@ const TIERS = {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 407,
+    minTests: 497,
   },
   sdk: {
     label: 'real-SDK',
