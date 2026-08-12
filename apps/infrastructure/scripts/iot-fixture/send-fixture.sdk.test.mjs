@@ -1474,23 +1474,31 @@ describe('MG-67 a write refusal outranks a real SDK diagnosis and destroys nothi
 // grep for credential shapes is part of acceptance). None is a real secret; each
 // carries a SHAPE the device rule must reject, and the point is that it is
 // rejected before it can be logged, sent or embedded.
+// The credential SHAPES, built once from self-describing plaintext and shared by
+// the device slot below and the account/database/container slots in section 10 —
+// so a single definition drives the refusal proof for every operator-name flag,
+// and none of them commits a credential literal (HR1). The = and ; of a
+// connection string and the dots of a JWT are the separators the narrowed name
+// rules reject; base64 padding is another.
+const JWT_SHAPE = ['header', 'payload', 'signature']
+  .map(seg => Buffer.from(`mg67-sdk-not-a-real-jwt-${seg}`).toString('base64url'))
+  .join('.');
+const CONNECTION_STRING_SHAPE = ['Endpoint', 'Id', 'Secret']
+  .map(part => `${part}=${Buffer.from(`mg67-sdk-not-a-real-${part}`).toString('base64url')}`)
+  .join(';');
+// A dotted Cosmos id that is LEGAL to Azure but pinned OUT by this tool's
+// narrowed database/container rule. It carries no secret, so it is written
+// literally: it is the exact carve-out an earlier cycle wrongly ACCEPTED and the
+// security review then reported as a hole, reproduced here to prove it is now
+// refused in the --database and --container slots by construction.
+const DOTTED_COSMOS_ID = 'analytics01.eventstore1.replicaWest';
+
 const REFUSED_DEVICE_SHAPES = [
-  [
-    'a JWT (three dot-separated base64url segments)',
-    ['header', 'payload', 'signature']
-      .map(seg => Buffer.from(`mg67-sdk-not-a-real-jwt-${seg}`).toString('base64url'))
-      .join('.'),
-  ],
+  ['a JWT (three dot-separated base64url segments)', JWT_SHAPE],
   ['a dotted name (dots are illegal in the device slot)', 'fixture.device.west'],
   [
     'a connection-string-shaped value (its = and ; are illegal in the device slot)',
-    // The SHAPE is what the device rule rejects (the = and ; separators). Built
-    // at runtime from plaintext and spelling no real credential field name, so
-    // the source commits no connection-string literal — same HR1 discipline as
-    // the JWT case and PLANTED above.
-    ['Endpoint', 'Id', 'Secret']
-      .map(part => `${part}=${Buffer.from(`mg67-sdk-not-a-real-${part}`).toString('base64url')}`)
-      .join(';'),
+    CONNECTION_STRING_SHAPE,
   ],
 ];
 
@@ -1516,26 +1524,38 @@ function realReaderProbe(constructed) {
   };
 }
 
-async function runWithDevice(device, { dir }) {
+async function runWithNames(overrides, { dir }) {
+  // Every operator-supplied name defaults to its valid dev value; `overrides`
+  // replaces exactly the one (or more) under test, so a single bad name is
+  // isolated against an otherwise-valid command line — the shape that proves the
+  // gate refuses THAT field rather than tripping on something else.
+  const names = {
+    '--hub': HUB,
+    '--account': ACCOUNT,
+    '--database': DATABASE,
+    '--container': CONTAINER,
+    '--device': FIXTURE_DEVICE_ID,
+    ...overrides,
+  };
   const log = recordingLog();
   const constructed = [];
   const spawned = [];
   const exitCode = await main({
     argv: [
       '--hub',
-      HUB,
+      names['--hub'],
       '--account',
-      ACCOUNT,
+      names['--account'],
       '--database',
-      DATABASE,
+      names['--database'],
       '--container',
-      CONTAINER,
+      names['--container'],
       '--container-definition',
       'container-show-clean.json',
       '--evidence-out',
       dir,
       '--device',
-      device,
+      names['--device'],
     ],
     createReader: realReaderProbe(constructed),
     spawn: async (...args) => {
@@ -1548,6 +1568,11 @@ async function runWithDevice(device, { dir }) {
     sleep: async () => {},
   });
   return { exitCode, log, constructed, spawned };
+}
+
+// The device-slot wrapper the existing section keeps using unchanged.
+async function runWithDevice(device, { dir }) {
+  return runWithNames({ '--device': device }, { dir });
 }
 
 describe('MG-67 a JWT-shaped --device never reaches the real SDK, the az argv, or a document body', () => {
@@ -1633,6 +1658,171 @@ describe('MG-67 a JWT-shaped --device never reaches the real SDK, the az argv, o
       // The sentinel aborts at the PRE-SEND read, so still nothing was sent.
       assert.equal(spawned.length, 0, 'the sdk-tier sentinel must abort before the send');
       assert.equal(exitCode, EXIT.TRANSPORT, 'the sentinel abort keeps its own transport code');
+    });
+  });
+});
+
+// ===========================================================================
+// 10. THE PER-TYPE ALLOWLIST STANDS IN FRONT OF THE REAL SDK FOR THE COSMOS
+//     NAME SLOTS TOO — --account, --database, --container.
+//     (Operator-authorized MG-67 correction — the reopened carve-out, closed.)
+//
+// THE FINDING (second half). Section 9 closes the JWT-as-device hole. This
+// section closes its sibling in the Cosmos name slots. An earlier cycle widened
+// the --database and --container rules to the FULL Azure-legal Cosmos id set,
+// carving the dotted id `analytics01.eventstore1.replicaWest` back IN as
+// accepted. That widening was the exact hole a security review reported: a
+// credential-shaped value accepted in the database and container name slots,
+// from which it would reach unsanitized operator output, the az argv and the
+// evidence target. fixture-core's account/database/container rules are now pinned
+// BELOW the Azure-legal set exactly as the device rule is — dots, connection-
+// string separators and base64 padding all rejected — so credential shapes fail
+// BY CONSTRUCTION in every one of the five name slots, not just the device one.
+// The fake tier proves each rule directly, both directions, per field.
+//
+// WHY IT BELONGS HERE. The claim this tier adds is ORDERING against the REAL
+// SDK, the same one section 9 makes for --device: a refused Cosmos name lands
+// BEFORE createRealReader constructs a real @azure/cosmos client, BEFORE the real
+// credential is built, BEFORE any az spawn, and BEFORE the name reaches an
+// operator line or the evidence record. requireComplete validates all five names
+// (hub, device, account, database, container) ahead of createReader, so a bad
+// --account/--database/--container aborts on the same path a bad --device does.
+// A fake createReader could pass while the real one had already been constructed;
+// only a probe wrapping the REAL createRealReader proves the real client was
+// never reached. Same probe (realReaderProbe) as section 9.
+//
+// Still offline: the probe substitutes a non-network reader, and every refused
+// case aborts before construction entirely, so no client method is ever called.
+// ===========================================================================
+
+// Each row: the flag under test, a label, and a value carrying a shape that
+// flag's narrowed rule must refuse. --account is lowercase/digits/hyphens, 3-44
+// chars; --database and --container are letters/digits/interior-hyphens, <=128.
+// A JWT (dots), a connection string (= and ;) and the dotted Cosmos id (the
+// reopened carve-out) carry SEPARATORS and so fail every one of the three rules.
+//
+// DELIBERATELY NOT the same base64 blob in every slot. The account rule is
+// stricter (lowercase-only, <=44), so an uppercase 64-char base64 key fails it
+// by construction and is a genuine refusal to assert there. But a base64 blob
+// that happens to be pure [A-Za-z0-9] is a LEGAL narrow database/container id —
+// the tool documents plainly (send-fixture.mjs "HONEST LIMITATION") that a secret
+// shaped like a legal narrow name is not caught by naming rules, and az resolving
+// the device key itself is what makes that acceptable. Asserting the Cosmos-id
+// slots "refuse" such a value would be asserting a guarantee the tool correctly
+// does not make. So the base64-key case is scoped to --account, where the rule
+// really does reject it; the Cosmos-id slots are covered by the separator-bearing
+// shapes, which is the credential class the widening actually let through.
+const REFUSED_COSMOS_NAME_SHAPES = [
+  ['--account', 'a JWT', JWT_SHAPE],
+  ['--account', 'a connection-string shape', CONNECTION_STRING_SHAPE],
+  ['--account', 'a base64 account-key shape (uppercase and over-length for the account rule)', PLANTED.accountKey],
+  ['--database', 'a JWT', JWT_SHAPE],
+  ['--database', 'a connection-string shape', CONNECTION_STRING_SHAPE],
+  ['--database', 'the reopened dotted Cosmos id', DOTTED_COSMOS_ID],
+  ['--container', 'a JWT', JWT_SHAPE],
+  ['--container', 'a connection-string shape', CONNECTION_STRING_SHAPE],
+  ['--container', 'the reopened dotted Cosmos id', DOTTED_COSMOS_ID],
+];
+
+describe('MG-67 a credential-shaped --account/--database/--container never reaches the real SDK, the az argv, or the evidence record', () => {
+  for (const [flag, label, value] of REFUSED_COSMOS_NAME_SHAPES) {
+    it(`refuses ${label} in ${flag} with USAGE before the real client is constructed or anything is sent`, async () => {
+      await withTempDir(async dir => {
+        const { exitCode, log, constructed, spawned } = await runWithNames(
+          { [flag]: value },
+          { dir }
+        );
+
+        // 1. USAGE — a naming refusal, "nothing live happened". Never a
+        //    confirmation, and never mistaken for a transport or timeout outcome.
+        assert.equal(
+          exitCode,
+          EXIT.USAGE,
+          `expected USAGE, got ${exitCode} (${exitLabel(exitCode)})`
+        );
+        assert.notEqual(exitCode, EXIT.OK, `a refused ${flag} is never a confirmation`);
+
+        // 2. THE REAL SDK WAS NEVER REACHED. The probe wraps the real
+        //    createRealReader; its never being invoked is the proof that no real
+        //    @azure/cosmos client and no real credential were constructed for a
+        //    value the gate should have refused first.
+        assert.equal(
+          constructed.length,
+          0,
+          `the real Cosmos client was constructed for a ${flag} the gate must refuse first`
+        );
+        // 3. NOTHING WAS SENT. The gate is ahead of the az spawn.
+        assert.equal(spawned.length, 0, `az was spawned for a refused ${flag}`);
+
+        // 4. THE REJECTED VALUE NEVER LEAKED — not to a log line, not into a
+        //    document/partition body line, not into an az argv this test could
+        //    observe, and (below) not to the evidence record. A rejection names
+        //    the flag and the rule, never the value.
+        const output = log.all();
+        assert.equal(
+          output.includes(value),
+          false,
+          `the rejected ${flag} value was echoed back onto operator output`
+        );
+        assert.ok(
+          output.includes(`${flag} is not a valid Azure resource name`),
+          `the refusal must name ${flag} and the rule`
+        );
+        assert.match(output, /The value is not echoed/);
+        // The planted account key must not appear on ANY path, including when it
+        // is the very value being refused.
+        assertNoPlantedSecret(output, `a refused ${flag}`);
+        // No document/partition line was ever built for it: buildFixtureMessages
+        // is never reached for a name refused at argument time.
+        assert.equal(
+          /partition .*=/.test(output),
+          false,
+          `a partition line was built for a ${flag} that should never reach the body`
+        );
+
+        // 5. NO EVIDENCE ARTIFACT. A run refused at argument time attempted
+        //    nothing and owes no record; a file here would be a phantom run whose
+        //    contents MG-53 and MG-54 would read as a program input.
+        const evidence = (await readdir(dir)).filter(
+          name => name.startsWith(EVIDENCE_PREFIX) && name.endsWith('.json')
+        );
+        assert.deepEqual(
+          evidence,
+          [],
+          `a refused-at-argument ${flag} run wrote an evidence artifact`
+        );
+      });
+    });
+  }
+
+  it('lets the legitimate dev account, database and container through to REAL @azure/cosmos construction (the accepted direction)', async () => {
+    // The other direction at the same boundary: the names this tool actually uses
+    // are NOT over-refused. All three dev names pass requireComplete and reach a
+    // genuine createRealReader construction carrying the dev endpoint — proving
+    // the narrowed rules close the finding without refusing the only account,
+    // database and container this fixture will ever name. The run then aborts on
+    // the sentinel (no network), so no client method runs and nothing is sent.
+    await withTempDir(async dir => {
+      const { exitCode, log, constructed, spawned } = await runWithNames({}, { dir });
+
+      assert.notEqual(
+        exitCode,
+        EXIT.USAGE,
+        'the legitimate dev account/database/container must not be refused'
+      );
+      assert.equal(
+        constructed.length,
+        1,
+        'validation passed but the real Cosmos client was never constructed'
+      );
+      assert.equal(
+        constructed[0].options.endpoint,
+        ENDPOINT,
+        'the real client got the dev endpoint derived from the accepted account'
+      );
+      assert.equal(spawned.length, 0, 'the sdk-tier sentinel must abort before the send');
+      assert.equal(exitCode, EXIT.TRANSPORT, 'the sentinel abort keeps its own transport code');
+      assertNoPlantedSecret(log.all(), 'the accepted-direction run');
     });
   });
 });
