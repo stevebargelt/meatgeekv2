@@ -1493,6 +1493,24 @@ const CONNECTION_STRING_SHAPE = ['Endpoint', 'Id', 'Secret']
 // refused in the --database and --container slots by construction.
 const DOTTED_COSMOS_ID = 'analytics01.eventstore1.replicaWest';
 
+// THE PIN CASE — the one a charset can never close (operator-required, MG-67).
+// An opaque 32-character alphanumeric secret is indistinguishable from a 32-char
+// alphanumeric device id: there is no character-class rule that separates them,
+// because there is no difference to detect. So --device is not merely
+// charset-narrowed, it is PINNED to the one declared durable fixture, and every
+// other value — this one included — is refused BEFORE it can be logged, handed to
+// the az argv, embedded in the Cosmos document body (deviceId being the partition
+// key), or written to the evidence record.
+//
+// Built at runtime from self-describing plaintext (HR1: no credential shape is
+// committed, tests included). 16 ASCII bytes -> exactly 32 lowercase hex
+// characters, which is the canonical "opaque key shaped exactly like a legal id":
+// pure [0-9a-f], no separators, so it PASSES the device charset and is refused
+// ONLY by the pin. If this constant were ever edited to carry a dash, a dot or a
+// non-32 length it would be refused by the charset instead and stop exercising
+// the pin — so the test below asserts both properties before it uses the value.
+const OPAQUE_DEVICE_SECRET = Buffer.from('mg67OpaqueDevKey').toString('hex');
+
 const REFUSED_DEVICE_SHAPES = [
   ['a JWT (three dot-separated base64url segments)', JWT_SHAPE],
   ['a dotted name (dots are illegal in the device slot)', 'fixture.device.west'],
@@ -1575,7 +1593,7 @@ async function runWithDevice(device, { dir }) {
   return runWithNames({ '--device': device }, { dir });
 }
 
-describe('MG-67 a JWT-shaped --device never reaches the real SDK, the az argv, or a document body', () => {
+describe('MG-67 a refused --device never reaches the real SDK, the az argv, or a document body', () => {
   for (const [label, device] of REFUSED_DEVICE_SHAPES) {
     it(`refuses ${label} with USAGE before the real client is constructed or anything is sent`, async () => {
       await withTempDir(async dir => {
@@ -1630,6 +1648,76 @@ describe('MG-67 a JWT-shaped --device never reaches the real SDK, the az argv, o
       });
     });
   }
+
+  it('refuses an OPAQUE 32-char alphanumeric --device — the pin case a charset cannot close — before the real SDK, the az argv, a body or the evidence record', async () => {
+    // THE FINDING THIS CLOSES (operator-required, MG-67): an opaque credential
+    // accepted as a device name, then logged and handed to az without redaction.
+    // The prior cycles' shapes (JWT, dotted, connection-string) are all refused by
+    // the CHARSET rule. This value is not: it is pure [0-9a-f], 32 chars, a LEGAL
+    // device charset — the residue no character-class rule can separate from a real
+    // id. The ONLY thing that refuses it is the pin to FIXTURE_DEVICE_ID. So this
+    // is the one --device case that proves the pin rather than the charset, and
+    // only this tier proves the refusal lands BEFORE the real @azure/cosmos client
+    // is constructed.
+    await withTempDir(async dir => {
+      // The premise, asserted rather than assumed: this value must PASS the device
+      // charset (so the refusal below is the pin, not the charset) and must not be
+      // the fixture's own name (so it is a value the pin actually turns away).
+      assert.equal(OPAQUE_DEVICE_SECRET.length, 32, 'the opaque device value must be 32 chars');
+      assert.match(
+        OPAQUE_DEVICE_SECRET,
+        /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/,
+        'the opaque device value must satisfy the device charset, or it would be refused by the charset and not by the pin'
+      );
+      assert.notEqual(
+        OPAQUE_DEVICE_SECRET,
+        FIXTURE_DEVICE_ID,
+        'the opaque device value must differ from the fixture id, or the pin would accept it'
+      );
+
+      const { exitCode, log, constructed, spawned } = await runWithDevice(OPAQUE_DEVICE_SECRET, {
+        dir,
+      });
+
+      // 1. USAGE — a naming refusal, "nothing live happened". Never a confirmation.
+      assert.equal(exitCode, EXIT.USAGE, `expected USAGE, got ${exitCode} (${exitLabel(exitCode)})`);
+      assert.notEqual(exitCode, EXIT.OK, 'an opaque credential-shaped device is never a confirmation');
+
+      // 2. THE REAL SDK WAS NEVER REACHED, and 3. NOTHING WAS SENT — the pin lands
+      //    ahead of createRealReader and ahead of the az spawn.
+      assert.equal(
+        constructed.length,
+        0,
+        'the real Cosmos client was constructed for an opaque device the pin must refuse first'
+      );
+      assert.equal(spawned.length, 0, 'az was spawned for an opaque device the pin must refuse first');
+
+      // 4. THE OPAQUE VALUE LEAKED NOWHERE — not to a log line, INCLUDING the
+      //    refusal path itself (a refused credential must never be echoed), not
+      //    into a partition/body line (buildFixtureMessages is never reached), and
+      //    not into any az argv this test could observe.
+      const output = log.all();
+      assert.equal(
+        output.includes(OPAQUE_DEVICE_SECRET),
+        false,
+        'the opaque --device value was echoed back onto operator output, including on its own refusal path'
+      );
+      assert.match(output, /--device is not a valid Azure resource name/);
+      assert.match(output, /The value is not echoed/);
+      assert.equal(
+        /partition .*=/.test(output),
+        false,
+        'a partition line was built for an opaque device that should never reach the body'
+      );
+
+      // 5. NO EVIDENCE ARTIFACT — a run refused at argument time attempted nothing
+      //    and owes no record, so the opaque value reaches no evidence file either.
+      const evidence = (await readdir(dir)).filter(
+        name => name.startsWith(EVIDENCE_PREFIX) && name.endsWith('.json')
+      );
+      assert.deepEqual(evidence, [], 'a refused opaque-device run wrote an evidence artifact');
+    });
+  });
 
   it('lets the legitimate fixture device through to REAL @azure/cosmos construction (the accepted direction)', async () => {
     // The other direction, at the same boundary: the value this tool actually
