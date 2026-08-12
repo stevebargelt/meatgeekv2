@@ -330,8 +330,20 @@ export function parseContainerDefinition(text, options = {}) {
 
 // One operator-facing line, built only from measured values. No branch of this
 // prints anything the tool did not read out of the definition it was given.
+//
+// The container name is SCRUBBED on the way out, even though it is a measured
+// value rather than a CLI argument. Validation (the sender refuses a credential-
+// shaped --container before it is ever passed to az) and sanitisation (this
+// line) are independent defences, and this is an operator-facing path: a name is
+// echoed verbatim from `id`/`name` in the az document, and if no expectedContainer
+// was given to refuse it, a credential-shaped value in that field would otherwise
+// reach the operator's terminal unredacted. The partition key path is already
+// constrained to a `/field` identifier by readPartitionKey, and the TTL is a
+// number, so those two need no scrub — but the name goes through the same posture
+// as every other fragment this module ever prints (safeFragment, the refusals).
 export function describeContainerDefinition(definition) {
-  const name = definition.containerName === null ? '(unnamed)' : definition.containerName;
+  const name =
+    definition.containerName === null ? '(unnamed)' : scrubSecrets(definition.containerName);
   const kind =
     definition.partitionKeyKind === null ? 'unspecified kind' : definition.partitionKeyKind;
   const ttl =

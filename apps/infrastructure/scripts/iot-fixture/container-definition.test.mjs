@@ -565,6 +565,34 @@ describe('the operator-facing summary', () => {
     const line = describeContainerDefinition(parseContainerDefinition(text));
     assert.match(line, /no expiry/);
   });
+
+  // Sanitisation is an independent defence from the sender's validation of
+  // --container: even a measured container name reaches the operator's terminal
+  // here, and `id`/`name` is echoed verbatim from the az document. When no
+  // expectedContainer is given to refuse it, a credential-shaped value in that
+  // field must not travel this operator-facing path unredacted. Placeholder
+  // spelling, not a real secret — the same convention the refusal tests use.
+  it('scrubs a credential-shaped container name out of the summary', async () => {
+    const FAKE_ACCOUNT_KEY = 'not-a-real-account-key-0000AAAAbbbbCCCC==';
+    const text = await mutateClean((doc, resource) => {
+      resource.id = `AccountKey=${FAKE_ACCOUNT_KEY}`;
+      doc.name = resource.id;
+    });
+    // No expectedContainer, so the name is accepted as measured and reaches the
+    // summary — exactly the path that must scrub.
+    const line = describeContainerDefinition(parseContainerDefinition(text));
+    assert.doesNotMatch(line, /not-a-real/);
+    assert.match(line, /\[redacted\]/);
+    // The rest of the measured line is unaffected.
+    assert.match(line, /\/deviceId/);
+  });
+
+  it('leaves a clean dev container name untouched in the summary', async () => {
+    const clean = parseContainerDefinition(await readFixture('container-show-clean.json'));
+    const line = describeContainerDefinition(clean);
+    // 'temperatures' is not secret-shaped, so the scrub is a no-op on it.
+    assert.match(line, /temperatures/);
+  });
 });
 
 describe('module boundaries', () => {
