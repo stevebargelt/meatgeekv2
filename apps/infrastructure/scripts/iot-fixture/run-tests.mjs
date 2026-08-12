@@ -210,21 +210,51 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // security finding, so it is precisely what must not silently cease to run.
 // The real-SDK tier grew alongside it (the AAD-only read-back wiring gained
 // coverage), measured at 44; its floor is RAISED to 43 (margin one, as before).
-// Honest counts, measured on the integrated tree: dependency-free 515
-// (fixture-core 206, container-definition 34, evidence 81, send-fixture 194);
-// real-SDK 44 across 1 file.
+//
+// RE-MEASURED AGAIN when the ACCOUNT/DATABASE/CONTAINER validation NARROWING
+// integrated. The DEVICE-ID cycle above tightened --device and --hub below the
+// Azure-legal ceiling but deliberately left --account, --database and --container
+// at the widest id Cosmos permits — a carve-out that had been protecting an
+// earlier over-refusal finding. The operator retracted it: this fixture addresses
+// ONE known dev account, ONE database and FIVE known containers, never an
+// arbitrary Cosmos resource, so those three slots are now constrained to what
+// the fixture actually needs rather than to what Cosmos legally allows. Dotted,
+// JWT-shaped and other credential-shaped input is refused in each slot BY
+// CONSTRUCTION — the same principle already applied to --device and --hub. The
+// finding had a second half: those values also reached UNSANITIZED operator
+// output and the evidence target, so validation (refuse the bad value) is now
+// paired with scrubbing (route the accepted value through the scrubber on every
+// operator-facing path and into the evidence record) — two independent defenses,
+// both named by the finding. That added a both-directions case per type in
+// fixture-core (the rule engine: cosmosAccountNameProblem / cosmosDatabaseIdProblem
+// / cosmosContainerIdProblem, each accepting the dev value this tool uses and
+// refusing credential-shaped input) and in send-fixture (the wiring, including the
+// validated-value-only output and evidence-sanitization cases), and the JWT-in-
+// --device case from the prior cycle still passes. That carried fixture-core
+// 206 -> 226 and send-fixture 194 -> 211, and pulled evidence 81 -> 94 and
+// container-definition 34 -> 36 (the sanitized-value round-trips reach the
+// record and the definition parse), moving the tier from 515 to 567. The floor
+// is RAISED to 562 to match — leaving it at 510 would let the entire
+// account/database/container narrowing block (52 cases closing a live security
+// finding) be reverted with this gate still reporting a pass, the exact failure
+// this file exists to refuse, and a security-closing block is precisely the one
+// that must not silently cease to run. The real-SDK tier grew alongside it to
+// 54; its floor is RAISED to 53 (margin one, as before).
+// Honest counts, measured on the integrated tree: dependency-free 567
+// (fixture-core 226, container-definition 36, evidence 94, send-fixture 211);
+// real-SDK 54 across 1 file.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 510,
+    minTests: 562,
   },
   sdk: {
     label: 'real-SDK',
     match: name => name.endsWith(SDK_SUFFIX),
     minFiles: 1,
-    minTests: 43,
+    minTests: 53,
   },
 };
 
