@@ -53,19 +53,19 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // minTests carries a margin below the honest count so that consolidating a
 // couple of cases does not turn this red for a reason that has nothing to do
 // with the suite failing to run. Counts measured at the time of writing:
-// dependency-free 409 tests across 4 files (container-definition 34,
-// evidence 85, fixture-core 137, send-fixture 153); real-SDK 40 across 1 file.
+// dependency-free 414 tests across 4 files (container-definition 34,
+// evidence 90, fixture-core 137, send-fixture 153); real-SDK 40 across 1 file.
 //
 // That margin is FOUR cases on the dependency-free tier and ONE on the much
 // smaller real-SDK tier — a small fixed number, not the ~7% earlier revisions
-// of this file used — and the reason is measured rather than stylistic. This
-// cycle's three evidence-write fixes added 22 executed cases (the tier stood
-// at 387 before them: container-definition 34, evidence 70, fixture-core 137,
-// send-fixture 146). A 7% margin on 409 is 29 — wide enough for all three
-// fixes to be reverted with this gate still reporting a pass, which is the
-// precise failure this file exists to refuse, committed in the file that
-// refuses it. A percentage margin also widens as the suite grows, so it gets
-// worse exactly as there is more to lose.
+// of this file used — and the reason is measured rather than stylistic. An
+// earlier evidence-write cycle's three fixes added 22 executed cases (the tier
+// stood at 387 before them: container-definition 34, evidence 70,
+// fixture-core 137, send-fixture 146). A 7% margin on 409 is 29 — wide enough
+// for all three fixes to be reverted with this gate still reporting a pass,
+// which is the precise failure this file exists to refuse, committed in the
+// file that refuses it. A percentage margin also widens as the suite grows, so
+// it gets worse exactly as there is more to lose.
 //
 // The cost is that consolidating five or more cases turns this red. That is
 // the intended prompt to re-measure and raise the floor deliberately, not a
@@ -80,10 +80,28 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // disappear inside it — so raising it is maintenance of the gate, not
 // tightening of it.
 //
-// These floors were last raised when the evidence-write integrity cycle landed
+// These floors were last raised when the evidence writer's PUBLICATION was
+// changed from check-then-act to EXCLUSION. Every guard in front of the write
+// read the destination and then, later, wrote it; nothing held the destination
+// in between, so two genuinely concurrent runs never observed each other, both
+// exited 0, and one run's record was destroyed by the other's rename. That is
+// silent data destruction reported as success, in the one artifact MG-53 and
+// MG-54 parse to decide whether to halt a migration. Publication is now an
+// exclusive create the filesystem adjudicates — of two concurrent runs exactly
+// one wins and the loser is TOLD, nonzero — and `--overwrite` claims the prior
+// record before the same exclusive step rather than clobbering through it.
+//
+// The five cases that pin it are the reason this floor moved from 405 to 410:
+// they are what distinguishes "the race is closed by exclusion" from "the race
+// window was narrowed", and a narrowed window is indistinguishable from a
+// closed one in prose. Left at 405 against an honest 414, this gate would
+// report a pass on a tree with the entire exclusion fix reverted — the failure
+// this file exists to refuse, in the cycle that fixed it.
+//
+// The raise before that came when the evidence-write integrity cycle landed
 // three fixes to the writer MG-53 and MG-54 consume mechanically. Each one is a
 // case where the tool destroyed or misfiled a record while reporting success,
-// and each now has cases this floor has to keep alive:
+// and each still has cases this floor has to keep alive:
 //
 //   - a STAT ERROR IS NOT AN ABSENCE. The no-overwrite guard read any stat
 //     failure as "nothing there" and wrote straight over an earlier run's
@@ -101,7 +119,7 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 //     still writing. The flag replaces the operator's OWN earlier record; a
 //     foreign partial is refused with the flag exactly as without it.
 //
-// The floors before this raise (360 / 35) would have passed a tree with all
+// The floors before THAT raise (360 / 35) would have passed a tree with all
 // three of those reverted — and so would a 7%-margin floor of 380, which is
 // why the margin was tightened above at the same time as the count was raised.
 //
@@ -139,7 +157,7 @@ const TIERS = {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 405,
+    minTests: 410,
   },
   sdk: {
     label: 'real-SDK',
