@@ -327,27 +327,42 @@ AUTH — THERE IS NO CREDENTIAL TO SUPPLY, AND NONE IS ACCEPTED
              spelling.
 
   NAME VALIDATION, PER FIELD. The five names you pass are each validated against
-  an allowlist as narrow as that field actually needs — NOT as wide as Azure
-  permits:
-    --device    a fixture device THIS TOOL names: letters, digits and interior
-                hyphens only. Dots are rejected, so a JWT (three dot-separated
-                segments) and every separator-bearing credential are refused in
-                this slot BY CONSTRUCTION — before that text can be logged, passed
-                to az, or (deviceId being the container partition key) embedded in
-                a Cosmos document body. Pinned far below the Azure-legal device id.
-    --hub       letters, digits and hyphens (IoT Hub name rule).
-    --account   lowercase letters, digits and hyphens (Cosmos account rule).
+  an allowlist as narrow as THIS FIXTURE actually addresses — NOT as wide as
+  Azure legally permits. This fixture names one known dev hub, one durable dev
+  device, one dev Cosmos account, one dev database and its containers, every one
+  a plain identifier; so each rule is pinned to that need and a dotted,
+  JWT-shaped or separator-bearing value is refused in EVERY slot BY CONSTRUCTION:
+    --device    letters, digits and interior hyphens only, no leading/trailing
+                hyphen, at most 128 chars. Dots are rejected, so a JWT (three
+                dot-separated segments) and every separator-bearing credential
+                cannot pass — before that text can be logged, passed to az, or
+                (deviceId being the container partition key) embedded in a Cosmos
+                document body. Pinned far below the Azure-legal device id.
+    --hub       letters, digits and hyphens, no leading/trailing hyphen (IoT Hub
+                name rule).
+    --account   lowercase letters, digits and hyphens, no leading/trailing
+                hyphen (Cosmos account rule).
     --database
-    --container Cosmos id rule: dots ARE legal here (e.g. a01.store.west), only
-                '/ \\ # ?' are forbidden.
+    --container letters, digits and interior hyphens only, at most 128 chars —
+                the SAME narrow rule as --device, NOT the Azure-legal Cosmos id
+                set. Azure permits dots and most punctuation in a Cosmos id, but
+                this fixture addresses only plain-identifier dev ids
+                (meatgeek-v2-dev-db, temperatures), so a dot (hence a JWT) and
+                every connection-string separator are refused here too. An
+                earlier cycle wrongly carved dotted Cosmos ids back in; that hole
+                let credential-shaped input into the --database/--container slots
+                and is closed.
   HONEST LIMITATION, stated per field so it is not overclaimed either way: a
-  recognisable credential SHAPE (a JWT, a connection string, a SAS token) no
-  longer passes a NAME slot. What naming rules still cannot tell apart is an
-  OPAQUE token already shaped like a legal identifier — a 32-char key that is also
-  a legal --hub/--account/--database/--container id. That residue does not matter,
-  because the tool never accepts, holds or requires a credential at all: az
-  resolves the device key itself and the read-back is AAD-only. Do not paste a
-  secret into a name field.
+  recognisable credential SHAPE (a JWT, a connection string, a SAS token) does
+  not pass ANY name slot. What naming rules still cannot tell apart is an OPAQUE
+  token already shaped like a legal identifier — a 32-char key that is also a
+  legal plain-identifier name. That residue does not matter, because the tool
+  never accepts, holds or requires a credential at all: az resolves the device
+  key itself and the read-back is AAD-only. As a second, independent defense
+  every one of these names is ALSO routed through the scrubber before it reaches
+  an operator log line, the az argv or the evidence record — validation and
+  sanitization do not depend on each other. Do not paste a secret into a name
+  field.
   Read-back: Azure Entra ID via DefaultAzureCredential, and ONLY that. The dev
              account runs local_authentication_enabled = false, so key auth
              could not work even if this tool offered it.
@@ -580,38 +595,41 @@ export function parseArgs(argv) {
 // Per-resource-type name validation (operator-authorized redesign, MG-67).
 //
 // The five operator-supplied names go onto an az command line, into the Cosmos
-// read-back and into the evidence record. Each is validated against the ACTUAL
-// Azure naming rule for THAT resource type — fixture-core owns the rules, cites
-// the Microsoft docs, and exposes them through resourceNameProblem(kind, value).
-// This is an ALLOWLIST: a value is accepted ONLY if it satisfies its own type's
-// rule.
+// read-back and into the evidence record. Each is validated against an allowlist
+// SCOPED TO WHAT THIS FIXTURE ADDRESSES — fixture-core owns the rules and exposes
+// them through resourceNameProblem(kind, value). This is an ALLOWLIST: a value is
+// accepted ONLY if it satisfies its own type's rule, and the rules are pinned to
+// this tool's genuine need (one known dev hub, one durable dev device, one dev
+// account, plain-identifier dev databases and containers) rather than to the
+// wider set Azure legally permits.
 //
-// It REPLACES the previous single credential-SHAPE heuristic
-// (`scrubSecrets(value) !== value`, applied uniformly to all five names) that
-// failed in both directions at once:
+// It REPLACES an earlier single credential-SHAPE heuristic
+// (`scrubSecrets(value) !== value`, applied uniformly to all five names), which
+// both accepted a 32-character opaque key (matched no scrubber pattern) and
+// over-refused. A follow-up cycle over-corrected by widening the --database and
+// --container rules to the FULL Azure-legal Cosmos id set — dots and most
+// punctuation allowed — to accept a value such as
+// `analytics01.eventstore1.replicaWest`. That was wrong: this fixture will never
+// name an arbitrary Cosmos resource, and the widening was the exact hole a
+// security review then reported — a credential-shaped value accepted in the
+// database and container slots, reaching operator output and the evidence target.
+// The rules are now pinned narrow for all five names alike.
 //
-//   - FALSE NEGATIVE: a 32-character opaque key matched no scrubber pattern, so
-//     it was accepted unchanged and then embedded in logs, the az argv and the
-//     document body.
-//   - FALSE POSITIVE: the scrubber's JWT pattern matches the LEGAL Cosmos id
-//     `analytics01.eventstore1.replicaWest` (Cosmos ids permit dots), so a valid
-//     container name was refused before anything could be measured or sent.
+// Detecting a secret by SHAPE cannot be patched into correctness. With per-type
+// allowlists scoped to the fixture's need, credential material fails BY
+// CONSTRUCTION: a connection string carries '/' and ';', and a JWT carries dots,
+// and EVERY one of the five rules — the two Cosmos-id rules now included — rejects
+// all of those.
 //
-// Detecting a secret by SHAPE cannot be patched into correctness, and applying
-// one heuristic across five materially different naming rules is what produced
-// both failures together. With per-type allowlists, credential material fails BY
-// CONSTRUCTION: a connection string carries '/' and ';', which every one of the
-// five rules rejects; a JWT carries dots, which the IoT Hub and Cosmos-account
-// rules reject.
-//
-// HONEST LIMITATION (FIX 3 — stated plainly in --help and in the runbook): this
-// is NOT a credential detector. A secret shaped like a LEGAL name — a
-// 32-character key passed as --device, indistinguishable from a 32-character
-// device id — is not detectable by naming rules, and this tool does not claim to
-// catch it. The operator-facing guarantee is narrower and true: the tool never
-// accepts, holds or requires a credential (az resolves the device key itself
-// under the caller's identity, and the read-back is AAD-only), so no key is ever
-// passed in to begin with.
+// HONEST LIMITATION (stated plainly in --help and in the runbook): this is NOT a
+// credential detector. A secret shaped like a LEGAL narrow name — a plain-
+// identifier-shaped opaque token — is not detectable by naming rules, and this
+// tool does not claim to catch it. The operator-facing guarantee is narrower and
+// true: the tool never accepts, holds or requires a credential (az resolves the
+// device key itself under the caller's identity, and the read-back is AAD-only),
+// so no key is ever passed in to begin with. As an INDEPENDENT second defense,
+// every accepted name is still routed through the scrubber before it reaches an
+// operator log line, the az argv or the evidence record.
 //
 // FIX 2 — NEVER ECHO RAW INPUT. A rejection names the FLAG and the RULE, never
 // the rejected value: resourceNameProblem() returns a reason fragment that does
@@ -700,10 +718,10 @@ export function buildSendArgv({ hub, device, message }) {
  * are re-checked HERE with the SAME per-type rules rather than by secret shape —
  * so a name the tool already accepted can never be rejected at the spawn it was
  * validated for, even a legal opaque-looking identifier a broad secret-shape
- * heuristic might have flagged. (The device rule is pinned below the Azure-legal
- * set — no dots — so a JWT is refused by BOTH gates; the dotted-id case that IS
- * legal belongs to Cosmos container/database ids, which never enter this send
- * argv.) Every OTHER element is tool-authored — the fixed
+ * heuristic might have flagged. (Every name rule this tool uses — device, hub,
+ * account, database and container alike — is pinned below the Azure-legal set and
+ * rejects dots, so a JWT is refused by BOTH gates in every slot.) Every OTHER
+ * element is tool-authored — the fixed
  * literals, the synthetic JSON body, the system-property string — and is never a
  * legal Azure name, so a credential SHAPE there is a real defect (a future edit
  * interpolating a secret into --data or --properties) and is refused by the
@@ -1076,13 +1094,20 @@ async function emitEvidence({
       ledger,
       confirmation,
       containerDefinition: definition,
+      // Scrubbed on the way into the record, not just validated on the way in.
+      // requireComplete already refused a dotted/credential-shaped name for every
+      // one of these fields, so scrubSecrets is a no-op on any value that reached
+      // here — but the two defenses are independent, and this is the one artifact
+      // MG-53 and MG-54 read mechanically: a credential-shaped value must never
+      // reach it even if a future edit weakens the input rule. Unlike the log
+      // lines, no truncation is applied, so a valid name round-trips byte-for-byte.
       target: {
-        hub: cfg.hub,
-        account: cfg.account,
-        database: cfg.database,
-        container: cfg.container,
+        hub: scrubSecrets(cfg.hub),
+        account: scrubSecrets(cfg.account),
+        database: scrubSecrets(cfg.database),
+        container: scrubSecrets(cfg.container),
       },
-      deviceId: cfg.device,
+      deviceId: scrubSecrets(cfg.device),
       now,
     });
     await writeEvidenceRecord(record, reservation, {
@@ -1093,7 +1118,7 @@ async function emitEvidence({
     // existing file this run refused to clobber, both of which the operator can
     // fix and re-run against.
     log.error(`${TOOL_NAME}: ${describeError(err)}`);
-    const where = `${cfg.database}/${cfg.container} from run ${snapshot.runId}, marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}`;
+    const where = `${safe(cfg.database)}/${safe(cfg.container)} from run ${snapshot.runId}, marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}`;
     const observed = [...snapshot.observedIds];
     // Everything that may be there and was not read back. Accepted and ambiguous
     // alike: az saying "ok" is not an observation either, and the operator's
@@ -1275,7 +1300,7 @@ export async function settleRun({
 
     if (exitCode === EXIT.OK) {
       log.info(
-        `${TOOL_NAME}: CONFIRMED — ${confirmation.observedCount} synthetic document(s) sent from ${device} via hub ${hub} were read back out of ${cfg.database}/${cfg.container}`
+        `${TOOL_NAME}: CONFIRMED — ${confirmation.observedCount} synthetic document(s) sent from ${device} via hub ${hub} were read back out of ${safe(cfg.database)}/${safe(cfg.container)}`
       );
       return exitCode;
     }
@@ -1398,7 +1423,7 @@ function lastResortExit({
     safeLog(
       log,
       'error',
-      `${TOOL_NAME}: ${ids.length} document id(s) from this run ARE or MAY BE in ${cfg ? `${cfg.database}/${cfg.container}` : 'the destination container'}, marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}${ids.length ? `: ${ids.join(', ')}` : ''}`
+      `${TOOL_NAME}: ${ids.length} document id(s) from this run ARE or MAY BE in ${cfg ? `${safe(cfg.database)}/${safe(cfg.container)}` : 'the destination container'}, marked ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER}${ids.length ? `: ${ids.join(', ')}` : ''}`
     );
     safeLog(
       log,

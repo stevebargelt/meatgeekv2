@@ -420,15 +420,28 @@ describe('argument parsing', () => {
   });
 
   // ------------------------------------------------------------------------
-  // Per-resource-type name validation (operator-authorized redesign, FIX 1/2/3).
+  // Per-resource-type name validation, SCOPED TO WHAT THIS FIXTURE ADDRESSES
+  // (operator-authorized correction, MG-67).
   //
-  // The single credential-SHAPE heuristic (scrubSecrets(value) !== value, applied
-  // uniformly to all five names) was replaced by a per-type ALLOWLIST: each name
-  // is validated against the ACTUAL Azure rule for its resource type. The old
-  // heuristic failed in BOTH directions — it accepted a 32-char opaque key (which
-  // matches no scrubber pattern) and refused the LEGAL dotted Cosmos id
-  // `analytics01.eventstore1.replicaWest` (Cosmos ids permit dots). Both
-  // directions are covered below, for EACH of the five types separately.
+  // Each of the five names is validated against an allowlist as narrow as THIS
+  // TOOL genuinely needs — NOT as wide as Azure legally permits. The fixture
+  // addresses one known dev hub, one durable dev device, one dev Cosmos account
+  // and its plain-identifier database and containers; so every rule rejects a
+  // dot, hence a JWT (three dot-separated segments), hence every separator-bearing
+  // credential, BY CONSTRUCTION.
+  //
+  // HISTORY, so the scoping is not silently re-widened later. An early cycle
+  // applied ONE credential-SHAPE heuristic (scrubSecrets(value) !== value)
+  // uniformly, which both accepted a 32-char opaque key and over-refused. The next
+  // cycle over-corrected: it carved the dotted Cosmos id
+  // `analytics01.eventstore1.replicaWest` back in as ACCEPTED for --database and
+  // --container, to placate an over-refusal finding — but that protected a case
+  // this fixture will NEVER address (it names meatgeek-v2-dev-db and temperatures,
+  // not arbitrary Cosmos resources), and it was the exact hole a security review
+  // then reported: credential-shaped input accepted in the database and container
+  // slots, reaching operator output and the evidence target. This cycle removes
+  // the carve-out. A dotted id is now REFUSED for --database and --container too,
+  // same as --device and --hub. Both directions are covered below, per type.
   // ------------------------------------------------------------------------
 
   const completeCfg = overrides => ({
@@ -436,25 +449,27 @@ describe('argument parsing', () => {
     ...overrides,
   });
 
-  // SHORT_JWT is genuinely credential-SHAPED — the scrubber rewrites it — which
-  // is exactly why the removed uniform heuristic refused it for ALL five names,
-  // including the two for which it is a perfectly legal id. That over-refusal is
-  // the FALSE POSITIVE the redesign removes.
+  // SHORT_JWT is credential-SHAPED — the scrubber rewrites it — AND, being dotted,
+  // fails every one of the five narrow name rules. Both facts matter now: it is
+  // refused at validation in EVERY slot, and (the independent second defense) if
+  // some future edit let it past, the scrubber would still rewrite it before it
+  // reached a log line, the az argv or the evidence record.
   const SHORT_JWT = 'aaaaaaaaaaa.bbbbbbbbbbb.ccccccccccc';
-  it('SHORT_JWT is credential-SHAPED, which is why the old uniform heuristic refused it everywhere', () => {
+  it('SHORT_JWT is credential-SHAPED (the scrubber rewrites it) AND dotted (every name rule refuses it)', () => {
     assert.notEqual(scrubSecrets(SHORT_JWT), SHORT_JWT);
   });
 
-  // An IoT Hub connection string reliably fails the hub/device/account rules on
-  // its ';' separators, its uppercase and its dots. It does NOT necessarily fail
-  // the Cosmos id rule — Cosmos ids permit ';', '=' and '.', forbidding only
-  // '/ \\ # ?' — so a Cosmos connection string (with '/' from its https:// URL)
-  // is used for the Cosmos types instead. Both embed a planted key, so the
-  // no-echo assertions below are load-bearing. (That a ';'-only connection string
-  // is a LEGAL Cosmos id is the honest limitation of naming-rule validation, not
-  // a gap this tool patches — see FIX 3.)
+  // Both connection-string shapes carry '/' ';' '=' and dots, every one of which
+  // is outside the narrow [A-Za-z0-9-] alphabet the account/database/container
+  // rules now allow — so BOTH are refused in every Cosmos slot, not just the hub
+  // one. Both embed a planted key, so the no-echo assertions below are
+  // load-bearing.
   const CONNECTION_STRING = `HostName=${HUB}.azure-devices.net;SharedAccessKeyName=iothubowner;SharedAccessKey=${PLANTED.deviceKey}`;
   const COSMOS_CONNECTION_STRING = `AccountEndpoint=https://${ACCOUNT}.documents.azure.com:443/;AccountKey=${PLANTED.deviceKey}==;`;
+  // The dotted Cosmos id the previous cycle wrongly accepted. It is credential-
+  // SHAPED to the scrubber (a JWT-like run of dotted segments) and it is exactly
+  // what this fixture will never legitimately be asked to name.
+  const DOTTED_COSMOS_ID = 'analytics01.eventstore1.replicaWest';
 
   const NAME_CASES = [
     {
@@ -462,18 +477,17 @@ describe('argument parsing', () => {
       field: 'hub',
       // A JWT's dots and a connection string's separators both fail the hub rule.
       legal: ['meatgeek-v2-dev-iothub-259d4bf5b628', 'abc'],
-      illegal: [SHORT_JWT, CONNECTION_STRING, 'has space', 'under_score'],
+      illegal: [SHORT_JWT, CONNECTION_STRING, DOTTED_COSMOS_ID, 'has space', 'under_score'],
     },
     {
       option: '--device',
       field: 'device',
       // --device names a FIXTURE DEVICE WHOSE NAME THIS TOOL CHOOSES, so the rule
-      // is pinned FAR BELOW the Azure-legal device set (operator-authorized
-      // correction, MG-67): letters, digits and interior hyphens only. Azure would
-      // legally permit -.+%_#*?!(),:=@$' , but this tool needs none of it, and a
-      // DOT is refused outright so a JWT — three dot-separated segments — cannot
-      // pass in the --device slot, before it can be logged, passed to az, or
-      // (deviceId being the container partition key) embedded in a document body.
+      // is pinned FAR BELOW the Azure-legal device set: letters, digits and
+      // interior hyphens only. A DOT is refused outright so a JWT — three
+      // dot-separated segments — cannot pass in the --device slot, before it can be
+      // logged, passed to az, or (deviceId being the container partition key)
+      // embedded in a document body.
       legal: [FIXTURE_DEVICE_ID, 'dev-fixture-v2-probe1'],
       illegal: [SHORT_JWT, CONNECTION_STRING, 'dev-fixture.v2', 'a/b', 'a;b', 'a:b', 'a#b', 'has space', 'under_score', 'x'.repeat(129)],
     },
@@ -481,31 +495,33 @@ describe('argument parsing', () => {
       option: '--account',
       field: 'account',
       legal: ['mgv2-dev-f640e19ae7ab', 'abc'],
-      illegal: [SHORT_JWT, CONNECTION_STRING, 'HasUpperCase', 'ab'],
+      illegal: [SHORT_JWT, CONNECTION_STRING, COSMOS_CONNECTION_STRING, DOTTED_COSMOS_ID, 'HasUpperCase', 'ab'],
     },
     {
       option: '--database',
       field: 'database',
-      // The dotted Cosmos id is explicitly accepted — the value the old gate wrongly refused.
-      legal: ['meatgeek-v2-dev-db', 'analytics01.eventstore1.replicaWest'],
-      illegal: [COSMOS_CONNECTION_STRING, 'a/b', 'a#b', 'a?b'],
+      // The five dev databases/containers are plain identifiers. The rule matches
+      // that need and NOT the Azure-legal Cosmos id set: a dot (hence the dotted id
+      // and a JWT) is refused, closing the carve-out the last cycle wrongly added.
+      legal: ['meatgeek-v2-dev-db', 'devices', 'temperatures'],
+      illegal: [SHORT_JWT, DOTTED_COSMOS_ID, COSMOS_CONNECTION_STRING, 'a/b', 'a#b', 'a?b', 'a.b'],
     },
     {
       option: '--container',
       field: 'container',
-      legal: ['temperatures', 'analytics01.eventstore1.replicaWest'],
-      illegal: [COSMOS_CONNECTION_STRING, 'a/b', 'a\\b', 'a#b'],
+      legal: ['temperatures', 'devices', 'cooks'],
+      illegal: [SHORT_JWT, DOTTED_COSMOS_ID, COSMOS_CONNECTION_STRING, 'a/b', 'a\\b', 'a#b', 'a.b'],
     },
   ];
 
   for (const { option, field, legal, illegal } of NAME_CASES) {
     for (const value of legal) {
-      it(`accepts a legal ${option} name (${value})`, () => {
+      it(`accepts the known dev / plain-identifier ${option} name (${value})`, () => {
         assert.doesNotThrow(() => requireComplete(completeCfg({ [field]: value })));
       });
     }
     for (const value of illegal) {
-      // FIX 2: the rejected value is NEVER reflected back onto the terminal — the
+      // The rejected value is NEVER reflected back onto the terminal — the
       // per-type checkers name the RULE, not the input, so a pasted credential
       // does not appear in the refusal.
       it(`refuses an illegal/credential-shaped ${option} without echoing it`, () => {
@@ -522,15 +538,13 @@ describe('argument parsing', () => {
     }
   }
 
-  // FIX 3 (operator-authorized correction, MG-67) — the finding being CLOSED.
-  // A JWT is a LEGAL IoT Hub device id (device ids permit the base64url charset and
-  // dots), so under the old Azure-legal rule it was ACCEPTED as --device, then
-  // logged, passed to the az argv, and — deviceId being the container partition
-  // key — embedded in the Cosmos document body. The device rule is now pinned
-  // below the Azure-legal set, so a JWT in the --device slot is REFUSED by
-  // construction (its dots), before it can travel any of those paths. This is the
-  // explicit JWT-as-device case the correction requires.
-  it('REFUSES a JWT-shaped value in the --device slot, before it is logged/sent/embedded (FIX 3)', () => {
+  // The explicit JWT-as-device case: a JWT is a LEGAL IoT Hub device id, so under
+  // an Azure-legal rule it would be ACCEPTED as --device, then logged, passed to
+  // the az argv, and — deviceId being the container partition key — embedded in the
+  // Cosmos document body. The device rule is pinned below the Azure-legal set, so a
+  // JWT in the --device slot is REFUSED by construction (its dots). This case must
+  // keep passing across the ceiling correction.
+  it('REFUSES a JWT-shaped value in the --device slot, before it is logged/sent/embedded', () => {
     const error = refusal(() => requireComplete(completeCfg({ device: SHORT_JWT })));
     assert.equal(error.exitCode, EXIT.USAGE);
     assert.match(error.message, /not a valid Azure resource name/);
@@ -541,23 +555,32 @@ describe('argument parsing', () => {
     );
     assertNoPlantedSecret(error.message, 'requireComplete(--device JWT)');
   });
-  // The dotted-id case the redesign correctly protects belongs to Cosmos
-  // CONTAINER/DATABASE ids (analytics01.eventstore1.replicaWest), NOT to device
-  // ids — the two rules are deliberately separate. A JWT-shaped value is still
-  // ACCEPTED as a container id, because dots are legal there. That is the honest
-  // residue the tool does not overclaim about: naming rules screen credential
-  // SHAPES, and the guarantee is that no credential is ever accepted AS ONE, held
-  // or required (az resolves the device key under the caller's identity).
-  it('accepts a JWT-shaped value as a Cosmos container id — dots are legal there (FIX 3)', () => {
-    assert.doesNotThrow(() => requireComplete(completeCfg({ container: SHORT_JWT })));
-  });
+
+  // The carve-out being CLOSED, stated as its own case. The previous cycle
+  // ACCEPTED a JWT-/dotted-shaped value as a Cosmos container id "because dots are
+  // legal there". They are not legal HERE any more: this fixture names plain
+  // identifiers, so a dotted value is refused in the --database and --container
+  // slots exactly as in the --device and --hub slots — before it can be logged,
+  // passed to az, embedded in a document body, or written to the evidence record.
+  for (const field of ['database', 'container']) {
+    it(`REFUSES a JWT-/dotted-shaped value as a Cosmos ${field} id — the carve-out is closed`, () => {
+      const error = refusal(() => requireComplete(completeCfg({ [field]: SHORT_JWT })));
+      assert.equal(error.exitCode, EXIT.USAGE);
+      assert.match(error.message, /not a valid Azure resource name/);
+      assert.equal(error.message.includes(SHORT_JWT), false);
+      assertNoPlantedSecret(error.message, `requireComplete(--${field} JWT)`);
+    });
+  }
 
   // Driven through main() so the assertion covers every line a real run prints,
   // not just the thrown message: no operator-facing line — info OR error — may
-  // carry a rejected name, on the rejection path (FIX 2, validate-then-use).
+  // carry a rejected name, on the rejection path (validate-then-use). Now includes
+  // --account and --database, the two slots the carve-out left exposed.
   for (const [option, value] of [
     ['--hub', SHORT_JWT],
     ['--device', CONNECTION_STRING],
+    ['--account', COSMOS_CONNECTION_STRING],
+    ['--database', DOTTED_COSMOS_ID],
     ['--container', COSMOS_CONNECTION_STRING],
   ]) {
     it(`main() emits no log line carrying a rejected ${option}, on the rejection path`, async () => {
@@ -570,6 +593,38 @@ describe('argument parsing', () => {
         `a rejected ${option} reached an operator log line`
       );
       assertNoPlantedSecret(log.all(), `main(${option})`);
+    });
+  }
+
+  // SECOND HALF OF THE FINDING — refused BEFORE az and BEFORE any evidence write.
+  // A credential-shaped --account/--database/--container is refused during
+  // argument validation, which runs before the container is measured, before the
+  // reservation, before the send and before the record is built. This asserts the
+  // negative directly: az is NEVER spawned and NO file is left in the real
+  // --evidence-out directory, so the value cannot have been passed to az, embedded
+  // in a document body, or written to the evidence target.
+  for (const [option, value] of [
+    ['--account', COSMOS_CONNECTION_STRING],
+    ['--database', DOTTED_COSMOS_ID],
+    ['--container', COSMOS_CONNECTION_STRING],
+  ]) {
+    it(`a credential-shaped ${option} never reaches az or the evidence record`, async () => {
+      await withTempDir(async dir => {
+        const log = recordingLog();
+        const spawn = fakeAzSpawn({});
+        const { exitCode } = await runMain({
+          argv: [option, value],
+          evidenceOut: dir,
+          spawn,
+          log,
+        });
+        assert.equal(exitCode, EXIT.USAGE);
+        assert.equal(spawn.calls.length, 0, `az was spawned with a credential-shaped ${option}`);
+        const left = await readdir(dir);
+        assert.deepEqual(left, [], `a run refusing ${option} still wrote into the evidence directory`);
+        assert.equal(log.all().includes(value), false, `a rejected ${option} reached a log line`);
+        assertNoPlantedSecret(log.all(), `main(${option} pre-az)`);
+      });
     });
   }
 
@@ -665,10 +720,10 @@ describe('the az invocation shape (HR1)', () => {
   // Defence in depth: the spawn gate judges the two name slots by the SAME
   // per-type rules requireComplete applied, so a dotted (JWT-shaped) device id is
   // refused HERE too — a dotted device can never reach the az argv even if a
-  // future caller bypasses requireComplete. (The dotted-id-is-legal case belongs
-  // to Cosmos container/database ids, which never enter this send argv; it is
-  // exercised in the requireComplete suite above.) The rejected value is not
-  // echoed.
+  // future caller bypasses requireComplete. (Only the hub and the device names
+  // enter this send argv; the Cosmos account/database/container names are
+  // validated by the same narrow rules in requireComplete above, where a dotted
+  // value is now refused for all of them alike.) The rejected value is not echoed.
   it('refuses a dotted (JWT-shaped) device id at the --device-id slot', () => {
     const dottedDevice = 'edge.fixture.mg67-probe';
     const dottedArgv = buildSendArgv({ hub: HUB, device: dottedDevice, message });
