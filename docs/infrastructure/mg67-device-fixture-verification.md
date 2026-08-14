@@ -537,8 +537,8 @@ echo "send-fixture exit=$RUN_EXIT"     # RECORD THIS — it is half the proof
 # now would copy a leaked credential into your terminal scrollback — and possibly
 # your shell history — BEFORE the screen could catch it, the runbook defeating its
 # own inspection step. So the raw capture is NOT shown until §7c's sweeps pass
-# (the first showing nothing but `[redacted]`, the second nothing at all). §6
-# needs only the exit code above; the captured text is read by machine, from the
+# (SCREEN1_OK=yes and SCREEN2_OK=yes — zero unexplained hits in either sweep).
+# §6 needs only the exit code above; the captured text is read by machine, from the
 # file, for the run id just below — not by eye. Do not hand-scrub it to peek
 # either: §7c forbids that, because a hand-scrubbed log proves nothing about the
 # tool, which is the thing under test.
@@ -580,11 +580,14 @@ correlation id and belong to it unambiguously — see §7c.
 the failure paths this criterion is really about write to stderr. By redirect,
 because `$?` after a pipeline is the pipeline's status, and `RUN_EXIT` has to be
 the tool's own exit code exactly: it is the half of the proof that says which
-outcome you got. The run waits up to `--timeout`, so nothing prints for a while;
-`tail -f "$RUN_ERR"` in a second terminal if you want to watch it — but treat that
-as an **unscreened raw view** (it can only ever be live, before §7c runs), so keep
-it out of anything you commit or paste, and let §7c's sweeps, not your eye, be
-what clears the capture.
+outcome you got. The run waits up to `--timeout`, so nothing prints to
+`$RUN_OUT` or `$RUN_ERR` for a while — that is expected, not a hang. **Do not
+`tail -f "$RUN_ERR"` in a second terminal to watch it.** That would display raw,
+unscreened output ahead of and outside §7c's sweeps — the same raw-capture
+display this section exists to prevent, just earlier and unconditional instead
+of gated on a match. If you need to confirm the run is still alive, check for
+the process instead of reading its output, e.g. `pgrep -f send-fixture.mjs`.
+Let §7c's sweeps, not your eye, be what clears the capture.
 
 **Do not delete these files if the run fails.** A failed run's output is the
 more interesting of the two for §7c — the criterion covers **every** failure
@@ -1094,62 +1097,182 @@ on an observation. That is the substitution §8 exists to reject.
 
 #### Inspect before you commit anything
 
-Run this against **both** captured streams from §6:
+**A screen reports that a match occurred, never what matched.** The earlier
+form of this step ran a raw `grep` and let it print the matched line —
+including the value — to your terminal before you had judged anything. That
+printed the exact credential it exists to catch, on every run that hit the
+scrubber's normal, expected over-redaction, which is most of them. It has been
+replaced: the commands below look at each candidate line internally and report
+only the **file**, the **line number**, and the **pattern class** that matched.
+They never print the line, the value, a prefix of it, or a masked form of it —
+the operator does not need the value to act, only to know a match occurred and
+where. Judging "was this value actually redacted" is the script's job now, not
+yours, precisely so nothing has to be displayed to make that judgment.
+
+**Shell contract for this block.** Every code fence in this document is
+labeled ```bash, but that is a syntax hint for your editor, not a guarantee —
+this block used to rely on bash's `"${!ARR[@]}"` index-expansion syntax, which
+your interactive shell may not run at all. If your default interactive shell
+is **zsh** (the macOS default, and common on Linux too), that syntax fails
+outright with `bad substitution` and the screen never runs — the function is
+simply never defined, so it fails closed via `SCREEN1_OK=no` rather than
+reporting a false-clean, but an unrunnable screen still blocks §7c and §5b of
+the sign-off checklist. A second, quieter incompatibility lived in both sweep
+functions below (`screen_stream` **and** `screen_blob_stream`): each held its
+per-shape line-number matches in a variable named `LINES`, which collides
+with zsh's own special `LINES` parameter (terminal row count) — assigning it
+a multi-line value corrupts zsh's internal state elsewhere in the same
+process, not at the assignment itself, so it does not read as an error where
+it happens. Both sweeps also iterated those matches with an unquoted
+`for LN in $MATCH_LINES`, which bash word-splits on whitespace by default but
+zsh does not, so the same line would parse in bash and misbehave in zsh
+without any error at all. **Both are fixed below** — the variable is renamed
+to `MATCH_LINES`, and it is walked with an explicit `while read` loop instead
+of relying on shell-dependent word-splitting — and **both functions**, not
+just `screen_stream`, have been run under **both `bash` and `zsh`** against
+fixture files as described below, with identical, correct results in each.
+Value iteration (`"${ARR[@]}"`), not index iteration, is what makes the
+`CRED_RULES` loop portable (see the comment above it). Paste this block as-is
+into whichever of the two shells you are running; you do not need to switch
+shells first.
+
+Run this against **both** captured streams from §6 — paste the whole block:
 
 ```bash
 # Every shape the tool's own scrubber matches, plus the ones this ticket names.
-# The pattern is a SHAPE, not a secret — no value appears in it, which is why it
-# is safe to keep in this document.
-CRED_SHAPES='SharedAccessKey|AccountKey|SharedAccessSignature|BEGIN [A-Z ]*PRIVATE KEY|Bearer [A-Za-z0-9]|[?&](sig|se|skn|sr)=|[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|(key|token|secret|password|credential|sig)[A-Za-z0-9_-]*[=:][^[:space:]]'
+# Each shape is paired with a human-readable class (reported on a hit, never
+# the matched text) and, where the shape can legitimately survive redaction as
+# `key=[redacted]`, a SAFE variant that recognizes exactly that redacted form.
+# A shape with no SAFE variant is one whose marker text could not appear at all
+# if the scrubber had actually redacted it (a PEM header, a bearer token
+# immediately followed by an alphanumeric character, a three-segment JWT) — so
+# for those, any match IS the leak; there is nothing to disambiguate.
+#
+# The three fields for one shape travel together in ONE array element,
+# tab-joined, and the loop below iterates ELEMENTS, never indices. Do not
+# "simplify" this back into three parallel arrays (CRED_CLASSES/CRED_DETECT/
+# CRED_SAFE) indexed together by position: that depends on
+# `"${!ARR[@]}"`-style index expansion, which is a bashism the operator's
+# shell (zsh) rejects outright ("bad substitution"), and even where a shell
+# accepts it, bash arrays are 0-based and zsh arrays are 1-based, so the same
+# index can silently pair a detector with the WRONG class/safe-variant across
+# the two — misclassifying a real leak as expected-redacted. Iterating values
+# (`"${ARR[@]}"`) is portable to both and cannot desync. Tab (`$'\t'`) is the
+# delimiter because none of the regexes below contain one; `|` is already
+# used inside several of them and cannot delimit.
+CRED_RULES=(
+  'possible connection string'$'\t''SharedAccessKey|AccountKey|SharedAccessSignature'$'\t''(SharedAccessKey|AccountKey|SharedAccessSignature)=\[redacted\]'
+  'possible private key block'$'\t''BEGIN [A-Z ]*PRIVATE KEY'$'\t'''
+  'possible bearer token'$'\t''Bearer [A-Za-z0-9]'$'\t'''
+  'possible SAS signature parameter'$'\t''[?&](sig|se|skn|sr)='$'\t''[?&](sig|se|skn|sr)=\[redacted\]'
+  'possible JWT'$'\t''[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'$'\t'''
+  'possible key/token/secret assignment'$'\t''(key|token|secret|password|credential|sig)[A-Za-z0-9_-]*[=:][^[:space:]]'$'\t''(key|token|secret|password|credential|sig)[A-Za-z0-9_-]*[=:]\[redacted\]'
+)
 
-grep -nEi "$CRED_SHAPES" "$RUN_OUT" "$RUN_ERR"
+# Screens one file. Prints FILE:LINE and the pattern class for every hit whose
+# value did not survive as `[redacted]` — never the line, never the value.
+# Returns non-zero (via HITS) when any such hit exists.
+screen_stream() {
+  # MATCH_LINES, not LINES: `LINES` is a special zsh parameter (terminal row
+  # count), and assigning it a multi-line, non-numeric value corrupts zsh's
+  # own internal state ("bad math expression") — a name collision, not a
+  # syntax error, so it will not show up just from reading the script.
+  # Likewise, `for LN in $MATCH_LINES` (unquoted) is skipped for a
+  # `while read` loop: bash word-splits an unquoted scalar on $IFS by
+  # default, but zsh does not, so the bash-only form would hand the whole
+  # multi-line match list to a single iteration under zsh.
+  local FILE="$1" TOTAL HITS=0 SAFE_HITS=0 ENTRY DETECT SAFE CLASS MATCH_LINES LN LINE
+  TOTAL=$(wc -l < "$FILE")
+  for ENTRY in "${CRED_RULES[@]}"; do
+    IFS=$'\t' read -r CLASS DETECT SAFE <<< "$ENTRY"
+    MATCH_LINES=$(grep -nEi "$DETECT" "$FILE" | cut -d: -f1)
+    if [ -n "$MATCH_LINES" ]; then
+      while IFS= read -r LN; do
+        LINE=$(sed -n "${LN}p" "$FILE")   # held in a variable, never printed
+        if [ -n "$SAFE" ] && printf '%s\n' "$LINE" | grep -Eqi "$SAFE"; then
+          SAFE_HITS=$((SAFE_HITS + 1))
+        else
+          HITS=$((HITS + 1))
+          echo "HIT: $FILE:$LN — $CLASS"
+        fi
+      done <<< "$MATCH_LINES"
+    fi
+  done
+  echo "$FILE: screened $TOTAL line(s); $HITS unexplained hit(s), $SAFE_HITS expected-redacted hit(s)"
+  [ "$HITS" -eq 0 ]
+}
+
+SCREEN1_OK=yes
+screen_stream "$RUN_OUT" || SCREEN1_OK=no
+screen_stream "$RUN_ERR" || SCREEN1_OK=no
 ```
 
-**Hits are EXPECTED, and a hit is not by itself a failure.** The scrubber
+**Expected-redacted hits are normal and are not a failure.** The scrubber
 replaces a matched value with the literal `[redacted]` and leaves the key name
-standing, so `…key=[redacted]` matches this pattern by design. What you are
-checking is one thing:
+standing, so `…key=[redacted]` matches the same detector that would catch
+`…key=<the real secret>` — that is the accepted MG-63 over-redaction limitation
+(a benign `partitionKey=deviceId` reads `partitionKey=[redacted]` too), not
+reopened here. `screen_stream` tells those apart itself, by checking the value
+in place rather than by displaying it, and counts them separately as
+`expected-redacted hit(s)`. **`unexplained hit(s)` is the only number that
+matters**; it is nonzero only when a matched value is something other than the
+literal `[redacted]` — a base64 blob, a hex string, a signature, a token, a
+`Host…=…;…Key=…` connection string, a raw PEM block, a bare bearer token, a
+JWT.
 
-> **Every hit's VALUE must be `[redacted]`.** A hit whose value is anything else
-> — a base64 blob, a hex string, a signature, a token, a `Host…=…;…Key=…`
-> connection string — is a live credential in a log file.
-
-Two consequences of the scrubber's design make this sweep readable rather than
-noisy. It over-redacts on purpose (the accepted MG-63 limitation: a
-credential-shaped **key name** always redacts, so a benign
-`partitionKey=deviceId` reads
-`partitionKey=[redacted]`), and it replaces values **whole** — never a prefix,
-never a length, never a hash, because each of those is still a fact about the
-secret. So the expected reading of this grep is a short list of `[redacted]`
-placeholders and nothing else.
+**A clean screen says so, with what it checked — it does not replay the
+capture.** `screen_stream` always prints a summary line (`screened N line(s);
+0 unexplained hit(s), M expected-redacted hit(s)`) for each file, whether or
+not anything matched. That line, not the file's contents, is what you paste
+into the ticket as the record that this inspection happened (§7b).
 
 #### Second sweep: a credential with no key name in front of it
 
-The pattern above finds a secret by the **name next to it**. A bare blob on its
-own line — a key echoed with no label, a token on a continuation line — has no
-name to match, so run this too:
+The detectors above find a secret by the **name next to it**. A bare blob on
+its own line — a key echoed with no label, a token on a continuation line —
+has no name to match, so run this too. Same discipline: report the location
+and the class, never the blob itself.
 
 ```bash
-grep -nE '[A-Za-z0-9+]{32,}={0,2}' "$RUN_OUT" "$RUN_ERR"
+screen_blob_stream() {
+  # See the comment in screen_stream() above: MATCH_LINES (not LINES, a
+  # special zsh parameter) fed to a `while read` loop (not an unquoted
+  # `for … in`, which zsh does not word-split by default).
+  local FILE="$1" TOTAL HITS=0 MATCH_LINES LN
+  TOTAL=$(wc -l < "$FILE")
+  MATCH_LINES=$(grep -nE '[A-Za-z0-9+]{32,}={0,2}' "$FILE" | cut -d: -f1)
+  if [ -n "$MATCH_LINES" ]; then
+    while IFS= read -r LN; do
+      HITS=$((HITS + 1))
+      echo "HIT: $FILE:$LN — possible unlabeled credential blob"
+    done <<< "$MATCH_LINES"
+  fi
+  echo "$FILE: screened $TOTAL line(s); $HITS hit(s)"
+  [ "$HITS" -eq 0 ]
+}
+
+SCREEN2_OK=yes
+screen_blob_stream "$RUN_OUT" || SCREEN2_OK=no
+screen_blob_stream "$RUN_ERR" || SCREEN2_OK=no
 ```
 
-**Expect this one to be completely empty**, and treat any hit as a finding to
-explain before you promote anything. Nothing this tool prints legitimately
-contains a 32-character unbroken alphanumeric run: the ids it emits are
-uuid-shaped (dashes break the run), the paths contain `/`, the instants contain
-`-` and `:`, and the device, hub, database and container names all contain `-`.
-That is what makes an empty result meaningful here rather than merely likely.
+**Expect zero hits, always** — this sweep has no expected-redacted case, so
+`$SCREEN2_OK=no` here is a finding to explain before you promote anything.
+Nothing this tool prints legitimately contains a 32-character unbroken
+alphanumeric run: the ids it emits are uuid-shaped (dashes break the run), the
+paths contain `/`, the instants contain `-` and `:`, and the device, hub,
+database and container names all contain `-`. That is what makes a zero-hit
+result meaningful here rather than merely likely.
 
-Between them the two sweeps cover a credential that has a name and one that does
-not. Neither is a proof of absence — no grep is — but a leaked credential that
-evades **both** would have to carry no credential-shaped name **and** no
+Between them the two sweeps cover a credential that has a name and one that
+does not. Neither is a proof of absence — no grep is — but a leaked credential
+that evades **both** would have to carry no credential-shaped name **and** no
 32-character unbroken run, which no key, token, signature or connection string
 this system handles does.
 
 #### An unexplained hit from either sweep is stop condition 2 — halt, do not commit
 
-That means: a first-sweep hit whose value is **not** `[redacted]`, or **any**
-second-sweep hit you cannot account for. In order:
+That means: `$SCREEN1_OK=no`, or `$SCREEN2_OK=no`. In order:
 
 1. **Do not commit the log**, do not paste it into the ticket, and do not paste
    the matching line anywhere. Committing it is what turns a transient leak into
@@ -1168,14 +1291,18 @@ second-sweep hit you cannot account for. In order:
 #### Where the capture goes when it passes
 
 ```bash
-# ONLY after BOTH sweeps pass: the first showing nothing but [redacted]
-# placeholders, the second showing nothing at all. Named for THIS run's
+# ONLY after ALL FOUR checks pass: SCREEN1_OK=yes (0 unexplained hits in both
+# files) and SCREEN2_OK=yes (0 blob hits in both files). Named for THIS run's
 # correlation id ($RUN_ID, from §6) — the same id the artifact's name derives
 # from — so the three files belong to this run unambiguously and cannot be
 # confused with an overlapping run's logs.
-test -n "$RUN_ID" || { echo "STOP: \$RUN_ID is unset (see §6); do not promote logs under a guessed name."; }
-cp "$RUN_OUT" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stdout.log"
-cp "$RUN_ERR" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stderr.log"
+if [ "$SCREEN1_OK" != yes ] || [ "$SCREEN2_OK" != yes ]; then
+  echo "STOP: an unexplained hit is on record above. Do not promote — see stop condition 2."
+else
+  test -n "$RUN_ID" || { echo "STOP: \$RUN_ID is unset (see §6); do not promote logs under a guessed name."; }
+  cp "$RUN_OUT" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stdout.log"
+  cp "$RUN_ERR" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stderr.log"
+fi
 ```
 
 Alongside the machine-readable artifact and named for the **same run id**, so the
@@ -1399,7 +1526,7 @@ disappear.
 | 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)                     | the §4 state file, `MG67_CREATED` either way        | **NOT RUN** |
 | 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                              | the exit code + the command line                    | **NOT RUN** |
 | 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a)            | the file path + its contents                        | **NOT RUN** |
-| 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the grep output + the two committed log files       | **NOT RUN** |
+| 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the screen summary lines (never a matched value) + the two committed log files | **NOT RUN** |
 | 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                            | all three Data Explorer queries, per container      | **NOT RUN** |
 | 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove             | both §5 proofs: yours gone, before/after diff empty | **NOT RUN** |
 | 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                                          | the finding text                                    | **NOT RUN** |
