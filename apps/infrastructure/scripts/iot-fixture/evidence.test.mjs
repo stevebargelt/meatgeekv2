@@ -1345,6 +1345,62 @@ describe('no field of the record can hold a credential', () => {
     }
   });
 
+  it('refuses PEM private-key (and certificate) text in an outcome reason (RF-5)', async () => {
+    // Built at runtime so no PEM block is committed to the repo (HR1). The body is
+    // hyphenated and short, so it deliberately does NOT trip the base64-run guard —
+    // this pins that the PEM MARKER itself is what gets refused, which is the gap
+    // RF-5 demonstrated: a PEM whose body evades the base64 run reached
+    // outcomeReason and serialized to disk with nothing objecting.
+    const pemBlock = [
+      ['-----BEGIN', 'PRIVATE', 'KEY-----'].join(' '),
+      'not-a-real-key-body-test-fixture-value-only',
+      ['-----END', 'PRIVATE', 'KEY-----'].join(' '),
+    ].join('\n');
+    assert.doesNotMatch(
+      pemBlock,
+      /[A-Za-z0-9+/]{40,}={0,2}/,
+      'the body must not itself trip the base64-run guard, or the test proves the wrong thing'
+    );
+    const risks = findCredentialRisks({ outcomeReason: pemBlock });
+    assert.ok(
+      risks.some(risk => risk.shape === 'a PEM key or certificate block'),
+      'a PEM private-key block must be flagged as a credential shape'
+    );
+
+    // End to end: a real failure record whose reason carries the PEM (RF-5 showed
+    // it reaching outcomeReason and serializing to disk) is refused at BUILD time
+    // by the same guard, naming the field and never echoing the value — so the
+    // record never becomes bytes on disk.
+    const definition = await cleanDefinition();
+    let refused = '';
+    assert.throws(
+      () =>
+        buildEvidenceRecord({
+          requestedIds: [],
+          outcome: { exitCode: EXIT.SEND_FAILURE, reason: pemBlock },
+          runId: RUN_ID,
+          containerDefinition: definition,
+          target: TARGET,
+          now: fixedClock(),
+        }),
+      err => {
+        refused = err.message;
+        return err instanceof FixtureError && err.exitCode === EXIT.USAGE;
+      }
+    );
+    assert.match(refused, /outcomeReason/, 'the refusal must name the field carrying the PEM');
+    assert.equal(refused.includes(pemBlock), false, 'the refusal must not echo the PEM');
+
+    // The other half of the invariant: a PEM CERTIFICATE is refused too.
+    const certBlock = ['-----BEGIN', 'CERTIFICATE-----'].join(' ');
+    assert.ok(
+      findCredentialRisks({ outcomeReason: certBlock }).some(
+        risk => risk.shape === 'a PEM key or certificate block'
+      ),
+      'a PEM certificate block must be flagged as a credential shape'
+    );
+  });
+
   it('the guard runs at BUILD time, so a poisoned record never reaches a file', async () => {
     const { confirmation } = await successfulConfirmation();
     assert.throws(
@@ -1710,6 +1766,77 @@ describe('writing the artifact into the reserved destination', () => {
         writeEvidenceRecord(record, bad),
         err => err instanceof FixtureError && err.exitCode === EXIT.EVIDENCE_UNRECORDED
       );
+    }
+  });
+
+  // RF-1: the reservation is only OWNERSHIP if it is held to publication. If a
+  // file replaces the reserved pathname between the reserve and the rename — after
+  // the live send — publishing by path would rename over it and silently destroy
+  // its contents while reporting a successful evidence write. The publish must
+  // detect that the reservation is no longer ours and refuse rather than clobber.
+  it('refuses to publish over a file that replaced the reservation after the send (RF-1)', async () => {
+    const dir = await tempDir();
+    try {
+      const record = await buildSuccessRecord();
+      const reservation = await reserveEvidenceDestination(dir, record.runId);
+
+      // Simulate a foreign writer replacing our empty placeholder with a genuine
+      // file of its own between the reserve and the publish: remove the
+      // placeholder and put a DIFFERENT file (distinct inode) at the same path.
+      await rm(reservation.path, { force: true });
+      const foreignContents = 'a different writer owns this file now\n';
+      await writeFile(reservation.path, foreignContents, 'utf8');
+
+      await assert.rejects(
+        writeEvidenceRecord(record, reservation),
+        err =>
+          err instanceof FixtureError &&
+          err.exitCode === EXIT.EVIDENCE_UNRECORDED &&
+          /reserved evidence file/.test(err.message)
+      );
+      // The foreign file is intact — the rename never ran over it, and no partial
+      // debris was left behind.
+      assert.equal(await readFile(reservation.path, 'utf8'), foreignContents);
+      assert.deepEqual(await readdir(dir), [evidenceFileName(record.runId)]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The same guard fires when the placeholder is REPLACED IN PLACE with content
+  // (same name, now non-empty) rather than swapped for a new inode.
+  it('refuses to publish when the reserved placeholder is no longer empty (RF-1)', async () => {
+    const dir = await tempDir();
+    try {
+      const record = await buildSuccessRecord();
+      const reservation = await reserveEvidenceDestination(dir, record.runId);
+      await writeFile(reservation.path, 'someone wrote into our reservation\n', 'utf8');
+
+      await assert.rejects(
+        writeEvidenceRecord(record, reservation),
+        err => err instanceof FixtureError && err.exitCode === EXIT.EVIDENCE_UNRECORDED
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // And when the reservation VANISHED entirely before publication: recreating it
+  // by rename is exactly the clobber risk (a later writer could reclaim the name),
+  // so this is refused rather than silently re-created.
+  it('refuses to publish when the reservation vanished before the write (RF-1)', async () => {
+    const dir = await tempDir();
+    try {
+      const record = await buildSuccessRecord();
+      const reservation = await reserveEvidenceDestination(dir, record.runId);
+      await rm(reservation.path, { force: true });
+
+      await assert.rejects(
+        writeEvidenceRecord(record, reservation),
+        err => err instanceof FixtureError && err.exitCode === EXIT.EVIDENCE_UNRECORDED
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

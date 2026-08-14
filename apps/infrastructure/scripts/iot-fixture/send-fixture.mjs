@@ -223,6 +223,13 @@ export const AZ_COMMAND = 'az';
 // asked to explain.
 export const DEFAULT_SEND_TIMEOUT_MS = 120_000;
 
+// The grace between SIGTERM and the SIGKILL that follows it. At timeoutMs the
+// child is asked to terminate; if it has not closed this many ms later it is
+// killed unconditionally, so the bound is HARD and not merely a polite request an
+// az that ignores SIGTERM could outlast. The hard bound the run actually enforces
+// is timeoutMs + this grace; that is what realSpawn reports.
+export const KILL_GRACE_MS = 5_000;
+
 const USAGE = `${TOOL_NAME} ${TOOL_VERSION} — send ${MESSAGES_PER_RUN} synthetic ${TICKET} messages from the
 durable dev fixture device and PROVE they were read back out of Cosmos.
 
@@ -654,7 +661,9 @@ function requireResourceName(value, flag, kind) {
     // The offending value is NOT echoed: `problem` names the rule, not the input
     // (FIX 2). An operator who mistyped a name learns the rule; an operator who
     // pasted a credential does not see it reflected back onto their terminal.
-    throw usageError(`${flag} is not a valid Azure resource name: ${problem}. The value is not echoed.`);
+    throw usageError(
+      `${flag} is not a valid Azure resource name: ${problem}. The value is not echoed.`
+    );
   }
   return value;
 }
@@ -795,28 +804,78 @@ export function assertArgvIsCredentialFree(argv) {
  *
  * Injected everywhere else in the tool; this is the only implementation that
  * touches a real process.
+ *
+ * The timeout is a HARD bound, enforced here rather than delegated to Node's
+ * `timeout`/`killSignal` spawn options. Those send ONE SIGTERM and then wait on
+ * `close` forever: an az child that ignores SIGTERM (still finishing a teardown,
+ * or wedged) outlives the bound entirely, which makes a tool whose whole contract
+ * is fail-closed able to hang. So the bound is enforced in two stages — SIGTERM at
+ * timeoutMs to let the child exit cleanly, then an unconditional SIGKILL a fixed
+ * grace later that it CANNOT ignore. The result carries the bound actually
+ * enforced (timeoutMs + the grace) and which signal ended it, so the caller can
+ * say "az was killed at the bound" rather than infer it.
  */
-export function realSpawn(command, argv, { timeoutMs = DEFAULT_SEND_TIMEOUT_MS } = {}) {
+export function realSpawn(
+  command,
+  argv,
+  { timeoutMs = DEFAULT_SEND_TIMEOUT_MS, killGraceMs = KILL_GRACE_MS } = {}
+) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, argv, {
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: timeoutMs,
-      killSignal: 'SIGTERM',
     });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let hardKilled = false;
+    let softTimer = null;
+    let hardTimer = null;
+    const clearTimers = () => {
+      if (softTimer !== null) clearTimeout(softTimer);
+      if (hardTimer !== null) clearTimeout(hardTimer);
+      softTimer = null;
+      hardTimer = null;
+    };
+
+    // Stage one: ask the child to terminate at the bound. Stage two: if it has
+    // not closed within the grace, SIGKILL it — a signal it cannot trap — so the
+    // bound holds against a child that ignores SIGTERM. `close` clears both.
+    softTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      hardTimer = setTimeout(() => {
+        hardKilled = true;
+        child.kill('SIGKILL');
+      }, killGraceMs);
+    }, timeoutMs);
+
     child.stdout.on('data', chunk => {
       stdout += chunk;
     });
     child.stderr.on('data', chunk => {
       stderr += chunk;
     });
-    child.on('error', reject);
+    child.on('error', err => {
+      clearTimers();
+      reject(err);
+    });
     child.on('close', (code, signal) => {
+      clearTimers();
       // A killed child has a null exit code. Reported as a distinct nonzero so
-      // "az was killed at the bound" never reads as "az succeeded".
-      resolve({ code: code === null ? 124 : code, signal: signal ?? null, stdout, stderr });
+      // "az was killed at the bound" never reads as "az succeeded". `timedOut`
+      // and `enforcedBoundMs` say the bound WAS reached and what it was, and
+      // `hardKilled` distinguishes a child that honored SIGTERM from one that had
+      // to be SIGKILLed — the case this hard bound exists for.
+      resolve({
+        code: code === null ? 124 : code,
+        signal: signal ?? null,
+        stdout,
+        stderr,
+        timedOut,
+        hardKilled,
+        enforcedBoundMs: timeoutMs + killGraceMs,
+      });
     });
   });
 }

@@ -335,6 +335,16 @@ const SECRET_PATTERNS = [
   [/\b[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}\b/g, '[redacted]'],
   // Connection-string / SAS fields, value running to whatever delimits it.
   [/\b(AccountEndpoint|HostName|SharedAccessKeyName|sv)\s*=\s*[^;&\s]*/gi, '$1=[redacted]'],
+  // A long unbroken base64 run. An Azure device key is 44 base64 characters, and
+  // az can print one bare — on its own line, not only after a `key=` assignment
+  // the value scan below covers. The key-name scan misses a value with no name in
+  // front of it, so the shape is matched directly. Same 40-char threshold and
+  // char class the evidence guard uses, so the scrubber and the record agree on
+  // what a bare key looks like. Nothing an operator diagnostic legitimately
+  // carries — an ISO instant, a hyphenated path segment, a resource name — is 40
+  // base64 characters with no separator; over-redacting a diagnostic is the
+  // acceptable cost, a committed key is not.
+  [/[A-Za-z0-9+/]{40,}={0,2}/g, '[redacted]'],
 ];
 
 // A credential-shaped key name's value is not parsed — it is consumed to the end

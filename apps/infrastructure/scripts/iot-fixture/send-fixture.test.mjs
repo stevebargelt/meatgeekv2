@@ -71,6 +71,8 @@ import {
 } from './fixture-core.mjs';
 import {
   AZ_COMMAND,
+  DEFAULT_SEND_TIMEOUT_MS,
+  KILL_GRACE_MS,
   assertArgvIsCredentialFree,
   buildSendArgv,
   cosmosReader,
@@ -79,6 +81,7 @@ import {
   main,
   parseArgs,
   preflight,
+  realSpawn,
   requireComplete,
   sendMessages,
   settleRun,
@@ -464,7 +467,7 @@ describe('argument parsing', () => {
   // credential shape, but it stands in for one the charset can never catch. This
   // is the residual case the operator flagged: the pin is the only defense that
   // reaches it, because narrowing the pattern cannot.
-  const OPAQUE_32_ALNUM = ('mg67opaqueDeviceToken' + 'x'.repeat(11));
+  const OPAQUE_32_ALNUM = 'mg67opaqueDeviceToken' + 'x'.repeat(11);
   it('OPAQUE_32_ALNUM is a 32-char alphanumeric value the charset accepts but the fixture pin must refuse', () => {
     assert.equal(OPAQUE_32_ALNUM.length, 32);
     assert.match(OPAQUE_32_ALNUM, /^[A-Za-z0-9]+$/);
@@ -512,13 +515,33 @@ describe('argument parsing', () => {
       // addressing a different device now requires a code change; intended, the
       // fixture is durable and singular and MG-62 reuses this exact name.
       legal: [FIXTURE_DEVICE_ID],
-      illegal: [OPAQUE_32_ALNUM, 'dev-fixture-v2-probe1', SHORT_JWT, CONNECTION_STRING, 'dev-fixture.v2', 'a/b', 'a;b', 'a:b', 'a#b', 'has space', 'under_score', 'x'.repeat(129)],
+      illegal: [
+        OPAQUE_32_ALNUM,
+        'dev-fixture-v2-probe1',
+        SHORT_JWT,
+        CONNECTION_STRING,
+        'dev-fixture.v2',
+        'a/b',
+        'a;b',
+        'a:b',
+        'a#b',
+        'has space',
+        'under_score',
+        'x'.repeat(129),
+      ],
     },
     {
       option: '--account',
       field: 'account',
       legal: ['mgv2-dev-f640e19ae7ab', 'abc'],
-      illegal: [SHORT_JWT, CONNECTION_STRING, COSMOS_CONNECTION_STRING, DOTTED_COSMOS_ID, 'HasUpperCase', 'ab'],
+      illegal: [
+        SHORT_JWT,
+        CONNECTION_STRING,
+        COSMOS_CONNECTION_STRING,
+        DOTTED_COSMOS_ID,
+        'HasUpperCase',
+        'ab',
+      ],
     },
     {
       option: '--database',
@@ -649,7 +672,11 @@ describe('argument parsing', () => {
         assert.equal(exitCode, EXIT.USAGE);
         assert.equal(spawn.calls.length, 0, `az was spawned with a credential-shaped ${option}`);
         const left = await readdir(dir);
-        assert.deepEqual(left, [], `a run refusing ${option} still wrote into the evidence directory`);
+        assert.deepEqual(
+          left,
+          [],
+          `a run refusing ${option} still wrote into the evidence directory`
+        );
         assert.equal(log.all().includes(value), false, `a rejected ${option} reached a log line`);
         assertNoPlantedSecret(log.all(), `main(${option} pre-az)`);
       });
@@ -768,7 +795,9 @@ describe('the az invocation shape (HR1)', () => {
   // is refused, because everything outside the two name slots is tool-authored
   // and never a legal Azure name.
   it('still refuses a credential shape planted in a non-name (tool-authored) slot', () => {
-    const error = refusal(() => assertArgvIsCredentialFree([...argv, `--data=Bearer ${PLANTED.jwt}`]));
+    const error = refusal(() =>
+      assertArgvIsCredentialFree([...argv, `--data=Bearer ${PLANTED.jwt}`])
+    );
     assert.equal(error.exitCode, EXIT.USAGE);
     assertNoPlantedSecret(error.message, 'assertArgvIsCredentialFree(non-name slot)');
   });
@@ -2613,6 +2642,57 @@ describe('source posture (HR1)', () => {
     assert.match(PLANTED.deviceKey, /^[A-Za-z0-9+/]{40,}={0,2}$/);
     assert.match(PLANTED.jwt, /^[\w-]{16,}\.[\w-]{16,}\.[\w-]{16,}$/);
     assert.match(PLANTED.sasSignature, /^[\w-]{20,}$/);
+  });
+});
+
+// RF-2: the az send timeout must be a HARD bound. Node's own spawn `timeout`
+// sends ONE SIGTERM and then waits on close forever, so an az child that ignores
+// SIGTERM outlives the bound — and a tool whose whole contract is fail-closed
+// must not be able to hang. realSpawn escalates to SIGKILL after a stated grace
+// and reports the bound it actually enforced. These drive the REAL primitive with
+// a real child; realSpawn is injected as a fake everywhere else in the suite.
+describe('realSpawn enforces a HARD timeout (RF-2)', () => {
+  // A child that traps SIGTERM and keeps running. Only SIGKILL — which it cannot
+  // trap — ends it, so it hangs forever unless realSpawn escalates.
+  const IGNORES_SIGTERM = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+
+  it('escalates to SIGKILL when the child ignores SIGTERM, at the stated bound', async () => {
+    const startedNs = process.hrtime.bigint();
+    const result = await realSpawn(process.execPath, ['-e', IGNORES_SIGTERM], {
+      timeoutMs: 60,
+      killGraceMs: 120,
+    });
+    const elapsedMs = Number(process.hrtime.bigint() - startedNs) / 1e6;
+
+    // The bound HELD: a SIGTERM-ignoring child did not outlive it.
+    assert.equal(result.timedOut, true, 'the bound must be reported as reached');
+    assert.equal(result.hardKilled, true, 'a SIGTERM-ignoring child must be SIGKILLed');
+    assert.equal(result.signal, 'SIGKILL');
+    // A killed child has a null exit code, reported as a distinct nonzero so it
+    // never reads as success.
+    assert.equal(result.code, 124);
+    assert.equal(result.enforcedBoundMs, 180, 'reports the bound it actually enforces');
+    // It returned near the hard bound, NOT never; generous ceiling for a slow CI.
+    assert.ok(elapsedMs < 5000, `realSpawn returned in ${elapsedMs}ms; the bound did not hold`);
+  });
+
+  it('lets a well-behaved child exit on its own without timing out', async () => {
+    const result = await realSpawn(process.execPath, ['-e', 'process.exit(0)'], {
+      timeoutMs: 5000,
+      killGraceMs: 5000,
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.timedOut, false, 'a child that exits in time is not timed out');
+    assert.equal(result.hardKilled, false);
+    assert.equal(result.signal, null);
+  });
+
+  it('wires the default kill grace to KILL_GRACE_MS', async () => {
+    assert.ok(Number.isInteger(KILL_GRACE_MS) && KILL_GRACE_MS > 0, 'a positive default grace');
+    const result = await realSpawn(process.execPath, ['-e', 'process.exit(3)']);
+    assert.equal(result.code, 3);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.enforcedBoundMs, DEFAULT_SEND_TIMEOUT_MS + KILL_GRACE_MS);
   });
 });
 

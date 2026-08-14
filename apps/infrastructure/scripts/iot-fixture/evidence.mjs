@@ -527,6 +527,14 @@ const CREDENTIAL_VALUE_PATTERNS = Object.freeze([
   // with no separator in it. A false positive here costs a named refusal the
   // operator can act on; a false negative costs a committed key.
   [/[A-Za-z0-9+/]{40,}={0,2}/, 'a long base64-shaped run'],
+  // A PEM block header. A PEM private key or certificate is wrapped base64, but a
+  // short synthetic key — or one whose body lines fall under the 40-char base64
+  // threshold above — slips the run pattern while still being an unmistakable
+  // credential. The `-----BEGIN … KEY/CERTIFICATE-----` marker is what names it,
+  // and nothing this record legitimately carries opens with one, so the marker
+  // alone refuses the write regardless of the body's shape. Covers PRIVATE KEY
+  // (RSA/EC/OPENSSH/plain) and CERTIFICATE both.
+  [/-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----/i, 'a PEM key or certificate block'],
 ]);
 
 function usageRefusal(message) {
@@ -1362,7 +1370,22 @@ export async function reserveEvidenceDestination(directory, runId, options = {})
     );
   }
 
-  return Object.freeze({ directory, fileName, path, runId });
+  // Fingerprint the placeholder we just created (device + inode). Publication
+  // renames by PATH, which replaces whatever is at that path; the reservation is
+  // only an OWNERSHIP fact if publication can prove the path still holds THIS
+  // placeholder and not a file that replaced it after the live send. This is the
+  // identity writeEvidenceRecord checks immediately before the rename.
+  let reservedIdentity = null;
+  try {
+    const placeholder = await fs.stat(path);
+    reservedIdentity = Object.freeze({ dev: placeholder.dev, ino: placeholder.ino });
+  } catch (err) {
+    throw usageRefusal(
+      `could not fingerprint the reserved evidence file ${safePath(path)}: ${err?.code ?? err?.name ?? 'stat error'}. Refused before any message was sent, so no synthetic document is in the container from this run.`
+    );
+  }
+
+  return Object.freeze({ directory, fileName, path, runId, reservedIdentity });
 }
 
 /**
@@ -1462,8 +1485,47 @@ export function classifyPartitionValues(values = [], expected = null) {
  * @param {{fs?: object}} [options] fs is a PARTIAL override (any member it omits
  *   is the real one), injected so the write-failure path is testable.
  */
+/**
+ * Refuse to publish unless the reserved path still holds THIS run's empty
+ * placeholder. Splits the three ways a reservation can stop being ours between
+ * the reserve and the rename — vanished, replaced by content, or replaced by a
+ * different file at the same name — each a distinct EVIDENCE_UNRECORDED refusal
+ * (this runs after the send, so no refusal here is usage-class). A reservation
+ * with no fingerprint (a hand-built one) is still held to exists-and-empty; the
+ * device/inode check only tightens that when the fingerprint is present.
+ */
+async function assertReservationStillHeld(fs, filePath, reservation) {
+  let placeholder;
+  try {
+    placeholder = await fs.stat(filePath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      throw evidenceUnrecordedRefusal(
+        `the reserved evidence file ${safePath(filePath)} no longer exists at publication time — this run's reservation was removed after the send. Refusing to recreate it by rename, because a file that replaced it would be silently overwritten. This run's documents are in the container and this run's evidence is NOT recorded.`
+      );
+    }
+    throw evidenceUnrecordedRefusal(
+      `cannot verify the reserved evidence file ${safePath(filePath)} is still this run's placeholder before publishing: ${err?.code ?? err?.name ?? 'stat error'}. Refusing to rename over a destination whose state cannot be read. This run's documents are in the container and this run's evidence is NOT recorded.`
+    );
+  }
+  if (placeholder.size !== 0) {
+    throw evidenceUnrecordedRefusal(
+      `the reserved evidence file ${safePath(filePath)} is no longer the empty placeholder this run claimed — something replaced its contents after the send. Refusing to rename over it, which would destroy that file. This run's documents are in the container and this run's evidence is NOT recorded.`
+    );
+  }
+  const identity = reservation.reservedIdentity;
+  if (
+    isPlainObject(identity) &&
+    (placeholder.dev !== identity.dev || placeholder.ino !== identity.ino)
+  ) {
+    throw evidenceUnrecordedRefusal(
+      `the reserved evidence file ${safePath(filePath)} is a DIFFERENT file than this run reserved (its device/inode changed) — the reservation was replaced after the send. Refusing to rename over it, which would silently overwrite whatever took its place. This run's documents are in the container and this run's evidence is NOT recorded.`
+    );
+  }
+}
+
 export async function writeEvidenceRecord(record, reservation, options = {}) {
-  const fs = { writeFile, rename, rm, ...(options.fs ?? {}) };
+  const fs = { writeFile, rename, rm, stat, ...(options.fs ?? {}) };
   if (
     !isPlainObject(reservation) ||
     typeof reservation.path !== 'string' ||
@@ -1494,6 +1556,20 @@ export async function writeEvidenceRecord(record, reservation, options = {}) {
     throw err instanceof FixtureError ? evidenceUnrecordedRefusal(err.message) : err;
   }
   const partialPath = partialPathFor(filePath, record.runId);
+
+  // Immediately before the rename, prove the reservation is STILL ours. The
+  // reservation claimed an empty O_EXCL placeholder before the live send; the
+  // rename below publishes BY PATH, replacing whatever now sits there. If another
+  // writer replaced that pathname between reservation and here — after the send —
+  // renaming onto it would silently destroy that file's contents while reporting a
+  // successful evidence write. So the reserved path must still exist, still be the
+  // empty placeholder, and still be the exact file (device + inode) the
+  // reservation fingerprinted; anything else means it is no longer a file this run
+  // owns, and the write is refused rather than allowed to clobber. A narrow window
+  // remains between this check and the rename that only a true atomic-rename
+  // primitive could close; this refuses the demonstrated case without redesigning
+  // the write+rename publication primitive.
+  await assertReservationStillHeld(fs, filePath, reservation);
 
   // Write in full to the per-run partial, then rename onto the reserved path.
   // rename is atomic on the same filesystem and replaces the empty placeholder

@@ -534,6 +534,35 @@ describe('scrubChildOutput', () => {
     assert.match(out, /\[redacted\]/);
   });
 
+  // RF-3: an Azure device key is a bare 44-character base64 run, and az can print
+  // one with no `key=` in front of it (a raw value on its own line, not the
+  // key/value assignment the name scan covers). The value patterns must catch the
+  // SHAPE directly, or the one credential format this tool is most likely to meet
+  // in az output is the one it lets through.
+  it('redacts a BARE base64 device-key run with no key= assignment in front of it (RF-3)', () => {
+    // Built at runtime so this file commits no credential shape (HR1); the string
+    // is the 44+ unbroken base64 shape of an IoT device key.
+    const bareKey = Buffer.from('mg67-test-only-never-a-real-device-key').toString('base64');
+    assert.match(
+      bareKey,
+      /^[A-Za-z0-9+/]{40,}={0,2}$/,
+      'the planted value must really be the shape'
+    );
+    const stderr = ['ERROR: az failed to authenticate', `primary device key: ${bareKey}`].join(
+      '\n'
+    );
+    const out = scrubChildOutput(stderr);
+    assert.equal(
+      out.includes(bareKey),
+      false,
+      'the bare device key survived child-output scrubbing'
+    );
+    assert.match(out, /\[redacted\]/);
+    assert.match(out, /az failed to authenticate/, 'the surrounding diagnostic is kept');
+    // The primitive the child-output scrub relies on redacts it directly, too.
+    assert.equal(scrubSecrets(bareKey).includes(bareKey), false, 'scrubSecrets left the bare key');
+  });
+
   // Bracket redaction runs over the whole text before the split on purpose: a
   // JSON object az printed across several lines has its braces on different
   // lines, and a per-line scrub would leave every inner value intact.
