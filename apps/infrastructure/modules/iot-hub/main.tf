@@ -297,6 +297,36 @@ resource "azurerm_iothub_endpoint_cosmosdb_account" "cosmos_storage" {
 
   authentication_type = "identityBased"
 
+  # Materialize a top-level partition value on every routed document (MG-73).
+  #
+  # IoT Hub WRAPS the device message: the routed Cosmos document is an envelope
+  # ({ Body, Properties, SystemProperties, id (a Cosmos-assigned GUID), _rid, _ts,
+  # ... }) with the device payload nested under Body and NO top-level deviceId —
+  # while the target container partitions on /deviceId (modules/cosmos-db/main.tf:
+  # partition_key_paths = ["/deviceId"]). Without these two attributes every routed
+  # document lands with an undefined partition value. A real observed envelope is
+  # committed at docs/infrastructure/evidence/mg73-observed-routed-document.json.
+  #
+  # partition_key_name is the top-level property the endpoint stamps, and it MUST be
+  # the container's partition key property name: deviceId. It is hardcoded, not wired
+  # through a variable, because the container's partition_key_paths is itself a
+  # create-only hardcoded literal (changing it is a container rebuild), not
+  # environment-varying config — nothing drives it through a variable, so threading
+  # one would invent a knob nobody sets and a second source of truth that can drift.
+  #
+  # partition_key_template is {deviceid} and NOTHING else — this is a TRUST BOUNDARY,
+  # not a formatting choice. The partition value must derive from the AUTHENTICATED
+  # device: the hub stamps SystemProperties["iothub-connection-device-id"] from the
+  # connection it authenticated, and {deviceid} is the closed-grammar token that
+  # reads it. Body.deviceId is payload-controlled — partitioning on it would let any
+  # authenticated device write into another device's partition by editing its own
+  # message body. The template grammar is CLOSED ({iothub}, {deviceid}, {DD}, {MM},
+  # {YYYY}, plus literal text); it has NO body-path syntax, so it structurally cannot
+  # reference Body.deviceId. That closed grammar is why this mechanism was chosen,
+  # and why the token stands alone with no literal text wrapped around it.
+  partition_key_name     = "deviceId"
+  partition_key_template = "{deviceid}"
+
   # Two independent preconditions, one handle each: the data-plane role must exist
   # (Azure validates the identity's access at creation, MG-24) AND the database and
   # container must exist (IH400142, MG-48). The names above cannot carry the second

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 2,
+  "kind": "mg67-device-fixture-evidence",
+  "ticket": "MG-67",
+  "tool": "iot-fixture",
+  "toolVersion": "1.0.0",
+  "runId": "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a",
+  "runInstant": "2026-08-14T16:10:54.442Z",
+  "confirmed": false,
+  "uncertain": true,
+  "attempted": true,
+  "outcome": "confirmation-timeout",
+  "exitCode": 3,
+  "exitLabel": "confirmation timeout",
+  "outcomeReason": "no document carrying run mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a was read back within the 180000ms wait bound, under the expected partition or any other — a timeout is a failure, not an absence to be explained away",
+  "scope": "cross-partition",
+  "marker": {
+    "field": "syntheticFixture",
+    "value": "MG-67-SYNTHETIC-FIXTURE",
+    "runIdField": "fixtureRunId"
+  },
+  "deviceId": "meatgeek-v2-dev-synthetic-fixture-device",
+  "target": {
+    "hub": "meatgeek-v2-dev-iothub-259d4bf5b628",
+    "account": "mgv2-dev-f640e19ae7ab",
+    "database": "meatgeek-v2-dev-db",
+    "container": "temperatures"
+  },
+  "containerName": "temperatures",
+  "partitionKeyPath": "/deviceId",
+  "partitionKeyField": "deviceId",
+  "partitionValue": "meatgeek-v2-dev-synthetic-fixture-device",
+  "observedPartitionValues": [],
+  "requestedIds": [
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-1",
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-2",
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-3"
+  ],
+  "requestedCount": 3,
+  "acceptedIds": [
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-1",
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-2",
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-3"
+  ],
+  "acceptedCount": 3,
+  "ambiguousIds": [],
+  "ambiguousCount": 0,
+  "observedIds": [],
+  "observedCount": 0,
+  "accountableIds": [
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-1",
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-2",
+    "mg-67-run-63b8f5df-6332-48b4-a660-4e7a8cf6426a-3"
+  ],
+  "accountableCount": 3,
+  "anomalousIds": [],
+  "anomalousCount": 0,
+  "unknownWriterCheck": {
+    "kind": "not-performed-by-this-tool",
+    "checked": false,
+    "by": "operator-unfiltered-enumeration",
+    "message": "Stop condition 1 (any unexpected document found in the source containers, i.e. a document written by an unknown writer) is NOT checked by this tool and is NOT what anomalousIds records. This tool's read-back is filtered to this run's own correlator, so a document an unknown writer produced is never returned by it and can never appear in anomalousIds; anomalousCount of 0 is therefore no evidence at all about unknown writers, not weak evidence of their absence. Checking stop condition 1 requires an UNFILTERED enumeration of the source containers, which is an operator host-phase step, compared against accountableIds recorded here."
+  },
+  "ids": [],
+  "count": 0,
+  "expectedCount": 3,
+  "idDivergence": false,
+  "measuredDefaultTtl": 604800,
+  "declaredDefaultTtl": 604800,
+  "ttlExpires": true,
+  "ttlDriftFinding": null,
+  "expiryInstant": "2026-08-21T16:10:54.442Z",
+  "waitBoundMs": 180000,
+  "pollIntervalMs": 5000,
+  "observedArrivalMs": null,
+  "elapsedMs": 180027,
+  "polls": 37,
+  "crossPartitionSweepRun": true,
+  "findings": [
+    {
+      "kind": "unconfirmed-run",
+      "measured": 0,
+      "declared": 3,
+      "message": "this run was NOT confirmed (exit 3, confirmation timeout); the record exists to preserve what was observed and what may exist, and must not be read either as proof that the path carried a message or as proof that it did not"
+    }
+  ]
+}

@@ -379,6 +379,12 @@ jobs:
         # credentials nor a terraform binary.
         run: bash apps/infrastructure/scripts/fixtures/run-cross-module-propagation-fixtures.sh
 
+      - name: IoT Hub Cosmos partition-key fixtures (MG-73)
+        # Credentialless mutation coverage for the endpoint/container contract:
+        # the routed envelope must receive a root deviceId from exactly the
+        # authenticated-device {deviceid} template, never from Body.deviceId.
+        run: bash apps/infrastructure/scripts/fixtures/run-iothub-cosmos-partition-key-fixtures.sh
+
       - name: Live host-storage gate fixtures (MG-58)
         # The post-apply live host-storage gate is the ONLY gate in this system
         # that can OBSERVE the MG-58 defect class. The pinned azurerm provider

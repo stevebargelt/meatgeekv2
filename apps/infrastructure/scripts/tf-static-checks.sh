@@ -1378,6 +1378,104 @@ fi
 echo "  check 19: located ${cosmos_handle_seen}/1 target handle and ${cosmos_endpoint_seen}/1 Cosmos endpoint under the explicit cross-module contract"
 check "the cross-module Cosmos target contract is wired end to end (triggers_replace + replace_triggered_by)" "${cosmos_contract_hits%$'\n'}"
 
+# --- CHECK 20. Cosmos routing partition identity contract (MG-73) -----------------
+# IoT Hub routes an ENVELOPE, not the device payload.  The temperatures container
+# partitions on /deviceId, but the envelope has no top-level deviceId unless the
+# endpoint materializes one.  The value must be the identity that IoT Hub
+# authenticated, not Body.deviceId (which the device controls).  This is lexical
+# by necessity: the credentialless PR gate deliberately has no Azure subscription
+# against which it could send and observe a routed message.
+partition_contract_blocks() {
+  awk -v f="$1" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function dash(s) { s = trim(s); return (s == "" ? "-" : s) }
+    function value(s) { sub(/^[^=]*=/, "", s); return trim(s) }
+    function emit() {
+      if (label == "azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage" ||
+          label == "azurerm_cosmosdb_sql_container.temperatures")
+        printf "%s\t%d\t%s\t%s\t%s\t%s\n", f, startline, label, dash(key_name), dash(key_template), dash(key_paths)
+      label = ""; key_name = ""; key_template = ""; key_paths = ""; inres = 0
+    }
+    { line = $0; sub(/#.*/, "", line) }
+    line ~ /^[[:space:]]*resource[[:space:]]+"[a-z][a-z0-9_]*"[[:space:]]+"/ {
+      emit()
+      inres = 1; startline = NR
+      label = line
+      sub(/^[[:space:]]*resource[[:space:]]+"/, "", label)
+      sub(/"[[:space:]]+"/, ".", label)
+      sub(/".*$/, "", label)
+      next
+    }
+    inres == 0 { next }
+    line ~ /^[[:space:]]*partition_key_name[[:space:]]*=/ { key_name = value(line); next }
+    line ~ /^[[:space:]]*partition_key_template[[:space:]]*=/ { key_template = value(line); next }
+    line ~ /^[[:space:]]*partition_key_paths[[:space:]]*=/ { key_paths = value(line); next }
+    line ~ /^}/ { emit(); next }
+    END { emit() }
+  ' "$1"
+}
+
+partition_contract_records=""
+while IFS= read -r tf_file; do
+  [[ -n "${tf_file}" ]] || continue
+  partition_contract_records+="$(partition_contract_blocks "${tf_file}")"$'\n'
+done <<< "$(find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' -o -name '.git' \) -prune -o -type f -name '*.tf' -print 2>/dev/null | sort)"
+partition_contract_records="$(printf '%s' "${partition_contract_records}" | grep -v '^$' || true)"
+
+partition_hits=""
+partition_endpoint_seen=0
+partition_container_seen=0
+container_partition_property=""
+endpoint_partition_name=""
+endpoint_partition_template=""
+while IFS=$'\t' read -r p_file p_line p_addr p_name p_template p_paths; do
+  [[ -n "${p_addr}" ]] || continue
+  if [[ "${p_addr}" == "azurerm_cosmosdb_sql_container.temperatures" ]]; then
+    partition_container_seen=1
+    case "${p_paths}" in
+      '["/'*'"]')
+        container_partition_property="${p_paths#*/}"
+        container_partition_property="${container_partition_property%\"]}"
+        ;;
+      *)
+        partition_hits+="${p_file}:${p_line}: azurerm_cosmosdb_sql_container.temperatures must declare one literal partition_key_paths value in the form [\"/deviceId\"] so the Cosmos routing endpoint can be checked against the container's create-only partition property (MG-73)"$'\n'
+        ;;
+    esac
+    if [[ "${container_partition_property}" != "deviceId" ]]; then
+      partition_hits+="${p_file}:${p_line}: azurerm_cosmosdb_sql_container.temperatures partitions on /${container_partition_property:-<missing>} instead of the required /deviceId; changing a Cosmos container partition path is create-only, so this endpoint/container contract must not drift (MG-73)"$'\n'
+    fi
+  fi
+  if [[ "${p_addr}" == "azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage" ]]; then
+    partition_endpoint_seen=1
+    endpoint_partition_name="${p_name}"
+    endpoint_partition_template="${p_template}"
+    if [[ "${p_name}" == "-" ]]; then
+      partition_hits+="${p_file}:${p_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage is missing partition_key_name — routed envelopes otherwise have no top-level /deviceId partition value (MG-73)"$'\n'
+    fi
+    if [[ "${p_template}" == "-" ]]; then
+      partition_hits+="${p_file}:${p_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage is missing partition_key_template — the endpoint must stamp the authenticated device identity onto the routed envelope (MG-73)"$'\n'
+    fi
+    if printf '%s\n' "${p_template}" | grep -Eiq '(^|[^[:alnum:]_])(body|payload)([./]|$)'; then
+      partition_hits+="${p_file}:${p_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage partition_key_template must not reference Body or a payload-derived value; Body.deviceId is device-controlled, not the authenticated connection identity (MG-73)"$'\n'
+    fi
+    if [[ "${p_template}" != '"{deviceid}"' ]]; then
+      partition_hits+="${p_file}:${p_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage partition_key_template must be exactly \"{deviceid}\" with no literal prefix, suffix, or other token; this is the authenticated device-id trust boundary (MG-73)"$'\n'
+    fi
+  fi
+done <<< "${partition_contract_records}"
+
+if [[ "${partition_container_seen}" -eq 0 ]]; then
+  partition_hits+="no resource \"azurerm_cosmosdb_sql_container\" \"temperatures\" found under ${INFRA_DIR} — the partition-key agreement check must never pass by finding no target container (MG-73)"$'\n'
+fi
+if [[ "${partition_endpoint_seen}" -eq 0 ]]; then
+  partition_hits+="no resource \"azurerm_iothub_endpoint_cosmosdb_account\" \"cosmos_storage\" found under ${INFRA_DIR} — the routing partition contract must never pass by finding no endpoint (MG-73)"$'\n'
+fi
+if [[ -n "${container_partition_property}" && "${endpoint_partition_name}" != "-" && "${endpoint_partition_name}" != "\"${container_partition_property}\"" ]]; then
+  partition_hits+="azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage partition_key_name ${endpoint_partition_name} does not match azurerm_cosmosdb_sql_container.temperatures's /${container_partition_property} partition property; the endpoint and create-only container partition key must agree (MG-73)"$'\n'
+fi
+echo "  check 20: located ${partition_endpoint_seen}/1 Cosmos endpoint and ${partition_container_seen}/1 temperatures container; endpoint partition key=${endpoint_partition_name:-<missing>}, template=${endpoint_partition_template:-<missing>}, container key=/${container_partition_property:-<missing>}"
+check "IoT Hub Cosmos routing materializes exactly the authenticated device id into the container partition key" "${partition_hits%$'\n'}"
+
 echo
 if [[ "${fail}" -ne 0 ]]; then
   echo "tf-static-checks: FAILED — fix the violations above." >&2

@@ -1,0 +1,26 @@
+{
+  "_comment": "MG-73 EVIDENCE — one routed document exactly as IoT Hub wrote it to meatgeek-v2-dev-db/temperatures on 2026-08-14. Captured read-only via cosmos-export --auth aad under a temporary Data Reader grant since removed. Synthetic fixture data only; both credential sweeps returned zero hits. Note: NO top-level deviceId, while the container partitions on /deviceId. The device payload is nested under Body. SystemProperties[iothub-connection-device-id] is the hub-stamped, authenticated identity.",
+  "id": "456b9c75-f0fb-4dfc-bced-fdec0d67731a",
+  "iothub_name": "meatgeek-v2-dev-iothub-259d4bf5b628",
+  "Body": {
+    "id": "mg-67-run-a781ceaf-a98c-4e5e-bee2-2a6f1e5edd37-1",
+    "deviceId": "meatgeek-v2-dev-synthetic-fixture-device",
+    "timestamp": "2026-08-14T16:04:46.049Z",
+    "syntheticFixture": "MG-67-SYNTHETIC-FIXTURE",
+    "fixtureRunId": "mg-67-run-a781ceaf-a98c-4e5e-bee2-2a6f1e5edd37",
+    "fixtureSequence": 1,
+    "ticket": "MG-67"
+  },
+  "Properties": {},
+  "SystemProperties": {
+    "message-id": "mg-67-run-a781ceaf-a98c-4e5e-bee2-2a6f1e5edd37-1",
+    "iothub-connection-device-id": "meatgeek-v2-dev-synthetic-fixture-device",
+    "iothub-connection-auth-method": "{\"scope\":\"device\",\"type\":\"sas\",\"issuer\":\"iothub\"}",
+    "iothub-connection-auth-generation-id": "639223201741688239",
+    "iothub-content-type": "application/json",
+    "iothub-content-encoding": "utf-8",
+    "iothub-enqueuedtime": "2026-08-14T16:04:49.639Z",
+    "iothub-message-source": "Telemetry"
+  },
+  "_ts": 1786723490
+}
