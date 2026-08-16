@@ -121,12 +121,30 @@ function scriptedOutcomes({ script = [], fallback = { docs: [] } } = {}) {
 // the first poll and NO further poll" are both expressible. `calls` records every
 // invocation so a test can assert the polling actually stopped.
 //
-// spec: { script: [{ docs } | { error }], fallback: { docs } | { error } }
+// spec: {
+//   script: [{ docs } | { error }], fallback: { docs } | { error },
+//   reads: { <rootId>: { doc } | { error } | { missing: true } },  // point-read overrides
+//   readError: <Error>,                                            // thrown for any point read
+// }
+//
+// POINT READ (MG-73): a document a partition-scoped query returned is addressable
+// at (that partition value, its root id) — a point read there returns it. This
+// fake models exactly that with an auto-built store, so the common case needs no
+// extra scripting. Cross-partition (sweep) results are deliberately NOT
+// registered: a document found only by a scan is (correctly) not point-readable
+// under the expected partition, which is the mis-partition the point read exists
+// to expose. `reads`/`readError` override the store for the failure paths a live
+// hub cannot be made to produce on demand.
 export function fakeReader(spec = {}) {
   const calls = [];
+  const readCalls = [];
   const next = scriptedOutcomes(spec);
+  const store = new Map();
+  const key = (partitionKey, id) => `${partitionKey}::${id}`;
+  const readOverrides = spec.reads ?? null;
   return {
     calls,
+    readCalls,
     async queryDocuments(request = {}) {
       calls.push({
         query: request.query,
@@ -135,7 +153,28 @@ export function fakeReader(spec = {}) {
       });
       const outcome = next();
       if (outcome.error) throw outcome.error;
-      return outcome.docs ?? [];
+      const docsOut = outcome.docs ?? [];
+      // Only a PARTITION-SCOPED query registers what it returned as addressable
+      // — a sweep (no partitionKey) does not, so its results stay unreachable by
+      // point read.
+      if (request.partitionKey !== undefined) {
+        for (const doc of docsOut) {
+          if (doc && typeof doc.id === 'string') store.set(key(request.partitionKey, doc.id), doc);
+        }
+      }
+      return docsOut;
+    },
+    async readDocument(request = {}) {
+      readCalls.push({ id: request.id, partitionKey: request.partitionKey });
+      if (spec.readError) throw spec.readError;
+      if (readOverrides && Object.prototype.hasOwnProperty.call(readOverrides, request.id)) {
+        const outcome = readOverrides[request.id];
+        if (outcome?.error) throw outcome.error;
+        if (outcome?.missing) return null;
+        return outcome?.doc ?? null;
+      }
+      // A 404 is a null, never a throw — "not addressable under this partition".
+      return store.get(key(request.partitionKey, request.id)) ?? null;
     },
     // Present and throwing: the reader seam is read-only by construction, and a
     // future edit that grows a write here fails a test rather than a review.
@@ -156,6 +195,7 @@ export function fakeReader(spec = {}) {
 export function fakeCosmosClient(spec = {}, { listError } = {}) {
   const calls = [];
   const readers = new Map();
+  const stores = new Map();
   return {
     calls,
     databases: {
@@ -186,6 +226,12 @@ export function fakeCosmosClient(spec = {}, { listError } = {}) {
           const key = `${databaseId}/${containerId}`;
           if (!readers.has(key)) readers.set(key, scriptedOutcomes(containerSpec));
           const next = readers.get(key);
+          // Point-read store, mirroring fakeReader: a partition-scoped query
+          // registers what it returned as addressable at (partition, root id).
+          if (!stores.has(key)) stores.set(key, new Map());
+          const store = stores.get(key);
+          const storeKey = (partitionKey, id) => `${partitionKey} ${id}`;
+          const readOverrides = containerSpec.reads ?? null;
           return {
             items: {
               query: (querySpec, options = {}) => ({
@@ -199,7 +245,15 @@ export function fakeCosmosClient(spec = {}, { listError } = {}) {
                   });
                   const outcome = next();
                   if (outcome.error) throw outcome.error;
-                  return { resources: outcome.docs ?? [] };
+                  const docsOut = outcome.docs ?? [];
+                  if (options.partitionKey !== undefined) {
+                    for (const doc of docsOut) {
+                      if (doc && typeof doc.id === 'string') {
+                        store.set(storeKey(options.partitionKey, doc.id), doc);
+                      }
+                    }
+                  }
+                  return { resources: docsOut };
                 },
               }),
               create: mutationGuard('items.create'),
@@ -207,7 +261,27 @@ export function fakeCosmosClient(spec = {}, { listError } = {}) {
               bulk: mutationGuard('items.bulk'),
               batch: mutationGuard('items.batch'),
             },
-            item: mutationGuard('container.item'),
+            // The EXACT point read the confirmation gates on (MG-73).
+            item: (id, partitionKey) => ({
+              read: async () => {
+                calls.push({
+                  database: databaseId,
+                  container: containerId,
+                  read: { id, partitionKey },
+                });
+                if (containerSpec.readError) throw containerSpec.readError;
+                if (readOverrides && Object.prototype.hasOwnProperty.call(readOverrides, id)) {
+                  const outcome = readOverrides[id];
+                  if (outcome?.error) throw outcome.error;
+                  if (outcome?.missing) return { resource: undefined, statusCode: 404 };
+                  return { resource: outcome?.doc, statusCode: 200 };
+                }
+                const found = store.get(storeKey(partitionKey, id));
+                return found
+                  ? { resource: found, statusCode: 200 }
+                  : { resource: undefined, statusCode: 404 };
+              },
+            }),
             delete: mutationGuard('container.delete'),
             replace: mutationGuard('container.replace'),
           };

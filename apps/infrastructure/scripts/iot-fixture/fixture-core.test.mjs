@@ -15,6 +15,9 @@ import { describe, it } from 'node:test';
 import {
   CHILD_OUTPUT_MAX_LINES,
   CONFIRMATION_QUERY,
+  CONNECTION_DEVICE_ID_PROPERTY,
+  ENVELOPE_BODY_FIELD,
+  ENVELOPE_SYSTEM_PROPERTIES_FIELD,
   D2C_CONTENT_ENCODING,
   D2C_CONTENT_TYPE,
   D2C_SYSTEM_PROPERTIES,
@@ -80,6 +83,41 @@ import {
 } from './fake-azure.mjs';
 
 const readSource = relative => readFile(fileURLToPath(new URL(relative, import.meta.url)), 'utf8');
+
+// A routed document exactly as IoT Hub writes it (MG-73): the sender's payload
+// nested under `Body`, a platform-assigned root `id`, the endpoint-stamped root
+// partition value, and the authenticated connection id under `SystemProperties`.
+// `bodyOverrides` merges into `Body` (marker/runId/sequence live there);
+// `rootOverrides` merges at the root (id, deviceId, the props Cosmos adds).
+const envelope = ({
+  rootId = 'cosmos-assigned-id',
+  bodyId = 'mg-67-run-abc-1',
+  runId = 'mg-67-run-abc',
+  sequence = 1,
+  rootPartitionValue = FIXTURE_DEVICE_ID,
+  connectionDeviceId = FIXTURE_DEVICE_ID,
+  bodyDeviceId = FIXTURE_DEVICE_ID,
+  marker = SYNTHETIC_MARKER,
+  bodyOverrides = {},
+  rootOverrides = {},
+} = {}) => ({
+  id: rootId,
+  [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: {
+    [CONNECTION_DEVICE_ID_PROPERTY]: connectionDeviceId,
+  },
+  ...(rootPartitionValue === undefined ? {} : { deviceId: rootPartitionValue }),
+  [ENVELOPE_BODY_FIELD]: {
+    id: bodyId,
+    deviceId: bodyDeviceId,
+    timestamp: '2026-08-10T12:00:00.000Z',
+    [SYNTHETIC_MARKER_FIELD]: marker,
+    [RUN_ID_FIELD]: runId,
+    [SEQUENCE_FIELD]: sequence,
+    ticket: TICKET,
+    ...bodyOverrides,
+  },
+  ...rootOverrides,
+});
 
 // assert.throws returns nothing, and every refusal in this tool is asserted BY
 // EXIT CODE rather than by message text, so the error itself has to come back.
@@ -733,13 +771,15 @@ describe('the fake Cosmos client', () => {
       ['items.upsert', () => container.items.upsert({})],
       ['items.bulk', () => container.items.bulk([])],
       ['items.batch', () => container.items.batch([])],
-      ['container.item', () => container.item('id')],
       ['container.delete', () => container.delete()],
       ['container.replace', () => container.replace({})],
     ];
     for (const [name, call] of guarded) {
       assert.throws(call, /read-only violation/, name);
     }
+    // container.item(id, pk).read() is the point read (MG-73) — a READ, not a
+    // mutation, so it is present and returns rather than throwing.
+    assert.equal(typeof container.item('id', 'pk').read, 'function');
   });
 });
 
@@ -898,11 +938,16 @@ describe('the synthetic document contract', () => {
   it('carries a sender-chosen id that is not the correlation key', () => {
     const [message] = build();
     assert.equal(message.body.id, message.messageId);
-    // The id is NOT what the read-back matches on: the platform assigns the
-    // document id and whether it honours this one is not pinned down anywhere.
-    // A document with a completely different id still correlates.
-    const renamed = { ...message.body, id: 'whatever-the-platform-chose' };
-    assert.equal(isSyntheticDocument(renamed, 'mg-67-run-fixed'), true);
+    // The ROOT id is NOT what the read-back matches on: the platform assigns it
+    // (MG-73) and the sender never learns it. A routed document under whatever
+    // root id the platform chose still correlates on Body.fixtureRunId.
+    const routed = {
+      id: 'whatever-the-platform-chose',
+      deviceId: FIXTURE_DEVICE_ID,
+      [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: { [CONNECTION_DEVICE_ID_PROPERTY]: FIXTURE_DEVICE_ID },
+      [ENVELOPE_BODY_FIELD]: { ...message.body },
+    };
+    assert.equal(isSyntheticDocument(routed, 'mg-67-run-fixed'), true);
   });
 
   it('refuses a partition key that is a path, or that collides with the contract', () => {
@@ -982,38 +1027,55 @@ describe('the synthetic document contract', () => {
 
 describe('isSyntheticDocument', () => {
   const RUN = 'mg-67-run-abc';
-  const marked = (extra = {}) => ({
-    id: `${RUN}-1`,
-    deviceId: FIXTURE_DEVICE_ID,
-    timestamp: '2026-08-10T12:00:00.000Z',
-    [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
-    [RUN_ID_FIELD]: RUN,
-    [SEQUENCE_FIELD]: 1,
-    ...extra,
-  });
+  // A routed envelope (MG-73): the marker and run correlator live under Body.
+  // bodyExtra overrides Body fields; rootExtra the platform's root bookkeeping.
+  const marked = (bodyExtra = {}, rootExtra = {}) =>
+    envelope({
+      rootId: `cosmos-${RUN}-1`,
+      bodyId: `${RUN}-1`,
+      runId: RUN,
+      bodyOverrides: bodyExtra,
+      rootOverrides: rootExtra,
+    });
 
   it('accepts a document this run built, including the fields Cosmos adds', () => {
     assert.equal(isSyntheticDocument(marked(), RUN), true);
     assert.equal(
-      isSyntheticDocument(marked({ _ts: 1786000000, _rid: 'x', _etag: '"0000"' }), RUN),
+      isSyntheticDocument(marked({}, { _ts: 1786000000, _rid: 'x', _etag: '"0000"' }), RUN),
       true
     );
+    // The sender's flat body, once IoT Hub has wrapped it under Body, is a
+    // synthetic document; the flat body on its own no longer is (MG-73).
     const [message] = buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId' });
-    assert.equal(isSyntheticDocument(message.body, RUN), true);
+    assert.equal(
+      isSyntheticDocument({ id: 'cosmos-x', [ENVELOPE_BODY_FIELD]: message.body }, RUN),
+      true
+    );
+    assert.equal(isSyntheticDocument(message.body, RUN), false);
   });
 
   it('rejects a document with no marker — the MARKER VIOLATION shape', () => {
-    const { [SYNTHETIC_MARKER_FIELD]: _dropped, ...unmarked } = marked();
-    assert.equal(isSyntheticDocument(unmarked, RUN), false);
-    assert.equal(hasSyntheticMarker(unmarked), false);
+    const noMarker = marked();
+    delete noMarker[ENVELOPE_BODY_FIELD][SYNTHETIC_MARKER_FIELD];
+    assert.equal(isSyntheticDocument(noMarker, RUN), false);
+    assert.equal(hasSyntheticMarker(noMarker), false);
     // A real-looking temperature reading is exactly what must NOT pass.
     assert.equal(
       isSyntheticDocument(
-        { id: 'r-1', deviceId: 'some-real-grill', timestamp: '2026-08-10T12:00:00.000Z' },
+        {
+          id: 'r-1',
+          deviceId: 'some-real-grill',
+          [ENVELOPE_BODY_FIELD]: {
+            deviceId: 'some-real-grill',
+            timestamp: '2026-08-10T12:00:00.000Z',
+          },
+        },
         RUN
       ),
       false
     );
+    // A document with no Body envelope at all is not one of ours.
+    assert.equal(isSyntheticDocument({ id: 'r-1', deviceId: 'some-real-grill' }, RUN), false);
   });
 
   it('rejects a marker that is merely truthy, or nearly right', () => {
@@ -1040,7 +1102,8 @@ describe('isSyntheticDocument', () => {
     const other = marked({ [RUN_ID_FIELD]: 'mg-67-run-somebody-else' });
     assert.equal(hasSyntheticMarker(other), true);
     assert.equal(isSyntheticDocument(other, RUN), false);
-    const { [RUN_ID_FIELD]: _dropped, ...noRun } = marked();
+    const noRun = marked();
+    delete noRun[ENVELOPE_BODY_FIELD][RUN_ID_FIELD];
     assert.equal(isSyntheticDocument(noRun, RUN), false);
     assert.equal(isSyntheticDocument(marked({ [RUN_ID_FIELD]: `${RUN}-1` }), RUN), false);
   });
@@ -1092,11 +1155,18 @@ describe('the document contract under the evidence-emission contract', () => {
     buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId', now: FIXED_CLOCK });
   const mintedIds = () => built().map(message => message.messageId);
 
-  // A document as COSMOS hands it back: the body, plus the platform's own
-  // bookkeeping, under whichever id the platform chose. Whether it honours the
-  // sender's `id` is behaviour no file in this repo pins down, so both are
-  // modelled and neither is assumed.
-  const routed = (message, id = message.body.id) => ({ ...message.body, id, _ts: 1786000000 });
+  // A document as COSMOS hands it back (MG-73): the sender's body nested under
+  // `Body`, the platform's own bookkeeping at the root, under whichever root id
+  // the platform chose. `id` defaults to the body's own id so the pure id-set
+  // functions can still be exercised with a "platform honoured the sender id"
+  // input; the read-back itself always addresses the Cosmos root id.
+  const routed = (message, id = message.body.id) => ({
+    id,
+    deviceId: FIXTURE_DEVICE_ID,
+    [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: { [CONNECTION_DEVICE_ID_PROPERTY]: FIXTURE_DEVICE_ID },
+    [ENVELOPE_BODY_FIELD]: { ...message.body },
+    _ts: 1786000000,
+  });
 
   // Enumerated FROM the vocabulary rather than listed by hand: an exit code added
   // later has to land in one bucket or the other, and this test is where it is
@@ -1266,29 +1336,44 @@ describe('the confirmation read-back', () => {
     {
       runId = RUN,
       idPrefix = 'cosmos-assigned',
+      // The endpoint-stamped ROOT partition value, materialized from the
+      // authenticated identity (MG-73). The authenticated connection id under
+      // SystemProperties defaults to the same value, so the identity equality
+      // the confirmation gates on holds for the happy path.
       partitionValue = FIXTURE_DEVICE_ID,
+      connId = partitionValue,
+      bodyDeviceId = partitionValue,
       unmarked = false,
       firstSequence = 1,
       // The architect's top-ranked risk for this route: nothing between the
       // device and Cosmos injects a partition key, so a body that omits the
-      // field produces a stored document with NO partition key at all.
+      // field produces a stored document with NO root partition value at all.
       omitPartitionKey = false,
+      omitConnectionId = false,
     } = {}
   ) =>
     Array.from({ length: count }, (_, i) => {
       const doc = {
         id: `${idPrefix}-${i + 1}`,
         deviceId: partitionValue,
-        timestamp: '2026-08-10T12:00:00.000Z',
-        [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
-        [RUN_ID_FIELD]: runId,
-        [SEQUENCE_FIELD]: firstSequence + i,
+        [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: omitConnectionId
+          ? {}
+          : { [CONNECTION_DEVICE_ID_PROPERTY]: connId },
+        [ENVELOPE_BODY_FIELD]: {
+          id: `${runId}-${firstSequence + i}`,
+          deviceId: bodyDeviceId,
+          timestamp: '2026-08-10T12:00:00.000Z',
+          [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
+          [RUN_ID_FIELD]: runId,
+          [SEQUENCE_FIELD]: firstSequence + i,
+          ticket: TICKET,
+        },
         // The properties Cosmos adds. They must not disturb the correlation.
         _ts: 1_786_000_000,
         _rid: 'fixture-rid',
         _etag: '"0000-0000"',
       };
-      if (unmarked) delete doc[SYNTHETIC_MARKER_FIELD];
+      if (unmarked) delete doc[ENVELOPE_BODY_FIELD][SYNTHETIC_MARKER_FIELD];
       if (omitPartitionKey) delete doc.deviceId;
       return doc;
     });
@@ -1370,6 +1455,133 @@ describe('the confirmation read-back', () => {
       assert.equal(result.observedIds.includes(id), false, `reported the requested id ${id}`);
     }
     assert.deepEqual(result.observedPartitionValues, [FIXTURE_DEVICE_ID]);
+  });
+
+  // MG-73's trust boundary is the THREE-WAY equality below.  These are
+  // deliberately end-to-end confirmation cases (scoped discovery -> point
+  // reads -> exit funnel), not tests of identityEqualityProblem in isolation:
+  // the regression to prevent is a complete discovery page becoming exit 0
+  // before the point-read proof has rejected the contradictory identities.
+  it('refuses a fixture-stamped root whose authenticated connection identity differs', async () => {
+    const { result } = await confirm({
+      script: [{ docs: routed(MESSAGES_PER_RUN, { connId: 'another-device' }) }],
+    });
+
+    assertFailed(
+      result,
+      EXIT.AMBIGUOUS,
+      'root stamp matches fixture but connection identity differs'
+    );
+    assert.equal(result.scope, 'point-read');
+    assert.match(result.reason, /does not equal its authenticated/);
+    assert.equal(result.observedDocuments[0].rootPartitionValue, FIXTURE_DEVICE_ID);
+    assert.equal(result.observedDocuments[0].connectionDeviceId, 'another-device');
+  });
+
+  it('refuses a non-fixture root even when the authenticated connection identity is the fixture', async () => {
+    const { result } = await confirm({
+      script: [
+        {
+          docs: routed(MESSAGES_PER_RUN, {
+            partitionValue: 'another-device',
+            connId: FIXTURE_DEVICE_ID,
+          }),
+        },
+      ],
+    });
+
+    assertFailed(
+      result,
+      EXIT.AMBIGUOUS,
+      'connection identity matches fixture but root stamp differs'
+    );
+    assert.equal(result.scope, 'point-read');
+    assert.match(result.reason, /root partition value .*not the registered fixture device/);
+    assert.equal(result.observedDocuments[0].rootPartitionValue, 'another-device');
+    assert.equal(result.observedDocuments[0].connectionDeviceId, FIXTURE_DEVICE_ID);
+  });
+
+  it('refuses root and authenticated identities that agree with each other but not with the fixture', async () => {
+    const { result } = await confirm({
+      script: [
+        {
+          docs: routed(MESSAGES_PER_RUN, {
+            partitionValue: 'another-device',
+            connId: 'another-device',
+          }),
+        },
+      ],
+    });
+
+    assertFailed(result, EXIT.AMBIGUOUS, 'root and connection agree on a foreign identity');
+    assert.equal(result.scope, 'point-read');
+    assert.match(result.reason, /root partition value .*not the registered fixture device/);
+    assert.deepEqual(result.observedDocuments[0], {
+      rootId: 'cosmos-assigned-1',
+      bodyId: `${RUN}-1`,
+      fixtureRunId: RUN,
+      rootPartitionValue: 'another-device',
+      connectionDeviceId: 'another-device',
+      bodyDeviceId: 'another-device',
+    });
+  });
+
+  it('confirms despite a conflicting payload Body.deviceId and records that claim as advisory', async () => {
+    const { result } = await confirm({
+      script: [{ docs: routed(MESSAGES_PER_RUN, { bodyDeviceId: 'payload-claim-only' }) }],
+    });
+
+    assert.equal(result.exitCode, EXIT.OK);
+    assert.equal(result.confirmed, true);
+    assert.equal(result.scope, 'expected-partition');
+    assert.equal(result.observedDocuments.length, MESSAGES_PER_RUN);
+    for (const identity of result.observedDocuments) {
+      assert.equal(identity.rootPartitionValue, FIXTURE_DEVICE_ID);
+      assert.equal(identity.connectionDeviceId, FIXTURE_DEVICE_ID);
+      assert.equal(identity.bodyDeviceId, 'payload-claim-only');
+    }
+  });
+
+  it('refuses a point read with SystemProperties absent rather than treating the root stamp alone as proof', async () => {
+    const page = routed(MESSAGES_PER_RUN);
+    for (const doc of page) delete doc[ENVELOPE_SYSTEM_PROPERTIES_FIELD];
+    const { result } = await confirm({ script: [{ docs: page }] });
+
+    assertFailed(result, EXIT.AMBIGUOUS, 'SystemProperties absent');
+    assert.equal(result.scope, 'point-read');
+    assert.match(result.reason, /authenticated identity .* is missing/);
+    assert.equal(result.observedDocuments[0].connectionDeviceId, null);
+  });
+
+  it('refuses a point read with the connection-device-id property absent', async () => {
+    const { result } = await confirm({
+      script: [{ docs: routed(MESSAGES_PER_RUN, { omitConnectionId: true }) }],
+    });
+
+    assertFailed(result, EXIT.AMBIGUOUS, 'connection-device-id property absent');
+    assert.equal(result.scope, 'point-read');
+    assert.match(result.reason, /authenticated identity .* is missing/);
+    assert.equal(result.observedDocuments[0].connectionDeviceId, null);
+  });
+
+  it('refuses a discovered root id whose exact point read is absent under the scoped partition', async () => {
+    const page = routed(MESSAGES_PER_RUN);
+    const { result, reader } = await confirm({
+      script: [{ docs: page }],
+      reads: { [page[1].id]: { missing: true } },
+    });
+
+    assertFailed(
+      result,
+      EXIT.UNEXPECTED_PARTITION,
+      'discovery result missing from its exact point read'
+    );
+    assert.equal(result.scope, 'point-read');
+    assert.match(result.reason, /point read .* returned nothing/);
+    assert.deepEqual(reader.readCalls, [
+      { id: page[0].id, partitionKey: FIXTURE_DEVICE_ID },
+      { id: page[1].id, partitionKey: FIXTURE_DEVICE_ID },
+    ]);
   });
 
   it('exits TIMEOUT when the bound elapses with nothing found anywhere', async () => {
@@ -1531,14 +1743,14 @@ describe('the confirmation read-back', () => {
     assert.equal(reader.calls.length, POLLS_TO_BOUND + 1);
   });
 
-  // THE PARTITION LABEL IS DECIDED BY THE DOCUMENTS, NOT BY WHICH QUERY FOUND
-  // THEM. The sweep only changes which query looked, and a document that arrives
-  // in the CORRECT partition during the round trip between the last scoped poll
-  // and the sweep is found only by the sweep. Reporting that as "found outside
-  // the expected partition" would put a routing anomaly that does not exist into
-  // the evidence artifact — and this is the discriminator MG-62's post-cutover
-  // proof reads, so a false positive here is read as a broken route.
-  it('confirms documents the sweep found IN the expected partition, rather than calling it an anomaly', async () => {
+  // THE SWEEP IS DIAGNOSTICS ONLY (MG-73): it may never contribute to a zero
+  // exit, because a cross-partition scan masks a mis-partition — the exact
+  // failure the point read exists to detect. Documents the sweep found in the
+  // expected partition after the bound elapsed are a TIMING artefact, not a
+  // success: the scoped poll (and its point read) missed them within the bound.
+  // The honest outcome is nonzero, naming the fix (raise the bound), rather than
+  // confirming on the strength of a scan.
+  it('does NOT confirm documents the sweep found IN the expected partition — the sweep can never confirm', async () => {
     const empties = Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
     const { result, reader } = await confirm({
       // The sweep returns the full set carrying the EXPECTED partition value:
@@ -1546,22 +1758,20 @@ describe('the confirmation read-back', () => {
       script: [...empties, { docs: routed(MESSAGES_PER_RUN) }],
     });
 
-    assert.equal(result.exitCode, EXIT.OK, describeConfirmation(result));
-    assert.equal(result.confirmed, true);
-    assert.notEqual(result.exitCode, EXIT.UNEXPECTED_PARTITION);
-    assert.notEqual(result.exitCode, EXIT.TIMEOUT);
+    assertFailed(result, EXIT.AMBIGUOUS, 'sweep-found in expected partition, never a success');
+    assert.equal(result.confirmed, false);
     assert.equal(result.observedCount, MESSAGES_PER_RUN);
     assert.deepEqual(result.observedPartitionValues, [FIXTURE_DEVICE_ID]);
-    // The sweep is what found them, and that is recorded — it just is not what
-    // decides the label.
+    // The sweep is what found them, and that is recorded — it just can never
+    // decide a success.
     assert.equal(result.crossPartitionSweepRun, true);
     assert.equal(result.scope, 'cross-partition');
     assert.equal(reader.calls[SWEEP_CALL_INDEX].partitionKey, undefined);
-    assert.equal(result.uncertain, false);
+    assert.equal(result.uncertain, true);
     // The bound is what was wrong, and the arrival delay past it is the
     // calibration that says so.
     assert.equal(result.observedArrivalMs, BOUND);
-    assert.match(result.reason, /NOT a partition anomaly/);
+    assert.match(result.reason, /diagnostics only|raise the bound/);
   });
 
   it('reports a MIXED landing as an unexpected partition, counted off the documents', async () => {
@@ -2539,30 +2749,40 @@ describe('every terminal outcome is recordable, with its four id sets intact', (
   const messages = buildFixtureMessages({ runId: RUN, partitionKeyField: 'deviceId' });
   const requested = messages.map(message => message.body.id);
 
-  // A document as Cosmos would return it if the platform HONOURED the id the
-  // body carried. Whether it does is behaviour no file in this repo pins down —
-  // which is exactly why both cases are exercised here.
+  // A routed envelope (MG-73). The root partition value and the authenticated
+  // connection id both carry the fixture device, so identity equality holds.
+  const routedDoc = (message, rootId, { deviceId = FIXTURE_DEVICE_ID } = {}) => ({
+    id: rootId,
+    deviceId,
+    [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: { [CONNECTION_DEVICE_ID_PROPERTY]: deviceId },
+    [ENVELOPE_BODY_FIELD]: { ...message.body },
+    _ts: 1,
+    _etag: '"0"',
+  });
+
+  // As Cosmos would return it if the platform HONOURED the body id — a valid
+  // FUNCTION input even though MG-73 proved the platform always assigns its own.
   const honoured = count =>
-    messages.slice(0, count).map(message => ({ ...message.body, _ts: 1, _etag: '"0"' }));
+    messages.slice(0, count).map(message => routedDoc(message, message.body.id));
 
-  // ...and as it would return them if the platform assigned its own ids.
+  // ...and as it actually returns them: under a platform-assigned root id.
   const renamed = count =>
-    messages.slice(0, count).map((message, i) => ({
-      ...message.body,
-      id: `cosmos-assigned-${i + 1}`,
-      _ts: 1,
-      _etag: '"0"',
-    }));
+    messages.slice(0, count).map((message, i) => routedDoc(message, `cosmos-assigned-${i + 1}`));
 
-  // ...and as it would return them if the body's partition value were not the
-  // one this run queried — the only thing that makes a landing UNEXPECTED. The
-  // sweep having been the query that found a document does not.
+  // ...and as it would return them if the endpoint stamped a DIFFERENT root
+  // partition value than the one this run queried — the only thing that makes a
+  // landing UNEXPECTED. The sweep having been the query that found a document
+  // does not.
   const landedElsewhere = count =>
-    renamed(count).map(doc => ({ ...doc, deviceId: 'some-other-partition' }));
+    messages
+      .slice(0, count)
+      .map((message, i) =>
+        routedDoc(message, `cosmos-assigned-${i + 1}`, { deviceId: 'some-other-partition' })
+      );
 
   const unmarkedStray = () => {
-    const doc = { ...messages[0].body, id: 'stray-1', [SEQUENCE_FIELD]: 99, _ts: 1 };
-    delete doc[SYNTHETIC_MARKER_FIELD];
+    const doc = routedDoc(messages[0], 'stray-1');
+    delete doc[ENVELOPE_BODY_FIELD][SYNTHETIC_MARKER_FIELD];
     return doc;
   };
 
@@ -2666,15 +2886,15 @@ describe('every terminal outcome is recordable, with its four id sets intact', (
         idDivergence: true,
       },
       {
-        // The same sweep, the same ids, the EXPECTED partition value in the
-        // bodies: a confirmation. What the sweep changes is which query looked,
-        // never where a document is, so this case and the one above it differ by
-        // exactly the field that decides the label.
+        // The same sweep, the same ids, the EXPECTED root partition value: still
+        // NOT a confirmation (MG-73). The sweep is diagnostics only — a scan
+        // masks a mis-partition — so it can never exit 0; the honest outcome is a
+        // timing ambiguity that says to raise the bound.
         context: 'found by the sweep, in the expected partition',
         spec: { script: [...empties, { docs: renamed(MESSAGES_PER_RUN) }] },
-        exitCode: EXIT.OK,
+        exitCode: EXIT.AMBIGUOUS,
         observedIds: ['cosmos-assigned-1', 'cosmos-assigned-2', 'cosmos-assigned-3'],
-        uncertain: false,
+        uncertain: true,
         idDivergence: true,
       },
     ];
@@ -2806,14 +3026,16 @@ describe('every terminal outcome is recordable, with its four id sets intact', (
 
 describe('evaluateReadBack', () => {
   const RUN = 'mg-67-run-evaluate';
-  const doc = (extra = {}) => ({
-    id: 'cosmos-assigned-1',
-    deviceId: FIXTURE_DEVICE_ID,
-    [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
-    [RUN_ID_FIELD]: RUN,
-    [SEQUENCE_FIELD]: 1,
-    ...extra,
-  });
+  // A routed envelope (MG-73): the marker and correlator under Body, the root id
+  // Cosmos-assigned. bodyExtra overrides Body fields; rootExtra the root.
+  const doc = (bodyExtra = {}, rootExtra = {}) =>
+    envelope({
+      rootId: 'cosmos-assigned-1',
+      bodyId: `${RUN}-1`,
+      runId: RUN,
+      bodyOverrides: bodyExtra,
+      rootOverrides: rootExtra,
+    });
 
   it('separates empty, partial and complete, and only complete can be a success', () => {
     assert.equal(evaluateReadBack([], { runId: RUN }).kind, 'empty');
@@ -2827,7 +3049,7 @@ describe('evaluateReadBack', () => {
   });
 
   it('ignores the properties Cosmos adds', () => {
-    const stored = doc({ _ts: 1, _rid: 'r', _etag: '"0"', _self: 'dbs/x' });
+    const stored = doc({}, { _ts: 1, _rid: 'r', _etag: '"0"', _self: 'dbs/x' });
     assert.equal(evaluateReadBack([stored], { runId: RUN, expectedCount: 1 }).kind, 'complete');
   });
 
@@ -2835,9 +3057,9 @@ describe('evaluateReadBack', () => {
   // classified in full before a verdict is chosen, so no single document can
   // erase what the others prove.
   it('reports both sets on every kind, and never counts what it cannot attribute', () => {
-    const stray = { ...doc(), id: 'stray-1', [SEQUENCE_FIELD]: 9 };
-    delete stray[SYNTHETIC_MARKER_FIELD];
-    const foreign = { ...doc(), id: 'other-1', [RUN_ID_FIELD]: 'mg-67-run-other' };
+    const stray = doc({}, { id: 'stray-1' });
+    delete stray[ENVELOPE_BODY_FIELD][SYNTHETIC_MARKER_FIELD];
+    const foreign = doc({ [RUN_ID_FIELD]: 'mg-67-run-other' }, { id: 'other-1' });
 
     for (const [context, page, kind, ids, anomalousIds] of [
       ['nothing yet', [], 'empty', [], []],

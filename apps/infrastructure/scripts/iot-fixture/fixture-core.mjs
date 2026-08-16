@@ -523,6 +523,34 @@ export const SYNTHETIC_MARKER = `${TICKET}-SYNTHETIC-FIXTURE`;
 export const RUN_ID_FIELD = 'fixtureRunId';
 export const SEQUENCE_FIELD = 'fixtureSequence';
 
+// ---------------------------------------------------------------------------
+// The routed-document envelope (MG-73, proven by live measurement).
+//
+// IoT Hub does not store the device payload flat. It WRAPS it: the body the
+// sender sent lands under `Body`, the hub's own metadata under `SystemProperties`
+// and `Properties`, and the platform assigns the document's root `id` — a Cosmos
+// GUID the sender never chooses and cannot predict. So every fixture field this
+// tool minted — the marker, the run correlator, the sequence, the sender's id —
+// is read back from UNDER `Body`, never from the root.
+//
+// Two identities therefore exist for one document, and they are different things:
+//   - the ROOT `id` (platform-assigned) ADDRESSES the document — it is what a
+//     point read and a downstream disposal target;
+//   - `Body.id` / `Body.fixtureRunId` CORRELATE it to this run — they are what
+//     the read-back matches on.
+//
+// And the routing endpoint STAMPS the partition value at the ROOT, materialized
+// from the AUTHENTICATED connection identity (SystemProperties
+// [iothub-connection-device-id]) — NOT from the payload. MG-73 proved this
+// differentially: a message sent as the fixture device whose Body.deviceId
+// claimed a different identity still landed with the authenticated id as its
+// root partition value, and a point read succeeded only under the authenticated
+// id. So the root partition value is trusted for identity; `Body.deviceId` is
+// payload-controlled and is advisory ONLY — recorded, never trusted.
+export const ENVELOPE_BODY_FIELD = 'Body';
+export const ENVELOPE_SYSTEM_PROPERTIES_FIELD = 'SystemProperties';
+export const CONNECTION_DEVICE_ID_PROPERTY = 'iothub-connection-device-id';
+
 // Fixed, small, and a constant rather than a flag ON PURPOSE. The evidence
 // record states a count that MG-53 checks the source against; if an operator
 // could pass --count, the recorded number and the code would drift and a
@@ -966,12 +994,98 @@ export function formatD2cProperties(systemProperties) {
 
 const isPlainObject = value => typeof value === 'object' && value !== null && !Array.isArray(value);
 
+// The `Body` envelope of a routed document, or null when the document carries
+// none (MG-73). The fixture's own fields live here — the root holds only the
+// platform-assigned id, the hub metadata, and the endpoint-stamped partition
+// value. A document with no plain-object Body cannot be one of ours.
+export function envelopeBody(doc) {
+  if (!isPlainObject(doc)) return null;
+  const body = doc[ENVELOPE_BODY_FIELD];
+  return isPlainObject(body) ? body : null;
+}
+
+// The AUTHENTICATED connection device id the hub stamped under SystemProperties,
+// or undefined. This is the identity the routing endpoint materializes the root
+// partition value from, so the equality between the two is the MG-73 proof.
+export function connectionDeviceId(doc) {
+  if (!isPlainObject(doc)) return undefined;
+  const props = doc[ENVELOPE_SYSTEM_PROPERTIES_FIELD];
+  return isPlainObject(props) ? props[CONNECTION_DEVICE_ID_PROPERTY] : undefined;
+}
+
+// The Cosmos-assigned ROOT id — what ADDRESSES the document for a point read and
+// a downstream disposal. A non-empty string or null; the sender never chooses it.
+export function rootDocumentId(doc) {
+  return isPlainObject(doc) && typeof doc.id === 'string' && doc.id.trim() !== '' ? doc.id : null;
+}
+
+// Both identities of one routed document, plus the MG-73 proof pair, read off
+// the envelope. Every string field is null unless it is genuinely a string, so a
+// consumer never has to re-test a type this already normalised:
+//   rootId              what ADDRESSES the document (Cosmos-assigned)
+//   bodyId              the sender's id — a CORRELATOR, never an address
+//   fixtureRunId        the run correlator (Body.fixtureRunId)
+//   rootPartitionValue  the endpoint's authenticated stamp at the root
+//   connectionDeviceId  SystemProperties[iothub-connection-device-id]
+//   bodyDeviceId        the payload's OWN deviceId claim — recorded ADVISORY,
+//                       never trusted for identity, because a device can put
+//                       anything there.
+export function documentIdentity(doc, partitionKeyField = null) {
+  const body = envelopeBody(doc) ?? {};
+  const asString = value => (typeof value === 'string' ? value : null);
+  const rootField =
+    partitionKeyField !== null &&
+    isPlainObject(doc) &&
+    Object.prototype.hasOwnProperty.call(doc, partitionKeyField)
+      ? doc[partitionKeyField]
+      : null;
+  const bodyField =
+    partitionKeyField !== null && Object.prototype.hasOwnProperty.call(body, partitionKeyField)
+      ? body[partitionKeyField]
+      : null;
+  return {
+    rootId: rootDocumentId(doc),
+    bodyId: asString(body.id),
+    fixtureRunId: asString(body[RUN_ID_FIELD]),
+    rootPartitionValue: asString(rootField),
+    connectionDeviceId: asString(connectionDeviceId(doc)),
+    bodyDeviceId: asString(bodyField),
+  };
+}
+
+// Why this document's identity is NOT proven, or null when it is. A document
+// COUNTS only when its endpoint-stamped root partition value equals BOTH the
+// registered fixture device AND the authenticated connection id. Equality with
+// only ONE of the two is not proof: the point of MG-73 is that the stamp TRACKS
+// the authenticated identity, not that two strings happen to match. A match on
+// the payload-controlled Body.deviceId is never consulted here.
+export function identityEqualityProblem(identity, expectedDeviceId) {
+  const { rootPartitionValue, connectionDeviceId: conn } = identity;
+  if (typeof rootPartitionValue !== 'string' || rootPartitionValue === '') {
+    return `it carries no usable root partition value — the routing endpoint stamps one from the authenticated identity, so its absence is not a document this run can claim`;
+  }
+  if (rootPartitionValue !== expectedDeviceId) {
+    return `its root partition value ${safeFragment(rootPartitionValue)} is not the registered fixture device — the point read landed on a document whose authenticated stamp is a different identity`;
+  }
+  if (typeof conn !== 'string' || conn === '') {
+    return `it carries no ${CONNECTION_DEVICE_ID_PROPERTY} under SystemProperties — the authenticated identity the root stamp must equal is missing, so equality with the fixture constant alone is not proof`;
+  }
+  if (rootPartitionValue !== conn) {
+    return `its root partition value ${safeFragment(rootPartitionValue)} does not equal its authenticated ${CONNECTION_DEVICE_ID_PROPERTY} ${safeFragment(conn)} — the stamp does not track the authenticated identity, which is exactly the mis-stamp the MG-73 proof exists to detect`;
+  }
+  return null;
+}
+
 // Does this document carry the marker AT ALL? Separate from the run-correlated
 // check because the two failures are different: a document without the marker
 // in a read-back is a MARKER VIOLATION (a defect in this sender, per HR3), while
 // a marked document from an earlier run is simply not this run's.
+//
+// Read from UNDER `Body`: the marker is a field the sender minted, and every
+// sender field is nested in the envelope IoT Hub wrote (MG-73).
 export function hasSyntheticMarker(doc) {
-  return isPlainObject(doc) && doc[SYNTHETIC_MARKER_FIELD] === SYNTHETIC_MARKER;
+  const body = envelopeBody(doc);
+  return body !== null && body[SYNTHETIC_MARKER_FIELD] === SYNTHETIC_MARKER;
 }
 
 // The zero-ambiguity validator the read-back gates on. Strict identity on both
@@ -988,7 +1102,7 @@ export function hasSyntheticMarker(doc) {
 export function isSyntheticDocument(doc, runId) {
   requireNonEmptyString(runId, 'runId');
   if (!hasSyntheticMarker(doc)) return false;
-  return doc[RUN_ID_FIELD] === runId;
+  return envelopeBody(doc)[RUN_ID_FIELD] === runId;
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,7 +1225,11 @@ export const DEFAULT_TRANSPORT_RETRIES = 3;
 // rather than as interpolated SQL. `SELECT *` is deliberate — the marker, the id
 // and the partition value all have to be inspected, and a projection that
 // dropped one would hide the failure it was meant to surface.
-export const CONFIRMATION_QUERY = `SELECT * FROM c WHERE c.${RUN_ID_FIELD} = @runId`;
+// Correlated on `Body.fixtureRunId` — the run correlator is nested in the
+// envelope IoT Hub wrote (MG-73), so a query against a top-level `fixtureRunId`
+// matches nothing, which is exactly why the pre-MG-73 read-back timed out on a
+// run whose three documents had all arrived.
+export const CONFIRMATION_QUERY = `SELECT * FROM c WHERE c.${ENVELOPE_BODY_FIELD}.${RUN_ID_FIELD} = @runId`;
 export const RUN_ID_PARAMETER = '@runId';
 
 const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -1127,10 +1245,18 @@ function requirePositiveInteger(value, name) {
 }
 
 function requireReader(reader) {
-  if (!reader || typeof reader.queryDocuments !== 'function') {
+  // BOTH primitives are required (MG-73): partition-scoped DISCOVERY finds this
+  // run's documents and yields their Cosmos root ids, and an EXACT point read of
+  // each id — under that same partition value — proves it. Neither alone is the
+  // contract, so a reader missing either is refused before any wait exists.
+  if (
+    !reader ||
+    typeof reader.queryDocuments !== 'function' ||
+    typeof reader.readDocument !== 'function'
+  ) {
     throw new FixtureError(
       EXIT.USAGE,
-      'a reader exposing queryDocuments() must be injected; this module constructs no Cosmos client'
+      'a reader exposing queryDocuments() AND readDocument() must be injected; discovery finds the run and the point read proves it, and this module constructs no Cosmos client'
     );
   }
   return reader;
@@ -1189,7 +1315,10 @@ const typeName = value =>
  *                  run id). Named, because an operator cannot investigate a
  *                  document nobody named, and NEVER counted as arrival.
  */
-export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PER_RUN } = {}) {
+export function evaluateReadBack(
+  documents,
+  { runId, expectedCount = MESSAGES_PER_RUN, partitionKeyField = null } = {}
+) {
   requireNonEmptyString(runId, 'runId');
   requirePositiveInteger(expectedCount, 'expectedCount');
 
@@ -1203,10 +1332,11 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
       exitCode: EXIT.AMBIGUOUS,
       ids: [],
       anomalousIds: [],
+      identities: [],
       reason: `the read-back returned ${typeName(documents)} rather than a list of documents — unreadable, which is a failure and not an absence`,
     };
   }
-  if (documents.length === 0) return { kind: 'empty', ids: [], anomalousIds: [] };
+  if (documents.length === 0) return { kind: 'empty', ids: [], anomalousIds: [], identities: [] };
 
   const mine = [];
   const anomalous = [];
@@ -1215,7 +1345,7 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
   let foreign = false;
   let unidentified = false;
 
-  const usableId = doc => (typeof doc.id === 'string' && doc.id.trim() !== '' ? doc.id : null);
+  const usableId = rootDocumentId;
 
   for (const doc of documents) {
     if (!isPlainObject(doc)) {
@@ -1226,7 +1356,7 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
     // HR3: a document reaching Cosmos without the marker is a defect in the
     // sender, not an acceptable variant. Its own exit code, because "the sender
     // built a body wrong" and "the route did not deliver" call for opposite
-    // responses from an operator.
+    // responses from an operator. The marker lives under `Body` (MG-73).
     if (!hasSyntheticMarker(doc)) {
       unmarked ??= id ?? '(a document with no usable id)';
       if (id) anomalous.push(id);
@@ -1234,16 +1364,17 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
     }
     // The predicate asked for this run only, so a foreign run id here means the
     // read-back cannot be trusted to mean what it says. Ambiguity, not success —
-    // and the document is emphatically not counted as one of ours.
-    if (doc[RUN_ID_FIELD] !== runId) {
+    // and the document is emphatically not counted as one of ours. Correlated on
+    // `Body.fixtureRunId`, never the payload-controlled root.
+    if (envelopeBody(doc)[RUN_ID_FIELD] !== runId) {
       foreign = true;
       if (id) anomalous.push(id);
       continue;
     }
-    // Evidence is recorded BY ID (MG-54 cites them in a destructive
-    // authorization). A document that cannot be named cannot be recorded, so it
-    // cannot be counted — and it cannot be listed as an anomaly either, since
-    // there is nothing to list.
+    // Evidence is recorded BY the ROOT id (MG-54 cites them in a destructive
+    // authorization, and the root id is what ADDRESSES the document). A document
+    // that cannot be named cannot be recorded, so it cannot be counted — and it
+    // cannot be listed as an anomaly either, since there is nothing to list.
     if (!id) {
       unidentified = true;
       continue;
@@ -1251,12 +1382,17 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
     mine.push(doc);
   }
 
-  // The ids the read-back ACTUALLY observed. Whether the platform honoured the
-  // sender's chosen id is behaviour no file in this repo pins down, so what the
-  // sender hoped for is never substituted here.
+  // The ROOT ids the read-back ACTUALLY observed — Cosmos-assigned, and what
+  // addresses each document. The sender's chosen `Body.id` is never substituted
+  // here: the platform assigns the root id, so the two legitimately differ.
   const ids = mine.map(doc => doc.id);
   const anomalousIds = [...new Set(anomalous)];
-  const verdict = fields => ({ ids, anomalousIds, ...fields });
+  // Both identities per document (MG-73): what ADDRESSES it (rootId) and what
+  // CORRELATES it (Body.id / Body.fixtureRunId), plus the proof pair — the
+  // endpoint-stamped root partition value and the authenticated connection id.
+  // Body.deviceId is recorded ADVISORY-only; it is payload-controlled.
+  const identities = mine.map(doc => documentIdentity(doc, partitionKeyField));
+  const verdict = fields => ({ ids, anomalousIds, identities, ...fields });
 
   // PRECEDENCE, most structural first. A page that cannot be parsed cannot be
   // judged for markers; a marker violation outranks a correlation ambiguity
@@ -1279,7 +1415,7 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
     return verdict({
       kind: 'foreign',
       exitCode: EXIT.AMBIGUOUS,
-      reason: `the read-back returned a document whose ${RUN_ID_FIELD} is not this run's — the correlation cannot be established deterministically`,
+      reason: `the read-back returned a document whose ${ENVELOPE_BODY_FIELD}.${RUN_ID_FIELD} is not this run's — the correlation cannot be established deterministically`,
     });
   }
   if (unidentified) {
@@ -1297,7 +1433,7 @@ export function evaluateReadBack(documents, { runId, expectedCount = MESSAGES_PE
       reason: `the read-back returned ${ids.length} documents sharing ${new Set(ids).size} id(s) — a duplicate cannot be told from a second arrival`,
     });
   }
-  const sequences = mine.map(doc => doc[SEQUENCE_FIELD]);
+  const sequences = mine.map(doc => envelopeBody(doc)[SEQUENCE_FIELD]);
   if (new Set(sequences).size !== sequences.length) {
     return verdict({
       kind: 'duplicate-sequence',
@@ -1372,6 +1508,22 @@ export async function confirmArrival({
   // these as ours would tell MG-53 that a document it must halt on is accounted
   // for. Naming them is what makes the finding actionable.
   let anomalousSoFar = [];
+  // Both identities per observed document (MG-73), keyed by the ROOT id so the
+  // union stays monotonic exactly as the id set does: what ADDRESSES the document
+  // and what CORRELATES it, plus the proof pair (root partition value and the
+  // authenticated connection id). The evidence record carries these so a
+  // downstream consumer has the addressing id AND the correlator for each.
+  let identitiesSoFar = [];
+  const mergeIdentities = incoming => {
+    const byRootId = new Map(identitiesSoFar.map(entry => [entry.rootId, entry]));
+    for (const entry of incoming) {
+      if (entry && typeof entry.rootId === 'string' && !byRootId.has(entry.rootId)) {
+        byRootId.set(entry.rootId, entry);
+      }
+    }
+    identitiesSoFar = [...byRootId.values()];
+    return identitiesSoFar;
+  };
 
   // Structured ids stay verbatim — they ARE the evidence, and a scrubbed id is
   // useless to MG-53 and MG-54. Only the human-readable `reason` embeds outside
@@ -1473,6 +1625,11 @@ export async function confirmArrival({
       ...fields,
       observedIds,
       observedCount: observedIds.length,
+      // Both identities per observed document (MG-73). Frozen and unioned in the
+      // one place every path passes through, so no exit path can drop them.
+      observedDocuments: Object.freeze(
+        mergeIdentities(fields.observedDocuments ?? []).map(entry => Object.freeze({ ...entry }))
+      ),
       // Never folded into observedIds and never silently dropped: a document
       // this run cannot claim is a finding in its own right, and the operator
       // needs it BY ID to investigate it.
@@ -1501,7 +1658,8 @@ export async function confirmArrival({
       parameters: [{ name: RUN_ID_PARAMETER, value: runId }],
       // Absent partitionKey IS the cross-partition sweep. The distinction
       // carries its own exit code, so it is expressed in the request rather
-      // than filtered afterwards.
+      // than filtered afterwards. The sweep is DIAGNOSTICS ONLY (MG-73) — it may
+      // never confirm; only the point read below can.
       ...(scoped ? { partitionKey: partitionValue } : {}),
     });
 
@@ -1519,18 +1677,27 @@ export async function confirmArrival({
       reason: `transport failure reading back run ${safeFragment(runId)} (${budget}) — aborting rather than reporting an absence: ${describeError(err)}`,
     });
 
-  // THE ONE PLACE a complete page becomes a confirmation, shared by the
-  // partition-scoped poll and the sweep. Sharing it is the point: the
-  // monotonicity guard below cannot be present in one caller and missing from
-  // the other, and a confirmation cannot come to mean two different things
-  // depending on which query produced it.
-  const completeResult = ({ verdict, documents, scope, note = '' }) => {
+  // THE ONLY PATH TO A ZERO EXIT (MG-73): partition-scoped discovery found the
+  // full expected set and yielded their Cosmos root ids; now EACH id is EXACTLY
+  // POINT-READ, under that same partition value, and only then is the run
+  // confirmed. Neither step alone is the contract — a pure point read is
+  // impossible because the sender never learns the platform-assigned root id, and
+  // a cross-partition scan standing in for the point read would MASK a
+  // mis-partition, which is precisely the failure the proof exists to detect.
+  //
+  // For each returned root id the point read must:
+  //   - ADDRESS a document under (id, partitionValue) — a 404 means the discovery
+  //     saw it but it is not there under this partition, a mis-partition;
+  //   - carry the marker and this run's correlator UNDER Body;
+  //   - satisfy the identity equality: root partition value == the fixture device
+  //     == SystemProperties[iothub-connection-device-id]. Equality with only one
+  //     is not proof, and a match on the payload's Body.deviceId is never enough.
+  const confirmByPointRead = async ({ verdict, documents, scope }) => {
     // The count is right in THIS page, but an earlier page returned ids this one
-    // does not. Confirming here would put an id in the evidence record's
-    // observed set that the confirming read did not see, or leave one out that
-    // was genuinely observed — either way MG-53's "the source holds only the
-    // recorded documents" check would be run against a set nobody read in one
-    // piece. Ambiguity, never a success.
+    // does not. Confirming here would put an id in the evidence record's observed
+    // set that the confirming read did not see, or leave one out that was
+    // genuinely observed — either way MG-53's "the source holds only the recorded
+    // documents" check would be run against a set nobody read in one piece.
     if (observedSoFar.length > verdict.ids.length) {
       return result({
         exitCode: EXIT.AMBIGUOUS,
@@ -1539,13 +1706,59 @@ export async function confirmArrival({
         reason: `${observedSoFar.length} distinct document id(s) have been read back across ${polls} poll(s) for a run that sent ${expectedCount}, and the ${verdict.ids.length} in the latest page are not all of them — an id seen once is never unseen, so this is a correlation ambiguity rather than a confirmation`,
       });
     }
+
+    const confirmedDocs = [];
+    for (const id of verdict.ids) {
+      let doc;
+      try {
+        doc = await reader.readDocument({ id, partitionKey: partitionValue });
+      } catch (err) {
+        if (classifyError(err) === EXIT.AUTH) return authResult(err, 'point-read');
+        return transportResult(
+          err,
+          'point-read',
+          'the point read of a discovered id failed; discovery already found the run, so this is a reader failure and not an absence'
+        );
+      }
+      if (!isPlainObject(doc)) {
+        return result({
+          exitCode: EXIT.UNEXPECTED_PARTITION,
+          scope: 'point-read',
+          observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
+          reason: `discovery found document ${safeFragment(id)} for run ${safeFragment(runId)} but the EXACT point read of it under partition ${safeFragment(partitionValue)} returned nothing — it is not addressable there, which a cross-partition scan would have masked; the run is not confirmed`,
+        });
+      }
+      if (!isSyntheticDocument(doc, runId)) {
+        return result({
+          exitCode: EXIT.MARKER_VIOLATION,
+          scope: 'point-read',
+          observedPartitionValues: Object.freeze(partitionValuesOf([doc])),
+          reason: `the point read of ${safeFragment(id)} returned a document that does not carry ${SYNTHETIC_MARKER_FIELD}=${SYNTHETIC_MARKER} and this run's ${ENVELOPE_BODY_FIELD}.${RUN_ID_FIELD} under Body — it cannot be counted as proof`,
+        });
+      }
+      const identity = documentIdentity(doc, partitionKeyField);
+      const problem = identityEqualityProblem(identity, partitionValue);
+      if (problem !== null) {
+        return result({
+          exitCode: EXIT.AMBIGUOUS,
+          scope: 'point-read',
+          observedPartitionValues: Object.freeze(partitionValuesOf([doc])),
+          observedDocuments: [identity],
+          reason: `the point read of ${safeFragment(id)} for run ${safeFragment(runId)} did not prove identity: ${problem}`,
+        });
+      }
+      confirmedDocs.push(doc);
+    }
+
     return result({
       confirmed: true,
       exitCode: EXIT.OK,
       scope,
-      observedPartitionValues: Object.freeze(partitionValuesOf(documents)),
+      observedIds: confirmedDocs.map(doc => doc.id),
+      observedDocuments: confirmedDocs.map(doc => documentIdentity(doc, partitionKeyField)),
+      observedPartitionValues: Object.freeze(partitionValuesOf(confirmedDocs)),
       observedArrivalMs: now() - startedAt,
-      reason: `read back ${verdict.ids.length} of ${expectedCount} marked, run-correlated document(s) out of the destination container${note}`,
+      reason: `read back and EXACTLY point-read ${confirmedDocs.length} of ${expectedCount} marked, run-correlated document(s) whose root partition value equals both the fixture device and the authenticated ${CONNECTION_DEVICE_ID_PROPERTY}`,
     });
   };
 
@@ -1578,11 +1791,12 @@ export async function confirmArrival({
     }
 
     if (!failed) {
-      const verdict = evaluateReadBack(documents, { runId, expectedCount });
+      const verdict = evaluateReadBack(documents, { runId, expectedCount, partitionKeyField });
       // Recorded BEFORE the branch, so every outcome below — including the ones
       // that abort — reports what this page saw.
       observedSoFar = mergeIds(observedSoFar, verdict.ids);
       anomalousSoFar = mergeIds(anomalousSoFar, verdict.anomalousIds);
+      mergeIdentities(verdict.identities ?? []);
       if (verdict.exitCode) {
         return result({
           exitCode: verdict.exitCode,
@@ -1592,7 +1806,9 @@ export async function confirmArrival({
         });
       }
       if (verdict.kind === 'complete') {
-        return completeResult({ verdict, documents, scope: 'expected-partition' });
+        // Discovery found the full set; the EXACT point read of each id under
+        // this partition is what confirms — the only path to a zero exit.
+        return await confirmByPointRead({ verdict, documents, scope: 'expected-partition' });
       }
       if (verdict.kind === 'partial') {
         lastPartial = verdict;
@@ -1641,9 +1857,10 @@ export async function confirmArrival({
     );
   }
 
-  const sweepVerdict = evaluateReadBack(sweep, { runId, expectedCount });
+  const sweepVerdict = evaluateReadBack(sweep, { runId, expectedCount, partitionKeyField });
   observedSoFar = mergeIds(observedSoFar, sweepVerdict.ids);
   anomalousSoFar = mergeIds(anomalousSoFar, sweepVerdict.anomalousIds);
+  mergeIdentities(sweepVerdict.identities ?? []);
   if (sweepVerdict.kind === 'empty') {
     return result({
       exitCode: EXIT.TIMEOUT,
@@ -1693,18 +1910,20 @@ export async function confirmArrival({
   const landing = partitionCensus(sweep);
   const landed = landing.values;
 
-  // Every document is in the partition this run queried. It is a CONFIRMATION —
-  // the scoped polls simply missed them by timing, most plainly when the
-  // documents arrived during the round trip between the last poll and the sweep.
-  // Calling this a partition anomaly would report a healthy route as broken.
-  // The bound is the thing that was wrong, and the recorded arrival delay (past
-  // the bound, on this path) is exactly the calibration that says so.
+  // Every document is in the partition this run queried — but the sweep found
+  // them, and the sweep is DIAGNOSTICS ONLY (MG-73): it may never contribute to a
+  // zero exit, because a cross-partition scan masks a mis-partition, which is the
+  // failure the point read exists to detect. So this is NOT a confirmation. It is
+  // a timing outcome — the scoped polls missed them within the bound — reported
+  // nonzero, with the calibration (arrival past the bound) that says to raise the
+  // bound so the scoped poll and its point read can confirm them next time.
   if (landing.elsewhere === 0) {
-    return completeResult({
-      verdict: sweepVerdict,
-      documents: sweep,
+    return result({
+      exitCode: EXIT.AMBIGUOUS,
       scope: 'cross-partition',
-      note: ` under the EXPECTED partition ${safeFragment(partitionValue)} — found by the cross-partition sweep rather than by a scoped poll, which is a timing artefact of the ${timeoutMs}ms wait bound and NOT a partition anomaly; raise the bound to observe them in the scoped poll`,
+      observedPartitionValues: Object.freeze(landed),
+      observedArrivalMs: now() - startedAt,
+      reason: `all ${landing.total} document(s) for run ${safeFragment(runId)} were found under the EXPECTED partition ${safeFragment(partitionValue)}, but ONLY by the cross-partition sweep after the ${timeoutMs}ms wait bound elapsed — the sweep is diagnostics only and can never confirm (a scan masks a mis-partition), so this is a timing artefact, not a success; raise the bound so the scoped poll finds them and the point read can prove them`,
     });
   }
 
@@ -1825,6 +2044,9 @@ export function abortedConfirmation({
     partitionKeyField,
     observedIds: Object.freeze(observed),
     observedCount: observed.length,
+    // A run that aborted before the read-back has no per-document identity pairs
+    // to record; the field is present and empty so the shape never varies.
+    observedDocuments: Object.freeze([]),
     anomalousIds: Object.freeze(anomalous),
     observedPartitionValues: Object.freeze([]),
     observedArrivalMs: null,

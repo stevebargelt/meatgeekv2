@@ -265,15 +265,15 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // silently cease to run. The real-SDK tier grew alongside it to 55 (the AAD-only
 // read-back wiring gained a case); its floor is RAISED to 54 (margin one, as
 // before).
-// Honest counts, measured on the integrated tree: dependency-free 576
-// (fixture-core 227, container-definition 36, evidence 99, send-fixture 214);
+// Honest counts, re-measured after the MG-73 identity-proof negatives: dependency-free 592
+// (fixture-core 235, container-definition 36, evidence 107, send-fixture 214);
 // real-SDK 55 across 1 file.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 571,
+    minTests: 587,
   },
   sdk: {
     label: 'real-SDK',

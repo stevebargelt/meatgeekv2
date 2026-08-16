@@ -106,6 +106,9 @@ import { fileURLToPath } from 'node:url';
 
 import { PARTIAL_SUFFIX } from './evidence.mjs';
 import {
+  CONNECTION_DEVICE_ID_PROPERTY,
+  ENVELOPE_BODY_FIELD,
+  ENVELOPE_SYSTEM_PROPERTIES_FIELD,
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
@@ -245,8 +248,14 @@ describe('MG-67 real Azure SDK wiring', () => {
     });
 
     assert.equal(typeof reader.queryDocuments, 'function');
-    // queryDocuments is deliberately NOT called: that would reach Azure.
-    assert.deepEqual(Object.keys(reader), ['queryDocuments'], 'the reader seam grew a method');
+    assert.equal(typeof reader.readDocument, 'function');
+    // Neither is called: that would reach Azure. The seam is discovery +
+    // point read (MG-73), and nothing more.
+    assert.deepEqual(
+      Object.keys(reader),
+      ['queryDocuments', 'readDocument'],
+      'the reader seam grew a method'
+    );
   });
 
   it('constructs the real DefaultAzureCredential offline without requesting a token', async () => {
@@ -611,14 +620,26 @@ function runIdFrom(parameters) {
   return bound.value;
 }
 
-/** The documents a healthy route delivers for `runId`, built through the real contract. */
+/**
+ * The documents a healthy route delivers for `runId`, as IoT Hub routes them
+ * (MG-73): the sender body nested under Body, the endpoint-stamped root partition
+ * value, and the authenticated connection id. These abort/partial fixtures model
+ * the root id as equal to the sent id, so the OBSERVED ids they assert on are the
+ * sender's `${runId}-N` — the point read is never reached on a partial set.
+ */
 function deliveredDocuments(runId) {
   return buildFixtureMessages({
     runId,
     partitionKeyField: MEASURED_PARTITION_FIELD,
     deviceId: FIXTURE_DEVICE_ID,
     now: () => 1_754_000_000_000,
-  }).map(message => ({ ...message.body, _ts: 1_754_000_000 }));
+  }).map(message => ({
+    id: message.body.id,
+    deviceId: FIXTURE_DEVICE_ID,
+    [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: { [CONNECTION_DEVICE_ID_PROPERTY]: FIXTURE_DEVICE_ID },
+    [ENVELOPE_BODY_FIELD]: { ...message.body },
+    _ts: 1_754_000_000,
+  }));
 }
 
 /**
@@ -645,6 +666,10 @@ function readerFailingAfterPreflight({ pages = [], error }) {
       if (page === undefined) throw error;
       return page(runIdFrom(parameters));
     },
+    // Required by confirmArrival (MG-73). These fixtures only ever serve PARTIAL
+    // pages, so discovery never completes and the point read is never reached; a
+    // null keeps the seam present without inventing an addressable document.
+    readDocument: async () => null,
   };
 }
 
@@ -1680,8 +1705,16 @@ describe('MG-67 a refused --device never reaches the real SDK, the az argv, or a
       });
 
       // 1. USAGE — a naming refusal, "nothing live happened". Never a confirmation.
-      assert.equal(exitCode, EXIT.USAGE, `expected USAGE, got ${exitCode} (${exitLabel(exitCode)})`);
-      assert.notEqual(exitCode, EXIT.OK, 'an opaque credential-shaped device is never a confirmation');
+      assert.equal(
+        exitCode,
+        EXIT.USAGE,
+        `expected USAGE, got ${exitCode} (${exitLabel(exitCode)})`
+      );
+      assert.notEqual(
+        exitCode,
+        EXIT.OK,
+        'an opaque credential-shaped device is never a confirmation'
+      );
 
       // 2. THE REAL SDK WAS NEVER REACHED, and 3. NOTHING WAS SENT — the pin lands
       //    ahead of createRealReader and ahead of the az spawn.
@@ -1690,7 +1723,11 @@ describe('MG-67 a refused --device never reaches the real SDK, the az argv, or a
         0,
         'the real Cosmos client was constructed for an opaque device the pin must refuse first'
       );
-      assert.equal(spawned.length, 0, 'az was spawned for an opaque device the pin must refuse first');
+      assert.equal(
+        spawned.length,
+        0,
+        'az was spawned for an opaque device the pin must refuse first'
+      );
 
       // 4. THE OPAQUE VALUE LEAKED NOWHERE — not to a log line, INCLUDING the
       //    refusal path itself (a refused credential must never be echoed), not
@@ -1737,7 +1774,11 @@ describe('MG-67 a refused --device never reaches the real SDK, the az argv, or a
         1,
         'validation passed but the real Cosmos client was never constructed'
       );
-      assert.equal(constructed[0].options.endpoint, ENDPOINT, 'the real client got the dev endpoint');
+      assert.equal(
+        constructed[0].options.endpoint,
+        ENDPOINT,
+        'the real client got the dev endpoint'
+      );
       // It reached the body/partition build, spelled with the legal device.
       assert.ok(
         log.all().includes(FIXTURE_DEVICE_ID),
@@ -1803,7 +1844,11 @@ describe('MG-67 a refused --device never reaches the real SDK, the az argv, or a
 const REFUSED_COSMOS_NAME_SHAPES = [
   ['--account', 'a JWT', JWT_SHAPE],
   ['--account', 'a connection-string shape', CONNECTION_STRING_SHAPE],
-  ['--account', 'a base64 account-key shape (uppercase and over-length for the account rule)', PLANTED.accountKey],
+  [
+    '--account',
+    'a base64 account-key shape (uppercase and over-length for the account rule)',
+    PLANTED.accountKey,
+  ],
   ['--database', 'a JWT', JWT_SHAPE],
   ['--database', 'a connection-string shape', CONNECTION_STRING_SHAPE],
   ['--database', 'the reopened dotted Cosmos id', DOTTED_COSMOS_ID],

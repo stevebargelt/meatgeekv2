@@ -56,6 +56,9 @@ import {
 } from './fake-azure.mjs';
 import {
   CONFIRMATION_QUERY,
+  CONNECTION_DEVICE_ID_PROPERTY,
+  ENVELOPE_BODY_FIELD,
+  ENVELOPE_SYSTEM_PROPERTIES_FIELD,
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
@@ -211,14 +214,35 @@ function throwingLog({ armOn = () => true } = {}) {
   return { ...base, info: emit('info'), error: emit('error') };
 }
 
-/** The documents a healthy route delivers for `runId`, built through the real contract. */
+/**
+ * The documents a healthy route delivers for `runId`, as IoT Hub routes them
+ * (MG-73): the sender body nested under `Body`, a platform-assigned root id, and
+ * the endpoint-stamped root partition value (with the matching authenticated
+ * connection id) at the root. `overrides` merges at the ROOT — e.g.
+ * `{ deviceId: 'some-other-partition' }` models a landing under a different
+ * partition value.
+ */
 function deliveredDocuments(runId = RUN_ID, overrides = {}) {
   return buildFixtureMessages({
     runId,
     partitionKeyField: 'deviceId',
     deviceId: FIXTURE_DEVICE_ID,
     now: () => RUN_MILLIS,
-  }).map(message => ({ ...message.body, _ts: 1_754_000_000, ...overrides }));
+  }).map((message, i) => {
+    const partitionValue = overrides.deviceId ?? FIXTURE_DEVICE_ID;
+    return {
+      id: `cosmos-assigned-${i + 1}`,
+      deviceId: partitionValue,
+      [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: { [CONNECTION_DEVICE_ID_PROPERTY]: partitionValue },
+      [ENVELOPE_BODY_FIELD]: { ...message.body },
+      _ts: 1_754_000_000,
+      ...overrides,
+    };
+  });
+}
+/** The Cosmos root ids a confirmed read-back observes for `runId`. */
+function observedRootIds() {
+  return Array.from({ length: MESSAGES_PER_RUN }, (_, i) => `cosmos-assigned-${i + 1}`);
 }
 
 const BASE_ARGV = Object.freeze([
@@ -1087,6 +1111,9 @@ describe('main: the confirmed path', () => {
           order.push('read');
           return reader.queryDocuments(request);
         },
+        // The point read the confirmation gates on (MG-73) delegates to the
+        // fake's store; it is not a 'read' poll, so it does not enter `order`.
+        readDocument: request => reader.readDocument(request),
       };
       const spawn = fakeAzSpawn({});
       const spy = async (...args) => {
@@ -1383,8 +1410,8 @@ describe('main: every failure class exits with its own code and claims nothing',
   it('a read-back document WITHOUT the marker exits MARKER_VIOLATION, not success', async () => {
     await withTempDir(async dir => {
       const unmarked = deliveredDocuments().map(doc => {
-        const copy = { ...doc };
-        delete copy[SYNTHETIC_MARKER_FIELD];
+        const copy = { ...doc, [ENVELOPE_BODY_FIELD]: { ...doc[ENVELOPE_BODY_FIELD] } };
+        delete copy[ENVELOPE_BODY_FIELD][SYNTHETIC_MARKER_FIELD];
         return copy;
       });
       const { exitCode } = await runMain({
@@ -1669,8 +1696,11 @@ describe('main: every failure class exits with its own code and claims nothing',
       assert.match(output, /EVIDENCE NOT RECORDED/);
       assert.match(output, /MAY BE in/, 'an unconfirmed run cannot claim the documents exist');
       assert.match(output, /confirmation timeout/);
+      // On a timeout nothing was observed, so the output names the SENT ids — the
+      // sender's Body.id, from the ledger — not the Cosmos root ids.
       for (const doc of deliveredDocuments()) {
-        assert.ok(output.includes(doc.id), `the output must name the sent id ${doc.id}`);
+        const sentId = doc[ENVELOPE_BODY_FIELD].id;
+        assert.ok(output.includes(sentId), `the output must name the sent id ${sentId}`);
       }
     });
   });
@@ -1776,8 +1806,8 @@ describe('main: every failure class exits with its own code and claims nothing',
       // the sender, and it is also three documents in the live container: the
       // exit code reports the defect, the artifact accounts for the documents.
       const unmarked = deliveredDocuments().map(doc => {
-        const copy = { ...doc };
-        delete copy[SYNTHETIC_MARKER_FIELD];
+        const copy = { ...doc, [ENVELOPE_BODY_FIELD]: { ...doc[ENVELOPE_BODY_FIELD] } };
+        delete copy[ENVELOPE_BODY_FIELD][SYNTHETIC_MARKER_FIELD];
         return copy;
       });
       const evidenceOut = dir;
@@ -1959,8 +1989,8 @@ describe('the evidence-write integrity contract', () => {
 describe('the evidence-emission contract holds on every terminal outcome', () => {
   const unmarkedDocuments = () =>
     deliveredDocuments().map(doc => {
-      const copy = { ...doc };
-      delete copy[SYNTHETIC_MARKER_FIELD];
+      const copy = { ...doc, [ENVELOPE_BODY_FIELD]: { ...doc[ENVELOPE_BODY_FIELD] } };
+      delete copy[ENVELOPE_BODY_FIELD][SYNTHETIC_MARKER_FIELD];
       return copy;
     });
 
@@ -2103,10 +2133,11 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
         assert.equal(record.uncertain, outcome.uncertain ?? true);
         assert.equal(record.confirmed, outcome.exit === EXIT.OK);
 
-        // 4. DIVERGENCE IS WITNESSED, NEVER INFERRED. Every one of these cases
-        // observed only ids the sender requested — including the two that
-        // observed FEWER than they sent, which is a shortfall and not a renaming.
-        assert.equal(record.idDivergence, false);
+        // 4. DIVERGENCE IS WITNESSED, NEVER INFERRED (MG-73). The platform
+        // assigns the Cosmos root id, so ANY run that OBSERVED a document
+        // witnesses divergence — while a run that observed nothing never infers
+        // one from a shortfall.
+        assert.equal(record.idDivergence, outcome.sets.observed > 0);
       });
     });
   }
@@ -2198,7 +2229,11 @@ describe('the evidence-emission contract holds on every terminal outcome', () =>
 
       assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
       const output = log.all();
-      const [seen1, seen2, unseen] = deliveredDocuments().map(doc => doc.id);
+      // The two OBSERVED documents are named by their Cosmos root ids (they ARE
+      // in the container); the third, sent but never observed, is named by its
+      // SENT id (it MAY BE in the container). (MG-73.)
+      const [seen1, seen2] = observedRootIds();
+      const unseen = deliveredDocuments()[2][ENVELOPE_BODY_FIELD].id;
       assert.match(output, /ARE in/);
       assert.match(output, /MAY BE in/);
       for (const id of [seen1, seen2, unseen]) {
@@ -2267,7 +2302,9 @@ describe('a settlement that throws after live effect never exits 1', () => {
       // what the code says. One document is of unknown fate, and it is named.
       assert.deepEqual(await readdir(dir), []);
       const output = log.all();
-      const [firstId] = deliveredDocuments().map(doc => doc.id);
+      // A send failure observed nothing, so the id named is the SENT id — the
+      // sender's Body.id of the one attempted message, not a Cosmos root id.
+      const firstId = deliveredDocuments()[0][ENVELOPE_BODY_FIELD].id;
       assert.ok(output.includes(firstId), 'the unrecorded id must be named');
       assert.equal(/nothing was written/i.test(output), false);
       assertNoPlantedSecret(output, 'the last-resort path');
@@ -2601,7 +2638,6 @@ describe('source posture (HR1)', () => {
       /\.items\.create\b/,
       /\.items\.upsert\b/,
       /\.items\.bulk\b/,
-      /\.item\(/,
       /\.containers\.create/,
       /\.databases\.create/,
       /\.replace\(/,
@@ -2609,6 +2645,9 @@ describe('source posture (HR1)', () => {
     ]) {
       assert.equal(pattern.test(code), false, `send-fixture.mjs matches ${pattern}`);
     }
+    // `.item(id, pk).read()` is the point read (MG-73) — a READ, the only item
+    // call allowed, and it must be paired with .read() and nothing mutating.
+    assert.match(code, /\.item\([^)]*\)\s*\.read\(\)/);
     assert.match(code, /shell:\s*false/);
   });
 

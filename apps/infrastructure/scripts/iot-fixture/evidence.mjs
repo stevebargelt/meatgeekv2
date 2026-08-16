@@ -444,6 +444,18 @@ export const EVIDENCE_RECORD_KEYS = Object.freeze(
     'partitionKeyField',
     'partitionValue',
     'observedPartitionValues',
+    // Both identities per observed document, plus the MG-73 proof pair. rootId
+    // ADDRESSES the document, bodyId/fixtureRunId CORRELATE it, and the
+    // (rootPartitionValue, connectionDeviceId) equality is the proof;
+    // bodyDeviceIdAdvisory is the payload's own claim, recorded but never trusted.
+    'observedDocuments',
+    'observedDocumentCount',
+    'rootId',
+    'bodyId',
+    'fixtureRunId',
+    'rootPartitionValue',
+    'connectionDeviceId',
+    'bodyDeviceIdAdvisory',
     // The four id sets of the evidence-emission contract, plus the union a
     // downstream ticket must account for, plus the documents this run cannot
     // claim (kept strictly apart from its own).
@@ -994,6 +1006,25 @@ export function buildEvidenceRecord({
     hasConfirmation && Array.isArray(confirmation.anomalousIds) ? confirmation.anomalousIds : []
   );
 
+  // Both identities per observed document (MG-73), taken verbatim from the
+  // confirmation. They are DIFFERENT things and both are needed downstream: the
+  // Cosmos root `id` is what ADDRESSES the document (MG-54 disposes by it), while
+  // Body.id and Body.fixtureRunId are what CORRELATE it to this run. The proof
+  // pair — the endpoint-stamped root partition value and the authenticated
+  // connection device id — is recorded because the equality between them is the
+  // proof; the payload's own Body.deviceId is carried ADVISORY, never trusted.
+  const observedDocuments =
+    hasConfirmation && Array.isArray(confirmation.observedDocuments)
+      ? confirmation.observedDocuments.map(entry => ({
+          rootId: entry?.rootId ?? null,
+          bodyId: entry?.bodyId ?? null,
+          fixtureRunId: entry?.fixtureRunId ?? null,
+          rootPartitionValue: entry?.rootPartitionValue ?? null,
+          connectionDeviceId: entry?.connectionDeviceId ?? null,
+          bodyDeviceIdAdvisory: entry?.bodyDeviceId ?? null,
+        }))
+      : [];
+
   const runMillis = now();
   const runInstant = instantFrom(runMillis);
   const measuredDefaultTtl = containerDefinition.measuredDefaultTtl;
@@ -1174,6 +1205,11 @@ export function buildEvidenceRecord({
     // empty list would discard the one fact that distinguishes "landed under a
     // different key" from "landed under no key".
     observedPartitionValues,
+    // Both identities per observed document, plus the MG-73 proof pair. See the
+    // derivation above: rootId ADDRESSES, bodyId/fixtureRunId CORRELATE, and the
+    // (rootPartitionValue, connectionDeviceId) equality is the proof.
+    observedDocuments,
+    observedDocumentCount: observedDocuments.length,
 
     // The four sets of the evidence-emission contract, each with its own count.
     requestedIds: requested,
@@ -1243,10 +1279,12 @@ export function buildEvidenceRecord({
     record.accountableIds,
     record.anomalousIds,
     record.observedPartitionValues,
+    record.observedDocuments,
     record.findings,
   ]) {
     Object.freeze(list);
   }
+  for (const entry of record.observedDocuments) Object.freeze(entry);
   Object.freeze(record.marker);
   if (record.ttlDriftFinding) Object.freeze(record.ttlDriftFinding);
   return Object.freeze(record);

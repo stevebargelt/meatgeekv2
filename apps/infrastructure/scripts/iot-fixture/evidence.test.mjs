@@ -25,6 +25,9 @@ import { parseContainerDefinition } from './container-definition.mjs';
 import { fakeClock, fakeReader, forbiddenError } from './fake-azure.mjs';
 import {
   CONFIRMATION_QUERY,
+  CONNECTION_DEVICE_ID_PROPERTY,
+  ENVELOPE_BODY_FIELD,
+  ENVELOPE_SYSTEM_PROPERTIES_FIELD,
   EXIT,
   FIXTURE_DEVICE_ID,
   FixtureError,
@@ -127,6 +130,31 @@ function sentMessages(runId = RUN_ID) {
 
 const requestedIdsOf = messages => messages.map(message => message.body.id);
 
+// The sent messages as IoT Hub routes them (MG-73): each sender body nested
+// under `Body`, a platform-assigned root id, the endpoint-stamped root partition
+// value, and the authenticated connection id under SystemProperties. This is
+// what the read-back and its point read actually see — the flat body no longer
+// is. The Cosmos root ids are deliberately NOT the sender ids, which is why every
+// confirmed record now witnesses id divergence.
+const ROOT_ID_PREFIX = 'cosmos-assigned';
+const deliveredEnvelopes = (
+  messages,
+  {
+    partitionValue = FIXTURE_DEVICE_ID,
+    rootId = (_message, i) => `${ROOT_ID_PREFIX}-${i + 1}`,
+  } = {}
+) =>
+  messages.map((message, i) => ({
+    id: rootId(message, i),
+    deviceId: partitionValue,
+    [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: { [CONNECTION_DEVICE_ID_PROPERTY]: partitionValue },
+    [ENVELOPE_BODY_FIELD]: { ...message.body },
+    _ts: 1,
+  }));
+// The root ids a confirmed read-back observes, paired positionally with the
+// requested sender ids above.
+const observedRootIdsOf = messages => messages.map((_, i) => `${ROOT_ID_PREFIX}-${i + 1}`);
+
 // A real confirmation result, produced by the real confirmArrival against the
 // fake reader. Never a hand-built stand-in: the record's whole job is to
 // transcribe what the confirmation concluded, and a fabricated confirmation
@@ -146,7 +174,7 @@ async function confirmationFor(spec, overrides = {}) {
 
 async function successfulConfirmation(deliveredDocuments) {
   const messages = sentMessages();
-  const delivered = deliveredDocuments ?? messages.map(message => message.body);
+  const delivered = deliveredDocuments ?? deliveredEnvelopes(messages);
   const confirmation = await confirmationFor({
     script: [{ docs: [] }, { docs: delivered }],
   });
@@ -186,7 +214,7 @@ async function buildRecordForRun(runId, millis = RUN_MILLIS) {
   });
   const clock = fakeClock({ start: RUN_MILLIS - 5000 });
   const confirmation = await confirmArrival({
-    reader: fakeReader({ script: [{ docs: [] }, { docs: messages.map(message => message.body) }] }),
+    reader: fakeReader({ script: [{ docs: [] }, { docs: deliveredEnvelopes(messages) }] }),
     runId,
     partitionKeyField: 'deviceId',
     partitionValue: FIXTURE_DEVICE_ID,
@@ -258,7 +286,9 @@ describe('the evidence record', () => {
     const record = await buildSuccessRecord();
     assert.equal(record.count, record.ids.length);
     assert.equal(record.count, MESSAGES_PER_RUN);
-    assert.deepEqual(record.ids, requestedIdsOf(sentMessages()));
+    // The OBSERVED ids are the Cosmos root ids the read-back addressed, not the
+    // sender's requested ids (MG-73): the platform assigns the root id.
+    assert.deepEqual(record.ids, observedRootIdsOf(sentMessages()));
     // The count is derived, never copied from the confirmation's own tally: two
     // numbers that could disagree are a number MG-53 cannot trust.
     assert.equal(JSON.parse(serializeEvidenceRecord(record)).count, record.ids.length);
@@ -321,21 +351,58 @@ describe('the evidence record', () => {
 });
 
 describe('requested versus observed ids', () => {
-  it('records both lists and sets the divergence flag when the platform renamed them', async () => {
+  it('records the root, body and authenticated identities while preserving Body.deviceId as advisory', async () => {
     const messages = sentMessages();
-    // What the platform stored: the same run's documents, with ids of its own
-    // choosing. The correlation key is marker + run id, so the proof survives.
-    const delivered = messages.map((message, index) => ({
-      ...message.body,
-      id: `cosmos-assigned-${index}`,
+    const delivered = deliveredEnvelopes(messages).map(document => ({
+      ...document,
+      [ENVELOPE_BODY_FIELD]: { ...document[ENVELOPE_BODY_FIELD], deviceId: 'payload-claim-only' },
     }));
+    const record = await buildSuccessRecord({ deliveredDocuments: delivered });
+
+    assert.equal(record.observedDocumentCount, MESSAGES_PER_RUN);
+    assert.deepEqual(record.observedDocuments, [
+      {
+        rootId: 'cosmos-assigned-1',
+        bodyId: messages[0].body.id,
+        fixtureRunId: RUN_ID,
+        rootPartitionValue: FIXTURE_DEVICE_ID,
+        connectionDeviceId: FIXTURE_DEVICE_ID,
+        bodyDeviceIdAdvisory: 'payload-claim-only',
+      },
+      {
+        rootId: 'cosmos-assigned-2',
+        bodyId: messages[1].body.id,
+        fixtureRunId: RUN_ID,
+        rootPartitionValue: FIXTURE_DEVICE_ID,
+        connectionDeviceId: FIXTURE_DEVICE_ID,
+        bodyDeviceIdAdvisory: 'payload-claim-only',
+      },
+      {
+        rootId: 'cosmos-assigned-3',
+        bodyId: messages[2].body.id,
+        fixtureRunId: RUN_ID,
+        rootPartitionValue: FIXTURE_DEVICE_ID,
+        connectionDeviceId: FIXTURE_DEVICE_ID,
+        bodyDeviceIdAdvisory: 'payload-claim-only',
+      },
+    ]);
+    assert.deepEqual(record.ids, observedRootIdsOf(messages));
+    assert.equal(record.confirmed, true);
+    assert.equal(record.marker.value, SYNTHETIC_MARKER);
+  });
+
+  it('records both lists and sets the divergence flag for the platform-assigned root ids', async () => {
+    const messages = sentMessages();
+    // What the platform stored: the same run's documents under Cosmos root ids of
+    // its own choosing (MG-73). The correlation key is Body.fixtureRunId, so the
+    // proof survives — and divergence is now the ordinary confirmed shape.
     const record = await buildSuccessRecord({
-      deliveredDocuments: delivered,
+      deliveredDocuments: deliveredEnvelopes(messages),
       requestedIds: requestedIdsOf(messages),
     });
 
     assert.equal(record.idDivergence, true);
-    assert.deepEqual(record.ids, ['cosmos-assigned-0', 'cosmos-assigned-1', 'cosmos-assigned-2']);
+    assert.deepEqual(record.ids, observedRootIdsOf(messages));
     assert.deepEqual(record.requestedIds, requestedIdsOf(messages));
     assert.equal(record.requestedCount, MESSAGES_PER_RUN);
     // An observation, not a failure: the run is still confirmed.
@@ -346,8 +413,16 @@ describe('requested versus observed ids', () => {
     assert.match(finding.message, /OBSERVED ids are the ones that exist/);
   });
 
-  it('leaves the divergence flag clear when the platform honoured the sender ids', async () => {
-    const record = await buildSuccessRecord();
+  it('leaves the divergence flag clear only when the observed root ids equal the requested ones', async () => {
+    // The pure clear case, exercised with a synthetic "platform honoured the
+    // sender id" delivery (root id == body id). MG-73 makes this impossible live —
+    // which is why the ordinary confirmed record above DOES diverge — but the
+    // builder must still leave the flag clear when the two sets genuinely match.
+    const messages = sentMessages();
+    const record = await buildSuccessRecord({
+      deliveredDocuments: deliveredEnvelopes(messages, { rootId: message => message.body.id }),
+      requestedIds: requestedIdsOf(messages),
+    });
     assert.equal(record.idDivergence, false);
     assert.deepEqual(record.ids, record.requestedIds);
     assert.equal(
@@ -598,9 +673,7 @@ describe('a run that changed the live system but observed nothing', () => {
     // confirmed, and the divergence was genuinely witnessed — MG-54 cites the
     // ids that exist, and these are they.
     const messages = sentMessages();
-    const delivered = messages
-      .slice(0, 2)
-      .map((message, index) => ({ ...message.body, id: `cosmos-assigned-${index}` }));
+    const delivered = deliveredEnvelopes(messages.slice(0, 2));
     const confirmation = await confirmationFor({ fallback: { docs: delivered } });
     assert.equal(confirmation.exitCode, EXIT.AMBIGUOUS, 'fixture setup');
 
@@ -614,7 +687,7 @@ describe('a run that changed the live system but observed nothing', () => {
 
     assert.equal(record.confirmed, false);
     assert.equal(record.idDivergence, true);
-    assert.deepEqual(record.ids, ['cosmos-assigned-0', 'cosmos-assigned-1']);
+    assert.deepEqual(record.ids, ['cosmos-assigned-1', 'cosmos-assigned-2']);
     assert.equal(record.count, 2);
     assert.deepEqual(record.requestedIds, requestedIdsOf(messages));
   });
@@ -779,7 +852,7 @@ describe('the evidence-emission contract: one record, four id sets, every outcom
       requestedIds: ids,
       acceptedIds: ids,
       ambiguousIds: [],
-      observedIds: ids,
+      observedIds: observedRootIdsOf(messages),
     });
     assert.equal(
       record.findings.some(finding => finding.kind === 'ambiguous-acceptance'),
@@ -837,7 +910,7 @@ describe('the evidence-emission contract: one record, four id sets, every outcom
     // already read — and the id it read is in the container whatever happens
     // next.
     const messages = sentMessages();
-    const delivered = messages[0].body;
+    const delivered = deliveredEnvelopes(messages.slice(0, 1))[0];
     const confirmation = await confirmationFor({
       script: [{ docs: [delivered] }, { error: forbiddenError() }],
     });
@@ -907,7 +980,7 @@ describe('the evidence-emission contract: one record, four id sets, every outcom
       target: TARGET,
       now: fixedClock(),
     });
-    assert.deepEqual(record.observedIds, requestedIdsOf(messages));
+    assert.deepEqual(record.observedIds, observedRootIdsOf(messages));
     assert.equal(record.confirmed, true);
   });
 
@@ -1060,8 +1133,8 @@ describe('the record retracts the unknown-writer claim it cannot honour', () => 
   it('is filtered to this run, which is WHY the check is impossible here', () => {
     assert.match(
       CONFIRMATION_QUERY,
-      new RegExp(`c\\.${RUN_ID_FIELD}\\s*=\\s*@runId`),
-      'the confirmation query must pin this run id — the retraction below is justified by this predicate'
+      new RegExp(`c\\.${ENVELOPE_BODY_FIELD}\\.${RUN_ID_FIELD}\\s*=\\s*@runId`),
+      'the confirmation query must pin this run id under Body — the retraction below is justified by this predicate'
     );
   });
 
@@ -1188,7 +1261,11 @@ describe('idDivergence is witnessed, never inferred', () => {
     // asserting one in the artifact MG-53 and MG-54 parse mechanically would have
     // a downstream ticket act on a fabricated claim.
     const messages = sentMessages();
-    const delivered = messages.slice(0, 2).map(message => message.body);
+    // A synthetic "platform honoured the sender id" delivery: the two observed
+    // root ids equal the sender's, so the shortfall is not a witnessed divergence.
+    const delivered = deliveredEnvelopes(messages.slice(0, 2), {
+      rootId: message => message.body.id,
+    });
     const confirmation = await confirmationFor({ fallback: { docs: delivered } });
     assert.equal(confirmation.exitCode, EXIT.AMBIGUOUS, 'fixture setup');
 
@@ -1222,11 +1299,12 @@ describe('idDivergence is witnessed, never inferred', () => {
 
   it('is TRUE only when an OBSERVED document carries an id nobody requested', async () => {
     const messages = sentMessages();
-    // One document arrived under an id of the platform's choosing. Witnessed:
-    // the document exists and its id is not one of ours.
-    const delivered = messages.map((message, index) =>
-      index === 0 ? { ...message.body, id: 'cosmos-assigned-0' } : message.body
-    );
+    // One document arrived under an id of the platform's choosing (the rest under
+    // ids equal to the sender's). Witnessed: that document exists and its root id
+    // is not one of ours.
+    const delivered = deliveredEnvelopes(messages, {
+      rootId: (message, index) => (index === 0 ? 'cosmos-assigned-0' : message.body.id),
+    });
     const { confirmation } = await successfulConfirmation(delivered);
     const record = buildEvidenceRecord({
       ledger: (() => {
@@ -2265,17 +2343,24 @@ describe('the partition the documents landed in', () => {
   const POLLS_TO_BOUND = 5;
   const emptyPolls = () => Array.from({ length: POLLS_TO_BOUND }, () => ({ docs: [] }));
 
-  // Documents as COSMOS returns them: the platform assigns the id, and the
-  // partition key is whatever the BODY carried.
+  // Documents as COSMOS returns them (MG-73): the platform assigns the root id,
+  // the endpoint stamps the ROOT partition value, and the sender body is nested
+  // under Body. `mutate` operates on the ROOT doc — the partition-landing states
+  // are about the root partition value the endpoint stamped.
   const routed = ({ partitionValue = FIXTURE_DEVICE_ID, mutate } = {}) =>
     Array.from({ length: MESSAGES_PER_RUN }, (_, i) => {
       const doc = {
         id: `cosmos-assigned-${i + 1}`,
         deviceId: partitionValue,
-        timestamp: '2026-08-11T08:59:55.000Z',
-        [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
-        [RUN_ID_FIELD]: RUN_ID,
-        [SEQUENCE_FIELD]: i + 1,
+        [ENVELOPE_SYSTEM_PROPERTIES_FIELD]: { [CONNECTION_DEVICE_ID_PROPERTY]: partitionValue },
+        [ENVELOPE_BODY_FIELD]: {
+          id: `${RUN_ID}-${i + 1}`,
+          deviceId: partitionValue,
+          timestamp: '2026-08-11T08:59:55.000Z',
+          [SYNTHETIC_MARKER_FIELD]: SYNTHETIC_MARKER,
+          [RUN_ID_FIELD]: RUN_ID,
+          [SEQUENCE_FIELD]: i + 1,
+        },
       };
       if (mutate) mutate(doc);
       return doc;

@@ -1048,6 +1048,19 @@ export function cosmosReader(client, { database, container }) {
       // is a failure — substituting [] here would launder it into an absence.
       return response?.resources;
     },
+    // The EXACT point read (MG-73): address a document by its Cosmos root id
+    // WITHIN a partition value. A 404 returns `resource: undefined` rather than
+    // throwing, and it means "not addressable under this partition" — the
+    // caller, not this adapter, decides what that means. A real error (auth,
+    // transport) still throws and is classified upstream.
+    async readDocument({ id, partitionKey } = {}) {
+      const response = await client
+        .database(database)
+        .container(container)
+        .item(id, partitionKey)
+        .read();
+      return response?.resource ?? null;
+    },
   };
 }
 
