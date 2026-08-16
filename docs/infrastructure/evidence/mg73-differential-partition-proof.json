@@ -1,0 +1,94 @@
+{
+  "_comment": "MG-73 DIFFERENTIAL PROOF — establishes that the IoT Hub Cosmos routing endpoint's {deviceid} template resolves from the AUTHENTICATED connection identity, not from the device-supplied payload. Sanitized: derived from the run's structured outcomes, not from raw command output. No credential-bearing output is reproduced here; none was observed, and the run logs passed both credential sweeps before anything was read.",
+  "ticket": "MG-73",
+  "date": "2026-08-15",
+  "change": {
+    "applied_commit": "943a1c9",
+    "pull_request": 45,
+    "gitops_run": {
+      "workflow": "Apply Dev Infrastructure",
+      "run_id": 31905863156,
+      "conclusion": "success"
+    },
+    "plan_reviewed_before_merge": {
+      "summary": "0 to add, 1 to change, 0 to destroy",
+      "resource": "module.iot_hub.azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage",
+      "action": "update",
+      "partition_key_name": { "before": "", "after": "deviceId" },
+      "partition_key_template": { "before": "", "after": "{deviceid}" },
+      "replacement_token_on_endpoint_route_or_consumer_group": false,
+      "destroy_circuit_breaker": "PASS — destroys nothing, orphans nothing; 0 destructive changes; no authorization list required",
+      "pre_apply_secret_gate": "PASS — no prohibited credential value reached app_settings or outputs"
+    },
+    "live_endpoint_after_apply": {
+      "name": "cosmos-storage",
+      "partitionKeyName": "deviceId",
+      "partitionKeyTemplate": "{deviceid}",
+      "authenticationType": "identityBased",
+      "databaseName": "meatgeek-v2-dev-db",
+      "containerName": "temperatures"
+    }
+  },
+  "differential_message": {
+    "sent_as_authenticated_device": "meatgeek-v2-dev-synthetic-fixture-device",
+    "body_deviceId_deliberately_false": "mg73-FALSE-PAYLOAD-DEVICE-not-the-authenticated-one",
+    "correlation_id": "mg73-differential-19499d48-9bcb-4786-9648-c4ffbcaa3d45",
+    "marker": "MG-73-DIFFERENTIAL-PROOF",
+    "cosmos_root_id_assigned": "6178f0eb-29c9-4cfe-bc8a-3e1b24ea7cb6",
+    "_why_differential": "The authenticated identity and the payload's claimed identity DISAGREE. A message whose two ids match would pass under either binding and prove nothing — which is why the six pre-change documents could not answer this."
+  },
+  "assertions": {
+    "1_root_deviceId_equals_authenticated_identity": {
+      "result": "PASS",
+      "observed_root_deviceId": "meatgeek-v2-dev-synthetic-fixture-device"
+    },
+    "2_root_deviceId_differs_from_false_body_deviceId": {
+      "result": "PASS",
+      "payload_claimed": "mg73-FALSE-PAYLOAD-DEVICE-not-the-authenticated-one",
+      "endpoint_stamped": "meatgeek-v2-dev-synthetic-fixture-device"
+    },
+    "3_system_property_identifies_authenticated_fixture": {
+      "result": "PASS",
+      "SystemProperties_iothub_connection_device_id": "meatgeek-v2-dev-synthetic-fixture-device"
+    },
+    "4_partition_scoped_discovery_only_under_authenticated_partition": {
+      "result": "PASS",
+      "docs_under_authenticated_partition": 1,
+      "docs_under_false_payload_partition": 0,
+      "query": "SELECT c.id FROM c WHERE c.Body.fixtureRunId = @correlator, partition-scoped"
+    },
+    "5_point_read_succeeds_authenticated_fails_payload": {
+      "result": "PASS",
+      "point_read_with_authenticated_deviceId": "FOUND",
+      "point_read_with_false_payload_deviceId": "NOT FOUND",
+      "_why_the_failure_half_matters": "The document is not reachable under an identity the sender chose. A success here would mean a device could address another device's partition by lying in its body."
+    },
+    "6_no_cross_partition_result_contributed": {
+      "result": "PASS",
+      "detail": "Every assertion is partition-scoped or a point read. No cross-partition query contributed to any passing result; a cross-partition scan would mask a mis-partition, which is the failure under test."
+    }
+  },
+  "conclusion": {
+    "deviceid_token_binding": "AUTHENTICATED — resolves from the connection IoT Hub authenticated, not from the payload",
+    "operator_identity_rule": "SATISFIED, and structurally: the closed template grammar cannot reference a body field, and the live proof confirms the token binds to the authenticated connection",
+    "reject_branch_taken": false,
+    "nested_partition_path_migration": "formally closed as an option — not needed"
+  },
+  "permission_hygiene": {
+    "temporary_assignment_created": "ad32a7f4-a3b2-48e8-8b4e-7de91b22d8e6",
+    "role": "Cosmos DB Built-in Data Reader (00000000-0000-0000-0000-000000000001)",
+    "scope": "account (/)",
+    "created_immediately_before_use": true,
+    "revoked_immediately_after": true,
+    "revocation_verified": {
+      "assignment_absent_after": true,
+      "assignment_count_before": 2,
+      "assignment_count_after": 2,
+      "pre_existing_assignments_all_retained": true,
+      "retained": [
+        "8663fcfd-04fe-f06f-d104-6e7d89352ec4 (Built-in Data Contributor)",
+        "96a25294-333f-6330-7d78-a3f71b964bd9 (Built-in Data Contributor)"
+      ]
+    }
+  }
+}
