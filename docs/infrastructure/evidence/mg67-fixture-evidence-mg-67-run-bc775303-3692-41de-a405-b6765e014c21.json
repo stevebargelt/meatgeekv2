@@ -30,9 +30,7 @@
   "partitionKeyPath": "/deviceId",
   "partitionKeyField": "deviceId",
   "partitionValue": "meatgeek-v2-dev-synthetic-fixture-device",
-  "observedPartitionValues": [
-    "meatgeek-v2-dev-synthetic-fixture-device"
-  ],
+  "observedPartitionValues": ["meatgeek-v2-dev-synthetic-fixture-device"],
   "observedDocuments": [
     {
       "rootId": "7a84ca35-8f20-49ab-a1b2-6f6930541073",
