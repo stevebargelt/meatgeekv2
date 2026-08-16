@@ -328,7 +328,30 @@ const BRACKETED = /[{[][\s\S]*[}\]]/g;
 const CREDENTIAL_KEY =
   /(?<![\w-])(["']?)([\w-]*(?:key|token|secret|password|credential|sig)[\w-]*)(["']?)(\s*[=:]\s*)/gi;
 
+// A PEM block — private key or certificate. Its base64 body is wrapped, and a
+// SHORT synthetic key (or one whose body lines fall under the 40-char base64 run
+// threshold below) slips that run pattern while still being an unmistakable
+// credential — the RF-4 reach: `az` can print a PEM on stderr and the run scan
+// alone let it through. So the whole block is matched from its BEGIN marker to
+// its END marker and replaced whole; the DOTALL span is non-greedy so two
+// adjacent blocks are not collapsed into one over-match. This mirrors the shape
+// the evidence guard (evidence.mjs) already refuses, so the scrubber and the
+// record agree on what a PEM looks like. Redacted here rather than refused,
+// because scrubChildOutput's contract is to emit a scrubbed diagnostic, not to
+// abort. Runs BEFORE the base64 pattern so the body is gone before that pattern
+// could fragment the block and leave the markers bare.
+const PEM_MARKER = /-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----/i;
+const PEM_BLOCK = new RegExp(
+  PEM_MARKER.source + '[\\s\\S]*?-----END [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----',
+  'gi'
+);
+
 const SECRET_PATTERNS = [
+  [PEM_BLOCK, '[redacted]'],
+  // A BEGIN marker with no closing END — a PEM truncated by the child-output line
+  // cap or by az cutting off mid-block — still redacts on the marker alone, so a
+  // partial key body trailing it never survives.
+  [new RegExp(PEM_MARKER.source, 'gi'), '[redacted]'],
   [/\bBearer\s+[\w.~+/=-]+/gi, 'Bearer [redacted]'],
   // A JWT: three base64url segments, each long enough that dotted host names
   // and namespaced identifiers do not match.

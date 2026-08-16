@@ -601,6 +601,40 @@ describe('scrubChildOutput', () => {
     assert.equal(scrubSecrets(bareKey).includes(bareKey), false, 'scrubSecrets left the bare key');
   });
 
+  // RF-4: a PEM private-key block reaching child output must be redacted whole.
+  // A SHORT key's base64 body lines fall under the 40-char base64 run threshold,
+  // so the bare-run pattern alone let the block through — the exact reach RF-4
+  // demonstrated. The marker + END framing is matched and the whole block goes.
+  it('redacts a short PEM private-key block the az child printed (RF-4)', () => {
+    // Built at runtime so no PEM block is committed to the repo (HR1). The body
+    // is deliberately SHORT — under the 40-char base64 run — so this pins that
+    // the PEM framing, not the base64 run, is what redacts it.
+    const begin = ['-----BEGIN', 'PRIVATE', 'KEY-----'].join(' ');
+    const end = ['-----END', 'PRIVATE', 'KEY-----'].join(' ');
+    const body = Buffer.from('mg67-test-only-not-a-real-key').toString('base64');
+    assert.doesNotMatch(
+      body,
+      /^[A-Za-z0-9+/]{40,}={0,2}$/,
+      'the body must be UNDER the base64 run'
+    );
+    const stderr = ['ERROR: az could not load the identity', begin, body, end].join('\n');
+    const out = scrubChildOutput(stderr);
+    assert.equal(out.includes(body), false, 'the PEM body survived child-output scrubbing');
+    assert.doesNotMatch(out, /BEGIN|END/, 'the PEM markers survived');
+    assert.match(out, /\[redacted\]/);
+    assert.match(out, /az could not load the identity/, 'the surrounding diagnostic is kept');
+    // The primitive the child-output scrub relies on redacts it directly, too —
+    // including a PEM CERTIFICATE and a block truncated to its BEGIN marker only.
+    assert.equal(scrubSecrets([begin, body, end].join('\n')).includes(body), false);
+    assert.doesNotMatch(
+      scrubSecrets(`${begin}\n${body}`),
+      /BEGIN/,
+      'a truncated PEM must still go'
+    );
+    const cert = ['-----BEGIN', 'CERTIFICATE-----'].join(' ');
+    assert.match(scrubSecrets(`${cert}\n${body}`), /\[redacted\]/);
+  });
+
   // Bracket redaction runs over the whole text before the split on purpose: a
   // JSON object az printed across several lines has its braces on different
   // lines, and a per-line scrub would leave every inner value intact.

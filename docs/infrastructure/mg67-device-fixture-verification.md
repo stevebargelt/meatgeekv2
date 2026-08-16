@@ -1,19 +1,30 @@
 # MG-67 — Dev IoT Device Fixture: Host-Phase Verification Runbook
 
-> **Nothing in this document has been run against the live tenant.** The build
-> pipeline that produced `apps/infrastructure/scripts/iot-fixture/` runs in a
-> container with **no Azure credential**, so every command below is **unexecuted**
-> until an operator runs it. No device has been registered by this procedure, no
-> container definition has been read by it, no role assignment has been made by
-> it, and **`send-fixture.mjs` has never been run against `meatgeek-v2-dev-db`**.
-> (MG-73's own, separate differential probe has since written one document there
-> — see the section below — but this ticket's own tool and its 3-message proof
-> have not run.) The tool and its tests are the pipeline's deliverable; the
-> **proof** is this procedure, and it is outstanding.
+> **The 3-message traversal has now run against the live tenant, and it was
+> confirmed.** On **2026-08-16** `send-fixture.mjs` ran against
+> `meatgeek-v2-dev-db` as run `mg-67-run-bc775303-3692-41de-a405-b6765e014c21`,
+> exited **0**, and read back **3 of 3** marked, run-correlated documents whose
+> root partition value equalled both the fixture device and the authenticated
+> `iothub-connection-device-id`. Its committed evidence is
+> `docs/infrastructure/evidence/mg67-fixture-evidence-mg-67-run-bc775303-3692-41de-a405-b6765e014c21.json`,
+> which also records §3's container measurement (`measuredDefaultTtl: 604800`,
+> partition key path `/deviceId`). The §12 sign-off lines that artifact evidences
+> — **1, 2, 4, 5** — are recorded as done below.
 >
-> Read the whole document before running step 1. The steps are ordered because
-> each depends on the state the previous one establishes, and §5 (removing the
-> temporary role assignment) is a **deliverable step, not cleanup**.
+> **The host-phase CLOSEOUT is not yet complete, and MG-67 does not close until it
+> is.** The build pipeline that produced `apps/infrastructure/scripts/iot-fixture/`
+> runs in a container with **no Azure credential**; the artifact above was produced
+> by an operator run, not by the pipeline. The steps that run does **not** evidence
+> remain outstanding and still read **NOT RUN** in §12: the §4/§5 temporary
+> role-assignment lifecycle (lines 3, 7), the §7c stdout/stderr capture and
+> credential screening (line 5b — **no run log is committed to
+> `docs/infrastructure/evidence/`**, so the no-emission criterion is not yet
+> evidenced), the §9 unfiltered enumeration (line 6), and the §10 findings (line
+> 8). Complete those before sign-off.
+>
+> Read the whole document before running any remaining step. The steps are ordered
+> because each depends on the state the previous one establishes, and §5 (removing
+> the temporary role assignment) is a **deliverable step, not cleanup**.
 
 ## What this ticket proves, in one sentence
 
@@ -34,7 +45,8 @@ that document does **not** carry this ticket's `MG-67-SYNTHETIC-FIXTURE` marker
 (its own marker is `MG-73-DIFFERENTIAL-PROOF`), so anyone running §9's unfiltered
 enumeration before it TTL-expires will see it as a nonzero, unmarked hit — real,
 expected, and not evidence of an unknown writer. **This ticket's own 3-message
-fixture run, via `send-fixture.mjs`, is still outstanding**, tracked in §12.
+fixture run, via `send-fixture.mjs`, has since been executed and confirmed**
+(2026-08-16; see the banner and §12); its host-phase closeout is what remains.
 
 The routing is not broken, and this ticket does not change it. Endpoint
 `cosmos-storage` (`authenticationType: identityBased`) and route
@@ -47,7 +59,7 @@ dev, so every routed document now gets a root `deviceId` stamped from the
 authenticated connection identity. That change, not this ticket, is why a
 read-back can be tied to a specific authenticated device at all — see §6 for
 the contract as it now stands. This ticket's own 3-message `send-fixture.mjs`
-run has not yet been executed.
+run has since been executed and confirmed (2026-08-16; see the banner and §12).
 
 ## Fixed coordinates
 
@@ -345,6 +357,11 @@ case "${MG67_GRANT_DECISION:-unset}" in
       echo "MG67_CREATED=no"
       echo "MG67_ASSIGNMENT_NAME="
       echo "MG67_PRE_EXISTING=$EXISTING"
+      # §5's after-check dereferences $MG67_BEFORE under `set -u`, on EVERY path.
+      # Record it here too — the skip path leaves the account untouched, so
+      # before==after and §5's before/after diff is correctly empty — otherwise a
+      # legitimate pre-existing-reader closeout aborts unbound mid-procedure.
+      echo "MG67_BEFORE=$BEFORE"
     } > "$MG67_STATE"
     echo "SKIPPED the grant: you already hold $EXISTING. §5 has NOTHING to remove."
     echo "Nothing was created. Go to §6."
@@ -1365,8 +1382,13 @@ That means: `$SCREEN1_OK=no`, or `$SCREEN2_OK=no`. In order:
 # confused with an overlapping run's logs.
 if [ "$SCREEN1_OK" != yes ] || [ "$SCREEN2_OK" != yes ]; then
   echo "STOP: an unexplained hit is on record above. Do not promote — see stop condition 2."
+elif [ -z "${RUN_ID:-}" ]; then
+  # REFUSE to promote, do not warn-and-copy: a log the gate cannot tie to the run
+  # that produced it is not evidence — it is an artifact nobody can attribute, and
+  # the whole point of the capture is to support the no-emission criterion for THIS
+  # run. A guessed or empty name loses that correlation, so nothing is copied.
+  echo "STOP: \$RUN_ID is unset or empty (see §6); refusing to promote logs under an uncorrelated name."
 else
-  test -n "$RUN_ID" || { echo "STOP: \$RUN_ID is unset (see §6); do not promote logs under a guessed name."; }
   cp "$RUN_OUT" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stdout.log"
   cp "$RUN_ERR" "docs/infrastructure/evidence/mg67-fixture-run-${RUN_ID}.stderr.log"
 fi
@@ -1596,17 +1618,17 @@ disappear.
 
 ## 12. Sign-off checklist
 
-| #   | Item                                                                                                                                                             | Evidence to record                                                             | State       |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ----------- |
-| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                                                                          | the `deviceId` + `status` row                                                  | **NOT RUN** |
-| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                                                                           | the `jq` output                                                                | **NOT RUN** |
-| 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)                     | the §4 state file, `MG67_CREATED` either way                                   | **NOT RUN** |
-| 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                              | the exit code + the command line                                               | **NOT RUN** |
-| 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a)            | the file path + its contents                                                   | **NOT RUN** |
-| 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the screen summary lines (never a matched value) + the two committed log files | **NOT RUN** |
-| 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                            | all three Data Explorer queries, per container                                 | **NOT RUN** |
-| 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove             | both §5 proofs: yours gone, before/after diff empty                            | **NOT RUN** |
-| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                                          | the finding text                                                               | **NOT RUN** |
+| #   | Item                                                                                                                                                             | Evidence to record                                                             | State                                                                                                                                                                         |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                                                                          | the `deviceId` + `status` row                                                  | **DONE** — the run's authenticated `connectionDeviceId` = `meatgeek-v2-dev-synthetic-fixture-device`; an unregistered device could not have sent an authenticated D2C message |
+| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                                                                           | the `jq` output                                                                | **DONE** — artifact `partitionKeyPath: /deviceId`, `measuredDefaultTtl: 604800`                                                                                               |
+| 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)                     | the §4 state file, `MG67_CREATED` either way                                   | **NOT RUN** — no §4 state file committed                                                                                                                                      |
+| 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                              | the exit code + the command line                                               | **DONE** — run `mg-67-run-bc775303-3692-41de-a405-b6765e014c21`, `exitCode: 0`, `confirmed: true`, 2026-08-16                                                                 |
+| 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a)            | the file path + its contents                                                   | **DONE** — `docs/infrastructure/evidence/mg67-fixture-evidence-mg-67-run-bc775303-3692-41de-a405-b6765e014c21.json` (`count: 3`, `anomalousIds: []`)                          |
+| 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the screen summary lines (never a matched value) + the two committed log files | **NOT RUN**                                                                                                                                                                   |
+| 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                            | all three Data Explorer queries, per container                                 | **NOT RUN**                                                                                                                                                                   |
+| 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove             | both §5 proofs: yours gone, before/after diff empty                            | **NOT RUN**                                                                                                                                                                   |
+| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                                          | the finding text                                                               | **NOT RUN**                                                                                                                                                                   |
 
 **MG-67 closes when every line above is recorded — and not before.** Line 4 is
 the traversal; lines 5 and 7 are what the downstream tickets and the security
