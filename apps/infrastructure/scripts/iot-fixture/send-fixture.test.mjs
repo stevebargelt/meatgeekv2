@@ -1102,6 +1102,39 @@ describe('main: the confirmed path', () => {
     });
   });
 
+  it('records the authenticated point-read identity, not the payload device claim, in the proof artifact', async () => {
+    await withTempDir(async dir => {
+      const { exitCode, reader } = await runMain({
+        evidenceOut: dir,
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+      });
+
+      assert.equal(exitCode, EXIT.OK);
+      // Discovery yields the platform-assigned root ids; each one must then be
+      // point-read under the registered fixture partition before exit 0 is
+      // possible. The payload's Body.deviceId is only an advisory claim.
+      assert.deepEqual(
+        reader.readCalls,
+        observedRootIds().map(id => ({ id, partitionKey: FIXTURE_DEVICE_ID }))
+      );
+
+      const record = JSON.parse(await readFile(evidenceFileIn(dir), 'utf8'));
+      assert.deepEqual(record.observedIds, observedRootIds());
+      assert.equal(record.observedDocuments.length, MESSAGES_PER_RUN);
+      for (const document of record.observedDocuments) {
+        assert.ok(observedRootIds().includes(document.rootId));
+        assert.notEqual(
+          document.rootId,
+          document.bodyId,
+          'the Cosmos root id is not sender-controlled'
+        );
+        assert.equal(document.rootPartitionValue, FIXTURE_DEVICE_ID);
+        assert.equal(document.connectionDeviceId, FIXTURE_DEVICE_ID);
+        assert.equal(document.bodyDeviceIdAdvisory, FIXTURE_DEVICE_ID);
+      }
+    });
+  });
+
   it('does the pre-send read BEFORE the first spawn, and polls only after sending', async () => {
     await withTempDir(async dir => {
       const order = [];
