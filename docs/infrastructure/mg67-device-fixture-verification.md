@@ -3,10 +3,13 @@
 > **Nothing in this document has been run against the live tenant.** The build
 > pipeline that produced `apps/infrastructure/scripts/iot-fixture/` runs in a
 > container with **no Azure credential**, so every command below is **unexecuted**
-> until an operator runs it. No device has been registered, no container
-> definition has been read, no role assignment has been made, and **no document
-> has ever been written to `meatgeek-v2-dev-db`**. The tool and its tests are the
-> pipeline's deliverable; the **proof** is this procedure, and it is outstanding.
+> until an operator runs it. No device has been registered by this procedure, no
+> container definition has been read by it, no role assignment has been made by
+> it, and **`send-fixture.mjs` has never been run against `meatgeek-v2-dev-db`**.
+> (MG-73's own, separate differential probe has since written one document there
+> — see the section below — but this ticket's own tool and its 3-message proof
+> have not run.) The tool and its tests are the pipeline's deliverable; the
+> **proof** is this procedure, and it is outstanding.
 >
 > Read the whole document before running step 1. The steps are ordered because
 > each depends on the state the previous one establishes, and §5 (removing the
@@ -18,15 +21,33 @@ That a message sent from a registered device to
 `meatgeek-v2-dev-iothub-259d4bf5b628` traverses the existing `cosmos-storage`
 route and lands as a **specific, newly identified document** that can be **read
 back out of** the `temperatures` container in `meatgeek-v2-dev-db` — something no
-one has ever observed, because as measured on **2026-08-10** all five containers
-in that database held **zero documents and zero bytes** and the hub had **zero
+one had ever observed as of **2026-08-10**, when all five containers in that
+database held **zero documents and zero bytes** and the hub had **zero
 registered devices**.
 
-The routing is not broken and is not being changed. Endpoint `cosmos-storage`
-(`authenticationType: identityBased`) and route `cosmos-storage-route`
-(`source: DeviceMessages`, `condition: true`, `isEnabled: true`) are already
-correct in `apps/infrastructure/modules/iot-hub/main.tf`. The path has simply
-never carried a message.
+**That has since changed once, narrowly.** MG-73's differential proof
+(`docs/infrastructure/evidence/mg73-differential-partition-proof.json`) sent one
+message and read one document back on **2026-08-15**, via separate, ad-hoc
+`cosmos-export`-based tooling — not `send-fixture.mjs` — to validate the routing
+endpoint's partition-key change. The container is therefore no longer empty, and
+that document does **not** carry this ticket's `MG-67-SYNTHETIC-FIXTURE` marker
+(its own marker is `MG-73-DIFFERENTIAL-PROOF`), so anyone running §9's unfiltered
+enumeration before it TTL-expires will see it as a nonzero, unmarked hit — real,
+expected, and not evidence of an unknown writer. **This ticket's own 3-message
+fixture run, via `send-fixture.mjs`, is still outstanding**, tracked in §12.
+
+The routing is not broken, and this ticket does not change it. Endpoint
+`cosmos-storage` (`authenticationType: identityBased`) and route
+`cosmos-storage-route` (`source: DeviceMessages`, `condition: true`,
+`isEnabled: true`) are already correct in
+`apps/infrastructure/modules/iot-hub/main.tf`. **MG-73 has since changed this
+same endpoint's partition key materialization** — `partitionKeyName` and
+`partitionKeyTemplate` went from unset to `deviceId` / `{deviceid}`, applied to
+dev, so every routed document now gets a root `deviceId` stamped from the
+authenticated connection identity. That change, not this ticket, is why a
+read-back can be tied to a specific authenticated device at all — see §6 for
+the contract as it now stands. This ticket's own 3-message `send-fixture.mjs`
+run has not yet been executed.
 
 ## Fixed coordinates
 
@@ -601,6 +622,23 @@ shell history next to the result. The defaults are the same values (180000 ms /
 
 ### What the tool does, in order — and where it can stop
 
+**The document IoT Hub writes to Cosmos is an envelope, not the message body.**
+It is shaped `{ Body: <the JSON the device sent>, Properties, SystemProperties,
+id, iothub-name, _ts, … }` — see
+`docs/infrastructure/evidence/mg73-observed-routed-document.json` for a real
+one. The fixture's `syntheticFixture`, `fixtureRunId`, `fixtureSequence`,
+`ticket`, `id` and `timestamp` all live **under `Body`**, never at the document
+root. The root `id` is a **Cosmos-assigned GUID** the sender never chooses and
+cannot predict — a pure point read is therefore impossible as a first step; the
+root id has to be discovered before it can be read. Since MG-73, the
+`cosmos-storage` endpoint's `partitionKeyTemplate` (`{deviceid}`) also stamps a
+root-level `deviceId` on every routed document, materialized from
+`SystemProperties["iothub-connection-device-id"]` — the **authenticated**
+connection identity — never from the body. `Body.deviceId` still exists (the
+fixture still writes it), but it is payload-controlled and plays no part in
+partitioning; a match on it alone is never sufficient and is recorded as
+advisory only (§7a).
+
 1. **Reserves this run's evidence file** inside the `--evidence-out` **directory**
    — **before anything live happens**. `--evidence-out` names a directory; the
    tool derives the file name from this run's own unique id
@@ -634,10 +672,12 @@ shell history next to the result. The defaults are the same values (180000 ms /
 
 2. **Measures** the container from §3's document. Refuses on anything it cannot
    read (**exit 8**); never defaults.
-3. **Reads the container BEFORE sending**, requiring this run's freshly minted
-   `fixtureRunId` to be absent. This is what makes the proof a _newly identified_
-   document rather than an assumption, and it surfaces a missing/unpropagated
-   role assignment (**exit 4**) while **nothing has been sent**.
+3. **Reads the container BEFORE sending** — a query scoped to the fixture
+   device's authenticated partition value, correlated on `Body.fixtureRunId` —
+   requiring this run's freshly minted correlator to be absent. This is what
+   makes the proof a _newly identified_ document rather than an assumption, and
+   it surfaces a missing/unpropagated role assignment (**exit 4**) while
+   **nothing has been sent**.
 4. **Sends 3 D2C messages** via `az iot device send-d2c-message`, each carrying
    `syntheticFixture=MG-67-SYNTHETIC-FIXTURE`, this run's `fixtureRunId`, a
    `fixtureSequence`, `ticket`, the partition field measured in §3 and a
@@ -645,30 +685,51 @@ shell history next to the result. The defaults are the same values (180000 ms /
    system properties. Any nonzero `az` exit aborts the run (**exit 2**) — after
    recording, for every message it attempted, whether `az` accepted it or left
    its acceptance **unknown**.
-5. **Polls** for the full set within the bound, scoped to the fixture device's
-   partition. Timeout is **exit 3**, a document without the marker is **exit 6**,
-   and a partial or ambiguous read is **exit 7** — never conflated, never
-   reported as an absence.
-6. **Sweeps cross-partition once** if the scoped polls found nothing, before
-   reporting any absence — otherwise a document that landed under a partition
-   value nobody expected would be reported as "the route didn't deliver". The
-   sweep's verdict is read **off the partition value the returned documents
-   carry**, not off which query found them:
-   - full set, all carrying the **expected** partition value → **exit 0**. They
-     arrived during the round trip after the last scoped poll; that is a timing
-     artefact of your `--timeout`, not a partition anomaly, and the recorded
-     arrival delay says to raise the bound.
+5. **Confirms in two phases, both scoped to the fixture device's authenticated
+   partition value**, within the bound:
+   - **Partition-scoped discovery** — a query scoped to the authenticated device
+     id as the partition value, correlated on `Body.fixtureRunId` — yields the
+     candidate documents' Cosmos root ids.
+   - **Exact point read** of each returned root id, under that **same**
+     partition value. A document counts only when its root partition value
+     equals **both** the registered fixture device id **and**
+     `SystemProperties["iothub-connection-device-id"]` — equality with only one
+     of the two is not proof. A match on `Body.deviceId` is **never** sufficient
+     on its own: it is payload-controlled, and is recorded as advisory only.
+
+   Timeout is **exit 3**, a document without the marker is **exit 6**, and a
+   partial or ambiguous read is **exit 7** — never conflated, never reported as
+   an absence.
+
+6. **Sweeps cross-partition once** if the scoped discovery-and-point-read found
+   nothing, before reporting a non-success outcome — otherwise a document that
+   landed under a partition value nobody expected would be reported as "the
+   route didn't deliver". **The sweep is diagnostics for non-success paths
+   only and can never produce exit 0**: it is not partition-scoped, so it
+   cannot supply the point-read proof exit 0 requires, and treating what it
+   finds as confirmation would let a scan mask a mis-partition — the exact
+   failure this proof exists to detect. It remains valuable for telling apart
+   "delivered, but not under the expected partition" from "not delivered",
+   which get different exit codes. The sweep's verdict is read **off the
+   partition value the returned documents carry**, not off which query found
+   them:
+   - full set, all carrying the **expected** partition value →
+     **exit 7 (correlation ambiguity), never exit 0**. A full set surfacing only
+     through an unscoped scan cannot be told apart from a race with a
+     late-arriving scoped result, and confirming off it would accept exactly the
+     kind of proof the partition-scoped discovery-and-point-read exists to
+     replace.
    - full set, one or more **not** carrying the expected partition value →
-     **exit 9**. The outcome text distinguishes the two ways that happens, because
-     they are different facts about the route needing different repairs: a
-     document under a **different** `deviceId`, and a document carrying **no
-     `deviceId` field at all** — which is the architect's top-ranked risk here,
-     since nothing between the device and Cosmos injects a partition key, so a
-     body that omits the field produces a document under **no** partition key
-     rather than under some other one. That second case points at the message
-     body the sender built, not at the routing target. Both are recorded
-     separately in `observedPartitionValues`; neither is collapsed into the other
-     or into an empty list (§7a).
+     **exit 9**, delivered under an unexpected root `deviceId`. Before MG-73
+     this could also mean a document with **no** root `deviceId` at all — the
+     architect's top-ranked risk, since nothing injected the partition key.
+     **MG-73 closes that case**: the endpoint now stamps a root `deviceId` on
+     every routed document from the authenticated connection identity, never
+     from the body, so a document with no root `deviceId` is no longer a live
+     possibility on this route. What remains is a document whose root
+     `deviceId` names a different authenticated device than the fixture's.
+     Recorded in `observedPartitionValues`; never collapsed into an empty list
+     (§7a).
    - a **partial** cross-partition set → **exit 7**, not exit 9: with most of the
      run unaccounted for, nothing has established where it landed, and a routing
      diagnosis nobody witnessed must not enter the artifact MG-53 parses.
@@ -755,8 +816,10 @@ What each field validates, exactly:
   `--container` slot. **This tool accepts none of them.** Rejecting dots means a JWT
   — and any separator-bearing credential — is refused in every one of these slots by
   construction, refused _before_ that text could be logged, passed to the `az` argv,
-  embedded in a Cosmos document body (`deviceId` is the container's partition key),
-  **or written into the evidence record**.
+  embedded in a Cosmos document body as `Body.deviceId` — advisory only since
+  MG-73; the container's actual partition key is a root field the routing
+  endpoint stamps from the authenticated connection identity, not from this
+  body field (§6) — **or written into the evidence record**.
 - **The residue the four charset rules cannot catch is an opaque token already
   shaped like a legal name — and it does not matter for them.** A 32-char hex key is
   indistinguishable from a 32-char identifier, and no naming rule can tell them
@@ -765,7 +828,7 @@ What each field validates, exactly:
   `az` resolves the device key itself under your identity, and the read-back is
   AAD-only, so no key is ever passed in for any of those fields to screen. The **one**
   field where that residue _would_ matter — because a device id flows into the `az`
-  argv, the operator log, and the document body as the partition key — is exactly the
+  argv, the operator log, and the document body's `Body.deviceId` — is exactly the
   field that is **pinned**, closing it completely.
 - **An earlier revision carved a dotted Cosmos id back into `--database`/`--container`
   and left `--device` as a charset rule — both were wrong, and both are retracted
@@ -811,16 +874,16 @@ credential where a name belongs, halt and report.
 
 | Code | Meaning                         | What it tells you                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ---- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | confirmed-in-cosmos             | **The only success.** 3 marker-carrying, run-correlated documents were read back out of `temperatures`, and the evidence was written.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 0    | confirmed-in-cosmos             | **The only success.** 3 documents, each found by partition-scoped discovery (correlated on `Body.fixtureRunId`) and confirmed by an exact point read, each carrying `Body.syntheticFixture` and this run's `Body.fixtureRunId`, each under a root `deviceId` equal to **both** the registered fixture device and `SystemProperties["iothub-connection-device-id"]` — and the evidence was written.                                                                                                                                                                                                                                                                          |
 | 1    | usage error                     | Bad/missing arguments, a refused credential-bearing flag (`--key`, `--connection-string`, `--sas`, …), a **name that fails its field's rule** (`--device` is **pinned** — any value other than `FIXTURE_DEVICE_ID`, including a valid-charset opaque token, fails here; the other four are charset-constrained, so a JWT or any dotted/separator-bearing value in `--hub`, `--account`, `--database` or `--container` fails here; in every case the value is **not** echoed back), or an **unusable or reused `--evidence-out`** caught by the reservation. **Nothing live happened** — the tool re-reports a usage failure that arrives after a send as **7**, never as 1. |
 | 2    | send failure                    | `az iot device send-d2c-message` failed. Check `az login` and `az extension add --name azure-iot`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | 3    | confirmation timeout            | The bound elapsed with the documents not found. **Not an absence, not a success.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | 4    | auth failure                    | 401/403, or no credential could be acquired. **Says nothing about whether the route delivered.** Usually §4 not propagated.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | 5    | transport abort                 | Retries exhausted on a transport error.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 6    | synthetic marker violation      | A read-back document lacked the marker — a defect in the sender, not an acceptable variant.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| 7    | correlation ambiguity           | Fewer documents than sent, a duplicate correlator, or an unreadable result. Also the code for a run that concluded a state this tool cannot name — see below. **Stop condition 3 (§9).**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 7    | correlation ambiguity           | Fewer documents than sent, a duplicate correlator, an unreadable result, or a full set found **only** by the cross-partition sweep — a scan is not partition-scoped proof, so it can no longer confirm even when every returned document carries the expected partition value (§6). Also the code for a run that concluded a state this tool cannot name — see below. **Stop condition 3 (§9).**                                                                                                                                                                                                                                                                            |
 | 8    | container definition refusal    | §3's document could not be measured. No default was substituted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| 9    | delivered, unexpected partition | The full set **arrived**, and one or more documents do **not carry the expected partition value** — read off the documents, not inferred from which query found them. The route works; the partition assumption does not. "Under a **different** `deviceId`" and "carrying **no** `deviceId` field at all" are stated and recorded separately (§6, §7a). Report it with `observedPartitionValues` — do not re-run hoping for a different answer.                                                                                                                                                                                                                            |
+| 9    | delivered, unexpected partition | The full set **arrived** under a root `deviceId` that is not the fixture's — read off the documents, not inferred from which query found them. The route works; the partition assumption does not. Before MG-73 this could also mean a document carrying **no** root `deviceId` at all; the endpoint now stamps one on every routed document from the authenticated connection identity, so that case is closed (§6). Report it with `observedPartitionValues` — do not re-run hoping for a different answer.                                                                                                                                                               |
 | 10   | evidence unrecorded             | **A send happened and no record of it survives.** See below — this one needs an action before any diagnosis.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 #### There is no default success — an unnameable outcome exits 7
@@ -943,24 +1006,25 @@ that and nothing else.
 Fields, by their real names. It is **`schemaVersion: 2`**; MG-53 and MG-54 check
 that first and must refuse a version they were not written against.
 
-| Field                                                                                                 | What it carries                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `confirmed`, `uncertain`, `attempted`, `outcome`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`   | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`. `outcome` is the stable slug to branch on. `scope` is `expected-partition`, `cross-partition`, `aborted-after-read-back` or `not-attempted`, and says which read found the documents — **not** where they landed. `scope: cross-partition` with `exitCode: 0` is a confirmed run whose documents the sweep found in the **expected** partition; where they landed is `observedPartitionValues`.                                                                                                              |
-| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `deviceId`                                                                                            | The fixture device.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed. `observedPartitionValues` records a document carrying **no** partition key field as the reserved token `<no-partition-key-field>`, and one whose value is present but empty or not a string as `<unusable-partition-key-value>` — **recorded states, not an absence**. An empty list would throw away the one fact separating "landed under a different key" from "landed under no key at all", and the second is the predicted failure mode for this route. Neither token is a legal device id this fixture mints. |
-| **the four id sets** — see below                                                                      | `requestedIds`, `acceptedIds`, `ambiguousIds`, `observedIds`, each with its `…Count`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| **`accountableIds`**, **`accountableCount`**                                                          | **Everything that is, or MAY BE, in the container** — accepted ∪ ambiguous ∪ observed, unioned once, here. **This is the set MG-53 must account for.**                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `anomalousIds`, `anomalousCount`                                                                      | Documents **the correlated read-back** returned that this run cannot claim — they carry this run's `fixtureRunId` but not the marker, or name a foreign run: a sender defect or a correlator collision. Kept strictly apart from the run's own ids. **This is NOT stop condition 1** — see below.                                                                                                                                                                                                                                                                                |
-| **`unknownWriterCheck`**                                                                              | A constant `checked: false`, `by: "operator-unfiltered-enumeration"`. The record saying **in itself** that stop condition 1 is not evaluated by this tool, and naming what does evaluate it (§9).                                                                                                                                                                                                                                                                                                                                                                                |
-| **`ids`**, **`count`**                                                                                | Schema-v1 aliases for `observedIds` / `observedCount` — the same array, so they cannot disagree. **This is the list MG-54 cites for disposal.**                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `expectedCount`, `idDivergence`                                                                       | What the run expected, and whether a **witnessed** observed document carried an id the sender did not request. Divergence is an observation, not a failure — and never inferred from a count shortfall.                                                                                                                                                                                                                                                                                                                                                                          |
-| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `ambiguous-acceptance`, `unattributable-documents`, `partition-landing`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`. `partition-landing` names each landing state separately and appears on a **confirmed** run too: a confirmed run whose documents carry an odd partition value is still confirmed, and the oddity is recorded rather than dropped.                                                                                                                                                |
+| Field                                                                                                 | What it carries                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `schemaVersion`, `kind`, `ticket`, `tool`, `toolVersion`                                              | Provenance. MG-53/MG-54 check `schemaVersion` first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `runId`, `runInstant`                                                                                 | The per-run correlator and the absolute wall-clock instant of the run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `confirmed`, `uncertain`, `attempted`, `outcome`, `exitCode`, `exitLabel`, `outcomeReason`, `scope`   | The outcome. `confirmed: true` only ever accompanies `exitCode: 0`. `outcome` is the stable slug to branch on. `scope` is `expected-partition`, `cross-partition`, `aborted-after-read-back` or `not-attempted`, and says which read found the documents — **not** where they landed. **`scope: cross-partition` never accompanies `exitCode: 0`**: the sweep is diagnostics for non-success paths only (§6), so a confirmed run is always `scope: expected-partition` — the only read that supplies the point-read proof exit 0 requires. |
+| `marker` → `field`, `value`, `runIdField`                                                             | `syntheticFixture` / `MG-67-SYNTHETIC-FIXTURE` / `fixtureRunId` — recorded here as bare names, but in the routed Cosmos document both live under `Body`, not at the document root (§6).                                                                                                                                                                                                                                                                                                                                                    |
+| `deviceId`                                                                                            | The fixture device.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `target` → `hub`, `account`, `database`, `container`                                                  | Where the documents are. Names only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `containerName`, `partitionKeyPath`, `partitionKeyField`, `partitionValue`, `observedPartitionValues` | The measured shape and the partition actually used/observed. `observedPartitionValues` records a document carrying **no** partition key field as the reserved token `<no-partition-key-field>`, and one whose value is present but empty or not a string as `<unusable-partition-key-value>` — **recorded states, not an absence**. An empty list would throw away the one fact separating "landed under a different key" from "landed under no key at all". Neither token is a legal device id this fixture mints.                        |
+| **the four id sets** — see below                                                                      | `requestedIds`, `acceptedIds`, `ambiguousIds`, `observedIds`, each with its `…Count`.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **`observedDocuments`**, **`observedDocumentCount`**                                                  | **Added by MG-73.** Per observed document, **both** identities together: the Cosmos root `id` that **addresses** it and its observed root partition value, and the `Body.id` plus `Body.fixtureRunId` that **correlate** it to this run — alongside the connection device id (`SystemProperties["iothub-connection-device-id"]`) the endpoint stamped that partition value from. Every prior field is preserved alongside it, including the `Body.syntheticFixture` match MG-53 and MG-54 consume — the schema did not break, it grew.     |
+| **`accountableIds`**, **`accountableCount`**                                                          | **Everything that is, or MAY BE, in the container** — accepted ∪ ambiguous ∪ observed, unioned once, here. **This is the set MG-53 must account for.**                                                                                                                                                                                                                                                                                                                                                                                     |
+| `anomalousIds`, `anomalousCount`                                                                      | Documents **the correlated read-back** returned that this run cannot claim — they carry this run's `Body.fixtureRunId` but not `Body.syntheticFixture`, or name a foreign run: a sender defect or a correlator collision. Kept strictly apart from the run's own ids. **This is NOT stop condition 1** — see below.                                                                                                                                                                                                                        |
+| **`unknownWriterCheck`**                                                                              | A constant `checked: false`, `by: "operator-unfiltered-enumeration"`. The record saying **in itself** that stop condition 1 is not evaluated by this tool, and naming what does evaluate it (§9).                                                                                                                                                                                                                                                                                                                                          |
+| **`ids`**, **`count`**                                                                                | Schema-v1 aliases for `observedIds` / `observedCount` — the same array, so they cannot disagree. **This is the list MG-54 cites for disposal.**                                                                                                                                                                                                                                                                                                                                                                                            |
+| `expectedCount`, `idDivergence`                                                                       | What the run expected, and whether a **witnessed** observed document carried an id the sender did not request. **Since MG-73, `idDivergence` fires on every confirmed run, and this is expected, not an anomaly**: the platform assigns each document's root `id`, so it necessarily differs from the `Body.id` the sender requested. Divergence is an observation, not a failure — and never inferred from a count shortfall.                                                                                                             |
+| **`measuredDefaultTtl`**, `declaredDefaultTtl`, `ttlExpires`, `ttlDriftFinding`, **`expiryInstant`**  | HR4. The **measured** retention, the declared comparand, any drift, and when these documents age out.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `waitBoundMs`, `pollIntervalMs`, `observedArrivalMs`, `elapsedMs`, `polls`, `crossPartitionSweepRun`  | The wait actually used and how long arrival really took.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `findings`                                                                                            | `ttl-drift`, `id-divergence`, `ambiguous-acceptance`, `unattributable-documents`, `partition-landing`, `no-ttl-expiry`, `unconfirmed-run` — each with `kind`, `measured`, `declared`, `message`. `partition-landing` names each landing state separately and appears on a **confirmed** run too: a confirmed run whose documents carry an odd partition value is still confirmed, and the oddity is recorded rather than dropped.                                                                                                          |
 
 #### The four id sets are not interchangeable
 
@@ -986,16 +1050,19 @@ established. Both facts are true; collapsing either loses a halt condition.
 An earlier revision of this runbook told MG-53 to read a non-empty `anomalousIds`
 as stop condition 1. **That was wrong, and it is retracted here.**
 
-The tool's read-back is a single query filtered to this run's own correlator:
+The tool's discovery read is a single query, scoped to the fixture device's
+authenticated partition value and filtered to this run's own correlator:
 
 ```sql
-SELECT * FROM c WHERE c.fixtureRunId = @runId
+SELECT c.id FROM c WHERE c.Body.fixtureRunId = @runId
 ```
 
-A document an **unknown writer** put in the container does not carry this run's
-freshly minted `fixtureRunId`, so the query never returns it, so it can **never**
-reach `anomalousIds` — on any path, including the cross-partition sweep, which
-uses the same predicate. `anomalousCount: 0` therefore says **nothing whatsoever**
+confirmed by an exact point read of each returned root `id` under that same
+partition value (§6). A document an **unknown writer** put in the container
+does not carry this run's freshly minted `Body.fixtureRunId`, so the discovery
+query never returns it, so it can **never** reach `anomalousIds` — on any path,
+including the cross-partition sweep, which uses the same predicate.
+`anomalousCount: 0` therefore says **nothing whatsoever**
 about unknown writers. It is not weak evidence of their absence; it is no evidence
 at all, and a consumer that reads it as a cleared stop condition proceeds on a
 vacuous proof of exactly the kind this ticket exists to eliminate.
@@ -1385,8 +1452,9 @@ report** rather than proceeding or improvising:
 ### Checking stop condition 1 — an UNFILTERED enumeration, and it is yours to run
 
 > **The tool does not check this stop condition and cannot.** Its read-back is
-> filtered to this run's own `fixtureRunId`, so a document an unknown writer
-> produced is never returned by it and never appears in any of its id sets —
+> scoped to the fixture device's authenticated partition and filtered to this
+> run's own `Body.fixtureRunId`, so a document an unknown writer produced is
+> never returned by it and never appears in any of its id sets —
 > including `anomalousIds`, which is a **different** finding (§7a). The evidence
 > record says so in itself: `unknownWriterCheck.checked` is a constant `false`
 > with `by: "operator-unfiltered-enumeration"`. **This section is that
@@ -1408,17 +1476,26 @@ Explorer** for the observation itself. Run all three **per container**:
 SELECT VALUE COUNT(1) FROM c
 
 -- 2. Anything WITHOUT the synthetic marker. This is the unknown-writer check.
---    ANY NONZERO RESULT IS A HALT.
-SELECT VALUE COUNT(1) FROM c WHERE NOT IS_DEFINED(c.syntheticFixture)
+--    The marker lives under Body, not at the document root (§6).
+--    ANY NONZERO RESULT IS A HALT — except a document you can positively
+--    attribute to a KNOWN, recorded probe outside this fixture's own marker,
+--    e.g. MG-73's differential proof (marker MG-73-DIFFERENTIAL-PROOF); see
+--    the note near the top of this document.
+SELECT VALUE COUNT(1) FROM c WHERE NOT IS_DEFINED(c.Body.syntheticFixture)
 
--- 3. The marked documents, BY ID, to reconcile against the evidence records.
-SELECT c.id, c.fixtureRunId, c.deviceId FROM c WHERE IS_DEFINED(c.syntheticFixture)
+-- 3. The marked documents, BOTH identities, to reconcile against the evidence
+--    records: the root id (Cosmos-assigned) and root deviceId (the
+--    authenticated partition value) alongside Body.id and Body.fixtureRunId,
+--    which correlate the document to a specific run.
+SELECT c.id, c.deviceId, c.Body.id AS bodyId, c.Body.fixtureRunId
+FROM c WHERE IS_DEFINED(c.Body.syntheticFixture)
 ```
 
-Query 2 is the halt. Query 3 is the reconciliation: **every id it returns must
-appear in the `accountableIds` of one of your committed evidence records.** An id
-that appears in neither — marked or not — is an unaccounted-for document and is
-also a halt.
+Query 2 is the halt. Query 3 is the reconciliation, now returning **both**
+identities per document (§7a): **every root `id` it returns must appear in the
+`accountableIds` of one of your committed evidence records**, and every
+`Body.fixtureRunId` must name one of those records. A document accounted for by
+neither — marked or not — is unaccounted for and is also a halt.
 
 **Reconcile against `accountableIds`, not against `ids`.** `ids` is what was read
 back; `accountableIds` additionally covers everything a run accepted or left of
@@ -1519,17 +1596,17 @@ disappear.
 
 ## 12. Sign-off checklist
 
-| #   | Item                                                                                                                                                             | Evidence to record                                  | State       |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------- |
-| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                                                                          | the `deviceId` + `status` row                       | **NOT RUN** |
-| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                                                                           | the `jq` output                                     | **NOT RUN** |
-| 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)                     | the §4 state file, `MG67_CREATED` either way        | **NOT RUN** |
-| 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                              | the exit code + the command line                    | **NOT RUN** |
-| 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a)            | the file path + its contents                        | **NOT RUN** |
+| #   | Item                                                                                                                                                             | Evidence to record                                                             | State       |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ----------- |
+| 1   | Fixture device registered on `meatgeek-v2-dev-iothub-259d4bf5b628` (§2)                                                                                          | the `deviceId` + `status` row                                                  | **NOT RUN** |
+| 2   | Live `temperatures` definition read; partition key path and `defaultTtl` measured (§3)                                                                           | the `jq` output                                                                | **NOT RUN** |
+| 3   | Temporary account-scope Data Reader assignment created **under a captured id**, or the `skip` branch taken because you already held one (§4)                     | the §4 state file, `MG67_CREATED` either way                                   | **NOT RUN** |
+| 4   | `send-fixture.mjs` exits **0** (§6)                                                                                                                              | the exit code + the command line                                               | **NOT RUN** |
+| 5   | Evidence artifact written and committed, `schemaVersion: 2`, with non-empty `ids`, `count == 3`, empty `anomalousIds`, and `measuredDefaultTtl` (§7a)            | the file path + its contents                                                   | **NOT RUN** |
 | 5b  | Run stdout **and** stderr captured, inspected for credential shapes, and promoted alongside the artifact (§7c) — **the only proof of the no-emission criterion** | the screen summary lines (never a matched value) + the two committed log files | **NOT RUN** |
-| 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                            | all three Data Explorer queries, per container      | **NOT RUN** |
-| 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove             | both §5 proofs: yours gone, before/after diff empty | **NOT RUN** |
-| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                                          | the finding text                                    | **NOT RUN** |
+| 6   | **Unfiltered** enumeration of all five source containers run, and they hold **only** the documents `accountableIds` accounts for (§9)                            | all three Data Explorer queries, per container                                 | **NOT RUN** |
+| 7   | Temporary role assignment **removed by its captured id**, and **nothing else removed** (§5) — or `MG67_CREATED=no`, so nothing was created to remove             | both §5 proofs: yours gone, before/after diff empty                            | **NOT RUN** |
+| 8   | Findings 10a / 10b / any TTL drift raised on the ticket                                                                                                          | the finding text                                                               | **NOT RUN** |
 
 **MG-67 closes when every line above is recorded — and not before.** Line 4 is
 the traversal; lines 5 and 7 are what the downstream tickets and the security
