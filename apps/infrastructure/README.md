@@ -160,14 +160,15 @@ nx output infrastructure
 ```
 
 **Steady-state dev infrastructure reconciles through CI**, not from a
-workstation. Under **MG-23** (*automated dev GitOps reconciliation*, CI-run) a
+workstation. Under **MG-23** (_automated dev GitOps reconciliation_, CI-run) a
 change goes: PR → `ci.yml`'s `validate-infrastructure` job runs the
 **credentialless** sequence (`assert-credentialless.sh` → `fmt -check` →
 `terraform init -backend=false -input=false -lockfile=readonly` → `validate` →
 `terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard
 fixtures → cross-module propagation fixtures → **live host-storage gate
 fixtures (MG-58)** → V1 Cosmos export tool tests (MG-48, `run-tests.mjs`) →
-per-module `terraform test`) → review → merge to `main` →
+dev IoT device fixture tests (MG-67, `iot-fixture/run-tests.mjs`) → per-module
+`terraform test`) → review → merge to `main` →
 `.github/workflows/infra-apply-dev.yml` runs the fail-closed pre-apply secret
 gate and destroy circuit-breaker, applies the exact saved plan, fails the run on
 any drift, and then asserts host storage against the **deployed site** (the live
@@ -210,13 +211,13 @@ Activation of the dev loop is operator-gated: see
 
 ## Module Structure
 
-| Module                | Responsibility                                             |
-| --------------------- | ---------------------------------------------------------- |
-| `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices    |
-| `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs |
+| Module                | Responsibility                                                                                                                                                                         |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices                                                                                                                                |
+| `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs                                                                                                                             |
 | `modules/functions/`  | Flex Consumption Function App (`azurerm_function_app_flex_consumption`) on an `FC1` `azurerm_service_plan` + its own storage account (MI blob deployment container, length-safe names) |
-| `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs) |
-| `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                      |
+| `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs)                                                                                                                             |
+| `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                                                                                                                                                  |
 
 The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it does
 **not** read a shared V1 account via a data source. There is no adoption of a pre-existing shared Cosmos account
@@ -269,7 +270,7 @@ modules, so a module cannot start being CI-invoked without also being gated.
 Locks are **multi-platform, on the same four platforms** everywhere:
 `linux_amd64` (the GitHub runners), `darwin_arm64` (Apple-silicon workstation),
 `darwin_amd64` (Intel Mac fallback) and `linux_arm64` (arm64 build/review
-containers). `init` only trusts a provider whose hash for the *current* platform
+containers). `init` only trusts a provider whose hash for the _current_ platform
 is already recorded, so regenerating with fewer platforms both dirties the tree
 and hands the dropped platforms an unpinned resolution. Always pass all four —
 from the module directory, or from `apps/infrastructure` for the root:
@@ -307,13 +308,22 @@ nx test infrastructure                         # node scripts/cosmos-export/run-
                                                #   second tier CI runs separately in lint-and-test, after
                                                #   `npm ci` (see the cosmos-export section below) —
                                                #   also picked up by `nx run-many -t test --all`
+                                               # NOT the whole of scripts/: this target runs cosmos-export
+                                               #   ONLY. The MG-67 iot-fixture suites have their own
+                                               #   wrapper and their own two CI steps, and `nx test` does
+                                               #   not reach them — run them directly (below).
+
+# MG-67 iot-fixture, both tiers — run these directly; `nx test infrastructure` does not.
+# Repo-root paths, the same two invocations ci.yml runs.
+node apps/infrastructure/scripts/iot-fixture/run-tests.mjs          # dependency-free tier (no npm ci, no network, no credential)
+node apps/infrastructure/scripts/iot-fixture/run-tests.mjs --sdk    # real-SDK tier — needs `npm ci` first
 ```
 
 Three invocation rules, each of which fails in a different and non-obvious way
 if ignored:
 
 - **Pass the environment as `--args="--env=<env>"`, never as a bare `--env=<env>`.**
-  `env` is a reserved `nx:run-commands` option typed as an *object*, so passing
+  `env` is a reserved `nx:run-commands` option typed as an _object_, so passing
   it bare is rejected before Terraform runs with
   `Property 'env' does not match the schema. 'dev' should be a 'object'.`
 - **`init` and `format` must use the `nx run <project>:<target>` form.** Bare
@@ -321,7 +331,7 @@ if ignored:
   `format` commands — they launch the workspace initializer / Prettier and the
   Terraform target never runs at all.
 - **`apply` takes no environment argument.** Its command is `terraform apply
-  tfplan`, which has no `{args.*}` placeholder, so a trailing `--args="--env=dev"`
+tfplan`, which has no `{args.*}` placeholder, so a trailing `--args="--env=dev"`
   is forwarded verbatim as `terraform apply tfplan --env=dev` and Terraform
   rejects it. The environment is already baked into `tfplan` by the preceding
   `nx plan`.
@@ -360,7 +370,7 @@ outputs — the former `cosmos_db_connection_string`, `iot_hub_connection_string
 `signalr_connection_string`, and `environment_config` aggregate outputs were
 **removed** (MG-24 S1), so no runtime credential is ever surfaced as an output or
 placed in app settings. (Note: each data service's key still exists as an
-inherent *computed attribute* in state — see "No runtime secret is USED …" under
+inherent _computed attribute_ in state — see "No runtime secret is USED …" under
 Security Notes for the full posture and how local-auth-disable renders those keys
 non-authenticating.) Consumers reach every service **identity-based** (managed
 identity + RBAC) via the non-secret endpoints below.
@@ -378,11 +388,11 @@ terraform output development_urls                # non-secret endpoint URLs
 The Function App runs under a **system-assigned managed identity** and is granted
 narrowly-scoped data-plane RBAC by the root module:
 
-| Service       | Non-secret endpoint (app setting)                                                                                                                                                                                                                                                                                                                                                                                   | Role granted to the Function App identity |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| Cosmos DB     | `COSMOSDB__accountEndpoint`                                                                                                                                                                                                                                                                                                                                                                                         | Cosmos DB Built-in Data Contributor       |
-| IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`                                                                                                                                                                                                                                                                                                                                                                            | Azure Event Hubs Data Receiver            |
-| SignalR       | `AzureSignalRConnectionString__serviceUri`                                                                                                                                                                                                                                                                                                                                                                          | SignalR Service Owner                     |
+| Service       | Non-secret endpoint (app setting)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Role granted to the Function App identity |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Cosmos DB     | `COSMOSDB__accountEndpoint`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Cosmos DB Built-in Data Contributor       |
+| IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Azure Event Hubs Data Receiver            |
+| SignalR       | `AzureSignalRConnectionString__serviceUri`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | SignalR Service Owner                     |
 | App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` — the FULL TF-managed connection string (`InstrumentationKey=…;IngestionEndpoint=…` — Microsoft requires the ikey as the destination-resource identifier even under Entra) wired via the **native** `site_config.application_insights_connection_string` field, **not** an app setting (Azure surfaces it to the host unchanged as this env var); plus the `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD` app setting. The ikey **cannot authenticate**: `local_authentication_enabled = false` on the App Insights resource forces AAD-only ingestion. | Monitoring Metrics Publisher              |
 
 The IoT Hub's own system-assigned identity likewise writes to Cosmos (Built-in
@@ -608,6 +618,7 @@ bash scripts/fixtures/run-live-host-storage-fixtures.sh
 
   (The **prod** deploy identity and a prod infra-apply identity are **MG-25**
   deliverables, out of scope here.)
+
 - **The resource-group boundary is load-bearing.** No identity inside
   `meatgeek-v2-dev-rg` holds a role outside it; the state account lives in a
   **separate** resource group (`meatgeek-v2-tfstate-rg`); there is no Microsoft
@@ -623,55 +634,55 @@ bash scripts/fixtures/run-live-host-storage-fixtures.sh
 - **No runtime secret is USED or surfaced; in-state keys are made
   non-authenticating (IoT Hub is the documented exception).** Cosmos /
   IoT-telemetry (Event Hubs) / SignalR access is identity-based (managed identity
-  + RBAC + non-secret endpoints); the Function App's host storage uses its
-  managed identity. **No connection-string or primary-key VALUE is placed in app
-  settings or surfaced as a Terraform output.** The accurate posture about
-  *state itself*, however, is NOT "no keys in state": every TF-managed data
-  service exposes its key/connection-string as a **computed attribute** that
-  Terraform reads back into state by construction (no `azurerm` argument
-  suppresses it) — exactly like App Insights. The control is to make those keys
-  **inert for authentication** by disabling local/key auth where safe:
-  `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
-  on SignalR, `shared_access_key_enabled = false` on the Functions storage
-  account (host storage is fully managed-identity), and
-  `local_authentication_enabled = false` on the Event Hubs namespace (its
-  auto-created `RootManageSharedAccessKey` is unused — the IoT Hub produces to it
-  identity-based and the Function App consumes via *Azure Event Hubs Data
-  Receiver*). With local auth off, the
-  in-state key is a **present-but-non-authenticating residual**.
-  **IoT Hub is the SOLE deliberate exception:** devices, the data-pusher, and the
-  device-controller authenticate with **SAS keys**, so key auth is intentionally
-  kept enabled and its in-state SAS keys are live — mitigated by restricted,
-  container-scoped state access and documented in the MG-24 ADR. The coupled
-  invariant (Cosmos/SignalR/Storage/Event Hubs namespace local auth must stay
-  disabled) is machine-enforced by the fail-closed
-  `scripts/tf-plan-secret-inspection.sh` gate, which flags any of those services
-  as a violation if local auth is re-enabled and accepts the IoT Hub keys with a
-  note. **Application Insights
-  telemetry ingestion is
-  AAD-authenticated:** the Function App authenticates via its managed identity —
-  `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a
-  `Monitoring Metrics Publisher` role assignment on the App Insights resource.
-  The **full** TF-managed App Insights connection string (with the
-  `InstrumentationKey`) is wired via the native
-  `site_config.application_insights_connection_string` field — **not** an app
-  setting (moved there to kill a perpetual second-plan diff; Azure surfaces it to
-  the host unchanged as the `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env
-  var, so `apps/api` telemetry is unaffected) — **because Microsoft requires
-  the connection string as the destination-resource identifier even under
-  Entra** — but the embedded ikey **cannot authenticate**: the App Insights
-  resource sets `local_authentication_enabled = false`, which forces AAD-only
-  ingestion and disables ikey/local auth. The connection string / instrumentation
-  key is therefore present in that `site_config` field and (as a computed attribute of
-  `azurerm_application_insights.main`) in Terraform state, but it is a
-  **present-but-non-authenticating** residual: **safe ONLY while local auth is
-  disabled**. That coupled invariant is machine-enforced — `tf-static-checks.sh`
-  check 9 rejects the full conn string reaching the Function module (now the
-  `site_config` field) unless
-  `local_authentication_enabled = false`, and the fail-closed
-  `scripts/tf-plan-secret-inspection.sh` gate enforces the same over the real
-  plan. See
-  [ADR: App Insights key in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
+  - RBAC + non-secret endpoints); the Function App's host storage uses its
+    managed identity. **No connection-string or primary-key VALUE is placed in app
+    settings or surfaced as a Terraform output.** The accurate posture about
+    _state itself_, however, is NOT "no keys in state": every TF-managed data
+    service exposes its key/connection-string as a **computed attribute** that
+    Terraform reads back into state by construction (no `azurerm` argument
+    suppresses it) — exactly like App Insights. The control is to make those keys
+    **inert for authentication** by disabling local/key auth where safe:
+    `local_authentication_enabled = false` on Cosmos, `local_auth_enabled = false`
+    on SignalR, `shared_access_key_enabled = false` on the Functions storage
+    account (host storage is fully managed-identity), and
+    `local_authentication_enabled = false` on the Event Hubs namespace (its
+    auto-created `RootManageSharedAccessKey` is unused — the IoT Hub produces to it
+    identity-based and the Function App consumes via _Azure Event Hubs Data
+    Receiver_). With local auth off, the
+    in-state key is a **present-but-non-authenticating residual**.
+    **IoT Hub is the SOLE deliberate exception:** devices, the data-pusher, and the
+    device-controller authenticate with **SAS keys**, so key auth is intentionally
+    kept enabled and its in-state SAS keys are live — mitigated by restricted,
+    container-scoped state access and documented in the MG-24 ADR. The coupled
+    invariant (Cosmos/SignalR/Storage/Event Hubs namespace local auth must stay
+    disabled) is machine-enforced by the fail-closed
+    `scripts/tf-plan-secret-inspection.sh` gate, which flags any of those services
+    as a violation if local auth is re-enabled and accepts the IoT Hub keys with a
+    note. **Application Insights
+    telemetry ingestion is
+    AAD-authenticated:** the Function App authenticates via its managed identity —
+    `APPLICATIONINSIGHTS_AUTHENTICATION_STRING = "Authorization=AAD"` plus a
+    `Monitoring Metrics Publisher` role assignment on the App Insights resource.
+    The **full** TF-managed App Insights connection string (with the
+    `InstrumentationKey`) is wired via the native
+    `site_config.application_insights_connection_string` field — **not** an app
+    setting (moved there to kill a perpetual second-plan diff; Azure surfaces it to
+    the host unchanged as the `APPLICATIONINSIGHTS_CONNECTION_STRING` runtime env
+    var, so `apps/api` telemetry is unaffected) — **because Microsoft requires
+    the connection string as the destination-resource identifier even under
+    Entra** — but the embedded ikey **cannot authenticate**: the App Insights
+    resource sets `local_authentication_enabled = false`, which forces AAD-only
+    ingestion and disables ikey/local auth. The connection string / instrumentation
+    key is therefore present in that `site_config` field and (as a computed attribute of
+    `azurerm_application_insights.main`) in Terraform state, but it is a
+    **present-but-non-authenticating** residual: **safe ONLY while local auth is
+    disabled**. That coupled invariant is machine-enforced — `tf-static-checks.sh`
+    check 9 rejects the full conn string reaching the Function module (now the
+    `site_config` field) unless
+    `local_authentication_enabled = false`, and the fail-closed
+    `scripts/tf-plan-secret-inspection.sh` gate enforces the same over the real
+    plan. See
+    [ADR: App Insights key in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
 
 ## Deploy Alignment (Function App name)
 
@@ -729,7 +740,7 @@ first: the value of any key matching
 unconditionally, with no exemption list — so ordinary diagnostics are caught
 along with real secrets (`partitionKey=deviceId` prints as
 `partitionKey=[redacted]`), and redaction runs to the end of the line, so text
-*after* a credential on the same line is lost too (`sig=[redacted]` can
+_after_ a credential on the same line is lost too (`sig=[redacted]` can
 swallow a trailing " failed"). This is deliberate, not a bug: an exemption for
 benign key names was tried and caused an actual secret leak (a quote inside a
 credential-shaped key defeated the match), so the rule is now that no fragment
@@ -740,14 +751,14 @@ recurs by construction.
 **Exit codes — the operator contract.** Scripts that wrap this tool key off
 the exit code, so treat it as stable:
 
-| Code | Meaning |
-| ---- | ------- |
-| 0    | verified-complete |
-| 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success |
+| Code | Meaning                                                                                                                                                                                                                 |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | verified-complete                                                                                                                                                                                                       |
+| 1    | usage error — includes a `--database`/`--container` filter that matched nothing in the account; that is deliberately a failure, not an empty success                                                                    |
 | 2    | reconciliation failure — written count doesn't match the pre-export `SELECT VALUE COUNT(1)`, the account has zero containers to export, or (in `--verify`) an on-disk hash/size/line-count mismatch or live-count drift |
-| 3    | throttling abort — 429 with retries exhausted |
-| 4    | auth failure — a 401/403 from the service, or a credential that could not be acquired at all (matched by exact `@azure/identity` error-class name, e.g. `AggregateAuthenticationError`) |
-| 5    | transport abort mid-pagination — also covers a non-credential error whose class name merely resembles one (e.g. `CredentialTransportError` from an `ECONNRESET`), which is deliberately excluded from exit 4 |
+| 3    | throttling abort — 429 with retries exhausted                                                                                                                                                                           |
+| 4    | auth failure — a 401/403 from the service, or a credential that could not be acquired at all (matched by exact `@azure/identity` error-class name, e.g. `AggregateAuthenticationError`)                                 |
+| 5    | transport abort mid-pagination — also covers a non-credential error whose class name merely resembles one (e.g. `CredentialTransportError` from an `ECONNRESET`), which is deliberately excluded from exit 4            |
 
 **Safety semantics.**
 
@@ -765,8 +776,233 @@ the exit code, so treat it as stable:
 
 ---
 
+## Dev IoT device fixture — device → IoT Hub → route → Cosmos (MG-67)
+
+`scripts/iot-fixture/` is the standing **dev test fixture** for the product's only
+write path. It registers nothing by itself: it sends a fixed set of **3**
+synthetic D2C messages from the durable fixture device
+`meatgeek-v2-dev-synthetic-fixture-device`, then **proves they arrived** by
+reading them back out of the `temperatures` container the `cosmos-storage` route
+targets. Run `node scripts/iot-fixture/send-fixture.mjs --help` for full usage;
+only what `--help` doesn't already cover is captured below.
+
+**The operator procedure is the [MG-67 device-fixture verification
+runbook](../../docs/infrastructure/mg67-device-fixture-verification.md)** —
+device registration, reading the live container definition, the temporary Cosmos
+data-plane role assignment **and its removal**, the live run, the evidence to
+capture, the stop conditions and the rejected proofs. Read it before running
+anything against dev.
+
+**The build pipeline never runs this live.** The build container holds no
+credentials, so CI never executes any step of that runbook — every test below
+runs against an injected fake reader and an injected fake spawn, no `az` binary,
+no Azure package, no network. An operator run is a separate act: `send-fixture.mjs`
+has since been run against `meatgeek-v2-dev-db` (run
+`mg-67-run-bc775303-3692-41de-a405-b6765e014c21`, 2026-08-16), exiting **0** with
+all 3 marked, run-correlated documents read back through the authenticated
+partition. That confirms the traversal; it does not close the ticket — the
+runbook's banner and §12 track the host-phase closeout items (role-assignment
+lifecycle, credential-screen promotion, unfiltered enumeration, findings) still
+outstanding. As with the cosmos-export tool, tests split into two tiers by
+**file name alone**: `run-tests.mjs` is the dependency-free tier that runs in the
+credentialless `validate-infrastructure` job, and `run-tests.mjs --sdk` (matching
+`*.sdk.test.mjs`) constructs the **real** `CosmosClient` / `DefaultAzureCredential`
+to prove the auth wiring builds, and so runs in `lint-and-test` after `npm ci`.
+Both wrappers floor the discovered-file and executed-test counts — `node --test`
+exits 0 when it discovers nothing, and a suite that passes by discovering nothing
+is worse than no suite.
+
+**Auth — there is no credential to supply, and none is accepted.** The send is
+`az iot device send-d2c-message`, which addresses the hub and the device **by
+name** and resolves the device key **itself**, server-side, under the operator's
+already-authenticated identity. The tool therefore never reads, holds or can leak
+one: there is **no key, connection-string, SAS or certificate mode at all**, not
+as a fallback and not behind a flag, and every spelling of such a flag is refused
+**by name** before its value is read. The five resource names (`--hub`,
+`--device`, `--account`, `--database`, `--container`) are each validated against a
+**per-field rule**, every rule as narrow as that field actually **addresses**
+rather than as wide as Azure permits — the tool talks to one dev hub, one durable
+dev device it names itself, one dev account and plain-identifier dev databases and
+containers — and a rejection names the **flag and the rule, never the value
+typed**, so no unvalidated argv text reaches a log, the `az` argv, a document body
+or the evidence record. **`--device` is the strongest: it is PINNED to the one
+declared fixture constant `FIXTURE_DEVICE_ID`
+(`meatgeek-v2-dev-synthetic-fixture-device`) — the only accepted value.** A charset
+rule cannot separate a 32-character opaque secret from a 32-character legal device
+id, because there is no difference to detect; so rather than narrow the pattern the
+tool refuses **every value but the fixture's own name**, which makes "an opaque
+credential accepted as a device name" **structurally unreachable rather than
+mitigated** — the device id is the one name that flows into the `az` argv, the
+operator log **and** the document body (it is the container partition key), so it is
+the one that must never carry an unpinned value. **Accepted tradeoff, on the
+record:** pointing the tool at a different device now requires a code change; that
+is intended, since the fixture is durable and singular and MG-62 reuses this exact
+device. The other four (`--hub`, `--account`, `--database`, `--container`) stay
+**charset-constrained** rather than pinned — the hub/account names carry
+infra-assigned random suffixes a legal replacement changes, and database/container
+are operator-supplied to match the **measured** container, so a literal pin there
+would hardcode a deployment identity and break on a legal infra change. Those four
+accept only letters, digits and interior hyphens (**no dots**), so a **JWT** — and
+any dotted or separator-bearing credential — is rejected in every one of those slots
+**by construction**, before it could be logged, passed to `az`, embedded in a Cosmos
+document body, **or written into the evidence record**. (An earlier revision wrongly
+widened `--database`/`--container` to the full Azure-legal Cosmos id set — dots and
+punctuation allowed — to accept a value like `analytics01.eventstore1.replicaWest`,
+**and** left `--device` as a charset rule; the first protected a case this fixture
+never encounters and the second left an opaque credential acceptable as a device
+name — both were the holes a security review reported, so both are corrected:
+`--device` is pinned and the other four are narrow.) Connection strings and JWTs are
+refused in every slot on their `/`, `;` and dots. What a _charset_ rule still cannot
+tell apart is an **opaque token already shaped like a legal narrow name** (a
+dot-free, separator-free plain identifier) — for `--device` that residue is caught
+anyway by the pin, and for the other four it does not matter anywhere, because the
+tool never accepts, holds or requires a credential, so there is no credential input
+to screen. As an **independent second defense**, every accepted name is also routed
+through the scrubber before it
+reaches operator output, the `az` argv, a document body or the evidence record. The
+argv handed to `az` is additionally re-scanned
+against the tool's own scrubber before the spawn, so a future edit that grows a
+credential argument fails there rather than at review — that matters because `az`
+persists invocations under `~/.azure` and prints request signatures under
+verbosity, which is disk this repo's redaction posture cannot reach (`--debug`
+and `--verbose` are never passed and are refused if supplied). Child `stderr` is
+scrubbed before any operator-facing line exists. The Cosmos read-back is **AAD-only
+via `DefaultAzureCredential`**; the account runs `local_authentication_enabled =
+false`, so a key mode could not work and could only leak. Data-plane access needs
+an **account-scoped** (`--scope "/"`) Cosmos Built-in Data **Reader** assignment —
+the runbook carries both the create and the matching delete, because `azurerm`
+manages only the two declared `azurerm_cosmosdb_sql_role_assignment` resources and
+will never prune a third. **The removal targets the assignment id captured at
+creation time and refuses to guess**: this is a shared live account, your
+principal may already hold a data-plane grant somebody else's work depends on, and
+a delete that finds its target by principal or role shape can revoke **that** one
+instead. The runbook snapshots every assignment on the account first and sets a
+single decision variable from that snapshot; **the create path is gated on it**,
+so a principal that already holds a grant creates nothing and therefore has
+nothing to remove, and a shell with no snapshot in scope refuses to grant at all.
+Afterwards it proves that exactly one assignment — yours — went.
+
+**Exit codes — the operator contract.** Exit **0 means exactly one thing**: 3
+marker-carrying, run-correlated documents were **read back out of** the
+destination container within an explicit, reported wait bound, and the evidence
+recording them was written. Absence of an error is never success.
+
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | confirmed-in-cosmos                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 1    | usage error — includes a refused credential-bearing or verbosity flag, a **name that fails its field's rule** (`--device` is **pinned** — any value but `FIXTURE_DEVICE_ID`, including a valid-charset opaque token, fails here; the other four are charset-constrained, so a JWT or separator-bearing value in `--hub`/`--account`/`--database`/`--container` fails here; the value is not echoed back), and an unusable or reused `--evidence-out` directory caught by the per-run **reservation before anything is sent** (`--evidence-out` is a directory; the tool names an immutable per-run file inside it — there is no `--overwrite`)                                                                                                                          |
+| 2    | send failure — `az iot device send-d2c-message` itself failed. **Ambiguous by construction**: `az` can fail after the hub took the message, so every attempted id is recorded first, as accepted or as of **unknown** acceptance — including a failure on message 1 of 3                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 3    | confirmation timeout — the bound elapsed with the documents not found                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 4    | auth failure — a 401/403, or a credential that could not be acquired; **never retried**, and it says nothing about whether the route delivered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 5    | transport abort — retries exhausted                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 6    | synthetic marker violation — a read-back document lacked the marker; a defect in the sender, not an acceptable variant                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 7    | correlation ambiguity — fewer documents than sent, a duplicate run id, an unreadable result, or a full set found **only** by the cross-partition sweep — a scan is not partition-scoped proof, so it can no longer confirm even when every returned document carries the expected partition value. A failure, never an absence. Also the code for a run concluding a state the tool cannot name: **exit 0 requires positive confirmation**, so an unanticipated state exits here rather than defaulting to success                                                                                                                                                                                                                                                      |
+| 8    | container definition refusal — the partition key path or `default_ttl` could not be measured. **No default is ever substituted**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 9    | delivered, unexpected partition — the full set **arrived** under a root `deviceId` that is not the fixture's. Read off the returned documents, never off which query found them: a **partial** cross-partition set is exit 7, not a partition claim, and a full set the cross-partition sweep finds **only** in the expected partition is also exit 7 (a timing artefact of the wait bound, since the sweep is diagnostics only and can never confirm). A working route is never reported as broken. Before MG-73 this could also mean a document carrying **no** `deviceId` field at all; the endpoint now stamps one on every routed document from the authenticated connection identity, so that case is closed — "under a **different** `deviceId`" is what remains |
+| 10   | evidence unrecorded — a send happened and the record of it could not be written or built. **Never exit 1**, which means "nothing live happened"; the ids are printed for the operator to record by hand, and this code takes precedence over the confirmation's own (still printed above it)                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+**Safety semantics.**
+
+- The partition key path and the `default_ttl` are **measured** from an
+  `az cosmosdb sql container show` document at runtime (HR4). There is no
+  hardcoded `/deviceId` and no hardcoded retention anywhere in the tool; a
+  measured value that differs from the declared `temperature_data_ttl_days = 7`
+  (604800s) is recorded as a **drift finding**, and the measured number is the one
+  used.
+- A **pre-send read** runs before anything is sent, requiring this run's freshly
+  minted correlator to be absent — that is what makes the proof a _newly
+  identified_ document, and it surfaces an unpropagated role assignment while
+  nothing has yet been written that could not then be confirmed.
+- **`--evidence-out` is a DIRECTORY, and every run exclusively owns one immutable
+  file inside it.** The tool derives the file name from the run's own unique id
+  (`mg67-fixture-evidence-<fixtureRunId>.json`), so two runs can never derive the
+  same name — **overlapping runs are fully supported and never share a
+  destination, and there is nothing to coordinate.** That derived file is
+  **RESERVED before the first send**: the reservation proves the directory usable,
+  **exercises the actual publication primitive** (a write-then-rename, with
+  disposable probe files, so a directory that cannot support it is caught **now**
+  rather than after documents are live), and **atomically claims** the derived
+  name. A reused destination (the derived file already exists) or an unusable
+  directory is a usage error (exit 1) while nothing is live, rather than 3
+  documents in the container the tool then refuses to record.
+- **The evidence write never destroys or interleaves a record, and never reports
+  success when it might have.** Three rules, because that record is what MG-53 and
+  MG-54 consume to decide whether to halt a migration. **(1) A stat error is not
+  an absence** — only an explicit `ENOENT` reads as "nothing there"; any other
+  `stat` failure, and a directory that cannot be enumerated, is a refusal, never
+  an assumption that the path is free. That is the same error/absence conflation
+  the MG-66 analysis names, applied to the tool's own filesystem. **(2) The
+  publication is a per-run temp file written then renamed onto the run's OWN
+  reserved path** — `<evidence-file>.<fixtureRunId>.partial` — and because each
+  run owns a distinct derived file, there is **no shared-writer coordination to
+  get wrong** and no way for one run's record to land under another run's name.
+  **(3) Evidence artifacts are immutable and per-run: there is no `--overwrite`
+  and no mode that replaces a record.** A destination whose derived file already
+  exists is a genuinely reused destination and the run **refuses to start** (exit
+  1, nothing sent) — the reservation catches it before any live effect. No flag on
+  this tool authorises destroying a committed record.
+- **The operator captures the live run's stdout and stderr to files, inspects
+  them for credential shapes, and commits them alongside the evidence artifact**
+  (runbook §7c). This is the **only** evidence that discharges the ticket's
+  no-emission criterion: reading the source proves the tool _cannot_ emit a
+  credential; only a captured run proves it _did not_. The pipeline cannot
+  produce it — it holds no credential and makes no live call. Expect the
+  inspection to hit credential-shaped **key names** followed by `[redacted]`;
+  what it must never hit is a key name followed by a value.
+- Every document carries `syntheticFixture=MG-67-SYNTHETIC-FIXTURE` plus a unique
+  per-run `fixtureRunId`, so a specific document ties to a specific run.
+- The tool writes **one machine-readable JSON record** into the `--evidence-out`
+  directory, at the run's own derived file name — the observed
+  document ids and count, the marker, the partition key path, the measured
+  `default_ttl`, the wait bound used, the observed arrival delay and the
+  run/expiry instants. MG-53 and MG-54 read that file as a **program input**; the
+  runbook is prose and must never be the thing they parse. The record has a closed
+  key set and is scanned for credential shapes at build and write time — a hit
+  **refuses the write** rather than redacting. It is written atomically to the
+  per-run file the reservation claimed; there is **no `--overwrite`** and no way to
+  replace a committed record.
+- **The evidence-emission contract: one path, every outcome.** A record is written
+  on **every** outcome that attempted a send — timeout, auth, transport, marker
+  violation, ambiguity, send failure — carrying an `unconfirmed-run` finding; only
+  a run that refused **before its first attempt** exits without one. It never
+  claims a success the confirmation did not reach, and it **never asserts that
+  nothing was written when something was attempted**. If the record itself cannot
+  be written or built, the run exits **10** and prints the ids to record by hand.
+  There is no path on which this tool causes a document to exist and then stays
+  silent about it.
+- **Four id sets (`schemaVersion: 2`), not one.** `requestedIds` (attempted),
+  `acceptedIds` (`az` reported success), `ambiguousIds` (`az` reported failure and
+  acceptance is **UNKNOWN** — the CLI can fail _after_ IoT Hub took the message, so
+  a send failure is ambiguous by construction and is never recorded as not-sent),
+  and `observedIds` (read back out of Cosmos, **monotonic** — a later auth or
+  transport abort never discards what an earlier poll saw). `accountableIds` is
+  their union minus nothing: the set a downstream ticket must account for.
+  `uncertain: true` means the run does not know what the container holds — `count:
+0` alongside it is **not** "nothing arrived". `idDivergence` is **witnessed**
+  (an observed document under an unrequested id), never inferred from a count
+  shortfall: asserting a platform renaming nobody saw, in the one artifact MG-53
+  and MG-54 parse mechanically, makes a downstream ticket act on a fabricated
+  claim. Documents the read-back returned that the run cannot claim go to
+  `anomalousIds`, kept strictly apart from its own.
+- **The record declares what it does NOT check.** The read-back is filtered to the
+  run's own correlator, so a document written by an **unknown writer** can never
+  appear in any of its id sets — `anomalousIds` included, which means a document
+  carrying this run's correlator but not the marker, and is a **different**
+  finding. `anomalousCount: 0` is therefore no evidence at all about unknown
+  writers, and a permanently-empty field read as a cleared stop condition is the
+  vacuous proof this tool exists to prevent. So the record carries a constant
+  `unknownWriterCheck: { checked: false, by: "operator-unfiltered-enumeration" }`,
+  and the runbook's **unfiltered enumeration** of all five containers is the only
+  thing that checks it.
+- A green hub metric, a green route metric and a green `/api/health/cosmos` are
+  **each rejected as proof** — none of them observes a document (MG-24 and MG-58
+  are the precedents). The tool consults none of them.
+
+---
+
 ## Further Reading
 
 - **[Bootstrap & greenfield acceptance runbook](../../docs/infrastructure/bootstrap-runbook.md)** — the operator procedure
+- **[MG-67 device-fixture verification runbook](../../docs/infrastructure/mg67-device-fixture-verification.md)** — the host-phase procedure for the dev IoT device fixture (device registration, the live run, the temporary data-plane role assignment **and its removal**, the evidence, the stop conditions)
 - **[Terraform setup](../../docs/infrastructure/terraform-setup.md)** — configuration reference
 - **[CI/CD pipeline](../../docs/development/ci-cd.md)** — the authoritative deploy model

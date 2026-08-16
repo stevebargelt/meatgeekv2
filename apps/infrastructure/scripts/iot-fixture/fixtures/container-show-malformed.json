@@ -1,0 +1,24 @@
+[
+  {
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2-dev-f640e19ae7ab/sqlDatabases/meatgeek-v2-dev-db/containers/sessions",
+    "name": "sessions",
+    "resource": {
+      "defaultTtl": null,
+      "id": "sessions",
+      "partitionKey": { "kind": "Hash", "paths": ["/userId"], "version": 1 }
+    },
+    "resourceGroup": "meatgeek-v2-dev-rg",
+    "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers"
+  },
+  {
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.DocumentDB/databaseAccounts/mgv2-dev-f640e19ae7ab/sqlDatabases/meatgeek-v2-dev-db/containers/temperatures",
+    "name": "temperatures",
+    "resource": {
+      "defaultTtl": 604800,
+      "id": "temperatures",
+      "partitionKey": { "kind": "Hash", "paths": ["/deviceId"], "version": 1 }
+    },
+    "resourceGroup": "meatgeek-v2-dev-rg",
+    "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers"
+  }
+]

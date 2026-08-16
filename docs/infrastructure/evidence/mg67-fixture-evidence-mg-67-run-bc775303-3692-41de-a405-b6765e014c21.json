@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 2,
+  "kind": "mg67-device-fixture-evidence",
+  "ticket": "MG-67",
+  "tool": "iot-fixture",
+  "toolVersion": "1.0.0",
+  "runId": "mg-67-run-bc775303-3692-41de-a405-b6765e014c21",
+  "runInstant": "2026-08-16T02:29:26.557Z",
+  "confirmed": true,
+  "uncertain": false,
+  "attempted": true,
+  "outcome": "confirmed-in-cosmos",
+  "exitCode": 0,
+  "exitLabel": "confirmed-in-cosmos",
+  "outcomeReason": "read back and EXACTLY point-read 3 of 3 marked, run-correlated document(s) whose root partition value equals both the fixture device and the authenticated iothub-connection-device-id",
+  "scope": "expected-partition",
+  "marker": {
+    "field": "syntheticFixture",
+    "value": "MG-67-SYNTHETIC-FIXTURE",
+    "runIdField": "fixtureRunId"
+  },
+  "deviceId": "meatgeek-v2-dev-synthetic-fixture-device",
+  "target": {
+    "hub": "meatgeek-v2-dev-iothub-259d4bf5b628",
+    "account": "mgv2-dev-f640e19ae7ab",
+    "database": "meatgeek-v2-dev-db",
+    "container": "temperatures"
+  },
+  "containerName": "temperatures",
+  "partitionKeyPath": "/deviceId",
+  "partitionKeyField": "deviceId",
+  "partitionValue": "meatgeek-v2-dev-synthetic-fixture-device",
+  "observedPartitionValues": ["meatgeek-v2-dev-synthetic-fixture-device"],
+  "observedDocuments": [
+    {
+      "rootId": "7a84ca35-8f20-49ab-a1b2-6f6930541073",
+      "bodyId": "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-1",
+      "fixtureRunId": "mg-67-run-bc775303-3692-41de-a405-b6765e014c21",
+      "rootPartitionValue": "meatgeek-v2-dev-synthetic-fixture-device",
+      "connectionDeviceId": "meatgeek-v2-dev-synthetic-fixture-device",
+      "bodyDeviceIdAdvisory": "meatgeek-v2-dev-synthetic-fixture-device"
+    },
+    {
+      "rootId": "0cd434e5-c8d0-4a41-9488-39cdef8634cb",
+      "bodyId": "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-2",
+      "fixtureRunId": "mg-67-run-bc775303-3692-41de-a405-b6765e014c21",
+      "rootPartitionValue": "meatgeek-v2-dev-synthetic-fixture-device",
+      "connectionDeviceId": "meatgeek-v2-dev-synthetic-fixture-device",
+      "bodyDeviceIdAdvisory": "meatgeek-v2-dev-synthetic-fixture-device"
+    },
+    {
+      "rootId": "2b015232-f2ca-41a8-8398-651d2ae968a0",
+      "bodyId": "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-3",
+      "fixtureRunId": "mg-67-run-bc775303-3692-41de-a405-b6765e014c21",
+      "rootPartitionValue": "meatgeek-v2-dev-synthetic-fixture-device",
+      "connectionDeviceId": "meatgeek-v2-dev-synthetic-fixture-device",
+      "bodyDeviceIdAdvisory": "meatgeek-v2-dev-synthetic-fixture-device"
+    }
+  ],
+  "observedDocumentCount": 3,
+  "requestedIds": [
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-1",
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-2",
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-3"
+  ],
+  "requestedCount": 3,
+  "acceptedIds": [
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-1",
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-2",
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-3"
+  ],
+  "acceptedCount": 3,
+  "ambiguousIds": [],
+  "ambiguousCount": 0,
+  "observedIds": [
+    "7a84ca35-8f20-49ab-a1b2-6f6930541073",
+    "0cd434e5-c8d0-4a41-9488-39cdef8634cb",
+    "2b015232-f2ca-41a8-8398-651d2ae968a0"
+  ],
+  "observedCount": 3,
+  "accountableIds": [
+    "7a84ca35-8f20-49ab-a1b2-6f6930541073",
+    "0cd434e5-c8d0-4a41-9488-39cdef8634cb",
+    "2b015232-f2ca-41a8-8398-651d2ae968a0",
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-1",
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-2",
+    "mg-67-run-bc775303-3692-41de-a405-b6765e014c21-3"
+  ],
+  "accountableCount": 6,
+  "anomalousIds": [],
+  "anomalousCount": 0,
+  "unknownWriterCheck": {
+    "kind": "not-performed-by-this-tool",
+    "checked": false,
+    "by": "operator-unfiltered-enumeration",
+    "message": "Stop condition 1 (any unexpected document found in the source containers, i.e. a document written by an unknown writer) is NOT checked by this tool and is NOT what anomalousIds records. This tool's read-back is filtered to this run's own correlator, so a document an unknown writer produced is never returned by it and can never appear in anomalousIds; anomalousCount of 0 is therefore no evidence at all about unknown writers, not weak evidence of their absence. Checking stop condition 1 requires an UNFILTERED enumeration of the source containers, which is an operator host-phase step, compared against accountableIds recorded here."
+  },
+  "ids": [
+    "7a84ca35-8f20-49ab-a1b2-6f6930541073",
+    "0cd434e5-c8d0-4a41-9488-39cdef8634cb",
+    "2b015232-f2ca-41a8-8398-651d2ae968a0"
+  ],
+  "count": 3,
+  "expectedCount": 3,
+  "idDivergence": true,
+  "measuredDefaultTtl": 604800,
+  "declaredDefaultTtl": 604800,
+  "ttlExpires": true,
+  "ttlDriftFinding": null,
+  "expiryInstant": "2026-08-23T02:29:26.557Z",
+  "waitBoundMs": 240000,
+  "pollIntervalMs": 5000,
+  "observedArrivalMs": 5144,
+  "elapsedMs": 5145,
+  "polls": 2,
+  "crossPartitionSweepRun": false,
+  "findings": [
+    {
+      "kind": "id-divergence",
+      "measured": 3,
+      "declared": 3,
+      "message": "3 document(s) were OBSERVED under an id the sender did not request; both lists are recorded and the OBSERVED ids are the ones that exist in the container"
+    }
+  ]
+}
