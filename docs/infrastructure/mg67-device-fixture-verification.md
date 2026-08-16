@@ -1246,7 +1246,7 @@ Run this against **both** captured streams from §6 — paste the whole block:
 # used inside several of them and cannot delimit.
 CRED_RULES=(
   'possible connection string'$'\t''SharedAccessKey|AccountKey|SharedAccessSignature'$'\t''(SharedAccessKey|AccountKey|SharedAccessSignature)=\[redacted\]'
-  'possible private key block'$'\t''BEGIN [A-Z ]*PRIVATE KEY'$'\t'''
+  'possible PEM block (private key or certificate)'$'\t''BEGIN [A-Z0-9 ]*(PRIVATE KEY|CERTIFICATE)'$'\t'''
   'possible bearer token'$'\t''Bearer [A-Za-z0-9]'$'\t'''
   'possible SAS signature parameter'$'\t''[?&](sig|se|skn|sr)='$'\t''[?&](sig|se|skn|sr)=\[redacted\]'
   'possible JWT'$'\t''[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'$'\t'''
