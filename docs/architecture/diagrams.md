@@ -408,8 +408,10 @@ flowchart TB
   secret is emitted as a Terraform output. Alongside the Cosmos endpoint sits
   one plain (non-endpoint) value, `COSMOSDB_DATABASE_NAME` — the API reads it
   itself rather than the host resolving it — required with no default and
-  Terraform-owned (`module.cosmos_db.database_name`), so the app can never be
-  deployed pointed at a database that does not exist (MG-51). The Flex
+  Terraform-owned (`module.cosmos_db.destination_database_name`, the MG-53
+  shared-throughput destination the MG-62 cutover repointed both dev consumers
+  onto), so the app can never be deployed pointed at a database that does not
+  exist (MG-51). The Flex
   deployment storage uses the same identity
   (`storage_authentication_type = "SystemAssignedIdentity"` on a
   `blobContainer`; shared-key access disabled).
