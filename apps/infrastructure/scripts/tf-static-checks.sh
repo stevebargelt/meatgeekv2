@@ -1554,7 +1554,22 @@ endpoint_partition_name=""
 endpoint_partition_template=""
 while IFS=$'\t' read -r p_file p_line p_addr p_name p_template p_paths; do
   [[ -n "${p_addr}" ]] || continue
+  # The resolved container label is a bare `type.name`, which is NOT unique across
+  # the whole INFRA_DIR: an UNRELATED module could declare a block with the same
+  # label. Only the container in the RESOLVED module's own source directory
+  # (cw_mod_dir, whose .tf files are mod_tf_files) is the endpoint's actual target.
+  # Scope the match to that directory so a same-labeled block in another module can
+  # neither satisfy this check vacuously nor break it (MG-62/MG-73 anti-vacuity).
+  # The membership loop is guarded by a non-empty resolved label, which is only set
+  # once cw_mod_dir resolved and mod_tf_files is non-empty — so `"${mod_tf_files[@]}"`
+  # never expands an empty array under `set -u` (bash 3.2-safe).
+  p_in_resolved_module=0
   if [[ -n "${resolved_container_label}" && "${p_addr}" == "${resolved_container_label}" ]]; then
+    for mf in "${mod_tf_files[@]}"; do
+      if [[ "${p_file}" == "${mf}" ]]; then p_in_resolved_module=1; break; fi
+    done
+  fi
+  if [[ "${p_in_resolved_module}" -eq 1 ]]; then
     partition_container_seen=1
     # This `case` is at main-shell scope (inside the while loop, NOT inside a
     # $(...) substitution), so it is bash 3.2-safe.
@@ -1591,14 +1606,16 @@ while IFS=$'\t' read -r p_file p_line p_addr p_name p_template p_paths; do
 done <<< "${partition_contract_records}"
 
 # Anti-vacuity: the endpoint must exist, and if we resolved a target container
-# label it must actually be found among the scanned blocks. (A resolution failure
-# above has already appended its own hit, so resolved_container_label is empty
-# there and this branch is correctly skipped rather than double-reporting.)
+# label it must actually be found in the RESOLVED module's source directory. (A
+# resolution failure above has already appended its own hit, so
+# resolved_container_label is empty there and this branch is correctly skipped
+# rather than double-reporting.) The lookup is scoped to cw_mod_dir, so a
+# same-labeled block in an unrelated module does not count as locating the target.
 if [[ "${partition_endpoint_seen}" -eq 0 ]]; then
   partition_hits+="no resource \"azurerm_iothub_endpoint_cosmosdb_account\" \"cosmos_storage\" found under ${INFRA_DIR} — the routing partition contract must never pass by finding no endpoint (MG-73)"$'\n'
 fi
 if [[ -n "${resolved_container_label}" && "${partition_container_seen}" -eq 0 ]]; then
-  partition_hits+="the routing endpoint wiring resolves to container ${resolved_container_label}, but no such resource block was found under ${INFRA_DIR} — the partition-key agreement check must never pass by failing to locate its resolved target (MG-62/MG-73)"$'\n'
+  partition_hits+="the routing endpoint wiring resolves to container ${resolved_container_label}, but no such resource block was found in the resolved module's source directory ${cw_mod_dir} — the partition-key agreement check must never pass by failing to locate its resolved target, nor be satisfied by a same-labeled container in an unrelated module (MG-62/MG-73)"$'\n'
 fi
 if [[ -n "${container_partition_property}" && "${endpoint_partition_name}" != "-" && "${endpoint_partition_name}" != "\"${container_partition_property}\"" ]]; then
   partition_hits+="azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage partition_key_name ${endpoint_partition_name} does not match ${resolved_container_label}'s /${container_partition_property} partition property; the endpoint and create-only container partition key must agree (MG-73)"$'\n'

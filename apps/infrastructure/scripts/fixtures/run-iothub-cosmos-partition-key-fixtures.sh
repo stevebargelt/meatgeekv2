@@ -131,6 +131,28 @@ mutate_case() {
     # renamed-output: rename the destination_container_ids output the wiring names,
     # so hop 3 (module output -> container resource) cannot resolve. FAIL, not skip.
     renamed-output) replace_once_in_file "${cosmos_outputs_file}" 'output "destination_container_ids"' 'output "destination_container_ids_renamed"' ;;
+    # unrelated-module-same-label: prove check 20 is SCOPED to the resolved module.
+    # Rename the real destination container away from the wired label so it no longer
+    # answers in its own module, then plant a same-labeled container carrying the
+    # CORRECT /deviceId in an UNRELATED module. The root wiring still resolves to
+    # azurerm_cosmosdb_sql_container.temperatures_shared (the outputs.tf reference is
+    # untouched). Before the cw_mod_dir scoping fix, the whole-INFRA_DIR scan let that
+    # foreign block satisfy the check vacuously (exit 0); the scoped check must FAIL —
+    # the wired target is absent from its own module and a same-labeled block in an
+    # unrelated module does not substitute for it.
+    unrelated-module-same-label)
+      replace_once_in_file "${cosmos_file}" \
+        'resource "azurerm_cosmosdb_sql_container" "temperatures_shared" {' \
+        'resource "azurerm_cosmosdb_sql_container" "temperatures_shared_local" {' || return 1
+      mkdir -p "$2/modules/z_unrelated" || return 1
+      cat > "$2/modules/z_unrelated/main.tf" <<'UNRELATED_TF'
+resource "azurerm_cosmosdb_sql_container" "temperatures_shared" {
+  name                = "temperatures"
+  database_name       = "unrelated"
+  partition_key_paths = ["/deviceId"]
+}
+UNRELATED_TF
+      ;;
     *) echo "run-iothub-cosmos-partition-key-fixtures: FATAL: unknown case ${case_name}" >&2; return 1 ;;
   esac
 }
@@ -175,9 +197,12 @@ run_case resolved-container-drift "does not match azurerm_cosmosdb_sql_container
 run_case nonliteral-target-paths 'must declare one literal partition_key_paths value'
 run_case missing-container-wiring 'cannot resolve module.iot_hub cosmos_container_id'
 run_case renamed-output 'does not expose key "temperatures" as a <type>.<name>.id container reference'
+# Scope regression (RF-3): a same-labeled container in an UNRELATED module must not
+# satisfy check 20 — the resolved target is looked up only in its own module dir.
+run_case unrelated-module-same-label 'nor be satisfied by a same-labeled container in an unrelated module'
 
-if [ "${checks}" -ne 11 ] || [ "${failures}" -ne 0 ]; then
-  echo "run-iothub-cosmos-partition-key-fixtures: FAILED — ${failures} of ${checks} checks failed (expected 11 checks)." >&2
+if [ "${checks}" -ne 12 ] || [ "${failures}" -ne 0 ]; then
+  echo "run-iothub-cosmos-partition-key-fixtures: FAILED — ${failures} of ${checks} checks failed (expected 12 checks)." >&2
   exit 1
 fi
 echo "run-iothub-cosmos-partition-key-fixtures: all ${checks} mutation checks behaved as expected under ${BASH_VERSION}."
