@@ -45,6 +45,25 @@ output "cosmos_db_database_name" {
   value       = module.cosmos_db.database_name
 }
 
+# Non-secret names the MG-53 post-create assertion resolves at apply time. The
+# live collector (scripts/collect-live-shared-throughput.sh, invoked by the apply
+# job) reads the destination back with `az cosmosdb sql ...` and needs the account
+# and the DESTINATION database name — resolved from DESIRED state via
+# `terraform output`, never a literal, the same way MG-58's host-storage gate
+# resolves function_app_name / storage_account_name. These are NAMES, not
+# credentials or endpoints, and are distinct from the destination DATA-PLANE
+# outputs in modules/cosmos-db/outputs.tf that MG-53 leaves intentionally unwired
+# for consumers — a verification gate reading a name is not a consumer.
+output "cosmos_account_name" {
+  description = "Name of the V2-owned CosmosDB account (non-secret; used by the MG-53 post-create assertion to address the live account)"
+  value       = module.cosmos_db.cosmos_account_name
+}
+
+output "destination_database_name" {
+  description = "Name of the MG-53 shared-throughput destination database (non-secret; the live post-create assertion asserts THIS database carries the single 400 RU/s database-level offer)"
+  value       = module.cosmos_db.destination_database_name
+}
+
 # Azure Functions Outputs
 output "function_app_name" {
   description = "Name of the Azure Function App"

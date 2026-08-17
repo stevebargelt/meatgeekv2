@@ -489,6 +489,27 @@ jobs:
         # that accepted any nonzero would let those swap silently.
         run: bash apps/infrastructure/scripts/fixtures/run-assert-live-shared-throughput-fixtures.sh
 
+      - name: Shared-throughput live COLLECTOR fixtures (MG-53)
+        # scripts/collect-live-shared-throughput.sh is the live half of the MG-53
+        # post-create assertion: it runs the `az cosmosdb sql ...` read-backs and
+        # assembles the bundle the gate above consumes, and the apply job
+        # (infra-apply-dev.yml) pipes its stdout straight into that gate. The gate
+        # is only fail-closed if the collector actually populates the bundle and
+        # classifies each probe fail-closed — an UNRECOGNISED az failure must become
+        # queryOk=false ("could not tell"), never offerFound=false ("no offer").
+        # This harness pins exactly that, credential-less: it overrides the
+        # collector's AZ_BIN with a FAKE `az` returning canned read-backs/exit codes
+        # and drives the collector end-to-end INTO the real gate, asserting the
+        # gate's verdict. A clean collection PASSES; a dedicated container offer, an
+        # absent db offer, an auth error, and an unreadable container-show each flip
+        # the end-to-end outcome exactly as they must.
+        #
+        # It belongs in THIS job for the same reason as the harnesses above: the
+        # fake `az` means it reaches no network and needs no credential — the
+        # property assert-credentialless.sh re-proves at runtime. The collector's
+        # LIVE run has its home in the post-merge apply job.
+        run: bash apps/infrastructure/scripts/fixtures/run-collect-live-shared-throughput-fixtures.sh
+
       - name: V1 Cosmos export tool tests (MG-48)
         # The export tool gates a PERMANENT deletion of the V1 Cosmos account,
         # so its failure paths — count mismatch, 429 with retries exhausted,
