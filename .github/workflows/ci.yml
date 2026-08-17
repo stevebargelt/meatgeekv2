@@ -436,6 +436,59 @@ jobs:
         # start deleting settings in response to an unreadable document.
         run: bash apps/infrastructure/scripts/fixtures/run-live-host-storage-fixtures.sh
 
+      - name: Cosmos definition-parity gate fixtures (MG-53)
+        # The MG-53 destination is only a valid destination if each of its five
+        # containers reproduces its SOURCE definition faithfully, and the live
+        # post-create assertion trusts scripts/cosmos-definition-parity.sh to
+        # observe any drift. This harness is what proves that parity script still
+        # rejects the documents it is supposed to reject: a matching pair passes,
+        # each single-scoped-field diff (partition key, excluded path, composite
+        # index, ttl, unique key, conflict policy) fails with the field named,
+        # and — the deliberate carve-out — a throughput-only difference still
+        # passes, because definition faithfulness excludes throughput (the
+        # destination temperatures container has none while the source has 400).
+        #
+        # It belongs in THIS job for the same reason the four harnesses above do:
+        # every fixture IS a canonical `az cosmosdb sql container show` document
+        # the parity script consumes, so it needs no Azure, no credentials, no
+        # `az` and no `terraform` binary, and cannot weaken the credentialless
+        # posture assert-credentialless.sh proves at runtime. The live parity
+        # comparison itself CANNOT run here — reading the destination back
+        # requires an Azure identity — and has its correct home in the
+        # post-merge apply job's assert-live-shared-throughput.sh gate.
+        #
+        # Exit codes are asserted EXACTLY, under both bash and sh: a real
+        # definition diff (nonzero) and an operational failure (a distinct
+        # nonzero) must stay distinguishable, so the live gate can tell "the
+        # destination is genuinely wrong" from "the probe could not be read."
+        run: bash apps/infrastructure/scripts/fixtures/run-cosmos-definition-parity-fixtures.sh
+
+      - name: Shared-throughput post-create assertion fixtures (MG-53)
+        # assert-live-shared-throughput.sh is the fail-closed post-create gate
+        # for the MG-53 destination: it asserts a single 400 RU/s DATABASE-level
+        # offer exists, that NO destination container holds a dedicated offer,
+        # that the destination temperatures container partitions on /deviceId
+        # (this gate — not tf-static-checks check 20, which keys on the source
+        # label — is authoritative for the destination's create-only partition
+        # key), and that all five destination definitions match source via the
+        # parity script above. A gate that reports PASS on an assertion that did
+        # not provably run is worthless, so this harness pins its behaviour: a
+        # clean bundle passes, and a dedicated container offer, an absent
+        # db-level offer, a mis-partitioned temperatures container and a
+        # definition drift each fail closed with the expected exit code.
+        #
+        # It belongs in THIS job for the same reason as the harness above: every
+        # fixture IS a live read-back document (throughput-show / per-container
+        # throughput probe / container-show) the gate consumes, so it reaches no
+        # network and needs no credential — the property assert-credentialless.sh
+        # re-proves at runtime. The gate itself CANNOT run here; it asserts
+        # against live Azure and has its home in the post-merge apply job.
+        #
+        # Exit codes asserted EXACTLY under both bash and sh: a real violation
+        # and an operational failure carry distinct nonzero codes, and a harness
+        # that accepted any nonzero would let those swap silently.
+        run: bash apps/infrastructure/scripts/fixtures/run-assert-live-shared-throughput-fixtures.sh
+
       - name: V1 Cosmos export tool tests (MG-48)
         # The export tool gates a PERMANENT deletion of the V1 Cosmos account,
         # so its failure paths — count mismatch, 429 with retries exhausted,
