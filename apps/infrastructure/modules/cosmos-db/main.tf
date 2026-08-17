@@ -152,7 +152,18 @@ resource "azurerm_cosmosdb_sql_database" "meatgeek" {
   resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
   account_name        = azurerm_cosmosdb_account.main.name
 
-  # No throughput at database level - containers will have individual throughput for minimal usage
+  # No database-level (shared) throughput offer on THIS source database — and that
+  # is the defect MG-53 exists to correct, recorded here so the wrong mental model
+  # is not read as intent. A database with no shared offer does NOT give its
+  # containers a shared pool; Cosmos has no mechanism for one container to draw on
+  # another's throughput. Each container that declares no throughput here silently
+  # receives its OWN 400 RU/s minimum manual offer, so this database provisions
+  # ~2000 RU/s (5 × 400), not the 400 the code intended. Sharing requires a single
+  # offer on the DATABASE (up to 25 containers share it), and Azure cannot convert
+  # an existing dedicated-throughput container to shared in place — so the fix is a
+  # newly-created shared-throughput database, added below as
+  # azurerm_cosmosdb_sql_database.meatgeek_shared. This source database is left
+  # unchanged (MG-53 is CREATE-ONLY; the repoint to the destination is MG-62).
 
   # NOT redundant with the account_name reference above — see the rule above.
   lifecycle {
@@ -170,7 +181,13 @@ resource "azurerm_cosmosdb_sql_container" "devices" {
 
   partition_key_paths   = ["/id"]
   partition_key_version = 1
-  # No throughput - will share from temperatures container
+  # No throughput declared here — and this does NOT share the temperatures
+  # container's offer. Cosmos provides no mechanism for a container to draw on a
+  # sibling container's throughput; sharing is only possible from a database-level
+  # offer, which this source database does not have. A container with no throughput
+  # in a database with no shared offer silently gets its own 400 RU/s minimum
+  # manual offer (MG-53). Left unchanged here — the shared-throughput fix lives on
+  # the meatgeek_shared destination database below, not on this source container.
 
   # Indexing policy optimized for device queries.
   #
@@ -402,5 +419,280 @@ resource "azurerm_cosmosdb_sql_container" "recipes" {
   # rule above the database block.
   lifecycle {
     replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek.id]
+  }
+}
+
+# =============================================================================
+# MG-53 DESTINATION — shared-throughput database (CREATE ONLY)
+# =============================================================================
+#
+# Everything above this banner is the SOURCE and is left as it was (only the two
+# false throughput comments on the source database and source devices container
+# were corrected). Everything below is a NEW, parallel destination that provisions
+# throughput the way the code always intended: a SINGLE 400 RU/s offer at the
+# DATABASE level, shared by all five containers, none of which declares its own
+# throughput.
+#
+# Why a whole new database rather than an edit to the source: Azure cannot convert
+# an existing dedicated-throughput container to shared throughput, and a database
+# created without a shared offer cannot acquire one later. The offer cannot be
+# moved from container to database in place. So the correct destination MUST be
+# newly created. This is strictly ADDITIVE — no source resource is replaced,
+# renamed, or repointed; the applied plan is creates-only.
+#
+# The five container definitions below are reproduced FAITHFULLY from their source
+# siblings (partition_key_paths, partition_key_version, indexing_policy including
+# included/excluded/composite, default_ttl, unique_key) so the destination is a
+# definition-faithful twin. The ONLY intended differences are (1) no per-container
+# throughput and (2) the database-level offer. Definition parity against the live
+# source is proven by scripts/cosmos-definition-parity.sh (MG-53 step 3) and the
+# post-create assertion scripts/assert-live-shared-throughput.sh (step 4).
+#
+# The composite indexes are copied verbatim from the source and are deliberately
+# NOT redesigned here (recorded for MG-59): they may not serve the routed
+# envelope's fields, but they are not wrong in themselves.
+#
+# Consumers (the IoT Hub Cosmos endpoint, the Function App database-name setting)
+# still address the SOURCE at the end of this work — the repoint is MG-62. The
+# destination outputs in outputs.tf are published but intentionally unwired.
+
+resource "azurerm_cosmosdb_sql_database" "meatgeek_shared" {
+  name                = "${var.resource_prefix}-shared-db"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+
+  # The fix: a SINGLE database-level shared-throughput offer. Up to 25 containers
+  # under this database share this 400 RU/s pool, so the five destination
+  # containers below carry NO throughput of their own.
+  throughput = 400
+
+  # Same reasoning as the source database's lifecycle block above: this child
+  # reaches azurerm_cosmosdb_account.main through the account's CONFIGURED name
+  # (ordering only), so it needs an explicit replace_triggered_by on the account's
+  # `.id` to be replaced along with a replaced account. `.id`, not the bare
+  # resource, to avoid firing on the account's in-place updates (MG-48 F4).
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id]
+  }
+}
+
+# Destination container: devices (faithful twin of azurerm_cosmosdb_sql_container.devices)
+resource "azurerm_cosmosdb_sql_container" "devices_shared" {
+  name                = "devices"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+
+  partition_key_paths   = ["/id"]
+  partition_key_version = 1
+  # No throughput — shared from the database-level offer above.
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+
+    composite_index {
+      index {
+        path  = "/userId"
+        order = "ascending"
+      }
+      index {
+        path  = "/isActive"
+        order = "ascending"
+      }
+    }
+  }
+
+  unique_key {
+    paths = ["/userId", "/name"]
+  }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]
+  }
+}
+
+# Destination container: temperatures (faithful twin of azurerm_cosmosdb_sql_container.temperatures)
+#
+# CREATE-ONLY PARTITION KEY (MG-73). partition_key_paths MUST stay ["/deviceId"] to
+# match the IoT Hub Cosmos routing endpoint's partition_key_name = "deviceId"; a
+# container partition path cannot be repaired after creation. The source-contract
+# check (tf-static-checks check 20) keys on the SOURCE container label and cannot
+# see this differently-labeled destination — scripts/assert-live-shared-throughput.sh
+# (MG-53 step 4) and the module tftest (step 2) are what guard this destination's
+# partition key.
+resource "azurerm_cosmosdb_sql_container" "temperatures_shared" {
+  name                = "temperatures"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+
+  partition_key_paths   = ["/deviceId"]
+  partition_key_version = 1
+  # No throughput — shared from the database-level offer above. The source
+  # temperatures container carries throughput = 400; that is intentionally NOT
+  # reproduced here, and the parity comparison scopes throughput out.
+
+  default_ttl = var.temperature_data_ttl
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+
+    composite_index {
+      index {
+        path  = "/deviceId"
+        order = "ascending"
+      }
+      index {
+        path  = "/timestamp"
+        order = "descending"
+      }
+    }
+
+    composite_index {
+      index {
+        path  = "/cookId"
+        order = "ascending"
+      }
+      index {
+        path  = "/timestamp"
+        order = "descending"
+      }
+    }
+  }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]
+  }
+}
+
+# Destination container: cooks (faithful twin of azurerm_cosmosdb_sql_container.cooks)
+resource "azurerm_cosmosdb_sql_container" "cooks_shared" {
+  name                = "cooks"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+
+  partition_key_paths   = ["/userId"]
+  partition_key_version = 1
+  # No throughput — shared from the database-level offer above.
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+
+    composite_index {
+      index {
+        path  = "/userId"
+        order = "ascending"
+      }
+      index {
+        path  = "/status"
+        order = "ascending"
+      }
+      index {
+        path  = "/startTime"
+        order = "descending"
+      }
+    }
+
+    composite_index {
+      index {
+        path  = "/userId"
+        order = "ascending"
+      }
+      index {
+        path  = "/meatType"
+        order = "ascending"
+      }
+    }
+  }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]
+  }
+}
+
+# Destination container: users (faithful twin of azurerm_cosmosdb_sql_container.users)
+resource "azurerm_cosmosdb_sql_container" "users_shared" {
+  name                = "users"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+
+  partition_key_paths   = ["/id"]
+  partition_key_version = 1
+  # No throughput — shared from the database-level offer above.
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+  }
+
+  unique_key {
+    paths = ["/email"]
+  }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]
+  }
+}
+
+# Destination container: recipes (faithful twin of azurerm_cosmosdb_sql_container.recipes)
+resource "azurerm_cosmosdb_sql_container" "recipes_shared" {
+  name                = "recipes"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+
+  partition_key_paths   = ["/userId"]
+  partition_key_version = 1
+  # No throughput — shared from the database-level offer above.
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+
+    composite_index {
+      index {
+        path  = "/meatType"
+        order = "ascending"
+      }
+      index {
+        path  = "/rating"
+        order = "descending"
+      }
+    }
+
+    composite_index {
+      index {
+        path  = "/isPublic"
+        order = "ascending"
+      }
+      index {
+        path  = "/rating"
+        order = "descending"
+      }
+    }
+  }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]
   }
 }
