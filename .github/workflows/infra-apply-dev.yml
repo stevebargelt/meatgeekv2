@@ -1328,11 +1328,23 @@ jobs:
       #     never a credential (the destination account has local auth disabled,
       #     MG-24), so the bundle is safe in a retained log, same rule as MG-58.
       - name: Live shared-throughput gate (fail-closed, on the CREATED destination)
-        # Unconditionally always(), like the host-storage gate: a timeout kill can
-        # land mid-apply, and the question "could this run have created/changed the
-        # destination?" is answered INSIDE the step from the runner's actual state,
-        # not from a step output that may be missing.
-        if: always()
+        # Freshness-gated, NOT always() — and that divergence from the sibling live
+        # gates is deliberate, because of WHAT this one inspects. The MG-58
+        # host-storage gate and the post-apply state-secret gate inspect live state
+        # that exists regardless of whether THIS run applied anything: a superseded
+        # run can still meaningfully read a deployed site's storage config, so
+        # always() plus a `.terraform` body guard is right for them and MG-23 exempts
+        # them for exactly that reason. THIS gate inspects the destination this run
+        # CREATED. The apply step is itself double-guarded on steps.freshness AND
+        # steps.freshness_final, so when either is false NO APPLY RAN and there is no
+        # created destination to verify — running the gate then would probe for
+        # something this run never made. The freshness gating is therefore not a
+        # weakening of the live-gate pattern; it follows from the gate being scoped to
+        # this run's own creation rather than to pre-existing state. The case that
+        # looks like a gap and is not: a run whose apply RAN and was then killed still
+        # had freshness_final true, so the gate is NOT skipped there — only a
+        # superseded run skips, and a superseded run never applied.
+        if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
         run: |
           set -eu
 
