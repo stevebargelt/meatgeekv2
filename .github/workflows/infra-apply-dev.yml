@@ -1338,13 +1338,27 @@ jobs:
         # CREATED. The apply step is itself double-guarded on steps.freshness AND
         # steps.freshness_final, so when either is false NO APPLY RAN and there is no
         # created destination to verify — running the gate then would probe for
-        # something this run never made. The freshness gating is therefore not a
-        # weakening of the live-gate pattern; it follows from the gate being scoped to
-        # this run's own creation rather than to pre-existing state. The case that
-        # looks like a gap and is not: a run whose apply RAN and was then killed still
-        # had freshness_final true, so the gate is NOT skipped there — only a
-        # superseded run skips, and a superseded run never applied.
-        if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
+        # something this run never made. The freshness conditions therefore SCOPE the
+        # gate to runs that actually reached apply; that scoping is not a weakening of
+        # the live-gate pattern, it follows from the gate being scoped to this run's
+        # own creation rather than to pre-existing state.
+        #
+        # BUT THE FRESHNESS CONDITIONS ALONE ARE FAIL-OPEN, and the leading always()
+        # is what closes it. GitHub ANDs an implicit success() into any step-level
+        # `if:` that carries NO status-check function. Without always(), this gate's
+        # condition is really `success() && steps.freshness… && steps.freshness_final…`
+        # — so an apply that CREATED the shared database/containers and then FAILED (or
+        # was killed) part-way SKIPS this gate rather than being evaluated. That is
+        # fail-open on the protected invariant, on the precise path where it matters
+        # most: a part-applied run is the state most likely to have produced a wrong
+        # destination and, under the implicit success(), the state least likely to be
+        # checked. always() overrides the implicit success() so the gate is EVALUATED
+        # even when the apply failed; the freshness conditions then still skip the one
+        # case they are meant to — a superseded run (freshness_final=false) that never
+        # applied. freshness_final runs immediately before apply, so any run that
+        # reached apply has already recorded freshness_final=true; a timeout that lands
+        # before apply leaves nothing created and is correctly skipped.
+        if: always() && steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
         run: |
           set -eu
 

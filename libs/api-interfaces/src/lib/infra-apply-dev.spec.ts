@@ -411,6 +411,53 @@ function jobRuns(
   return truthy(evaluateExpression(expr, ctx, state));
 }
 
+/**
+ * The state a STEP's `if:` is evaluated against, one level down from the job.
+ *   priorStepFailed — a step earlier in this job exited nonzero (e.g. the
+ *                     `terraform apply` step failed part-way through).
+ *   cancelled       — the job was cancelled (a `timeout-minutes` kill, or a
+ *                     rejected deployment) while this step was still pending.
+ */
+interface StepState {
+  priorStepFailed: boolean;
+  cancelled: boolean;
+}
+
+/**
+ * Does GitHub run this STEP?
+ *
+ * This models the one rule RF-2 turned on: GitHub ANDs an IMPLICIT success() into
+ * any step-level `if:` that carries no status-check function. A step whose `if`
+ * names no status function therefore runs only when every prior step succeeded —
+ * so a gate conditioned purely on `steps.freshness*` outputs is SKIPPED, not
+ * evaluated, once `terraform apply` has failed part-way. A status function
+ * (always/failure/cancelled) removes that implicit guard and the expression is
+ * evaluated as written.
+ *
+ * Status functions are resolved to booleans HERE and substituted before the shared
+ * expression evaluator runs, so that evaluator keeps refusing to guess at
+ * success()/failure() everywhere else (its self-test still pins the throw).
+ */
+function stepRuns(stepIf: string, ctx: Record<string, unknown>, state: StepState): boolean {
+  const raw = String(stepIf ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const hasStatusFn = /\b(always|success|failure|cancelled)\s*\(\s*\)/.test(raw);
+  // GitHub success() is true iff nothing before this step failed AND the run was
+  // not cancelled; failure() is its complement excluding cancellation.
+  const success = !state.priorStepFailed && !state.cancelled;
+  const failure = state.priorStepFailed && !state.cancelled;
+  // A bare `if:` (empty) is implicit-success() too; a non-empty if with no status
+  // function gets the implicit success() ANDed in, exactly as GitHub does.
+  const base = raw === '' ? 'success()' : hasStatusFn ? raw : `success() && (${raw})`;
+  const resolved = base
+    .replace(/\balways\s*\(\s*\)/g, 'true')
+    .replace(/\bcancelled\s*\(\s*\)/g, state.cancelled ? 'true' : 'false')
+    .replace(/\bsuccess\s*\(\s*\)/g, success ? 'true' : 'false')
+    .replace(/\bfailure\s*\(\s*\)/g, failure ? 'true' : 'false');
+  return truthy(evaluateExpression(resolved, ctx, { cancelled: state.cancelled }));
+}
+
 describe('MG-23: infra-apply-dev.yml — automated dev GitOps reconciliation', () => {
   it('parses as a workflow with exactly the two expected jobs', () => {
     expect(WF.name).toBeDefined();
@@ -1536,6 +1583,127 @@ describe('MG-23: infra-apply-dev.yml — automated dev GitOps reconciliation', (
       expect((LIVE as Record<string, unknown>)['permissions']).toBeUndefined();
       expect((LIVE as Record<string, unknown>)['environment']).toBeUndefined();
       expect(LIVE_RUN).not.toMatch(/\baz login\b/);
+    });
+  });
+
+  /* ------------------------------------------------------------------------ *
+   * MG-53 GUARD — THE LIVE SHARED-THROUGHPUT GATE MUST NOT FAIL OPEN WHEN THE
+   * APPLY FAILS PART-WAY (RF-2).
+   *
+   * This gate is scoped to the destination THIS run created, so unlike the
+   * always()-run post-apply/host-storage gates it is legitimately conditioned on
+   * the freshness outputs — a superseded run created nothing and must skip. The
+   * trap RF-2 caught: GitHub ANDs an implicit success() into a step-level `if:`
+   * with no status function, so freshness conditions ALONE mean a `terraform
+   * apply` that created the shared database/containers and then FAILED skips this
+   * gate rather than being evaluated — fail-open on the exact invariant the gate
+   * protects, on the path most likely to have produced a wrong destination.
+   *
+   * The fix is a leading always() that overrides the implicit success() while the
+   * freshness conditions keep skipping the genuinely-superseded run. Reachability
+   * is `demonstrated`, so this is proven by EVALUATING the step condition under
+   * each run state, not by asserting the text of the `if:`.
+   * ------------------------------------------------------------------------ */
+  describe('MG-53 guard: the live shared-throughput gate is not skipped by a failed apply (RF-2)', () => {
+    const iGate = stepIndex(/collect-live-shared-throughput\.sh/);
+    const GATE = APPLY_STEPS[iGate] ?? {};
+    const GATE_IF = String(GATE.if ?? '');
+
+    /** freshness outputs for a run that reached apply (both gates recorded true). */
+    const REACHED_APPLY = {
+      steps: {
+        freshness: { outputs: { fresh: 'true' } },
+        freshness_final: { outputs: { fresh: 'true' } },
+      },
+    };
+    /** A superseded run: the final freshness gate recorded fresh=false, apply skipped. */
+    const SUPERSEDED = {
+      steps: {
+        freshness: { outputs: { fresh: 'true' } },
+        freshness_final: { outputs: { fresh: 'false' } },
+      },
+    };
+
+    it('exists as exactly one step in the apply job', () => {
+      expect(iGate).toBeGreaterThan(-1);
+      expect(
+        APPLY_STEPS.filter(s => /collect-live-shared-throughput\.sh/.test(String(s.run ?? '')))
+          .length
+      ).toBe(1);
+      // Piped straight into the assertion gate — the collect->assert seam.
+      expect(String(GATE.run ?? '')).toMatch(
+        /collect-live-shared-throughput\.sh[\s\S]*\|\s*scripts\/assert-live-shared-throughput\.sh/
+      );
+    });
+
+    it('the stepRuns model itself is not vacuous (self-test of the implicit success())', () => {
+      // A no-status-function step runs on success and SKIPS once a prior step
+      // failed — that IS the implicit success() this guard turns on. Adding
+      // always() flips the failed case back to running. If stepRuns did not model
+      // this, every assertion below would be worthless.
+      const cond = "s.o == 'true'";
+      const ctx = { s: { o: 'true' } };
+      expect(stepRuns(cond, ctx, { priorStepFailed: false, cancelled: false })).toBe(true);
+      expect(stepRuns(cond, ctx, { priorStepFailed: true, cancelled: false })).toBe(false);
+      expect(
+        stepRuns(`always() && ${cond}`, ctx, { priorStepFailed: true, cancelled: false })
+      ).toBe(true);
+      // On cancellation a plain step skips; always() runs; cancelled() runs.
+      expect(stepRuns(cond, ctx, { priorStepFailed: false, cancelled: true })).toBe(false);
+      expect(
+        stepRuns(`always() && ${cond}`, ctx, { priorStepFailed: false, cancelled: true })
+      ).toBe(true);
+      // A falsey underlying condition is still false even with always().
+      expect(
+        stepRuns("always() && s.o == 'x'", ctx, { priorStepFailed: true, cancelled: false })
+      ).toBe(false);
+    });
+
+    it('RUNS when the apply reached the destination and then FAILED part-way', () => {
+      // THE REGRESSION THIS GUARD EXISTS FOR. Without the leading always() the
+      // implicit success() skips the gate exactly when a partial apply may have
+      // built a wrong destination — the strongest fail-open on the invariant.
+      expect(stepRuns(GATE_IF, REACHED_APPLY, { priorStepFailed: true, cancelled: false })).toBe(
+        true
+      );
+    });
+
+    it('RUNS when a timeout kill cancelled the job after apply began', () => {
+      // A `timeout-minutes` kill is the wedged-mid-write case — most likely to have
+      // updated the destination — and it must still be verified.
+      expect(stepRuns(GATE_IF, REACHED_APPLY, { priorStepFailed: true, cancelled: true })).toBe(
+        true
+      );
+    });
+
+    it('RUNS on a clean successful apply', () => {
+      expect(stepRuns(GATE_IF, REACHED_APPLY, { priorStepFailed: false, cancelled: false })).toBe(
+        true
+      );
+    });
+
+    it('SKIPS a superseded run that never applied (the genuine skip is preserved)', () => {
+      // freshness_final=false => nothing was created => nothing to assert. always()
+      // must not turn this into a probe for a destination this run never made.
+      for (const cancelled of [false, true]) {
+        for (const priorStepFailed of [false, true]) {
+          expect({
+            cancelled,
+            priorStepFailed,
+            runs: stepRuns(GATE_IF, SUPERSEDED, { priorStepFailed, cancelled }),
+          }).toEqual({ cancelled, priorStepFailed, runs: false });
+        }
+      }
+    });
+
+    it('carries a status function AND both freshness conditions (textual backstop)', () => {
+      // The semantic proof above is the real guard; this trips too if a future edit
+      // deletes always() (reintroducing the implicit success() skip) or drops a
+      // freshness condition (running the gate on a superseded run).
+      const norm = GATE_IF.replace(/\s+/g, ' ');
+      expect(norm).toMatch(/\balways\(\)/);
+      expect(norm).toMatch(/steps\.freshness\.outputs\.fresh == 'true'/);
+      expect(norm).toMatch(/steps\.freshness_final\.outputs\.fresh == 'true'/);
     });
   });
 
