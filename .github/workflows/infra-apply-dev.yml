@@ -1300,7 +1300,136 @@ jobs:
             exit 1
           fi
 
-      # 13. The saved plan is a sensitive artifact (it embeds planned values). It
+      # 13. LIVE SHARED-THROUGHPUT GATE (MG-53), fail-closed, on the CREATED
+      #     destination. This is the missing half the config-surface gates cannot
+      #     supply: the destination's database-level offer, its containers' absence
+      #     of dedicated offers, the temperatures container's create-only /deviceId
+      #     partition key, and each container's definition parity are ALL properties
+      #     that exist only on the live destination and are INVISIBLE to
+      #     tf-static-checks (which keys on the SOURCE labels). The gate
+      #     scripts/assert-live-shared-throughput.sh is authored fail-closed but is
+      #     a pure function of a read-back bundle — it asserts nothing until it is
+      #     RUN with a bundle actually populated from Azure. A fail-closed gate that
+      #     never runs is fail-OPEN, which is the exact invariant MG-53 protects.
+      #
+      #     Two halves, same seam as MG-58's host-storage gate: the live COLLECTOR
+      #     (scripts/collect-live-shared-throughput.sh) runs the `az cosmosdb sql
+      #     ...` read-backs and assembles the bundle; its stdout is piped STRAIGHT
+      #     into the gate. The collector holds all the Azure coupling so the gate
+      #     stays credential-lessly testable in CI, and the collector itself is
+      #     regression-tested credential-less by
+      #     run-collect-live-shared-throughput-fixtures.sh (fake `az`).
+      #
+      #     NO NEW AUTHORITY. Runs inside the existing apply job under its existing
+      #     id-token/environment and the azure/login already performed above; the
+      #     collector's reads (`az cosmosdb sql database/container throughput show`,
+      #     `... container show`) need only the reader access the infra-apply
+      #     identity already holds. Names and RU/s integers only reach the log —
+      #     never a credential (the destination account has local auth disabled,
+      #     MG-24), so the bundle is safe in a retained log, same rule as MG-58.
+      - name: Live shared-throughput gate (fail-closed, on the CREATED destination)
+        # Freshness-gated, NOT always() — and that divergence from the sibling live
+        # gates is deliberate, because of WHAT this one inspects. The MG-58
+        # host-storage gate and the post-apply state-secret gate inspect live state
+        # that exists regardless of whether THIS run applied anything: a superseded
+        # run can still meaningfully read a deployed site's storage config, so
+        # always() plus a `.terraform` body guard is right for them and MG-23 exempts
+        # them for exactly that reason. THIS gate inspects the destination this run
+        # CREATED. The apply step is itself double-guarded on steps.freshness AND
+        # steps.freshness_final, so when either is false NO APPLY RAN and there is no
+        # created destination to verify — running the gate then would probe for
+        # something this run never made. The freshness gating is therefore not a
+        # weakening of the live-gate pattern; it follows from the gate being scoped to
+        # this run's own creation rather than to pre-existing state. The case that
+        # looks like a gap and is not: a run whose apply RAN and was then killed still
+        # had freshness_final true, so the gate is NOT skipped there — only a
+        # superseded run skips, and a superseded run never applied.
+        if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
+        run: |
+          set -eu
+
+          if [ ! -d apps/infrastructure/.terraform ]; then
+            echo "No initialized backend in the workspace — this run never bound state and never reached Cosmos, so it cannot have created the MG-53 destination. Nothing to assert."
+            exit 0
+          fi
+          cd apps/infrastructure
+
+          ERR="$(mktemp)"
+
+          # The destination is CREATE-ONLY. If it is not in state, this run never
+          # created it (a plan-only run, or a push that touched no infrastructure),
+          # and there is nothing to assert. A state read that FAILS is a different
+          # question, and is not an answer: fail closed and say why.
+          if ! TF_ADDRS="$(terraform state list 2>"$ERR")"; then
+            echo "Could not read state to resolve the shared-throughput destination — failing closed." >&2
+            cat "$ERR" >&2
+            rm -f "$ERR"
+            exit 1
+          fi
+          if ! printf '%s\n' "$TF_ADDRS" | grep -q 'azurerm_cosmosdb_sql_database\.meatgeek_shared'; then
+            echo "No MG-53 shared-throughput destination database in state — it has not been created, so there is nothing to assert live."
+            rm -f "$ERR"
+            exit 0
+          fi
+
+          # Resolve the account and BOTH database names from DESIRED state, never a
+          # literal — that is what makes this a live-versus-desired assertion. These
+          # are NAMES, not secrets (MG-24: the account has local auth disabled).
+          if ! RG="$(terraform output -raw resource_group_name 2>"$ERR")" || [ -z "$RG" ]; then
+            echo "Could not resolve resource_group_name from terraform output — failing closed." >&2
+            cat "$ERR" >&2; rm -f "$ERR"; exit 1
+          fi
+          if ! ACCT="$(terraform output -raw cosmos_account_name 2>"$ERR")" || [ -z "$ACCT" ]; then
+            echo "Could not resolve cosmos_account_name from terraform output — failing closed." >&2
+            cat "$ERR" >&2; rm -f "$ERR"; exit 1
+          fi
+          if ! DEST_DB="$(terraform output -raw destination_database_name 2>"$ERR")" || [ -z "$DEST_DB" ]; then
+            echo "Could not resolve destination_database_name from terraform output — failing closed." >&2
+            cat "$ERR" >&2; rm -f "$ERR"; exit 1
+          fi
+          if ! SRC_DB="$(terraform output -raw cosmos_db_database_name 2>"$ERR")" || [ -z "$SRC_DB" ]; then
+            echo "Could not resolve cosmos_db_database_name (source) from terraform output — failing closed." >&2
+            cat "$ERR" >&2; rm -f "$ERR"; exit 1
+          fi
+          rm -f "$ERR"
+
+          echo "Asserting the live MG-53 destination: account $ACCT, destination db $DEST_DB, source db $SRC_DB (resource group $RG)."
+
+          # THE COLLECT -> ASSERT SEAM. The collector's bundle reaches the gate's
+          # stdin and nowhere else (no file, no tee, no artifact) — the same
+          # secret-hygiene discipline as MG-58, even though this bundle carries only
+          # names/schema/RU integers. Capture BOTH exit codes so a collector that
+          # could not read (operational) is told apart from a gate that found the
+          # destination provably wrong (violation).
+          set +e
+          scripts/collect-live-shared-throughput.sh \
+            --account-name "$ACCT" --resource-group "$RG" \
+            --database-name "$DEST_DB" --source-database-name "$SRC_DB" \
+            | scripts/assert-live-shared-throughput.sh \
+                --expected-throughput 400 --database-name "$DEST_DB" -
+          RC=("${PIPESTATUS[@]}")
+          set -e
+          COLLECT_RC="${RC[0]}"
+          GATE_RC="${RC[1]}"
+
+          if [ "$COLLECT_RC" -ne 0 ]; then
+            echo "Could not COLLECT the live destination read-backs (collector exit $COLLECT_RC) — failing closed. An unreadable destination is not a healthy destination; 'cannot tell' is never 'nothing wrong'. The collector's reasons are above; they name containers and fields only, never values." >&2
+            exit 1
+          fi
+
+          if [ "$GATE_RC" -eq 0 ]; then
+            echo "LIVE SHARED-THROUGHPUT DESTINATION VALID — a manual 400 RU/s database-level offer exists on $DEST_DB, no destination container holds a dedicated offer, temperatures is on /deviceId, and all five definitions are faithful to source."
+          elif [ "$GATE_RC" -eq 3 ]; then
+            echo "The MG-53 destination is PROVABLY WRONG (gate exit 3) — the named violation(s) are above (they name containers/fields/RU integers only, never values)." >&2
+            echo "A container's partition key path is CREATE-ONLY: a mis-partitioned temperatures container must be REBUILT, not edited. A missing database-level offer or a stray dedicated container offer means the destination was not created as a shared-throughput database." >&2
+            echo "Read: learnings/decisions/ for the MG-53 shared-throughput decision, and scripts/assert-live-shared-throughput.sh's header for the authority split with tf-static-checks check 20." >&2
+            exit 1
+          else
+            echo "The live shared-throughput gate could not run an assertion to a definite answer (gate exit $GATE_RC) — an operational/assembly failure, NOT a clean destination. Its reasons are above. Failing closed." >&2
+            exit 1
+          fi
+
+      # 14. The saved plan is a sensitive artifact (it embeds planned values). It
       #     is NEVER uploaded — there is no upload-artifact step anywhere in this
       #     workflow, by design — but remove it explicitly rather than relying on
       #     runner teardown.

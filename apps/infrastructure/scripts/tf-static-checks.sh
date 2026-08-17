@@ -1192,7 +1192,13 @@ name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 # below it fails — see the ratchet paragraph under 18 in the header. Raise it
 # freely as the stack grows; lowering it is a reviewed decision, never a reflex to
 # make a red check green.
-NAME_REF_PAIR_FLOOR=20
+#
+# Measured 31 against this branch's tree (feat/mg-53-cosmos-shared-throughput-create)
+# after MG-53 added the shared-throughput destination to modules/cosmos-db/main.tf:
+# azurerm_cosmosdb_sql_database.meatgeek_shared (1 account_name pair) and its five
+# *_shared containers (each an account_name + a database_name pair = 10), which
+# ratcheted the pre-MG-53 floor of 20 up by 11 to 31.
+NAME_REF_PAIR_FLOOR=31
 
 name_replace_hits=""
 name_ref_pairs=0

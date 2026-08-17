@@ -575,9 +575,9 @@ config appsettings delete` performs the same client-side GET→drop→PUT agains
   invalidate the standard-DNS premise and force the service-URI form.
 - **MG-60 inherits the Storage Queue Data Contributor question** and depends on
   MG-58 landing first. MG-58 itself carries **no role delta**.
-- **MG-58 is sequenced before MG-53** (the Cosmos shared-throughput migration),
-  so that a cutover failure there is not ambiguous between a Cosmos cause and a
-  broken host storage plane.
+- **MG-58 is sequenced before MG-53** (the Cosmos shared-throughput destination
+  create; cutover is the separate MG-62), so that a cutover failure there is
+  not ambiguous between a Cosmos cause and a broken host storage plane.
 - **The live proofs are the corrected ones** (see _(i)_). A **positive `Healthy`
   row is UNSATISFIABLE and must not be reintroduced** into any acceptance text —
   the platform is silent when healthy. The proofs are: **`Host lock lease

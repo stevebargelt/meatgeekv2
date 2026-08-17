@@ -137,6 +137,69 @@ output "database_throughput" {
 # that is confidently wrong is worse than no cost figure — this one was found
 # during a cost-reduction effort, where it would have misdirected the reader.
 
+# =============================================================================
+# MG-53 DESTINATION OUTPUTS — shared-throughput database (intentionally UNWIRED)
+# =============================================================================
+#
+# These publish the NEW shared-throughput destination created in main.tf. They are
+# SEPARATE from the source-bound outputs above (database_name, database_id,
+# container_names, container_ids, partition_keys, application_config), which STILL
+# resolve to the SOURCE and must not be changed here — the IoT Hub Cosmos endpoint
+# and the Function App COSMOSDB_DATABASE_NAME read those source outputs and must
+# keep addressing the source at the end of MG-53.
+#
+# Nothing consumes the outputs below yet. They exist so MG-62's repoint is a
+# one-line change (swap the consumer from the source output to its destination
+# twin), not a schema edit. Do NOT wire them to any consumer as part of MG-53.
+
+output "destination_database_id" {
+  description = "ID of the MG-53 shared-throughput destination database (UNWIRED; MG-62 repoints consumers here)"
+  value       = azurerm_cosmosdb_sql_database.meatgeek_shared.id
+}
+
+output "destination_database_name" {
+  description = "Name of the MG-53 shared-throughput destination database (UNWIRED; MG-62 repoints consumers here)"
+  value       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+}
+
+output "destination_database_throughput" {
+  description = "Database-level shared throughput (RU/s) on the destination database — the single 400 RU/s offer the five destination containers share"
+  value       = azurerm_cosmosdb_sql_database.meatgeek_shared.throughput
+}
+
+output "destination_container_names" {
+  description = "Names of the containers under the MG-53 shared-throughput destination database (UNWIRED)"
+  value = {
+    devices      = azurerm_cosmosdb_sql_container.devices_shared.name
+    temperatures = azurerm_cosmosdb_sql_container.temperatures_shared.name
+    cooks        = azurerm_cosmosdb_sql_container.cooks_shared.name
+    users        = azurerm_cosmosdb_sql_container.users_shared.name
+    recipes      = azurerm_cosmosdb_sql_container.recipes_shared.name
+  }
+}
+
+output "destination_container_ids" {
+  description = "Resource IDs of the containers under the MG-53 shared-throughput destination database (UNWIRED). As with container_ids above, reference the id (not a bare resource address) in any future replace_triggered_by."
+  value = {
+    devices      = azurerm_cosmosdb_sql_container.devices_shared.id
+    temperatures = azurerm_cosmosdb_sql_container.temperatures_shared.id
+    cooks        = azurerm_cosmosdb_sql_container.cooks_shared.id
+    users        = azurerm_cosmosdb_sql_container.users_shared.id
+    recipes      = azurerm_cosmosdb_sql_container.recipes_shared.id
+  }
+}
+
+output "destination_partition_keys" {
+  description = "Partition key paths for each destination container. temperatures MUST be /deviceId to match the IoT Hub Cosmos endpoint's authenticated partition identity (MG-73)."
+  value = {
+    devices      = "/id"
+    temperatures = "/deviceId"
+    cooks        = "/userId"
+    users        = "/id"
+    recipes      = "/userId"
+  }
+}
+
 # Environment Information
 output "environment_info" {
   description = "Environment-specific information"
