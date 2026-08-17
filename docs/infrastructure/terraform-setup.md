@@ -227,6 +227,22 @@ dev apply workflow's destroy guard to be explicitly authorized (see
 [CI/CD Pipeline](../development/ci-cd.md)); the guard is fail-closed and
 refuses the run otherwise.
 
+**Shared-throughput destination database (MG-53).** The module also creates a
+second, parallel database, `azurerm_cosmosdb_sql_database.meatgeek_shared`
+(`${resource_prefix}-shared-db`), with a single 400 RU/s offer at the
+**database** level shared by five definition-faithful twin containers
+(`*_shared`). This corrects a wrong mental model in the original per-container
+comments — Cosmos has no mechanism for one container to draw on a sibling's
+throughput, so a database with no shared offer left each of the five source
+containers with its own 400 RU/s minimum offer (~2000 RU/s total) instead of
+the 400 RU/s the code intended. The destination is **create-only**: nothing
+repoints to it, its outputs are published but unwired, and the source database
+and its containers are unchanged. See the
+[MG-53 shared-throughput destination ADR](../../learnings/decisions/mg-53-cosmos-shared-throughput-destination.md)
+for the full decision, the create-only partition-key reasoning for
+`temperatures_shared`, and the live post-create gate that proves the
+destination once it exists.
+
 ## Nx Integration
 
 `project.json` wraps the Terraform commands. The `init` target is **env-aware**
