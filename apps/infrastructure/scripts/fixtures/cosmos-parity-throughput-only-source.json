@@ -1,0 +1,39 @@
+{
+  "id": "temperatures",
+  "throughput": 400,
+  "resource": {
+    "id": "temperatures",
+    "partitionKey": {
+      "paths": ["/deviceId"],
+      "kind": "Hash",
+      "version": 2
+    },
+    "indexingPolicy": {
+      "automatic": false,
+      "indexingMode": "consistent",
+      "includedPaths": [{ "path": "/*" }],
+      "excludedPaths": [{ "path": "/\"_etag\"/?" }],
+      "compositeIndexes": [
+        [
+          { "path": "/deviceId", "order": "ascending" },
+          { "path": "/timestamp", "order": "descending" }
+        ],
+        [
+          { "path": "/cookId", "order": "ascending" },
+          { "path": "/timestamp", "order": "descending" }
+        ]
+      ]
+    },
+    "defaultTtl": 7776000,
+    "uniqueKeyPolicy": { "uniqueKeys": [] },
+    "conflictResolutionPolicy": {
+      "mode": "LastWriterWins",
+      "conflictResolutionPath": "/_ts",
+      "conflictResolutionProcedure": ""
+    },
+    "_rid": "srcThroughputRid==",
+    "_ts": 1723800111,
+    "_self": "dbs/aaaa/colls/src-throughput/",
+    "_etag": "\"00000000-0000-0000-0000-0000000000aa\""
+  }
+}
