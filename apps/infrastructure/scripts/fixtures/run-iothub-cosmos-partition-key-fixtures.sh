@@ -38,20 +38,41 @@ make_tree() {
   cp -R "${INFRA_SOURCE}/bootstrap" "${fixture_dir}/bootstrap" || return 1
 }
 
-count_occurrences() {
-  OLD_TEXT="$1" perl -0777 -ne '$count = () = /\Q$ENV{OLD_TEXT}\E/g; print $count' "$2"
+# Count occurrences of a literal, but only inside ONE resource block selected by
+# its full label (type + name). MG-53 added a second _shared container to the
+# cosmos-db module whose partition_key_paths line is byte-identical to the source
+# container's, so a whole-file literal now matches two places; scoping to the
+# resource label keeps the mutation aimed at exactly the resource the case intends.
+count_occurrences_in_resource() {
+  RES_TYPE="$1" RES_NAME="$2" OLD_TEXT="$3" perl -0777 -ne '
+    my $blk = "";
+    if (/(resource\s+"\Q$ENV{RES_TYPE}\E"\s+"\Q$ENV{RES_NAME}\E"\s*\{.*?)(?=\nresource\s|\z)/s) { $blk = $1; }
+    my $c = () = ($blk =~ /\Q$ENV{OLD_TEXT}\E/g);
+    print $c;
+  ' "$4"
 }
 
-replace_once() {
+# Replace exactly one literal, scoped to a single resource block chosen by label.
+# The mutation is deterministic: a future resource that happens to share the same
+# term cannot silently become the target, and a zero/multiple match in the
+# addressed block is a loud fixture error rather than a misleading result.
+replace_once_in_resource() {
   target_file="$1"
-  old_text="$2"
-  new_text="$3"
-  occurrences="$(count_occurrences "${old_text}" "${target_file}")"
+  resource_type="$2"
+  resource_name="$3"
+  old_text="$4"
+  new_text="$5"
+  occurrences="$(count_occurrences_in_resource "${resource_type}" "${resource_name}" "${old_text}" "${target_file}")"
   if [ "${occurrences}" != "1" ]; then
-    echo "run-iothub-cosmos-partition-key-fixtures: FATAL: expected one mutation target in ${target_file}, found ${occurrences}" >&2
+    echo "run-iothub-cosmos-partition-key-fixtures: FATAL: expected one mutation target in resource ${resource_type}.${resource_name} of ${target_file}, found ${occurrences}" >&2
     return 1
   fi
-  OLD_TEXT="${old_text}" NEW_TEXT="${new_text}" perl -0pi -e 's/\Q$ENV{OLD_TEXT}\E/$ENV{NEW_TEXT}/' "${target_file}"
+  # The block is anchored to this label's header, and the non-greedy .*? stops at
+  # the FIRST occurrence of old_text after it — which the count above proved is
+  # the only one in this block.
+  RES_TYPE="${resource_type}" RES_NAME="${resource_name}" OLD_TEXT="${old_text}" NEW_TEXT="${new_text}" perl -0777 -i -pe '
+    s/(resource\s+"\Q$ENV{RES_TYPE}\E"\s+"\Q$ENV{RES_NAME}\E"\s*\{.*?)\Q$ENV{OLD_TEXT}\E/"$1$ENV{NEW_TEXT}"/se;
+  ' "${target_file}"
 }
 
 mutate_case() {
@@ -60,13 +81,22 @@ mutate_case() {
   cosmos_file="$2/modules/cosmos-db/main.tf"
   case "${case_name}" in
     clean) ;;
-    missing-name) replace_once "${iothub_file}" $'  partition_key_name     = "deviceId"\n' '' ;;
-    missing-template) replace_once "${iothub_file}" $'  partition_key_template = "{deviceid}"\n' '' ;;
-    endpoint-container-drift) replace_once "${iothub_file}" 'partition_key_name     = "deviceId"' 'partition_key_name     = "tenantId"' ;;
-    literal-prefix) replace_once "${iothub_file}" 'partition_key_template = "{deviceid}"' 'partition_key_template = "dev-{deviceid}"' ;;
-    wrong-token) replace_once "${iothub_file}" 'partition_key_template = "{deviceid}"' 'partition_key_template = "{iothub}"' ;;
-    body-derived-template) replace_once "${iothub_file}" 'partition_key_template = "{deviceid}"' 'partition_key_template = "{Body.deviceId}"' ;;
-    container-drift) replace_once "${cosmos_file}" 'partition_key_paths   = ["/deviceId"]' 'partition_key_paths   = ["/tenantId"]' ;;
+    # The six IoT Hub cases target the single cosmos endpoint by label. They match
+    # once today, but a second azurerm_iothub_endpoint_cosmosdb_account would make a
+    # whole-file replace ambiguous the same way MG-53's second container did to
+    # container-drift below — scope every case so no future addition can silently
+    # move the target.
+    missing-name) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage $'  partition_key_name     = "deviceId"\n' '' ;;
+    missing-template) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage $'  partition_key_template = "{deviceid}"\n' '' ;;
+    endpoint-container-drift) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage 'partition_key_name     = "deviceId"' 'partition_key_name     = "tenantId"' ;;
+    literal-prefix) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage 'partition_key_template = "{deviceid}"' 'partition_key_template = "dev-{deviceid}"' ;;
+    wrong-token) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage 'partition_key_template = "{deviceid}"' 'partition_key_template = "{iothub}"' ;;
+    body-derived-template) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage 'partition_key_template = "{deviceid}"' 'partition_key_template = "{Body.deviceId}"' ;;
+    # check 20 is scoped to the SOURCE endpoint-to-container agreement, so this
+    # mutates azurerm_cosmosdb_sql_container.temperatures explicitly. MG-53's
+    # temperatures_shared carries the identical partition_key_paths line; a
+    # whole-file match found 2 and aborted setup.
+    container-drift) replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_container temperatures 'partition_key_paths   = ["/deviceId"]' 'partition_key_paths   = ["/tenantId"]' ;;
     *) echo "run-iothub-cosmos-partition-key-fixtures: FATAL: unknown case ${case_name}" >&2; return 1 ;;
   esac
 }
