@@ -1,92 +1,71 @@
-**Last session ended 2026-08-16.**
+**Last session ended 2026-08-17.**
 
-**Where we left off:** MG-67, MG-72 and MG-73 all shipped and CLOSED. V2's IoT-to-Cosmos path has
-been proven end to end for the first time, and the partition identity contract is settled with a
-passing differential proof. **MG-53 is the next active work.**
+**Where we left off:** MG-53 shipped and CLOSED. The V2 dev shared-throughput destination exists,
+was verified live, and the fail-closed gate that certifies it has had two fail-open paths closed.
+**MG-62 (cutover) is the next active work.**
 
 **Picked up next:**
 
-1. **MG-53 — create the 400 RU/s shared-throughput database and five definition-faithful containers.**
-   CREATE ONLY: no copy, no repointing. Before creating anything, run the source-state confirmation —
-   and read MG-53's own body for the inventory, because it is not what the older text implies:
-   **ten synthetic documents across THREE runs and TWO markers**, all under `Body.syntheticFixture`
-   (NOT a top-level field — IoT Hub wraps the message, so a root-level query finds nothing and reads
-   as all-clear). A halt check matching only `MG-67-SYNTHETIC-FIXTURE` will falsely halt on the
-   MG-73 differential document. Most will have aged out on the 604800s TTL by 2026-08-21/23; a
-   smaller count is expected expiry, anything unmarked or a count ABOVE what is recorded is a HALT.
-2. **MG-62 — cutover.** Waits on MG-53 alone now. It inherits MG-67's fixture, its read-back contract
-   and a pre-cutover baseline (3/3 confirmed in 2 polls, 5144ms) that makes a post-cutover failure
-   attributable.
-3. **MG-54 — delete promptly** after MG-62. Its authorization covers disposing of all the synthetic
+1. **MG-62 — cut over and prove a new post-cutover telemetry document.** Waits on nothing now.
+   It repoints the IoT Hub Cosmos routing endpoint and the Function App `COSMOSDB_DATABASE_NAME`
+   to `meatgeek-v2-dev-shared-db`. It inherits MG-67's fixture, its read-back contract, and a
+   pre-cutover baseline (3/3 confirmed in 2 polls, 5144ms) that makes a post-cutover failure
+   attributable. **Merging MG-62's Terraform IS the cutover** — GitOps applies on merge, so the
+   merge is the live event, not a later manual step.
+   - **Carry the check-20 forward gap.** `tf-static-checks.sh` check 20 keys on the exact resource
+     label `azurerm_cosmosdb_sql_container.temperatures`. Once the endpoint addresses the
+     `*_shared` container, check 20 validates the WRONG container and reads green. Extend it to the
+     container the endpoint actually addresses, or check 20 silently stops guarding the
+     authentication-anchored partition contract at the exact moment it starts mattering.
+2. **MG-54 — delete promptly** after MG-62. Its authorization covers disposing of all synthetic
    documents, including the MG-73 differential one.
-4. **MG-59 — after the whole chain.** It now has a specified persisted shape: the envelope is
-   authoritative, `Body` is advisory, and a mapping layer owns envelope → TemperatureReading with
-   identity sourced from the authenticated system property.
+3. **MG-59 — after the whole chain.** Persisted shape is specified: the envelope is authoritative,
+   `Body` is advisory, identity comes from the authenticated system property.
 
 **What shipped this session:**
 
-- **MG-72** (`83a1c0c`) — the runbook's credential screen reports the match (file, line, pattern
-  class), never the matched value. Also fixed a §6 `tail -f` that displayed unscreened output, and
-  two zsh incompatibilities that made the screen either fail outright or silently misbehave.
-- **MG-73** (`943a1c9`) — the routing endpoint now stamps a top-level `deviceId` from `{deviceid}`,
-  proven **authentication-anchored** by a differential test: a message sent AS the fixture device
-  while its payload claimed another identity landed under the AUTHENTICATED id, and a point read
-  FAILED under the payload-supplied one.
-- **MG-67** (`48068ff`) — the durable device fixture, a secret-safe fail-closed sender, and the live
-  traversal: `confirmed-in-cosmos: 3/3 (2 polls, arrived after 5144ms)`.
+- **MG-53** (`e720931` create, `3ddd088` gate hardening) — `meatgeek-v2-dev-shared-db` with a single
+  400 RU/s database-level offer and five definition-faithful containers holding no dedicated offer.
+  Verified live; the post-apply gate re-asserts it every dev apply and passed on the real
+  destination with full parity across all eight scoped fields.
 
 **Live state:**
 
-- `main` = `48068ff`, CI green. Nothing unpushed. `feat/mg-67-iot-device-fixture` merged (branch not
-  deleted).
-- **No standing Azure permissions.** Three temporary Data Reader grants were created immediately
-  before use and revoked immediately after, each verified against a snapshot with both pre-existing
-  Contributor assignments retained.
-- The dev IoT device `meatgeek-v2-dev-synthetic-fixture-device` is registered and enabled. It is a
-  DURABLE fixture — but the registry is data-plane state no Terraform resource owns, and a hub
-  replacement silently empties it, so MG-62 must re-check rather than assume.
-- Ten synthetic documents live in `temperatures`, expiring 2026-08-21 through 08-23.
+- `main` = `3ddd088`, CI green, dev apply converged (`No changes`, `0 added/changed/destroyed`).
+- **Account total is 2400 RU/s** — 2000 source (five dedicated offers) + 400 destination. Free tier
+  covers the first 1000. The source's 2000 accrues until MG-54; that delay is the dominant cost of a
+  slow cutover, not the destination.
+- **Destination is EMPTY and that is correct** — measured `TOTAL=0` across all five containers. The
+  10 synthetic documents remain in the SOURCE deliberately and are MG-54's to dispose of.
+- Source `temperatures` still holds exactly 10 synthetic documents, expiring 2026-08-21..08-23.
+- **No standing Azure permissions.** A temporary Data Reader grant was created immediately before
+  the emptiness count and revoked immediately after; baseline verified restored (2 assignments,
+  identical ids, no leftover reader).
 
-**Open follow-ups from this chain:** MG-68 (data-pusher content-type — narrowed: the fixture proved
-setting it is necessary but NOT sufficient, since wrapping happens regardless), MG-69 (retry budget),
-MG-70 (hold the evidence reservation through publication — do NOT add a fourth check-then-act),
-MG-71 (timeout is terminal — fix both anchors together), MG-74 (pre-existing TS2304 in
-`apps/mobile/src/test-setup.ts`; CI's per-project mobile job passes, so it is the cross-project
-typecheck that fails), MG-75 (marker-only PEM fallback redacts BEGIN but leaves the body).
+**Open follow-ups:** MG-76 (NEW — infra harnesses and per-test identity invisible to the review
+lane), MG-68, MG-69, MG-70, MG-71, MG-74, MG-75.
 
 **Decisions worth not relitigating:**
 
-- **The cross-partition sweep can never confirm.** It is non-success diagnostics only. A review
-  finding argued it should confirm a full set found in the expected partition; that was rejected on a
-  candidate-bound anchored contradiction, because a scan is not partition-scoped proof and confirming
-  off it would mask a mis-partition. Do not relax this to get a green post-cutover result.
+- **The cross-partition sweep can never confirm.** Non-success diagnostics only.
 - **`Body.deviceId` is never trusted** for identity, authorization or partition evidence. Only
   `SystemProperties[iothub-connection-device-id]` and the root partition value stamped from it.
-- **`--device` is pinned** to the fixture constant. That is what makes credential-shaped input
-  structurally unable to reach a device name; do not add a flag to override it.
-- **`idDivergence` is true on every confirmed run** and that is expected — Cosmos assigns root ids, so
-  they necessarily differ from requested ids.
+- **`--device` is pinned** to the fixture constant. Do not add an override flag.
+- **Parity deliberately excludes throughput.** The destination's absent dedicated offer is the
+  POINT of MG-53, not a mismatch against the source's 400 RU/s.
 
-**One judgment call to review:** MG-67 merged with strict tip equality NOT satisfied — the review
-settled at `fbc34bb`, the merge tip was `4f266e8`. Verified before merging: zero production source
-changed in the delta (one additive passing test, two docs reformatted, the evidence artifact
-reformatted with semantics re-validated), and all 11 CI checks green on the merge tip itself. Merged
-on that basis rather than on the gate passing. If that should be a hard stop unattended, say so.
+**Operational lessons that cost real time this session:**
 
-**Operational lessons that cost real time:**
-
-- **Never end a turn without BOTH dispatching the next transition and arming a monitor** (~25 hours
-  lost with review findings dispositioned and the batch fix never dispatched).
-- **`persistent: true` monitors silently deliver nothing here.** Use `persistent: false`, re-arm on
-  the 60-minute timeout, include an idle break — and STOP every monitor you arm. No tool enumerates
-  them; `TaskList` returns nothing while they run.
-- **A live run with a tool timeout above 120s must go under `forge launch run`.** A synchronous Bash
-  call was SIGTERM'd mid-confirmation, leaving 3 unrecorded documents live.
-- **Check whether a red CI job is a flake before re-running** — verify the step passes on main and
-  locally first.
-- `forge retry` on a fanout CHILD is refused; use `forge recover <parent> --re-drive`. A plain
-  `forge retry` only queues — `forge next` dispatches.
-- **Local `terraform init`/`test` runs leave GB-scale `.terraform` caches** that get mounted into
-  every agent container and can starve `forge-test` (1.7GB removed this session).
-- A `stale_protocol` reviewer refusal is cleared by `forge upgrade`, which republishes the seed
-  generation. `forge upgrade` also rewrites `CLAUDE.md` — stash it off a feature branch.
+- **Never commit onto a branch under review outside the coordinator's fix cycle.** Doing so stranded
+  MG-53's review candidate three commits behind the merge, and the shipping review then refused
+  `blocked_environment`. The fix was to re-anchor a NEW review at the merged sha — which is what
+  found RF-1 and RF-2, two fail-open paths that did not exist at the stale candidate. Checking out
+  the stale candidate to "unblock" the review would have shipped both.
+- **`gh run list --commit <short-sha>` silently returns EMPTY.** It needs the full 40-char sha. A
+  monitor built on the short form waited 60 minutes on a run set that was green the whole time.
+- **`forge review`'s `--add-lens` widenings do not persist across a refused stage.** A refused
+  `confirm_contract` writes nothing, so every widening must be passed again in ONE invocation.
+- **A green suite is not evidence a named test ran.** Jest's default reporter prints suite-level
+  `PASS` only, and this repo's infra fixture harnesses run in `ci.yml` alone — so the rechecker
+  correctly recorded `not_executed` for two assertions that genuinely passed. That is MG-76.
+- **`forge gate <id> <decision>`** is positional; there is no `--advance` flag.
