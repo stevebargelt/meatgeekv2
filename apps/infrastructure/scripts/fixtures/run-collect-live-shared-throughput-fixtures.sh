@@ -49,10 +49,10 @@ ACCOUNT="meatgeekv2devcosmos"
 RG="meatgeek-v2-dev-rg"
 CONTAINERS="cooks users recipes temperatures devices"
 
-# 5 end-to-end scenarios, each contributing 2 checks per shell (four scenarios:
+# 6 end-to-end scenarios, each contributing 2 checks per shell (five scenarios:
 # collector-exit + gate-verdict; the die scenario: collector-exit + no-stdout) =
-# 10 checks per shell. Raise it whenever a case is added.
-MIN_CHECKS_PER_SHELL=10
+# 12 checks per shell. Raise it whenever a case is added.
+MIN_CHECKS_PER_SHELL=12
 
 SHELL_BINS=""
 for cand in bash sh; do
@@ -207,6 +207,20 @@ rm -f "${DB_AUTH}/db-throughput.out"
 printf '%s\n' '1' > "${DB_AUTH}/db-throughput.rc"
 printf '%s\n' "ERROR: Please run 'az login' to setup account." > "${DB_AUTH}/db-throughput.err"
 
+# A container throughput probe whose failure names the TARGET as absent (an ARM
+# ResourceNotFound — the account/rg/resource, not the offer) -> the collector must
+# classify queryOk=false, NOT offerFound=false. A broad not-found classifier read
+# this as a healthy shared container (offerFound=false) and the gate PASSED a
+# destination it never actually probed — the exact fail-open this scenario pins.
+# The container's definition read-backs stay clean, so the collector does NOT die on
+# a definition; the misclassification, if present, would reach the gate as a bundle
+# and PASS. queryOk=false makes the gate fail closed (exit 1) instead.
+CONTAINER_TARGET_NOTFOUND="${WORK}/container-target-notfound"
+stage_clean "${CONTAINER_TARGET_NOTFOUND}"
+rm -f "${CONTAINER_TARGET_NOTFOUND}/container-tp-recipes.rc" "${CONTAINER_TARGET_NOTFOUND}/container-tp-recipes.err"
+printf '%s\n' '3' > "${CONTAINER_TARGET_NOTFOUND}/container-tp-recipes.rc"
+printf '%s\n' "ERROR: (ResourceNotFound) The Resource 'Microsoft.DocumentDB/databaseAccounts/meatgeekv2devcosmos' under resource group 'meatgeek-v2-dev-rg' was not found." > "${CONTAINER_TARGET_NOTFOUND}/container-tp-recipes.err"
+
 # An unreadable container-show (definition) -> the collector DIES (exit 1) and
 # writes no bundle, rather than emitting one missing a definition the gate needs.
 DEF_UNREADABLE="${WORK}/def-unreadable"
@@ -227,6 +241,7 @@ for shell_bin in ${SHELL_BINS}; do
     run_scenario "${shell_bin}" "${DEDICATED}"      0 "${EX_VIOLATION}" "[violation] recipes holds a dedicated offer -> gate VIOLATION"
     run_scenario "${shell_bin}" "${DB_ABSENT}"      0 "${EX_VIOLATION}" "[violation] no database-level offer -> gate VIOLATION"
     run_scenario "${shell_bin}" "${DB_AUTH}"        0 "${EX_OP}"        "[fail-closed] db offer probe auth error -> queryOk=false -> gate exit 1"
+    run_scenario "${shell_bin}" "${CONTAINER_TARGET_NOTFOUND}" 0 "${EX_OP}" "[fail-closed] container probe hits ARM ResourceNotFound (wrong target) -> queryOk=false -> gate exit 1, NOT a false PASS"
     run_scenario "${shell_bin}" "${DEF_UNREADABLE}" "${EX_OP}" 0        "[fail-closed] unreadable container-show -> collector dies, no bundle"
   } > "${run_out}" 2>&1
   cat "${run_out}"

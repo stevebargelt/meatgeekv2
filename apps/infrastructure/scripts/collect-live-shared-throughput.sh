@@ -46,10 +46,17 @@
 # QUERYOK/OFFERFOUND CLASSIFICATION IS FAIL-CLOSED. The gate's contract is that
 # "could not tell" (queryOk=false) is NEVER "nothing wrong". A throughput-show that
 # exits nonzero is classified offerFound=false ONLY when its stderr carries a
-# recognised not-found marker (the real no-offer case). ANY other nonzero exit —
-# not logged in, network, throttled, wrong name, a 5xx — is classified
-# queryOk=false, which the gate then fails closed on. Unrecognised is never read as
-# "no offer". An exit-0 database probe that does not carry a numeric
+# recognised OFFER-absence marker (the real no-offer case) AND carries NO
+# target-existence marker. The distinction is load-bearing: a probe aimed at the
+# wrong account, resource group, subscription or resource returns an ARM
+# not-found ("ResourceNotFound", "ResourceGroupNotFound", "could not be found",
+# "the Resource ... was not found") whose tokens overlap a bare "not found" — and
+# reading THAT as an absent offer would turn "we could not look at the right
+# target" into the strongest success claim ("we looked and it shares the offer").
+# So a target-existence not-found, like any other nonzero exit — not logged in,
+# network, throttled, a 5xx — is classified queryOk=false, which the gate then
+# fails closed on. Unrecognised is never read as "no offer", and neither is a
+# mistargeted probe. An exit-0 database probe that does not carry a numeric
 # `.resource.throughput` is likewise queryOk=false: a success we cannot interpret
 # is not an interpretation.
 #
@@ -140,11 +147,40 @@ trap 'rm -rf "${WORK}"' EXIT INT TERM
 
 echo "${PROG}: collecting the LIVE MG-53 destination read-backs (account=${ACCOUNT_NAME} rg=${RESOURCE_GROUP} dest-db=${DATABASE_NAME} src-db=${SOURCE_DATABASE_NAME})" >&2
 
-# notfound_marker <stderr-file> — 0 iff the captured az stderr carries a recognised
-# "the throughput offer does not exist" signal (the real no-offer case). Kept
-# narrow and explicit: an UNRECOGNISED failure is never classified as "no offer".
+# target_absent_marker <stderr-file> — 0 iff the captured az stderr indicates the
+# TARGET ITSELF (the account, resource group, subscription, or the ARM resource the
+# probe was aimed at) could not be resolved, as opposed to a throughput offer that
+# legitimately does not exist. These are ARM/management-plane not-found signals
+# (ResourceNotFound, ResourceGroupNotFound, "could not be found", "the Resource ...
+# was not found") and they mean we probed the WRONG place — never that the offer is
+# absent. Kept separate from the offer signal precisely so a mistargeted probe fails
+# closed instead of being read as a healthy shared container.
+target_absent_marker() {
+  grep -iE 'resourcenotfound|resource not found|resourcegroupnotfound|subscriptionnotfound|databaseaccountnotfound|the resource .* was not found|resource group .* (could not be found|not found|was not found)|could not be found' "$1" >/dev/null 2>&1
+}
+
+# offer_absent_marker <stderr-file> — 0 iff the captured az stderr carries the
+# specific "the throughput OFFER does not exist" signal (the real no-offer case): a
+# container/database that SHARES throughput rather than holding its own offer makes
+# `az ... throughput show` 404 the offer entity. This is the DocumentDB data-plane
+# "Entity with the specified id does not exist" 404, distinct from the ARM
+# target-existence errors above.
+offer_absent_marker() {
+  grep -iE 'entity with the specified id does not exist|throughput is not defined|no throughput|the offer .* (does not exist|not found|was not found)|throughput .* (does not exist|not found)' "$1" >/dev/null 2>&1
+}
+
+# notfound_marker <stderr-file> — 0 iff this is a GENUINE absent-offer outcome: an
+# offer-absence signal AND NO target-existence signal. A broad "not found" that names
+# an absent account/resource-group/subscription/resource is NOT "no offer" — we could
+# not read the intended target, so it fails closed (queryOk=false), which is exactly
+# what the contract requires ("could not tell" is never "nothing wrong"). Narrow and
+# explicit on both sides: an UNRECOGNISED failure is never classified as "no offer",
+# and neither is a mistargeted probe that happens to carry a not-found token.
 notfound_marker() {
-  grep -iE 'notfound|not found|does not exist|was not found|throughput is not defined|no throughput' "$1" >/dev/null 2>&1
+  if target_absent_marker "$1"; then
+    return 1
+  fi
+  offer_absent_marker "$1"
 }
 
 # --- 2. Database-level offer probe (assertion a) ----------------------------
