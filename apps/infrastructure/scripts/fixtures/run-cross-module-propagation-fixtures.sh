@@ -82,6 +82,43 @@ replace_all() {
   OLD_TEXT="${old_text}" NEW_TEXT="${new_text}" perl -0pi -e 's/\Q$ENV{OLD_TEXT}\E/$ENV{NEW_TEXT}/g' "${target_file}"
 }
 
+# Count occurrences of a literal, but only inside ONE resource block selected by
+# its full label (type + name). MG-53 added a second cosmos database whose
+# lifecycle block is byte-identical to the source database's, so a whole-file
+# literal now matches two places; scoping to the resource label keeps the mutation
+# aimed at exactly the resource the case intends.
+count_occurrences_in_resource() {
+  RES_TYPE="$1" RES_NAME="$2" OLD_TEXT="$3" perl -0777 -ne '
+    my $blk = "";
+    if (/(resource\s+"\Q$ENV{RES_TYPE}\E"\s+"\Q$ENV{RES_NAME}\E"\s*\{.*?)(?=\nresource\s|\z)/s) { $blk = $1; }
+    my $c = () = ($blk =~ /\Q$ENV{OLD_TEXT}\E/g);
+    print $c;
+  ' "$4"
+}
+
+# Replace exactly one literal, scoped to a single resource block chosen by label.
+# The mutation is deterministic: a future resource that happens to share the same
+# lifecycle text cannot silently become the target, and a zero/multiple match in
+# the addressed block is a loud fixture error rather than a misleading result.
+replace_once_in_resource() {
+  target_file="$1"
+  resource_type="$2"
+  resource_name="$3"
+  old_text="$4"
+  new_text="$5"
+  occurrences="$(count_occurrences_in_resource "${resource_type}" "${resource_name}" "${old_text}" "${target_file}")"
+  if [ "${occurrences}" != "1" ]; then
+    echo "run-cross-module-propagation-fixtures: FATAL: expected one mutation target in resource ${resource_type}.${resource_name} of ${target_file}, found ${occurrences}" >&2
+    return 1
+  fi
+  # The block is anchored to this label's header, and the non-greedy .*? stops at
+  # the FIRST occurrence of old_text after it — which the count above proved is
+  # the only one in this block.
+  RES_TYPE="${resource_type}" RES_NAME="${resource_name}" OLD_TEXT="${old_text}" NEW_TEXT="${new_text}" perl -0777 -i -pe '
+    s/(resource\s+"\Q$ENV{RES_TYPE}\E"\s+"\Q$ENV{RES_NAME}\E"\s*\{.*?)\Q$ENV{OLD_TEXT}\E/"$1$ENV{NEW_TEXT}"/se;
+  ' "${target_file}"
+}
+
 mutate_case() {
   case_name="$1"
   fixture_dir="$2"
@@ -92,13 +129,16 @@ mutate_case() {
     clean)
       ;;
     missing-child-lifecycle)
-      replace_once "${cosmos_file}" $'  lifecycle {\n    replace_triggered_by = [azurerm_cosmosdb_account.main.id]\n  }' ''
+      # Target the SOURCE database by label. Its lifecycle block is now identical to
+      # azurerm_cosmosdb_sql_database.meatgeek_shared's (MG-53), so a whole-file
+      # replace_once matches two blocks and fails; scope to meatgeek explicitly.
+      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek $'  lifecycle {\n    replace_triggered_by = [azurerm_cosmosdb_account.main.id]\n  }' ''
       ;;
     wrong-parent)
-      replace_once "${cosmos_file}" 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_iothub.main.id]'
+      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_iothub.main.id]'
       ;;
     bare-parent)
-      replace_once "${cosmos_file}" 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_cosmosdb_account.main]'
+      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_cosmosdb_account.main]'
       ;;
     no-discovered-pairs)
       # This is intentionally broad over the throwaway tree: no configured-name
@@ -106,9 +146,14 @@ mutate_case() {
       find "${fixture_dir}" -type f -name '*.tf' -exec perl -pi -e 's/\.name\b/.id/g' {} \;
       ;;
     below-pair-floor)
-      # The clean tree records 20 pairs. Removing the five database->container
-      # name links still leaves fifteen pairs, isolating the ratchet rather than
-      # merely re-testing the zero-pair failure.
+      # Sever the source containers' database_name -> database name links (turn
+      # each .meatgeek.name into a computed .meatgeek.id), dropping exactly those
+      # pairs from the discovered count. The clean tree discovers exactly the floor
+      # (an honest floor equals the committed count), so removing any nonzero set of
+      # pairs lands strictly below it — isolating the ratchet rather than re-testing
+      # the zero-pair failure. The count removed and the floor are both measured at
+      # runtime (see BELOW_FLOOR_* below), so nothing here goes stale when the module
+      # grows and the floor is raised.
       replace_all "${cosmos_file}" 'database_name       = azurerm_cosmosdb_sql_database.meatgeek.name' 'database_name       = azurerm_cosmosdb_sql_database.meatgeek.id'
       ;;
     missing-cosmos-endpoint-lifecycle)
@@ -159,13 +204,36 @@ run_case() {
   fi
 }
 
+# Read the floor from the checker itself so the clean and below-floor expectations
+# track the single recorded source of truth instead of a second hardcoded copy that
+# would silently go stale the next time the module (and the floor) grow.
+FLOOR="$(sed -n 's/^NAME_REF_PAIR_FLOOR=\([0-9][0-9]*\)$/\1/p' "${CHECKER}")"
+if [ -z "${FLOOR}" ]; then
+  echo "run-cross-module-propagation-fixtures: FATAL: could not read NAME_REF_PAIR_FLOOR from ${CHECKER}" >&2
+  exit 2
+fi
+
+# An honest floor equals the committed tree's discovered count, so a clean scan
+# reports exactly the floor. Asserting that ties this fixture to the floor: raising
+# the floor above the true count, or letting the tree outgrow the floor, fails here.
+CLEAN_EXPECTED="check 18: discovered ${FLOOR} name-referenced (child, parent) pair(s) (floor ${FLOOR})"
+
+# below-pair-floor removes the source containers' database_name links. Measure how
+# many that is against the real module and subtract from the floor, so the expected
+# post-removal count is derived, never hardcoded. Removing a nonzero set from a count
+# that equals the floor is guaranteed to land below it.
+BELOW_FLOOR_REMOVED="$(count_occurrences 'database_name       = azurerm_cosmosdb_sql_database.meatgeek.name' "${INFRA_SOURCE}/modules/cosmos-db/main.tf")"
+BELOW_FLOOR_DISCOVERED=$((FLOOR - BELOW_FLOOR_REMOVED))
+BELOW_FLOOR_EXPECTED="this scan discovered ${BELOW_FLOOR_DISCOVERED} name-referenced (child, parent) pair(s), below the recorded floor of ${FLOOR}"
+
 echo "run-cross-module-propagation-fixtures: exercising ${CHECKER} with isolated INFRA_DIR copies"
-run_case clean 'check 18: discovered 20 name-referenced (child, parent) pair(s) (floor 20)'
+echo "run-cross-module-propagation-fixtures: floor=${FLOOR}, below-floor removes ${BELOW_FLOOR_REMOVED} pair(s) -> discovers ${BELOW_FLOOR_DISCOVERED}"
+run_case clean "${CLEAN_EXPECTED}"
 run_case missing-child-lifecycle 'declares no lifecycle { replace_triggered_by = [azurerm_cosmosdb_account.main.id] }'
 run_case wrong-parent 'its replace_triggered_by names azurerm_iothub.main.id instead of azurerm_cosmosdb_account.main.id'
 run_case bare-parent 'replace_triggered_by names the whole resource azurerm_cosmosdb_account.main instead of azurerm_cosmosdb_account.main.id'
 run_case no-discovered-pairs "this check has stopped working (it must never pass by finding nothing)"
-run_case below-pair-floor 'this scan discovered 15 name-referenced (child, parent) pair(s), below the recorded floor of 20'
+run_case below-pair-floor "${BELOW_FLOOR_EXPECTED}"
 run_case missing-cosmos-endpoint-lifecycle 'azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage declares no lifecycle { replace_triggered_by = [terraform_data.cosmos_target_ready.id] }'
 run_case missing-cosmos-triggers-replace 'terraform_data.cosmos_target_ready declares no triggers_replace'
 
