@@ -1,0 +1,38 @@
+{
+  "id": "temperatures",
+  "resource": {
+    "id": "temperatures",
+    "partitionKey": {
+      "paths": ["/deviceId"],
+      "kind": "Hash",
+      "version": 2
+    },
+    "indexingPolicy": {
+      "automatic": true,
+      "indexingMode": "consistent",
+      "includedPaths": [{ "path": "/*" }],
+      "excludedPaths": [{ "path": "/\"_etag\"/?" }],
+      "compositeIndexes": [
+        [
+          { "path": "/deviceId", "order": "ascending" },
+          { "path": "/timestamp", "order": "descending" }
+        ],
+        [
+          { "path": "/cookId", "order": "ascending" },
+          { "path": "/timestamp", "order": "descending" }
+        ]
+      ]
+    },
+    "defaultTtl": 3600,
+    "uniqueKeyPolicy": { "uniqueKeys": [] },
+    "conflictResolutionPolicy": {
+      "mode": "LastWriterWins",
+      "conflictResolutionPath": "/_ts",
+      "conflictResolutionProcedure": ""
+    },
+    "_rid": "diffTtlRid==",
+    "_ts": 1723900666,
+    "_self": "dbs/zzzz/colls/diff-ttl/",
+    "_etag": "\"00000000-0000-0000-0000-0000000000c4\""
+  }
+}

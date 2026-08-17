@@ -1,0 +1,38 @@
+{
+  "id": "temperatures",
+  "resource": {
+    "id": "temperatures",
+    "partitionKey": {
+      "paths": ["/deviceId"],
+      "kind": "Hash",
+      "version": 2
+    },
+    "indexingPolicy": {
+      "automatic": true,
+      "indexingMode": "consistent",
+      "includedPaths": [{ "path": "/*" }],
+      "excludedPaths": [{ "path": "/\"_etag\"/?" }],
+      "compositeIndexes": [
+        [
+          { "path": "/deviceId", "order": "ascending" },
+          { "path": "/timestamp", "order": "descending" }
+        ],
+        [
+          { "path": "/cookId", "order": "ascending" },
+          { "path": "/timestamp", "order": "descending" }
+        ]
+      ]
+    },
+    "defaultTtl": 7776000,
+    "uniqueKeyPolicy": { "uniqueKeys": [] },
+    "conflictResolutionPolicy": {
+      "mode": "LastWriterWins",
+      "conflictResolutionPath": "/_ts",
+      "conflictResolutionProcedure": ""
+    },
+    "_rid": "aaaaSOURCErid==",
+    "_ts": 1723800000,
+    "_self": "dbs/aaaa/colls/bbbb-source/",
+    "_etag": "\"00000000-0000-0000-0000-000000000001\""
+  }
+}
