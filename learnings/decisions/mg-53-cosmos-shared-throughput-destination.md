@@ -16,9 +16,11 @@
   `apps/infrastructure/scripts/cosmos-definition-parity.sh`,
   `apps/infrastructure/scripts/collect-live-shared-throughput.sh`,
   `apps/infrastructure/scripts/assert-live-shared-throughput.sh` and their
-  fixture harnesses, and the two new gates wired into `.github/workflows/ci.yml`
+  fixture harnesses, the two new gates wired into `.github/workflows/ci.yml`
   (credential-less fixtures) and `.github/workflows/infra-apply-dev.yml` (the
-  live post-create gate).
+  live post-create gate), and `libs/api-interfaces/src/lib/infra-apply-dev.spec.ts`
+  (the workflow-level spec proving the live gate's own step condition is not
+  skipped when the apply step fails part-way — see _RF-2_ below).
 
 ## Context
 
@@ -116,10 +118,14 @@ MG-58 host-storage gate:
   `az cosmosdb sql container show` against both the destination and source
   databases, and assembles a single JSON "read-back bundle." A throughput
   probe that exits nonzero is classified `offerFound=false` (the healthy
-  no-offer case) **only** when its stderr carries a recognised not-found
-  marker; any other nonzero exit (auth, network, throttle, a 5xx) is
-  classified `queryOk=false` — "could not tell" is never conflated with "no
-  offer."
+  no-offer case) **only** when its stderr carries a recognised offer-absent
+  marker (the DocumentDB "entity with the specified id does not exist" 404)
+  **and no** target-absent marker (an ARM not-found on the account, resource
+  group, subscription or resource itself) — a mistargeted probe is never read
+  as a healthy shared container, because that would turn "we could not reach
+  the intended target" into the strongest success claim. Any other nonzero
+  exit (auth, network, throttle, a 5xx, or a mistargeted probe) is classified
+  `queryOk=false` — "could not tell" is never conflated with "no offer."
 - **`scripts/assert-live-shared-throughput.sh`** (the gate) is a pure function
   of that bundle — no Azure, no `az`, no credentials — which is what lets it
   run credential-less in CI against fixtures. It asserts all four properties
@@ -134,11 +140,28 @@ MG-58 host-storage gate:
   `run-collect-live-shared-throughput-fixtures.sh`) credential-lessly on every
   PR, each driving the real scripts against canned/fake `az` output.
   `.github/workflows/infra-apply-dev.yml` runs the live collector piped into
-  the live gate, `always()`, after the apply step, resolving the account and
-  both database names from `terraform output` (never a literal) and failing
-  closed — including when the destination was never created by this run (a
-  plan-only push), in which case the step is a deliberate no-op rather than a
-  false failure.
+  the live gate, `always() && steps.freshness.outputs.fresh == 'true' &&
+  steps.freshness_final.outputs.fresh == 'true'`, after the apply step,
+  resolving the account and both database names from `terraform output`
+  (never a literal) and failing closed — including when the destination was
+  never created by this run (a plan-only push), in which case the step is a
+  deliberate no-op rather than a false failure.
+
+**(RF-2) The gate's own step condition was itself a fail-open surface, closed
+before this became live.** GitHub ANDs an implicit `success()` into any
+step-level `if:` that carries no status-check function, so a condition built
+from the freshness outputs alone — with no `always()` — means a `terraform
+apply` that CREATED the shared database/containers and then failed part-way
+would have SKIPPED this gate rather than being evaluated: fail-open on exactly
+the run most likely to have produced a wrong destination. The leading
+`always()` overrides that implicit `success()` so the gate is evaluated
+regardless of apply outcome, while the freshness conditions still skip the one
+case they exist to skip — a superseded run that never applied. This is proven
+by `libs/api-interfaces/src/lib/infra-apply-dev.spec.ts`, which models GitHub's
+step-level `if:` evaluation (including the implicit-`success()` rule) and
+evaluates the gate's actual condition string under each run state — a failed
+part-way apply, a timeout kill after apply began, a clean apply, and a
+superseded run — rather than asserting the text of the `if:`.
 
 Throughput is **scoped out** of `cosmos-definition-parity.sh`'s comparison by
 design: `az cosmosdb sql container show` does not even return throughput (it
@@ -171,7 +194,9 @@ database-level 400 RU/s offer against a mocked provider; the three fixture
 harnesses exercise `cosmos-definition-parity.sh`,
 `assert-live-shared-throughput.sh`, and `collect-live-shared-throughput.sh`
 credential-lessly against canned/fake `az` output; `tf-static-checks` check 20
-continues to guard the source partition-key contract unchanged. `terraform`
+continues to guard the source partition-key contract unchanged; and the
+`infra-apply-dev.spec.ts` suite (95 tests, including the RF-2 guard above)
+passes. `terraform`
 is not available in this environment, so `terraform validate`/`fmt`/`test`
 were not re-run here as part of this reconciliation pass — that verification
 is the CI `validate-infrastructure` job's responsibility on this PR.
