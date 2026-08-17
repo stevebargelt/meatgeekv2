@@ -1385,12 +1385,131 @@ echo "  check 19: located ${cosmos_handle_seen}/1 target handle and ${cosmos_end
 check "the cross-module Cosmos target contract is wired end to end (triggers_replace + replace_triggered_by)" "${cosmos_contract_hits%$'\n'}"
 
 # --- CHECK 20. Cosmos routing partition identity contract (MG-73) -----------------
-# IoT Hub routes an ENVELOPE, not the device payload.  The temperatures container
+# IoT Hub routes an ENVELOPE, not the device payload.  The routing target container
 # partitions on /deviceId, but the envelope has no top-level deviceId unless the
 # endpoint materializes one.  The value must be the identity that IoT Hub
 # authenticated, not Body.deviceId (which the device controls).  This is lexical
 # by necessity: the credentialless PR gate deliberately has no Azure subscription
 # against which it could send and observe a routed message.
+#
+# The target container is NOT a hardcoded label. It is RESOLVED by following the
+# root module wiring the endpoint actually consumes, so this check tracks the
+# endpoint wherever it is repointed (MG-62 moved it from the source container
+# azurerm_cosmosdb_sql_container.temperatures to the shared-throughput destination
+# azurerm_cosmosdb_sql_container.temperatures_shared). The resolution chain is:
+#   root main.tf  module "iot_hub"  cosmos_container_id
+#     -> module.<local>.<output>.<key>              (the id wiring; a resource
+#        address, unambiguous where the container *name* "temperatures" is shared
+#        by both source and destination containers)
+#     -> that module's source dir, output "<output>", map key "<key>"
+#     -> azurerm_cosmosdb_sql_container.<name>.id   (the resolved container)
+#     -> that container's literal partition_key_paths
+# then assert the endpoint's partition_key_name agrees with THAT container. Every
+# hop that cannot be resolved (missing wiring, missing/renamed output, missing
+# container label, or a non-literal partition_key_paths on the resolved container)
+# FAILS — the check must never silently skip to a vacuous pass.
+
+# Extract the RHS value of an input `key` inside a top-level `module "name"` block
+# in `file`. Top-level module blocks close with a column-0 `}` (the same
+# convention the resource scanner below relies on). Emits nothing if not found.
+tf_module_input_value() {
+  awk -v want_mod="$2" -v want_key="$3" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    { line = $0; sub(/#.*/, "", line) }
+    line ~ ("^[[:space:]]*module[[:space:]]+\"" want_mod "\"[[:space:]]*{") { inmod = 1; next }
+    inmod && line ~ /^}/ { inmod = 0 }
+    inmod && line ~ ("^[[:space:]]*" want_key "[[:space:]]*=") {
+      v = line; sub(/^[^=]*=[[:space:]]*/, "", v); print trim(v); exit
+    }
+  ' "$1"
+}
+
+# Extract the RHS value of `key` inside an `output "name"` block, scanning one or
+# more files. `output` blocks close with a column-0 `}`. For a scalar output pass
+# key="value"; for a map output pass the map key. Emits nothing if not found.
+tf_output_field_value() {
+  want_out="$1"; want_key="$2"; shift 2
+  awk -v want_out="${want_out}" -v want_key="${want_key}" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    FNR == 1 { inout = 0 }
+    { line = $0; sub(/#.*/, "", line) }
+    line ~ ("^[[:space:]]*output[[:space:]]+\"" want_out "\"[[:space:]]*{") { inout = 1; next }
+    inout && line ~ /^}/ { inout = 0 }
+    inout && line ~ ("^[[:space:]]*" want_key "[[:space:]]*=") {
+      v = line; sub(/^[^=]*=[[:space:]]*/, "", v); print trim(v); exit
+    }
+  ' "$@"
+}
+
+partition_hits=""
+ROOT_MAIN_20="${INFRA_DIR}/main.tf"
+
+# ---- Resolve the endpoint's target container (and, for the diagnostic, its
+# database) by following the root wiring. No `case` is used inside any $(...)
+# substitution below: the parsing uses awk and bash [[ =~ ]], both of which
+# behave identically under macOS bash 3.2.57 and CI bash 5. ----------------------
+resolved_container_label=""
+resolved_db_label=""
+
+# hop 1: module "iot_hub" cosmos_container_id  ->  module.<local>.<output>.<key>
+iot_container_wire="$(tf_module_input_value "${ROOT_MAIN_20}" iot_hub cosmos_container_id)"
+iot_db_wire="$(tf_module_input_value "${ROOT_MAIN_20}" iot_hub cosmos_database_name)"
+
+wire_map_re='^module\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$'
+wire_scalar_re='^module\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$'
+res_ref_re='^([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\.(id|name)$'
+
+cw_mod=""; cw_out=""; cw_key=""; cw_mod_dir=""
+if [[ "${iot_container_wire}" =~ $wire_map_re ]]; then
+  cw_mod="${BASH_REMATCH[1]}"; cw_out="${BASH_REMATCH[2]}"; cw_key="${BASH_REMATCH[3]}"
+else
+  partition_hits+="${ROOT_MAIN_20}: cannot resolve module.iot_hub cosmos_container_id (\"${iot_container_wire:-<missing>}\") to a module output reference of the form module.<name>.<output>.<key>; check 20 must resolve the routing endpoint's target container from the wiring and must never skip to a vacuous pass (MG-62/MG-73)"$'\n'
+fi
+
+# hop 2: resolve that module's source directory
+if [[ -n "${cw_mod}" ]]; then
+  cw_mod_source="$(tf_module_input_value "${ROOT_MAIN_20}" "${cw_mod}" source)"
+  cw_mod_source="${cw_mod_source%\"}"; cw_mod_source="${cw_mod_source#\"}"
+  if [[ -n "${cw_mod_source}" ]]; then
+    cw_mod_dir="${INFRA_DIR}/${cw_mod_source#./}"
+  fi
+  if [[ -z "${cw_mod_source}" || ! -d "${cw_mod_dir}" ]]; then
+    partition_hits+="${ROOT_MAIN_20}: module \"${cw_mod}\" (referenced by cosmos_container_id) has no resolvable source directory under ${INFRA_DIR}; cannot follow the wiring to the target container (MG-62/MG-73)"$'\n'
+    cw_mod_dir=""
+  fi
+fi
+
+# Collect the resolved module's .tf files once; hop 3 (container and database
+# outputs) reads from them.
+mod_tf_files=()
+if [[ -n "${cw_mod_dir}" ]]; then
+  while IFS= read -r mf; do
+    [[ -n "${mf}" ]] && mod_tf_files+=("${mf}")
+  done < <(find "${cw_mod_dir}" -maxdepth 1 -type f -name '*.tf' 2>/dev/null | sort)
+fi
+
+# hop 3: output "<cw_out>" map key "<cw_key>"  ->  <type>.<name>.id
+if [[ -n "${cw_mod_dir}" && "${#mod_tf_files[@]}" -gt 0 ]]; then
+  container_ref="$(tf_output_field_value "${cw_out}" "${cw_key}" "${mod_tf_files[@]}")"
+  if [[ "${container_ref}" =~ $res_ref_re ]]; then
+    resolved_container_label="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+  else
+    partition_hits+="${cw_mod_dir}: module \"${cw_mod}\" output \"${cw_out}\" does not expose key \"${cw_key}\" as a <type>.<name>.id container reference (got \"${container_ref:-<missing>}\"); check 20 cannot resolve the endpoint's target container (MG-62/MG-73)"$'\n'
+  fi
+
+  # Best-effort database resolution — for the diagnostic and a light cross-check.
+  # The scalar destination_database_name output publishes <db>.name.
+  if [[ "${iot_db_wire}" =~ $wire_scalar_re ]]; then
+    dw_out="${BASH_REMATCH[2]}"
+    db_ref="$(tf_output_field_value "${dw_out}" value "${mod_tf_files[@]}")"
+    if [[ "${db_ref}" =~ $res_ref_re ]]; then
+      resolved_db_label="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+    fi
+  fi
+fi
+
+# ---- Scan every Cosmos routing endpoint and EVERY sql container block, so the
+# loop below can look up whichever container the wiring resolved to. --------------
 partition_contract_blocks() {
   awk -v f="$1" '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
@@ -1398,7 +1517,7 @@ partition_contract_blocks() {
     function value(s) { sub(/^[^=]*=/, "", s); return trim(s) }
     function emit() {
       if (label == "azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage" ||
-          label == "azurerm_cosmosdb_sql_container.temperatures")
+          label ~ /^azurerm_cosmosdb_sql_container\./)
         printf "%s\t%d\t%s\t%s\t%s\t%s\n", f, startline, label, dash(key_name), dash(key_template), dash(key_paths)
       label = ""; key_name = ""; key_template = ""; key_paths = ""; inres = 0
     }
@@ -1428,7 +1547,6 @@ while IFS= read -r tf_file; do
 done <<< "$(find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' -o -name '.git' \) -prune -o -type f -name '*.tf' -print 2>/dev/null | sort)"
 partition_contract_records="$(printf '%s' "${partition_contract_records}" | grep -v '^$' || true)"
 
-partition_hits=""
 partition_endpoint_seen=0
 partition_container_seen=0
 container_partition_property=""
@@ -1436,19 +1554,21 @@ endpoint_partition_name=""
 endpoint_partition_template=""
 while IFS=$'\t' read -r p_file p_line p_addr p_name p_template p_paths; do
   [[ -n "${p_addr}" ]] || continue
-  if [[ "${p_addr}" == "azurerm_cosmosdb_sql_container.temperatures" ]]; then
+  if [[ -n "${resolved_container_label}" && "${p_addr}" == "${resolved_container_label}" ]]; then
     partition_container_seen=1
+    # This `case` is at main-shell scope (inside the while loop, NOT inside a
+    # $(...) substitution), so it is bash 3.2-safe.
     case "${p_paths}" in
       '["/'*'"]')
         container_partition_property="${p_paths#*/}"
         container_partition_property="${container_partition_property%\"]}"
         ;;
       *)
-        partition_hits+="${p_file}:${p_line}: azurerm_cosmosdb_sql_container.temperatures must declare one literal partition_key_paths value in the form [\"/deviceId\"] so the Cosmos routing endpoint can be checked against the container's create-only partition property (MG-73)"$'\n'
+        partition_hits+="${p_file}:${p_line}: resolved routing-target container ${resolved_container_label} must declare one literal partition_key_paths value in the form [\"/deviceId\"] so the Cosmos routing endpoint can be checked against the container's create-only partition property (MG-73)"$'\n'
         ;;
     esac
-    if [[ "${container_partition_property}" != "deviceId" ]]; then
-      partition_hits+="${p_file}:${p_line}: azurerm_cosmosdb_sql_container.temperatures partitions on /${container_partition_property:-<missing>} instead of the required /deviceId; changing a Cosmos container partition path is create-only, so this endpoint/container contract must not drift (MG-73)"$'\n'
+    if [[ -n "${container_partition_property}" && "${container_partition_property}" != "deviceId" ]]; then
+      partition_hits+="${p_file}:${p_line}: resolved routing-target container ${resolved_container_label} partitions on /${container_partition_property} instead of the required /deviceId; changing a Cosmos container partition path is create-only, so this endpoint/container contract must not drift (MG-73)"$'\n'
     fi
   fi
   if [[ "${p_addr}" == "azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage" ]]; then
@@ -1470,16 +1590,20 @@ while IFS=$'\t' read -r p_file p_line p_addr p_name p_template p_paths; do
   fi
 done <<< "${partition_contract_records}"
 
-if [[ "${partition_container_seen}" -eq 0 ]]; then
-  partition_hits+="no resource \"azurerm_cosmosdb_sql_container\" \"temperatures\" found under ${INFRA_DIR} — the partition-key agreement check must never pass by finding no target container (MG-73)"$'\n'
-fi
+# Anti-vacuity: the endpoint must exist, and if we resolved a target container
+# label it must actually be found among the scanned blocks. (A resolution failure
+# above has already appended its own hit, so resolved_container_label is empty
+# there and this branch is correctly skipped rather than double-reporting.)
 if [[ "${partition_endpoint_seen}" -eq 0 ]]; then
   partition_hits+="no resource \"azurerm_iothub_endpoint_cosmosdb_account\" \"cosmos_storage\" found under ${INFRA_DIR} — the routing partition contract must never pass by finding no endpoint (MG-73)"$'\n'
 fi
-if [[ -n "${container_partition_property}" && "${endpoint_partition_name}" != "-" && "${endpoint_partition_name}" != "\"${container_partition_property}\"" ]]; then
-  partition_hits+="azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage partition_key_name ${endpoint_partition_name} does not match azurerm_cosmosdb_sql_container.temperatures's /${container_partition_property} partition property; the endpoint and create-only container partition key must agree (MG-73)"$'\n'
+if [[ -n "${resolved_container_label}" && "${partition_container_seen}" -eq 0 ]]; then
+  partition_hits+="the routing endpoint wiring resolves to container ${resolved_container_label}, but no such resource block was found under ${INFRA_DIR} — the partition-key agreement check must never pass by failing to locate its resolved target (MG-62/MG-73)"$'\n'
 fi
-echo "  check 20: located ${partition_endpoint_seen}/1 Cosmos endpoint and ${partition_container_seen}/1 temperatures container; endpoint partition key=${endpoint_partition_name:-<missing>}, template=${endpoint_partition_template:-<missing>}, container key=/${container_partition_property:-<missing>}"
+if [[ -n "${container_partition_property}" && "${endpoint_partition_name}" != "-" && "${endpoint_partition_name}" != "\"${container_partition_property}\"" ]]; then
+  partition_hits+="azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage partition_key_name ${endpoint_partition_name} does not match ${resolved_container_label}'s /${container_partition_property} partition property; the endpoint and create-only container partition key must agree (MG-73)"$'\n'
+fi
+echo "  check 20: endpoint resolved via root wiring to container ${resolved_container_label:-<unresolved>} (database ${resolved_db_label:-<unresolved>}); saw ${partition_endpoint_seen}/1 endpoint and ${partition_container_seen}/1 resolved target container; endpoint partition key=${endpoint_partition_name:-<missing>}, template=${endpoint_partition_template:-<missing>}, resolved container key=/${container_partition_property:-<missing>}"
 check "IoT Hub Cosmos routing materializes exactly the authenticated device id into the container partition key" "${partition_hits%$'\n'}"
 
 echo

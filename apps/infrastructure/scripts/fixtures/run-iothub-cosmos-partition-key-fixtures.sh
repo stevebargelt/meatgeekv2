@@ -75,10 +75,29 @@ replace_once_in_resource() {
   ' "${target_file}"
 }
 
+# Replace exactly one whole-file literal, count-guarded. Used for the resolution
+# wiring the re-keyed check 20 follows (a module input in the ROOT main.tf and an
+# output declaration in the cosmos-db module), which live in module/output blocks
+# rather than resource blocks and so cannot be targeted by the label-scoped
+# replacer above. A zero/multiple match is a loud fixture error, not a silent skip.
+replace_once_in_file() {
+  target_file="$1"
+  old_text="$2"
+  new_text="$3"
+  occurrences="$(OLD_TEXT="${old_text}" perl -0777 -ne 'my $c = () = (/\Q$ENV{OLD_TEXT}\E/g); print $c;' "${target_file}")"
+  if [ "${occurrences}" != "1" ]; then
+    echo "run-iothub-cosmos-partition-key-fixtures: FATAL: expected one mutation target for '${old_text}' in ${target_file}, found ${occurrences}" >&2
+    return 1
+  fi
+  OLD_TEXT="${old_text}" NEW_TEXT="${new_text}" perl -0777 -i -pe 's/\Q$ENV{OLD_TEXT}\E/$ENV{NEW_TEXT}/;' "${target_file}"
+}
+
 mutate_case() {
   case_name="$1"
   iothub_file="$2/modules/iot-hub/main.tf"
   cosmos_file="$2/modules/cosmos-db/main.tf"
+  cosmos_outputs_file="$2/modules/cosmos-db/outputs.tf"
+  root_file="$2/main.tf"
   case "${case_name}" in
     clean) ;;
     # The six IoT Hub cases target the single cosmos endpoint by label. They match
@@ -92,11 +111,26 @@ mutate_case() {
     literal-prefix) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage 'partition_key_template = "{deviceid}"' 'partition_key_template = "dev-{deviceid}"' ;;
     wrong-token) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage 'partition_key_template = "{deviceid}"' 'partition_key_template = "{iothub}"' ;;
     body-derived-template) replace_once_in_resource "${iothub_file}" azurerm_iothub_endpoint_cosmosdb_account cosmos_storage 'partition_key_template = "{deviceid}"' 'partition_key_template = "{Body.deviceId}"' ;;
-    # check 20 is scoped to the SOURCE endpoint-to-container agreement, so this
-    # mutates azurerm_cosmosdb_sql_container.temperatures explicitly. MG-53's
-    # temperatures_shared carries the identical partition_key_paths line; a
-    # whole-file match found 2 and aborted setup.
-    container-drift) replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_container temperatures 'partition_key_paths   = ["/deviceId"]' 'partition_key_paths   = ["/tenantId"]' ;;
+    # After the MG-62 repoint, check 20 no longer keys on the SOURCE container.
+    # It RESOLVES the endpoint's target through the root wiring to the DESTINATION
+    # container azurerm_cosmosdb_sql_container.temperatures_shared. These cases
+    # prove the re-keyed check follows the wiring and stays anti-vacuous:
+    #
+    # resolved-container-drift: mutate the RESOLVED destination container's
+    # partition key. This case was UNREACHABLE while the check pinned the source
+    # label — the endpoint addresses temperatures_shared, so drifting it must now
+    # be caught (agreement mismatch against the endpoint's partition_key_name).
+    resolved-container-drift) replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_container temperatures_shared 'partition_key_paths   = ["/deviceId"]' 'partition_key_paths   = ["/tenantId"]' ;;
+    # nonliteral-target-paths: the resolved container declares a non-literal
+    # partition_key_paths; the check cannot compare it and must FAIL, not skip.
+    nonliteral-target-paths) replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_container temperatures_shared 'partition_key_paths   = ["/deviceId"]' 'partition_key_paths   = [var.temperatures_partition_path]' ;;
+    # missing-container-wiring: break the root module input the check resolves
+    # from, so hop 1 (module.iot_hub cosmos_container_id -> module output) yields
+    # a non-module reference. The check must FAIL, never fall back to a guess.
+    missing-container-wiring) replace_once_in_file "${root_file}" '= module.cosmos_db.destination_container_ids.temperatures' '= local.orphaned_container_id' ;;
+    # renamed-output: rename the destination_container_ids output the wiring names,
+    # so hop 3 (module output -> container resource) cannot resolve. FAIL, not skip.
+    renamed-output) replace_once_in_file "${cosmos_outputs_file}" 'output "destination_container_ids"' 'output "destination_container_ids_renamed"' ;;
     *) echo "run-iothub-cosmos-partition-key-fixtures: FATAL: unknown case ${case_name}" >&2; return 1 ;;
   esac
 }
@@ -124,17 +158,26 @@ run_case() {
 }
 
 echo "run-iothub-cosmos-partition-key-fixtures: exercising ${CHECKER} with isolated INFRA_DIR copies"
-run_case clean 'check 20: located 1/1 Cosmos endpoint and 1/1 temperatures container; endpoint partition key="deviceId", template="{deviceid}", container key=/deviceId'
+# The clean case proves the re-keyed check RESOLVED the endpoint through the root
+# wiring to the DESTINATION container temperatures_shared under the shared-db
+# resource, rather than passing vacuously against the source temperatures label.
+run_case clean 'endpoint resolved via root wiring to container azurerm_cosmosdb_sql_container.temperatures_shared (database azurerm_cosmosdb_sql_database.meatgeek_shared)'
 run_case missing-name 'is missing partition_key_name'
 run_case missing-template 'is missing partition_key_template'
 run_case endpoint-container-drift 'partition_key_name "tenantId" does not match'
 run_case literal-prefix 'partition_key_template must be exactly "{deviceid}"'
 run_case wrong-token 'partition_key_template must be exactly "{deviceid}"'
 run_case body-derived-template 'must not reference Body or a payload-derived value'
-run_case container-drift 'partitions on /tenantId instead of the required /deviceId'
+# Re-keyed target: mutating the RESOLVED destination container is rejected, and the
+# diagnostic names temperatures_shared — proving the check followed the repoint.
+run_case resolved-container-drift "does not match azurerm_cosmosdb_sql_container.temperatures_shared's /tenantId partition property"
+# Anti-vacuity across the new resolution chain: each unresolvable target FAILS.
+run_case nonliteral-target-paths 'must declare one literal partition_key_paths value'
+run_case missing-container-wiring 'cannot resolve module.iot_hub cosmos_container_id'
+run_case renamed-output 'does not expose key "temperatures" as a <type>.<name>.id container reference'
 
-if [ "${checks}" -ne 8 ] || [ "${failures}" -ne 0 ]; then
-  echo "run-iothub-cosmos-partition-key-fixtures: FAILED — ${failures} of ${checks} checks failed (expected 8 checks)." >&2
+if [ "${checks}" -ne 11 ] || [ "${failures}" -ne 0 ]; then
+  echo "run-iothub-cosmos-partition-key-fixtures: FAILED — ${failures} of ${checks} checks failed (expected 11 checks)." >&2
   exit 1
 fi
 echo "run-iothub-cosmos-partition-key-fixtures: all ${checks} mutation checks behaved as expected under ${BASH_VERSION}."

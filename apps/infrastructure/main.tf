@@ -228,10 +228,10 @@ module "iot_hub" {
   # too, rather than restated here: Terraform owns that name, and a consumer that
   # spells it out itself is a second source of truth that can silently drift.
   cosmos_account_endpoint = module.cosmos_db.endpoint
-  cosmos_database_name    = module.cosmos_db.database_name
-  cosmos_container_name   = module.cosmos_db.container_names.temperatures
-  cosmos_database_id      = module.cosmos_db.database_id
-  cosmos_container_id     = module.cosmos_db.container_ids.temperatures
+  cosmos_database_name    = module.cosmos_db.destination_database_name
+  cosmos_container_name   = module.cosmos_db.destination_container_names.temperatures
+  cosmos_database_id      = module.cosmos_db.destination_database_id
+  cosmos_container_id     = module.cosmos_db.destination_container_ids.temperatures
 
   # Dependency handle: the Cosmos routing endpoint uses the IoT Hub identity, so
   # it must be created only AFTER that identity holds the data-plane role. Only
@@ -322,7 +322,7 @@ module "azure_functions" {
   # consumer. Restating the literal here would be the second source of truth the
   # iot_hub block's comment already warns against.
   cosmos_account_endpoint = module.cosmos_db.endpoint
-  cosmos_database_name    = module.cosmos_db.database_name
+  cosmos_database_name    = module.cosmos_db.destination_database_name
   eventhub_namespace_fqdn = module.iot_hub.eventhub_namespace_fqdn
   signalr_service_uri     = module.signalr.service_uri
 
