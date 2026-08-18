@@ -129,16 +129,18 @@ mutate_case() {
     clean)
       ;;
     missing-child-lifecycle)
-      # Target the SOURCE database by label. Its lifecycle block is now identical to
-      # azurerm_cosmosdb_sql_database.meatgeek_shared's (MG-53), so a whole-file
-      # replace_once matches two blocks and fails; scope to meatgeek explicitly.
-      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek $'  lifecycle {\n    replace_triggered_by = [azurerm_cosmosdb_account.main.id]\n  }' ''
+      # Target the DESTINATION database by label. MG-54 deleted the source
+      # azurerm_cosmosdb_sql_database.meatgeek; its destination twin meatgeek_shared
+      # carries the byte-identical lifecycle block (MG-53) and reaches
+      # azurerm_cosmosdb_account.main by that account's configured name, so check 18
+      # exercises the same missing-lifecycle assertion against the surviving subtree.
+      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek_shared $'  lifecycle {\n    replace_triggered_by = [azurerm_cosmosdb_account.main.id]\n  }' ''
       ;;
     wrong-parent)
-      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_iothub.main.id]'
+      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek_shared 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_iothub.main.id]'
       ;;
     bare-parent)
-      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_cosmosdb_account.main]'
+      replace_once_in_resource "${cosmos_file}" azurerm_cosmosdb_sql_database meatgeek_shared 'replace_triggered_by = [azurerm_cosmosdb_account.main.id]' 'replace_triggered_by = [azurerm_cosmosdb_account.main]'
       ;;
     no-discovered-pairs)
       # This is intentionally broad over the throwaway tree: no configured-name
@@ -146,15 +148,16 @@ mutate_case() {
       find "${fixture_dir}" -type f -name '*.tf' -exec perl -pi -e 's/\.name\b/.id/g' {} \;
       ;;
     below-pair-floor)
-      # Sever the source containers' database_name -> database name links (turn
-      # each .meatgeek.name into a computed .meatgeek.id), dropping exactly those
-      # pairs from the discovered count. The clean tree discovers exactly the floor
-      # (an honest floor equals the committed count), so removing any nonzero set of
-      # pairs lands strictly below it — isolating the ratchet rather than re-testing
-      # the zero-pair failure. The count removed and the floor are both measured at
-      # runtime (see BELOW_FLOOR_* below), so nothing here goes stale when the module
-      # grows and the floor is raised.
-      replace_all "${cosmos_file}" 'database_name       = azurerm_cosmosdb_sql_database.meatgeek.name' 'database_name       = azurerm_cosmosdb_sql_database.meatgeek.id'
+      # Sever the destination containers' database_name -> database name links (turn
+      # each .meatgeek_shared.name into a computed .meatgeek_shared.id), dropping
+      # exactly those pairs from the discovered count. MG-54 deleted the source
+      # containers, so the surviving *_shared containers carry these links now. The
+      # clean tree discovers exactly the floor (an honest floor equals the committed
+      # count), so removing any nonzero set of pairs lands strictly below it —
+      # isolating the ratchet rather than re-testing the zero-pair failure. The count
+      # removed and the floor are both measured at runtime (see BELOW_FLOOR_* below),
+      # so nothing here goes stale when the module grows and the floor is raised.
+      replace_all "${cosmos_file}" 'database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name' 'database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.id'
       ;;
     missing-cosmos-endpoint-lifecycle)
       replace_once "${iothub_file}" $'  lifecycle {\n    replace_triggered_by = [terraform_data.cosmos_target_ready.id]\n  }' ''
@@ -218,11 +221,11 @@ fi
 # the floor above the true count, or letting the tree outgrow the floor, fails here.
 CLEAN_EXPECTED="check 18: discovered ${FLOOR} name-referenced (child, parent) pair(s) (floor ${FLOOR})"
 
-# below-pair-floor removes the source containers' database_name links. Measure how
-# many that is against the real module and subtract from the floor, so the expected
-# post-removal count is derived, never hardcoded. Removing a nonzero set from a count
-# that equals the floor is guaranteed to land below it.
-BELOW_FLOOR_REMOVED="$(count_occurrences 'database_name       = azurerm_cosmosdb_sql_database.meatgeek.name' "${INFRA_SOURCE}/modules/cosmos-db/main.tf")"
+# below-pair-floor removes the destination containers' database_name links. Measure
+# how many that is against the real module and subtract from the floor, so the
+# expected post-removal count is derived, never hardcoded. Removing a nonzero set
+# from a count that equals the floor is guaranteed to land below it.
+BELOW_FLOOR_REMOVED="$(count_occurrences 'database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name' "${INFRA_SOURCE}/modules/cosmos-db/main.tf")"
 BELOW_FLOOR_DISCOVERED=$((FLOOR - BELOW_FLOOR_REMOVED))
 BELOW_FLOOR_EXPECTED="this scan discovered ${BELOW_FLOOR_DISCOVERED} name-referenced (child, parent) pair(s), below the recorded floor of ${FLOOR}"
 

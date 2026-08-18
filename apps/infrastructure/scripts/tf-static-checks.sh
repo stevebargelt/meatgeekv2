@@ -1193,12 +1193,23 @@ name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 # freely as the stack grows; lowering it is a reviewed decision, never a reflex to
 # make a red check green.
 #
-# Measured 31 against this branch's tree (feat/mg-53-cosmos-shared-throughput-create)
+# Measured 31 against the MG-53 tree (feat/mg-53-cosmos-shared-throughput-create)
 # after MG-53 added the shared-throughput destination to modules/cosmos-db/main.tf:
 # azurerm_cosmosdb_sql_database.meatgeek_shared (1 account_name pair) and its five
 # *_shared containers (each an account_name + a database_name pair = 10), which
 # ratcheted the pre-MG-53 floor of 20 up by 11 to 31.
-NAME_REF_PAIR_FLOOR=31
+#
+# MG-54 then DELETED the five superseded source containers (devices, temperatures,
+# cooks, users, recipes) and the source database (meatgeek) once MG-62 cut telemetry
+# over to the destination. That removed exactly 11 name-referenced (child, parent)
+# pairs — the mirror image of the 11 MG-53 added: meatgeek (1 account_name pair) and
+# its five source containers (each an account_name + a database_name pair = 10). The
+# 11 destination *_shared pairs are byte-unchanged and still discovered, so the count
+# fell 31 -> 20 solely because those source resources left the tree (verified: the
+# check's discovery regex and block-boundary logic are untouched, and the deleted
+# blocks each carried a proper `.id`-form replace_triggered_by). This lowers the floor
+# back to the pre-MG-53 baseline of 20.
+NAME_REF_PAIR_FLOOR=20
 
 name_replace_hits=""
 name_ref_pairs=0

@@ -129,7 +129,7 @@
 # therefore ordering-only:
 #
 #   account_name        = azurerm_cosmosdb_account.main.name           (6: db + 5 containers)
-#   database_name       = azurerm_cosmosdb_sql_database.meatgeek.name  (5: containers)
+#   database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name  (5: containers)
 #   resource_group_name = azurerm_cosmosdb_account.main.resource_group_name (6)
 #
 # (The `.id` references introduced by F4 are lifecycle triggers, not arguments,
@@ -180,8 +180,8 @@ run "parent_names_are_configured_values_that_survive_replacement" {
   }
 
   assert {
-    condition     = azurerm_cosmosdb_sql_database.meatgeek.name == "${var.resource_prefix}-db"
-    error_message = "The SQL database name must be the configured literal '${var.resource_prefix}-db' — this is the name that stayed in Terraform state after Azure destroyed the database with the account, and the name Azure rejected with IH400142 when the IoT Hub endpoint tried to bind to it"
+    condition     = azurerm_cosmosdb_sql_database.meatgeek_shared.name == "${var.resource_prefix}-shared-db"
+    error_message = "The shared SQL database name must be the configured literal '${var.resource_prefix}-shared-db' — a pure function of input variables, identical before and after a replacement. MG-54 deleted the source database azurerm_cosmosdb_sql_database.meatgeek, so the surviving shared destination subtree is now the live subject of this propagation contract; the historical MG-48 failure (state kept listing a database Azure had destroyed, then IH400142) is what this contract exists to prevent from recurring on the destination"
   }
 
   assert {
@@ -230,14 +230,14 @@ run "account_carries_in_place_updatable_arguments" {
 }
 
 # The database reaches its account by the account's CONFIGURED name, not by its
-# id. Ordering only. azurerm_cosmosdb_sql_database.meatgeek therefore needs
+# id. Ordering only. azurerm_cosmosdb_sql_database.meatgeek_shared therefore needs
 # lifecycle.replace_triggered_by = [azurerm_cosmosdb_account.main.id].
 run "database_reaches_its_account_through_the_accounts_configured_name" {
   command = plan
 
   assert {
-    condition     = azurerm_cosmosdb_sql_database.meatgeek.account_name == azurerm_cosmosdb_account.main.name
-    error_message = "The SQL database must reach the account through azurerm_cosmosdb_account.main.name — a configured value identical before and after replacement. This pairing is what azurerm_cosmosdb_sql_database.meatgeek's replace_triggered_by must name, as azurerm_cosmosdb_account.main.id; without that block Azure destroys the database with the account while Terraform's state keeps listing it"
+    condition     = azurerm_cosmosdb_sql_database.meatgeek_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "The shared SQL database must reach the account through azurerm_cosmosdb_account.main.name — a configured value identical before and after replacement. This pairing is what azurerm_cosmosdb_sql_database.meatgeek_shared's replace_triggered_by must name, as azurerm_cosmosdb_account.main.id; without that block Azure destroys the database with the account while Terraform's state keeps listing it"
   }
 }
 
@@ -261,76 +261,78 @@ run "children_reach_the_account_through_its_configured_resource_group_name" {
   }
 
   assert {
-    condition     = azurerm_cosmosdb_sql_database.meatgeek.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name
-    error_message = "The SQL database reaches azurerm_cosmosdb_account.main through the account's configured resource_group_name — a second, unscanned pairing with the SAME parent as its account_name reference. It is already covered by the database's replace_triggered_by only because that block names the parent's id rather than the attribute the child reads; nothing verifies that coincidence except this assertion"
+    condition     = azurerm_cosmosdb_sql_database.meatgeek_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name
+    error_message = "The shared SQL database reaches azurerm_cosmosdb_account.main through the account's configured resource_group_name — a second, unscanned pairing with the SAME parent as its account_name reference. It is already covered by the database's replace_triggered_by only because that block names the parent's id rather than the attribute the child reads; nothing verifies that coincidence except this assertion"
   }
 
   assert {
     condition = alltrue([
-      azurerm_cosmosdb_sql_container.devices.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
-      azurerm_cosmosdb_sql_container.temperatures.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
-      azurerm_cosmosdb_sql_container.cooks.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
-      azurerm_cosmosdb_sql_container.users.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
-      azurerm_cosmosdb_sql_container.recipes.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.devices_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.temperatures_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.cooks_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.users_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.recipes_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
     ])
-    error_message = "All five containers reach azurerm_cosmosdb_account.main through the account's configured resource_group_name. If a container ever sourced its resource group from anywhere else — var.resource_group_name directly, or a different parent — it would stop being paired with the account through this attribute, and the enumeration in this file's preamble would be stale. That silent staleness is how MG-48 broke dev three times"
+    error_message = "All five destination containers reach azurerm_cosmosdb_account.main through the account's configured resource_group_name. If a container ever sourced its resource group from anywhere else — var.resource_group_name directly, or a different parent — it would stop being paired with the account through this attribute, and the enumeration in this file's preamble would be stale. That silent staleness is how MG-48 broke dev three times"
   }
 }
 
-# All five containers reach the account AND the database by configured name.
-# Each therefore needs replace_triggered_by naming BOTH parents' ids: the account
-# because Azure destroys the container with it, and the database because a
-# replaced database is a new, empty database that the old container is not in.
+# All five destination containers reach the account AND the shared database by
+# configured name. Each therefore needs replace_triggered_by naming BOTH parents'
+# ids: the account because Azure destroys the container with it, and the database
+# because a replaced database is a new, empty database that the old container is
+# not in. (MG-54 deleted the five source containers; the *_shared destination
+# twins carry identical replace_triggered_by blocks, so the contract lives on.)
 run "containers_reach_their_parents_through_configured_names" {
   command = plan
 
   # --- devices ---
   assert {
-    condition     = azurerm_cosmosdb_sql_container.devices.account_name == azurerm_cosmosdb_account.main.name
-    error_message = "Container 'devices' must reach the account through azurerm_cosmosdb_account.main.name — a configured value that does not change on replacement, so this reference orders creation but never propagates replacement. azurerm_cosmosdb_sql_container.devices must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.devices_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "Container 'devices_shared' must reach the account through azurerm_cosmosdb_account.main.name — a configured value that does not change on replacement, so this reference orders creation but never propagates replacement. azurerm_cosmosdb_sql_container.devices_shared must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
   }
   assert {
-    condition     = azurerm_cosmosdb_sql_container.devices.database_name == azurerm_cosmosdb_sql_database.meatgeek.name
-    error_message = "Container 'devices' must reach the database through azurerm_cosmosdb_sql_database.meatgeek.name — a configured literal, so a REPLACED database looks identical from here. azurerm_cosmosdb_sql_container.devices must name azurerm_cosmosdb_sql_database.meatgeek.id in replace_triggered_by or it is left in state pointing at a database that no longer holds it"
+    condition     = azurerm_cosmosdb_sql_container.devices_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
+    error_message = "Container 'devices_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal, so a REPLACED database looks identical from here. azurerm_cosmosdb_sql_container.devices_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by or it is left in state pointing at a database that no longer holds it"
   }
 
   # --- temperatures ---
   assert {
-    condition     = azurerm_cosmosdb_sql_container.temperatures.account_name == azurerm_cosmosdb_account.main.name
-    error_message = "Container 'temperatures' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.temperatures must name azurerm_cosmosdb_account.main.id in replace_triggered_by. This is the container the IoT Hub Cosmos endpoint writes into, so a ghost entry here is the IH400142 path"
+    condition     = azurerm_cosmosdb_sql_container.temperatures_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "Container 'temperatures_shared' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.temperatures_shared must name azurerm_cosmosdb_account.main.id in replace_triggered_by. This is the container the IoT Hub Cosmos endpoint writes into after the MG-62 repoint, so a ghost entry here is the IH400142 path"
   }
   assert {
-    condition     = azurerm_cosmosdb_sql_container.temperatures.database_name == azurerm_cosmosdb_sql_database.meatgeek.name
-    error_message = "Container 'temperatures' must reach the database through azurerm_cosmosdb_sql_database.meatgeek.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.temperatures must name azurerm_cosmosdb_sql_database.meatgeek.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.temperatures_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
+    error_message = "Container 'temperatures_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.temperatures_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by"
   }
 
   # --- cooks ---
   assert {
-    condition     = azurerm_cosmosdb_sql_container.cooks.account_name == azurerm_cosmosdb_account.main.name
-    error_message = "Container 'cooks' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.cooks must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.cooks_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "Container 'cooks_shared' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.cooks_shared must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
   }
   assert {
-    condition     = azurerm_cosmosdb_sql_container.cooks.database_name == azurerm_cosmosdb_sql_database.meatgeek.name
-    error_message = "Container 'cooks' must reach the database through azurerm_cosmosdb_sql_database.meatgeek.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.cooks must name azurerm_cosmosdb_sql_database.meatgeek.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.cooks_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
+    error_message = "Container 'cooks_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.cooks_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by"
   }
 
   # --- users ---
   assert {
-    condition     = azurerm_cosmosdb_sql_container.users.account_name == azurerm_cosmosdb_account.main.name
-    error_message = "Container 'users' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.users must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.users_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "Container 'users_shared' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.users_shared must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
   }
   assert {
-    condition     = azurerm_cosmosdb_sql_container.users.database_name == azurerm_cosmosdb_sql_database.meatgeek.name
-    error_message = "Container 'users' must reach the database through azurerm_cosmosdb_sql_database.meatgeek.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.users must name azurerm_cosmosdb_sql_database.meatgeek.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.users_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
+    error_message = "Container 'users_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.users_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by"
   }
 
   # --- recipes ---
   assert {
-    condition     = azurerm_cosmosdb_sql_container.recipes.account_name == azurerm_cosmosdb_account.main.name
-    error_message = "Container 'recipes' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.recipes must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.recipes_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "Container 'recipes_shared' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.recipes_shared must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
   }
   assert {
-    condition     = azurerm_cosmosdb_sql_container.recipes.database_name == azurerm_cosmosdb_sql_database.meatgeek.name
-    error_message = "Container 'recipes' must reach the database through azurerm_cosmosdb_sql_database.meatgeek.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.recipes must name azurerm_cosmosdb_sql_database.meatgeek.id in replace_triggered_by"
+    condition     = azurerm_cosmosdb_sql_container.recipes_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
+    error_message = "Container 'recipes_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.recipes_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by"
   }
 }

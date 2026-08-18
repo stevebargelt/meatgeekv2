@@ -40,11 +40,6 @@ output "cosmos_db_endpoint" {
   value       = module.cosmos_db.endpoint
 }
 
-output "cosmos_db_database_name" {
-  description = "CosmosDB database name"
-  value       = module.cosmos_db.database_name
-}
-
 # Non-secret names the MG-53 post-create assertion resolves at apply time. The
 # live collector (scripts/collect-live-shared-throughput.sh, invoked by the apply
 # job) reads the destination back with `az cosmosdb sql ...` and needs the account
