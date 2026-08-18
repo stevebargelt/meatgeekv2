@@ -4,6 +4,115 @@
 
 This document outlines the cost-optimized approach for using a single CosmosDB account across multiple environments for the MeatGeek V2 system.
 
+## MG-54 Cleanup: Mandatory Two-Phase Apply (delete-before-limit)
+
+> **Operational runbook — read before applying the MG-54 change.** This is the
+> **second authorization point** in the dev cosmos migration. No live apply is
+> performed by the code change itself; the orchestrator owns the recovery apply.
+
+### What the MG-54 change does
+
+The MG-54 edit to `apps/infrastructure/modules/cosmos-db/main.tf` is a **pure
+destroy** of exactly six source resources plus **one in-place account attribute
+add**:
+
+- Deletes the five source containers and the source database:
+  - `module.cosmos_db.azurerm_cosmosdb_sql_database.meatgeek`
+  - `module.cosmos_db.azurerm_cosmosdb_sql_container.devices`
+  - `module.cosmos_db.azurerm_cosmosdb_sql_container.temperatures`
+  - `module.cosmos_db.azurerm_cosmosdb_sql_container.cooks`
+  - `module.cosmos_db.azurerm_cosmosdb_sql_container.users`
+  - `module.cosmos_db.azurerm_cosmosdb_sql_container.recipes`
+- Adds a `capacity { total_throughput_limit = 1000 }` block to
+  `azurerm_cosmosdb_account.main` (the free-tier account ceiling — dev already
+  has `cosmos_enable_free_tier = true`). This is an **in-place update** of the
+  account, never a replace.
+
+The destination twins — `azurerm_cosmosdb_sql_database.meatgeek_shared` and the
+five `*_shared` containers — and every `destination_*` output are left
+**untouched** (MG-62 consumes them).
+
+### Why a single `terraform apply` is unsafe
+
+The account-level ceiling `total_throughput_limit = 1000` is **below the
+~2400 RU/s currently provisioned** while the five source container-level offers
+still exist. Azure **rejects** an account throughput ceiling that sits below the
+sum of the account's currently provisioned offers.
+
+A single `terraform apply` does **not** guarantee the ordering that would make
+the ceiling safe:
+
+- Terraform will destroy the source **children** (containers, then database)
+  before it would touch the account.
+- But the ceiling is an **in-place UPDATE on the parent account**, and there is
+  **no graph edge** forcing that parent update to run _after_ the child destroys
+  have settled at the service level. Dependency edges order create/destroy of
+  the _tree_; they do not sequence an in-place parent-attribute update behind the
+  service-side settling of child deletions.
+- So within one apply the ceiling can land while ~2400 RU/s of source offers are
+  still provisioned, and Azure rejects it — a failed, half-applied run.
+
+Ordering therefore must be **enforced operationally as two applies**, not relied
+upon inside a single plan.
+
+### The procedure
+
+**Phase 1 — targeted destroy of the six source resources.**
+Apply _only_ the six source-resource destroys, in isolation:
+
+```
+terraform apply \
+  -target=module.cosmos_db.azurerm_cosmosdb_sql_database.meatgeek \
+  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.devices \
+  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.temperatures \
+  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.cooks \
+  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.users \
+  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.recipes
+```
+
+Then **confirm the account settles to 400 RU/s provisioned** — the single
+`meatgeek_shared` database-level offer — before proceeding. Do not start Phase 2
+until the account is observed at 400 RU/s.
+
+**Phase 2 — full `terraform apply`.**
+Run a full `terraform apply`. With the source offers gone and the account now at
+a 400 RU/s steady state, the plan lands the account's **in-place capacity
+update** to `total_throughput_limit = 1000` — comfortably above 400 — and Azure
+accepts it.
+
+### Each phase's plan is gated by `scripts/tf-plan-destroy-guard.sh`
+
+Both phase plans pass through the fail-closed destroy guard, and the expected
+protected-change set differs per phase:
+
+- **Phase 1** authorizes **exactly six `delete` tokens** — one per source
+  resource — and no other destructive token:
+  - `delete:module.cosmos_db.azurerm_cosmosdb_sql_database.meatgeek`
+  - `delete:module.cosmos_db.azurerm_cosmosdb_sql_container.devices`
+  - `delete:module.cosmos_db.azurerm_cosmosdb_sql_container.temperatures`
+  - `delete:module.cosmos_db.azurerm_cosmosdb_sql_container.cooks`
+  - `delete:module.cosmos_db.azurerm_cosmosdb_sql_container.users`
+  - `delete:module.cosmos_db.azurerm_cosmosdb_sql_container.recipes`
+
+  Each must be a **pure delete**, never a replace (`-/+`). Any replace on the
+  six, or any `delete`/`replace`/`forget` token on any other resource (the
+  account, the destination twins, IoT Hub routes/endpoints/consumer groups, role
+  assignments, diagnostic settings), is a defect — **stop**.
+
+- **Phase 2** shows the account as a single in-place `~ update` carrying
+  `capacity { total_throughput_limit = 1000 }` and **no destroy token at all**.
+  The guard's authorized-changes set for Phase 2 is therefore **empty** (an
+  in-place update is not a protected change); any destructive token appearing in
+  the Phase 2 plan is a defect.
+
+### No live apply in the MG-54 code change
+
+The MG-54 code deliverable is documentation + the single coherent final module
+state. **No live `terraform apply` is performed by this change.** The
+orchestrator executes the two-phase runbook above at recovery-apply time, under
+a separate destroy authorization that also names the disposal of the synthetic
+fixture documents.
+
 ## Architecture: Multiple Databases Approach
 
 ### Structure

@@ -16,116 +16,11 @@ output "endpoint" {
   value       = azurerm_cosmosdb_account.main.endpoint
 }
 
-# Database Information
-output "database_id" {
-  description = "ID of the environment-specific database"
-  value       = azurerm_cosmosdb_sql_database.meatgeek.id
-}
-
-output "database_name" {
-  description = "Name of the environment-specific database"
-  value       = azurerm_cosmosdb_sql_database.meatgeek.name
-}
-
 # Connection Information
 # NOTE: the former `connection_string`, `primary_key`, and `secondary_key`
 # secret outputs were REMOVED (MG-24 S1). Consumers (the Function App, the IoT
 # Hub route) access Cosmos identity-based via the non-secret `endpoint` above
 # plus a Cosmos SQL data-plane role assignment — no AccountKey enters state.
-
-# Container Information
-output "container_names" {
-  description = "Names of all containers created in the database"
-  value = {
-    devices      = azurerm_cosmosdb_sql_container.devices.name
-    temperatures = azurerm_cosmosdb_sql_container.temperatures.name
-    cooks        = azurerm_cosmosdb_sql_container.cooks.name
-    users        = azurerm_cosmosdb_sql_container.users.name
-    recipes      = azurerm_cosmosdb_sql_container.recipes.name
-  }
-}
-
-# Container identities, published so a consumer can depend on a container's
-# EXISTENCE and not merely on its name (MG-48).
-#
-# A container's `name` is a CONFIGURED literal — "temperatures" is spelled in
-# main.tf and is byte-identical before and after the container is replaced. A
-# consumer handed `container_names.temperatures` therefore learns what the
-# container is called but never learns WHETHER the thing behind that name still
-# exists: the value it sees is unchanged across a destroy-and-recreate, so it is
-# never planned for replacement alongside it. An `id` is COMPUTED and changes on
-# replacement, which is what makes it usable as a `replace_triggered_by` trigger
-# (see the route comments in modules/iot-hub/main.tf for the same distinction one
-# layer up). Names still cross the boundary next to these ids — the Azure APIs
-# want the literal name — but the ids are what carry identity.
-#
-# CONSUME THESE AS AN ATTRIBUTE, never as a bare resource address. The distinction
-# is not cosmetic and it cuts the opposite way from the one above. Downstream, an
-# id ends up on a trigger, and `replace_triggered_by = [azurerm_cosmosdb_account.main]`
-# naming a WHOLE resource fires when that resource is planned for in-place UPDATE as
-# well as for replacement (measured against Terraform 1.9.8), so a trigger written
-# that way turns a routine tag, backup-policy or consistency-level edit on the parent
-# into a destroy-and-recreate of every container beneath it — data loss dressed up as
-# a safety feature. The `.id` form fires on the VALUE changing instead: unknown
-# at plan time when the parent is replaced, untouched by an in-place edit. That is
-# a documented property rather than an observed one, and it is the whole reason
-# what crosses this boundary is an id and not the resource that produced it.
-# Over-triggering was caught in review on this change before it shipped; re-opening
-# it is as easy as writing the bare form in a new consumer.
-output "container_ids" {
-  description = "Resource IDs of all containers created in the database. Computed, unlike container_names: an id changes when a container is replaced, so a consumer that must be replaced WITH a container references the id — the configured name survives replacement unchanged and cannot carry that dependency. Reference the id as an attribute in replace_triggered_by; a bare whole-resource address there also fires on the parent's in-place update and would recreate the container on an ordinary tag edit."
-  value = {
-    devices      = azurerm_cosmosdb_sql_container.devices.id
-    temperatures = azurerm_cosmosdb_sql_container.temperatures.id
-    cooks        = azurerm_cosmosdb_sql_container.cooks.id
-    users        = azurerm_cosmosdb_sql_container.users.id
-    recipes      = azurerm_cosmosdb_sql_container.recipes.id
-  }
-}
-
-output "partition_keys" {
-  description = "Partition key paths for each container"
-  value = {
-    devices      = "/id"
-    temperatures = "/deviceId"
-    cooks        = "/userId"
-    users        = "/id"
-    recipes      = "/userId"
-  }
-}
-
-# Application Configuration
-output "application_config" {
-  description = "Configuration object for applications"
-  value = {
-    endpoint            = azurerm_cosmosdb_account.main.endpoint
-    database_name       = azurerm_cosmosdb_sql_database.meatgeek.name
-    account_name        = azurerm_cosmosdb_account.main.name
-    resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
-
-    containers = {
-      devices      = azurerm_cosmosdb_sql_container.devices.name
-      temperatures = azurerm_cosmosdb_sql_container.temperatures.name
-      cooks        = azurerm_cosmosdb_sql_container.cooks.name
-      users        = azurerm_cosmosdb_sql_container.users.name
-      recipes      = azurerm_cosmosdb_sql_container.recipes.name
-    }
-
-    partition_keys = {
-      devices      = "/id"
-      temperatures = "/deviceId"
-      cooks        = "/userId"
-      users        = "/id"
-      recipes      = "/userId"
-    }
-  }
-}
-
-# Cost and Performance Information
-output "database_throughput" {
-  description = "Configured database throughput in RU/s"
-  value       = azurerm_cosmosdb_sql_database.meatgeek.throughput
-}
 
 # The former `estimated_monthly_cost` output was REMOVED (MG-48). It was wrong by
 # 100x — it read $0.008 as a per-RU/s-hour rate when Azure charges it per 100 RU/s

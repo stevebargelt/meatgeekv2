@@ -52,3 +52,19 @@ run "free_tier_is_off_when_disabled" {
     error_message = "enable_free_tier = false must leave the account off the free tier so it cannot take the subscription's single slot from dev"
   }
 }
+
+# MG-54: the free-tier account throughput ceiling. The capacity block on
+# azurerm_cosmosdb_account.main caps TOTAL provisioned throughput for the whole
+# account at 1000 RU/s — the free-tier grant. `capacity` is a list-nested block, so
+# one() unwraps the single element. This is a literal ceiling (not variable-driven,
+# matching the source), so it is asserted against 1000 directly. If the ceiling is
+# ever dropped, total_throughput_limit plans as unknown and this condition errors
+# rather than silently passing.
+run "account_carries_the_free_tier_throughput_ceiling" {
+  command = plan
+
+  assert {
+    condition     = one(azurerm_cosmosdb_account.main.capacity).total_throughput_limit == 1000
+    error_message = "azurerm_cosmosdb_account.main must carry capacity { total_throughput_limit = 1000 } — the MG-54 free-tier account ceiling. Removing it uncaps total provisioned throughput above the free-tier grant; changing it off 1000 breaks the delete-before-limit ordering the two-phase apply (COSMOS-COST-STRATEGY.md) is built around."
+  }
+}

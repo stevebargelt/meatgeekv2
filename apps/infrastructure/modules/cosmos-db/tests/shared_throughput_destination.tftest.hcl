@@ -178,27 +178,11 @@ run "destination_containers_reproduce_the_source_definition_shape" {
   }
 }
 
-# Regression fence: the SOURCE is left untouched by MG-53. The source temperatures
-# container still carries its dedicated throughput = 400 and its /deviceId key, and
-# the source database still has NO database-level offer. If a future edit
-# accidentally moves the offer off the source or reshapes the source key, this run
-# turns red — the destination work must not perturb the source (the repoint is
-# MG-62, deletion is MG-54).
-run "source_is_left_unchanged_by_the_destination_addition" {
-  command = plan
-
-  assert {
-    condition     = azurerm_cosmosdb_sql_container.temperatures.throughput == 400
-    error_message = "The SOURCE temperatures container must keep its dedicated throughput = 400. MG-53 is CREATE-ONLY on the destination; it must not remove or move the source's offer (that is not this ticket's scope)."
-  }
-
-  assert {
-    condition     = azurerm_cosmosdb_sql_container.temperatures.partition_key_paths == tolist(["/deviceId"])
-    error_message = "The SOURCE temperatures container must keep partition_key_paths = /deviceId. tf-static-checks check 20 also guards this; asserted here so a source reshape during destination work is caught in the same suite."
-  }
-
-  assert {
-    condition     = azurerm_cosmosdb_sql_container.temperatures.database_name == azurerm_cosmosdb_sql_database.meatgeek.name
-    error_message = "The SOURCE temperatures container must remain under the SOURCE database azurerm_cosmosdb_sql_database.meatgeek — the destination addition must not rebind source containers."
-  }
-}
+# Regression fence RETIRED by MG-54. This run block asserted that the SOURCE
+# subtree (azurerm_cosmosdb_sql_container.temperatures + azurerm_cosmosdb_sql_database.meatgeek)
+# was left untouched by the MG-53 destination addition. MG-54 has now DELETED that
+# source subtree entirely (the five source containers and the source database), so
+# there is no source left to fence — every assertion here referenced resources that
+# no longer exist and would error on resolution under `terraform test`. The
+# regression it guarded (destination work perturbing the source) is moot once the
+# source is gone; the surviving destination-shape coverage above is unaffected.
