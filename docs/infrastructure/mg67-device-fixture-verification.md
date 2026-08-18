@@ -67,12 +67,20 @@ Every command below uses these. They come from the MG-67 brief and from the
 Terraform in this repo; confirm the two marked ones with `terraform output`
 rather than trusting the literal.
 
+> **MG-54 has since deleted the source database `meatgeek-v2-dev-db` and its
+> five containers, and pruned the `cosmos_db_database_name` root output along
+> with it.** The row below can no longer be re-confirmed with
+> `terraform output` — it is retained as the coordinate the already-completed
+> 2026-08-16 run (see the banner) actually used, not as a live instruction.
+> This entire procedure targeted the source path MG-54 removes; it is not
+> re-runnable against dev as written.
+
 | Thing                 | Value                                                                                                                                                      |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workload RG           | `meatgeek-v2-dev-rg` (West US 2)                                                                                                                           |
 | IoT Hub               | `meatgeek-v2-dev-iothub-259d4bf5b628`                                                                                                                      |
 | Cosmos account        | `mgv2-dev-f640e19ae7ab` — no output publishes the bare name; confirm with `terraform output -raw cosmos_db_endpoint` (the account name is its first label) |
-| Database              | `meatgeek-v2-dev-db` — confirm with `terraform output -raw cosmos_db_database_name`                                                                        |
+| Database              | `meatgeek-v2-dev-db` — historical; the `cosmos_db_database_name` output that confirmed it was removed by MG-54                                            |
 | Destination container | `temperatures` (the container the route targets)                                                                                                           |
 | Fixture device id     | `meatgeek-v2-dev-synthetic-fixture-device` (`FIXTURE_DEVICE_ID`)                                                                                           |
 | Synthetic marker      | `syntheticFixture` = `MG-67-SYNTHETIC-FIXTURE`                                                                                                             |

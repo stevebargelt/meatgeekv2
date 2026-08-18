@@ -241,9 +241,16 @@ unwired to any consumer; MG-62 is the repoint — the IoT Hub Cosmos routing
 endpoint (`cosmos_database_name`, `cosmos_container_name`, `cosmos_database_id`,
 `cosmos_container_id`) and the Function App's `COSMOSDB_DATABASE_NAME` now read
 `module.cosmos_db.destination_*` instead of the source's `database_name` /
-`container_names` / `database_id` / `container_ids`, as a matched set. The
-source database and its containers are otherwise unchanged and are MG-54's to
-remove. See the
+`container_names` / `database_id` / `container_ids`, as a matched set. MG-54
+has since deleted the source database and its five containers outright, pruned
+the module's now-dangling `database_id` / `database_name` / `container_names`
+/ `container_ids` / `partition_keys` / `application_config` /
+`database_throughput` outputs and the root `cosmos_db_database_name` output,
+and added a `capacity { total_throughput_limit = 1000 }` block (the free-tier
+ceiling) to the account as an in-place update — see the mandatory two-phase
+apply runbook in
+[COSMOS-COST-STRATEGY.md](../../apps/infrastructure/COSMOS-COST-STRATEGY.md#mg-54-cleanup-mandatory-two-phase-apply-delete-before-limit).
+The destination twins and every `destination_*` output are untouched. See the
 [MG-53 shared-throughput destination ADR](../../learnings/decisions/mg-53-cosmos-shared-throughput-destination.md)
 for the create-only partition-key reasoning for `temperatures_shared` and the
 live post-create gate that proves the destination once it exists, and the
