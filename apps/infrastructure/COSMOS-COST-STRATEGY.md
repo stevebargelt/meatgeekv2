@@ -58,27 +58,86 @@ upon inside a single plan.
 ### The procedure
 
 **Phase 1 — targeted destroy of the six source resources.**
-Apply _only_ the six source-resource destroys, in isolation:
+Destroy _only_ the six source resources, in isolation. **Never a bare
+`terraform apply`** — a bare apply re-plans at apply time and discards the change
+set the guard reviewed. Follow the same `plan -out` → destroy-guard →
+`apply <saved-plan>` sequence the automatic reconciler uses, so the destructive
+change set that is applied is exactly the one the guard authorized:
 
-```
-terraform apply \
-  -target=module.cosmos_db.azurerm_cosmosdb_sql_database.meatgeek \
-  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.devices \
-  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.temperatures \
-  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.cooks \
-  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.users \
-  -target=module.cosmos_db.azurerm_cosmosdb_sql_container.recipes
-```
+1. **Plan the six targeted destroys to a saved plan file** (run from
+   `apps/infrastructure/`):
+
+   ```
+   terraform plan -input=false -lock-timeout=5m \
+     -var-file=environments/dev.tfvars \
+     -target=module.cosmos_db.azurerm_cosmosdb_sql_database.meatgeek \
+     -target=module.cosmos_db.azurerm_cosmosdb_sql_container.devices \
+     -target=module.cosmos_db.azurerm_cosmosdb_sql_container.temperatures \
+     -target=module.cosmos_db.azurerm_cosmosdb_sql_container.cooks \
+     -target=module.cosmos_db.azurerm_cosmosdb_sql_container.users \
+     -target=module.cosmos_db.azurerm_cosmosdb_sql_container.recipes \
+     -out=tfplan-phase1.bin
+   ```
+
+2. **Pass the saved plan through the fail-closed destroy guard**, authorizing
+   EXACTLY the six source `delete` tokens (see the token list below) and nothing
+   else. The guard fails closed on any extra token, any missing token, or any
+   `replace` (`-/+`) on the six:
+
+   ```
+   TF_DESTROY_GUARD_AUTHORIZED_CHANGES='delete:module.cosmos_db.azurerm_cosmosdb_sql_database.meatgeek,delete:module.cosmos_db.azurerm_cosmosdb_sql_container.devices,delete:module.cosmos_db.azurerm_cosmosdb_sql_container.temperatures,delete:module.cosmos_db.azurerm_cosmosdb_sql_container.cooks,delete:module.cosmos_db.azurerm_cosmosdb_sql_container.users,delete:module.cosmos_db.azurerm_cosmosdb_sql_container.recipes' \
+     scripts/tf-plan-destroy-guard.sh tfplan-phase1.bin
+   ```
+
+   The guard must print `DESTRUCTIVE APPLY AUTHORIZED` (exit 0). If it prints any
+   `planned but NOT authorized` / `authorized but NOT in this plan` line, or any
+   `PROTECTED` token beyond the six above, **stop** — the plan is not the change
+   set you reviewed.
+
+3. **Only then apply the saved plan** — the exact reviewed `tfplan-phase1.bin`,
+   never a re-plan:
+
+   ```
+   terraform apply -input=false -lock-timeout=5m -auto-approve tfplan-phase1.bin
+   ```
 
 Then **confirm the account settles to 400 RU/s provisioned** — the single
 `meatgeek_shared` database-level offer — before proceeding. Do not start Phase 2
 until the account is observed at 400 RU/s.
 
-**Phase 2 — full `terraform apply`.**
-Run a full `terraform apply`. With the source offers gone and the account now at
-a 400 RU/s steady state, the plan lands the account's **in-place capacity
-update** to `total_throughput_limit = 1000` — comfortably above 400 — and Azure
-accepts it.
+**Phase 2 — full apply of the account ceiling.**
+Run the same `plan -out` → destroy-guard → `apply <saved-plan>` sequence, this
+time with NO targeting and NO authorization override. With the source offers gone
+and the account now at a 400 RU/s steady state, the plan lands the account's
+**in-place capacity update** to `total_throughput_limit = 1000` — comfortably
+above 400 — and Azure accepts it.
+
+1. **Plan the full change to a saved plan file:**
+
+   ```
+   terraform plan -input=false -lock-timeout=5m \
+     -var-file=environments/dev.tfvars \
+     -out=tfplan-phase2.bin
+   ```
+
+2. **Pass the saved plan through the destroy guard with NO override.** Phase 2
+   carries only the account's in-place `~ update` and **no destroy token at
+   all**, so the guard's protected-change set is empty and it must PASS with no
+   `TF_DESTROY_GUARD_AUTHORIZED_CHANGES` set. Any destructive token appearing
+   here is a defect — **stop**:
+
+   ```
+   scripts/tf-plan-destroy-guard.sh tfplan-phase2.bin
+   ```
+
+   The guard must print `PASS — this plan destroys nothing and orphans nothing`
+   (exit 0).
+
+3. **Only then apply the saved plan:**
+
+   ```
+   terraform apply -input=false -lock-timeout=5m -auto-approve tfplan-phase2.bin
+   ```
 
 ### Each phase's plan is gated by `scripts/tf-plan-destroy-guard.sh`
 
