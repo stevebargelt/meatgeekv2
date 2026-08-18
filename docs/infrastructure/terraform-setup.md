@@ -227,21 +227,29 @@ dev apply workflow's destroy guard to be explicitly authorized (see
 [CI/CD Pipeline](../development/ci-cd.md)); the guard is fail-closed and
 refuses the run otherwise.
 
-**Shared-throughput destination database (MG-53).** The module also creates a
-second, parallel database, `azurerm_cosmosdb_sql_database.meatgeek_shared`
-(`${resource_prefix}-shared-db`), with a single 400 RU/s offer at the
-**database** level shared by five definition-faithful twin containers
-(`*_shared`). This corrects a wrong mental model in the original per-container
-comments — Cosmos has no mechanism for one container to draw on a sibling's
-throughput, so a database with no shared offer left each of the five source
-containers with its own 400 RU/s minimum offer (~2000 RU/s total) instead of
-the 400 RU/s the code intended. The destination is **create-only**: nothing
-repoints to it, its outputs are published but unwired, and the source database
-and its containers are unchanged. See the
+**Shared-throughput destination database (MG-53), repointed by the MG-62
+cutover.** The module also creates a second, parallel database,
+`azurerm_cosmosdb_sql_database.meatgeek_shared` (`${resource_prefix}-shared-db`),
+with a single 400 RU/s offer at the **database** level shared by five
+definition-faithful twin containers (`*_shared`). This corrects a wrong mental
+model in the original per-container comments — Cosmos has no mechanism for one
+container to draw on a sibling's throughput, so a database with no shared
+offer left each of the five source containers with its own 400 RU/s minimum
+offer (~2000 RU/s total) instead of the 400 RU/s the code intended. MG-53
+created the destination **create-only**, with its outputs published but
+unwired to any consumer; MG-62 is the repoint — the IoT Hub Cosmos routing
+endpoint (`cosmos_database_name`, `cosmos_container_name`, `cosmos_database_id`,
+`cosmos_container_id`) and the Function App's `COSMOSDB_DATABASE_NAME` now read
+`module.cosmos_db.destination_*` instead of the source's `database_name` /
+`container_names` / `database_id` / `container_ids`, as a matched set. The
+source database and its containers are otherwise unchanged and are MG-54's to
+remove. See the
 [MG-53 shared-throughput destination ADR](../../learnings/decisions/mg-53-cosmos-shared-throughput-destination.md)
-for the full decision, the create-only partition-key reasoning for
-`temperatures_shared`, and the live post-create gate that proves the
-destination once it exists.
+for the create-only partition-key reasoning for `temperatures_shared` and the
+live post-create gate that proves the destination once it exists, and the
+[MG-62 cutover ADR](../../learnings/decisions/mg-62-cosmos-dev-telemetry-cutover.md)
+for the repoint itself and the accompanying `tf-static-checks` check 20
+re-keying.
 
 ## Nx Integration
 
@@ -540,9 +548,13 @@ and authenticated-smoke-test procedure.
 > the functions module's `cosmos_database_name` input, which is **required with
 > no default**: an empty or unset value fails Terraform validation at plan time
 > rather than deploying an app pointed at a database that does not exist. The
-> value is Terraform-owned (`module.cosmos_db.database_name`, the same
-> expression the IoT Hub routing endpoint already reads) so the API and the IoT
-> ingest path cannot drift onto two different names (**MG-51**). Each data
+> value is Terraform-owned (`module.cosmos_db.destination_database_name`, the
+> same expression the IoT Hub routing endpoint already reads) so the API and
+> the IoT ingest path cannot drift onto two different names (**MG-51**). Both
+> consumers were repointed from the source database onto the MG-53
+> shared-throughput destination as a matched pair by the **MG-62** cutover —
+> see the [MG-62 cutover ADR](../../learnings/decisions/mg-62-cosmos-dev-telemetry-cutover.md).
+> Each data
 > service's key does still exist as an inherent **computed attribute** in state
 > (true of any TF-managed resource); the control is to render those keys
 > non-authenticating by disabling local/key auth where safe
