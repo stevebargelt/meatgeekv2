@@ -1,65 +1,45 @@
-**Last session ended 2026-08-17.**
+**Last session ended 2026-08-20.**
 
-**Where we left off:** MG-62 (cosmos dev cutover) SHIPPED and CLOSED. The IoT Hub cosmos-storage
-routing endpoint and route now address meatgeek-v2-dev-shared-db; the Function App
-COSMOSDB_DATABASE_NAME cut over. Merged as a544fd3; applied live via the infra-apply-dev.yml
-workflow_dispatch RECOVERY path (run 32083576526) with an operator 3-token destroy authorization.
-All four live proofs pass (see the MG-62 Acceptance Evidence grid). The temporary Cosmos Data
-Reader grant used for the send-fixture read-back was created and REVOKED; baseline restored (2
-assignments, none for the operator identity).
+**Where we left off:** MG-54 (cosmos dev cleanup) SHIPPED and CLOSED (merge 8eaf060). The five source
+containers + source database were destroyed and the account 1000 RU/s free-tier ceiling applied, via
+an operator-authorized TWO-PHASE HOST APPLY (phase 1: targeted destroy of the six source addresses ->
+400 RU/s; phase 2: account in-place update -> 1000 ceiling). Provisioned throughput 2400 -> 400 RU/s;
+enableFreeTier=true; dev Cosmos is now inside the free-tier allowance (0 billable). Post-cleanup MG-67
+send proved the write path intact (3/3 into the destination). The 10 synthetic docs were disposed with
+the source; the MG-67 fixture device survives. Temp Cosmos grant revoked, baseline restored (2/0).
 
 **Picked up next:**
 
-1. **MG-54 — delete the superseded source dedicated-throughput containers and apply the 1000 RU/s
-   free-tier account ceiling.** This is the ONLY destructive phase and what stops the source's
-   2000 RU/s (the dominant ongoing cost now). Its authorization covers disposing of all synthetic
-   documents, including the ones MG-62 and MG-67 wrote. Run it PROMPTLY.
-2. **MG-77 — the api-interfaces required check is RED repo-wide.** run-flex-secret-gate-fixtures
-   mktemp-stub portability broke on the current GitHub runner (MG-40/MG-44 class). It blocks every
-   PR merge and the GitOps auto-apply. MG-62 was override-merged past it with operator authorization
-   since it is unrelated + fail-safe. Fix before the next merge that cannot be overridden.
-3. **MG-76** — check-20 (and the other infra fixture harnesses') in-lane provability; RF-3's fix
-   shipped and was proven manually (12/12 under bash 3.2) but the review lane cannot see the harness
-   run, so it settled deferred. Same wall as MG-53 RF-1/RF-2.
+1. **MG-77 (HIGH) — the api-interfaces required check is RED repo-wide** and now intermittently
+   fail-fast-CANCELS sibling required checks (lint-and-test (api)). run-flex-secret-gate-fixtures
+   mktemp-stub portability broke on the current GitHub runner (MG-40/MG-44 class). It blocks every PR
+   merge (both MG-62 and MG-54 were override-merged past it) and is escalating from one-check-to-
+   override toward blocking the whole matrix. Fix this before the next merge that cannot be overridden.
+2. **MG-76 — infra fixture-harness provability.** The review lane cannot run tf-static-checks or the
+   fixture runners, so MG-54's deletion silently broke TWO source-coupled harnesses that only CI
+   caught: the check-18 name-pair floor (31->20) and run-cross-module-propagation-fixtures.sh (it
+   mutated the deleted source db). Both fixed via engineer + CI-verified, but the evidence-led review
+   settled GREEN on a diff that then failed CI. Deletion/rename tickets especially need these harnesses.
+3. **MG-47 billing measurement (pending, time-gated)** — take the post-cleanup dollar billing-window
+   measurement after a full post-2026-08-20 billing cycle; it is MG-54 AC 9, recorded on MG-47, and
+   unblocks MG-48 AC6 + MG-25. RU/s evidence already establishes the expected result (inside free tier).
 
-**External state to remember:**
+**Operational lessons this session:**
 
-- **Cutover applied + converged.** Endpoint databaseName=meatgeek-v2-dev-shared-db (live),
-  partition /deviceId, template {deviceid}, identityBased. Post-cutover send-fixture landed 3/3 in
-  the destination in 1 poll / 70ms (baseline was source, 3 docs, 2 polls, 5144ms).
-- **Account still at 2400 RU/s** (2000 source + 400 destination) until MG-54. Free tier covers the
-  first 1000. The source's ~1000 billable RU/s accrues until MG-54 — reason to run it promptly.
-- **The MG-62 apply went red BY DESIGN on the MG-58 host-storage gate** (azurerm v4.81.0 injects the
-  scalar AzureWebJobsStorage on every Function App update; the gate deletes it and fails the run).
-  Remediation held; the rerun's host-storage gate PASSED. Two rerun attempts then failed at PLAN on
-  a transient SignalR listKeys network flake ("HTTP response was nil; connection may have been
-  reset") — unrelated to the cutover; infra is converged. If GitOps reconciliation stays red on
-  SignalR, it may need a look, but it read as transient.
-- **No standing Azure permissions.** The temporary Cosmos Data Reader grant pattern (create right
-  before a live data-plane read, revoke right after, verify baseline restored) was used again and
-  cleaned up. Cosmos account: mgv2-dev-f640e19ae7ab / meatgeek-v2-dev-rg / VSE02
-  (c7e800cb-0ee6-4175-9605-a6b97c6f419f).
-- **Health-endpoint proof requires an Entra bearer** (scope api://348570b2-44e5-41a6-ad15-2a7032366130/access_as_user);
-  az account get-access-token from the operator session works (CLI public client is pre-authorized).
-
-**Operational lessons that cost time this session:**
-
-- **Never run forge next synchronously for a phase that dispatches a container** — the 2m Bash
-  timeout SIGTERM-swept the verify container (FG-535); it left a result (19/19 passed) that had to
-  be reconciled with forge show --reconcile. Launch every phase durably.
-- **The migrated feature pipeline build gate is settled by the evidence-led ledger, not verdicts.**
-  It needs forge review start/continue against a COMMITTED branch (the pipeline leaves the diff on an
-  integration branch — assemble a clean feature branch off origin/main first). Contract lenses must
-  be from wide|narrow|frontend|backend|security (the tech-lead wrote "platform"; remap to wide).
-- **Acceptance claims for the shipping review** are a bare JSON ARRAY of {ref, verdict, evidence},
-  and a "met" claim's evidence must be a structured executed-evidence object (e.g.
-  replayed_reproduction {kind, command, output}) — a plain string downgrades to unproven.
-- **Environment approvals** for the RECOVERY apply: gh api .../pending_deployments with
-  -F "environment_ids[]=<int>". gh run rerun --failed re-runs only the failed job and skips the
-  already-approved recovery_approval gate.
+- **Destructive Cosmos two-phase apply.** The account total_throughput_limit ceiling is rejected while
+  over-provisioned, and a single terraform apply cannot order the account update after the child
+  destroys (no graph edge). The RECOVERY workflow cannot do a targeted apply. So: phase 1 = host
+  targeted apply of the exact destroy set (terraform plan -target ... -out, tf-plan-destroy-guard on
+  it, then apply), confirm the account settles to the new floor; phase 2 = host apply of the account
+  in-place update. Guard-gated each phase; a safety check refuses phase 2 if any destroy token appears.
+- **The MG-76 lane gap bites deletion tickets hardest** — a diff can settle a green evidence-led review
+  yet fail CI on multiple source-coupled infra harnesses. After a deletion diff, proactively run ALL
+  cosmos fixture harnesses locally to find every break in one pass, then fix in one engineer batch.
+- **Live-read pattern reaffirmed:** temporary Cosmos Data Reader grant (create -> read/send -> revoke
+  -> verify baseline 2/0) each time; @azure/cosmos + DefaultAzureCredential via dist/esm/index.js works
+  for source enumeration; the health proof needs the Entra bearer (api://348570b2.../access_as_user).
 
 **Shipped (for reference):**
-- **MG-62** (merge a544fd3; RECOVERY apply run 32083576526) — the live cutover to the shared-throughput
-  destination, with a ten-row acceptance-evidence grid. RF-1 accepted_risk authorized the 3 routing
-  replaces; RF-3 fix shipped (provability deferred to MG-76).
-- **MG-77** (filed) — the repo-wide red api-interfaces required check.
+- MG-62 (merge a544fd3) — cutover to the shared-throughput destination (all four live proofs).
+- MG-54 (merge 8eaf060) — source deletion + 1000 RU/s ceiling; nine-row acceptance-evidence grid
+  (8/9 met, AC 9 billing pending on MG-47). MG-77 filed (repo-wide red required check).
