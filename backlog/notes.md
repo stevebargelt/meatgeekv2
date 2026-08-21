@@ -1,45 +1,5 @@
-**Last session ended 2026-08-20.**
+**Last session: MG-77 + MG-78 SHIPPED and CLOSED (merge b7aad0f, PR #51).** The api-interfaces required check was red repo-wide for TWO independent causes; both fixed. MG-77: run-flex-secret-gate-fixtures.sh mktemp-failure injection was environment-fragile (the current runner's bare-mktemp resolution bypassed the PATH stub -> vacuous fail-safe exit 0); reworked to an exported bash-function shadow (bypass-proof, host-independent) + PATH stub for dash, export -f gated on BASH_VERSION for bash 3.2/5 + dash safety; durable Jest regression added; fail-closed gate + absolute-path anti-vacuity guard untouched. MG-78 (filed this session): two MG-51 fail-loud guards in flex-hosting-config.spec.ts asserted pre-MG-53 Cosmos names — reconciled to destination_database_name/meatgeek_shared (verified stale, not a regression; main.tf 231/325 still wire both consumers; guard strength preserved by scratch mutation). Full 11-check PR matrix green with ZERO overrides; lint-and-test (api) no longer fail-fast-cancelled; post-merge main CI green on b7aad0f. Both tickets closed with acceptance-evidence grids.
 
-**Where we left off:** MG-54 (cosmos dev cleanup) SHIPPED and CLOSED (merge 8eaf060). The five source
-containers + source database were destroyed and the account 1000 RU/s free-tier ceiling applied, via
-an operator-authorized TWO-PHASE HOST APPLY (phase 1: targeted destroy of the six source addresses ->
-400 RU/s; phase 2: account in-place update -> 1000 ceiling). Provisioned throughput 2400 -> 400 RU/s;
-enableFreeTier=true; dev Cosmos is now inside the free-tier allowance (0 billable). Post-cleanup MG-67
-send proved the write path intact (3/3 into the destination). The 10 synthetic docs were disposed with
-the source; the MG-67 fixture device survives. Temp Cosmos grant revoked, baseline restored (2/0).
+**Picked up next: MG-59** (api persistence gap — production-activation blocker). The V2 API has never persisted anything: libs/azure-client/cosmos-client.ts is a no-op shell (no @azure/cosmos import, every method a console.log+TODO, hardcoded healthy healthCheck — MG-51-class defect), not wired into any handler; handlers carry their own inline mocks and re-declare api-interfaces contracts locally. Only real Cosmos code is functions/health/cosmos-health.ts (MG-51). This is implementation_full — real architecture/decomposition question (implement Cosmos persistence under managed identity, wire handlers, kill mocks, define a real health probe, dedup contracts). Present the plan + scope decisions before dispatching the pipeline.
 
-**Picked up next:**
-
-1. **MG-77 (HIGH) — the api-interfaces required check is RED repo-wide** and now intermittently
-   fail-fast-CANCELS sibling required checks (lint-and-test (api)). run-flex-secret-gate-fixtures
-   mktemp-stub portability broke on the current GitHub runner (MG-40/MG-44 class). It blocks every PR
-   merge (both MG-62 and MG-54 were override-merged past it) and is escalating from one-check-to-
-   override toward blocking the whole matrix. Fix this before the next merge that cannot be overridden.
-2. **MG-76 — infra fixture-harness provability.** The review lane cannot run tf-static-checks or the
-   fixture runners, so MG-54's deletion silently broke TWO source-coupled harnesses that only CI
-   caught: the check-18 name-pair floor (31->20) and run-cross-module-propagation-fixtures.sh (it
-   mutated the deleted source db). Both fixed via engineer + CI-verified, but the evidence-led review
-   settled GREEN on a diff that then failed CI. Deletion/rename tickets especially need these harnesses.
-3. **MG-47 billing measurement (pending, time-gated)** — take the post-cleanup dollar billing-window
-   measurement after a full post-2026-08-20 billing cycle; it is MG-54 AC 9, recorded on MG-47, and
-   unblocks MG-48 AC6 + MG-25. RU/s evidence already establishes the expected result (inside free tier).
-
-**Operational lessons this session:**
-
-- **Destructive Cosmos two-phase apply.** The account total_throughput_limit ceiling is rejected while
-  over-provisioned, and a single terraform apply cannot order the account update after the child
-  destroys (no graph edge). The RECOVERY workflow cannot do a targeted apply. So: phase 1 = host
-  targeted apply of the exact destroy set (terraform plan -target ... -out, tf-plan-destroy-guard on
-  it, then apply), confirm the account settles to the new floor; phase 2 = host apply of the account
-  in-place update. Guard-gated each phase; a safety check refuses phase 2 if any destroy token appears.
-- **The MG-76 lane gap bites deletion tickets hardest** — a diff can settle a green evidence-led review
-  yet fail CI on multiple source-coupled infra harnesses. After a deletion diff, proactively run ALL
-  cosmos fixture harnesses locally to find every break in one pass, then fix in one engineer batch.
-- **Live-read pattern reaffirmed:** temporary Cosmos Data Reader grant (create -> read/send -> revoke
-  -> verify baseline 2/0) each time; @azure/cosmos + DefaultAzureCredential via dist/esm/index.js works
-  for source enumeration; the health proof needs the Entra bearer (api://348570b2.../access_as_user).
-
-**Shipped (for reference):**
-- MG-62 (merge a544fd3) — cutover to the shared-throughput destination (all four live proofs).
-- MG-54 (merge 8eaf060) — source deletion + 1000 RU/s ceiling; nine-row acceptance-evidence grid
-  (8/9 met, AC 9 billing pending on MG-47). MG-77 filed (repo-wide red required check).
+**Still open follow-ups from earlier:** MG-76 (infra fixture-harness invisible to review lane — the class MG-78 belongs to), MG-47 (post-cleanup billing measurement, time-gated on a full post-2026-08-20 cycle).
