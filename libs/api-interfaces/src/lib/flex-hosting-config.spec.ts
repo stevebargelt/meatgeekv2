@@ -204,20 +204,27 @@ describe('MG-51: the Cosmos database name reaches every consumer from one Terraf
 
   it('the database is still created from resource_prefix (the value everything else derives from)', () => {
     const cosmos = stripComments(readRepo('apps/infrastructure/modules/cosmos-db/main.tf'));
+    // MG-53 renamed the resource meatgeek -> meatgeek_shared and the database
+    // name -db -> -shared-db during the shared-throughput cutover; still derived
+    // from resource_prefix, so everything downstream keeps its single source.
     expect(cosmos).toMatch(
-      /resource\s+"azurerm_cosmosdb_sql_database"\s+"meatgeek"\s*\{[\s\S]*?name\s*=\s*"\$\{var\.resource_prefix\}-db"/
+      /resource\s+"azurerm_cosmosdb_sql_database"\s+"meatgeek_shared"\s*\{[\s\S]*?name\s*=\s*"\$\{var\.resource_prefix\}-shared-db"/
     );
-    // Published so consumers can read it rather than rebuild it.
+    // Published so consumers can read it rather than rebuild it. MG-53 renamed the
+    // consumed output database_name -> destination_database_name (MG-62 repointed).
     const outputs = stripComments(readRepo('apps/infrastructure/modules/cosmos-db/outputs.tf'));
     expect(outputs).toMatch(
-      /output\s+"database_name"\s*\{[\s\S]*?value\s*=\s*azurerm_cosmosdb_sql_database\.meatgeek\.name/
+      /output\s+"destination_database_name"\s*\{[\s\S]*?value\s*=\s*azurerm_cosmosdb_sql_database\.meatgeek_shared\.name/
     );
   });
 
   it('the root wires that output to BOTH the IoT Hub and the Functions module', () => {
     const root = stripComments(readRepo('apps/infrastructure/main.tf'));
+    // MG-62 repointed both consumers at the MG-53 destination twin
+    // (module.cosmos_db.destination_database_name); the single-source invariant
+    // is unchanged — both halves must still read the same module output.
     const wirings =
-      root.match(/cosmos_database_name\s*=\s*module\.cosmos_db\.database_name/g) ?? [];
+      root.match(/cosmos_database_name\s*=\s*module\.cosmos_db\.destination_database_name/g) ?? [];
     // One for iot_hub, one for azure_functions. The Functions half is what MG-51
     // added; a future consumer must join them, not spell the name again.
     expect(wirings.length).toBe(2);
