@@ -1165,6 +1165,32 @@ esac
     }
   });
 
+  it('MG-77: forces the temp-file FATAL via an exported mktemp function shadow even when a WORKING mktemp is on PATH', () => {
+    // Reproduces the current-GitHub-runner / Darwin failure mode WITHOUT depending
+    // on the host mktemp implementation. On the runner a PATH-prepended stub
+    // stopped intercepting the gate's bare `mktemp` (the shell's resolution
+    // bypassed the prepend), so the real, fully-working mktemp ran, the gate
+    // ACCEPTED the valid fixture, and the fail-closed temp-file control fell
+    // fail-SAFE to a vacuous exit 0. An exported shell FUNCTION sits above
+    // builtin/hash/PATH in bash's command lookup, so the gate's bare `mktemp`
+    // resolves to it regardless of PATH order or hashing — the real binary here is
+    // deliberately left reachable to prove the shadow overrides it, not merely a
+    // missing PATH entry. This is the bypass-proof injector the fixture harness now
+    // uses for its bash legs (the PATH stub still covers dash).
+    const script =
+      `mktemp() { echo 'stub mktemp: refusing to create a temp file' >&2; return 1; }\n` +
+      `export -f mktemp\n` +
+      `command -v mktemp\n` + // proves mktemp resolves to the function, not the binary
+      `bash ${JSON.stringify(INSPECT)} --json ${JSON.stringify(fixture('flex-plan-accepted.json'))}\n`;
+    const r = run('bash', ['-c', script]);
+    // The gate must fail closed with the temp-file FATAL and must NOT reach its
+    // PASS line, even though a real, working mktemp is on PATH.
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/stub mktemp: refusing to create a temp file/);
+    expect(r.out).toMatch(/cannot create a temp file/);
+    expect(r.out).not.toMatch(/PASS — no prohibited credential VALUE/);
+  });
+
   it('keeps signaled and failed-to-spawn runners distinct from a nonzero gate verdict', () => {
     const signaled = run('sh', ['-c', 'kill -TERM $$']);
     const spawnFailed = run('mg-40-command-does-not-exist', ['-c', 'exit 1']);

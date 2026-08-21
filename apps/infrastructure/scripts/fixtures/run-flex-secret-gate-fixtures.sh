@@ -22,7 +22,9 @@
 #     Unchecked, a failing mktemp left the path EMPTY, redirected all three
 #     inspection loops to/from "", and still printed PASS. Pinned by the
 #     mktemp-failure environment case below, which needs no fixture: it forces the
-#     failure with a stub `mktemp` on PATH (see that case for why NOT via TMPDIR).
+#     failure with an exported `mktemp` function shadow (bypass-proof in bash) PLUS
+#     a stub `mktemp` on PATH (for dash) — see that case for why NOT via TMPDIR and
+#     why a PATH stub ALONE broke on the current runner (MG-77).
 #   * A valid EMPTY resource_changes array must still PASS — that is a real
 #     converged no-op plan (what infra-apply-dev.yml's final drift plan emits on a
 #     healthy run), and failing it would wedge the GitOps loop. Pinned by
@@ -97,7 +99,10 @@ OUT="${WORK}/out"
 
 # A stub `mktemp` that always fails, for the temp-file environment case below. It
 # is prepended to PATH for that one invocation only, so the gate's own bare
-# `mktemp` resolves to this instead of the real binary. Shebang is /bin/sh so the
+# `mktemp` resolves to this instead of the real binary — the injector for a gate
+# leg that does NOT import exported shell functions (dash). The bash legs are
+# ALSO covered by an exported `mktemp` function shadow (see that case), which
+# beats PATH/hash resolution — the MG-77 robustness fix. Shebang is /bin/sh so the
 # stub itself is interpreter-independent.
 STUB_BIN="${WORK}/stub-bin"
 mkdir -p "${STUB_BIN}"
@@ -271,28 +276,58 @@ for shell_bin in ${SHELL_BINS}; do
   # mktemp fails -> the gate must FATAL, not stage zero rows and print PASS (the
   # pre-fix behaviour was exit 0 with a clean PASS line).
   #
-  # The failure is forced with a STUB `mktemp` ahead of the real one on PATH, NOT
-  # by pointing TMPDIR at an unwritable directory. TMPDIR is not a portable lever:
-  # GNU mktemp honours it and fails, but macOS mktemp IGNORES an unwritable TMPDIR
-  # and falls back to /var/folders — so mktemp SUCCEEDS, the gate correctly accepts
-  # the valid fixture, and this case reported a false red on every Darwin host
-  # under every shell. Skipping the case on Darwin would assert an MG-23 blocker-1
-  # fail-closed control on ONE platform; the stub exercises it on BOTH.
+  # HOW THE FAILURE IS FORCED — two independent, mutually-reinforcing injectors so
+  # it fires DETERMINISTICALLY regardless of how the gate's shell resolves a bare
+  # `mktemp` (MG-77 portability, the MG-40/MG-44 class):
   #
-  # A PATH stub can only intercept a BARE `mktemp`. If the gate ever called it by
-  # absolute path the stub would be bypassed and this case would go green for the
-  # wrong reason, so that is checked rather than assumed.
+  #   1. An exported shell FUNCTION `mktemp` that always fails. In bash a function
+  #      sits ABOVE builtin, hash and PATH in command lookup, so the gate's bare
+  #      `mktemp` resolves to it no matter what. This is the MG-77 fix: on the
+  #      current GitHub runner a PATH-prepended stub STOPPED intercepting the gate's
+  #      bare mktemp (the shell's resolution bypassed the prepend), so the negative
+  #      case fell fail-SAFE to exit 0 — a vacuous green on a control whose whole
+  #      job is to prove the gate fails closed. A function shadow cannot be bypassed
+  #      by PATH order or command hashing. `export -f` is bash-only; a non-bash
+  #      harness shell silently relies on injector 2. bash 3.2 and bash 5 both
+  #      honour it, and shell_bin resolves to the SAME bash the harness runs under,
+  #      so the exported-function wire format always matches.
+  #   2. The PATH stub, prepended for this one invocation. dash does NOT import
+  #      exported functions, so the sh leg is intercepted here — and dash honours
+  #      PATH reliably (the resolution that broke on the runner was bash's, not
+  #      dash's).
+  #
+  # Both injectors print the SAME marker, so the assertion below is satisfied
+  # whichever fired. The failure is INDEPENDENT of the host mktemp implementation:
+  # it never consults TMPDIR (GNU mktemp honours an unwritable TMPDIR and fails, but
+  # macOS mktemp IGNORES it and falls back to /var/folders — so TMPDIR is not a
+  # portable lever, the reason MG-40 abandoned it) and, via injector 1, does not
+  # even depend on a PATH lookup landing on the stub.
+  #
+  # A stub / function shadow can only intercept a BARE `mktemp`. If the gate ever
+  # called it by absolute path both injectors would be bypassed and this case would
+  # go green for the wrong reason, so that is checked rather than assumed.
   checks=$((checks + 1))
   if grep -q '/bin/mktemp' "${GATE}"; then
     echo "  ✗ [env] mktemp failure: the gate names mktemp by ABSOLUTE path — a PATH stub cannot intercept it, so this case would be vacuous" >&2
     failures=$((failures + 1))
   else
-    PATH="${STUB_BIN}:${PATH}" "${shell_bin}" "${GATE}" --json "${VALID_FIXTURE}" >"${OUT}" 2>&1
+    # Inject both shadows inside a subshell so the function definition and its
+    # `export -f` never leak into the harness's own environment. `export -f` is a
+    # bash extension AND a POSIX special-builtin usage error elsewhere — under dash
+    # a bad option to a special builtin ABORTS the shell before `|| true` could
+    # catch it — so it is gated to a bash harness via BASH_VERSION. When the harness
+    # itself is not bash the exported-function injector is simply skipped and the
+    # PATH stub carries the interception (dash honours PATH reliably).
+    (
+      mktemp() { echo 'stub mktemp: refusing to create a temp file' >&2; return 1; }
+      if [ -n "${BASH_VERSION:-}" ]; then export -f mktemp; fi
+      PATH="${STUB_BIN}:${PATH}" "${shell_bin}" "${GATE}" --json "${VALID_FIXTURE}"
+    ) >"${OUT}" 2>&1
     code=$?
     if [ "${code}" -ne 0 ] && grep -q 'stub mktemp: refusing to create a temp file' "${OUT}" && grep -q 'cannot create a temp file' "${OUT}"; then
-      echo "  ✓ [env] failing mktemp (stubbed on PATH): stub intercepted mktemp and the gate rendered a temp-file FATAL"
+      echo "  ✓ [env] failing mktemp (function shadow + PATH stub): mktemp intercepted and the gate rendered a temp-file FATAL"
     else
-      echo "  ✗ [env] failing mktemp (stubbed on PATH): expected nonzero with BOTH the stub interception marker and temp-file FATAL, got ${code}" >&2
+      echo "  ✗ [env] failing mktemp (function shadow + PATH stub): expected nonzero with BOTH the stub interception marker and temp-file FATAL, got ${code}" >&2
       sed 's/^/      /' "${OUT}" >&2
       failures=$((failures + 1))
     fi
