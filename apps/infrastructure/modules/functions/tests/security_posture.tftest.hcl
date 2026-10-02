@@ -28,6 +28,7 @@ variables {
   application_insights_connection_string = "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://westus2.in.applicationinsights.azure.com/;LiveEndpoint=https://westus2.livediagnostics.monitor.azure.com/"
   cosmos_account_endpoint                = "https://mgv2dev.documents.azure.com/"
   cosmos_database_name                   = "meatgeek-v2-dev-db"
+  cooks_container_name                   = "cooks"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   # dev/prod tfvars always supply explicit, non-empty CORS origins (no wildcard).
@@ -203,6 +204,19 @@ run "cosmos_database_name_reaches_the_app" {
   }
 }
 
+# MG-59 — the cooks CONTAINER name reaches the app the same MG-51-safe way the
+# database name does: present in app_settings and equal to the module input
+# (root wires it from module.cosmos_db.destination_container_names.cooks), NOT a
+# literal restated in the module. This is the setting the cooks adapter's
+# fail-loud guard reads (COSMOSDB_COOKS_CONTAINER_NAME).
+run "cooks_container_name_reaches_the_app" {
+  command = plan
+  assert {
+    condition     = azurerm_function_app_flex_consumption.main.app_settings["COSMOSDB_COOKS_CONTAINER_NAME"] == var.cooks_container_name
+    error_message = "COSMOSDB_COOKS_CONTAINER_NAME must be set from var.cooks_container_name — the cooks adapter reads this setting and has no fallback (MG-59)"
+  }
+}
+
 # MG-51 negative — an empty database name is refused at plan time. A blank
 # setting deploys an app that cannot resolve a database at all, which is the same
 # outage as the absent setting this ticket fixes; it must not be expressible.
@@ -213,6 +227,19 @@ run "empty_cosmos_database_name_is_refused" {
   }
   expect_failures = [
     var.cosmos_database_name,
+  ]
+}
+
+# MG-59 negative — a blank cooks container name is refused at plan time, exactly
+# as the database name is. A blank setting deploys cooks handlers that cannot
+# address their container (a config-drift 404), so it must not be expressible.
+run "empty_cooks_container_name_is_refused" {
+  command = plan
+  variables {
+    cooks_container_name = ""
+  }
+  expect_failures = [
+    var.cooks_container_name,
   ]
 }
 

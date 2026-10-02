@@ -102,6 +102,16 @@ variable "cosmos_database_name" {
   }
 }
 
+variable "cooks_container_name" {
+  description = "Name of the Terraform-owned Cosmos container the cooks handlers read and write (non-secret), published to the app as COSMOSDB_COOKS_CONTAINER_NAME. Sourced from the cosmos-db module output (destination_container_names.cooks), NOT restated as a literal — a second spelling is a source of truth that can silently drift from the deployed container. NO DEFAULT on purpose: the cooks adapter (MG-59) reads this setting with an MG-51-style fail-loud guard and has no safe fallback, so a caller that forgets to wire it must fail at plan time rather than deploy an app pointed at a container that does not exist."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.cooks_container_name)) > 0
+    error_message = "cooks_container_name must be non-empty — an empty setting is the same defect as an absent one (MG-51/MG-59)."
+  }
+}
+
 variable "eventhub_namespace_fqdn" {
   description = "Fully-qualified Event Hubs namespace hostname (non-secret) for the IoT telemetry stream. Runtime access is identity-based via an Azure Event Hubs Data Receiver role assignment."
   type        = string

@@ -1,94 +1,116 @@
 import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
+import type { Cook } from '@meatgeekv2/api-interfaces';
+
 import {
   buildCookEnvelope,
   COOK_STOPPED,
   signalROutput,
   SignalROutputMessage,
 } from '../signalr/envelope';
-import { Cook } from './start-cook';
+import {
+  principalFromRequest,
+  unauthenticatedResponse,
+  type HeaderReader,
+  type PrincipalResult,
+} from '../../shared/auth/principal';
+import { CooksRepository, getCooksRepository } from '../../shared/cosmos/cooks-repository';
 
-export interface StopCookRequest {
-  deviceId: string;
+/**
+ * MG-59 — stop a cook by durably completing the REAL persisted document.
+ *
+ * This handler no longer mints a synthetic placeholder cook (the old mock stamped
+ * `name: `Cook ${id}``, `startTime: endTime`, `meatType: 'unknown'` and a
+ * hardcoded `user-1` tenant). It now read-then-updates the actual cook the caller
+ * started: it derives the partition `userId` from the authenticated Easy Auth
+ * principal, point-reads `(userId, cookId)` in that single partition, transitions
+ * it to `completed` with a real `endTime`, and returns the persisted final state.
+ * The SignalR COOK_STOPPED envelope is emitted ONLY after that write succeeds, and
+ * its delivery scope (userId = the cook's deviceId) stays a distinct axis from the
+ * persisted identity userId.
+ *
+ * Sanitization (MG-51 discipline): a dependency error can carry the account host,
+ * the database/container name, or token fragments. None of it reaches a response
+ * body or a log line — failures collapse to a fixed error class and the RU charge
+ * surfaced for measurement is a bare number.
+ */
+
+/**
+ * The repository surface stop-cook depends on. Injected behind {@link StopCookDeps}
+ * so unit tests exercise the read-then-update path against a fake with no Azure and
+ * no credentials.
+ */
+export type StopCookRepository = Pick<CooksRepository, 'stopCook'>;
+
+/**
+ * The two seams stop-cook resolves the request through: the authenticated
+ * principal and the cooks repository. Defaulted to the real implementations; a
+ * test injects fakes so neither Easy Auth nor Cosmos is touched.
+ */
+export interface StopCookDeps {
+  resolvePrincipal: (request: HeaderReader) => PrincipalResult;
+  getRepository: () => StopCookRepository;
 }
+
+const defaultDeps: StopCookDeps = {
+  resolvePrincipal: principalFromRequest,
+  getRepository: getCooksRepository,
+};
 
 export async function stopCookHandler(
   request: HttpRequest,
-  context: InvocationContext
+  context: InvocationContext,
+  deps: StopCookDeps = defaultDeps
 ): Promise<HttpResponseInit> {
   context.log('Processing stopCook request');
 
-  try {
-    const cookId = request.params['cookId'];
-    const body = (await request.json()) as StopCookRequest;
+  // Correlation id propagates from the inbound request when present, else the
+  // Functions invocation id (matches start-cook).
+  const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
 
-    // Validate required fields. No SignalR message is emitted on a 400.
-    if (!body.deviceId) {
-      return {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-        jsonBody: {
-          error: 'VALIDATION_ERROR',
-          message: 'Missing required field: deviceId',
-          requestId: context.invocationId,
-        },
-      };
-    }
+  // The cooks partition value comes SOLELY from the authenticated Easy Auth
+  // principal — never from the body, the query string, or a fabricated tenant.
+  // An unauthenticated request is rejected before any read or write; the response
+  // carries a fixed reason code only, never identity material.
+  const principal = deps.resolvePrincipal(request);
+  if (!principal.authenticated) {
+    return unauthenticatedResponse(principal.reason, correlationId);
+  }
+  const { userId } = principal.principal;
 
-    // Correlation id propagates from the inbound request when present, else the
-    // Functions invocation id (matches start-cook).
-    const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
-
-    const endTime = new Date().toISOString();
-
-    // Complete the cook (still a mock — the durable write lands in a later
-    // ticket). The envelope-level cook data is what the pusher consumes.
-    //
-    // PLACEHOLDER VALUES: there is no persisted cook to read back (start-cook is
-    // a mock — DEC-3; the persist-or-minimize decision is tracked in the MG-14
-    // follow-up ticket), so name/startTime/meatType cannot be the real values.
-    // We emit schema-VALID synthetic placeholders instead of empty strings so
-    // the payload conforms to the Cook schema (name minLength 3, startTime
-    // date-time). The Go data-pusher consumer does NOT read name/startTime on
-    // cook_stopped — it keys off payload.id — so synthetic values are safe:
-    //   - name:      `Cook ${cookId}` (obviously synthetic, >= 3 chars)
-    //   - startTime: reuse endTime (true start unknown; documented approximation)
-    //   - meatType:  'unknown' (valid non-empty string; meatType is optional)
-    const cook: Cook = {
-      id: cookId,
-      userId: 'user-1', // TODO: Extract from auth token
-      deviceId: body.deviceId,
-      name: `Cook ${cookId}`,
-      status: 'completed',
-      startTime: endTime,
-      endTime,
-      meatType: 'unknown',
-    };
-
-    context.log(`Stopped cook: ${cook.id} for device: ${body.deviceId}`);
-
-    // Emit AFTER building the (mock) completed cook. userId scopes delivery to
-    // the device's SignalR user group.
-    const message: SignalROutputMessage = {
-      target: COOK_STOPPED,
-      userId: body.deviceId,
-      arguments: [buildCookEnvelope(COOK_STOPPED, cook, correlationId)],
-    };
-    context.extraOutputs.set(signalROutput, [message]);
-
+  const cookId = request.params['cookId'];
+  if (!cookId || cookId.trim().length === 0) {
+    // Defensive: the route binds `{cookId}`, so this is unreachable in the
+    // deployed app, but an empty id must never be addressed against Cosmos.
     return {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Request-ID': correlationId,
+      status: 400,
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': correlationId },
+      jsonBody: {
+        error: 'VALIDATION_ERROR',
+        message: 'Missing required path parameter: cookId',
+        requestId: context.invocationId,
       },
-      jsonBody: cook,
     };
-  } catch (error) {
-    context.error('Error in stopCook:', error);
+  }
 
+  const endTime = new Date().toISOString();
+
+  let stopped: Cook | undefined;
+  try {
+    // Read-then-update within the caller's partition. The repository point-reads
+    // (userId, cookId) and only replaces the correctly-addressed document when it
+    // exists — a miss returns `cook: undefined` WITHOUT writing.
+    const result = await deps.getRepository().stopCook(userId, cookId, endTime);
+    stopped = result.cook;
+    // RU charge is a bare number — safe to log against the shared 400 RU/s budget.
+    context.log(`stopCook request charge: ${result.requestCharge}`);
+  } catch {
+    // A Cosmos/credential error can carry the account host, database, container,
+    // or token fragments; it is swallowed and replaced with a fixed class so
+    // nothing leaks. No SignalR message is emitted on failure.
+    context.error('stopCook failed: cosmos_stop_failed');
     return {
       status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': correlationId },
       jsonBody: {
         error: 'INTERNAL_SERVER_ERROR',
         message: 'Failed to stop cook',
@@ -96,4 +118,42 @@ export async function stopCookHandler(
       },
     };
   }
+
+  // Absent in the caller's partition → 404, NO SignalR emit. A cook owned by a
+  // different principal lives in a different partition and is invisible here, so
+  // this also refuses any cross-tenant addressing attempt.
+  if (!stopped) {
+    return {
+      status: 404,
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': correlationId },
+      jsonBody: {
+        error: 'NOT_FOUND',
+        message: 'Cook not found',
+        requestId: context.invocationId,
+      },
+    };
+  }
+
+  context.log(`Stopped cook: ${stopped.id}`);
+
+  // Emit COOK_STOPPED ONLY after the durable update succeeded (emit-after-write).
+  // Delivery is scoped to the device's SignalR user group (userId = deviceId) —
+  // a DIFFERENT axis from the persisted identity userId, which stays the
+  // authenticated principal. deviceId comes from the persisted cook, not the
+  // caller.
+  const message: SignalROutputMessage = {
+    target: COOK_STOPPED,
+    userId: stopped.deviceId,
+    arguments: [buildCookEnvelope(COOK_STOPPED, stopped, correlationId)],
+  };
+  context.extraOutputs.set(signalROutput, [message]);
+
+  return {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Request-ID': correlationId,
+    },
+    jsonBody: stopped,
+  };
 }

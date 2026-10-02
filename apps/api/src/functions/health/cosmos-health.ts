@@ -1,131 +1,114 @@
 import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { CosmosClient } from '@azure/cosmos';
 
-import { environment } from '../../environments/environment';
 import type { HealthStatus } from '@meatgeekv2/api-interfaces';
+import {
+  CosmosConfigError,
+  type CosmosConfigFailure,
+  getCosmosAdapter,
+} from '../../shared/cosmos/cosmos-adapter';
 
 /**
- * MG-51 — dev health check for the API's OWN path to Cosmos.
+ * MG-51 / MG-59 — health check for the API's OWN path to Cosmos.
  *
  * The IoT Hub ingest path writes to Cosmos through an Azure routing endpoint
  * configured entirely in Terraform. This path — API code, reading app settings,
  * opening its own client — shares NO code with it. That is why an ingest-path
- * check was GREEN throughout the outage this ticket fixes: the API was pointed
- * at `meatgeek-dev`, a database that has never existed, and nothing exercised
- * it. So this check deliberately resolves configuration the way a request
- * handler does (`environment.cosmosDb`, the app settings Terraform publishes)
- * and then actually talks to Cosmos. A check that asserted the settings were
- * present without dialling would have missed a name that is set but wrong.
+ * check was GREEN throughout the MG-51 outage: the API was pointed at
+ * `meatgeek-dev`, a database that has never existed, and nothing exercised it.
  *
- * `database(...).read()` is a metadata read of the database itself: it is the
- * cheapest call that can only succeed if the account is reachable, the identity
- * holds a data-plane role, AND the configured database exists. It creates
- * nothing and touches no container.
+ * MG-59 removes the last way this probe could drift from the handlers: it no
+ * longer builds its own CosmosClient and no longer hand-rolls a managed-identity
+ * token fetch against the instance-metadata endpoint. It reaches Cosmos through
+ * the ONE shared adapter every cooks handler uses (`getCosmosAdapter`), so the
+ * client, the managed-identity credential, the database, and the cooks
+ * container it exercises are — by
+ * construction — the exact ones a request handler exercises. A green health
+ * check can no longer share zero code with the real path.
+ *
+ * `database(...).read()` and `container(...).read()` are metadata reads: the
+ * cheapest calls that can only succeed if the account is reachable, the identity
+ * holds a data-plane role, AND the configured database and cooks container exist.
+ * They create nothing and write nothing.
  *
  * What it deliberately does NOT report: the account endpoint, the database name,
- * or any text a dependency produced. The 200/503 plus a fixed failure code is
- * the entire signal; a caller that is entitled to know which database is
- * configured reads it from the Function App's settings.
+ * the container name, or any text a dependency produced. The 200/503 plus a
+ * fixed failure code is the entire signal; a caller entitled to know which
+ * database or container is configured reads it from the Function App's settings.
  */
-
-/** The one Cosmos operation this check performs, behind a seam. */
-export interface CosmosDatabaseProbe {
-  readDatabase(databaseName: string): Promise<void>;
-}
-
-export type CosmosProbeFactory = (accountEndpoint: string) => CosmosDatabaseProbe;
 
 /**
- * The only failure vocabulary this check speaks. Each code names the STEP that
- * failed, chosen by control flow — never derived from a dependency's error text.
- * A Cosmos or managed-identity error can carry token fragments, the
- * X-IDENTITY-HEADER, internal URLs or the account host, and this endpoint must
+ * The two read-only metadata reads this check performs, behind a seam. Both are
+ * no-argument: WHICH database and container are read is fixed by the shared
+ * adapter's configuration, not chosen by the caller — so a probe cannot be
+ * pointed at a name of its own and stay green through the misconfiguration this
+ * check exists to catch.
+ */
+export interface CosmosHealthProbe {
+  /** Metadata read of the configured database. Creates nothing. */
+  readDatabase(): Promise<void>;
+  /** Metadata read of the configured cooks container. Creates nothing. */
+  readCooksContainer(): Promise<void>;
+}
+
+/**
+ * Builds the probe. The default factory binds the SHARED adapter, so the probe
+ * dials Cosmos through the exact client, credential, database, and cooks
+ * container a cooks handler uses. It MAY throw `CosmosConfigError` — the shared
+ * adapter's fail-loud config guard, the same one the handlers hit — which
+ * `checkCosmosHealth` maps to an unhealthy result rather than letting it crash
+ * the request.
+ */
+export type CosmosHealthProbeFactory = () => CosmosHealthProbe;
+
+/**
+ * Production seam. Reaches Cosmos ONLY through the shared adapter: no separately
+ * constructed CosmosClient, no hand-rolled managed-identity token fetch. The
+ * adapter's credential is a ManagedIdentityCredential in the deployed Function
+ * (never DefaultAzureCredential), built once and reused across warm invocations.
+ */
+const sharedAdapterProbe: CosmosHealthProbeFactory = () => {
+  const adapter = getCosmosAdapter();
+  return {
+    async readDatabase() {
+      await adapter.getDatabase().read();
+    },
+    async readCooksContainer() {
+      await adapter.getCooksContainer().read();
+    },
+  };
+};
+
+/**
+ * The only failure vocabulary this check speaks. The three configuration codes
+ * are reused verbatim from the shared adapter's guard, so the health check and
+ * the handlers name a missing setting the same way. Each code names the STEP
+ * that failed, chosen by control flow — never derived from a dependency's error
+ * text. A Cosmos or managed-identity error can carry token fragments, an
+ * identity header, internal URLs or the account host, and this endpoint must
  * put none of that in a response body or a log line.
  */
-export type CosmosHealthFailure =
-  | 'cosmos_database_name_not_configured'
-  | 'cosmos_account_endpoint_not_configured'
-  | 'cosmos_probe_failed';
+export type CosmosHealthFailure = CosmosConfigFailure | 'cosmos_probe_failed';
 
 export interface CosmosHealthResult extends HealthStatus {
   error?: CosmosHealthFailure;
   /**
    * The numeric HTTP status the dependency reported, when it reported one. This
    * is the whole diagnostic budget for a failure: 404 says the configured
-   * database is absent, 403 says the identity lacks its data-plane role, 401
-   * says the token was refused. A number cannot carry an identifier.
+   * database or container is absent, 403 says the identity lacks its data-plane
+   * role, 401 says the token was refused. A number cannot carry an identifier.
    */
   probeStatusCode?: number;
 }
 
 /**
- * App Service / Functions managed-identity token endpoint. The Function App has
- * no Cosmos key to fall back on — MG-24 removed every key output — so this is
- * the only credential the app has. `@azure/identity` would supply this, but it
- * is not a dependency of this workspace; the IDENTITY_ENDPOINT contract it would
- * use here is a documented, stable HTTP interface.
- */
-function managedIdentityCredential() {
-  const identityEndpoint = process.env['IDENTITY_ENDPOINT'];
-  const identityHeader = process.env['IDENTITY_HEADER'];
-
-  return {
-    async getToken(scopes: string | string[]) {
-      if (!identityEndpoint || !identityHeader) {
-        throw new Error(
-          'IDENTITY_ENDPOINT/IDENTITY_HEADER are unset — the Function App has no managed identity available, and there is no key fallback (MG-24 removed them)'
-        );
-      }
-
-      // Cosmos asks for `<endpoint>/.default`; the App Service token endpoint
-      // takes the bare audience.
-      const scope = Array.isArray(scopes) ? scopes[0] : scopes;
-      const resource = scope.replace(/\/\.default$/, '');
-
-      const url = `${identityEndpoint}?api-version=2019-08-01&resource=${encodeURIComponent(resource)}`;
-      const response = await fetch(url, { headers: { 'X-IDENTITY-HEADER': identityHeader } });
-      if (!response.ok) {
-        throw new Error(
-          `managed identity token request failed: ${response.status} ${response.statusText}`
-        );
-      }
-
-      const body = (await response.json()) as { access_token: string; expires_on: string };
-      // expires_on is epoch seconds on Linux hosts and a date string on Windows.
-      const expiresOn = Number(body.expires_on);
-      return {
-        token: body.access_token,
-        expiresOnTimestamp: Number.isNaN(expiresOn)
-          ? Date.parse(body.expires_on)
-          : expiresOn * 1000,
-      };
-    },
-  };
-}
-
-const realCosmosProbe: CosmosProbeFactory = accountEndpoint => {
-  const client = new CosmosClient({
-    endpoint: accountEndpoint,
-    aadCredentials: managedIdentityCredential(),
-  });
-
-  return {
-    async readDatabase(databaseName: string) {
-      await client.database(databaseName).read();
-    },
-  };
-};
-
-/**
- * Terraform publishes the account endpoint as `COSMOSDB__accountEndpoint` (the
- * Functions host resolves that form for identity-based bindings) and the
- * database name as `COSMOSDB_DATABASE_NAME`, which the app reads itself via
- * `environment.cosmosDb`. Reading the name through `environment` rather than
- * `process.env` here is the point: it is the exact resolution a handler gets,
- * including its refusal to invent a default.
+ * Runs the read-only probe and maps every outcome to a sanitized result. Missing
+ * configuration surfaces as unhealthy through the SAME `CosmosConfigError` guard
+ * the handlers hit — its `.code` (a fixed vocabulary that names only the setting,
+ * never its value) becomes the health failure code. A dependency failure becomes
+ * `cosmos_probe_failed` plus a numeric status and nothing else.
  */
 export async function checkCosmosHealth(
-  probeFactory: CosmosProbeFactory = realCosmosProbe
+  probeFactory: CosmosHealthProbeFactory = sharedAdapterProbe
 ): Promise<CosmosHealthResult> {
   const startedAt = Date.now();
   const unhealthy = (error: CosmosHealthFailure, probeStatusCode?: number): CosmosHealthResult => ({
@@ -135,24 +118,27 @@ export async function checkCosmosHealth(
     ...(probeStatusCode === undefined ? {} : { probeStatusCode }),
   });
 
-  // Resolving `environment` can itself throw when infrastructure never set
-  // COSMOSDB_DATABASE_NAME — that is the MG-51 failure, and reporting it as
-  // unhealthy here is what makes it visible from a health check rather than
-  // from a user-facing 404 much later.
-  let databaseName: string;
+  let probe: CosmosHealthProbe;
   try {
-    databaseName = environment.cosmosDb.databaseName;
-  } catch {
-    return unhealthy('cosmos_database_name_not_configured');
+    // Acquiring the adapter runs its fail-loud config guard. On a Function App
+    // that never received a setting this throws CosmosConfigError, whose code
+    // names the missing setting (not its value) — reporting it as unhealthy is
+    // what makes an MG-51-class misconfiguration visible from a health check
+    // rather than from a user-facing 404 much later.
+    probe = probeFactory();
+  } catch (error) {
+    if (error instanceof CosmosConfigError) {
+      return unhealthy(error.code);
+    }
+    return unhealthy('cosmos_probe_failed', dependencyStatusCode(error));
   }
 
-  const accountEndpoint = process.env['COSMOSDB__accountEndpoint'] ?? '';
-  if (!accountEndpoint) {
-    return unhealthy('cosmos_account_endpoint_not_configured');
-  }
-
   try {
-    await probeFactory(accountEndpoint).readDatabase(databaseName);
+    // Read-only metadata reads of the database AND the cooks container the
+    // handlers use. Both must answer for the API's Cosmos path to be healthy;
+    // neither creates anything.
+    await probe.readDatabase();
+    await probe.readCooksContainer();
   } catch (error) {
     return unhealthy('cosmos_probe_failed', dependencyStatusCode(error));
   }
@@ -177,7 +163,7 @@ function dependencyStatusCode(error: unknown): number | undefined {
 export async function cosmosHealthHandler(
   _request: HttpRequest,
   context: InvocationContext,
-  probeFactory?: CosmosProbeFactory
+  probeFactory?: CosmosHealthProbeFactory
 ): Promise<HttpResponseInit> {
   context.log('Processing cosmos health check');
 
@@ -195,8 +181,8 @@ export async function cosmosHealthHandler(
   // Projected field by field rather than spread: the response body is an
   // allowlist, so a field added to CosmosHealthResult later cannot reach a
   // caller by accident. The 200/503 carries the health signal; the configured
-  // account and database are read from the Function App's settings by whoever
-  // is entitled to them, not served from here.
+  // account, database, and container are read from the Function App's settings
+  // by whoever is entitled to them, not served from here.
   return {
     status: result.status === 'healthy' ? 200 : 503,
     headers: {

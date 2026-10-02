@@ -323,6 +323,13 @@ module "azure_functions" {
   # iot_hub block's comment already warns against.
   cosmos_account_endpoint = module.cosmos_db.endpoint
   cosmos_database_name    = module.cosmos_db.destination_database_name
+  # The cooks CONTAINER name travels the same way as the database name (MG-59):
+  # from the SAME module output that creates the container, so the fail-loud
+  # cooks adapter and the deployed container cannot drift and a migration renames
+  # it in ONE place (modules/cosmos-db/main.tf). Restating the literal "cooks"
+  # here would be the second source of truth this block's comments already warn
+  # against.
+  cooks_container_name    = module.cosmos_db.destination_container_names.cooks
   eventhub_namespace_fqdn = module.iot_hub.eventhub_namespace_fqdn
   signalr_service_uri     = module.signalr.service_uri
 
