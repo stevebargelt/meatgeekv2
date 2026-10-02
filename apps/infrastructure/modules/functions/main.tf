@@ -397,6 +397,25 @@ resource "azurerm_function_app_flex_consumption" "main" {
     # against the new target; an app setting has no such state.
     "COSMOSDB_DATABASE_NAME" = var.cosmos_database_name
 
+    # Which CONTAINER inside that database the cooks handlers read and write
+    # (MG-59). Like COSMOSDB_DATABASE_NAME, the endpoint + database name alone
+    # never said which container the cooks persistence path addresses, and the
+    # MG-51 lesson is that a silently-defaulted name hides a config-drift 404
+    # until runtime. So the cooks adapter reads THIS setting with a fail-loud
+    # guard (throw at module load on missing/blank, invent no default), and the
+    # value is Terraform-owned: it comes from the cosmos-db module output
+    # (module.cosmos_db.destination_container_names.cooks, threaded through the
+    # root), NOT a literal restated here — a second spelling is exactly the
+    # source-of-truth drift the COSMOSDB_DATABASE_NAME comment above warns
+    # against.
+    #
+    # Plain app setting, NOT a `__`-suffixed binding property: the value is read
+    # by the API's own code (process.env.COSMOSDB_COOKS_CONTAINER_NAME), not
+    # resolved by the Functions host as part of the COSMOSDB identity-based
+    # connection — same treatment as COSMOSDB_DATABASE_NAME. It carries a NAME,
+    # not a credential, so it is compatible with the secrets-out-of-state posture.
+    "COSMOSDB_COOKS_CONTAINER_NAME" = var.cooks_container_name
+
     # IoT telemetry (Event Hubs-compatible) — identity-based. The fully-qualified
     # namespace is non-secret; the identity is granted Azure Event Hubs Data
     # Receiver in the root module.

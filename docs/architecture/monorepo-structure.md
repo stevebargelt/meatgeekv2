@@ -20,7 +20,6 @@ meatgeekv2/
 │   ├── api-interfaces/           # TypeScript types and interfaces
 │   ├── ui-components/            # Shared React/React Native components
 │   ├── data-models/              # Domain models and business logic
-│   ├── azure-client/             # Azure service clients
 │   ├── realtime/                 # SignalR real-time communication
 │   ├── charts/                   # Data visualization components
 │   ├── tracing/                  # OpenTelemetry observability
@@ -407,25 +406,7 @@ export class TemperatureCalculator {
 }
 ```
 
-#### 4. Azure Client (`libs/azure-client/`)
-**Purpose**: Centralized Azure service integration  
-
-```typescript
-export class CosmosClient {
-  async saveTemperatureReading(reading: TemperatureReading): Promise<void> { }
-  async queryCookTemperatures(cookId: string): Promise<TemperatureReading[]> { }
-}
-
-export class IoTHubClient {
-  async sendTelemetry(deviceId: string, data: any): Promise<void> { }
-}
-
-export class SignalRService {
-  async sendToGroup(groupName: string, method: string, data: any): Promise<void> { }
-}
-```
-
-#### 5. OpenAPI Specifications (`libs/api-specs/`)
+#### 4. OpenAPI Specifications (`libs/api-specs/`)
 **Purpose**: Contract-first API development  
 
 ```
@@ -441,7 +422,7 @@ libs/api-specs/
 
 ### Buildable Library Pattern
 
-Libraries that are compiled into a dependent app's build — the API dependency chain `api-interfaces`, `utils`, `data-models`, and `azure-client` — each carry a minimal `package.json` whose `name` matches the library's `@meatgeekv2/*` alias in `tsconfig.base.json`:
+Libraries that are compiled into a dependent app's build — the API dependency chain `api-interfaces`, `utils`, and `data-models` — each carry a minimal `package.json` whose `name` matches the library's `@meatgeekv2/*` alias in `tsconfig.base.json`:
 
 ```json
 // libs/api-interfaces/package.json
@@ -524,8 +505,6 @@ The monorepo dependency graph flows from shared libraries to applications:
 libs/api-interfaces ←──┼──→ apps/mobile
                        ↑        ↑
 libs/data-models ──────┼────────┘
-                       ↑
-libs/azure-client ─────┼──→ apps/web
                        ↑
 libs/tracing ──────────┘
 

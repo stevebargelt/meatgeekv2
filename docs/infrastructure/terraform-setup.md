@@ -561,6 +561,12 @@ and authenticated-smoke-test procedure.
 > consumers were repointed from the source database onto the MG-53
 > shared-throughput destination as a matched pair by the **MG-62** cutover —
 > see the [MG-62 cutover ADR](../../learnings/decisions/mg-62-cosmos-dev-telemetry-cutover.md).
+>
+> The cooks **container** name travels the same way, as its own plain app
+> setting, `COSMOSDB_COOKS_CONTAINER_NAME` (**MG-59**): required with no
+> default, Terraform-owned (`module.cosmos_db.destination_container_names.cooks`),
+> read by the cooks persistence code itself rather than restated as a literal,
+> so the fail-loud cooks adapter and the deployed container cannot drift.
 > Each data
 > service's key does still exist as an inherent **computed attribute** in state
 > (true of any TF-managed resource); the control is to render those keys

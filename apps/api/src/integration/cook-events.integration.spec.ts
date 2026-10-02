@@ -137,6 +137,100 @@ const VALID_START = {
 };
 
 // ---------------------------------------------------------------------------
+// MG-59 injection seams. The cooks handlers now (a) derive the persisted userId
+// from the authenticated Easy Auth principal and (b) persist through the shared
+// Cosmos adapter. This suite is about the SignalR PRODUCER contract, not
+// persistence or auth, so it injects a fake authenticated principal and a fake
+// repository — exactly the handlers' own DI seam (start-cook.ts StartCookDeps /
+// stop-cook.ts StopCookDeps). No Easy Auth, no Cosmos, no credentials are
+// touched; the producer envelopes are asserted through the real handler code.
+// ---------------------------------------------------------------------------
+
+/** A fixed authenticated principal (tenant-namespaced userId), never 'user-1'. */
+const AUTHED_PRINCIPAL = {
+  authenticated: true as const,
+  principal: {
+    userId: 'tenant-aaaa:oid-bbbb',
+    objectId: 'oid-bbbb',
+    tenantId: 'tenant-aaaa',
+  },
+};
+
+/** Fake start-cook deps: authenticated, with a repository that echoes the write. */
+function startDeps() {
+  return {
+    resolvePrincipal: () => AUTHED_PRINCIPAL,
+    getRepository: () => ({
+      // Persist = echo back the document the handler built (what Cosmos returns).
+      createCook: async (cook: Cook) => ({ cook, requestCharge: 1 }),
+    }),
+  };
+}
+
+/**
+ * Fake stop-cook deps. `persisted` models the durable cook the repository
+ * point-reads and completes; `undefined` models a cook absent in the caller's
+ * partition (a 404). The stopped cook keeps the persisted `deviceId` — the axis
+ * the COOK_STOPPED envelope is delivered on — which under the new contract comes
+ * from PERSISTENCE, not from the request body.
+ */
+function stopDeps(persisted: Cook | undefined) {
+  return {
+    resolvePrincipal: () => AUTHED_PRINCIPAL,
+    getRepository: () => ({
+      stopCook: async (_userId: string, id: string, endTime: string) => ({
+        cook: persisted
+          ? ({ ...persisted, id, status: 'completed', endTime } as Cook)
+          : undefined,
+        requestCharge: 1,
+        transitioned: persisted !== undefined,
+      }),
+    }),
+  };
+}
+
+/** The persisted active cook a stop reads back (deviceId is the delivery axis). */
+function persistedActiveCook(): Cook {
+  return {
+    id: 'persisted-id',
+    userId: AUTHED_PRINCIPAL.principal.userId,
+    deviceId: 'meatgeek3',
+    name: 'Weekend Brisket',
+    status: 'active',
+    startTime: '2026-08-24T06:00:00Z',
+    meatType: 'brisket',
+  };
+}
+
+/** Drives the registered startCook handler with injected deps (3rd arg seam). */
+function invokeStart(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  deps: ReturnType<typeof startDeps> = startDeps()
+) {
+  const handler = mockRegistrations['startCook'].handler as unknown as (
+    r: HttpRequest,
+    c: InvocationContext,
+    d: unknown
+  ) => Promise<unknown>;
+  return handler(req, ctx, deps);
+}
+
+/** Drives the registered stopCook handler with injected deps (3rd arg seam). */
+function invokeStop(
+  req: HttpRequest,
+  ctx: InvocationContext,
+  deps: ReturnType<typeof stopDeps> = stopDeps(persistedActiveCook())
+) {
+  const handler = mockRegistrations['stopCook'].handler as unknown as (
+    r: HttpRequest,
+    c: InvocationContext,
+    d: unknown
+  ) => Promise<unknown>;
+  return handler(req, ctx, deps);
+}
+
+// ---------------------------------------------------------------------------
 // A. main.ts wiring — routes, methods, and the shared SignalR bindings.
 // ---------------------------------------------------------------------------
 describe('main.ts SignalR producer registrations', () => {
@@ -180,11 +274,9 @@ describe('main.ts SignalR producer registrations', () => {
 // B. cook_started, driven through the registered handler.
 // ---------------------------------------------------------------------------
 describe('POST /cooks (startCook) — cook_started producer', () => {
-  const handler = () => mockRegistrations['startCook'].handler;
-
   it('emits exactly one cook_started envelope on group userId=deviceId with correlation from X-Request-ID', async () => {
     const { ctx, messages } = mockContext();
-    const res = await handler()(
+    const res = await invokeStart(
       mockRequest({ body: VALID_START, headers: { 'X-Request-ID': 'req-xyz' } }),
       ctx
     );
@@ -214,7 +306,7 @@ describe('POST /cooks (startCook) — cook_started producer', () => {
 
   it('falls back to the invocation id for correlation when X-Request-ID is absent', async () => {
     const { ctx, messages } = mockContext();
-    await handler()(mockRequest({ body: VALID_START }), ctx);
+    await invokeStart(mockRequest({ body: VALID_START }), ctx);
     expect(messages()![0].arguments[0].correlation.id).toBe(INVOCATION_ID);
   });
 
@@ -222,10 +314,34 @@ describe('POST /cooks (startCook) — cook_started producer', () => {
     ['name', { deviceId: 'meatgeek3', meatType: 'brisket' }],
     ['deviceId', { name: 'x', meatType: 'brisket' }],
     ['meatType', { name: 'x', deviceId: 'meatgeek3' }],
-  ])('returns 400 and emits NO message when %s is missing', async (_field, body) => {
+  ])('returns 400 and emits NO message when %s is missing (authenticated)', async (_field, body) => {
+    // Authenticated (via injected deps) but invalid: validation still returns 400
+    // and emits nothing. The auth gate is upstream of validation, so a missing
+    // field is a 400, not a 401.
     const { ctx, messages } = mockContext();
-    const res = await handler()(mockRequest({ body }), ctx);
+    const res = await invokeStart(mockRequest({ body }), ctx);
     expect((res as { status: number }).status).toBe(400);
+    expect(messages()).toBeUndefined();
+  });
+
+  it('returns 401 and emits NO message when the request is unauthenticated', async () => {
+    // The persisted userId comes ONLY from the authenticated principal; an
+    // unauthenticated caller is rejected before any write or SignalR emit.
+    const { ctx, messages } = mockContext();
+    const unauthDeps = {
+      resolvePrincipal: () => ({ authenticated: false as const, reason: 'principal_header_missing' as const }),
+      getRepository: () => ({
+        createCook: async () => {
+          throw new Error('must not be called when unauthenticated');
+        },
+      }),
+    };
+    const res = await invokeStart(
+      mockRequest({ body: VALID_START }),
+      ctx,
+      unauthDeps as unknown as ReturnType<typeof startDeps>
+    );
+    expect((res as { status: number }).status).toBe(401);
     expect(messages()).toBeUndefined();
   });
 });
@@ -234,13 +350,10 @@ describe('POST /cooks (startCook) — cook_started producer', () => {
 // C. cook_stopped, driven through the registered handler.
 // ---------------------------------------------------------------------------
 describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () => {
-  const handler = () => mockRegistrations['stopCook'].handler;
-
   it('emits one cook_stopped envelope on group userId=deviceId with top-level cookId OMITTED', async () => {
     const { ctx, messages } = mockContext();
-    const res = await handler()(
+    const res = await invokeStop(
       mockRequest({
-        body: { deviceId: 'meatgeek3' },
         params: { cookId: 'cook-abc' },
         headers: { 'X-Request-ID': 'req-stop' },
       }),
@@ -261,9 +374,9 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
     expect(env.payload.status).toBe('completed');
     expect(env.correlation.id).toBe('req-stop');
 
-    // The stop payload is a synthetic (non-persisted) Cook but must still be
-    // schema-VALID: name >= 3 chars, startTime a parseable ISO-8601 date-time.
-    // The Go consumer keys off payload.id and ignores name/startTime here.
+    // The stop payload is the PERSISTED cook read back and completed; it is a
+    // schema-VALID Cook: name >= 3 chars, startTime a parseable ISO-8601
+    // date-time. The Go consumer keys off payload.id and ignores name/startTime.
     expect(env.payload.name.length).toBeGreaterThanOrEqual(3);
     expect(Number.isNaN(Date.parse(env.payload.startTime))).toBe(false);
 
@@ -272,10 +385,7 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
 
   it('serializes cook_stopped with no cookId key on the wire (matches Go omitempty pointer)', async () => {
     const { ctx, messages } = mockContext();
-    await handler()(
-      mockRequest({ body: { deviceId: 'meatgeek3' }, params: { cookId: 'cook-99' } }),
-      ctx
-    );
+    await invokeStop(mockRequest({ params: { cookId: 'cook-99' } }), ctx);
     // What the SignalR output binding actually puts on the wire.
     const wire = JSON.parse(JSON.stringify(messages()![0].arguments[0]));
     expect(Object.keys(wire)).not.toContain('cookId');
@@ -284,17 +394,42 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
 
   it('falls back to the invocation id for correlation when X-Request-ID is absent', async () => {
     const { ctx, messages } = mockContext();
-    await handler()(
-      mockRequest({ body: { deviceId: 'meatgeek3' }, params: { cookId: 'cook-1' } }),
-      ctx
-    );
+    await invokeStop(mockRequest({ params: { cookId: 'cook-1' } }), ctx);
     expect(messages()![0].arguments[0].correlation.id).toBe(INVOCATION_ID);
   });
 
-  it('returns 400 and emits NO message when deviceId is missing', async () => {
+  it('returns 404 and emits NO message when the cook is absent in the caller partition', async () => {
+    // MG-59 contract change: stop no longer synthesizes a cook from body.deviceId
+    // (the old contract, which 400'd on a missing deviceId). It point-reads the
+    // PERSISTED cook in the caller's partition; a miss is a 404 with NO emit — and
+    // a cook owned by another principal lives in another partition, so this same
+    // path also refuses any cross-tenant stop.
     const { ctx, messages } = mockContext();
-    const res = await handler()(mockRequest({ body: {}, params: { cookId: 'cook-abc' } }), ctx);
-    expect((res as { status: number }).status).toBe(400);
+    const res = await invokeStop(
+      mockRequest({ params: { cookId: 'ghost' } }),
+      ctx,
+      stopDeps(undefined)
+    );
+    expect((res as { status: number }).status).toBe(404);
+    expect(messages()).toBeUndefined();
+  });
+
+  it('returns 401 and emits NO message when the request is unauthenticated', async () => {
+    const { ctx, messages } = mockContext();
+    const unauthDeps = {
+      resolvePrincipal: () => ({ authenticated: false as const, reason: 'principal_header_missing' as const }),
+      getRepository: () => ({
+        stopCook: async () => {
+          throw new Error('must not be called when unauthenticated');
+        },
+      }),
+    };
+    const res = await invokeStop(
+      mockRequest({ params: { cookId: 'cook-abc' } }),
+      ctx,
+      unauthDeps as unknown as ReturnType<typeof stopDeps>
+    );
+    expect((res as { status: number }).status).toBe(401);
     expect(messages()).toBeUndefined();
   });
 });

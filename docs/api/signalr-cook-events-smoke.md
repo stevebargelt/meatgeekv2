@@ -57,20 +57,22 @@ client must be adapted to consume `{ url, accessToken }` and dial the returned
 negotiate against the real Function App and the rest of the procedure is
 gated on it.
 
-### DEC-3 — `start-cook` / `stop-cook` are still mocks (persistence pending)
+### DEC-3 — `start-cook` / `stop-cook` persist through Cosmos (MG-59, superseded)
 
-`start-cook.ts` mints a mock cook (`id: cook-${Date.now()}`, `userId: 'user-1'`
-hard-coded — see the `TODO: Extract from auth token`) and `stop-cook.ts`
-returns a mock completed cook. **Neither writes durable state.** Consequences
-for this smoke test:
+As of MG-59, `start-cook.ts` and `stop-cook.ts` no longer mock anything: the
+`userId` partition value is derived solely from the authenticated Easy Auth
+principal (`apps/api/src/shared/auth/principal.ts` — the tenant-namespaced
+Entra object id, never a hard-coded `user-1`), and both routes read/write the
+real cooks container through the shared Cosmos adapter under managed identity.
+Consequences for this smoke test:
 
-- The `cookId` from `cook_started` is real on the SignalR wire and is correctly
-  consumed by the pusher, **but it will not appear in `GET /cooks`
-  (`list-cooks`)** and **will not be recoverable by
-  `cooksession.Reconcile`** — there is nothing persisted for Reconcile to read
-  back. Do not assert the started cook via the list/reconcile path.
-- Verification of the started/stopped cook id must be done **on the SignalR
-  event and on the outbound telemetry**, not via the API's read side.
+- The `cookId` from `cook_started` **is now persisted** and **will appear in
+  `GET /cooks` (`list-cooks`)**, scoped to the caller's own partition (a
+  caller-supplied `userId` query param is accepted but discarded — identity
+  comes only from the bearer token). It should also be recoverable by
+  `cooksession.Reconcile` once that path queries the same identity.
+- The started/stopped cook id can now be cross-checked against the API's read
+  side (`GET /cooks`) in addition to the SignalR event and outbound telemetry.
 
 ### DEC-4 — negotiate trusts a `deviceId` query param, not the caller's identity (tracked as MG-30)
 
@@ -170,7 +172,7 @@ curl -sS -X POST "https://<funcapp>/api/cooks" \
   -d '{"name":"AC5 smoke","deviceId":"<deviceId>","meatType":"brisket"}'
 ```
 
-Expected — response is **HTTP 201** with the mock cook body, including
+Expected — response is **HTTP 201** with the persisted cook document, including
 `id: cook-<epoch-ms>` and `status: "active"`. On the SignalR side, `startCook`
 emits a message with `target: cook_started` scoped to `userId = <deviceId>`, and
 the envelope carries `cookId = <the new cook id>` (see `buildCookEnvelope` —
@@ -207,11 +209,12 @@ properties).
 ```bash
 curl -sS -X POST "https://<funcapp>/api/cooks/<cookId>/stop" \
   -H "Authorization: Bearer ${BEARER}" \
-  -H "Content-Type: application/json" \
-  -d '{"deviceId":"<deviceId>"}'
+  -H "Content-Type: application/json"
 ```
 
-Expected — response is **HTTP 200** with the mock completed cook
+No body is required: `stopCook` no longer reads a request body — it point-reads
+`(userId, cookId)` in the caller's partition and transitions the persisted
+document. Expected — response is **HTTP 200** with the persisted, completed cook
 (`status: "completed"`, `endTime` set). On the SignalR side, `stopCook` emits
 `target: cook_stopped` scoped to `userId = <deviceId>`, and the envelope
 **omits** `cookId` entirely (`buildCookEnvelope` drops the key on `cook_stopped`
