@@ -442,6 +442,13 @@ COSMOSDB__accountEndpoint=<cosmos-account-endpoint>
 # app pointed at a database that does not exist (MG-51).
 COSMOSDB_DATABASE_NAME=<cosmos-database-name>
 
+# Which container inside that database the cooks handlers read and write
+# (MG-59). A plain app setting (not a `__`-suffixed identity binding) — the API
+# reads it itself. Terraform-owned (module.cosmos_db.destination_container_names.cooks)
+# and REQUIRED: no default, so a caller that omits it fails at `terraform plan`
+# rather than shipping a cooks adapter pointed at a container that does not exist.
+COSMOSDB_COOKS_CONTAINER_NAME=<cosmos-cooks-container-name>
+
 # IoT telemetry (Event Hubs-compatible) — identity-based. NON-SECRET
 # fully-qualified namespace only; the managed identity holds Azure Event Hubs
 # Data Receiver.

@@ -172,6 +172,25 @@ Because the check happens ahead of the Functions host, a 401 here is produced by
 the platform, not by any application code — there is no application 401 path to
 maintain.
 
+## How Application Code Reads the Validated Identity (MG-59)
+
+Easy Auth validates the bearer token and, on success, injects the validated
+principal into the request as a base64-encoded JSON header,
+**`X-MS-CLIENT-PRINCIPAL`**, before the function runs. This is still *platform*
+validation, not application code re-verifying anything — the cooks handlers
+(`apps/api/src/functions/cooks/*.ts`, via
+`apps/api/src/shared/auth/principal.ts`) only **read** that already-trusted
+header to derive the `userId` a request is allowed to act as. They never read
+identity from the query string or the request body, so a caller cannot assert
+an arbitrary `userId` to read or orphan another tenant's cooks.
+
+The identifier is the Entra **object id** (`oid` claim), namespaced by the
+**tenant id** (`tid` claim) as `"<tid>:<oid>"` — an `oid` is only guaranteed
+unique *within* its tenant, so the namespace travels with the key and is used
+as-is as the Cosmos partition value for the `cooks` container. A missing,
+unparseable, or claim-incomplete header is **UNAUTHENTICATED** — there is no
+fallback identity and no default `userId`.
+
 ## What Is *Not* Implemented
 
 To be explicit, the following do **not** exist in the V2 stack:

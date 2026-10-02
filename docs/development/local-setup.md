@@ -53,9 +53,13 @@ AZURE_CLIENT_ID=your-client-id
 AZURE_CLIENT_SECRET=your-client-secret
 AZURE_SUBSCRIPTION_ID=your-subscription-id
 
-# CosmosDB Connection
-COSMOSDB_CONNECTION_STRING=your-cosmos-connection-string
-COSMOSDB_DATABASE_NAME=meatgeek
+# CosmosDB — identity-based (no connection string / key exists in the shipped
+# adapter; see docs/api/azure-functions.md#application-settings). The account
+# endpoint, database name, and cooks container name are all required with no
+# default — the adapter throws at first use if any is missing or blank.
+COSMOSDB__accountEndpoint=your-cosmos-account-endpoint
+COSMOSDB_DATABASE_NAME=your-cosmos-database-name
+COSMOSDB_COOKS_CONTAINER_NAME=your-cosmos-cooks-container-name
 
 # IoT Hub Configuration
 IOTHUB_CONNECTION_STRING=your-iothub-connection-string
@@ -178,7 +182,6 @@ meatgeekv2/
 │   ├── api-interfaces/       # TypeScript types
 │   ├── ui-components/        # React components
 │   ├── data-models/          # Business logic
-│   ├── azure-client/         # Cloud integrations
 │   └── ...
 └── tools/                    # Build and deployment scripts
 ```

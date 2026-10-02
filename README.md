@@ -76,7 +76,6 @@ meatgeekv2/
 │   ├── api-interfaces/           # TypeScript types and interfaces
 │   ├── ui-components/            # Shared React/React Native components
 │   ├── data-models/              # Domain models and business logic
-│   ├── azure-client/             # Azure service clients
 │   ├── realtime/                 # SignalR real-time communication
 │   ├── charts/                   # Data visualization components
 │   ├── tracing/                  # OpenTelemetry observability
