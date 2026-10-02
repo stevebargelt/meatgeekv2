@@ -183,6 +183,7 @@ function stopDeps(persisted: Cook | undefined) {
           ? ({ ...persisted, id, status: 'completed', endTime } as Cook)
           : undefined,
         requestCharge: 1,
+        transitioned: persisted !== undefined,
       }),
     }),
   };

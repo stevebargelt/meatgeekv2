@@ -95,12 +95,14 @@ export async function stopCookHandler(
   const endTime = new Date().toISOString();
 
   let stopped: Cook | undefined;
+  let transitioned = false;
   try {
     // Read-then-update within the caller's partition. The repository point-reads
     // (userId, cookId) and only replaces the correctly-addressed document when it
     // exists — a miss returns `cook: undefined` WITHOUT writing.
     const result = await deps.getRepository().stopCook(userId, cookId, endTime);
     stopped = result.cook;
+    transitioned = result.transitioned;
     // RU charge is a bare number — safe to log against the shared 400 RU/s budget.
     context.log(`stopCook request charge: ${result.requestCharge}`);
   } catch {
@@ -136,17 +138,22 @@ export async function stopCookHandler(
 
   context.log(`Stopped cook: ${stopped.id}`);
 
-  // Emit COOK_STOPPED ONLY after the durable update succeeded (emit-after-write).
-  // Delivery is scoped to the device's SignalR user group (userId = deviceId) —
-  // a DIFFERENT axis from the persisted identity userId, which stays the
-  // authenticated principal. deviceId comes from the persisted cook, not the
+  // Emit COOK_STOPPED ONLY when THIS call's durable update performed the
+  // transition (emit-after-write). An already-completed cook — a retried stop
+  // whose first response was lost, or a concurrent stop that lost the race — is
+  // still returned 200 idempotently, but is not re-announced: no new write, no
+  // new event. Delivery is scoped to the device's SignalR user group (userId =
+  // deviceId) — a DIFFERENT axis from the persisted identity userId, which stays
+  // the authenticated principal. deviceId comes from the persisted cook, not the
   // caller.
-  const message: SignalROutputMessage = {
-    target: COOK_STOPPED,
-    userId: stopped.deviceId,
-    arguments: [buildCookEnvelope(COOK_STOPPED, stopped, correlationId)],
-  };
-  context.extraOutputs.set(signalROutput, [message]);
+  if (transitioned) {
+    const message: SignalROutputMessage = {
+      target: COOK_STOPPED,
+      userId: stopped.deviceId,
+      arguments: [buildCookEnvelope(COOK_STOPPED, stopped, correlationId)],
+    };
+    context.extraOutputs.set(signalROutput, [message]);
+  }
 
   return {
     status: 200,

@@ -63,6 +63,14 @@ export interface CookResult {
   readonly requestCharge: number;
 }
 
+/** A stop's outcome: the cook plus whether THIS call performed the transition. */
+export interface StopCookResult extends CookResult {
+  /** `true` only when this call's write moved the cook to `completed`. An
+   *  already-completed cook returned idempotently (a retry, or a concurrent stop
+   *  that won the race) is `false` — the caller must not re-announce it. */
+  readonly transitioned: boolean;
+}
+
 /** A single page of a user's cooks, with its measured RU cost. */
 export interface CookPage {
   readonly cooks: Cook[];
@@ -200,8 +208,9 @@ export class CooksRepository {
    *
    * The whole document is replaced within its `(id, userId)` address, so the
    * partition value cannot drift. RU charge sums every read and the winning write.
+   * `transitioned` is true only when this call's replace succeeded.
    */
-  async stopCook(userId: string, id: string, endTime: string): Promise<CookResult> {
+  async stopCook(userId: string, id: string, endTime: string): Promise<StopCookResult> {
     let requestCharge = 0;
 
     for (let attempt = 1; attempt <= STOP_COOK_MAX_ATTEMPTS; attempt++) {
@@ -210,7 +219,7 @@ export class CooksRepository {
 
       // Absent in this partition — a miss. No write, no cross-partition fallback.
       if (!existing.cook) {
-        return { cook: undefined, requestCharge };
+        return { cook: undefined, requestCharge, transitioned: false };
       }
 
       // Idempotent stop: an already-completed cook (e.g. a concurrent request won
@@ -218,7 +227,7 @@ export class CooksRepository {
       // converge on the winner's endTime instead of the last write silently
       // overwriting it.
       if (existing.cook.status === 'completed') {
-        return { cook: existing.cook, requestCharge };
+        return { cook: existing.cook, requestCharge, transitioned: false };
       }
 
       const stopped: Cook = {
@@ -232,7 +241,7 @@ export class CooksRepository {
           .item(id, userId)
           .replace<Cook>(stopped, ifMatch(existing.etag));
         requestCharge += response.requestCharge;
-        return { cook: response.resource ?? stopped, requestCharge };
+        return { cook: response.resource ?? stopped, requestCharge, transitioned: true };
       } catch (error) {
         // 412 = another writer replaced the document between our read and write.
         // Re-read and retry within the budget; on the final attempt (or any other
@@ -246,7 +255,7 @@ export class CooksRepository {
 
     // Unreachable: the loop always returns or throws on the final attempt. Kept so
     // the method is total for the type-checker.
-    return { cook: undefined, requestCharge };
+    return { cook: undefined, requestCharge, transitioned: false };
   }
 
   /**

@@ -83,7 +83,7 @@ interface RepoSpy {
     userId: string,
     id: string,
     endTime: string
-  ) => Promise<{ cook: Cook | undefined; requestCharge: number }>;
+  ) => Promise<{ cook: Cook | undefined; requestCharge: number; transitioned: boolean }>;
 }
 
 /**
@@ -95,7 +95,7 @@ function fakeRepository(
     userId: string,
     id: string,
     endTime: string
-  ) => { cook: Cook | undefined; requestCharge: number }
+  ) => { cook: Cook | undefined; requestCharge: number; transitioned: boolean }
 ): RepoSpy {
   const calls: RepoSpy['calls'] = [];
   return {
@@ -163,6 +163,7 @@ describe('stopCookHandler', () => {
     const repo = fakeRepository((userId, id, endTime) => ({
       cook: { ...storedCook(), userId, id, status: 'completed', endTime },
       requestCharge: 4.2,
+      transitioned: true,
     }));
 
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
@@ -203,6 +204,7 @@ describe('stopCookHandler', () => {
     const repo = fakeRepository((userId, id, endTime) => ({
       cook: { ...storedCook(), userId, id, status: 'completed', endTime },
       requestCharge: 1,
+      transitioned: true,
     }));
 
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
@@ -213,6 +215,30 @@ describe('stopCookHandler', () => {
     expect(repo.calls[0].userId).not.toBe('user-1');
     expect((res.jsonBody as Cook).userId).not.toBe('user-1');
     expect(JSON.stringify(res.jsonBody)).not.toContain('user-1');
+  });
+
+  it('returns 200 idempotently but emits NO COOK_STOPPED when the cook was already completed (retried stop)', async () => {
+    const { ctx, messages } = mockContext();
+    // A retry after a successful stop whose response was lost: the repository
+    // finds the cook already completed and performs no write.
+    const firstEndTime = '2026-08-24T20:00:00.000Z';
+    const repo = fakeRepository(() => ({
+      cook: storedCook({ status: 'completed', endTime: firstEndTime }),
+      requestCharge: 1,
+      transitioned: false,
+    }));
+
+    const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
+      resolvePrincipal: authenticatedAs(AUTH_USER_ID),
+      getRepository: () => repo,
+    });
+
+    expect(res.status).toBe(200);
+    const body = res.jsonBody as Cook;
+    expect(body.status).toBe('completed');
+    expect(body.endTime).toBe(firstEndTime);
+    // No new durable transition → no duplicate downstream notification.
+    expect(messages()).toBeUndefined();
   });
 
   it('returns 401 with no update and no emit when unauthenticated', async () => {
@@ -236,7 +262,11 @@ describe('stopCookHandler', () => {
   it('returns 404 with no emit when the cook is absent in the caller partition', async () => {
     const { ctx, messages } = mockContext();
     // A miss: the read found nothing in this partition, so nothing is written.
-    const repo = fakeRepository(() => ({ cook: undefined, requestCharge: 1.2 }));
+    const repo = fakeRepository(() => ({
+      cook: undefined,
+      requestCharge: 1.2,
+      transitioned: false,
+    }));
 
     const res = await stopCookHandler(mockRequest('cook-missing'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
@@ -293,6 +323,7 @@ describe('stopCookHandler', () => {
     const repo = fakeRepository((userId, id, endTime) => ({
       cook: { ...storedCook({ userId }), userId, id, status: 'completed', endTime },
       requestCharge: 2,
+      transitioned: true,
     }));
 
     const res = await stopCookHandler(

@@ -265,6 +265,7 @@ describe('MG-59 cooks repository', () => {
       expect(calls.replaces[0].endTime).toBe('2026-08-24T20:00:00Z');
       expect(calls.replaces[0].userId).toBe(USER_A);
       expect(result.cook?.status).toBe('completed');
+      expect(result.transitioned).toBe(true);
       // RU sums read + write.
       expect(result.requestCharge).toBeCloseTo(6.5);
     });
@@ -277,7 +278,26 @@ describe('MG-59 cooks repository', () => {
       const result = await repo.stopCook(USER_A, 'missing', '2026-08-24T20:00:00Z');
 
       expect(result.cook).toBeUndefined();
+      expect(result.transitioned).toBe(false);
       expect(calls.replaces).toHaveLength(0);
+    });
+
+    it('an already-completed cook (a retried stop) is returned as-is with transitioned=false — no write', async () => {
+      const { container, calls, staged } = fakeContainer();
+      const firstEndTime = '2026-08-24T20:00:00Z';
+      staged.readResponse = {
+        resource: sampleCook({ status: 'completed', endTime: firstEndTime }),
+        statusCode: 200,
+        requestCharge: 1,
+        etag: 'etag-v2',
+      };
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.stopCook(USER_A, 'cook-1', '2026-08-24T21:00:00Z');
+
+      expect(calls.replaces).toHaveLength(0);
+      expect(result.cook?.endTime).toBe(firstEndTime);
+      expect(result.transitioned).toBe(false);
     });
 
     it('writes with an If-Match on the ETag it read (optimistic concurrency)', async () => {
@@ -327,6 +347,8 @@ describe('MG-59 cooks repository', () => {
       expect(result.cook?.status).toBe('completed');
       // No lost update: our later endTime did NOT overwrite the winner's.
       expect(result.cook?.endTime).toBe(winnerEndTime);
+      // The loser performed no transition, so it must not announce one.
+      expect(result.transitioned).toBe(false);
       // RU sums both reads (the failed write threw before charging).
       expect(result.requestCharge).toBeCloseTo(2.3);
     });
