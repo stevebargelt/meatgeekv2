@@ -8,7 +8,7 @@ import { HttpRequest, InvocationContext } from '@azure/functions';
 import type { Cook, StartCookRequest } from '@meatgeekv2/api-interfaces';
 import type { StartCookDeps } from './start-cook';
 import type { SignalROutputMessage } from '../signalr/envelope';
-import type { CookResult } from '../../shared/cosmos/cooks-repository';
+import type { StartCookResult } from '../../shared/cosmos/cooks-repository';
 import type { PrincipalResult } from '../../shared/auth/principal';
 
 const INVOCATION_ID = 'inv-42';
@@ -78,22 +78,39 @@ function mockContext(): Captured {
 }
 
 /**
- * Records every createCook call so a test can assert the write happened exactly
- * once and inspect the persisted document (its partition userId in particular).
- * `echoResource` toggles whether Cosmos echoes the stored resource (it does) vs.
- * returning nothing, exercising the `persisted ?? newCook` fallback.
+ * An in-memory model of CooksRepository.startCook: it records every write and
+ * answers like the real batch does — a known id is a replay, a device held by a
+ * non-terminal cook is busy, otherwise the cook is created and takes the device.
+ * `echoResource` toggles whether the store echoes the stored resource or the
+ * handler falls back to its own copy (the repository's `stored ?? cook`).
  */
 function fakeRepository(opts: { echoResource?: boolean } = {}) {
   const echoResource = opts.echoResource ?? true;
   const writes: Cook[] = [];
+  const stored = new Map<string, Cook>();
+  const deviceHolder = new Map<string, string>();
   return {
     writes,
-    createCook: async (cook: Cook): Promise<CookResult> => {
+    stored,
+    /** Model a stop: the cook completes and its device is released. */
+    complete(id: string) {
+      const cook = stored.get(id)!;
+      stored.set(id, { ...cook, status: 'completed' });
+      deviceHolder.delete(cook.deviceId);
+    },
+    startCook: async (cook: Cook): Promise<StartCookResult> => {
+      const existing = stored.get(cook.id);
+      if (existing) {
+        return { outcome: 'replayed', cook: { ...existing }, requestCharge: 2 };
+      }
+      const holder = deviceHolder.get(cook.deviceId);
+      if (holder) {
+        return { outcome: 'deviceBusy', activeCookId: holder, requestCharge: 3 };
+      }
       writes.push(cook);
-      return {
-        cook: echoResource ? { ...cook } : undefined,
-        requestCharge: 7.42,
-      };
+      stored.set(cook.id, { ...cook });
+      deviceHolder.set(cook.deviceId, cook.id);
+      return { outcome: 'created', cook: echoResource ? { ...cook } : cook, requestCharge: 7.42 };
     },
   };
 }
@@ -117,7 +134,11 @@ function authedDeps(repo = fakeRepository()): {
   return { deps, writes: repo.writes };
 }
 
+const COOK_ID = '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d';
+const OTHER_COOK_ID = 'a0b1c2d3-e4f5-4a6b-8c7d-8e9f0a1b2c3d';
+
 const validBody: StartCookRequest = {
+  id: COOK_ID,
   name: 'Weekend Brisket',
   deviceId: 'meatgeek3',
   meatType: 'brisket',
@@ -141,6 +162,8 @@ describe('startCookHandler', () => {
     const persisted = res.jsonBody as Cook;
     expect(persisted.userId).toBe(PRINCIPAL_USER_ID);
     expect(persisted.id).toBe(writes[0].id);
+    // MG-84: the id is the one the client sent, not a server-minted one.
+    expect(persisted.id).toBe(COOK_ID);
 
     // Emitted only after the write, scoped to the DEVICE group (=deviceId), a
     // different axis from the persisted identity userId.
@@ -201,7 +224,7 @@ describe('startCookHandler', () => {
         },
       }),
       getRepository: () => ({
-        createCook: async () => {
+        startCook: async () => {
           // A Cosmos-style error whose message carries an account endpoint — it
           // must NOT surface in the response body.
           throw Object.assign(new Error('request to https://acct.documents.azure.com failed'), {
@@ -256,9 +279,10 @@ describe('startCookHandler', () => {
   });
 
   it.each([
-    ['name', { deviceId: 'meatgeek3', meatType: 'brisket' }],
-    ['deviceId', { name: 'x', meatType: 'brisket' }],
-    ['meatType', { name: 'x', deviceId: 'meatgeek3' }],
+    ['name', { id: COOK_ID, deviceId: 'meatgeek3', meatType: 'brisket' }],
+    ['deviceId', { id: COOK_ID, name: 'x', meatType: 'brisket' }],
+    ['meatType', { id: COOK_ID, name: 'x', deviceId: 'meatgeek3' }],
+    ['id', { name: 'x', deviceId: 'meatgeek3', meatType: 'brisket' }],
   ])(
     'returns 400 with no write and no SignalR message when %s is missing',
     async (_field, body) => {
@@ -278,7 +302,7 @@ describe('startCookHandler', () => {
     const { deps, writes } = authedDeps();
 
     const res = await startCookHandler(
-      mockRequest({ name: '   ', deviceId: 'meatgeek3', meatType: 'brisket' }),
+      mockRequest({ id: COOK_ID, name: '   ', deviceId: 'meatgeek3', meatType: 'brisket' }),
       ctx,
       deps
     );
@@ -294,7 +318,12 @@ describe('startCookHandler', () => {
     const { deps, writes } = authedDeps();
 
     const res = await startCookHandler(
-      mockRequest({ name: '  Weekend Brisket  ', deviceId: 'meatgeek3', meatType: 'brisket' }),
+      mockRequest({
+        id: COOK_ID,
+        name: '  Weekend Brisket  ',
+        deviceId: 'meatgeek3',
+        meatType: 'brisket',
+      }),
       ctx,
       deps
     );
@@ -302,5 +331,170 @@ describe('startCookHandler', () => {
     expect(res.status).toBe(201);
     expect((res.jsonBody as Cook).name).toBe('Weekend Brisket');
     expect(writes[0].name).toBe('Weekend Brisket');
+  });
+
+  describe('MG-84 — retry-safe start', () => {
+    it.each([
+      ['not a UUID', 'cook-123'],
+      ['empty', ''],
+      ['a number', 42],
+      ['a device lock id', 'active-device:meatgeek3'],
+    ])('returns 400 with no write when id is %s', async (_label, id) => {
+      const { ctx, messages } = mockContext();
+      const { deps, writes } = authedDeps();
+
+      const res = await startCookHandler(
+        mockRequest({ ...validBody, id: id as unknown as string }),
+        ctx,
+        deps
+      );
+
+      expect(res.status).toBe(400);
+      expect((res.jsonBody as { error: string }).error).toBe('VALIDATION_ERROR');
+      expect(writes).toHaveLength(0);
+      expect(messages()).toBeUndefined();
+    });
+
+    it('a retry after success returns 200 with the original cook and emits no second COOK_STARTED', async () => {
+      const repo = fakeRepository();
+      const { deps } = authedDeps(repo);
+      const first = mockContext();
+      const created = await startCookHandler(mockRequest(validBody), first.ctx, deps);
+
+      const retry = mockContext();
+      const replayed = await startCookHandler(mockRequest(validBody), retry.ctx, deps);
+
+      expect(created.status).toBe(201);
+      expect(first.messages()).toHaveLength(1);
+      expect(replayed.status).toBe(200);
+      expect(replayed.jsonBody).toEqual(created.jsonBody);
+      expect(retry.messages()).toBeUndefined();
+      expect(repo.writes).toHaveLength(1);
+    });
+
+    it('a retry with the same body in a different key order is still a replay', async () => {
+      const repo = fakeRepository();
+      const { deps } = authedDeps(repo);
+      const body = { ...validBody, targetTemps: { grill: 225, probe1: 203 } };
+      await startCookHandler(mockRequest(body), mockContext().ctx, deps);
+
+      const retry = mockContext();
+      const res = await startCookHandler(
+        mockRequest({ ...body, targetTemps: { probe1: 203, grill: 225 } }),
+        retry.ctx,
+        deps
+      );
+
+      expect(res.status).toBe(200);
+      expect(retry.messages()).toBeUndefined();
+    });
+
+    it('a replay of a cook that has since completed returns that cook, not a new one', async () => {
+      const repo = fakeRepository();
+      const { deps } = authedDeps(repo);
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+      repo.complete(COOK_ID);
+
+      const retry = mockContext();
+      const res = await startCookHandler(mockRequest(validBody), retry.ctx, deps);
+
+      expect(res.status).toBe(200);
+      expect((res.jsonBody as Cook).status).toBe('completed');
+      expect(retry.messages()).toBeUndefined();
+      expect(repo.writes).toHaveLength(1);
+    });
+
+    it.each([
+      ['name', { name: 'Different Brisket' }],
+      ['deviceId', { deviceId: 'meatgeek4' }],
+      ['meatType', { meatType: 'pork' }],
+      ['weight', { weight: 9 }],
+      ['targetTemps', { targetTemps: { grill: 250 } }],
+      ['notes', { notes: 'changed' }],
+    ])(
+      'the same id with a different %s returns 422 COOK_ID_REUSED with no write and no emit',
+      async (_field, change) => {
+        const repo = fakeRepository();
+        const { deps } = authedDeps(repo);
+        await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+
+        const reuse = mockContext();
+        const res = await startCookHandler(
+          mockRequest({ ...validBody, ...change }),
+          reuse.ctx,
+          deps
+        );
+
+        expect(res.status).toBe(422);
+        expect(res.jsonBody).toEqual({
+          error: 'COOK_ID_REUSED',
+          message: expect.any(String),
+          requestId: INVOCATION_ID,
+        });
+        expect(reuse.messages()).toBeUndefined();
+        expect(repo.writes).toHaveLength(1);
+      }
+    );
+
+    it('distinct ids on different devices create distinct cooks, each announced once', async () => {
+      const repo = fakeRepository();
+      const { deps } = authedDeps(repo);
+      const first = mockContext();
+      const second = mockContext();
+
+      const a = await startCookHandler(mockRequest(validBody), first.ctx, deps);
+      const b = await startCookHandler(
+        mockRequest({ ...validBody, id: OTHER_COOK_ID, deviceId: 'meatgeek4' }),
+        second.ctx,
+        deps
+      );
+
+      expect([a.status, b.status]).toEqual([201, 201]);
+      expect((a.jsonBody as Cook).id).toBe(COOK_ID);
+      expect((b.jsonBody as Cook).id).toBe(OTHER_COOK_ID);
+      expect(repo.writes.map(cook => cook.id)).toEqual([COOK_ID, OTHER_COOK_ID]);
+      expect(first.messages()).toHaveLength(1);
+      expect(second.messages()).toHaveLength(1);
+    });
+
+    it('a second cook on a busy device returns 409 COOK_ALREADY_ACTIVE with the active cook id, no write, no emit', async () => {
+      const repo = fakeRepository();
+      const { deps } = authedDeps(repo);
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+
+      const busy = mockContext();
+      const res = await startCookHandler(
+        mockRequest({ ...validBody, id: OTHER_COOK_ID }),
+        busy.ctx,
+        deps
+      );
+
+      expect(res.status).toBe(409);
+      expect(res.jsonBody).toEqual({
+        error: 'COOK_ALREADY_ACTIVE',
+        message: expect.any(String),
+        requestId: INVOCATION_ID,
+        activeCookId: COOK_ID,
+      });
+      expect(busy.messages()).toBeUndefined();
+      expect(repo.writes).toHaveLength(1);
+    });
+
+    it('once the active cook is stopped, a new cook on the same device is created', async () => {
+      const repo = fakeRepository();
+      const { deps } = authedDeps(repo);
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+      repo.complete(COOK_ID);
+
+      const next = mockContext();
+      const res = await startCookHandler(
+        mockRequest({ ...validBody, id: OTHER_COOK_ID }),
+        next.ctx,
+        deps
+      );
+
+      expect(res.status).toBe(201);
+      expect(next.messages()).toHaveLength(1);
+    });
   });
 });

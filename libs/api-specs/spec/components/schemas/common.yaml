@@ -15,6 +15,8 @@ ErrorCode:
     - UNAUTHORIZED
     - FORBIDDEN
     - CONFLICT
+    - COOK_ALREADY_ACTIVE
+    - COOK_ID_REUSED
     - INTERNAL_SERVER_ERROR
     - SERVICE_UNAVAILABLE
 
@@ -39,6 +41,30 @@ ErrorResponse:
       description: |
         Echoes Functions' InvocationContext.invocationId. Used as the correlation
         id for log/trace lookup and for X-Request-ID response header parity.
+
+CookAlreadyActiveError:
+  type: object
+  description: |
+    409 body for POST /cooks when the device already has an active cook for
+    this user (MG-84: one active cook per device). `activeCookId` is the cook
+    holding the device; stop it before starting another.
+  required:
+    - error
+    - message
+    - requestId
+    - activeCookId
+  additionalProperties: false
+  properties:
+    error:
+      type: string
+      enum:
+        - COOK_ALREADY_ACTIVE
+    message:
+      type: string
+    requestId:
+      type: string
+    activeCookId:
+      type: string
 
 Pagination:
   type: object

@@ -1,4 +1,11 @@
-import type { Container, ItemResponse, RequestOptions } from '@azure/cosmos';
+import type {
+  Container,
+  ItemResponse,
+  JSONObject,
+  OperationInput,
+  OperationResponse,
+  RequestOptions,
+} from '@azure/cosmos';
 import type { Cook } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
@@ -113,6 +120,86 @@ export const STOP_COOK_MAX_ATTEMPTS = 3;
  */
 export const MAX_PAGE_SIZE = 100;
 
+/**
+ * MG-84 — at most one active cook per (user, device).
+ *
+ * The rule is held by a small LOCK document that lives in the same `/userId`
+ * partition as the cooks it guards, so it can be written in the SAME
+ * transactional batch as the cook: either the cook and its lock both commit or
+ * neither does. Its id is `active-device:<deviceId>`. Cook ids are UUIDs, so the
+ * prefix keeps the two id spaces apart. `docType` marks it so the list query can
+ * exclude it; it never goes through {@link toCook} and never reaches a caller.
+ */
+export const ACTIVE_DEVICE_LOCK_DOC_TYPE = 'activeDeviceLock';
+
+/** The id of the lock document for one device (within the caller's partition).
+ *  The device id is URI-encoded because Cosmos ids may not contain `/`, `\`,
+ *  `?` or `#`; ordinary device ids such as `meatgeek3` are unchanged. */
+export function activeDeviceLockId(deviceId: string): string {
+  return `active-device:${encodeURIComponent(deviceId)}`;
+}
+
+/** The stored lock document. Never returned to a caller. */
+export interface ActiveDeviceLock {
+  readonly id: string;
+  readonly userId: string;
+  readonly docType: typeof ACTIVE_DEVICE_LOCK_DOC_TYPE;
+  readonly deviceId: string;
+  /** The cook currently holding the device. */
+  readonly cookId: string;
+}
+
+/**
+ * Bounded number of start batches {@link CooksRepository.startCook} runs. A
+ * retry happens only when the lock changed under us (a stale lock was taken
+ * over or released between our read and our batch), so the common case is one
+ * batch and the cap only bounds a pathological race on the shared RU pool.
+ */
+export const START_COOK_MAX_ATTEMPTS = 3;
+
+/**
+ * What a start did. The handler maps these to 201 / 200 (or 422) / 409.
+ *   - `created`: this call wrote the cook and took the device lock.
+ *   - `replayed`: a cook with this id already exists in the caller's partition
+ *     (a retry, or a concurrent duplicate that won). `cook` is the STORED cook;
+ *     the handler checks it matches the request.
+ *   - `deviceBusy`: another non-terminal cook holds the device.
+ */
+export type StartCookResult =
+  | { readonly outcome: 'created'; readonly cook: Cook; readonly requestCharge: number }
+  | { readonly outcome: 'replayed'; readonly cook: Cook; readonly requestCharge: number }
+  | {
+      readonly outcome: 'deviceBusy';
+      readonly activeCookId: string;
+      readonly requestCharge: number;
+    };
+
+/** A cook in one of these states no longer holds its device. */
+function isTerminal(status: Cook['status']): boolean {
+  return status === 'completed' || status === 'cancelled';
+}
+
+/** The outcome of one transactional batch, read per operation. */
+interface BatchOutcome {
+  readonly ok: boolean;
+  /** Per-operation status codes, in operation order (424 = rolled back because
+   *  another operation failed). */
+  readonly statuses: readonly (number | undefined)[];
+  readonly results: readonly OperationResponse[];
+  readonly requestCharge: number;
+}
+
+/** The first real failure in a batch (424 Failed Dependency is only a rollback). */
+function firstFailure(statuses: readonly (number | undefined)[]): number | undefined {
+  return statuses.find(code => code !== undefined && (code < 200 || code > 299) && code !== 424);
+}
+
+/** An error carrying only a numeric status, so the handler can log the status
+ *  without any Cosmos error text. */
+function batchError(statusCode: number | undefined): Error {
+  return Object.assign(new Error('cooks transactional batch failed'), { statusCode });
+}
+
 /** A write/read that resolved to a single cook, with its measured RU cost. */
 export interface CookResult {
   /** The persisted cook, or `undefined` when no document exists in the
@@ -192,19 +279,6 @@ export class CooksRepository {
   constructor(private readonly container: Container) {}
 
   /**
-   * Persists a new cook. The partition value is the document's own `userId`, so
-   * the write lands in that user's partition — the addressing the point-read and
-   * list below rely on. Returns the stored cook and the write's RU charge.
-   */
-  async createCook(cook: Cook): Promise<CookResult> {
-    const response: ItemResponse<StoredCook> = await this.container.items.create<StoredCook>(cook);
-    return {
-      cook: toCook(response.resource ?? cook),
-      requestCharge: response.requestCharge,
-    };
-  }
-
-  /**
    * Point-reads a cook by `(userId, id)`. Passing `userId` as the partition-key
    * value routes the read to exactly one partition — NOT a cross-partition scan
    * filtered down to one document. A missing document (404) is a normal miss:
@@ -227,14 +301,18 @@ export class CooksRepository {
    * stopCook replaces the whole document and must not drop stored fields it does
    * not model; public methods map it through {@link toCook} before returning.
    */
-  private async readCookWithEtag(
+  private readCookWithEtag(userId: string, id: string) {
+    return this.readDocument<StoredCook>(userId, id);
+  }
+
+  /** {@link readCookWithEtag} for any document in the caller's partition (the
+   *  device lock included). */
+  private async readDocument<T extends object>(
     userId: string,
     id: string
-  ): Promise<{ document: StoredCook | undefined; etag?: string; requestCharge: number }> {
+  ): Promise<{ document: T | undefined; etag?: string; requestCharge: number }> {
     try {
-      const response: ItemResponse<StoredCook> = await this.container
-        .item(id, userId)
-        .read<StoredCook>();
+      const response: ItemResponse<T> = await this.container.item(id, userId).read<T>();
       // v4 returns 404 with an undefined resource rather than throwing; treat a
       // 404 status the same as a missing resource.
       if (response.statusCode === 404 || response.resource === undefined) {
@@ -251,6 +329,115 @@ export class CooksRepository {
       }
       throw error;
     }
+  }
+
+  /**
+   * Runs one TRANSACTIONAL batch in the caller's partition. Cosmos commits every
+   * operation or none. A failed batch does not throw: the SDK returns 207 with a
+   * status per operation (the failing one carries its own code, the rest 424),
+   * so the outcome is read per operation here. A transport-level failure still
+   * throws and propagates to the handler.
+   */
+  private async runBatch(userId: string, operations: OperationInput[]): Promise<BatchOutcome> {
+    const response = await this.container.items.batch(operations, userId);
+    const results = response.result ?? [];
+    const statuses = operations.map((_, index) => results[index]?.statusCode);
+    return {
+      ok: statuses.every(code => code !== undefined && code >= 200 && code <= 299),
+      statuses,
+      results,
+      requestCharge: results.reduce((sum, result) => sum + (result.requestCharge ?? 0), 0),
+    };
+  }
+
+  /**
+   * MG-84 — retry-safe start. The cook's id is supplied by the client and reused
+   * on every retry, so Cosmos' own `(partition, id)` uniqueness is the
+   * idempotency check: a second create of the same id fails with 409 and is
+   * answered from the stored cook instead of writing a second one. Concurrent
+   * duplicates collapse the same way, because exactly one create can win.
+   *
+   * The same batch creates the device lock ({@link ActiveDeviceLock}), so "one
+   * active cook per (user, device)" holds without a check-then-write race:
+   *
+   *   - op 0 (create cook) 409 → `replayed`: the stored cook is returned. This is
+   *     checked first, so a retry of the cook that HOLDS the device is a replay,
+   *     not a busy device.
+   *   - op 1 (lock) fails → read the lock. If its cook is still non-terminal the
+   *     device is busy. If the lock is stale (its cook is completed, cancelled or
+   *     missing) the next batch replaces it under If-Match; if it vanished, the
+   *     next batch creates it. Bounded by {@link START_COOK_MAX_ATTEMPTS}.
+   *   - both commit → `created`.
+   */
+  async startCook(cook: Cook): Promise<StartCookResult> {
+    const { userId, deviceId } = cook;
+    const lockId = activeDeviceLockId(deviceId);
+    const lock: ActiveDeviceLock = {
+      id: lockId,
+      userId,
+      docType: ACTIVE_DEVICE_LOCK_DOC_TYPE,
+      deviceId,
+      cookId: cook.id,
+    };
+    const lockBody = lock as unknown as JSONObject;
+    let lockOperation: OperationInput = { operationType: 'Create', resourceBody: lockBody };
+    let requestCharge = 0;
+    let lastFailure: number | undefined;
+
+    for (let attempt = 1; attempt <= START_COOK_MAX_ATTEMPTS; attempt++) {
+      const batch = await this.runBatch(userId, [
+        { operationType: 'Create', resourceBody: cook as unknown as JSONObject },
+        lockOperation,
+      ]);
+      requestCharge += batch.requestCharge;
+
+      if (batch.ok) {
+        const stored = batch.results[0]?.resourceBody as unknown as StoredCook | undefined;
+        return { outcome: 'created', cook: toCook(stored ?? cook), requestCharge };
+      }
+
+      const [cookStatus, lockStatus] = batch.statuses;
+      if (cookStatus === 409) {
+        const existing = await this.readCookWithEtag(userId, cook.id);
+        requestCharge += existing.requestCharge;
+        if (!existing.document) {
+          // Cooks are never deleted, so a 409 without a readable cook is not a
+          // replay we can answer. Surface it as a failure.
+          throw batchError(409);
+        }
+        return { outcome: 'replayed', cook: toCook(existing.document), requestCharge };
+      }
+
+      lastFailure = firstFailure(batch.statuses);
+      if (lockStatus !== 409 && lockStatus !== 412 && lockStatus !== 404) {
+        throw batchError(lastFailure);
+      }
+
+      // The lock is held, or changed since we last looked. Decide from its
+      // current state.
+      const held = await this.readDocument<ActiveDeviceLock>(userId, lockId);
+      requestCharge += held.requestCharge;
+      if (!held.document) {
+        lockOperation = { operationType: 'Create', resourceBody: lockBody };
+        continue;
+      }
+
+      const holder = await this.readCookWithEtag(userId, held.document.cookId);
+      requestCharge += holder.requestCharge;
+      if (holder.document && !isTerminal(holder.document.status)) {
+        return { outcome: 'deviceBusy', activeCookId: held.document.cookId, requestCharge };
+      }
+
+      // Stale lock: take it over, but only the version we just read.
+      lockOperation = {
+        operationType: 'Replace',
+        id: lockId,
+        resourceBody: lockBody,
+        ...(held.etag ? { ifMatch: held.etag } : {}),
+      };
+    }
+
+    throw batchError(lastFailure);
   }
 
   /**
@@ -303,6 +490,37 @@ export class CooksRepository {
         endTime,
       };
 
+      // MG-84: if this cook holds its device lock, release the lock in the same
+      // transactional batch as the stop, so the device is free exactly when the
+      // cook is completed. A cook without a lock (created before MG-84, or whose
+      // lock was taken over as stale) takes the plain replace below.
+      const lockId = activeDeviceLockId(existing.document.deviceId);
+      const lock = await this.readDocument<ActiveDeviceLock>(userId, lockId);
+      requestCharge += lock.requestCharge;
+      if (lock.document?.cookId === id) {
+        const batch = await this.runBatch(userId, [
+          {
+            operationType: 'Replace',
+            id,
+            resourceBody: stopped as unknown as JSONObject,
+            ...(existing.etag ? { ifMatch: existing.etag } : {}),
+          },
+          { operationType: 'Delete', id: lockId },
+        ]);
+        requestCharge += batch.requestCharge;
+        if (batch.ok) {
+          const stored = batch.results[0]?.resourceBody as unknown as StoredCook | undefined;
+          return { cook: toCook(stored ?? stopped), requestCharge, transitioned: true };
+        }
+        // 412: the cook changed since our read (a concurrent stop). 404: the lock
+        // went away. Either way re-read and decide again within the budget.
+        const failure = firstFailure(batch.statuses);
+        if ((failure === 412 || failure === 404) && attempt < STOP_COOK_MAX_ATTEMPTS) {
+          continue;
+        }
+        throw batchError(failure);
+      }
+
       try {
         const response: ItemResponse<StoredCook> = await this.container
           .item(id, userId)
@@ -343,7 +561,10 @@ export class CooksRepository {
 
     const iterator = this.container.items.query<StoredCook>(
       {
-        query: 'SELECT * FROM c WHERE c.userId = @userId ORDER BY c.startTime DESC',
+        // MG-84: device lock documents share the partition; only cooks are listed.
+        query:
+          'SELECT * FROM c WHERE c.userId = @userId AND NOT IS_DEFINED(c.docType) ' +
+          'ORDER BY c.startTime DESC',
         parameters: [{ name: '@userId', value: userId }],
       },
       {

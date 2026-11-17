@@ -165,23 +165,35 @@ resolve MG-29 before continuing.**
 
 ### 3. Start a cook — observe `cook_started`
 
+The client supplies the cook id (MG-84): a UUID generated once per start and
+reused on every retry of that start.
+
 ```bash
+COOK_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 curl -sS -X POST "https://<funcapp>/api/cooks" \
   -H "Authorization: Bearer ${BEARER}" \
   -H "Content-Type: application/json" \
-  -d '{"name":"AC5 smoke","deviceId":"<deviceId>","meatType":"brisket"}'
+  -d "{\"id\":\"${COOK_ID}\",\"name\":\"AC5 smoke\",\"deviceId\":\"<deviceId>\",\"meatType\":\"brisket\"}"
 ```
 
 Expected — response is **HTTP 201** with the persisted cook document, including
-`id: cook-<epoch-ms>` and `status: "active"`. On the SignalR side, `startCook`
+`id: ${COOK_ID}` and `status: "active"`. A **409 `COOK_ALREADY_ACTIVE`** means
+the device already has an active cook for this user; its id is in
+`activeCookId`. Stop it (step 5) and start again. On the SignalR side, `startCook`
 emits a message with `target: cook_started` scoped to `userId = <deviceId>`, and
 the envelope carries `cookId = <the new cook id>` (see `buildCookEnvelope` —
 `cookId` is **present** on `cook_started`).
 
 Confirm on the **pusher**: its SignalR consumer goroutine receives the event and
 calls `cooksession.SetActiveCookID(<new cookId>)` — log line
-`cooksession: set active cook id  cookId=cook-<epoch-ms>`. The correlation id
+`cooksession: set active cook id  cookId=<COOK_ID>`. The correlation id
 from the envelope is also latched into the pusher's correlation holder.
+
+**Retry check (MG-84).** Re-run the exact same `curl` (same `COOK_ID`, same
+body). Expected — **HTTP 200** with the same cook document as the 201, and **no**
+second `cook_started` on the SignalR side: the pusher logs no new
+`cooksession: set active cook id` line. Sending the same `COOK_ID` with a
+different body (e.g. another `name`) returns **422 `COOK_ID_REUSED`**.
 
 ### 4. Observe the cook id ride on outbound telemetry
 
@@ -275,7 +287,8 @@ AC5 is satisfied for a given environment when an operator has, against **live**
 MG-24 infrastructure, observed **all** of:
 
 1. A bearer-authenticated `POST /api/cooks` returns 201 and the pusher logs
-   `cooksession: set active cook id` with the returned cook id.
+   `cooksession: set active cook id` with the returned cook id. Repeating the
+   same request returns 200 with the same cook and no second `cook_started`.
 2. Outbound telemetry payloads carry that cook id (and message properties carry
    the propagated `correlation.id`).
 3. A bearer-authenticated `POST /api/cooks/<cookId>/stop` returns 200 and the

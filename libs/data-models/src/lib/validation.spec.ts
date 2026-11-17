@@ -71,6 +71,7 @@ describe('DataValidator', () => {
 
   describe('validateStartCookRequest', () => {
     const baseRequest = (): StartCookRequest => ({
+      id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
       name: 'Sunday Brisket',
       deviceId: 'device-123',
       meatType: 'Brisket',

@@ -119,6 +119,8 @@ describe('round-trip — spec → openapi-typescript → fixture conformance', (
     if (!activeCook) throw new Error('fixtures missing an active cook');
 
     const startRequest = {
+      // MG-84: the client-generated cook id (UUID) is required.
+      id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
       name: activeCook.name,
       deviceId: activeCook.deviceId,
       meatType: activeCook.meatType ?? 'brisket',

@@ -40,6 +40,14 @@ export interface Cook {
  * Request to start a new cook session
  */
 export interface StartCookRequest {
+  /**
+   * Client-generated cook id (a UUID, e.g. from `crypto.randomUUID()`), and the
+   * idempotency key for the start. Generate it ONCE per start intent and send
+   * the same id, with the same body, on every retry. A repeat returns the
+   * original cook with 200 instead of creating a second one; the same id with a
+   * different body is rejected with 422 `COOK_ID_REUSED`.
+   */
+  id: string;
   name: string;
   deviceId: string;
   meatType: string;
