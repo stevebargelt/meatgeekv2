@@ -136,6 +136,13 @@ Branch protection on `main` is **load-bearing under MG-23**: a merge to `main` n
 
 Branch protection is configured on the GitHub repository (Settings → Branches), not in a tracked file. When you add or rename a required job in `ci.yml`, update the required-status-check list to match, or the new job will run without gating merges.
 
+### Agent-delivered changes
+
+Some pull requests are opened by an automated engineer working on a per-issue branch.
+Those pull requests go through exactly the same required checks listed above as any other pull request — there is no bypass or reduced gate.
+An independent reviewer checks the diff before the work is considered done.
+The repository owner performs every merge to `main`; the automated engineer never merges.
+
 ## npm and the Lockfile
 
 `package.json` pins the toolchain via `"packageManager": "npm@10.9.8"`, and CI activates it with a `corepack enable` step before `npm ci` in every dependency-installing job (`setup`, `lint-and-test`, `build-typescript`, `security-scan`). Corepack reads the `packageManager` field and provisions npm 10.9.8 automatically, so both the runners and local contributors resolve dependencies with the same pinned npm. (`engines.npm` remains `>=10.0.0` as a floor.)
