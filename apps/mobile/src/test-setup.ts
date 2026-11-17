@@ -30,5 +30,13 @@ jest.mock('@react-native-community/netinfo', () => {
   };
 });
 
-// Global test setup
-global.__DEV__ = true;
+// Global test setup.
+// react-native's types declare __DEV__ as a block-scoped `const`, so it is not a
+// property of `globalThis` in the type system and cannot be assigned directly.
+// Define it as a property instead, the same way react-native/jest/setup.js does.
+Object.defineProperty(globalThis, '__DEV__', {
+  configurable: true,
+  enumerable: true,
+  value: true,
+  writable: true,
+});
