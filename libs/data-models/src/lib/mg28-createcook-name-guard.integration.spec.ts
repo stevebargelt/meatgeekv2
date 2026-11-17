@@ -27,6 +27,7 @@ import type { Cook, StartCookRequest } from '@meatgeekv2/api-interfaces';
 const GUARD_ERROR = 'createCook: cook name must not be empty or whitespace-only';
 
 const baseRequest = (overrides: Partial<StartCookRequest> = {}): StartCookRequest => ({
+  id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
   name: 'Sunday Cook',
   deviceId: 'device-1',
   meatType: 'BRISKET',

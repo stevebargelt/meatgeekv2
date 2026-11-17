@@ -19,6 +19,7 @@ import type { TemperatureReading } from '@meatgeekv2/api-interfaces';
 const UUIDV4_COOK_ID = /^cook-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const baseRequest = (overrides: Partial<StartCookRequest> = {}): StartCookRequest => ({
+  id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
   name: 'Sunday Cook',
   deviceId: 'device-1',
   meatType: 'BRISKET',

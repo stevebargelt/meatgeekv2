@@ -41,6 +41,7 @@ const baseReading = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const baseRequest = (overrides: Partial<StartCookRequest> = {}): StartCookRequest => ({
+  id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
   name: 'Sunday Cook',
   deviceId: 'device-1',
   meatType: 'BRISKET',
