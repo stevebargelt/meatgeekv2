@@ -116,10 +116,10 @@ before doing any other work, so an unauthenticated caller triggers no body
 parse, no query, and no write.
 
 - **Point reads** address `(id, userId)` directly
-  (`cooks-repository.ts:154`, `getCook` / `readCookWithEtag`), routing the SDK to
+  (`cooks-repository.ts:213`, `getCook` / `readCookWithEtag`), routing the SDK to
   exactly one partition rather than a cross-partition scan filtered down to one
   document.
-- **`listCooksByUser`** (`cooks-repository.ts:270`) is a single-partition query —
+- **`listCooksByUser`** (`cooks-repository.ts:341`) is a single-partition query —
   both the `WHERE c.userId = @userId` predicate and the `partitionKey` option pin
   it to one partition — with a bounded page size (`clampPageSize`, default 20,
   hard cap 100) and continuation-token pagination. There is no offset parameter
@@ -129,7 +129,7 @@ parse, no query, and no write.
   [`mg-53-cosmos-shared-throughput-destination`](mg-53-cosmos-shared-throughput-destination.md));
   offset pagination would re-charge every skipped document against that shared
   pool.
-- **`stopCook`** (`cooks-repository.ts:213`) is read-then-replace with an
+- **`stopCook`** (`cooks-repository.ts:278`) is read-then-replace with an
   `If-Match` on the ETag the read returned. A 412 (another writer replaced the
   document between the read and the write) triggers a bounded re-read-and-retry
   (`STOP_COOK_MAX_ATTEMPTS = 3`); the re-read sees the now-`completed` document
@@ -218,8 +218,16 @@ the build if any non-allowlisted handler — the cooks handlers are deliberately
   after a timed-out-but-succeeded write creates a second `Cook` document with a
   new `id` (`cook-${Date.now()}`), not a no-op. MG-84 owns making the route
   idempotent.
-- **Responses currently include Cosmos system properties.** `createCook`,
-  `getCook`/`stopCook`, and `listCooksByUser` all return the Cosmos SDK's
-  `response.resource` (or query results) unprojected, so fields like `_rid`,
-  `_self`, `_etag`, and `_ts` reach the wire alongside the `Cook` shape. MG-85
-  owns projecting responses down to the `@meatgeekv2/api-interfaces` contract.
+- **Responses included Cosmos system properties — resolved by MG-85.** As
+  shipped, `createCook`, `getCook`/`stopCook`, and `listCooksByUser` returned the
+  Cosmos SDK's `response.resource` (or query results) unprojected, so `_rid`,
+  `_self`, `_etag`, `_attachments`, and `_ts` reached the HTTP bodies and the
+  SignalR envelopes. MG-85 projects every cook the repository returns through
+  `toCook` (`cooks-repository.ts`), an allow-list of `Cook` fields checked
+  against `keyof Cook` at compile time; `stopCook` still replaces the whole
+  stored document, so only the returned value is narrowed. The same change
+  replaced `CookListResponse`'s offset-era `total`/`offset` fields with an
+  optional `continuationToken`. The ETag is not exposed: no client route takes
+  `If-Match` yet, and the stop path's concurrency check is server-side. Entities
+  that move onto Cosmos later (MG-79..82) should map in their repository the
+  same way.

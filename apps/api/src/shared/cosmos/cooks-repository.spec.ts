@@ -455,6 +455,114 @@ describe('MG-59 cooks repository', () => {
     });
   });
 
+  describe('MG-85 — every returned cook is projected to the api-interfaces Cook shape', () => {
+    /** The document as Cosmos returns it: contract fields plus system properties
+     *  (and, for a migrated document, a field the contract does not model). */
+    function storedCook(overrides: Partial<Cook> = {}): Cook {
+      return {
+        ...sampleCook(overrides),
+        _rid: 'Zm9vAA==',
+        _self: 'dbs/Zm9vAA==/colls/Zm9vAA==/docs/Zm9vAA==/',
+        _etag: '"00000000-0000-0000-0000-000000000000"',
+        _attachments: 'attachments/',
+        _ts: 1790000000,
+        legacyField: 'not in the contract',
+      } as unknown as Cook;
+    }
+
+    it('toCook keeps every Cook field and drops everything else', () => {
+      const full: Cook = {
+        ...sampleCook(),
+        endTime: '2026-08-24T18:00:00Z',
+        weight: 14,
+        targetTemps: { grill: 250, probe1: 203 },
+        actualDuration: 12,
+        maxTemps: { grill: 270 },
+        notes: 'wrapped at 165',
+        photos: ['p1.jpg'],
+        rating: 5,
+        isPublic: false,
+      };
+      const stored = { ...storedCook(), ...full } as Cook;
+
+      expect(mod.toCook(stored)).toEqual(full);
+      // Absent optional fields stay absent — no undefined keys are introduced.
+      expect(Object.keys(mod.toCook(sampleCook()))).toEqual(Object.keys(sampleCook()));
+    });
+
+    it('createCook returns the projected cook', async () => {
+      const { container, staged } = fakeContainer();
+      staged.createResponse = { resource: storedCook(), requestCharge: 6 };
+      const repo = new mod.CooksRepository(container);
+
+      expect((await repo.createCook(sampleCook())).cook).toEqual(sampleCook());
+    });
+
+    it('getCook returns the projected cook', async () => {
+      const { container, staged } = fakeContainer();
+      staged.readResponse = { resource: storedCook(), statusCode: 200, requestCharge: 1 };
+      const repo = new mod.CooksRepository(container);
+
+      expect((await repo.getCook(USER_A, 'cook-1')).cook).toEqual(sampleCook());
+    });
+
+    it('stopCook replaces the whole stored document but returns the projected cook', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.readResponse = {
+        resource: storedCook(),
+        statusCode: 200,
+        requestCharge: 1,
+        etag: '"v1"',
+      };
+      staged.replaceResponse = {
+        resource: storedCook({ status: 'completed', endTime: '2026-08-24T18:00:00Z' }),
+        requestCharge: 5,
+      };
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.stopCook(USER_A, 'cook-1', '2026-08-24T18:00:00Z');
+
+      expect(result.cook).toEqual(
+        sampleCook({ status: 'completed', endTime: '2026-08-24T18:00:00Z' })
+      );
+      // The write is not narrowed: a stored field the contract does not model
+      // survives the replace.
+      expect(calls.replaces[0]).toHaveProperty('legacyField', 'not in the contract');
+    });
+
+    it('stopCook on an already-completed cook returns the projected cook', async () => {
+      const { container, staged } = fakeContainer();
+      staged.readResponse = {
+        resource: storedCook({ status: 'completed', endTime: '2026-08-24T18:00:00Z' }),
+        statusCode: 200,
+        requestCharge: 1,
+      };
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.stopCook(USER_A, 'cook-1', '2026-08-24T19:00:00Z');
+
+      expect(result.transitioned).toBe(false);
+      expect(result.cook).toEqual(
+        sampleCook({ status: 'completed', endTime: '2026-08-24T18:00:00Z' })
+      );
+    });
+
+    it('listCooksByUser returns projected cooks', async () => {
+      const { container, staged } = fakeContainer();
+      staged.queryResponse = {
+        resources: [storedCook(), storedCook({ id: 'cook-2' })],
+        hasMoreResults: false,
+        continuationToken: undefined,
+        requestCharge: 3,
+      };
+      const repo = new mod.CooksRepository(container);
+
+      const page = await repo.listCooksByUser(USER_A);
+
+      expect(page.cooks).toEqual([sampleCook(), sampleCook({ id: 'cook-2' })]);
+    });
+  });
+
   describe('sanitization', () => {
     it('the source leaks no account host, key vocabulary, or identity header', () => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires

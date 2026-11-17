@@ -71,17 +71,51 @@ function context(invocationId: string): {
   };
 }
 
+/**
+ * Cosmos stamps these system properties on every document it stores and returns
+ * them on every read, query, create and replace. The fake does the same so the
+ * flow proves they never reach a client (MG-85).
+ */
+let systemVersion = 0;
+function withSystemProperties<T extends Cook>(cook: T): T {
+  systemVersion += 1;
+  return {
+    ...cook,
+    _rid: 'Zm9vAA==',
+    _self: 'dbs/Zm9vAA==/colls/Zm9vAA==/docs/Zm9vAA==/',
+    _etag: `"etag-${systemVersion}"`,
+    _attachments: 'attachments/',
+    _ts: 1_790_000_000 + systemVersion,
+  };
+}
+
+/** Every key path in a JSON value whose final segment starts with `_`. */
+function underscoreKeyPaths(value: unknown, path = '$'): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => underscoreKeyPaths(item, `${path}[${index}]`));
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value).flatMap(([key, child]) => [
+      ...(key.startsWith('_') ? [`${path}.${key}`] : []),
+      ...underscoreKeyPaths(child, `${path}.${key}`),
+    ]);
+  }
+  return [];
+}
+
 /** A stateful, single-partition Cosmos Container contract for this test. */
 function containerContract() {
   const cooks = new Map<string, Cook>();
   const queryCalls: Array<{ partitionKey?: unknown; userId?: unknown }> = [];
+  const replaceBodies: unknown[] = [];
   const key = (id: string, userId: string) => `${userId}/${id}`;
 
   const container = {
     items: {
       create: async <T extends Cook>(cook: T) => {
-        cooks.set(key(cook.id, cook.userId), { ...cook });
-        return { resource: { ...cook }, requestCharge: 5 };
+        const stored = withSystemProperties(cook);
+        cooks.set(key(cook.id, cook.userId), stored);
+        return { resource: { ...stored }, requestCharge: 5 };
       },
       query: <T extends Cook>(
         querySpec: { parameters?: Array<{ name: string; value: unknown }> },
@@ -91,7 +125,8 @@ function containerContract() {
         queryCalls.push({ partitionKey: options.partitionKey, userId });
         const resources = [...cooks.values()]
           .filter(cook => cook.userId === userId && options.partitionKey === userId)
-          .sort((a, b) => b.startTime.localeCompare(a.startTime)) as T[];
+          .sort((a, b) => b.startTime.localeCompare(a.startTime))
+          .map(cook => ({ ...cook })) as T[];
         return {
           fetchNext: async () => ({
             resources,
@@ -104,17 +139,30 @@ function containerContract() {
     },
     item: (id: string, userId: string) => ({
       read: async <T extends Cook>() => {
-        const resource = cooks.get(key(id, userId)) as T | undefined;
-        return { resource, statusCode: resource ? 200 : 404, requestCharge: 1, etag: 'etag-1' };
+        const stored = cooks.get(key(id, userId)) as (T & { _etag?: string }) | undefined;
+        const resource = stored && { ...stored };
+        return {
+          resource,
+          statusCode: resource ? 200 : 404,
+          requestCharge: 1,
+          etag: resource?._etag,
+        };
       },
       replace: async <T extends Cook>(cook: T) => {
-        cooks.set(key(id, userId), { ...cook });
-        return { resource: { ...cook }, requestCharge: 4 };
+        replaceBodies.push({ ...cook });
+        const stored = withSystemProperties(cook);
+        cooks.set(key(id, userId), stored);
+        return { resource: { ...stored }, requestCharge: 4 };
       },
     }),
   };
 
-  return { repository: new CooksRepository(container as unknown as Container), cooks, queryCalls };
+  return {
+    repository: new CooksRepository(container as unknown as Container),
+    cooks,
+    queryCalls,
+    replaceBodies,
+  };
 }
 
 describe('MG-59 cooks persistence flow', () => {
@@ -198,5 +246,58 @@ describe('MG-59 cooks persistence flow', () => {
     expect(store.cooks.get(`tenant-owner:owner-oid/${created.id}`)).toMatchObject({
       status: 'active',
     });
+  });
+
+  it('MG-85: no Cosmos system property reaches any cooks response body or SignalR envelope', async () => {
+    const store = containerContract();
+    const startContext = context('start-request');
+    const started = await startCookHandler(
+      request({
+        identity: OWNER,
+        body: { name: 'Pork butt', deviceId: 'grill-9', meatType: 'pork' },
+      }),
+      startContext.context,
+      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+    );
+    const created = started.jsonBody as Cook;
+    // The store really does carry the system properties the responses must not.
+    expect(store.cooks.get(`tenant-owner:owner-oid/${created.id}`)).toHaveProperty('_rid');
+
+    const listed = await getCooksHandler(request({ identity: OWNER }), context('list').context, {
+      getRepository: () => store.repository,
+    });
+    const stopContext = context('stop-request');
+    const stopped = await stopCookHandler(
+      request({ identity: OWNER, params: { cookId: created.id } }),
+      stopContext.context,
+      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+    );
+    const stoppedAgain = await stopCookHandler(
+      request({ identity: OWNER, params: { cookId: created.id } }),
+      context('stop-again').context,
+      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+    );
+
+    expect([started.status, listed.status, stopped.status, stoppedAgain.status]).toEqual([
+      201, 200, 200, 200,
+    ]);
+    for (const body of [
+      started.jsonBody,
+      listed.jsonBody,
+      stopped.jsonBody,
+      stoppedAgain.jsonBody,
+    ]) {
+      expect(underscoreKeyPaths(body)).toEqual([]);
+    }
+    expect(underscoreKeyPaths(startContext.messages())).toEqual([]);
+    expect(underscoreKeyPaths(stopContext.messages())).toEqual([]);
+
+    // The list body is exactly the continuation-token contract: no total/offset.
+    expect(Object.keys(listed.jsonBody as object).sort()).toEqual(['cooks', 'hasMore', 'limit']);
+
+    // The stop still replaced the WHOLE stored document under its ETag; only the
+    // response was projected.
+    expect(store.replaceBodies).toHaveLength(1);
+    expect(store.replaceBodies[0]).toHaveProperty('_rid');
   });
 });

@@ -4,6 +4,65 @@ import type { Cook } from '@meatgeekv2/api-interfaces';
 import { getCosmosAdapter } from './cosmos-adapter';
 
 /**
+ * MG-85 — the ONE place a stored cooks document becomes an api-interfaces
+ * {@link Cook}.
+ *
+ * Cosmos stamps every document it returns with system properties (`_rid`,
+ * `_self`, `_etag`, `_attachments`, `_ts`). They are not part of the Cook
+ * contract and `_rid`/`_self` expose internal Cosmos resource ids, so nothing
+ * the repository hands back may carry them — not the HTTP bodies, and not the
+ * SignalR envelopes built from the same cook.
+ *
+ * This is an ALLOW-list, not a strip-underscores deny-list: a field reaches a
+ * caller only because the contract names it. The list is checked against
+ * `keyof Cook` at compile time in both directions, so a field added to the
+ * contract fails the type-check here until it is mapped.
+ */
+const COOK_FIELDS = [
+  'id',
+  'userId',
+  'deviceId',
+  'name',
+  'status',
+  'startTime',
+  'endTime',
+  'meatType',
+  'weight',
+  'targetTemps',
+  'actualDuration',
+  'maxTemps',
+  'notes',
+  'photos',
+  'rating',
+  'isPublic',
+] as const satisfies readonly (keyof Cook)[];
+
+type UnmappedCookField = Exclude<keyof Cook, (typeof COOK_FIELDS)[number]>;
+/** Compile-time guard: fails if the Cook contract gains a field not listed above. */
+const cookFieldsAreExhaustive: [UnmappedCookField] extends [never] ? true : never = true;
+void cookFieldsAreExhaustive;
+
+/** A cooks document as Cosmos returns it: the Cook fields PLUS whatever system
+ *  (or legacy) properties the store carries at runtime, which the static type
+ *  cannot see. Never returned to a caller without going through {@link toCook}. */
+type StoredCook = Cook;
+
+/**
+ * Projects a stored document onto the api-interfaces Cook shape. Absent fields
+ * stay absent (no `undefined` keys are introduced).
+ */
+export function toCook(document: StoredCook): Cook {
+  const source = document as unknown as Record<string, unknown>;
+  const cook: Record<string, unknown> = {};
+  for (const field of COOK_FIELDS) {
+    if (source[field] !== undefined) {
+      cook[field] = source[field];
+    }
+  }
+  return cook as unknown as Cook;
+}
+
+/**
  * MG-59 — the cooks data-access layer, built on the ONE shared Cosmos adapter.
  *
  * The deployed cooks container is partitioned on `/userId` (see
@@ -138,9 +197,9 @@ export class CooksRepository {
    * list below rely on. Returns the stored cook and the write's RU charge.
    */
   async createCook(cook: Cook): Promise<CookResult> {
-    const response: ItemResponse<Cook> = await this.container.items.create<Cook>(cook);
+    const response: ItemResponse<StoredCook> = await this.container.items.create<StoredCook>(cook);
     return {
-      cook: response.resource ?? cook,
+      cook: toCook(response.resource ?? cook),
       requestCharge: response.requestCharge,
     };
   }
@@ -152,8 +211,8 @@ export class CooksRepository {
    * `cook` comes back `undefined`, not an error.
    */
   async getCook(userId: string, id: string): Promise<CookResult> {
-    const { cook, requestCharge } = await this.readCookWithEtag(userId, id);
-    return { cook, requestCharge };
+    const { document, requestCharge } = await this.readCookWithEtag(userId, id);
+    return { cook: document && toCook(document), requestCharge };
   }
 
   /**
@@ -161,28 +220,34 @@ export class CooksRepository {
    * optimistic-concurrency (If-Match) write against the exact version it read.
    * The ETag is Cosmos' per-document version token; it is opaque and carries no
    * account/database/container/identity text, so it is safe to hold and pass to a
-   * conditional replace. A 404 (absent in the partition) yields `cook: undefined`
-   * and no ETag — a miss, not a throw.
+   * conditional replace. A 404 (absent in the partition) yields `document:
+   * undefined` and no ETag — a miss, not a throw.
+   *
+   * Returns the RAW stored document (system properties included) because
+   * stopCook replaces the whole document and must not drop stored fields it does
+   * not model; public methods map it through {@link toCook} before returning.
    */
   private async readCookWithEtag(
     userId: string,
     id: string
-  ): Promise<{ cook: Cook | undefined; etag?: string; requestCharge: number }> {
+  ): Promise<{ document: StoredCook | undefined; etag?: string; requestCharge: number }> {
     try {
-      const response: ItemResponse<Cook> = await this.container.item(id, userId).read<Cook>();
+      const response: ItemResponse<StoredCook> = await this.container
+        .item(id, userId)
+        .read<StoredCook>();
       // v4 returns 404 with an undefined resource rather than throwing; treat a
       // 404 status the same as a missing resource.
       if (response.statusCode === 404 || response.resource === undefined) {
-        return { cook: undefined, requestCharge: response.requestCharge };
+        return { document: undefined, requestCharge: response.requestCharge };
       }
       return {
-        cook: response.resource,
+        document: response.resource,
         etag: response.etag,
         requestCharge: response.requestCharge,
       };
     } catch (error) {
       if (statusCodeOf(error) === 404) {
-        return { cook: undefined, requestCharge: 0 };
+        return { document: undefined, requestCharge: 0 };
       }
       throw error;
     }
@@ -218,7 +283,7 @@ export class CooksRepository {
       requestCharge += existing.requestCharge;
 
       // Absent in this partition — a miss. No write, no cross-partition fallback.
-      if (!existing.cook) {
+      if (!existing.document) {
         return { cook: undefined, requestCharge, transitioned: false };
       }
 
@@ -226,22 +291,28 @@ export class CooksRepository {
       // the race) is returned as-is. This is what makes two concurrent stops
       // converge on the winner's endTime instead of the last write silently
       // overwriting it.
-      if (existing.cook.status === 'completed') {
-        return { cook: existing.cook, requestCharge, transitioned: false };
+      if (existing.document.status === 'completed') {
+        return { cook: toCook(existing.document), requestCharge, transitioned: false };
       }
 
-      const stopped: Cook = {
-        ...existing.cook,
+      // Replace the WHOLE stored document (unmodelled stored fields survive the
+      // write); only the value returned to the caller is projected to Cook.
+      const stopped: StoredCook = {
+        ...existing.document,
         status: 'completed',
         endTime,
       };
 
       try {
-        const response: ItemResponse<Cook> = await this.container
+        const response: ItemResponse<StoredCook> = await this.container
           .item(id, userId)
-          .replace<Cook>(stopped, ifMatch(existing.etag));
+          .replace<StoredCook>(stopped, ifMatch(existing.etag));
         requestCharge += response.requestCharge;
-        return { cook: response.resource ?? stopped, requestCharge, transitioned: true };
+        return {
+          cook: toCook(response.resource ?? stopped),
+          requestCharge,
+          transitioned: true,
+        };
       } catch (error) {
         // 412 = another writer replaced the document between our read and write.
         // Re-read and retry within the budget; on the final attempt (or any other
@@ -270,7 +341,7 @@ export class CooksRepository {
   async listCooksByUser(userId: string, options: ListCooksOptions = {}): Promise<CookPage> {
     const maxItemCount = clampPageSize(options.maxItemCount);
 
-    const iterator = this.container.items.query<Cook>(
+    const iterator = this.container.items.query<StoredCook>(
       {
         query: 'SELECT * FROM c WHERE c.userId = @userId ORDER BY c.startTime DESC',
         parameters: [{ name: '@userId', value: userId }],
@@ -285,7 +356,7 @@ export class CooksRepository {
     const response = await iterator.fetchNext();
 
     return {
-      cooks: response.resources,
+      cooks: response.resources.map(toCook),
       continuationToken: response.hasMoreResults ? response.continuationToken : undefined,
       requestCharge: response.requestCharge,
     };

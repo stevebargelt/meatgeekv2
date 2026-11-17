@@ -40,28 +40,40 @@ function nextCookId(): string {
   return `cook-${Date.now()}-${counter}`;
 }
 
-function paginate<T>(items: T[], offset: number, limit: number): T[] {
-  return items.slice(offset, offset + limit);
+/**
+ * The mock's continuation token: an opaque-to-clients encoding of the next
+ * start index. Clients must echo it unchanged, exactly as with the real API's
+ * Cosmos token, so they never learn to compute an offset.
+ */
+function encodeContinuation(nextIndex: number): string {
+  return Buffer.from(`mock:${nextIndex}`, 'utf8').toString('base64url');
+}
+
+function decodeContinuation(token: string | undefined): number {
+  if (!token) return 0;
+  const match = /^mock:(\d+)$/.exec(Buffer.from(token, 'base64url').toString('utf8'));
+  return match ? Number(match[1]) : 0;
 }
 
 function listCooks(req: Request, res: Response): void {
   const userId = (req.query['userId'] as string) || undefined;
   const status = (req.query['status'] as Cook['status']) || undefined;
-  const limit = req.query['limit'] !== undefined ? Number(req.query['limit']) : 20;
-  const offset = req.query['offset'] !== undefined ? Number(req.query['offset']) : 0;
+  // Same clamp as the deployed API (MAX_PAGE_SIZE = 100).
+  const limit = Math.min(req.query['limit'] !== undefined ? Number(req.query['limit']) : 20, 100);
+  const start = decodeContinuation(req.query['continuationToken'] as string | undefined);
 
   let filtered = cookStore;
   if (userId) filtered = filtered.filter((c) => c.userId === userId);
   if (status) filtered = filtered.filter((c) => c.status === status);
 
-  const page = paginate(filtered, offset, limit);
+  const page = filtered.slice(start, start + limit);
+  const next = start + page.length;
   const body: CookListResponse = {
     cooks: page,
-    total: filtered.length,
-    offset,
     limit,
-    hasMore: offset + page.length < filtered.length,
+    hasMore: next < filtered.length,
   };
+  if (body.hasMore) body.continuationToken = encodeContinuation(next);
   res.status(200).json(body);
 }
 

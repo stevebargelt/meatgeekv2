@@ -30,14 +30,12 @@ import {
  * back to the repository; the client advances by echoing it, not by an offset.
  *
  * RESPONSE SHAPE
- * The wire body extends the api-interfaces {@link CookListResponse}. That
- * interface predates persistence and carries offset-era fields (`total`,
- * `offset`) that a single-partition continuation query cannot cheaply compute — a
- * true `total` would require a separate COUNT that charges the shared pool. So
- * `hasMore` + `continuationToken` are the AUTHORITATIVE pagination signals here;
- * `total` reports the current page's size and `offset` is a fixed 0 retained only
- * for wire compatibility. Reconciling that interface is out of scope for MG-59
- * (cooks-only; no api-interfaces edits).
+ * The wire body is exactly the api-interfaces {@link CookListResponse}:
+ * `cooks`, `limit`, `hasMore` and — when `hasMore` — the opaque
+ * `continuationToken`. There is no `total` (an exact count would need a separate
+ * COUNT that charges the shared pool) and no `offset` (MG-85). Each cook is
+ * already projected to the Cook contract by the repository, so no Cosmos system
+ * property (`_rid`, `_self`, `_etag`, ...) reaches the body.
  *
  * SANITIZED FAILURES
  * A dependency failure returns a fixed 500 shape with a request id and nothing
@@ -46,20 +44,9 @@ import {
  * shared-throughput budget, never alongside the principal's identity.
  */
 
-/** The continuation-model body this route returns. Extends the api-interfaces
- *  contract (not a re-declaration of it) with the opaque next-page token. */
-export interface PaginatedCookListResponse extends CookListResponse {
-  /** Opaque token for the next page, or absent when the partition is drained.
-   *  NEVER an offset. */
-  continuationToken?: string;
-}
-
-/** The recognised pagination inputs. `limit` is the api-interfaces field; the
- *  continuation token is this route's cursor. A caller-supplied `userId` is
- *  deliberately NOT part of this shape — identity is never taken from the query. */
-type ListCooksQuery = Pick<ListCooksRequest, 'limit'> & {
-  continuationToken?: string;
-};
+/** The recognised pagination inputs. A caller-supplied `userId` is deliberately
+ *  NOT part of this shape — identity is never taken from the query. */
+type ListCooksQuery = Pick<ListCooksRequest, 'limit' | 'continuationToken'>;
 
 /** Mirrors the repository's clamp so the reported `limit` matches the page the
  *  repository actually served. Kept local rather than exported from the
@@ -119,16 +106,14 @@ export async function getCooksHandler(
     // 400 RU/s budget. The principal's identity is deliberately NOT logged.
     context.log(`getCooks completed: requestCharge=${page.requestCharge} returned=${cooks.length}`);
 
-    const response: PaginatedCookListResponse = {
+    const response: CookListResponse = {
       cooks,
-      // Offset-era fields the single-partition continuation model cannot cheaply
-      // fill; see the module comment. hasMore + continuationToken are authoritative.
-      total: cooks.length,
-      offset: 0,
       limit: effectivePageSize(query.limit),
       hasMore: page.continuationToken !== undefined,
-      continuationToken: page.continuationToken,
     };
+    if (page.continuationToken !== undefined) {
+      response.continuationToken = page.continuationToken;
+    }
 
     return {
       status: 200,
