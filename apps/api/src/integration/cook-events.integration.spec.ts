@@ -131,6 +131,8 @@ function mockContext(connectionInfo?: unknown): CapturingContext {
 }
 
 const VALID_START = {
+  // MG-84: the client supplies the cook id (a UUID) on every start.
+  id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
   name: 'Weekend Brisket',
   deviceId: 'meatgeek3',
   meatType: 'brisket',
@@ -162,7 +164,7 @@ function startDeps() {
     resolvePrincipal: () => AUTHED_PRINCIPAL,
     getRepository: () => ({
       // Persist = echo back the document the handler built (what Cosmos returns).
-      createCook: async (cook: Cook) => ({ cook, requestCharge: 1 }),
+      startCook: async (cook: Cook) => ({ outcome: 'created' as const, cook, requestCharge: 1 }),
     }),
   };
 }
@@ -331,7 +333,7 @@ describe('POST /cooks (startCook) — cook_started producer', () => {
     const unauthDeps = {
       resolvePrincipal: () => ({ authenticated: false as const, reason: 'principal_header_missing' as const }),
       getRepository: () => ({
-        createCook: async () => {
+        startCook: async () => {
           throw new Error('must not be called when unauthenticated');
         },
       }),

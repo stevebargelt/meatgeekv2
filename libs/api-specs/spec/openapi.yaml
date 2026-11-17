@@ -83,6 +83,8 @@ components:
       $ref: './components/schemas/common.yaml#/ErrorCode'
     ErrorResponse:
       $ref: './components/schemas/common.yaml#/ErrorResponse'
+    CookAlreadyActiveError:
+      $ref: './components/schemas/common.yaml#/CookAlreadyActiveError'
     Pagination:
       $ref: './components/schemas/common.yaml#/Pagination'
     TemperatureUnit:

@@ -59,6 +59,7 @@ function fakeContainer() {
     replaces: [] as Cook[],
     replaceOptions: [] as unknown[],
     creates: [] as Cook[],
+    batches: [] as Array<{ operations: Array<Record<string, unknown>>; partitionKey: unknown }>,
     queries: [] as Array<{
       spec: unknown;
       options: {
@@ -90,6 +91,12 @@ function fakeContainer() {
     // A sequence of errors, consumed one per replace() call; a truthy entry is
     // thrown (used to model a 412 Precondition Failed from a lost If-Match race).
     replaceErrors: [] as unknown[],
+    // MG-84 device locks, keyed by lock id. Reads of an `active-device:` id are
+    // answered from here (404 when absent) and never consume readResponses.
+    locks: new Map<string, { resource: Record<string, unknown>; etag?: string }>(),
+    // A sequence of per-operation batch results, consumed one per batch() call.
+    // When empty, every operation succeeds and echoes its body.
+    batchResults: [] as Array<Array<{ statusCode: number; requestCharge?: number }>>,
     queryResponse: {
       resources: [] as Cook[],
       hasMoreResults: false,
@@ -104,6 +111,15 @@ function fakeContainer() {
       read: async <T>() => {
         calls.reads += 1;
         if (staged.readError) throw staged.readError;
+        if (id.startsWith('active-device:')) {
+          const lock = staged.locks.get(id);
+          return {
+            resource: lock?.resource as T | undefined,
+            statusCode: lock ? 200 : 404,
+            etag: lock?.etag,
+            requestCharge: 1,
+          };
+        }
         const r =
           staged.readResponses.length > 0
             ? staged.readResponses.shift()!
@@ -133,6 +149,22 @@ function fakeContainer() {
       calls.creates.push(body);
       const r = staged.createResponse ?? { resource: body, requestCharge: 7 };
       return { resource: (r.resource ?? body) as T, requestCharge: r.requestCharge ?? 7 };
+    },
+    batch: async (operations: Array<Record<string, unknown>>, partitionKey: unknown) => {
+      calls.batches.push({ operations, partitionKey });
+      const staged_ = staged.batchResults.shift();
+      const result = operations.map((operation, index) => {
+        const statusCode =
+          staged_?.[index]?.statusCode ?? (operation['operationType'] === 'Create' ? 201 : 200);
+        const ok = statusCode >= 200 && statusCode <= 299;
+        return {
+          statusCode,
+          requestCharge: staged_?.[index]?.requestCharge ?? (ok ? 6 : 1),
+          resourceBody: ok ? operation['resourceBody'] : undefined,
+        };
+      });
+      const failed = result.some(({ statusCode }) => statusCode < 200 || statusCode > 299);
+      return { code: failed ? 207 : 200, result };
     },
     query: <T>(spec: unknown, options: (typeof calls.queries)[number]['options']) => {
       calls.queries.push({ spec, options });
@@ -174,20 +206,131 @@ describe('MG-59 cooks repository', () => {
     jest.resetModules();
   });
 
-  describe('createCook — write addressed by the /userId partition', () => {
-    it('creates the document (partition value = the cook userId) and returns the RU charge', async () => {
-      const { container, calls, staged } = fakeContainer();
-      staged.createResponse = { resource: sampleCook(), requestCharge: 6.29 };
+  describe('MG-84 startCook — cook and device lock in one transactional batch', () => {
+    const COOK_ID = '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d';
+    const LOCK_ID = 'active-device:meatgeek3';
+    const newCook = () => sampleCook({ id: COOK_ID });
+    const lockFor = (cookId: string) => ({
+      id: LOCK_ID,
+      userId: USER_A,
+      docType: 'activeDeviceLock',
+      deviceId: 'meatgeek3',
+      cookId,
+    });
+
+    it('creates the cook and the device lock in one batch in the caller partition', async () => {
+      const { container, calls } = fakeContainer();
       const repo = new mod.CooksRepository(container);
 
-      const result = await repo.createCook(sampleCook());
+      const result = await repo.startCook(newCook());
 
-      expect(calls.creates).toHaveLength(1);
-      expect(calls.creates[0].userId).toBe(USER_A);
-      expect(result.cook?.userId).toBe(USER_A);
-      expect(result.requestCharge).toBe(6.29);
-      // No cross-partition read path was touched.
+      expect(calls.batches).toHaveLength(1);
+      expect(calls.batches[0].partitionKey).toBe(USER_A);
+      expect(calls.batches[0].operations).toEqual([
+        { operationType: 'Create', resourceBody: newCook() },
+        { operationType: 'Create', resourceBody: lockFor(COOK_ID) },
+      ]);
+      expect(result).toEqual({ outcome: 'created', cook: newCook(), requestCharge: 12 });
+      expect(mod.activeDeviceLockId('meatgeek3')).toBe(LOCK_ID);
+      // Characters Cosmos forbids in an id are encoded.
+      expect(mod.activeDeviceLockId('rack/1?#\\')).toBe('active-device:rack%2F1%3F%23%5C');
+      // No single-document create bypasses the lock.
+      expect(calls.creates).toHaveLength(0);
       expect(calls.readAll).toBe(0);
+    });
+
+    it('a 409 on the cook (retry or concurrent duplicate) is a replay of the stored cook — no second batch', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.batchResults = [[{ statusCode: 409 }, { statusCode: 424 }]];
+      staged.readResponse = { resource: newCook(), statusCode: 200, requestCharge: 1 };
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.startCook(newCook());
+
+      expect(result.outcome).toBe('replayed');
+      expect(result.outcome === 'replayed' && result.cook).toEqual(newCook());
+      expect(calls.batches).toHaveLength(1);
+      expect(calls.itemAddresses).toEqual([{ id: COOK_ID, partitionKey: USER_A }]);
+    });
+
+    it('a device held by a non-terminal cook is busy — reports the holder and writes nothing more', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.batchResults = [[{ statusCode: 424 }, { statusCode: 409 }]];
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-0'), etag: 'lock-v1' });
+      staged.readResponse = {
+        resource: sampleCook({ id: 'cook-0', status: 'paused' }),
+        statusCode: 200,
+      };
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.startCook(newCook());
+
+      expect(result).toEqual({ outcome: 'deviceBusy', activeCookId: 'cook-0', requestCharge: 4 });
+      expect(calls.batches).toHaveLength(1);
+    });
+
+    it.each([
+      ['completed', { resource: sampleCook({ id: 'cook-0', status: 'completed' }) }],
+      ['cancelled', { resource: sampleCook({ id: 'cook-0', status: 'cancelled' }) }],
+      ['missing', { resource: undefined, statusCode: 404 }],
+    ])(
+      'a stale lock (holder %s) is taken over under If-Match on the lock version read',
+      async (_label, holderRead) => {
+        const { container, calls, staged } = fakeContainer();
+        staged.batchResults = [[{ statusCode: 424 }, { statusCode: 409 }]];
+        staged.locks.set(LOCK_ID, { resource: lockFor('cook-0'), etag: 'lock-v1' });
+        staged.readResponse = holderRead;
+        const repo = new mod.CooksRepository(container);
+
+        const result = await repo.startCook(newCook());
+
+        expect(result.outcome).toBe('created');
+        expect(calls.batches).toHaveLength(2);
+        expect(calls.batches[1].operations[1]).toEqual({
+          operationType: 'Replace',
+          id: LOCK_ID,
+          resourceBody: lockFor(COOK_ID),
+          ifMatch: 'lock-v1',
+        });
+      }
+    );
+
+    it('a lock that vanished between the batch and the read is created on the next batch', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.batchResults = [[{ statusCode: 424 }, { statusCode: 409 }]];
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.startCook(newCook());
+
+      expect(result.outcome).toBe('created');
+      expect(calls.batches).toHaveLength(2);
+      expect(calls.batches[1].operations[1]).toEqual({
+        operationType: 'Create',
+        resourceBody: lockFor(COOK_ID),
+      });
+    });
+
+    it('a lock that keeps changing under us is bounded and propagates the status', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.batchResults = Array.from({ length: mod.START_COOK_MAX_ATTEMPTS }, () => [
+        { statusCode: 424 },
+        { statusCode: 412 },
+      ]);
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-0'), etag: 'lock-v1' });
+      staged.readResponse = { resource: undefined, statusCode: 404 };
+      const repo = new mod.CooksRepository(container);
+
+      await expect(repo.startCook(newCook())).rejects.toMatchObject({ statusCode: 412 });
+      expect(calls.batches).toHaveLength(mod.START_COOK_MAX_ATTEMPTS);
+    });
+
+    it('any other batch failure propagates without a retry (the handler sanitises it)', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.batchResults = [[{ statusCode: 429 }, { statusCode: 424 }]];
+      const repo = new mod.CooksRepository(container);
+
+      await expect(repo.startCook(newCook())).rejects.toMatchObject({ statusCode: 429 });
+      expect(calls.batches).toHaveLength(1);
     });
   });
 
@@ -255,9 +398,11 @@ describe('MG-59 cooks repository', () => {
 
       const result = await repo.stopCook(USER_A, 'cook-1', '2026-08-24T20:00:00Z');
 
-      // Both the read and the replace addressed the same single partition.
+      // The read, the device-lock read (MG-84) and the replace all addressed the
+      // same single partition.
       expect(calls.itemAddresses).toEqual([
         { id: 'cook-1', partitionKey: USER_A },
+        { id: 'active-device:meatgeek3', partitionKey: USER_A },
         { id: 'cook-1', partitionKey: USER_A },
       ]);
       expect(calls.replaces).toHaveLength(1);
@@ -266,8 +411,8 @@ describe('MG-59 cooks repository', () => {
       expect(calls.replaces[0].userId).toBe(USER_A);
       expect(result.cook?.status).toBe('completed');
       expect(result.transitioned).toBe(true);
-      // RU sums read + write.
-      expect(result.requestCharge).toBeCloseTo(6.5);
+      // RU sums read + lock read + write.
+      expect(result.requestCharge).toBeCloseTo(7.5);
     });
 
     it('a cook absent in the caller partition is a 404 miss — no write is issued', async () => {
@@ -349,8 +494,9 @@ describe('MG-59 cooks repository', () => {
       expect(result.cook?.endTime).toBe(winnerEndTime);
       // The loser performed no transition, so it must not announce one.
       expect(result.transitioned).toBe(false);
-      // RU sums both reads (the failed write threw before charging).
-      expect(result.requestCharge).toBeCloseTo(2.3);
+      // RU sums both reads and the one lock read (the failed write threw before
+      // charging; the second attempt stopped at the completed guard).
+      expect(result.requestCharge).toBeCloseTo(3.3);
     });
 
     it('sustained write contention (repeated 412) is bounded and propagates for the handler to sanitise', async () => {
@@ -370,6 +516,93 @@ describe('MG-59 cooks repository', () => {
 
       await expect(repo.stopCook(USER_A, 'cook-1', '2026-08-24T20:00:00Z')).rejects.toBeDefined();
       expect(calls.replaces).toHaveLength(mod.STOP_COOK_MAX_ATTEMPTS);
+    });
+  });
+
+  describe('MG-84 stopCook — releases the device lock with the stop', () => {
+    const LOCK_ID = 'active-device:meatgeek3';
+    const lockFor = (cookId: string) => ({
+      id: LOCK_ID,
+      userId: USER_A,
+      docType: 'activeDeviceLock',
+      deviceId: 'meatgeek3',
+      cookId,
+    });
+
+    it('a cook holding its lock is stopped and the lock deleted in one batch, under If-Match', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.readResponse = { resource: sampleCook(), statusCode: 200, etag: 'etag-v1' };
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-1'), etag: 'lock-v1' });
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.stopCook(USER_A, 'cook-1', '2026-08-24T20:00:00Z');
+
+      expect(calls.replaces).toHaveLength(0);
+      expect(calls.batches).toEqual([
+        {
+          partitionKey: USER_A,
+          operations: [
+            {
+              operationType: 'Replace',
+              id: 'cook-1',
+              resourceBody: sampleCook({ status: 'completed', endTime: '2026-08-24T20:00:00Z' }),
+              ifMatch: 'etag-v1',
+            },
+            { operationType: 'Delete', id: LOCK_ID },
+          ],
+        },
+      ]);
+      expect(result.transitioned).toBe(true);
+      expect(result.cook).toEqual(
+        sampleCook({ status: 'completed', endTime: '2026-08-24T20:00:00Z' })
+      );
+    });
+
+    it('a lock held by a different cook is left alone (plain conditional replace)', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.readResponse = { resource: sampleCook(), statusCode: 200, etag: 'etag-v1' };
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-other'), etag: 'lock-v1' });
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.stopCook(USER_A, 'cook-1', '2026-08-24T20:00:00Z');
+
+      expect(calls.batches).toHaveLength(0);
+      expect(calls.replaces).toHaveLength(1);
+      expect(result.transitioned).toBe(true);
+    });
+
+    it('a concurrent stop (412 in the batch) re-reads and returns the winner without a second transition', async () => {
+      const { container, calls, staged } = fakeContainer();
+      const winnerEndTime = '2026-08-24T20:00:00Z';
+      staged.readResponses = [
+        { resource: sampleCook(), statusCode: 200, etag: 'etag-v1' },
+        {
+          resource: sampleCook({ status: 'completed', endTime: winnerEndTime }),
+          statusCode: 200,
+          etag: 'etag-v2',
+        },
+      ];
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-1'), etag: 'lock-v1' });
+      staged.batchResults = [[{ statusCode: 412 }, { statusCode: 424 }]];
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.stopCook(USER_A, 'cook-1', '2026-08-24T21:00:00Z');
+
+      expect(calls.batches).toHaveLength(1);
+      expect(result.transitioned).toBe(false);
+      expect(result.cook?.endTime).toBe(winnerEndTime);
+    });
+
+    it('a non-retryable batch failure propagates for the handler to sanitise', async () => {
+      const { container, staged } = fakeContainer();
+      staged.readResponse = { resource: sampleCook(), statusCode: 200, etag: 'etag-v1' };
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-1'), etag: 'lock-v1' });
+      staged.batchResults = [[{ statusCode: 429 }, { statusCode: 424 }]];
+      const repo = new mod.CooksRepository(container);
+
+      await expect(repo.stopCook(USER_A, 'cook-1', '2026-08-24T20:00:00Z')).rejects.toMatchObject({
+        statusCode: 429,
+      });
     });
   });
 
@@ -395,6 +628,8 @@ describe('MG-59 cooks repository', () => {
       expect((spec as { parameters: Array<{ name: string; value: unknown }> }).parameters).toEqual([
         { name: '@userId', value: USER_A },
       ]);
+      // MG-84: device lock documents share the partition and are never listed.
+      expect((spec as { query: string }).query).toContain('NOT IS_DEFINED(c.docType)');
       // Continuation token, not an offset, drives the next page.
       expect(page.continuationToken).toBe('ct-next');
       expect(options).not.toHaveProperty('offset');
@@ -490,12 +725,20 @@ describe('MG-59 cooks repository', () => {
       expect(Object.keys(mod.toCook(sampleCook()))).toEqual(Object.keys(sampleCook()));
     });
 
-    it('createCook returns the projected cook', async () => {
+    it('startCook returns the projected cook, created or replayed', async () => {
       const { container, staged } = fakeContainer();
-      staged.createResponse = { resource: storedCook(), requestCharge: 6 };
+      staged.batchResults = [
+        [{ statusCode: 201 }, { statusCode: 201 }],
+        [{ statusCode: 409 }, { statusCode: 424 }],
+      ];
+      staged.readResponse = { resource: storedCook(), statusCode: 200, requestCharge: 1 };
       const repo = new mod.CooksRepository(container);
 
-      expect((await repo.createCook(sampleCook())).cook).toEqual(sampleCook());
+      const created = await repo.startCook(storedCook());
+      const replayed = await repo.startCook(storedCook());
+
+      expect(created.outcome === 'created' && created.cook).toEqual(sampleCook());
+      expect(replayed.outcome === 'replayed' && replayed.cook).toEqual(sampleCook());
     });
 
     it('getCook returns the projected cook', async () => {

@@ -14,6 +14,8 @@ import { MOCK_USER_ID } from '../mock-data';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const request: typeof import('supertest') = require('supertest');
 
+const NEW_COOK_ID = '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d';
+
 describe('mock-server', () => {
   let app: Express;
 
@@ -90,8 +92,10 @@ describe('mock-server', () => {
       .post('/cooks')
       .set('Content-Type', 'application/json')
       .send({
+        id: NEW_COOK_ID,
         name: 'Tri-Tip Reverse Sear',
-        deviceId: 'meatgeek3',
+        // meatgeek3 already has an active fixture cook; one active cook per device.
+        deviceId: 'meatgeek4',
         meatType: 'beef',
         weight: 2.5,
         targetTemps: { grill: 250, probe1: 130 },
@@ -102,21 +106,21 @@ describe('mock-server', () => {
       expect.objectContaining({
         id: expect.any(String),
         userId: MOCK_USER_ID,
-        deviceId: 'meatgeek3',
+        deviceId: 'meatgeek4',
         name: 'Tri-Tip Reverse Sear',
         status: 'active',
         startTime: expect.any(String),
         meatType: 'beef',
       }),
     );
-    expect(res.body.id).toMatch(/^cook-/);
+    expect(res.body.id).toBe(NEW_COOK_ID);
   });
 
   test('(d) POST /cooks with missing meatType returns 400 with VALIDATION_ERROR envelope', async () => {
     const res = await request(app)
       .post('/cooks')
       .set('Content-Type', 'application/json')
-      .send({ name: 'Half-formed Cook', deviceId: 'meatgeek3' });
+      .send({ id: NEW_COOK_ID, name: 'Half-formed Cook', deviceId: 'meatgeek3' });
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
       expect.objectContaining({
@@ -145,6 +149,56 @@ describe('mock-server', () => {
       expect(grill).toBeGreaterThanOrEqual(200);
       expect(grill).toBeLessThanOrEqual(300);
     }
+  });
+
+  describe('MG-84 POST /cooks retry contract', () => {
+    const start = (body: Record<string, unknown>) =>
+      request(app).post('/cooks').set('Content-Type', 'application/json').send(body);
+    const brisket = {
+      id: NEW_COOK_ID,
+      name: 'Retry Brisket',
+      deviceId: 'meatgeek4',
+      meatType: 'brisket',
+      targetTemps: { grill: 225, probe1: 203 },
+    };
+
+    test('a retry returns 200 with the original cook and stores one cook', async () => {
+      const first = await start(brisket);
+      const retry = await start(brisket);
+
+      expect(first.status).toBe(201);
+      expect(retry.status).toBe(200);
+      expect(retry.body).toEqual(first.body);
+      const all = await request(app).get('/cooks').query({ limit: 100 });
+      expect(all.body.cooks.filter((c: { id: string }) => c.id === NEW_COOK_ID)).toHaveLength(1);
+    });
+
+    test('the same id with a different body returns 422 COOK_ID_REUSED', async () => {
+      await start(brisket);
+      const reuse = await start({ ...brisket, name: 'Different Brisket' });
+
+      expect(reuse.status).toBe(422);
+      expect(reuse.body.error).toBe('COOK_ID_REUSED');
+    });
+
+    test('a second cook on a busy device returns 409 COOK_ALREADY_ACTIVE with the active cook id', async () => {
+      const busy = await start({ ...brisket, deviceId: 'meatgeek3' });
+
+      expect(busy.status).toBe(409);
+      expect(busy.body).toEqual({
+        error: 'COOK_ALREADY_ACTIVE',
+        message: expect.any(String),
+        requestId: expect.any(String),
+        activeCookId: 'cook-active-001',
+      });
+    });
+
+    test('a missing or non-UUID id returns 400 VALIDATION_ERROR', async () => {
+      const { id: _omit, ...withoutId } = brisket;
+      void _omit;
+      expect((await start(withoutId)).status).toBe(400);
+      expect((await start({ ...brisket, id: 'cook-1' })).status).toBe(400);
+    });
   });
 
   test('POST /cooks with empty body returns 400 (validation middleware engaged)', async () => {

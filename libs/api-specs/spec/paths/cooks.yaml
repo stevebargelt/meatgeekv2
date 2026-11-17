@@ -69,9 +69,20 @@ cooks-collection:
     summary: Start a new cook session
     description: |
       Creates a cook in `active` status. Mirrors apps/api/src/functions/cooks/
-      start-cook.ts: validates name/deviceId/meatType, returns 201 with the
-      created Cook directly (NOT wrapped in ApiResponse). Returns 400
-      VALIDATION_ERROR if required fields are missing.
+      start-cook.ts: validates id/name/deviceId/meatType and returns the Cook
+      directly (NOT wrapped in ApiResponse).
+
+      Retry-safe (MG-84). The client generates the cook `id` (a UUID) once
+      per start intent and resends the same request on every retry:
+        - 201: the cook was created; `cook_started` is emitted once.
+        - 200: a cook with this id already exists with the same body (a
+          retry or a concurrent duplicate). The stored cook is returned and
+          nothing is emitted.
+        - 422 COOK_ID_REUSED: the id exists with a different body.
+        - 409 COOK_ALREADY_ACTIVE: the device already has an active cook for
+          this user. One active cook per device; stop it first.
+        - 400 VALIDATION_ERROR: a required field is missing or `id` is not a
+          UUID.
     tags: [cooks]
     requestBody:
       required: true
@@ -80,6 +91,18 @@ cooks-collection:
           schema:
             $ref: '../components/schemas/cook.yaml#/StartCookRequest'
     responses:
+      '200':
+        description: |
+          Replay. A cook with this id already exists with the same body; it is
+          returned unchanged and no `cook_started` is emitted.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/Cook'
       '201':
         description: Cook created.
         headers:
@@ -90,8 +113,24 @@ cooks-collection:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/Cook'
+      '409':
+        description: |
+          COOK_ALREADY_ACTIVE. The device already has an active cook for this
+          user; `activeCookId` names it. Nothing was written.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/CookAlreadyActiveError'
+      '422':
+        description: |
+          COOK_ID_REUSED. A cook with this id exists with a different body.
+          Nothing was written.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '400':
-        description: Validation failure (missing name/deviceId/meatType).
+        description: Validation failure (missing id/name/deviceId/meatType, or id not a UUID).
         content:
           application/json:
             schema:

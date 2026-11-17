@@ -214,10 +214,12 @@ the build if any non-allowlisted handler — the cooks handlers are deliberately
   nothing here verifies the caller actually owns that device. MG-83 (depends on
   MG-80, devices onto real persistence) owns closing that gap. Until it lands, a
   caller can address SignalR delivery at any `deviceId` it names.
-- **`POST /cooks` (`start-cook.ts`) is not retry-idempotent.** A client retry
-  after a timed-out-but-succeeded write creates a second `Cook` document with a
-  new `id` (`cook-${Date.now()}`), not a no-op. MG-84 owns making the route
-  idempotent.
+- **`POST /cooks` (`start-cook.ts`) was not retry-idempotent — resolved by
+  MG-84.** As shipped, a client retry after a timed-out-but-succeeded write
+  created a second `Cook` document with a new `id` (`cook-${Date.now()}`) and a
+  second `COOK_STARTED`. MG-84 makes the client supply the cook id and adds a
+  one-active-cook-per-device rule; see
+  [mg-84-retry-safe-cook-start.md](mg-84-retry-safe-cook-start.md).
 - **Responses included Cosmos system properties — resolved by MG-85.** As
   shipped, `createCook`, `getCook`/`stopCook`, and `listCooksByUser` returned the
   Cosmos SDK's `response.resource` (or query results) unprojected, so `_rid`,

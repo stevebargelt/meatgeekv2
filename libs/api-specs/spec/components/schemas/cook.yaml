@@ -69,7 +69,10 @@ Cook:
   properties:
     id:
       type: string
-      description: Cook session id. Handler emits `cook-${Date.now()}`.
+      description: |
+        Cook session id. Since MG-84 this is the UUID the client sent as
+        `StartCookRequest.id`. Cooks created earlier keep their
+        `cook-<epoch-ms>` ids; treat the id as an opaque string.
     userId:
       type: string
     deviceId:
@@ -122,14 +125,26 @@ Cook:
 StartCookRequest:
   type: object
   description: |
-    Body for POST /cooks. Handler validates `name`, `deviceId`, `meatType`
-    presence and returns VALIDATION_ERROR on missing fields.
+    Body for POST /cooks. Handler validates `id`, `name`, `deviceId`,
+    `meatType` presence (and that `id` is a UUID) and returns
+    VALIDATION_ERROR otherwise.
   required:
+    - id
     - name
     - deviceId
     - meatType
   additionalProperties: false
   properties:
+    id:
+      type: string
+      format: uuid
+      description: |
+        Client-generated cook id and the idempotency key for the start.
+        Generate it once per start intent (e.g. `crypto.randomUUID()`) and
+        send the same id, with the same body, on every retry. A repeat
+        returns the original cook with 200 and emits no second
+        `cook_started`; the same id with a different body returns 422
+        COOK_ID_REUSED.
     name:
       type: string
       minLength: 3

@@ -103,30 +103,104 @@ function underscoreKeyPaths(value: unknown, path = '$'): string[] {
   return [];
 }
 
-/** A stateful, single-partition Cosmos Container contract for this test. */
+type StoredDocument = Cook | (Record<string, unknown> & { id: string; userId: string });
+
+function cosmosError(statusCode: number): Error {
+  return Object.assign(new Error(`fake cosmos ${statusCode}`), { statusCode });
+}
+
+/**
+ * A stateful Cosmos Container contract for this test. It enforces what the real
+ * container does and the repository relies on: `(partition, id)` uniqueness on
+ * create, If-Match on replace, and an ALL-OR-NOTHING transactional batch that
+ * reports a status per operation (the failing one its own, the rest 424).
+ */
 function containerContract() {
-  const cooks = new Map<string, Cook>();
+  const cooks = new Map<string, StoredDocument>();
   const queryCalls: Array<{ partitionKey?: unknown; userId?: unknown }> = [];
   const replaceBodies: unknown[] = [];
   const key = (id: string, userId: string) => `${userId}/${id}`;
+  const etagOf = (doc: StoredDocument | undefined) =>
+    (doc as { _etag?: string } | undefined)?._etag;
+
+  /** Applies one batch operation to `docs`, or returns the status it fails with. */
+  function apply(
+    docs: Map<string, StoredDocument>,
+    userId: string,
+    operation: {
+      operationType: string;
+      id?: string;
+      resourceBody?: StoredDocument;
+      ifMatch?: string;
+    }
+  ): { statusCode: number; resourceBody?: StoredDocument } {
+    const id = operation.id ?? operation.resourceBody!.id;
+    const existing = docs.get(key(id, userId));
+    switch (operation.operationType) {
+      case 'Create': {
+        if (existing) return { statusCode: 409 };
+        const stored = withSystemProperties(operation.resourceBody as Cook);
+        docs.set(key(id, userId), stored);
+        return { statusCode: 201, resourceBody: { ...stored } };
+      }
+      case 'Replace': {
+        if (!existing) return { statusCode: 404 };
+        if (operation.ifMatch && operation.ifMatch !== etagOf(existing)) {
+          return { statusCode: 412 };
+        }
+        replaceBodies.push({ ...operation.resourceBody });
+        const stored = withSystemProperties(operation.resourceBody as Cook);
+        docs.set(key(id, userId), stored);
+        return { statusCode: 200, resourceBody: { ...stored } };
+      }
+      case 'Delete': {
+        if (!existing) return { statusCode: 404 };
+        docs.delete(key(id, userId));
+        return { statusCode: 204 };
+      }
+      default:
+        throw new Error(`unsupported batch operation ${operation.operationType}`);
+    }
+  }
 
   const container = {
     items: {
-      create: async <T extends Cook>(cook: T) => {
-        const stored = withSystemProperties(cook);
-        cooks.set(key(cook.id, cook.userId), stored);
-        return { resource: { ...stored }, requestCharge: 5 };
+      batch: async (operations: Array<Parameters<typeof apply>[2]>, userId: string) => {
+        // Work on a copy and commit only if every operation succeeds.
+        const draft = new Map(cooks);
+        const result: Array<{ statusCode: number; requestCharge: number; resourceBody?: unknown }> =
+          [];
+        for (const operation of operations) {
+          const outcome = apply(draft, userId, operation);
+          result.push({ ...outcome, requestCharge: 6 });
+          if (outcome.statusCode >= 300) {
+            const failed = result.length - 1;
+            return {
+              code: 207,
+              result: operations.map((_, index) =>
+                index === failed
+                  ? { statusCode: outcome.statusCode, requestCharge: 1 }
+                  : { statusCode: 424, requestCharge: 0 }
+              ),
+            };
+          }
+        }
+        cooks.clear();
+        draft.forEach((doc, docKey) => cooks.set(docKey, doc));
+        return { code: 200, result };
       },
       query: <T extends Cook>(
-        querySpec: { parameters?: Array<{ name: string; value: unknown }> },
+        querySpec: { query: string; parameters?: Array<{ name: string; value: unknown }> },
         options: { partitionKey?: unknown }
       ) => {
         const userId = querySpec.parameters?.find(({ name }) => name === '@userId')?.value;
         queryCalls.push({ partitionKey: options.partitionKey, userId });
+        const excludesLocks = querySpec.query.includes('NOT IS_DEFINED(c.docType)');
         const resources = [...cooks.values()]
-          .filter(cook => cook.userId === userId && options.partitionKey === userId)
-          .sort((a, b) => b.startTime.localeCompare(a.startTime))
-          .map(cook => ({ ...cook })) as T[];
+          .filter(doc => doc.userId === userId && options.partitionKey === userId)
+          .filter(doc => !excludesLocks || !('docType' in doc))
+          .sort((a, b) => String(b.startTime).localeCompare(String(a.startTime)))
+          .map(doc => ({ ...doc })) as T[];
         return {
           fetchNext: async () => ({
             resources,
@@ -138,21 +212,29 @@ function containerContract() {
       },
     },
     item: (id: string, userId: string) => ({
-      read: async <T extends Cook>() => {
-        const stored = cooks.get(key(id, userId)) as (T & { _etag?: string }) | undefined;
+      read: async <T>() => {
+        const stored = cooks.get(key(id, userId));
         const resource = stored && { ...stored };
         return {
-          resource,
+          resource: resource as T | undefined,
           statusCode: resource ? 200 : 404,
           requestCharge: 1,
-          etag: resource?._etag,
+          etag: etagOf(stored),
         };
       },
-      replace: async <T extends Cook>(cook: T) => {
-        replaceBodies.push({ ...cook });
-        const stored = withSystemProperties(cook);
-        cooks.set(key(id, userId), stored);
-        return { resource: { ...stored }, requestCharge: 4 };
+      replace: async <T extends Cook>(
+        cook: T,
+        options?: { accessCondition?: { condition?: string } }
+      ) => {
+        const ifMatch = options?.accessCondition?.condition;
+        const outcome = apply(cooks, userId, {
+          operationType: 'Replace',
+          id,
+          resourceBody: cook,
+          ifMatch,
+        });
+        if (outcome.statusCode >= 300) throw cosmosError(outcome.statusCode);
+        return { resource: outcome.resourceBody as T, requestCharge: 4 };
       },
     }),
   };
@@ -174,6 +256,7 @@ describe('MG-59 cooks persistence flow', () => {
         identity: OWNER,
         // userId is deliberately malicious/legacy input: only Easy Auth may set it.
         body: {
+          id: '0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f',
           name: '  Sunday brisket  ',
           deviceId: 'grill-7',
           meatType: 'brisket',
@@ -228,7 +311,15 @@ describe('MG-59 cooks persistence flow', () => {
   it('does not stop a cook addressed by an authenticated caller in another partition', async () => {
     const store = containerContract();
     const ownerStart = await startCookHandler(
-      request({ identity: OWNER, body: { name: 'Ribs', deviceId: 'grill-8', meatType: 'pork' } }),
+      request({
+        identity: OWNER,
+        body: {
+          id: '1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a',
+          name: 'Ribs',
+          deviceId: 'grill-8',
+          meatType: 'pork',
+        },
+      }),
       context('owner-start').context,
       { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
     );
@@ -254,7 +345,12 @@ describe('MG-59 cooks persistence flow', () => {
     const started = await startCookHandler(
       request({
         identity: OWNER,
-        body: { name: 'Pork butt', deviceId: 'grill-9', meatType: 'pork' },
+        body: {
+          id: '2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b',
+          name: 'Pork butt',
+          deviceId: 'grill-9',
+          meatType: 'pork',
+        },
       }),
       startContext.context,
       { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
@@ -299,5 +395,156 @@ describe('MG-59 cooks persistence flow', () => {
     // response was projected.
     expect(store.replaceBodies).toHaveLength(1);
     expect(store.replaceBodies[0]).toHaveProperty('_rid');
+  });
+});
+
+describe('MG-84 retry-safe start through the real repository', () => {
+  const COOK_X = '3f4a5b6c-7d8e-4f9a-8b1c-2d3e4f5a6b7c';
+  const COOK_Y = '4a5b6c7d-8e9f-4a0b-9c2d-3e4f5a6b7c8d';
+  const OWNER_PARTITION = 'tenant-owner:owner-oid';
+  const startDeps = (store: ReturnType<typeof containerContract>) => ({
+    resolvePrincipal: principalFromRequest,
+    getRepository: () => store.repository,
+  });
+  const body = (id: string, deviceId = 'grill-1') => ({
+    id,
+    name: 'Brisket',
+    deviceId,
+    meatType: 'brisket',
+    targetTemps: { grill: 225, probe1: 203 },
+  });
+  const start = async (store: ReturnType<typeof containerContract>, startBody: unknown) => {
+    const ctx = context(`start-${Math.random()}`);
+    const response = await startCookHandler(
+      request({ identity: OWNER, body: startBody }),
+      ctx.context,
+      startDeps(store)
+    );
+    return { response, messages: ctx.messages() };
+  };
+  const stop = (store: ReturnType<typeof containerContract>, cookId: string) =>
+    stopCookHandler(
+      request({ identity: OWNER, params: { cookId } }),
+      context(`stop-${cookId}`).context,
+      startDeps(store)
+    );
+  const storedCooks = (store: ReturnType<typeof containerContract>) =>
+    [...store.cooks.values()].filter(doc => !('docType' in doc));
+
+  it('a retry after success returns the original cook with 200 and no second COOK_STARTED', async () => {
+    const store = containerContract();
+
+    const first = await start(store, body(COOK_X));
+    const retry = await start(store, body(COOK_X));
+
+    expect(first.response.status).toBe(201);
+    expect(first.messages).toHaveLength(1);
+    expect(retry.response.status).toBe(200);
+    expect(retry.response.jsonBody).toEqual(first.response.jsonBody);
+    expect(retry.messages).toEqual([]);
+    expect(storedCooks(store)).toHaveLength(1);
+  });
+
+  it('concurrent duplicate submits persist one cook and emit one COOK_STARTED', async () => {
+    const store = containerContract();
+
+    const results = await Promise.all([start(store, body(COOK_X)), start(store, body(COOK_X))]);
+
+    expect(results.map(({ response }) => response.status).sort()).toEqual([200, 201]);
+    expect(results.flatMap(({ messages }) => messages)).toHaveLength(1);
+    expect(results[0].response.jsonBody).toEqual(results[1].response.jsonBody);
+    expect(storedCooks(store)).toHaveLength(1);
+  });
+
+  it('distinct ids on different devices create distinct cooks, each announced once', async () => {
+    const store = containerContract();
+
+    const x = await start(store, body(COOK_X, 'grill-1'));
+    const y = await start(store, body(COOK_Y, 'grill-2'));
+
+    expect([x.response.status, y.response.status]).toEqual([201, 201]);
+    expect([x.messages.length, y.messages.length]).toEqual([1, 1]);
+    expect(
+      storedCooks(store)
+        .map(cook => cook.id)
+        .sort()
+    ).toEqual([COOK_X, COOK_Y].sort());
+  });
+
+  it('one active cook per device: 409 until the active cook is stopped, then the device is free', async () => {
+    const store = containerContract();
+    await start(store, body(COOK_X));
+
+    const busy = await start(store, body(COOK_Y));
+    expect(busy.response.status).toBe(409);
+    expect(busy.response.jsonBody).toMatchObject({
+      error: 'COOK_ALREADY_ACTIVE',
+      activeCookId: COOK_X,
+    });
+    expect(busy.messages).toEqual([]);
+    expect(storedCooks(store)).toHaveLength(1);
+
+    expect((await stop(store, COOK_X)).status).toBe(200);
+    // The stop released the lock in the same batch.
+    expect(store.cooks.has(`${OWNER_PARTITION}/active-device:grill-1`)).toBe(false);
+
+    const next = await start(store, body(COOK_Y));
+    expect(next.response.status).toBe(201);
+    expect(next.messages).toHaveLength(1);
+  });
+
+  it('a stale lock (its cook completed without releasing it) does not block a start', async () => {
+    const store = containerContract();
+    await start(store, body(COOK_X));
+    // Simulate a lock left behind: complete the cook directly in the store.
+    const cookKey = `${OWNER_PARTITION}/${COOK_X}`;
+    store.cooks.set(cookKey, { ...(store.cooks.get(cookKey) as Cook), status: 'completed' });
+
+    const next = await start(store, body(COOK_Y));
+
+    expect(next.response.status).toBe(201);
+    expect(store.cooks.get(`${OWNER_PARTITION}/active-device:grill-1`)).toMatchObject({
+      cookId: COOK_Y,
+    });
+  });
+
+  it('the same id with a different body is refused with 422 and writes nothing', async () => {
+    const store = containerContract();
+    await start(store, body(COOK_X));
+
+    const reuse = await start(store, { ...body(COOK_X), name: 'Something else' });
+
+    expect(reuse.response.status).toBe(422);
+    expect(reuse.response.jsonBody).toMatchObject({ error: 'COOK_ID_REUSED' });
+    expect(reuse.messages).toEqual([]);
+    expect(storedCooks(store)).toHaveLength(1);
+  });
+
+  it('the list never returns lock documents, and no response carries lock or system fields', async () => {
+    const store = containerContract();
+    const x = await start(store, body(COOK_X, 'grill-1'));
+    await start(store, body(COOK_Y, 'grill-2'));
+    const replay = await start(store, body(COOK_X, 'grill-1'));
+    const busy = await start(store, body('5b6c7d8e-9f0a-4b1c-8d3e-4f5a6b7c8d9e', 'grill-1'));
+    // Two cooks and two locks are stored in the caller's partition.
+    expect(store.cooks.size).toBe(4);
+
+    const listed = await getCooksHandler(request({ identity: OWNER }), context('list').context, {
+      getRepository: () => store.repository,
+    });
+
+    const cooks = (listed.jsonBody as { cooks: Cook[] }).cooks;
+    expect(cooks.map(cook => cook.id).sort()).toEqual([COOK_X, COOK_Y].sort());
+    for (const responseBody of [
+      x.response.jsonBody,
+      replay.response.jsonBody,
+      busy.response.jsonBody,
+      listed.jsonBody,
+    ]) {
+      expect(underscoreKeyPaths(responseBody)).toEqual([]);
+      expect(JSON.stringify(responseBody)).not.toContain('docType');
+    }
+    expect(underscoreKeyPaths(x.messages)).toEqual([]);
+    expect(JSON.stringify(x.messages)).not.toContain('docType');
   });
 });
