@@ -69,21 +69,30 @@ export interface ListCooksRequest {
   meatType?: string;
   sortBy?: 'startTime' | 'duration' | 'rating';
   sortOrder?: 'asc' | 'desc';
+  /** Page size. The API clamps it to its own maximum. */
   limit?: number;
-  offset?: number;
+  /** Opaque cursor from a previous page's {@link CookListResponse.continuationToken}. */
+  continuationToken?: string;
   startDate?: string;
   endDate?: string;
 }
 
 /**
- * Response for cook listing
+ * Response for cook listing.
+ *
+ * Pagination is by continuation token, not offset: cooks are listed as a
+ * single-partition Cosmos query, where an offset re-charges every skipped
+ * document and an exact `total` needs a separate COUNT query. To read the next
+ * page, send `continuationToken` back unchanged; it is present exactly when
+ * `hasMore` is true.
  */
 export interface CookListResponse {
   cooks: Cook[];
-  total: number;
-  offset: number;
+  /** The page size actually applied (after the API's clamp). */
   limit: number;
   hasMore: boolean;
+  /** Opaque cursor for the next page; absent when `hasMore` is false. */
+  continuationToken?: string;
 }
 
 /**

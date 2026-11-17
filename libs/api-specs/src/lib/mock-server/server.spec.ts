@@ -43,12 +43,13 @@ describe('mock-server', () => {
     expect(res.body).toEqual(
       expect.objectContaining({
         cooks: expect.any(Array),
-        total: expect.any(Number),
-        offset: expect.any(Number),
         limit: expect.any(Number),
         hasMore: expect.any(Boolean),
       }),
     );
+    // Continuation-token pagination (MG-85): no offset-era fields.
+    expect(res.body).not.toHaveProperty('total');
+    expect(res.body).not.toHaveProperty('offset');
     // Fixture seeded with 3 cooks.
     expect(res.body.cooks.length).toBeGreaterThan(0);
     for (const cook of res.body.cooks) {
@@ -63,6 +64,25 @@ describe('mock-server', () => {
         }),
       );
     }
+  });
+
+  test('(b2) GET /cooks pages by an opaque continuation token', async () => {
+    const first = await request(app).get('/cooks').query({ limit: 1 });
+    expect(first.status).toBe(200);
+    expect(first.body.cooks).toHaveLength(1);
+    expect(first.body.hasMore).toBe(true);
+    expect(first.body.continuationToken).toEqual(expect.any(String));
+
+    const second = await request(app)
+      .get('/cooks')
+      .query({ limit: 1, continuationToken: first.body.continuationToken });
+    expect(second.status).toBe(200);
+    expect(second.body.cooks).toHaveLength(1);
+    expect(second.body.cooks[0].id).not.toBe(first.body.cooks[0].id);
+
+    const all = await request(app).get('/cooks').query({ limit: 100 });
+    expect(all.body.hasMore).toBe(false);
+    expect(all.body).not.toHaveProperty('continuationToken');
   });
 
   test('(c) POST /cooks with valid body returns 201 + Cook', async () => {

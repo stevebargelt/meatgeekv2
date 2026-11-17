@@ -228,17 +228,14 @@ describe('getCooksHandler', () => {
     expect(calls[0].options.continuationToken).toBe('ct-prev');
     expect(calls[0].options).not.toHaveProperty('offset');
 
-    const body = res.jsonBody as {
-      continuationToken?: string;
-      hasMore: boolean;
-      limit: number;
-      offset: number;
-    };
-    // The next-page token is surfaced; page size is clamped to the repository cap.
-    expect(body.continuationToken).toBe('ct-next');
-    expect(body.hasMore).toBe(true);
-    expect(body.limit).toBe(100);
-    expect(body.offset).toBe(0);
+    // The next-page token is surfaced; page size is clamped to the repository
+    // cap; the body is exactly the CookListResponse contract — no total/offset.
+    expect(res.jsonBody).toEqual({
+      cooks: [sampleCook()],
+      limit: 100,
+      hasMore: true,
+      continuationToken: 'ct-next',
+    });
   });
 
   it('reports a bounded default page size and no continuation token on the last page', async () => {
@@ -253,7 +250,10 @@ describe('getCooksHandler', () => {
     const body = res.jsonBody as { hasMore: boolean; limit: number; continuationToken?: string };
     expect(body.limit).toBe(20);
     expect(body.hasMore).toBe(false);
-    expect(body.continuationToken).toBeUndefined();
+    // Absent, not present-but-undefined.
+    expect(body).not.toHaveProperty('continuationToken');
+    expect(body).not.toHaveProperty('total');
+    expect(body).not.toHaveProperty('offset');
   });
 
   it('returns a sanitized 500 on a Cosmos failure, leaking no account detail', async () => {

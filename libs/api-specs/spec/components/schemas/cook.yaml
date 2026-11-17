@@ -174,13 +174,12 @@ CookListResponse:
   type: object
   description: |
     Response envelope for GET /cooks. Matches CookListResponse in
-    apps/api/src/functions/cooks/list-cooks.ts: bare cook array under
-    `cooks` plus offset/limit/hasMore pagination block (NOT wrapped in
-    ApiResponse).
+    libs/api-interfaces/src/lib/cook.ts: bare cook array under `cooks` plus
+    continuation-token pagination (NOT wrapped in ApiResponse). There is no
+    `total` and no `offset`: cooks are a single-partition Cosmos query, where
+    an offset re-charges skipped documents and a total needs a separate COUNT.
   required:
     - cooks
-    - total
-    - offset
     - limit
     - hasMore
   additionalProperties: false
@@ -189,18 +188,18 @@ CookListResponse:
       type: array
       items:
         $ref: '#/Cook'
-    total:
-      type: integer
-      minimum: 0
-    offset:
-      type: integer
-      minimum: 0
     limit:
       type: integer
       minimum: 1
-      maximum: 500
+      maximum: 100
+      description: The page size actually applied, after the API's clamp.
     hasMore:
       type: boolean
+    continuationToken:
+      type: string
+      description: |
+        Opaque cursor for the next page. Present exactly when `hasMore` is
+        true; send it back unchanged as the `continuationToken` query param.
 
 CookSummary:
   type: object
