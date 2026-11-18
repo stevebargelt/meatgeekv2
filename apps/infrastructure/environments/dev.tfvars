@@ -132,14 +132,25 @@ functions_auth_tenant_id         = "7466b411-ac2e-49a0-b5d5-b1e866d26bac"
 functions_auth_allowed_audiences = ["api://348570b2-44e5-41a6-ad15-2a7032366130"]
 
 # allowed_applications = the CALLING client(s) Easy Auth accepts (validates the
-# token's appid/azp), NOT the API registration. The operator smoke test acquires
-# a token via `az account get-access-token --scope "<App ID URI>/access_as_user"`,
-# whose caller is the Azure CLI PUBLIC client (04b07795-8ddb-461a-bbee-02f9e1bf7b46),
-# so that is the default. Override with a dedicated dev client's app id if you use
-# one. Every id here MUST be pre-authorized for access_as_user on the dev API
-# registration (bootstrap SMOKE_TEST_CLIENT_IDS → preAuthorizedApplications), else
-# token acquisition prompts for consent. A token from any OTHER client is rejected.
-functions_auth_allowed_client_app_ids = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"] # Azure CLI public client
+# token's appid/azp), NOT the API registration. A token from any OTHER client is
+# rejected. Dev has two callers:
+#
+# 1. The Azure CLI PUBLIC client (04b07795-8ddb-461a-bbee-02f9e1bf7b46): by-hand
+#    smoke tests and acceptance runs with a DELEGATED token from
+#    `az account get-access-token --scope "<App ID URI>/access_as_user"`. It MUST be
+#    pre-authorized for access_as_user on the dev API registration (bootstrap
+#    SMOKE_TEST_CLIENT_IDS → preAuthorizedApplications), else token acquisition
+#    prompts for consent.
+# 2. The dev APP-PUBLISH identity (the `development` environment's
+#    AZURE_APP_DEPLOY_CLIENT_ID): the acceptance job in
+#    .github/workflows/app-deploy-dev.yml calls the deployed API as this identity
+#    with an APP-ONLY token for "<App ID URI>/.default", to prove each dev deploy
+#    works without a human (MG-36). Client-credentials tokens need no
+#    pre-authorization; this entry is what lets Easy Auth accept it.
+functions_auth_allowed_client_app_ids = [
+  "04b07795-8ddb-461a-bbee-02f9e1bf7b46", # Azure CLI public client
+  "8426e178-a4f6-49f8-868a-f070a4ae397f", # dev app-publish identity (AZURE_APP_DEPLOY_CLIENT_ID)
+]
 
 # App-deployment identity → Function App publish role (MG-24 item 4).
 # The SERVICE PRINCIPAL OBJECT ID of the SEPARATE app-deployment identity that

@@ -85,8 +85,11 @@ application code), against the Entra identity provider configured in
    URI (`api://<dev-api-app-id>`) — the dev Entra API registration.
 4. **Calling client** (`allowed_applications`): the calling client's `appid`/`azp`
    must be one of the pre-authorized client ids (the Azure CLI public client
-   `04b07795-8ddb-461a-bbee-02f9e1bf7b46` by default, or a dedicated dev client). A
-   token minted by any other client is rejected.
+   `04b07795-8ddb-461a-bbee-02f9e1bf7b46` by default, or a dedicated dev client). In
+   dev the list also holds the app-publish identity, which calls the API with an
+   app-only token in the CI acceptance run
+   ([Live acceptance](../development/live-acceptance.md)). A token minted by any
+   other client is rejected.
 
 The provider is deliberately configured as bearer-validation-only:
 

@@ -75,6 +75,14 @@ output "function_app_hostname" {
   value       = module.azure_functions.hostname
 }
 
+# The audience a caller requests a token for (the API App ID URI). Non-secret.
+# .github/workflows/app-deploy-dev.yml reads it to mint the acceptance run's
+# app-only token as "<audience>/.default". Empty when no audience is configured.
+output "functions_auth_audience" {
+  description = "API App ID URI the Function App's Easy Auth accepts as token audience (first entry of functions_auth_allowed_audiences; non-secret)"
+  value       = try(var.functions_auth_allowed_audiences[0], "")
+}
+
 # SignalR Outputs (non-secret)
 output "signalr_service_uri" {
   description = "SignalR Service URI (non-secret; access is identity-based)"
