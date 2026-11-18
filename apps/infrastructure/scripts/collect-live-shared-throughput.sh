@@ -35,13 +35,17 @@
 #       of the five destination containers. Same outcome encoding: a container with
 #       NO dedicated offer (the healthy shared case) exits nonzero, recorded as
 #       throughputProbe.{queryOk:true, offerFound:false}.
-#   (c/d) DEFINITIONS — `az cosmosdb sql container show` for each container against
-#       BOTH the destination database (definition) and the source database
-#       (sourceDefinition). These MUST succeed and return a `.resource` object; a
-#       container-show that cannot be read is an operational failure here (the gate
-#       cannot assert a partition key or definition parity it never received), so
+#   (c) DEFINITIONS — `az cosmosdb sql container show` for each container against
+#       the destination database (definition). These MUST succeed and return a
+#       `.resource` object; a container-show that cannot be read is an operational
+#       failure here (the gate cannot assert a partition key it never received), so
 #       this collector FAILS CLOSED on it rather than emitting a bundle the gate
 #       would have to reject as malformed.
+#
+#   The collector reads the DESTINATION database only. It once also read each
+#   container's SOURCE definition (sourceDefinition) for a definition-parity check;
+#   MG-54 deleted the source database, so that read — and the bundle field — were
+#   retired (HAR-10).
 #
 # QUERYOK/OFFERFOUND CLASSIFICATION IS FAIL-CLOSED. The gate's contract is that
 # "could not tell" (queryOk=false) is NEVER "nothing wrong". A throughput-show that
@@ -84,7 +88,7 @@
 # USAGE
 #   collect-live-shared-throughput.sh \
 #       --account-name <cosmos-account> --resource-group <rg> \
-#       --database-name <destination-db> --source-database-name <source-db> \
+#       --database-name <destination-db> \
 #       [--containers "cooks users recipes temperatures devices"]
 #   AZ_BIN=/path/to/fake-az collect-live-shared-throughput.sh ...   # testing seam
 #
@@ -106,7 +110,7 @@ DEFAULT_CONTAINERS="cooks users recipes temperatures devices"
 die() { echo "${PROG}: FATAL: $*" >&2; exit "${EX_OP}"; }
 
 usage() {
-  echo "usage: ${PROG}.sh --account-name <acct> --resource-group <rg> --database-name <dest-db> --source-database-name <src-db> [--containers \"<names>\"]" >&2
+  echo "usage: ${PROG}.sh --account-name <acct> --resource-group <rg> --database-name <dest-db> [--containers \"<names>\"]" >&2
 }
 
 command -v jq >/dev/null 2>&1 || die "jq is required but not on PATH"
@@ -115,7 +119,6 @@ command -v jq >/dev/null 2>&1 || die "jq is required but not on PATH"
 ACCOUNT_NAME=""
 RESOURCE_GROUP=""
 DATABASE_NAME=""
-SOURCE_DATABASE_NAME=""
 CONTAINERS="${DEFAULT_CONTAINERS}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -125,8 +128,6 @@ while [ "$#" -gt 0 ]; do
     --resource-group=*)     RESOURCE_GROUP="${1#--resource-group=}"; shift ;;
     --database-name)        [ "$#" -ge 2 ] || { usage; die "--database-name requires a value"; };          DATABASE_NAME="$2"; shift 2 ;;
     --database-name=*)      DATABASE_NAME="${1#--database-name=}"; shift ;;
-    --source-database-name) [ "$#" -ge 2 ] || { usage; die "--source-database-name requires a value"; };   SOURCE_DATABASE_NAME="$2"; shift 2 ;;
-    --source-database-name=*) SOURCE_DATABASE_NAME="${1#--source-database-name=}"; shift ;;
     --containers)           [ "$#" -ge 2 ] || { usage; die "--containers requires a value"; };             CONTAINERS="$2"; shift 2 ;;
     --containers=*)         CONTAINERS="${1#--containers=}"; shift ;;
     -h|--help)              usage; exit "${EX_OP}" ;;
@@ -137,7 +138,6 @@ done
 [ -n "${ACCOUNT_NAME}" ]         || { usage; die "--account-name is required and must be non-empty — refusing to collect against an unresolved account"; }
 [ -n "${RESOURCE_GROUP}" ]       || { usage; die "--resource-group is required and must be non-empty"; }
 [ -n "${DATABASE_NAME}" ]        || { usage; die "--database-name (the destination database) is required and must be non-empty"; }
-[ -n "${SOURCE_DATABASE_NAME}" ] || { usage; die "--source-database-name is required and must be non-empty — definition parity compares each destination container against its SOURCE twin"; }
 [ -n "${CONTAINERS}" ]           || { usage; die "--containers must be non-empty"; }
 
 command -v "${AZ_BIN}" >/dev/null 2>&1 || die "the az CLI ('${AZ_BIN}') is not on PATH — a collector that cannot read Azure cannot assemble a bundle. Fail-closed"
@@ -145,7 +145,7 @@ command -v "${AZ_BIN}" >/dev/null 2>&1 || die "the az CLI ('${AZ_BIN}') is not o
 WORK="$(mktemp -d 2>/dev/null)" || die "could not create a temp working dir"
 trap 'rm -rf "${WORK}"' EXIT INT TERM
 
-echo "${PROG}: collecting the LIVE MG-53 destination read-backs (account=${ACCOUNT_NAME} rg=${RESOURCE_GROUP} dest-db=${DATABASE_NAME} src-db=${SOURCE_DATABASE_NAME})" >&2
+echo "${PROG}: collecting the LIVE MG-53 destination read-backs (account=${ACCOUNT_NAME} rg=${RESOURCE_GROUP} dest-db=${DATABASE_NAME})" >&2
 
 # target_absent_marker <stderr-file> — 0 iff the captured az stderr indicates the
 # TARGET ITSELF (the account, resource group, subscription, or the ARM resource the
@@ -216,7 +216,7 @@ else
   echo "${PROG}: database offer: probe did not run to a definite answer (queryOk=false) — unrecognised az failure, NOT an absent offer" >&2
 fi
 
-# --- 3. Per container: throughput probe (b) + definitions (c/d) --------------
+# --- 3. Per container: throughput probe (b) + definition (c) ----------------
 ENTRIES="${WORK}/entries.jsonl"
 : > "${ENTRIES}"
 
@@ -239,11 +239,10 @@ for name in ${CONTAINERS}; do
     echo "${PROG}: container '${name}': throughput probe did not run to a definite answer (queryOk=false) — the gate fails closed on this" >&2
   fi
 
-  # (c/d) definitions — destination and source container-show. These MUST succeed
-  # and carry a .resource object; a definition the gate never received is an
-  # operational failure, not "definitions match".
+  # (c) definition — destination container-show. It MUST succeed and carry a
+  # .resource object; a definition the gate never received is an operational
+  # failure, not a healthy container.
   DEF="${WORK}/${name}-dst.json"
-  SRCDEF="${WORK}/${name}-src.json"
   "${AZ_BIN}" cosmosdb sql container show \
     --account-name "${ACCOUNT_NAME}" --resource-group "${RESOURCE_GROUP}" \
     --database-name "${DATABASE_NAME}" --name "${name}" \
@@ -253,18 +252,9 @@ for name in ${CONTAINERS}; do
   jq -e '(.resource | type) == "object"' "${DEF}" >/dev/null 2>&1 \
     || die "the destination container-show for '${name}' returned no .resource object — this is not a container-show document. Fail-closed"
 
-  "${AZ_BIN}" cosmosdb sql container show \
-    --account-name "${ACCOUNT_NAME}" --resource-group "${RESOURCE_GROUP}" \
-    --database-name "${SOURCE_DATABASE_NAME}" --name "${name}" \
-    --output json >"${SRCDEF}" 2>"${WORK}/${name}-src.err"
-  srcdef_rc=$?
-  [ "${srcdef_rc}" -eq 0 ] || die "could not read the SOURCE definition for container '${name}' (az cosmosdb sql container show exited ${srcdef_rc} against source db '${SOURCE_DATABASE_NAME}') — definition parity needs both twins. Fail-closed"
-  jq -e '(.resource | type) == "object"' "${SRCDEF}" >/dev/null 2>&1 \
-    || die "the source container-show for '${name}' returned no .resource object. Fail-closed"
-
   jq -n --arg n "${name}" --argjson qok "${c_queryok}" --argjson off "${c_offerfound}" \
-    --slurpfile dstdoc "${DEF}" --slurpfile srcdoc "${SRCDEF}" \
-    '{name:$n, throughputProbe:{queryOk:$qok, offerFound:$off}, definition:$dstdoc[0], sourceDefinition:$srcdoc[0]}' \
+    --slurpfile dstdoc "${DEF}" \
+    '{name:$n, throughputProbe:{queryOk:$qok, offerFound:$off}, definition:$dstdoc[0]}' \
     >> "${ENTRIES}" \
     || die "could not assemble the bundle entry for container '${name}'"
 done

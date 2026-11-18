@@ -3,9 +3,8 @@
 # assert-live-shared-throughput.sh — FAIL-CLOSED post-create assertion that the
 # MG-53 DESTINATION shared-throughput Cosmos database was materialised exactly as
 # intended: a SINGLE 400 RU/s offer at the DATABASE level, five containers that
-# hold NO dedicated offer of their own, the temperatures container partitioned on
-# /deviceId, and five container definitions that are faithful twins of their
-# sources. It asserts the acceptance of MG-53 against LIVE Azure read-backs, in
+# hold NO dedicated offer of their own, and the temperatures container partitioned
+# on /deviceId. It asserts the acceptance of MG-53 against LIVE Azure read-backs, in
 # the same fail-closed style as scripts/assert-live-host-storage.sh (MG-58).
 #
 # WHY THIS GATE EXISTS — read this before changing anything here.
@@ -17,10 +16,9 @@
 # Azure cannot convert a dedicated-throughput container to shared in place, so the
 # fix is a NEWLY CREATED shared-throughput database. A destination that is built
 # wrong — a missing database-level offer, a container that kept a dedicated offer,
-# a temperatures container that drifted off /deviceId, or a definition that does
-# not match its source — is not a valid destination, and every one of those
-# failures is INVISIBLE to the config-surface gates (they key on the SOURCE
-# labels). The live destination is the only surface these defects exist on, so
+# or a temperatures container that drifted off /deviceId — is not a valid
+# destination, and every one of those failures is INVISIBLE to the config-surface
+# gates. The live destination is the only surface these defects exist on, so
 # this gate reads live read-backs and asserts against them.
 #
 # AUTHORITY SPLIT — THIS SCRIPT OWNS THE DESTINATION'S CREATE-ONLY PARTITION KEY.
@@ -53,20 +51,20 @@
 #   (c) TEMPERATURES IS ON /deviceId. The destination temperatures container's
 #       partition key paths (from `az cosmosdb sql container show`) equal exactly
 #       ["/deviceId"]. This gate is authoritative for this create-only property.
-#   (d) DEFINITIONS MATCH SOURCE. For each of the five containers, the destination
-#       definition is definition-faithful to its source, proven by invoking
-#       scripts/cosmos-definition-parity.sh (MG-53 step 3) on the two canonical
-#       `az cosmosdb sql container show` read-backs. Throughput is scoped OUT of
-#       that comparison by design (the source temperatures container carries a
-#       dedicated 400 RU/s offer; the destination deliberately carries none).
 #
-# NEVER A PASS ON AN ASSERTION THAT DID NOT RUN. Every one of the four assertions
+#   RETIRED: SOURCE DEFINITION PARITY. This gate once had a fourth assertion that
+#   compared each destination container's definition against its SOURCE twin. MG-54
+#   deleted the source database, so there is no twin left to compare against, and
+#   that assertion was removed (HAR-10). The bundle no longer carries a
+#   sourceDefinition; one that still does is ignored, never consumed. The three
+#   destination assertions above are exactly as strict as before.
+#
+# NEVER A PASS ON AN ASSERTION THAT DID NOT RUN. Every one of the three assertions
 # above sets a "provably ran" marker only after it reaches a recognised verdict,
-# and the final PASS is re-derived from all four markers AND a zero violation
+# and the final PASS is re-derived from all three markers AND a zero violation
 # count — it cannot be reached by decrementing a counter or by an assertion that
 # silently skipped. Every operational failure (missing/empty/malformed/unreadable
-# input, a probe that could not run, a parity comparison that errored) is a FATAL
-# that exits before the verdict. "Cannot tell" is NEVER "nothing wrong".
+# input, a probe that could not run) is a FATAL that exits before the verdict. "Cannot tell" is NEVER "nothing wrong".
 #
 # INPUT — a single JSON "read-back bundle" the OPERATOR assembles from the live az
 # read-backs, passed as a file argument or on stdin (exactly one document, like
@@ -97,8 +95,7 @@
 #           "offerFound": false     // did it return a dedicated offer?
 #                                   //   true => VIOLATION (container has its own offer)
 #         },
-#         "definition": { ... },       // destination `az cosmosdb sql container show`
-#         "sourceDefinition": { ... }  // source      `az cosmosdb sql container show`
+#         "definition": { ... }   // destination `az cosmosdb sql container show`
 #       },
 #       ... exactly the five containers: cooks, users, recipes, temperatures, devices
 #     ]
@@ -116,8 +113,8 @@
 # OUTPUT CONTRACT — NAMES AND REASONS, NEVER SECRETS. A container-show document and
 # a throughput offer carry schema and RU/s numbers, not credentials or connection
 # strings (the destination account has local auth disabled, MG-24). This gate
-# prints container names, field names, fixed reasons, and RU/s integers — the
-# schema fragments the parity script already prints on a diff. It is safe in a
+# prints container names, field names, fixed reasons, RU/s integers, and the
+# temperatures partition-key paths. It is safe in a
 # retained CI log, same rule as assert-live-host-storage.sh.
 #
 # PORTABILITY IS A SECURITY PROPERTY HERE, NOT A STYLE NOTE. Written to run
@@ -132,18 +129,16 @@
 # EXIT CODES — a caller depends on the distinction between "the destination is
 # provably wrong" and "I could not tell".
 #   0  PASS: (a) a 400 RU/s database-level offer exists, (b) zero containers hold a
-#      dedicated offer, (c) temperatures is on /deviceId, and (d) all five
-#      definitions match their source — all four assertions provably ran.
+#      dedicated offer, and (c) temperatures is on /deviceId — all three
+#      assertions provably ran.
 #   3  VIOLATION: at least one assertion RAN and FAILED — no database-level offer,
-#      a container holding a dedicated offer, temperatures off /deviceId, or a
-#      definition drift. A real, provable defect in the destination; the failing
+#      a container holding a dedicated offer, or temperatures off /deviceId. A real, provable defect in the destination; the failing
 #      assertion(s) are named. Distinct from operational failure so a caller can
 #      tell a genuine defect apart from an environment problem.
 #   1  OPERATIONAL FAILURE / FAIL-CLOSED: anything that prevented an assertion from
-#      provably running — no jq, the parity script missing/unrunnable, a
-#      missing/unreadable/empty input, invalid JSON, a bundle that is not the
-#      expected shape (wrong top-level type, wrong container set, a probe that
-#      could not run), or a parity comparison that itself errored.
+#      provably running — no jq, a missing/unreadable/empty input, invalid JSON,
+#      a bundle that is not the expected shape (wrong top-level type, wrong
+#      container set, a probe that could not run).
 #
 # USAGE
 #   assert-live-shared-throughput.sh [--expected-throughput 400] \
@@ -179,15 +174,6 @@ usage() {
 }
 
 command -v jq >/dev/null 2>&1 || die "jq is required but not on PATH"
-
-# The parity script (MG-53 step 3) lives next to this one. Resolve it relative to
-# this script so the gate works from any CWD, and fail closed if it is absent or
-# not executable — a definition assertion that cannot invoke its comparator has
-# not run, and "could not compare" is never "definitions match".
-HERE="$(cd "$(dirname "$0")" && pwd)" || die "could not resolve this script's directory"
-PARITY="${HERE}/cosmos-definition-parity.sh"
-[ -f "${PARITY}" ] || die "the definition-parity comparator is not next to this gate: ${PARITY} (MG-53 step 3). Refusing to report PASS on definition parity that could not be checked"
-[ -r "${PARITY}" ] || die "the definition-parity comparator is not readable: ${PARITY}"
 
 # --- 1. Arguments -----------------------------------------------------------
 EXPECTED_THROUGHPUT="400"
@@ -278,19 +264,20 @@ containers_type="$(jqp '(.containers | type) // "null"')"
 [ "${containers_type}" = "array" ] || die "the bundle (${SRC}) has no '.containers' array (got '${containers_type}'). Fail-closed"
 
 # The container SET must be EXACTLY the five expected names — no more, no fewer, no
-# duplicates. A bundle that silently omits a container would let (b)/(c)/(d) "pass"
-# by never running for it; a bundle with a duplicate name makes per-name lookup
+# duplicates. A bundle that silently omits a container would let (b)/(c) "pass" by
+# never running for it; a bundle with a duplicate name makes per-name lookup
 # ambiguous. Both are the vacuous-PASS class. Compare canonical sorted name lists.
 got_names="$(jqpc '[ .containers[]? | .name ] | sort')"
 case "${got_names}" in *__PROBE_ERROR__*) die "the container-name probe failed on ${SRC}" ;; esac
 want_names="$(printf '%s\n' "${EXPECTED_CONTAINERS}" | tr ' ' '\n' | jq -R . | jq -c -s 'sort' 2>/dev/null || printf '%s\n' '__PROBE_ERROR__')"
 case "${want_names}" in *__PROBE_ERROR__*) die "internal error building the expected container-name set — refusing to compare against nothing" ;; esac
 [ "${got_names}" = "${want_names}" ] || \
-  die "the bundle (${SRC}) does not carry EXACTLY the five expected destination containers. expected=${want_names} got=${got_names} — a bundle missing/duplicating a container cannot be asserted (an omitted container would silently skip its offer/partition/parity checks). Fail-closed"
+  die "the bundle (${SRC}) does not carry EXACTLY the five expected destination containers. expected=${want_names} got=${got_names} — a bundle missing/duplicating a container cannot be asserted (an omitted container would silently skip its offer/partition checks). Fail-closed"
 
 # Every container entry must be an object carrying a string name, a throughputProbe
-# object, and definition + sourceDefinition objects. The per-container assertions
-# ARE those fields; a malformed entry cannot be asserted against.
+# object, and a definition object. The per-container assertions ARE those fields;
+# a malformed entry cannot be asserted against. A leftover sourceDefinition (the
+# retired parity input) is neither required nor read.
 malformed="$(jqp '
   [ .containers[]
     | if type != "object" then 1
@@ -299,7 +286,6 @@ malformed="$(jqp '
       elif ((.throughputProbe.queryOk | type) != "boolean") then 1
       elif ((.throughputProbe.offerFound | type) != "boolean") then 1
       elif ((.definition | type) != "object") then 1
-      elif ((.sourceDefinition | type) != "object") then 1
       else empty end
   ] | length
 ')"
@@ -307,7 +293,7 @@ case "${malformed}" in
   ''|*[!0-9]*) die "the container-shape probe failed on ${SRC} — refusing to report PASS on a bundle whose entries could not be validated" ;;
 esac
 [ "${malformed}" -eq 0 ] || \
-  die "${malformed} container entr(y/ies) in ${SRC} are malformed (not an object with a string name, a throughputProbe{queryOk:bool,offerFound:bool}, and definition + sourceDefinition objects). Fail-closed"
+  die "${malformed} container entr(y/ies) in ${SRC} are malformed (not an object with a string name, a throughputProbe{queryOk:bool,offerFound:bool}, and a definition object). Fail-closed"
 
 # The database offer probe must likewise carry boolean queryOk/offerFound. Read
 # each with an explicit type test, NEVER the jq `//` alternative operator: `false
@@ -339,12 +325,11 @@ fi
 # --- verdict accounting -----------------------------------------------------
 violations=0
 # Each assertion sets its marker to 1 ONLY after it reaches a recognised verdict.
-# The final PASS requires all four markers AND zero violations, so no accept path
+# The final PASS requires all three markers AND zero violations, so no accept path
 # is reachable by an assertion that did not provably run.
 ran_db_offer=0
 ran_container_offers=0
 ran_partition_key=0
-ran_parity=0
 
 # report <subject> <reason> — a NAME/subject and a fixed reason. Never a secret.
 report() {
@@ -438,58 +423,15 @@ else
 fi
 ran_partition_key=1
 
-# --- 6. Assertion (d): definitions match source (via the step-3 parity script) --
-# For each container, extract the destination and source container-show documents
-# and hand them to cosmos-definition-parity.sh. Its exit code is the verdict:
-#   0 => faithful; 3 => a real definition DIFF (VIOLATION here); anything else =>
-#   an operational failure in the comparator, which is a FATAL here (a comparison
-#   that errored is never "definitions match").
-TMPDIR_PARITY="$(mktemp -d 2>/dev/null)" || die "could not create a temp dir for the parity read-backs"
-# Clean up the temp dir on any exit. Single-quoted so it expands at trap time.
-trap 'rm -rf "${TMPDIR_PARITY}"' EXIT INT TERM
-
-for name in ${EXPECTED_CONTAINERS}; do
-  dst_file="${TMPDIR_PARITY}/${name}.destination.json"
-  src_file="${TMPDIR_PARITY}/${name}.source.json"
-
-  dst_doc="$(printf '%s\n' "${JSON}" | jq -c --arg n "${name}" '
-    (.containers[] | select(.name == $n) | .definition) // empty' 2>/dev/null || printf '%s\n' '__PROBE_ERROR__')"
-  case "${dst_doc}" in
-    __PROBE_ERROR__|'') die "could not extract the destination definition for container '${name}' from ${SRC} — refusing to report parity on a document that could not be read" ;;
-  esac
-  src_doc="$(printf '%s\n' "${JSON}" | jq -c --arg n "${name}" '
-    (.containers[] | select(.name == $n) | .sourceDefinition) // empty' 2>/dev/null || printf '%s\n' '__PROBE_ERROR__')"
-  case "${src_doc}" in
-    __PROBE_ERROR__|'') die "could not extract the source definition for container '${name}' from ${SRC}" ;;
-  esac
-
-  printf '%s\n' "${dst_doc}" > "${dst_file}" || die "could not stage the destination definition for '${name}'"
-  printf '%s\n' "${src_doc}" > "${src_file}" || die "could not stage the source definition for '${name}'"
-
-  # Invoke the comparator. Capture its exit code EXPLICITLY (do not let set -e or a
-  # pipeline swallow it) and branch on the three recognised outcomes.
-  parity_rc=0
-  bash "${PARITY}" --source "${src_file}" --destination "${dst_file}" --label "${name}" || parity_rc=$?
-  case "${parity_rc}" in
-    0)
-      echo "  · definition:${name}: faithful to source (parity script PASS)" ;;
-    3)
-      report "definition:${name}" "the destination container '${name}' definition is NOT faithful to its source (cosmos-definition-parity.sh reported a DIFF; the differing field(s) are named in its output above). A destination that differs from its source is not a valid destination" ;;
-    *)
-      die "the definition-parity comparison for container '${name}' did not run to a definite answer (cosmos-definition-parity.sh exited ${parity_rc}, an operational failure) — refusing to report PASS on definition parity that could not be checked. Fail-closed" ;;
-  esac
-done
-ran_parity=1
-
-# --- 7. Verdict -------------------------------------------------------------
-# PASS is re-derived from all four assertions having provably RUN and the
+# --- 6. Verdict -------------------------------------------------------------
+# PASS is re-derived from all three assertions having provably RUN and the
 # violation count being exactly zero. No future edit can reach PASS by
 # decrementing a counter: each ran_* marker is set only after its assertion
 # reached a recognised verdict, and every operational failure above already
 # die()d with exit 1 before this point.
 echo
-if [ "${ran_db_offer}" -ne 1 ] || [ "${ran_container_offers}" -ne 1 ] || [ "${ran_partition_key}" -ne 1 ] || [ "${ran_parity}" -ne 1 ]; then
-  die "not all four assertions provably ran (db_offer=${ran_db_offer} container_offers=${ran_container_offers} partition_key=${ran_partition_key} parity=${ran_parity}) — refusing to report a verdict on an incomplete assertion. This is a bug in this gate, and it fails closed by design"
+if [ "${ran_db_offer}" -ne 1 ] || [ "${ran_container_offers}" -ne 1 ] || [ "${ran_partition_key}" -ne 1 ]; then
+  die "not all three assertions provably ran (db_offer=${ran_db_offer} container_offers=${ran_container_offers} partition_key=${ran_partition_key}) — refusing to report a verdict on an incomplete assertion. This is a bug in this gate, and it fails closed by design"
 fi
 
 if [ "${violations}" -ne 0 ]; then
@@ -497,5 +439,5 @@ if [ "${violations}" -ne 0 ]; then
   exit "${EX_VIOLATION}"
 fi
 
-echo "${PROG}: PASS — a manual ${EXPECTED_THROUGHPUT} RU/s database-level offer exists, no destination container holds a dedicated offer, temperatures is on ${DEVICEID_PATH}, and all five destination definitions are faithful to their source."
+echo "${PROG}: PASS — a manual ${EXPECTED_THROUGHPUT} RU/s database-level offer exists, no destination container holds a dedicated offer, and temperatures is on ${DEVICEID_PATH}."
 exit 0

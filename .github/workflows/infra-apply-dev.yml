@@ -1303,10 +1303,9 @@ jobs:
       # 13. LIVE SHARED-THROUGHPUT GATE (MG-53), fail-closed, on the CREATED
       #     destination. This is the missing half the config-surface gates cannot
       #     supply: the destination's database-level offer, its containers' absence
-      #     of dedicated offers, the temperatures container's create-only /deviceId
-      #     partition key, and each container's definition parity are ALL properties
-      #     that exist only on the live destination and are INVISIBLE to
-      #     tf-static-checks (which keys on the SOURCE labels). The gate
+      #     of dedicated offers, and the temperatures container's create-only
+      #     /deviceId partition key are ALL properties that exist only on the live
+      #     destination and are INVISIBLE to tf-static-checks. The gate
       #     scripts/assert-live-shared-throughput.sh is authored fail-closed but is
       #     a pure function of a read-back bundle — it asserts nothing until it is
       #     RUN with a bundle actually populated from Azure. A fail-closed gate that
@@ -1327,6 +1326,12 @@ jobs:
       #     identity already holds. Names and RU/s integers only reach the log —
       #     never a credential (the destination account has local auth disabled,
       #     MG-24), so the bundle is safe in a retained log, same rule as MG-58.
+      #
+      #     DESTINATION-ONLY. The gate once also compared each destination
+      #     container's definition against its SOURCE twin. MG-54 deleted the
+      #     source database and its root name output, so there is no twin left to
+      #     compare against; that parity half was retired (HAR-10). Every
+      #     destination assertion above is unchanged.
       - name: Live shared-throughput gate (fail-closed, on the CREATED destination)
         # Freshness-gated, NOT always() — and that divergence from the sibling live
         # gates is deliberate, because of WHAT this one inspects. The MG-58
@@ -1386,9 +1391,10 @@ jobs:
             exit 0
           fi
 
-          # Resolve the account and BOTH database names from DESIRED state, never a
-          # literal — that is what makes this a live-versus-desired assertion. These
-          # are NAMES, not secrets (MG-24: the account has local auth disabled).
+          # Resolve the account and the destination database name from DESIRED
+          # state, never a literal — that is what makes this a live-versus-desired
+          # assertion. These are NAMES, not secrets (MG-24: the account has local
+          # auth disabled).
           if ! RG="$(terraform output -raw resource_group_name 2>"$ERR")" || [ -z "$RG" ]; then
             echo "Could not resolve resource_group_name from terraform output — failing closed." >&2
             cat "$ERR" >&2; rm -f "$ERR"; exit 1
@@ -1401,13 +1407,9 @@ jobs:
             echo "Could not resolve destination_database_name from terraform output — failing closed." >&2
             cat "$ERR" >&2; rm -f "$ERR"; exit 1
           fi
-          if ! SRC_DB="$(terraform output -raw cosmos_db_database_name 2>"$ERR")" || [ -z "$SRC_DB" ]; then
-            echo "Could not resolve cosmos_db_database_name (source) from terraform output — failing closed." >&2
-            cat "$ERR" >&2; rm -f "$ERR"; exit 1
-          fi
           rm -f "$ERR"
 
-          echo "Asserting the live MG-53 destination: account $ACCT, destination db $DEST_DB, source db $SRC_DB (resource group $RG)."
+          echo "Asserting the live MG-53 destination: account $ACCT, destination db $DEST_DB (resource group $RG)."
 
           # THE COLLECT -> ASSERT SEAM. The collector's bundle reaches the gate's
           # stdin and nowhere else (no file, no tee, no artifact) — the same
@@ -1418,7 +1420,7 @@ jobs:
           set +e
           scripts/collect-live-shared-throughput.sh \
             --account-name "$ACCT" --resource-group "$RG" \
-            --database-name "$DEST_DB" --source-database-name "$SRC_DB" \
+            --database-name "$DEST_DB" \
             | scripts/assert-live-shared-throughput.sh \
                 --expected-throughput 400 --database-name "$DEST_DB" -
           RC=("${PIPESTATUS[@]}")
@@ -1432,7 +1434,7 @@ jobs:
           fi
 
           if [ "$GATE_RC" -eq 0 ]; then
-            echo "LIVE SHARED-THROUGHPUT DESTINATION VALID — a manual 400 RU/s database-level offer exists on $DEST_DB, no destination container holds a dedicated offer, temperatures is on /deviceId, and all five definitions are faithful to source."
+            echo "LIVE SHARED-THROUGHPUT DESTINATION VALID — a manual 400 RU/s database-level offer exists on $DEST_DB, no destination container holds a dedicated offer, and temperatures is on /deviceId."
           elif [ "$GATE_RC" -eq 3 ]; then
             echo "The MG-53 destination is PROVABLY WRONG (gate exit 3) — the named violation(s) are above (they name containers/fields/RU integers only, never values)." >&2
             echo "A container's partition key path is CREATE-ONLY: a mis-partitioned temperatures container must be REBUILT, not edited. A missing database-level offer or a stray dedicated container offer means the destination was not created as a shared-throughput database." >&2

@@ -122,10 +122,11 @@ run "destination_temperatures_keeps_the_create_only_deviceid_partition_key" {
 }
 
 # Faithful destination shape for all five containers — the config-known half of
-# the definition (partition keys, versions, database binding, unique keys). The
-# indexing policy and the live definition-parity comparison are covered by the
-# parity script (step 3) and the live assertion (step 4); this pins the parts a
-# plan can see so a copy-paste drift on the destination is caught in-container.
+# the definition (partition keys, versions, database binding, unique keys). This
+# pins the parts a plan can see so a copy-paste drift on the destination is caught
+# in-container. (The live source-vs-destination definition-parity comparison was
+# retired with the source database, HAR-10; the live post-create assertion still
+# checks the destination's offers and the temperatures partition key.)
 run "destination_containers_reproduce_the_source_definition_shape" {
   command = plan
 

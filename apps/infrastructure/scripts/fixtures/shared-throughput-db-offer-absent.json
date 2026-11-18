@@ -43,47 +43,6 @@
         }
       },
       "name": "cooks",
-      "sourceDefinition": {
-        "id": "cooks",
-        "resource": {
-          "_etag": "\"cooks-src\"",
-          "_rid": "cooksSRC==",
-          "_self": "dbs/source/colls/cooks/",
-          "_ts": 1723800000,
-          "conflictResolutionPolicy": {
-            "conflictResolutionPath": "/_ts",
-            "conflictResolutionProcedure": "",
-            "mode": "LastWriterWins"
-          },
-          "defaultTtl": -1,
-          "id": "cooks",
-          "indexingPolicy": {
-            "automatic": true,
-            "compositeIndexes": [],
-            "excludedPaths": [
-              {
-                "path": "/\"_etag\"/?"
-              }
-            ],
-            "includedPaths": [
-              {
-                "path": "/*"
-              }
-            ],
-            "indexingMode": "consistent"
-          },
-          "partitionKey": {
-            "kind": "Hash",
-            "paths": [
-              "/id"
-            ],
-            "version": 2
-          },
-          "uniqueKeyPolicy": {
-            "uniqueKeys": []
-          }
-        }
-      },
       "throughputProbe": {
         "offerFound": false,
         "queryOk": true
@@ -138,53 +97,6 @@
         }
       },
       "name": "users",
-      "sourceDefinition": {
-        "id": "users",
-        "resource": {
-          "_etag": "\"users-src\"",
-          "_rid": "usersSRC==",
-          "_self": "dbs/source/colls/users/",
-          "_ts": 1723800000,
-          "conflictResolutionPolicy": {
-            "conflictResolutionPath": "/_ts",
-            "conflictResolutionProcedure": "",
-            "mode": "LastWriterWins"
-          },
-          "defaultTtl": -1,
-          "id": "users",
-          "indexingPolicy": {
-            "automatic": true,
-            "compositeIndexes": [],
-            "excludedPaths": [
-              {
-                "path": "/\"_etag\"/?"
-              }
-            ],
-            "includedPaths": [
-              {
-                "path": "/*"
-              }
-            ],
-            "indexingMode": "consistent"
-          },
-          "partitionKey": {
-            "kind": "Hash",
-            "paths": [
-              "/id"
-            ],
-            "version": 2
-          },
-          "uniqueKeyPolicy": {
-            "uniqueKeys": [
-              {
-                "paths": [
-                  "/email"
-                ]
-              }
-            ]
-          }
-        }
-      },
       "throughputProbe": {
         "offerFound": false,
         "queryOk": true
@@ -233,47 +145,6 @@
         }
       },
       "name": "recipes",
-      "sourceDefinition": {
-        "id": "recipes",
-        "resource": {
-          "_etag": "\"recipes-src\"",
-          "_rid": "recipesSRC==",
-          "_self": "dbs/source/colls/recipes/",
-          "_ts": 1723800000,
-          "conflictResolutionPolicy": {
-            "conflictResolutionPath": "/_ts",
-            "conflictResolutionProcedure": "",
-            "mode": "LastWriterWins"
-          },
-          "defaultTtl": -1,
-          "id": "recipes",
-          "indexingPolicy": {
-            "automatic": true,
-            "compositeIndexes": [],
-            "excludedPaths": [
-              {
-                "path": "/\"_etag\"/?"
-              }
-            ],
-            "includedPaths": [
-              {
-                "path": "/*"
-              }
-            ],
-            "indexingMode": "consistent"
-          },
-          "partitionKey": {
-            "kind": "Hash",
-            "paths": [
-              "/id"
-            ],
-            "version": 2
-          },
-          "uniqueKeyPolicy": {
-            "uniqueKeys": []
-          }
-        }
-      },
       "throughputProbe": {
         "offerFound": false,
         "queryOk": true
@@ -333,58 +204,6 @@
         }
       },
       "name": "temperatures",
-      "sourceDefinition": {
-        "id": "temperatures",
-        "resource": {
-          "_etag": "\"temperatures-src\"",
-          "_rid": "temperaturesSRC==",
-          "_self": "dbs/source/colls/temperatures/",
-          "_ts": 1723800000,
-          "conflictResolutionPolicy": {
-            "conflictResolutionPath": "/_ts",
-            "conflictResolutionProcedure": "",
-            "mode": "LastWriterWins"
-          },
-          "defaultTtl": 7776000,
-          "id": "temperatures",
-          "indexingPolicy": {
-            "automatic": true,
-            "compositeIndexes": [
-              [
-                {
-                  "order": "ascending",
-                  "path": "/deviceId"
-                },
-                {
-                  "order": "descending",
-                  "path": "/timestamp"
-                }
-              ]
-            ],
-            "excludedPaths": [
-              {
-                "path": "/\"_etag\"/?"
-              }
-            ],
-            "includedPaths": [
-              {
-                "path": "/*"
-              }
-            ],
-            "indexingMode": "consistent"
-          },
-          "partitionKey": {
-            "kind": "Hash",
-            "paths": [
-              "/deviceId"
-            ],
-            "version": 2
-          },
-          "uniqueKeyPolicy": {
-            "uniqueKeys": []
-          }
-        }
-      },
       "throughputProbe": {
         "offerFound": false,
         "queryOk": true
@@ -433,47 +252,6 @@
         }
       },
       "name": "devices",
-      "sourceDefinition": {
-        "id": "devices",
-        "resource": {
-          "_etag": "\"devices-src\"",
-          "_rid": "devicesSRC==",
-          "_self": "dbs/source/colls/devices/",
-          "_ts": 1723800000,
-          "conflictResolutionPolicy": {
-            "conflictResolutionPath": "/_ts",
-            "conflictResolutionProcedure": "",
-            "mode": "LastWriterWins"
-          },
-          "defaultTtl": -1,
-          "id": "devices",
-          "indexingPolicy": {
-            "automatic": true,
-            "compositeIndexes": [],
-            "excludedPaths": [
-              {
-                "path": "/\"_etag\"/?"
-              }
-            ],
-            "includedPaths": [
-              {
-                "path": "/*"
-              }
-            ],
-            "indexingMode": "consistent"
-          },
-          "partitionKey": {
-            "kind": "Hash",
-            "paths": [
-              "/id"
-            ],
-            "version": 2
-          },
-          "uniqueKeyPolicy": {
-            "uniqueKeys": []
-          }
-        }
-      },
       "throughputProbe": {
         "offerFound": false,
         "queryOk": true
