@@ -342,6 +342,20 @@ resource "azapi_resource" "function_app" {
   # Event Hub, SignalR, App Insights). Imported with the site, never recreated.
   identity {
     type = "SystemAssigned"
+    # LOAD-BEARING (HAR-16): keeps principal_id KNOWN on every plan, so the six
+    # role assignments that read identity_principal_id are never replaced.
+    # azapi v2.11.0 internal/services/azapi_resource.go:581-587 (ModifyPlan)
+    # copies the state identity (principal_id, tenant_id) into the plan ONLY when
+    # planIdentity.Type.Equal(stateIdentity.Type) &&
+    # planIdentity.IdentityIDs.Equal(stateIdentity.IdentityIDs). The comparison
+    # is strict: state holds identity_ids = [], an omitted attribute plans null,
+    # [] != null, so principal_id went "(known after apply)" and principal_id is
+    # ForceNew on azurerm_role_assignment and
+    # azurerm_cosmosdb_sql_role_assignment. Apply Dev Infrastructure run
+    # 44413716132 planned 6 to destroy for exactly this and the destroy guard
+    # refused it. Do not remove; tf-static-checks.sh check 9c and the
+    # system_identity_keeps_principal_id_known test guard it.
+    identity_ids = []
   }
 
   body = {

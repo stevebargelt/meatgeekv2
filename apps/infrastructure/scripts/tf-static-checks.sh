@@ -648,6 +648,39 @@ else
 fi
 check "Function App site has exactly one writer and no scalar host/deployment storage setting (HAR-15)" "${writer_hits%$'\n'}"
 
+# --- CHECK 9c. The site's system identity declares identity_ids = [] (HAR-16) ------
+# azapi v2.11.0 ModifyPlan (internal/services/azapi_resource.go:581-587) copies
+# the STATE identity (principal_id, tenant_id) into the plan only when the planned
+# type and identity_ids STRICTLY equal the state's. State holds identity_ids = [];
+# an omitted attribute plans null, [] != null, so principal_id plans as
+# "(known after apply)". principal_id is ForceNew on azurerm_role_assignment and
+# azurerm_cosmosdb_sql_role_assignment, so all six Function App role assignments
+# were planned for replacement (Apply Dev Infrastructure run 44413716132). This
+# check refuses an azapi_resource "function_app" whose identity block (comments
+# stripped) lacks `identity_ids = []` or is not SystemAssigned. Finding no such
+# resource or no identity block is a failure, not a vacuous pass.
+identity_hits=""
+if [[ -f "${FUNC_MAIN}" ]]; then
+  site_block="$(sed -e 's|^[[:space:]]*#.*$||' -e 's|[[:space:]]#.*$||' "${FUNC_MAIN}" \
+    | awk '/^resource[[:space:]]+"azapi_resource"[[:space:]]+"function_app"[[:space:]]*\{/{f=1} f{print} f&&/^}/{f=0}')"
+  if [[ -z "${site_block}" ]]; then
+    identity_hits+="${FUNC_MAIN}: resource \"azapi_resource\" \"function_app\" not found"$'\n'
+  else
+    identity_block="$(awk '/^[[:space:]]*identity[[:space:]]*\{/{f=1} f{print} f&&/^[[:space:]]*}/{exit}' <<< "${site_block}")"
+    if [[ -z "${identity_block}" ]]; then
+      identity_hits+="${FUNC_MAIN}: azapi_resource.function_app has no identity block"$'\n'
+    else
+      grep -qE '^[[:space:]]*type[[:space:]]*=[[:space:]]*"SystemAssigned"[[:space:]]*$' <<< "${identity_block}" \
+        || identity_hits+="${FUNC_MAIN}: azapi_resource.function_app identity is not type = \"SystemAssigned\""$'\n'
+      grep -qE '^[[:space:]]*identity_ids[[:space:]]*=[[:space:]]*\[[[:space:]]*\][[:space:]]*$' <<< "${identity_block}" \
+        || identity_hits+="${FUNC_MAIN}: azapi_resource.function_app identity lacks identity_ids = [] — without it azapi plans principal_id as unknown and REPLACES every role assignment granted to the app (HAR-16, run 44413716132)"$'\n'
+    fi
+  fi
+else
+  identity_hits+="modules/functions/main.tf not found"$'\n'
+fi
+check "Function App identity declares identity_ids = [] so principal_id stays known (HAR-16)" "${identity_hits%$'\n'}"
+
 # --- CHECK 10. Globally-unique Functions storage account name (MG-24 red-fix) ------
 # Must be subscription-derived (same approach as the Cosmos account name) so a
 # greenfield apply cannot collide with a pre-existing global storage name.
