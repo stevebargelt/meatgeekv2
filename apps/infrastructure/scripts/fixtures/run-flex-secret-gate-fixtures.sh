@@ -70,6 +70,11 @@ flex-plan-siteconfig-localauth-enabled.json fail auto
 flex-plan-siteconfig-noncred.json fail auto
 flex-plan-sas-endpoint.json fail auto
 flex-plan-deploy-storage-key.json fail auto
+azapi-site-plan-accepted.json pass auto
+azapi-site-plan-host-storage-connstr.json fail auto
+azapi-site-plan-deploy-connstr-auth.json fail auto
+azapi-site-plan-sas-endpoint.json fail auto
+azapi-site-plan-foreign-ikey.json fail auto
 secret-gate-empty-resource-changes.json pass json
 secret-gate-resource-changes-string.json fail json
 secret-gate-resource-changes-object.json fail json
@@ -229,7 +234,9 @@ for shell_bin in ${SHELL_BINS}; do
   # secret-gate-foreign-ikey-sentinel.json embeds the sentinel MGSENTINELDONOTLOG
   # in EVERY credential value and is built to drive every reject path at once
   # (foreign-ikey, export-surface output, generic marker, bare managed ikey, Flex
-  # storage_access_key, inherent-key data service, azapi shared-key). So this is a
+  # storage_access_key, inherent-key data service, azapi shared-key, and — HAR-15
+  # — the azapi Function App site's app settings, deployment endpoint and
+  # connection-string deployment auth). So this is a
   # whole-surface assertion, not a single-message one.
   #
   # STDOUT AND STDERR ARE CAPTURED SEPARATELY, deliberately. The fixture cases

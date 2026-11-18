@@ -1,0 +1,80 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "_fixture_note": "HAR-15 destroy circuit-breaker fixture \u2014 TWO forgets of the same ARM id beside one import of it. One import cannot be custody for two state entries, so the pairing is ambiguous and BOTH forgets stay PROTECTED: the guard must FAIL with no override.",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "module.azure_functions.azurerm_function_app_flex_consumption.main",
+      "module_address": "module.azure_functions",
+      "mode": "managed",
+      "type": "azurerm_function_app_flex_consumption",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "forget"
+        ],
+        "before": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456",
+          "name": "meatgeek-v2-dev-func-abc123def456"
+        },
+        "after": null
+      }
+    },
+    {
+      "address": "module.legacy.azurerm_function_app_flex_consumption.main",
+      "module_address": "module.legacy",
+      "mode": "managed",
+      "type": "azurerm_function_app_flex_consumption",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "forget"
+        ],
+        "before": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456",
+          "name": "meatgeek-v2-dev-func-abc123def456"
+        },
+        "after": null
+      }
+    },
+    {
+      "address": "module.azure_functions.azapi_resource.function_app",
+      "module_address": "module.azure_functions",
+      "mode": "managed",
+      "type": "azapi_resource",
+      "name": "function_app",
+      "provider_name": "registry.terraform.io/azure/azapi",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "before": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456"
+        },
+        "after": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456"
+        },
+        "importing": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456?api-version=2024-04-01"
+        }
+      }
+    },
+    {
+      "address": "module.azure_functions.azurerm_role_assignment.functions_storage_blob",
+      "type": "azurerm_role_assignment",
+      "name": "functions_storage_blob",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    }
+  ]
+}

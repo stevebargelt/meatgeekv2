@@ -1,7 +1,9 @@
 # Single Flex Consumption hosting model for both dev and prod, replacing the inherited Y1(dev)/EP1(prod) split
 
-- **Status:** Accepted (deterministic code landed; live destroy/re-apply operator-gated)
-- **Date:** 2026-07-23
+- **Status:** Accepted (deterministic code landed; live destroy/re-apply operator-gated;
+  **amended 2026-11-18 by HAR-15** — the resource that expresses this model
+  changed, the model did not; see the note below)
+- **Date:** 2026-07-23; amended 2026-11-18
 - **Ticket:** MG-24 (greenfield V2 infrastructure — Azure Functions hosting revision)
 - **Scope:** `apps/infrastructure` — the Functions module
   (`modules/functions`), the root wiring (`main.tf` / `variables.tf`), the
@@ -16,6 +18,27 @@
 > destroy/re-apply (with the Cosmos-migration decision below) is the operator's
 > out-of-band gated step, not part of this deterministic delivery. Do not read a
 > green `terraform validate` as "the Function App is running on Flex."
+
+
+> **Amendment 2026-11-18 (HAR-15) — the site is no longer
+> `azurerm_function_app_flex_consumption`.** The hosting decision below stands:
+> one Flex Consumption model (FC1 plan, node 24, blob-container deployment
+> storage authenticated by the system-assigned identity, the same scale knobs)
+> for dev and prod. What changed is the Terraform resource that declares it. That
+> azurerm resource writes a scalar `AzureWebJobsStorage` connection string with
+> an empty AccountKey on every create and update and hides it on read, at the
+> pinned v4.81.0 and still at v5.14.0
+> ([MG-58 ADR, revision 2026-11-18](mg-58-host-storage-managed-identity.md)).
+> The site is now `azapi_resource.function_app` (`Microsoft.Web/sites`, kind
+> `functionapp,linux`) and Easy Auth is `azapi_resource.function_app_auth`
+> (`Microsoft.Web/sites/config` `authsettingsV2`), so where this ADR says "the
+> flex resource", `runtime_name` / `runtime_version`,
+> `storage_authentication_type`, `site_config`, or `auth_settings_v2`, read the
+> azapi body's `functionAppConfig`, `siteConfig` and the `authsettingsV2`
+> resource. The `azurerm_service_plan` (FC1) is still retained: the site's
+> `serverFarmId` points at it. The App Insights connection string is an app
+> setting again (azapi has no native field to route it through, and azapi sends
+> the settings verbatim, so the MG-24 second-plan diff does not arise).
 
 ## Context
 

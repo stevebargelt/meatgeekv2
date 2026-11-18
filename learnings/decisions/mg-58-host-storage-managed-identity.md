@@ -2,8 +2,10 @@
 
 - **Status:** Accepted (decision binding; **revised 2026-08-10** — the root cause
   is the provider, not the module, and the ticket's framing changed with it; see
-  _Root cause_ and the Honest boundary)
-- **Date:** 2026-08-09; **revised 2026-08-10**
+  _Root cause_ and the Honest boundary; **revised 2026-11-18 (HAR-15)** — the
+  cause is removed: azapi is the sole owner of the site, see
+  _Revision 2026-11-18_ directly below)
+- **Date:** 2026-08-09; **revised 2026-08-10**; **revised 2026-11-18**
 - **Ticket:** MG-58 (dev Function host cannot authenticate to `AzureWebJobsStorage`)
 - **Scope:** `apps/infrastructure/modules/functions` (the Flex Function App's
   `app_settings` and its two storage role assignments), the module's
@@ -100,6 +102,116 @@ fmt -check`, `terraform validate` and `terraform test` in
 > **Do not read any green guard as "the host can reach its storage account."**
 > That inference — a green guard read as an operational fact — is exactly how
 > this defect shipped past eleven green checks (see _The architectural lesson_).
+
+## Revision 2026-11-18 (HAR-15): the cause is removed — azapi is the sole owner of the site
+
+**What changed.** The Function App is no longer `azurerm_function_app_flex_consumption`.
+`apps/infrastructure/modules/functions/main.tf` now declares the site as
+`azapi_resource.function_app` (`Microsoft.Web/sites`, kind `functionapp,linux`)
+and Easy Auth as `azapi_resource.function_app_auth`
+(`Microsoft.Web/sites/config`, name `authsettingsV2`). The site body carries
+`serverFarmId`, `functionAppConfig` (blob-container deployment storage
+authenticated as `SystemAssignedIdentity`, node 24, the same scale knobs), the
+system-assigned identity, and `siteConfig` with the **complete** `appSettings`
+list. Nothing else writes the site or any of its `config/*` children, and
+`tf-static-checks.sh` check 9b refuses any azurerm site-writing resource, any
+second azapi writer of a `Microsoft.Web/sites` type, and any declared scalar
+`AzureWebJobsStorage` or `DEPLOYMENT_STORAGE_CONNECTION_STRING` (case-insensitive).
+
+**What that does to this ADR's central claim.** _(e)_ split authority because
+the absence of the scalar key was not representable on any Terraform surface:
+the provider wrote it on every create and update and hid it on read. With azapi
+as the only writer, the settings collection Terraform PUTs **is** the deployed
+collection (a site PUT replaces it whole), so the desired state is now
+authoritative for **both** claims — the presence of
+`AzureWebJobsStorage__accountName` and the absence of the scalar form. The
+module tests assert both on the azapi request body, matched case-insensitively
+(`tests/flex_hosting_behavior.tftest.hcl`,
+`app_settings_are_exactly_the_declared_collection`, which also pins the exact
+set of setting names). The consequence _(f)_ accepted — `main` going red after
+every Function-App-updating apply until upstream fixed the provider — no longer
+holds: an update is an azapi PUT that injects nothing.
+
+**Why this is not rejected alternative (b).** (b) was a second writer
+**co-owning** the replace-whole-collection `config/appsettings` child **while
+azurerm still owned the site** and kept injecting settings the second writer
+could not see. Its failure mode was the two writers deleting each other's
+settings. HAR-15 has no co-owner: azurerm writes nothing on the site, azapi owns
+the whole site (the `functions_storage` precedent this ADR already accepted),
+and `authsettingsV2` is a different config child that never touches settings.
+The settings (b) feared losing were checked one by one: the App Insights
+connection string is now declared explicitly; `APPINSIGHTS_INSTRUMENTATIONKEY`
+and `WEBSITE_HEALTHCHECK_MAXPINGFAILURES` were already **removed** by the azurerm
+expander in this configuration (empty ikey, no health-check path);
+`DEPLOYMENT_STORAGE_CONNECTION_STRING` is deliberately absent because deployment
+storage authenticates by managed identity (it was the MG-61 residue, and the
+first azapi PUT removes it from the live site).
+
+**The migration does not recreate the site.** The root module drops the azurerm
+address with `removed { destroy = false }` and adopts the same live site and its
+`authsettingsV2` with `import` blocks whose ids the module derives from the
+environment's own resource group and names (`function_app_import_ids`). They run
+only where `adopt_existing_function_app = true` (dev); prod state is greenfield.
+The identity is imported, not recreated, so every role assignment keeps its
+principal. `tf-plan-destroy-guard.sh` still protects a `forget`; it clears this
+one only as a **custody transfer** — exactly one forget and exactly one benign
+(no-op/update) import of the identical ARM id in the same plan — with fixtures
+for the cases that must stay protected.
+
+**Upstream evidence, re-read for this revision** (hashicorp/terraform-provider-azurerm):
+
+| Version                          | File                                                                     | Lines                                        | What they do                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v4.81.0 (pinned)                 | `internal/services/appservice/helpers/function_app_schema.go`            | 2097, 2113–2117                              | `ExpandSiteConfigFunctionFlexConsumptionApp` takes `storageUsesMSI` but never reads it; `if storageStringFlex != ""` appends `AzureWebJobsStorage`, and `DEPLOYMENT_STORAGE_CONNECTION_STRING` when that name is passed                                                                           |
+| v4.81.0                          | `internal/services/appservice/function_app_flex_consumption_resource.go` | 445–463, 505 (create); 873–897, 913 (update) | composes `StorageStringFmt` (`…AccountKey=%s…`) from the endpoint's account name and `StorageAccessKey` (empty under MI), then calls the expander with `storageUsesMSI = false`; the update path keeps `DEPLOYMENT_STORAGE_CONNECTION_STRING` unless `storage_authentication_type` itself changed |
+| v4.81.0                          | `function_app_flex_consumption_resource.go`                              | 1090–1098                                    | read path: the `AzureWebJobsStorage` key is routed into `storage_access_key`, `DEPLOYMENT_STORAGE_CONNECTION_STRING` is filtered out — neither reaches `app_settings`                                                                                                                             |
+| **v5.14.0** (latest, 2026-11-13) | `function_app_flex_consumption_resource.go`                              | 426–451, 483 (create); 849–870, 886 (update) | unchanged: same `StorageStringFmt` composition with `StorageAccessKey`, same `storageUsesMSI = false` call                                                                                                                                                                                        |
+| v5.14.0                          | `helpers/function_app_schema.go`                                         | 2072, 2088–2092                              | same expander signature, same unconditional `if storageStringFlex != ""` append; no authentication-type branch was added                                                                                                                                                                          |
+
+So no released provider fixes it, and upgrading azurerm (a major version) would
+not have helped.
+
+**The live gate stays, as detection, and has a retirement condition.**
+`.github/workflows/infra-apply-dev.yml`'s "Live host-storage gate" is unchanged
+in what it asserts and in its remediate-then-fail behaviour. Only its state
+detection changed: it now recognises the site under
+`azapi_resource.function_app` as well as the old azurerm address, so it does not
+silently report "no Function App in state" after the migration. Retire the step
+(and `assert-live-host-storage.sh` with it) when **both** hold: (1) check 9b is
+green, so no azurerm resource writes the site; and (2) the gate has **observed**
+the scalar key absent, with no deletion performed, on the HAR-15 migration apply
+**and** on at least one later apply that updated the Function App in place.
+Retire on that observation, never on this paragraph alone. MG-25's prod
+precondition _(j)_ was written on the premise that prod "inherits the identical
+injection at its first apply"; with the site created by azapi that premise no
+longer holds, and MG-25 should re-evaluate the precondition against this
+retirement condition rather than port the gate by default.
+
+**Draft upstream issue (not posted — filing is out of HAR-15's scope).**
+
+> **`azurerm_function_app_flex_consumption`: writes a scalar `AzureWebJobsStorage` connection string with an empty AccountKey under `storage_authentication_type = "SystemAssignedIdentity"`, and hides it on read**
+>
+> Provider: v4.81.0, reproduced in source at v5.14.0.
+> On create and on every update, the resource composes
+> `DefaultEndpointsProtocol=https;AccountName=<account>;AccountKey=<storage_access_key>;EndpointSuffix=…`
+> and passes it to `ExpandSiteConfigFunctionFlexConsumptionApp`, which appends it
+> as `AzureWebJobsStorage` whenever it is non-empty. Under managed-identity
+> deployment storage `storage_access_key` is empty, so the site gets an
+> `AzureWebJobsStorage` with an empty `AccountKey`. The Functions host resolves
+> that scalar form before `AzureWebJobsStorage__accountName`, so host storage
+> fails (`azure.functions.webjobs.storage` Unhealthy / AuthenticationFailed). The
+> update path also writes `DEPLOYMENT_STORAGE_CONNECTION_STRING` unless
+> `storage_authentication_type` changed in the same apply. The read path moves
+> `AzureWebJobsStorage` into `storage_access_key` and filters
+> `DEPLOYMENT_STORAGE_CONNECTION_STRING`, so no plan ever shows either.
+> Expected: under `SystemAssignedIdentity` / `UserAssignedIdentity`, write no
+> connection-string settings (the Linux/Windows Function App expanders in the same
+> file already branch on managed identity), and do not hide settings on read.
+
+Everything below is the 2026-08-09 decision and its 2026-08-10 revision as
+written. Where it says the absence of the scalar key cannot be asserted in
+Terraform, or that `main` goes red after Function-App updates, read it as the
+record of why HAR-15 was needed.
 
 ## Context
 

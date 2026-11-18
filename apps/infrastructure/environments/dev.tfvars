@@ -77,7 +77,8 @@ temperature_data_ttl_days = 7 # Shorter retention for dev (cost savings)
 # using an MI-auth BLOB deployment container instead of an Azure Files content
 # share, so shared_access_key_enabled=false stays on the functions storage account.
 #
-# Flex knobs (mapped to azurerm_function_app_flex_consumption on azurerm v4.81.0):
+# Flex knobs (mapped to functionAppConfig.scaleAndConcurrency on the azapi
+# Microsoft.Web/sites resource since HAR-15):
 #   instance_memory_in_mb  — per-instance memory tier (smallest widely-supported GA
 #                            tier is 2048 MB; keep small in dev for cost).
 #   maximum_instance_count — hard ceiling on horizontal scale-out (dev capped low).
@@ -89,6 +90,14 @@ temperature_data_ttl_days = 7 # Shorter retention for dev (cost savings)
 instance_memory_in_mb  = 2048
 maximum_instance_count = 40 # Flex minimum ceiling — dev needs no burst headroom
 always_ready           = 0  # scale-to-zero: no always-on instances, ~$0 idle
+
+# HAR-15: dev state holds the Function App under the former azurerm Flex
+# resource. true makes the root import blocks adopt that SAME live site (and its
+# authsettingsV2 config) into the azapi resources, while a `removed` block drops
+# the azurerm address without destroying anything. The site and its managed
+# identity are never recreated. Once dev has applied this, the imports are
+# no-ops; delete the toggle and the import blocks together.
+adopt_existing_function_app = true
 
 # SignalR - Free tier
 signalr_sku_name     = "Free_F1" # Free tier - 20 concurrent connections

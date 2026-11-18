@@ -215,7 +215,7 @@ Activation of the dev loop is operator-gated: see
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `modules/iot-hub/`    | IoT Hub, Event Hub namespace, parallel routing, devices                                                                                                                                |
 | `modules/cosmos-db/`  | **V2-owned** Cosmos account, database, containers, outputs                                                                                                                             |
-| `modules/functions/`  | Flex Consumption Function App (`azurerm_function_app_flex_consumption`) on an `FC1` `azurerm_service_plan` + its own storage account (MI blob deployment container, length-safe names) |
+| `modules/functions/`  | Flex Consumption Function App (azapi `Microsoft.Web/sites` + `authsettingsV2`, HAR-15) on an `FC1` `azurerm_service_plan` + its own storage account (MI blob deployment container, length-safe names) |
 | `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs)                                                                                                                             |
 | `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                                                                                                                                                  |
 
@@ -223,12 +223,18 @@ The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it do
 **not** read a shared V1 account via a data source. There is no adoption of a pre-existing shared Cosmos account
 anywhere in the stack.
 
-The Functions module creates an **`azurerm_function_app_flex_consumption`** app
+The Functions module creates a **Flex Consumption** Function App
 (MG-24 hosting revision) — a **single Flex Consumption** model for **both** dev
 and prod, replacing the inherited `Y1`(dev)/`EP1`(prod) `azurerm_linux_function_app`
 split. Flex still **requires** a service plan, so the `azurerm_service_plan` is
-**retained** but repurposed to SKU **`FC1`** (the Flex plan) — its id is a required
-argument on the flex resource; it is **not** removed. The deployment package is
+**retained** but repurposed to SKU **`FC1`** (the Flex plan) — the site's
+`serverFarmId` points at it; it is **not** removed. Since **HAR-15** the site is
+an azapi `Microsoft.Web/sites` resource (`azapi_resource.function_app`) and Easy
+Auth is its `config/authsettingsV2` (`azapi_resource.function_app_auth`), not the
+azurerm Flex resource, which wrote a scalar `AzureWebJobsStorage` connection
+string on every update. azapi PUTs the complete app settings collection and is the
+site's only writer; see the
+[MG-58 ADR revision](../../learnings/decisions/mg-58-host-storage-managed-identity.md). The deployment package is
 read from an **MI-authenticated blob container** (no Azure Files content share, no
 shared key), which is why the functions storage account keeps
 `shared_access_key_enabled = false`. The Node runtime is **24**, the region is

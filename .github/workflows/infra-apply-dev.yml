@@ -1101,7 +1101,12 @@ jobs:
             rm -f "$ERR"
             exit 1
           fi
-          if ! printf '%s\n' "$TF_ADDRS" | grep -q 'azurerm_function_app'; then
+          # The site is azapi_resource.function_app since HAR-15 (it was
+          # azurerm_function_app_flex_consumption.main before). Match either
+          # owner, so the detection keeps firing across the migration and after
+          # it. Only WHICH state address names the app changed; what this gate
+          # asserts and does on a dirty site did not.
+          if ! printf '%s\n' "$TF_ADDRS" | grep -qE '(azurerm_function_app|azapi_resource\.function_app$)'; then
             echo "No Function App in state — the provider has not created one, so it cannot have injected a host-storage connection string into one. Nothing to assert."
             rm -f "$ERR"
             exit 0

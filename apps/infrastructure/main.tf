@@ -351,6 +351,54 @@ module "azure_functions" {
   ]
 }
 
+# --- HAR-15: hand the Function App from azurerm to azapi without recreating it --
+#
+# The site used to be the azurerm Flex Function App resource (`main`) inside
+# module.azure_functions. That provider resource injects a scalar
+# AzureWebJobsStorage connection string on every create and update (MG-58 ADR),
+# so the module now manages the site and its Easy Auth config as azapi
+# resources. The change of owner must NOT recreate the site: a new site would
+# get a new system-assigned identity, and every role assignment granted to the
+# old principal (Cosmos, Event Hubs, SignalR, App Insights, both storage roles)
+# would point at nothing.
+#
+# So the migration is a custody transfer inside ONE plan:
+#   * `removed { destroy = false }` drops the azurerm resource from state and
+#     leaves the live site alone (plan action: forget).
+#   * `import` adopts that same live site, and its authsettingsV2 config, into
+#     the azapi addresses (plan action: import, then an in-place update that
+#     PUTs the declared settings collection).
+# tf-plan-destroy-guard.sh still protects a `forget` in general. It clears this
+# one only because the same plan imports the identical ARM object into another
+# address, so the site never leaves Terraform management.
+#
+# The import ids come from the module (function_app_import_ids), derived from
+# THIS environment's resource group and names, never a literal dev id. The
+# import runs only where var.adopt_existing_function_app is true: dev, whose
+# state holds the azurerm site. Prod state is greenfield, so prod creates the
+# azapi site directly and an import there would fail on a site that does not
+# exist. Once dev has applied this, the import blocks are no-ops (the address
+# is already in state) and can be deleted together with the variable.
+removed {
+  from = module.azure_functions.azurerm_function_app_flex_consumption.main
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+import {
+  for_each = var.adopt_existing_function_app ? toset(["site"]) : toset([])
+  to       = module.azure_functions.azapi_resource.function_app
+  id       = module.azure_functions.function_app_import_ids.site
+}
+
+import {
+  for_each = var.adopt_existing_function_app ? toset(["auth"]) : toset([])
+  to       = module.azure_functions.azapi_resource.function_app_auth
+  id       = module.azure_functions.function_app_import_ids.auth
+}
+
 # --- Function App identity → data-plane RBAC (least privilege, MG-24 S1) -----
 # Cosmos DB Built-in Data Contributor (data-plane) on the V2-owned account so
 # the Function App reads/writes documents via AAD, not an account key.

@@ -27,6 +27,23 @@ scripts/fixtures/run-flex-secret-gate-fixtures.sh
 The IoT-Hub documented exception set is unchanged: none of these fixtures add a
 new authenticating-key allowance.
 
+### azapi-owned Function App site (HAR-15)
+
+Since HAR-15 the Function App is an `azapi_resource` of type
+`Microsoft.Web/sites`, not the azurerm Flex resource, so the gate has a
+dedicated collector for its body. These fixtures pin it. The `flex-plan-*`
+fixtures above stay: the azurerm collector is kept so a reintroduced azurerm
+site would still be inspected.
+
+| fixture | expected | proves |
+| --- | --- | --- |
+| `azapi-site-plan-accepted.json` | **exit 0** | the shipped shape passes: the full App Insights connection string with the MANAGED ikey under `local_authentication_enabled=false` in `siteConfig.appSettings`, `AzureWebJobsStorage__accountName` as a name, and SAS-free blob deployment storage authenticated as `SystemAssignedIdentity` |
+| `azapi-site-plan-host-storage-connstr.json` | **nonzero** | the scalar `AzureWebJobsStorage` connection string with an `AccountKey` in the azapi settings list is caught (the MG-58 injection, expressed in the azapi body) |
+| `azapi-site-plan-deploy-connstr-auth.json` | **nonzero** | deployment storage authenticating by connection string (`StorageAccountConnectionString` / a `storageAccountConnectionStringName`) is rejected on presence alone |
+| `azapi-site-plan-sas-endpoint.json` | **nonzero** | a SAS token on the `functionAppConfig` deployment endpoint is caught |
+| `azapi-site-plan-foreign-ikey.json` | **nonzero** | an App Insights connection string carrying an ikey that is NOT the managed one is rejected |
+
+
 ## assert-live-host-storage LIVE settings fixtures (MG-58)
 
 The `live-appsettings-*.json` fixtures pin the behaviour of

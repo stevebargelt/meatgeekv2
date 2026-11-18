@@ -1,21 +1,28 @@
 # Plan-level security-posture test for the Functions module (MG-24 step 1).
 #
-# Runs the module as the config-under-test with a MOCKED azurerm provider — NO
-# live Azure, NO credentials, NO apply. It EXERCISES the rendered plan (not just
-# static text) to prove the security invariants item 2 (App Insights AAD
-# ingestion), item 3 (dev Easy-Auth validation-only + fail-closed) and item 9
-# (globally-unique Function App name) must hold — now on the Flex Consumption
-# resource (azurerm_function_app_flex_consumption) after the MG-24 hosting
-# revision replaced the Y1/EP1 azurerm_linux_function_app.
+# Runs the module as the config-under-test with MOCKED providers — NO live Azure,
+# NO credentials, NO apply. It EXERCISES the rendered plan (not just static text)
+# to prove the security invariants item 2 (App Insights AAD ingestion), item 3
+# (dev Easy-Auth validation-only + fail-closed) and item 9 (globally-unique
+# Function App name) must hold.
+#
+# HAR-15: the Function App is an azapi Microsoft.Web/sites resource
+# (azapi_resource.function_app) and Easy Auth is its own azapi
+# Microsoft.Web/sites/config resource named authsettingsV2
+# (azapi_resource.function_app_auth). The assertions below are the same
+# properties the suite asserted on the former azurerm Flex resource, read from
+# the request bodies azapi actually sends. Because a site PUT replaces the whole
+# app settings collection, the declared settings ARE the deployed settings, so
+# the host-storage absence assertions are now authoritative, not regression
+# fences.
 #
 # Run:  terraform -chdir=apps/infrastructure/modules/functions test
 # (init the module dir with `terraform init -backend=false` first).
 
 mock_provider "azurerm" {}
 
-# The module now creates the Flex deployment blob container via azapi over the ARM
-# control plane (Microsoft.Storage/.../blobServices/containers), so the azapi
-# provider is mocked here too — NO live Azure, NO credentials.
+# The storage account, deployment container, Function App site and its Easy
+# Auth config are all azapi resources, so azapi is mocked too.
 mock_provider "azapi" {}
 
 variables {
@@ -37,7 +44,7 @@ variables {
   auth_active_directory_client_id = "11111111-1111-1111-1111-111111111111"
   auth_active_directory_tenant_id = "22222222-2222-2222-2222-222222222222"
   auth_allowed_audiences          = ["api://meatgeek-v2-dev-api"]
-  # allowed_applications = the CALLING client (Azure CLI public client), NOT the
+  # allowedApplications = the CALLING client (Azure CLI public client), NOT the
   # API registration. This is the smoke-test caller that acquires the token.
   auth_allowed_client_app_ids = ["04b07795-8ddb-461a-bbee-02f9e1bf7b46"]
 }
@@ -47,8 +54,18 @@ variables {
 run "function_app_name_is_globally_unique" {
   command = plan
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.name == "meatgeek-v2-dev-func-abc123def456"
+    condition     = azapi_resource.function_app.name == "meatgeek-v2-dev-func-abc123def456"
     error_message = "Function App name must append global_suffix for global uniqueness"
+  }
+  # The site is created in the module's resource group. The root's import id is
+  # derived from these same two values, so they must stay the site's identity.
+  assert {
+    condition     = azapi_resource.function_app.parent_id == var.resource_group_id
+    error_message = "The Function App site must be created in the module's resource group (parent_id = var.resource_group_id)"
+  }
+  assert {
+    condition     = azapi_resource.function_app.body.kind == "functionapp,linux"
+    error_message = "The site must be a Linux function app (kind = \"functionapp,linux\")"
   }
 }
 
@@ -59,8 +76,7 @@ run "function_app_name_is_globally_unique" {
 # back to a key and no key can leak into state — the precondition the gate's
 # storage-residual acceptance relies on. The account is created via azapi over the
 # ARM control plane (Microsoft.Storage/storageAccounts), so shared-key
-# disablement is asserted on the azapi body (allowSharedKeyAccess=false) rather
-# than the former azurerm shared_access_key_enabled attribute.
+# disablement is asserted on the azapi body (allowSharedKeyAccess=false).
 #
 # SCOPE (MG-58): this run block covers DEPLOYMENT storage ONLY. HOST storage
 # (AzureWebJobsStorage) is a SEPARATE authentication surface on the SAME account
@@ -83,26 +99,35 @@ run "deployment_storage_is_managed_identity_only" {
     error_message = "Function storage must enforce minimumTlsVersion=TLS1_2"
   }
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.storage_authentication_type == "SystemAssignedIdentity"
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.type == "SystemAssignedIdentity"
     error_message = "Flex deployment storage must authenticate with the system-assigned managed identity, not a storage account key"
   }
+  # The connection-string auth path names an app setting that would carry a
+  # key. Under managed-identity auth it must not be set at all.
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.storage_container_type == "blobContainer"
+    condition     = !can(azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.authentication.storageAccountConnectionStringName)
+    error_message = "Flex deployment storage must not name a storage connection-string setting (storageAccountConnectionStringName) — that is the shared-key deployment path"
+  }
+  assert {
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.type == "blobContainer"
     error_message = "Flex deployment storage must use a blobContainer (MI-auth), not an Azure Files content share"
+  }
+  # The endpoint is a plain URL on the functions account and container: no SAS,
+  # no AccountKey, nothing after the container name.
+  assert {
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.deployment.storage.value == "https://${var.storage_account_name}.blob.core.windows.net/deployment-package"
+    error_message = "Flex deployment storage must be the plain blob-container URL of the functions storage account's deployment-package container (no SAS, no key)"
   }
   # The deployment container must be PRIVATE — never anonymously readable. The
   # package ZIP is fetched by the Function App's managed identity, so no public
-  # blob access is ever needed. It is created via azapi over the ARM control plane
-  # (publicAccess = "None"). (The endpoint itself is built by string interpolation
-  # of the blob endpoint + this container name, carrying no SAS / AccountKey; the
-  # plain-URL shape is asserted by the pre-apply secret gate.)
+  # blob access is ever needed.
   assert {
     condition     = azapi_resource.deployment_container.body.properties.publicAccess == "None"
     error_message = "Flex deployment container must be private (publicAccess = \"None\", no anonymous blob access)"
   }
   # Node 24 runtime (matches the API engines.node and the operator's local Node).
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.runtime_name == "node" && azurerm_function_app_flex_consumption.main.runtime_version == "24"
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.runtime.name == "node" && azapi_resource.function_app.body.properties.functionAppConfig.runtime.version == "24"
     error_message = "Flex runtime must be node / version 24"
   }
 }
@@ -110,10 +135,10 @@ run "deployment_storage_is_managed_identity_only" {
 # MG-58 HOST-storage posture — a SEPARATELY NAMED invariant, deliberately NOT
 # folded into deployment_storage_is_managed_identity_only above. Host storage and
 # deployment storage are two independent authentication surfaces that happen to
-# share one storage account: the flex resource's storage_* arguments configure
-# only the DEPLOYMENT surface, and the host's own required storage (host lock and
-# singleton leases, timer schedule status, the key store) is configured only by
-# the AzureWebJobsStorage* app setting. Nothing about one implies the other.
+# share one storage account: functionAppConfig configures only the DEPLOYMENT
+# surface, and the host's own required storage (host lock and singleton leases,
+# timer schedule status, the key store) is configured only by the
+# AzureWebJobsStorage* app setting. Nothing about one implies the other.
 #
 # Both halves of the posture are asserted here, because a green half is what let
 # the defect through:
@@ -121,69 +146,81 @@ run "deployment_storage_is_managed_identity_only" {
 #     functions storage account. Its absence is the MG-58 outage
 #     (azure.functions.webjobs.storage Unhealthy / AuthenticationFailed).
 #   NEGATIVE — the credential-carrying connection-string form is ABSENT, and so is
-#     every service-URI variant. The account-name form and the service-URI form
-#     are ALTERNATIVES, not complements.
-# The account NAME is not a credential: no key, no SAS, no connection string
-# reaches app_settings or state, so this is compatible with — and depends on —
-# allowSharedKeyAccess=false asserted above. Shared keys are NOT restored.
+#     every service-URI variant and the deployment-storage connection string.
+#
+# HAR-15: these assertions read the settings collection azapi PUTs. That
+# collection replaces whatever the site had, and nothing else writes it, so
+# "absent here" now means "absent on the deployed site" — the property the
+# azurerm provider made impossible to state in HCL. App Service treats setting
+# names case-insensitively, so the absence checks lower-case every name.
 run "host_storage_is_managed_identity_only" {
   command = plan
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.app_settings["AzureWebJobsStorage__accountName"] == var.storage_account_name
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["AzureWebJobsStorage__accountName"] == var.storage_account_name
     error_message = "Host storage must be wired identity-based via AzureWebJobsStorage__accountName = the functions storage account name (MG-58). Absent, the host cannot authenticate to its own required storage and no storage-dependent trigger (timer schedule status, singleton lease) can run"
   }
-  # NEGATIVE: the credential-carrying form must never come back. This is the
-  # secrets-out-of-state invariant for the host surface — a connection string here
-  # would carry an account key or SAS, which the account cannot even mint
-  # (allowSharedKeyAccess=false) and which must never reach app_settings or state.
+  # NEGATIVE: the credential-carrying form must never be declared, in any case.
+  # With shared keys disabled it can only carry an unusable key, and the host
+  # reads it BEFORE the identity form — its presence is the MG-58 outage.
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "AzureWebJobsStorage")
-    error_message = "The bare AzureWebJobsStorage connection-string form must NOT be an app setting — it carries a shared key or SAS. Host storage authenticates by managed identity (MG-58); shared keys stay disabled"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "azurewebjobsstorage")
+    error_message = "The scalar AzureWebJobsStorage connection-string setting must NOT be declared (matched case-insensitively) — it carries a shared key or SAS and shadows the identity form. Host storage authenticates by managed identity (MG-58, HAR-15)"
   }
-  # NEGATIVE: exactly ONE host-storage form is published. Expressed as a set
-  # equality so it also rejects a variant nobody thought to name.
+  # NEGATIVE: the deployment-storage connection string must never be declared.
+  # Deployment storage authenticates by managed identity in functionAppConfig.
   assert {
-    condition     = [for k in sort(keys(azurerm_function_app_flex_consumption.main.app_settings)) : k if startswith(k, "AzureWebJobsStorage")] == ["AzureWebJobsStorage__accountName"]
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "deployment_storage_connection_string")
+    error_message = "DEPLOYMENT_STORAGE_CONNECTION_STRING must NOT be declared (matched case-insensitively) — deployment storage authenticates by managed identity, and a connection string here carries a key (MG-61, HAR-15)"
+  }
+  # NEGATIVE: exactly ONE host-storage form is published, case-insensitively.
+  # Expressed as a set equality so it also rejects a variant nobody thought to
+  # name (__blobServiceUri / __queueServiceUri / __tableServiceUri, or a
+  # differently-cased duplicate of the account-name form).
+  assert {
+    condition     = [for n in sort([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)]) : n if startswith(n, "azurewebjobsstorage")] == ["azurewebjobsstorage__accountname"]
     error_message = "Exactly ONE host-storage setting form may be published — the account-name form. No AzureWebJobsStorage__blobServiceUri/__queueServiceUri/__tableServiceUri variant may accompany it: the forms are alternatives, and this account is on standard Azure DNS with no private endpoint and no VNet integration (MG-58)"
   }
   # The host reaches that account over its SYSTEM-ASSIGNED identity — the same
   # identity the deployment surface uses and the one the storage data roles are
   # granted to. Without an identity the account name resolves to nothing.
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.identity[0].type == "SystemAssigned"
+    condition     = azapi_resource.function_app.identity[0].type == "SystemAssigned"
     error_message = "The identity-based host-storage form requires the app's system-assigned managed identity — AzureWebJobsStorage__accountName has no credential of its own to fall back on"
   }
 }
 
-# item 2 (+ MG-24 second-plan no-op fix) — the FULL App Insights connection string
-# (InstrumentationKey included) is wired verbatim via the Flex resource's NATIVE
-# site_config.application_insights_connection_string field (NOT an app_setting):
-# the Flex provider reflects APPLICATIONINSIGHTS_CONNECTION_STRING into that native
-# field, so setting it as an app_setting produced a perpetual second-plan diff.
-# Authorization=AAD stays a plain app_setting. The ikey is a non-credential because
-# the root sets local_authentication_enabled=false on the AI resource (that coupling
-# is enforced by the pre-apply inspection gate, on the site_config field now).
+# item 2 — the FULL App Insights connection string (InstrumentationKey included)
+# reaches the app as APPLICATIONINSIGHTS_CONNECTION_STRING, and Authorization=AAD
+# makes ingestion identity-based. The ikey is a non-credential because the root
+# sets local_authentication_enabled=false on the AI resource; that coupling is
+# enforced by the pre-apply inspection gate on this setting.
+#
+# HAR-15: under azurerm the string was wired through the native
+# site_config.application_insights_connection_string field, which the provider
+# turned into this same app setting on the wire (declaring it directly caused a
+# perpetual azurerm diff). azapi sends the settings collection verbatim, so the
+# setting is declared directly and asserted here.
 run "appinsights_full_connection_string_aad" {
   command = plan
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.site_config[0].application_insights_connection_string == var.application_insights_connection_string
-    error_message = "site_config.application_insights_connection_string must be the full TF-managed connection string (native Flex field, not an app_setting — the second-plan no-op fix)"
-  }
-  # The AI conn string must NOT be duplicated back into app_settings (that is the
-  # exact drift the native-field wiring removes).
-  assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_CONNECTION_STRING")
-    error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must NOT be an app_setting — it is wired via the native site_config field (second-plan no-op fix)"
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["APPLICATIONINSIGHTS_CONNECTION_STRING"] == var.application_insights_connection_string
+    error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must be the full TF-managed App Insights connection string"
   }
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.app_settings["APPLICATIONINSIGHTS_AUTHENTICATION_STRING"] == "Authorization=AAD"
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["APPLICATIONINSIGHTS_AUTHENTICATION_STRING"] == "Authorization=AAD"
     error_message = "Telemetry ingestion must authenticate via AAD"
   }
-  # NEGATIVE: no OTHER service's secret (SAS / account / primary key) may reach
-  # app_settings. The AI connection string is the only accepted residual.
+  # NEGATIVE: the bare instrumentation key setting is not published. The full
+  # connection string is the only App Insights destination the app gets.
   assert {
-    condition     = alltrue([for v in values(azurerm_function_app_flex_consumption.main.app_settings) : !can(regex("(?i)(accountkey|sharedaccesskey|primarykey|secondarykey)=", v))])
-    error_message = "No SAS/account/primary key may appear in Function App app_settings"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "appinsights_instrumentationkey")
+    error_message = "APPINSIGHTS_INSTRUMENTATIONKEY must NOT be declared — a bare ikey is prohibited in app settings"
+  }
+  # NEGATIVE: no OTHER service's secret (SAS / account / primary key) may reach
+  # the app settings. The AI connection string is the only accepted residual.
+  assert {
+    condition     = alltrue([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : !can(regex("(?i)(accountkey|sharedaccesskey|sharedaccesssignature|primarykey|secondarykey)=", s.value))])
+    error_message = "No SAS/account/primary key may appear in Function App app settings"
   }
 }
 
@@ -195,24 +232,24 @@ run "appinsights_full_connection_string_aad" {
 run "cosmos_database_name_reaches_the_app" {
   command = plan
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.app_settings["COSMOSDB_DATABASE_NAME"] == var.cosmos_database_name
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_DATABASE_NAME"] == var.cosmos_database_name
     error_message = "COSMOSDB_DATABASE_NAME must be set from var.cosmos_database_name — the API reads this setting and has no fallback (MG-51)"
   }
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.app_settings["COSMOSDB__accountEndpoint"] == var.cosmos_account_endpoint
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB__accountEndpoint"] == var.cosmos_account_endpoint
     error_message = "COSMOSDB__accountEndpoint must still be set alongside the database name — the app needs both to reach Cosmos"
   }
 }
 
 # MG-59 — the cooks CONTAINER name reaches the app the same MG-51-safe way the
-# database name does: present in app_settings and equal to the module input
+# database name does: present in the app settings and equal to the module input
 # (root wires it from module.cosmos_db.destination_container_names.cooks), NOT a
 # literal restated in the module. This is the setting the cooks adapter's
 # fail-loud guard reads (COSMOSDB_COOKS_CONTAINER_NAME).
 run "cooks_container_name_reaches_the_app" {
   command = plan
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.app_settings["COSMOSDB_COOKS_CONTAINER_NAME"] == var.cooks_container_name
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_COOKS_CONTAINER_NAME"] == var.cooks_container_name
     error_message = "COSMOSDB_COOKS_CONTAINER_NAME must be set from var.cooks_container_name — the cooks adapter reads this setting and has no fallback (MG-59)"
   }
 }
@@ -245,48 +282,75 @@ run "empty_cooks_container_name_is_refused" {
 
 # item 3 (configured path) — Easy Auth is validation-only: client-secret-free,
 # audience/app pinned, token store off, and unauthenticated requests rejected.
+# Asserted on the config/authsettingsV2 body azapi PUTs.
 run "easy_auth_is_validation_only_and_fail_closed" {
   command = plan
+  # It is the authsettingsV2 config child, not some other config resource. (Its
+  # parent is the site's computed id, unknown at plan; tf-static-checks.sh
+  # asserts parent_id = azapi_resource.function_app.id in the HCL.)
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].require_authentication == true
-    error_message = "require_authentication must be true"
+    condition     = azapi_resource.function_app_auth.name == "authsettingsV2"
+    error_message = "Easy Auth must be the Function App site's config/authsettingsV2"
   }
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].unauthenticated_action == "Return401"
+    condition     = azapi_resource.function_app_auth.body.properties.platform.enabled == true
+    error_message = "Easy Auth must be enabled on the platform"
+  }
+  assert {
+    condition     = azapi_resource.function_app_auth.body.properties.globalValidation.requireAuthentication == true
+    error_message = "requireAuthentication must be true"
+  }
+  assert {
+    condition     = azapi_resource.function_app_auth.body.properties.globalValidation.unauthenticatedClientAction == "Return401"
     error_message = "Unauthenticated requests must be rejected with 401"
   }
-  # allowed_applications validates the CALLING client (appid/azp), NOT the API
+  # allowedApplications validates the CALLING client (appid/azp), NOT the API
   # registration. It must carry the smoke-test client (Azure CLI public client),
   # and must NOT be bound to the API registration's own client id.
   assert {
-    condition     = contains(azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].allowed_applications, "04b07795-8ddb-461a-bbee-02f9e1bf7b46")
-    error_message = "allowed_applications must contain the calling client app id (Azure CLI public client), not the API registration"
+    condition     = contains(azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedApplications, "04b07795-8ddb-461a-bbee-02f9e1bf7b46")
+    error_message = "allowedApplications must contain the calling client app id (Azure CLI public client), not the API registration"
   }
   assert {
-    condition     = !contains(azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].allowed_applications, "11111111-1111-1111-1111-111111111111")
-    error_message = "allowed_applications must NOT be the API registration client id (that is the callee, never the caller)"
+    condition     = !contains(azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedApplications, "11111111-1111-1111-1111-111111111111")
+    error_message = "allowedApplications must NOT be the API registration client id (that is the callee, never the caller)"
   }
-  # client_id + allowed_audiences carry the API registration / App ID URI.
+  # clientId + allowedAudiences carry the API registration / App ID URI, and the
+  # issuer is the tenant's v2.0 endpoint.
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].client_id == "11111111-1111-1111-1111-111111111111"
-    error_message = "client_id must be the API registration client id"
+    condition     = azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.registration.clientId == "11111111-1111-1111-1111-111111111111"
+    error_message = "clientId must be the API registration client id"
+  }
+  assert {
+    condition     = azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.registration.openIdIssuer == "https://login.microsoftonline.com/22222222-2222-2222-2222-222222222222/v2.0"
+    error_message = "openIdIssuer must be the configured tenant's v2.0 endpoint"
+  }
+  assert {
+    condition     = jsonencode(azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.validation.allowedAudiences) == jsonencode(["api://meatgeek-v2-dev-api"])
+    error_message = "allowedAudiences must be exactly the configured API App ID URI(s)"
+  }
+  # Bearer-validation-only API: no browser challenge.
+  assert {
+    condition     = azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.login.disableWWWAuthenticate == true
+    error_message = "The WWW-Authenticate challenge must be disabled (bearer validation only, clean 401)"
   }
   # NEGATIVE: no client secret is ever configured (bearer validation only).
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].client_secret_setting_name == null || azurerm_function_app_flex_consumption.main.auth_settings_v2[0].active_directory_v2[0].client_secret_setting_name == ""
+    condition     = !can(azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.registration.clientSecretSettingName) && !can(azapi_resource.function_app_auth.body.properties.identityProviders.azureActiveDirectory.registration.clientSecretCertificateThumbprint)
     error_message = "No client secret may be configured for the Function App auth provider"
   }
   # NEGATIVE: token store disabled (no token-at-rest surface).
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.auth_settings_v2[0].login[0].token_store_enabled == false
+    condition     = azapi_resource.function_app_auth.body.properties.login.tokenStore.enabled == false
     error_message = "Easy Auth token store must be disabled"
   }
 }
 
 # item 3 (unconfigured path) — FAIL-CLOSED. With no API registration client id,
-# the plan is REFUSED by the precondition: an anonymous Function App can never be
-# deployed. (Azure cannot render a valid auth_settings_v2 without a provider, so
-# there is no "auth-enabled-but-no-provider" deployable state.)
+# the plan is REFUSED by the precondition on the authsettingsV2 resource: an
+# anonymous Function App can never be deployed. (Azure cannot render valid
+# authsettingsV2 without a provider, so there is no
+# "auth-enabled-but-no-provider" deployable state.)
 run "unconfigured_auth_is_refused_fail_closed" {
   command = plan
   variables {
@@ -295,6 +359,60 @@ run "unconfigured_auth_is_refused_fail_closed" {
     auth_allowed_audiences          = []
   }
   expect_failures = [
-    azurerm_function_app_flex_consumption.main,
+    azapi_resource.function_app_auth,
   ]
+}
+
+# The other three preconditions, each in isolation: a client id with no tenant,
+# no audience, or no calling-client allowlist is refused rather than deployed
+# as an Easy Auth that rejects every token or accepts any client.
+run "auth_without_tenant_is_refused" {
+  command = plan
+  variables {
+    auth_active_directory_tenant_id = ""
+  }
+  expect_failures = [
+    azapi_resource.function_app_auth,
+  ]
+}
+
+run "auth_without_audience_is_refused" {
+  command = plan
+  variables {
+    auth_allowed_audiences = []
+  }
+  expect_failures = [
+    azapi_resource.function_app_auth,
+  ]
+}
+
+run "auth_without_calling_client_allowlist_is_refused" {
+  command = plan
+  variables {
+    auth_allowed_client_app_ids = []
+  }
+  expect_failures = [
+    azapi_resource.function_app_auth,
+  ]
+}
+
+# HAR-15 migration — the root module adopts the existing dev site with import
+# blocks whose ids come from the function_app_import_ids output. Those ids must
+# name exactly the site and config child this module manages, at the
+# api-version the resources declare; a mismatch would import the wrong object
+# or fail the dev plan. Derived from the inputs, never a literal dev id.
+run "import_ids_name_the_site_this_module_manages" {
+  command = plan
+  assert {
+    condition     = output.function_app_import_ids.site == "${var.resource_group_id}/providers/Microsoft.Web/sites/${azapi_resource.function_app.name}?api-version=${split("@", azapi_resource.function_app.type)[1]}"
+    error_message = "function_app_import_ids.site must be <resource group id>/providers/Microsoft.Web/sites/<site name>?api-version=<the site's api-version>"
+  }
+  assert {
+    condition     = output.function_app_import_ids.auth == "${var.resource_group_id}/providers/Microsoft.Web/sites/${azapi_resource.function_app.name}/config/${azapi_resource.function_app_auth.name}?api-version=${split("@", azapi_resource.function_app_auth.type)[1]}"
+    error_message = "function_app_import_ids.auth must be the site's config/authsettingsV2 id at the auth resource's api-version"
+  }
+  assert {
+    condition     = startswith(azapi_resource.function_app.type, "Microsoft.Web/sites@") && startswith(azapi_resource.function_app_auth.type, "Microsoft.Web/sites/config@")
+    error_message = "The site and its Easy Auth config must be Microsoft.Web/sites and Microsoft.Web/sites/config resources"
+  }
 }

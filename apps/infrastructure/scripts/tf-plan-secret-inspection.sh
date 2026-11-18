@@ -454,6 +454,57 @@ flex_sink_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
 ' 2>/dev/null)" || die "cannot inspect: failed to collect Flex Consumption site_config / deployment-storage sink values from ${SRC}"
 flex_sink_rows="$(printf '%s\n' "${flex_sink_rows}" | sort -u)"
 
+# azapi-owned Function App site (HAR-15). The dev Function App is no longer an
+# azurerm resource: azapi_resource.function_app PUTs a Microsoft.Web/sites body
+# whose siteConfig.appSettings list is the site's COMPLETE app settings
+# collection, and whose functionAppConfig carries the deployment-storage
+# endpoint and authentication. Neither the `function_app` substring walk nor the
+# azurerm flex walk above sees it (the type is azapi_resource), so it gets its
+# own collector with the SAME classifier semantics:
+#   * every appSettings entry      -> kind "app_setting" (the App Insights
+#                                     residual is accepted here under the same
+#                                     coupling as an azurerm app_settings map);
+#   * every OTHER string leaf under body.properties (siteConfig without
+#     appSettings, functionAppConfig — the deployment endpoint included)
+#                                  -> kind "site_config" (marker-classified, so a
+#                                     SAS or AccountKey on the endpoint is caught);
+#   * deployment storage that authenticates by CONNECTION STRING (authentication
+#     type StorageAccountConnectionString, or any storageAccountConnectionStringName)
+#                                  -> kind "deploy_storage_auth", rejected
+#                                     UNCONDITIONALLY. That path puts a shared key
+#                                     into an app setting; under the shipped design
+#                                     deployment storage authenticates as the
+#                                     system-assigned identity and names no setting.
+# body is `dynamic`: azapi 2.x renders it as an OBJECT in show -json; a JSON-STRING
+# body (azapi 1.x shape) is decoded defensively, as for the storage account above.
+# Same fail-closed discipline: a jq failure dies; an empty result proceeds.
+azapi_site_rows="$(printf '%s\n' "${RESOURCES}" | jq -r '
+  .[]
+  | select(.type == "azapi_resource")
+  | . as $r
+  | (($r.values.type // "") | tostring) as $azt
+  | select($azt | test("^Microsoft[.]Web/sites@"; "i"))
+  | ($r.values.body
+     | if type == "string" then (try fromjson catch {}) else . end) as $body
+  | (if ($body | type) == "object" then ($body.properties // {}) else {} end) as $p
+  | (
+      ( ($p.siteConfig.appSettings // []) | .[]?
+        | ["app_setting",
+           ($r.address + " :: body.properties.siteConfig.appSettings[\"" + ((.name // "") | tostring) + "\"]"),
+           ((.value // "") | tostring)] ),
+      ( ($p | del(.siteConfig.appSettings)) | [.. | strings] | .[]
+        | ["site_config", ($r.address + " :: body.properties"), .] ),
+      ( ($p.functionAppConfig.deployment.storage.authentication // {}) as $a
+        | select(((($a.type // "") | tostring | ascii_downcase) == "storageaccountconnectionstring")
+                 or ((($a.storageAccountConnectionStringName // "") | tostring) != ""))
+        | ["deploy_storage_auth",
+           ($r.address + " :: body.properties.functionAppConfig.deployment.storage.authentication"),
+           "-"] )
+    )
+  | @tsv
+' 2>/dev/null)" || die "cannot inspect: failed to collect azapi Microsoft.Web/sites (Function App) sink values from ${SRC}"
+azapi_site_rows="$(printf '%s\n' "${azapi_site_rows}" | sort -u)"
+
 # --- 4. Classify every collected VALUE --------------------------------------
 # CREDENTIAL markers that appear INSIDE a secret VALUE (right-hand side). These
 # are the standard Azure connection-string / SAS / key delimiters. A non-secret
@@ -575,6 +626,16 @@ inspect_rows() {
     # raw storage key is an opaque base64 blob carrying NO credential marker, so the
     # CRED_MARKER_RE test below would let it PASS (fail-open) — hence it is rejected
     # UNCONDITIONALLY here on presence alone, before any marker classification.
+    # azapi Function App site (HAR-15) whose deployment storage authenticates by
+    # CONNECTION STRING. That auth type stores a shared-key connection string in
+    # an app setting; the shipped design authenticates deployment storage as the
+    # system-assigned identity. Rejected on presence alone. The row carries no
+    # value, so nothing secret can be printed.
+    if [ "${kind}" = "deploy_storage_auth" ]; then
+      report "${kind}" "${path}" "Flex deployment storage on the azapi Function App site authenticates by connection string (authentication.type StorageAccountConnectionString or a storageAccountConnectionStringName) — that path keeps a shared-key connection string in an app setting; deployment storage must authenticate as SystemAssignedIdentity (MG-24, HAR-15)"
+      continue
+    fi
+
     if [ "${kind}" = "deploy_storage_key" ]; then
       report "${kind}" "${path}" "raw deployment-storage account key VALUE on the Flex Consumption Function App — the deployment container must use storage_authentication_type=SystemAssignedIdentity (no shared key); a key persisted in state is a LIVE credential (MG-24: shared_access_key stays disabled)"
       continue
@@ -739,7 +800,7 @@ trap cleanup_tempfiles EXIT
 
 rows_file="$(mktemp)" || die "cannot create a temp file to stage the sink rows (mktemp failed; TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
 [ -n "${rows_file}" ] || die "mktemp returned an EMPTY path for the sink rows (TMPDIR=${TMPDIR:-/tmp}) — refusing to report PASS on an inspection that cannot run"
-{ printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${flex_sink_rows}"; printf '%s\n' "${output_rows}"; } \
+{ printf '%s\n' "${app_setting_rows}"; printf '%s\n' "${flex_sink_rows}"; printf '%s\n' "${azapi_site_rows}"; printf '%s\n' "${output_rows}"; } \
   | grep -v '^[[:space:]]*$' > "${rows_file}" || true
 inspect_rows < "${rows_file}"
 

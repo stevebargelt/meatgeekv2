@@ -97,6 +97,9 @@ SET_DEPOSED_ONLY_DEPOSED="${DEP_A},${DEP_B}"           # current object missed
 FORGET_COSMOS="forget:module.cosmos_db.azurerm_cosmosdb_account.main"
 DELETE_COSMOS="delete:module.cosmos_db.azurerm_cosmosdb_account.main"
 UNKNOWN_IOTHUB="obliterate:module.iot_hub.azurerm_iothub.main"
+# HAR-15 custody transfer: the azurerm Flex site is forgotten and the same ARM
+# object imported into azapi in one plan.
+FORGET_FLEX_SITE="forget:module.azure_functions.azurerm_function_app_flex_consumption.main"
 # destroy-guard-unknown-action-composite.json carries actions ["delete","obliterate"]
 # on one address. COMPOSITE_AS_MODELED is the token verb precedence would emit for
 # it — the one an operator would be handed and would authorize in good faith.
@@ -138,6 +141,12 @@ destroy-guard-deposed.json 1 ${SET_DEPOSED_EXCESSIVE}
 destroy-guard-forget.json 1 -
 destroy-guard-forget.json pass ${FORGET_COSMOS}
 destroy-guard-forget.json 1 ${DELETE_COSMOS}
+destroy-guard-custody-transfer.json pass -
+destroy-guard-custody-transfer.json 1 ${FORGET_FLEX_SITE}
+destroy-guard-custody-transfer-other-object.json 1 -
+destroy-guard-custody-transfer-other-object.json pass ${FORGET_FLEX_SITE}
+destroy-guard-custody-transfer-ambiguous.json 1 -
+destroy-guard-custody-transfer-replaced-import.json 1 -
 destroy-guard-unknown-action.json 1 -
 destroy-guard-unknown-action.json 1 ${UNKNOWN_IOTHUB}
 destroy-guard-unknown-action-composite.json 1 -

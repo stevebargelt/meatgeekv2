@@ -133,6 +133,23 @@ coupled invariant on the `site_config` field exactly as it did on the former
 `app_setting`. Below, where this ADR reasons about the string being "in
 `app_settings`", the identical reasoning now applies to the `site_config` field.
 
+
+### Wiring update (HAR-15, 2026-11-18): the connection string is an `app_setting` again, on the azapi site
+
+The Function App is no longer `azurerm_function_app_flex_consumption`; it is
+`azapi_resource.function_app` (`Microsoft.Web/sites`), because the azurerm
+resource injected a scalar `AzureWebJobsStorage` on every update
+([MG-58 ADR, revision 2026-11-18](mg-58-host-storage-managed-identity.md)).
+azapi has no native field to route the connection string through and sends the
+settings collection verbatim, so the string is declared directly as the
+`APPLICATIONINSIGHTS_CONNECTION_STRING` entry of `siteConfig.appSettings`, and
+the second-plan diff that motivated the `site_config` move cannot occur. The
+decision below is unchanged: the residual is accepted only while
+`local_authentication_enabled = false`, and the pre-apply gate enforces that
+coupling on the azapi app setting (`tf-plan-secret-inspection.sh`, azapi
+`Microsoft.Web/sites` collector). Where this ADR says `site_config`, read the
+azapi site's `APPLICATIONINSIGHTS_CONNECTION_STRING` app setting.
+
 ## Decision
 
 **Accept** the Application Insights **full connection string** (with its
