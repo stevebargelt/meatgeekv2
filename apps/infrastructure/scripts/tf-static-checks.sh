@@ -334,6 +334,15 @@
 #   INFRA_DIR defaults to the directory that contains this script's parent
 #   (i.e. apps/infrastructure). Override it to point the checks at a fixture.
 #
+# Never feed a variable to an early-exiting reader through a pipe
+# (`printf '%s\n' "${x}" | grep -q …`). Under pipefail that pipeline is racy:
+# bash line-buffers builtin printf, so a multi-line value is written one line
+# per write(); when grep -q matches an early line and exits, the next write
+# takes SIGPIPE, printf exits 141, and pipefail reports the whole pipeline as
+# failed even though grep matched. `if ! …` then records a violation that does
+# not exist (HAR-14: CI run 44343390609 failed the committed infra on
+# "declares no mock_provider" for a file that declares one). Use a here-string
+# instead: `grep -q … <<< "${x}"` has no writer process to kill.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -781,8 +790,8 @@ else
     #    One-directional on purpose: declaring a mock for a provider the file does
     #    not reference is harmless, referencing one with no mock is not.
     for prov in azurerm azapi; do
-      if printf '%s\n' "${code}" | grep -qE "\b${prov}_[a-z0-9_]+" ; then
-        if ! printf '%s\n' "${code}" | grep -qE "^[[:space:]]*mock_provider[[:space:]]+\"${prov}\"" ; then
+      if grep -qE "\b${prov}_[a-z0-9_]+" <<< "${code}" ; then
+        if ! grep -qE "^[[:space:]]*mock_provider[[:space:]]+\"${prov}\"" <<< "${code}" ; then
           tftest_hits+="${tf_test}: references ${prov}_* resources but declares no \`mock_provider \"${prov}\"\` — the test would use a REAL ${prov} provider"$'\n'
         fi
       fi
@@ -885,7 +894,7 @@ else
     constrained="$(module_providers_constrained "${mod}")"
     while IFS= read -r prov; do
       [[ -n "${prov}" ]] || continue
-      if ! printf '%s\n' "${constrained}" | grep -qx "${prov}"; then
+      if ! grep -qx "${prov}" <<< "${constrained}"; then
         pin_hits+="${mod}: uses ${prov}_* resources but declares no explicit \`${prov}\` version constraint in a required_providers block — a standalone init resolves it UNCONSTRAINED (this is how azurerm v5.0.1 landed). Add ${prov} with a version to the module's required_providers."$'\n'
       fi
     done <<< "$(module_providers_used "${mod}")"
@@ -1060,8 +1069,8 @@ else
     fi
     while IFS= read -r ep; do
       [[ -n "${ep}" ]] || continue
-      if ! printf '%s\n' "${rtb_ids}" | grep -qxF "${ep}"; then
-        if printf '%s\n' "${rtb_bare}" | grep -qxF "${ep}"; then
+      if ! grep -qxF "${ep}" <<< "${rtb_ids}"; then
+        if grep -qxF "${ep}" <<< "${rtb_bare}"; then
           route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} names ${ep} in replace_triggered_by as a BARE whole-resource reference instead of ${ep}.id — the bare form also fires when that endpoint is planned for an in-place UPDATE, so an ordinary edit to the endpoint would destroy and recreate this route and open a device-message routing gap for no reason. Write ${ep}.id: the id is unknown at plan time when the endpoint is REPLACED (so the pairing still fires, IH400111 still averted) and byte-identical across an in-place edit (so it stays quiet)"$'\n'
         elif [[ -z "${rtb_flat}" ]]; then
           route_replace_hits+="${r_file}:${r_line}: azurerm_iothub_route.${r_label} routes to ${ep} but declares no lifecycle { replace_triggered_by = [${ep}.id] } — replacing that endpoint would leave this route pointing at it and Azure rejects the endpoint delete with IH400111, the failure that broke the dev apply on 2026-08-06"$'\n'
@@ -1242,14 +1251,14 @@ while IFS=$'\t' read -r n_file n_line n_child n_parents n_rtb; do
   name_ref_children=$((name_ref_children + 1))
   for n_parent in ${n_parents}; do
     name_ref_pairs=$((name_ref_pairs + 1))
-    if ! printf '%s\n' "${rtb_ids}" | grep -qxF "${n_parent}"; then
-      if printf '%s\n' "${rtb_bare}" | grep -qxF "${n_parent}"; then
+    if ! grep -qxF "${n_parent}" <<< "${rtb_ids}"; then
+      if grep -qxF "${n_parent}" <<< "${rtb_bare}"; then
         # The right parent in the wrong form — already reported above, with the
         # in-place-update hazard named. Reporting it a second time as a missing or
         # mis-aimed pairing would describe the same line as two different defects.
         continue
       fi
-      if printf '%s\n' "${rtb_attr_addrs}" | grep -qxF "${n_parent}"; then
+      if grep -qxF "${n_parent}" <<< "${rtb_attr_addrs}"; then
         # The right parent through the wrong attribute. Only `.id` is the parent's
         # identity; every other attribute either survives replacement unchanged
         # (`.name` is the configured literal this whole check is about) or tracks
@@ -1358,10 +1367,10 @@ while IFS=$'\t' read -r x_file x_line x_addr x_trg x_rtb; do
     if [[ "${x_trg}" == "-" ]]; then
       cosmos_contract_hits+="${x_file}:${x_line}: terraform_data.cosmos_target_ready declares no triggers_replace — the Cosmos target ids must sit on triggers_replace = { database_id = var.cosmos_database_id, container_id = var.cosmos_container_id }, not on \`input\` and not nowhere. MEASURED (Terraform 1.9.8): terraform_data keeps its \`id\` byte-identical across an in-place update and regenerates it only on REPLACEMENT, so a payload anywhere but triggers_replace leaves this handle UPDATED, its \`.id\` unchanged, and azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage's replace_triggered_by silently never fires. The endpoint would keep pointing at a database Azure had already destroyed and recreated — Azure IH400142 \"Database does not exist\", the failure this ticket exists to close (MG-48 F5)"$'\n'
     else
-      if ! printf '%s' "${x_trg}" | grep -q 'var\.cosmos_database_id'; then
+      if ! grep -q 'var\.cosmos_database_id' <<< "${x_trg}"; then
         cosmos_contract_hits+="${x_file}:${x_line}: terraform_data.cosmos_target_ready's triggers_replace does not carry var.cosmos_database_id — the endpoint's dependency on the SQL DATABASE existing is what this handle stands for, and only the database's computed id expresses it. var.cosmos_database_name is a configured literal, identical before and after Azure destroys and recreates the database, so it cannot carry replacement across the module boundary at all (MG-48 F5)"$'\n'
       fi
-      if ! printf '%s' "${x_trg}" | grep -q 'var\.cosmos_container_id'; then
+      if ! grep -q 'var\.cosmos_container_id' <<< "${x_trg}"; then
         cosmos_contract_hits+="${x_file}:${x_line}: terraform_data.cosmos_target_ready's triggers_replace does not carry var.cosmos_container_id — the endpoint writes into the CONTAINER, so the container's destruction must reach it for the same reason as the database's. var.cosmos_container_name is a configured literal and cannot express whether the container still exists (MG-48 F5)"$'\n'
       fi
     fi
@@ -1373,7 +1382,7 @@ while IFS=$'\t' read -r x_file x_line x_addr x_trg x_rtb; do
     # in-place update of the handle.
     x_ids="$(rtb_select "${x_rtb}" id)"
     x_flat="$(rtb_flatten "${x_rtb}")"
-    if ! printf '%s\n' "${x_ids}" | grep -qxF 'terraform_data.cosmos_target_ready'; then
+    if ! grep -qxF 'terraform_data.cosmos_target_ready' <<< "${x_ids}"; then
       if [[ -z "${x_flat}" ]]; then
         cosmos_contract_hits+="${x_file}:${x_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage declares no lifecycle { replace_triggered_by = [terraform_data.cosmos_target_ready.id] } — this block is the LAST HOP of the MG-48 propagation chain and deleting it breaks the whole ticket silently: checks 1-18 and both iot-hub test suites stay green because the endpoint reaches the database through var.cosmos_database_name, a variable, which check 18 cannot and must not discover. depends_on is NOT a substitute — it carries ordering only and never plans this endpoint for replacement, so the endpoint would keep pointing, unchanged, at a database Azure had already destroyed and recreated (Azure IH400142 \"Database does not exist\") (MG-48 F5)"$'\n'
       else
@@ -1607,7 +1616,7 @@ while IFS=$'\t' read -r p_file p_line p_addr p_name p_template p_paths; do
     if [[ "${p_template}" == "-" ]]; then
       partition_hits+="${p_file}:${p_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage is missing partition_key_template — the endpoint must stamp the authenticated device identity onto the routed envelope (MG-73)"$'\n'
     fi
-    if printf '%s\n' "${p_template}" | grep -Eiq '(^|[^[:alnum:]_])(body|payload)([./]|$)'; then
+    if grep -Eiq '(^|[^[:alnum:]_])(body|payload)([./]|$)' <<< "${p_template}"; then
       partition_hits+="${p_file}:${p_line}: azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage partition_key_template must not reference Body or a payload-derived value; Body.deviceId is device-controlled, not the authenticated connection identity (MG-73)"$'\n'
     fi
     if [[ "${p_template}" != '"{deviceid}"' ]]; then
