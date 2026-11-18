@@ -681,6 +681,37 @@ else
 fi
 check "Function App identity declares identity_ids = [] so principal_id stays known (HAR-16)" "${identity_hits%$'\n'}"
 
+# --- CHECK 9d. Easy Auth config ignores ONLY the tags ARM echoes (HAR-17) ---------
+# GET of Microsoft.Web/sites/config/authsettingsV2 returns the PARENT SITE's tags.
+# azapi v2.11.0 Read (internal/services/azapi_resource.go:1068-1070) stores them,
+# and ModifyPlan (:663-666, tagsWithDefaultTags :1422-1461) plans an unset `tags`
+# as null, so every apply "removed" them and the next refresh put them back: the
+# dev apply's final drift plan could never converge (Apply Dev Infrastructure run
+# 44418353799). `tags = var.tags` is refused by azapi's embedded schema (no tags
+# on Microsoft.Web/sites/config). So azapi_resource.function_app_auth carries
+# lifecycle { ignore_changes = [tags] }. This check refuses that block (comments
+# stripped) when it has no code line `ignore_changes = [tags]`, or when it has any
+# other ignore_changes (body, identity and the rest stay managed). Finding no such
+# resource is a failure, not a vacuous pass.
+auth_tags_hits=""
+if [[ -f "${FUNC_MAIN}" ]]; then
+  auth_code_block="$(sed -e 's|^[[:space:]]*#.*$||' -e 's|[[:space:]]#.*$||' "${FUNC_MAIN}" \
+    | awk '/^resource[[:space:]]+"azapi_resource"[[:space:]]+"function_app_auth"[[:space:]]*\{/{f=1} f{print} f&&/^}/{f=0}')"
+  if [[ -z "${auth_code_block}" ]]; then
+    auth_tags_hits+="${FUNC_MAIN}: resource \"azapi_resource\" \"function_app_auth\" not found"$'\n'
+  else
+    n_tags_ignore="$(grep -cE '^[[:space:]]*ignore_changes[[:space:]]*=[[:space:]]*\[[[:space:]]*tags[[:space:]]*\][[:space:]]*$' <<< "${auth_code_block}" || true)"
+    n_any_ignore="$(grep -cE '^[[:space:]]*ignore_changes[[:space:]]*=' <<< "${auth_code_block}" || true)"
+    [[ "${n_tags_ignore}" == "1" ]] \
+      || auth_tags_hits+="${FUNC_MAIN}: azapi_resource.function_app_auth lacks lifecycle { ignore_changes = [tags] } — ARM echoes the parent site's tags on config/authsettingsV2, azapi plans an unset tags as null, and the dev apply's final drift plan never converges (HAR-17, run 44418353799)"$'\n'
+    [[ "${n_any_ignore}" == "${n_tags_ignore}" ]] \
+      || auth_tags_hits+="${FUNC_MAIN}: azapi_resource.function_app_auth ignores more than tags — only the echoed tags may be ignored; body, identity and every other attribute stay managed (HAR-17):"$'\n'"$(grep -nE '^[[:space:]]*ignore_changes[[:space:]]*=' <<< "${auth_code_block}")"$'\n'
+  fi
+else
+  auth_tags_hits+="modules/functions/main.tf not found"$'\n'
+fi
+check "Function App Easy Auth config ignores only the parent-echoed tags (HAR-17)" "${auth_tags_hits%$'\n'}"
+
 # --- CHECK 10. Globally-unique Functions storage account name (MG-24 red-fix) ------
 # Must be subscription-derived (same approach as the Cosmos account name) so a
 # greenfield apply cannot collide with a pre-existing global storage name.

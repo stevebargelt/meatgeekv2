@@ -457,6 +457,11 @@ IOTHUB_EVENTS__fullyQualifiedNamespace=<iot-eventhub-namespace-fqdn>
 # SignalR — identity-based. NON-SECRET service URI only; the managed identity
 # holds SignalR Service Owner.
 AzureSignalRConnectionString__serviceUri=<signalr-service-uri>
+
+# Which environment the app runs in: "dev" or "prod" (HAR-17). A plain,
+# non-secret label from the root's `environment` variable; the functions module
+# input has no default and validates dev/prod. No app code reads it yet.
+MEATGEEK_ENVIRONMENT=<dev|prod>
 ```
 
 > The `__accountEndpoint` / `__fullyQualifiedNamespace` / `__serviceUri` suffixes

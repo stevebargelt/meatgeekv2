@@ -195,6 +195,12 @@ locals {
     # SignalR — identity-based. Service URI is non-secret; the identity is
     # granted SignalR Service Owner in the root module.
     "AzureSignalRConnectionString__serviceUri" = var.signalr_service_uri
+
+    # Which environment this app runs in ("dev" or "prod", validated on the
+    # variable). A plain, non-secret label the running app can read (HAR-17).
+    # Nothing reads it yet; it is also the Terraform-made setting change whose
+    # merge proves the dev apply -> deploy -> acceptance chain (goal HAR-9 item 7).
+    "MEATGEEK_ENVIRONMENT" = var.environment
   }
 }
 
@@ -525,6 +531,33 @@ resource "azapi_resource" "function_app_auth" {
   }
 
   lifecycle {
+    # ARM echoes the PARENT SITE's tags on this proxy resource, and Terraform can
+    # never converge them any other way (HAR-17, Apply Dev Infrastructure run
+    # 44418353799: the final drift plan showed `tags {...} -> null` right after an
+    # apply that had just "removed" them). The chain, in azapi v2.11.0:
+    #   * Read (internal/services/azapi_resource.go:1068-1070) stores the GET
+    #     response's `tags` in state, and GET of config/authsettingsV2 returns the
+    #     site's tags. ImportState (:1292-1294) does the same.
+    #   * ModifyPlan (:663-666) plans tagsWithDefaultTags(config.Tags, ...)
+    #     (:1422-1461): config tags are null, the body has none, there are no
+    #     provider default_tags, and state tags are non-empty, so it returns null
+    #     and plans `tags -> null` plus an unknown output.
+    #   * expandBody (:1589-1591) adds tags to the PUT only when non-empty, so the
+    #     apply sends none, ARM keeps echoing the site's tags, and the next refresh
+    #     puts them back.
+    # Declaring `tags = var.tags` instead is refused: the embedded schema for
+    # Microsoft.Web/sites/config@2024-04-01 (authsettingsV2) has no `tags`
+    # property, and schemaValidate (internal/services/resource.go:66-69, 106-124)
+    # fails "`tags` is not expected here".
+    # ignore_changes works because Terraform core rewrites the CONFIG the provider
+    # sees before PlanResourceChange (terraform v1.9.8,
+    # internal/terraform/node_resource_abstract_instance.go:897-904, 947-949):
+    # config tags become the state tags, so tagsWithDefaultTags returns them at
+    # rule 1 (:1423-1426), plan == state, and nothing changes. tags ONLY: body,
+    # identity and every other attribute stay fully managed. tf-static-checks.sh
+    # check 9d and the auth_config_ignores_echoed_parent_tags test guard this line.
+    ignore_changes = [tags]
+
     # Fail-closed: refuse to deploy without platform authentication. Azure
     # requires at least one identity provider, so an empty client id cannot
     # produce valid auth settings; the plan is refused rather than shipping an
