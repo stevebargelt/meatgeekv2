@@ -645,6 +645,23 @@ describe('MG-24 S1: the static gate behaves — accepts the residual, catches re
     expect(code).toBe(0);
   });
 
+  it('HAR-14: never pipes into an early-exiting `grep -q` (pipefail + SIGPIPE made the committed-infra verdict flaky)', () => {
+    // The gate runs under `set -o pipefail`. `printf '%s\n' "${x}" | grep -q …`
+    // races: bash writes a multi-line value one line per write(), grep -q exits
+    // on its first match, the next write takes SIGPIPE, and pipefail reports the
+    // pipeline as failed although grep matched. CI run 44343390609 failed the
+    // committed infra that way ("declares no mock_provider" for a file that
+    // declares one). Here-strings (`grep -q … <<< "${x}"`) do not race.
+    const earlyExitPipe = /\|\s*grep\b[^|;]*?\s(-[A-Za-z]*q[A-Za-z]*|--quiet)\b/;
+    const offenders = fs
+      .readFileSync(GATE, 'utf8')
+      .split('\n')
+      .map((line, i) => ({ n: i + 1, line }))
+      .filter(({ line }) => !/^\s*#/.test(line) && earlyExitPipe.test(line))
+      .map(({ n, line }) => `${n}: ${line.trim()}`);
+    expect(offenders).toEqual([]);
+  });
+
   it('FAILS when the FULL AI conn string is wired but local auth is re-enabled (local_authentication_enabled flipped to true)', () => {
     // The coupled invariant, exercised: the same full-conn-string app_setting
     // that is ACCEPTED while local auth is disabled becomes a VIOLATION the
