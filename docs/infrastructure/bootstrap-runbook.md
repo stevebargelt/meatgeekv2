@@ -92,8 +92,8 @@ azurerm_resource_group.main.location` and every module reads the RG location,
 - **Runtime is Node 24** (`runtime_name = "node"`, `runtime_version = "24"`) —
   matches the API's `engines.node` and the CI `NODE_VERSION`.
 - **A service plan is still present — SKU `FC1`, not `Y1`/`EP1`.** Flex requires a
-  plan (`azurerm_function_app_flex_consumption.service_plan_id` is a required
-  argument on the pinned provider), so `azurerm_service_plan.functions` is
+  plan (the site's `serverFarmId`; since HAR-15 the site is the azapi
+  `Microsoft.Web/sites` resource `azapi_resource.function_app`), so `azurerm_service_plan.functions` is
   **retained and repurposed to the Flex `FC1` SKU** — it is **not** removed. There
   is no standalone `Y1`/`EP1` consumption/premium plan anymore; billing is the
   per-execution GB-s / always-ready model below.
@@ -829,7 +829,7 @@ Data Contributor`:
 # listing falls back to a broader scope and can print the same SP object id from
 # an unrelated assignment, which reads exactly like the grant you were checking
 # for. Assert the id, then look.
-FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex_consumption.main | awk '/^ *id /{print $3; exit}')"
+FUNC_ID="$(terraform state show module.azure_functions.azapi_resource.function_app | awk '/^ *id /{print $3; exit}')"
 [ -n "$FUNC_ID" ] || echo "UNVERIFIED: FUNC_ID unresolved — the listing below would not be scoped to the Function App." >&2
 if [ -n "$FUNC_ID" ]; then
   az role assignment list --scope "$FUNC_ID" \
@@ -873,7 +873,7 @@ to the dev Function App:
 
 ```bash
 FUNC="$(terraform output -raw function_app_name)"
-FUNC_ID="$(terraform state show module.azure_functions.azurerm_function_app_flex_consumption.main | awk '/^ *id /{print $3; exit}')"
+FUNC_ID="$(terraform state show module.azure_functions.azapi_resource.function_app | awk '/^ *id /{print $3; exit}')"
 
 # Only if you don't already have publish rights on the dev FA:
 ME="$(az ad signed-in-user show --query id -o tsv)"

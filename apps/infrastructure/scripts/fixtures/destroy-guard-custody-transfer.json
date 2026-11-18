@@ -1,0 +1,84 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "_fixture_note": "HAR-15 destroy circuit-breaker fixture \u2014 CUSTODY TRANSFER. The dev Function App moves from azurerm_function_app_flex_consumption to azapi_resource in ONE plan: a `removed { destroy = false }` block forgets the azurerm address and an `import` block adopts the SAME ARM object (same id, case-insensitive, api-version query stripped) into the azapi address, followed by an in-place update. The object never leaves Terraform management, so this forget is NOT an orphaning and the guard must PASS with no override. An override naming the forget must FAIL: the plan's protected set is empty, so that override is a superset.",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "module.azure_functions.azurerm_function_app_flex_consumption.main",
+      "module_address": "module.azure_functions",
+      "mode": "managed",
+      "type": "azurerm_function_app_flex_consumption",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "forget"
+        ],
+        "before": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456",
+          "name": "meatgeek-v2-dev-func-abc123def456"
+        },
+        "after": null
+      }
+    },
+    {
+      "address": "module.azure_functions.azapi_resource.function_app",
+      "module_address": "module.azure_functions",
+      "mode": "managed",
+      "type": "azapi_resource",
+      "name": "function_app",
+      "provider_name": "registry.terraform.io/azure/azapi",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "before": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456"
+        },
+        "after": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456"
+        },
+        "importing": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456?api-version=2024-04-01"
+        }
+      }
+    },
+    {
+      "address": "module.azure_functions.azapi_resource.function_app_auth",
+      "module_address": "module.azure_functions",
+      "mode": "managed",
+      "type": "azapi_resource",
+      "name": "function_app_auth",
+      "provider_name": "registry.terraform.io/azure/azapi",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456/config/authsettingsV2"
+        },
+        "after": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456/config/authsettingsV2"
+        },
+        "importing": {
+          "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/sites/meatgeek-v2-dev-func-abc123def456/config/authsettingsV2?api-version=2024-04-01"
+        }
+      }
+    },
+    {
+      "address": "module.azure_functions.azurerm_role_assignment.functions_storage_blob",
+      "type": "azurerm_role_assignment",
+      "name": "functions_storage_blob",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    }
+  ]
+}

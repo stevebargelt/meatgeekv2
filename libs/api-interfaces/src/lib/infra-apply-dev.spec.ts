@@ -1342,6 +1342,10 @@ describe('MG-23: infra-apply-dev.yml — automated dev GitOps reconciliation', (
       expect(preamble).toMatch(/\.terraform/);
       expect(preamble).toMatch(/terraform state list/);
       expect(preamble).toMatch(/azurerm_function_app/);
+      // HAR-15: the site is azapi_resource.function_app now. The detection must
+      // match it too, or the gate would report "no Function App in state" and
+      // exit 0 on every run after the migration — silently retiring itself.
+      expect(preamble).toMatch(/azapi_resource\\\.function_app\$/);
       expect(preamble).toMatch(/exit 0/);
 
       // ...but an unreadable state or an unreadable SITE is NOT "nothing to

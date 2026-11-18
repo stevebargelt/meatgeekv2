@@ -329,3 +329,16 @@ variable "admin_email" {
   type        = string
   default     = "admin@example.com"
 }
+
+# HAR-15 — adopt the existing Function App site into its azapi addresses.
+# true ONLY in an environment whose state still holds the site under the former
+# azurerm Flex resource (dev). It enables the root import blocks that adopt that
+# live site and its authsettingsV2 config instead of creating new ones. false
+# (the default, and prod) creates the azapi site directly; importing a site that
+# does not exist fails the plan. See the block comment above the import blocks
+# in main.tf.
+variable "adopt_existing_function_app" {
+  description = "Adopt the existing Function App site and its authsettingsV2 config into the azapi resources via import blocks (HAR-15). true only where state holds the site under the former azurerm Flex resource (dev)."
+  type        = bool
+  default     = false
+}

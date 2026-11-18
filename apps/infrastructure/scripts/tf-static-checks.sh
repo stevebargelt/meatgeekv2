@@ -484,25 +484,19 @@ if [[ -f "${FUNC_MAIN}" ]]; then
     func_posture+="Function App missing SystemAssigned managed identity"$'\n'
   fi
   # Identity-based deployment storage, NO account key in state (MG-24 Flex revision).
-  # The hosting model moved from azurerm_linux_function_app (Y1/EP1) to
-  # azurerm_function_app_flex_consumption. The old azurerm_linux_function_app
-  # attribute `storage_uses_managed_identity = true` NO LONGER EXISTS on the flex
-  # resource; MI-authenticated deployment storage is now expressed by the pair
-  # storage_authentication_type = "SystemAssignedIdentity" +
-  # storage_container_type = "blobContainer" (a BLOB deployment container, not the
-  # Y1 Azure Files content share that required a shared key). We also re-assert here
-  # that the functions storage account KEEPS shared key DISABLED, so no account key
-  # can be minted into state (MG-24 point 5 — no new key exception). The account is
-  # now created via azapi over the ARM CONTROL PLANE
-  # (Microsoft.Storage/storageAccounts) — NOT azurerm_storage_account, whose OWN
-  # shared-key data-plane reads 403 on a shared-key-disabled account — so the
-  # disablement invariant lives in the azapi body's allowSharedKeyAccess = false
-  # rather than the former azurerm shared_access_key_enabled attribute.
-  if ! grep -qE 'storage_authentication_type[[:space:]]*=[[:space:]]*"SystemAssignedIdentity"' "${FUNC_MAIN}"; then
-    func_posture+="Function App Flex deployment storage is not identity-based (storage_authentication_type = \"SystemAssignedIdentity\" absent — the flex MI-blob replacement for the removed storage_uses_managed_identity)"$'\n'
+  # Since HAR-15 the site is an azapi Microsoft.Web/sites resource, so MI-
+  # authenticated deployment storage is expressed in its body:
+  # functionAppConfig.deployment.storage = { type = "blobContainer", …,
+  # authentication = { type = "SystemAssignedIdentity" } } — a BLOB deployment
+  # container authenticated by the app's identity, not the Y1 Azure Files content
+  # share that required a shared key. We also re-assert that the functions storage
+  # account KEEPS shared key DISABLED (azapi body allowSharedKeyAccess = false), so
+  # no account key can be minted into state (MG-24 point 5).
+  if ! grep -qE '^[[:space:]]*type[[:space:]]*=[[:space:]]*"SystemAssignedIdentity"' "${FUNC_MAIN}"; then
+    func_posture+="Function App Flex deployment storage is not identity-based (functionAppConfig deployment storage authentication type = \"SystemAssignedIdentity\" absent)"$'\n'
   fi
-  if ! grep -qE 'storage_container_type[[:space:]]*=[[:space:]]*"blobContainer"' "${FUNC_MAIN}"; then
-    func_posture+="Function App Flex deployment storage is not a blob container (storage_container_type = \"blobContainer\" absent)"$'\n'
+  if ! grep -qE '^[[:space:]]*type[[:space:]]*=[[:space:]]*"blobContainer"' "${FUNC_MAIN}"; then
+    func_posture+="Function App Flex deployment storage is not a blob container (functionAppConfig deployment storage type = \"blobContainer\" absent)"$'\n'
   fi
   if ! grep -qE 'allowSharedKeyAccess[[:space:]]*=[[:space:]]*false' "${FUNC_MAIN}"; then
     func_posture+="Functions storage account no longer disables shared key (azapi body allowSharedKeyAccess = false absent — a re-enabled key would mint an account key into state)"$'\n'
@@ -514,8 +508,9 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # / .primary_connection_string), a var whose name ends in *connection_string /
   # *instrumentation_key, a literal ingestion/account/SAS key marker
   # (InstrumentationKey= / AccountKey= / SharedAccessKey=), a raw
-  # storage_account_access_key, OR the Flex deployment-storage `storage_access_key`
-  # attribute. Under the shipped MI model the flex deployment container authenticates
+  # storage_account_access_key, the Flex deployment-storage `storage_access_key`
+  # attribute, OR the connection-string deployment auth of the azapi site
+  # (`StorageAccountConnectionString` type / `storageAccountConnectionStringName`). Under the shipped MI model the flex deployment container authenticates
   # via storage_authentication_type=SystemAssignedIdentity, so `storage_access_key`
   # MUST NOT appear at all — any assignment reintroduces the shared-key deployment
   # path and would mint a key into state (the HCL-level companion to the plan gate's
@@ -542,7 +537,7 @@ if [[ -f "${FUNC_MAIN}" ]]; then
   # attribute/var references AND obfuscated index refs (a resource/module/data/
   # local reference indexed with a dynamically-assembled key or a secret-fragment
   # string literal). Numeric attribute indexing (`.identity[0]`) is not matched.
-  APPSETTING_SECRET_RE='\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|storage_access_key[[:space:]]*=|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING|(azurerm_|module\.|data\.|local\.)[A-Za-z0-9_.]+\[[[:space:]]*(format|join|lookup|element|coalesce|try)\(|\[[[:space:]]*"[^"]*(connection|instrumentation|primary_key|secondary_key|access_key|shared_access|password)[^"]*"[[:space:]]*\]'
+  APPSETTING_SECRET_RE='\.connection_string|\.instrumentation_key|\.primary_key|\.primary_access_key|\.primary_connection_string|\.secondary_[a-z_]*key|var\.[a-z_]*connection_string|var\.[a-z_]*instrumentation_key|InstrumentationKey=|AccountKey=|SharedAccessKey=|storage_account_access_key|storage_access_key[[:space:]]*=|StorageAccountConnectionString|COSMOSDB_CONNECTION_STRING|IOTHUB_CONNECTION_STRING|SIGNALR_CONNECTION_STRING|(azurerm_|module\.|data\.|local\.)[A-Za-z0-9_.]+\[[[:space:]]*(format|join|lookup|element|coalesce|try)\(|\[[[:space:]]*"[^"]*(connection|instrumentation|primary_key|secondary_key|access_key|shared_access|password)[^"]*"[[:space:]]*\]'
 
   # Is telemetry local auth disabled on the AI resource in the ROOT main.tf? Only
   # then is the full-conn-string exemption unlocked (the coupled invariant). We
@@ -580,14 +575,78 @@ if [[ -f "${FUNC_MAIN}" ]]; then
       func_posture+="connection-string / ingestion-key / access-key setting still present:"$'\n'"${cs_settings}"$'\n'
     fi
   fi
-  # Default-deny App Service Authentication.
-  if ! grep -qE 'require_authentication[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then
-    func_posture+="Function App auth is not default-deny (require_authentication = true absent)"$'\n'
+  # Default-deny App Service Authentication (azapi config/authsettingsV2, HAR-15):
+  # authentication required, unauthenticated callers get 401, and the config is
+  # the authsettingsV2 child of THIS module's site.
+  if ! grep -qE 'requireAuthentication[[:space:]]*=[[:space:]]*true' "${FUNC_MAIN}"; then
+    func_posture+="Function App auth is not default-deny (requireAuthentication = true absent)"$'\n'
+  fi
+  if ! grep -qE 'unauthenticatedClientAction[[:space:]]*=[[:space:]]*"Return401"' "${FUNC_MAIN}"; then
+    func_posture+="Function App auth does not reject unauthenticated callers (unauthenticatedClientAction = \"Return401\" absent)"$'\n'
+  fi
+  auth_block="$(awk '/resource[[:space:]]+"azapi_resource"[[:space:]]+"function_app_auth"/{f=1} f{print} f&&/^}/{f=0}' "${FUNC_MAIN}" 2>/dev/null || true)"
+  if ! grep -qE 'name[[:space:]]*=[[:space:]]*"authsettingsV2"' <<< "${auth_block}" \
+     || ! grep -qE 'parent_id[[:space:]]*=[[:space:]]*azapi_resource\.function_app\.id' <<< "${auth_block}"; then
+    func_posture+="Function App Easy Auth is not the site's config/authsettingsV2 (azapi_resource.function_app_auth must set name = \"authsettingsV2\" and parent_id = azapi_resource.function_app.id)"$'\n'
   fi
 else
   func_posture="modules/functions/main.tf not found"
 fi
 check "Function App: managed identity + default-deny auth + no secret settings" "${func_posture%$'\n'}"
+
+# --- CHECK 9b. ONE writer for the Function App site and its settings (HAR-15) ------
+# The pinned azurerm provider writes a scalar AzureWebJobsStorage connection
+# string (empty AccountKey) into the site's settings on every create and update,
+# whatever storage_authentication_type says (MG-58 ADR). HAR-15 removed the cause
+# by making azapi the SOLE owner of the site: azapi_resource.function_app PUTs the
+# COMPLETE settings collection, and azapi_resource.function_app_auth owns
+# config/authsettingsV2. That is only safe while NOTHING ELSE writes
+# Microsoft.Web/sites/<app> or its config/* children, so this check refuses:
+#   a) ANY azurerm site-writing resource type declared anywhere in the stack (the
+#      Flex, Linux, Windows function/web app resources, their slots, and the
+#      legacy app_service resources; azurerm_service_plan writes serverfarms and
+#      is not matched). The `removed` block that forgets the old resource is not
+#      a declaration and does not match;
+#   b) any azapi writer of a Microsoft.Web/sites type other than the one site and
+#      the one authsettingsV2 config in modules/functions/main.tf
+#      (azapi_update_resource / azapi_resource_action included);
+#   c) the scalar `AzureWebJobsStorage` or `DEPLOYMENT_STORAGE_CONNECTION_STRING`
+#      as a declared name in modules/functions/main.tf, matched
+#      case-insensitively on code (comments stripped).
+writer_hits=""
+tf_files="$(find "${INFRA_DIR}" -type d \( -name '.terraform' -o -name 'node_modules' -o -name '.nx' -o -name '.git' \) -prune -o -type f -name '*.tf' -print 2>/dev/null | sort)"
+if [[ -z "${tf_files}" ]]; then
+  writer_hits+="no *.tf files found under ${INFRA_DIR} — this check must never pass by finding nothing"$'\n'
+else
+  while IFS= read -r tf_file; do
+    [[ -n "${tf_file}" ]] || continue
+    tf_code="$(sed -e 's|^[[:space:]]*#.*$||' -e 's|[[:space:]]#.*$||' -e 's|^[[:space:]]*//.*$||' "${tf_file}")"
+    azurerm_site="$(grep -nE 'resource[[:space:]]+"azurerm_(function_app_flex_consumption|((linux|windows)_)?(function_app|web_app)(_slot)?|function_app(_slot)?|app_service(_slot)?)"' <<< "${tf_code}" || true)"
+    [[ -n "${azurerm_site}" ]] && writer_hits+="${tf_file}: declares an azurerm resource that writes Microsoft.Web/sites — azapi_resource.function_app must be the site's only writer (HAR-15):"$'\n'"${azurerm_site}"$'\n'
+    site_writers="$(grep -nE 'Microsoft\.Web/sites' <<< "${tf_code}" || true)"
+    if [[ -n "${site_writers}" && "${tf_file}" != "${FUNC_MAIN}" ]]; then
+      writer_hits+="${tf_file}: references a Microsoft.Web/sites type outside modules/functions/main.tf — a second writer of the site or its config children (HAR-15):"$'\n'"${site_writers}"$'\n'
+    fi
+    other_azapi="$(grep -nE 'resource[[:space:]]+"azapi_(update_resource|resource_action|data_plane_resource)"' <<< "${tf_code}" || true)"
+    if [[ -n "${other_azapi}" ]] && grep -qE 'Microsoft\.Web/sites' <<< "${tf_code}"; then
+      writer_hits+="${tf_file}: an azapi update/action resource sits beside a Microsoft.Web/sites type — the site must have exactly one writer (HAR-15):"$'\n'"${other_azapi}"$'\n'
+    fi
+  done <<< "${tf_files}"
+fi
+if [[ -f "${FUNC_MAIN}" ]]; then
+  func_code="$(sed -e 's|^[[:space:]]*#.*$||' -e 's|[[:space:]]#.*$||' "${FUNC_MAIN}")"
+  n_sites="$(grep -cE 'type[[:space:]]*=[[:space:]]*"Microsoft\.Web/sites@' <<< "${func_code}" || true)"
+  n_configs="$(grep -cE 'type[[:space:]]*=[[:space:]]*"Microsoft\.Web/sites/' <<< "${func_code}" || true)"
+  [[ "${n_sites}" == "1" ]] || writer_hits+="${FUNC_MAIN}: expected exactly ONE Microsoft.Web/sites@ azapi type (the site), found ${n_sites:-0}"$'\n'
+  [[ "${n_configs}" == "1" ]] || writer_hits+="${FUNC_MAIN}: expected exactly ONE Microsoft.Web/sites/* azapi type (config/authsettingsV2), found ${n_configs:-0}"$'\n'
+  scalar_hits="$(grep -niE '"azurewebjobsstorage"|deployment_storage_connection_string' <<< "${func_code}" || true)"
+  [[ -n "${scalar_hits}" ]] && writer_hits+="${FUNC_MAIN}: declares the scalar AzureWebJobsStorage or DEPLOYMENT_STORAGE_CONNECTION_STRING setting (case-insensitive) — host and deployment storage authenticate by managed identity, and the scalar form shadows AzureWebJobsStorage__accountName (MG-58, HAR-15):"$'\n'"${scalar_hits}"$'\n'
+  grep -qE '"AzureWebJobsStorage__accountName"[[:space:]]*=' <<< "${func_code}" \
+    || writer_hits+="${FUNC_MAIN}: AzureWebJobsStorage__accountName is not declared — the host has no identity-based storage connection (MG-58)"$'\n'
+else
+  writer_hits+="modules/functions/main.tf not found"$'\n'
+fi
+check "Function App site has exactly one writer and no scalar host/deployment storage setting (HAR-15)" "${writer_hits%$'\n'}"
 
 # --- CHECK 10. Globally-unique Functions storage account name (MG-24 red-fix) ------
 # Must be subscription-derived (same approach as the Cosmos account name) so a

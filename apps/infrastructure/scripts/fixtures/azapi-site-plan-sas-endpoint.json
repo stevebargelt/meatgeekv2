@@ -1,0 +1,132 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_application_insights.main",
+          "type": "azurerm_application_insights",
+          "name": "main",
+          "values": {
+            "local_authentication_enabled": false,
+            "instrumentation_key": "11111111-1111-1111-1111-111111111111",
+            "connection_string": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/"
+          }
+        }
+      ],
+      "child_modules": [
+        {
+          "address": "module.azure_functions",
+          "resources": [
+            {
+              "address": "module.azure_functions.azapi_resource.functions_storage",
+              "type": "azapi_resource",
+              "name": "functions_storage",
+              "values": {
+                "type": "Microsoft.Storage/storageAccounts@2023-05-01",
+                "name": "mgv2funcabc123def456",
+                "body": {
+                  "sku": {
+                    "name": "Standard_LRS"
+                  },
+                  "kind": "StorageV2",
+                  "properties": {
+                    "minimumTlsVersion": "TLS1_2",
+                    "allowSharedKeyAccess": false,
+                    "allowBlobPublicAccess": false,
+                    "supportsHttpsTrafficOnly": true
+                  }
+                }
+              }
+            },
+            {
+              "address": "module.azure_functions.azapi_resource.function_app",
+              "type": "azapi_resource",
+              "name": "function_app",
+              "values": {
+                "type": "Microsoft.Web/sites@2024-04-01",
+                "name": "meatgeek-v2-dev-func-abc123def456",
+                "body": {
+                  "kind": "functionapp,linux",
+                  "properties": {
+                    "serverFarmId": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Web/serverFarms/meatgeek-v2-dev-func-plan",
+                    "functionAppConfig": {
+                      "deployment": {
+                        "storage": {
+                          "type": "blobContainer",
+                          "value": "https://mgv2funcabc123def456.blob.core.windows.net/deployment-package?sv=2022-11-02&ss=b&srt=co&sp=rl&se=2030-01-01T00:00:00Z&sig=c2lnbmF0dXJl",
+                          "authentication": {
+                            "type": "SystemAssignedIdentity"
+                          }
+                        }
+                      },
+                      "runtime": {
+                        "name": "node",
+                        "version": "24"
+                      },
+                      "scaleAndConcurrency": {
+                        "instanceMemoryMB": 2048,
+                        "maximumInstanceCount": 40,
+                        "alwaysReady": []
+                      }
+                    },
+                    "siteConfig": {
+                      "appSettings": [
+                        {
+                          "name": "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
+                          "value": "Authorization=AAD"
+                        },
+                        {
+                          "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                          "value": "InstrumentationKey=11111111-1111-1111-1111-111111111111;IngestionEndpoint=https://westus2-0.in.applicationinsights.azure.com/"
+                        },
+                        {
+                          "name": "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE",
+                          "value": "50"
+                        },
+                        {
+                          "name": "AzureSignalRConnectionString__serviceUri",
+                          "value": "https://mgv2-signalr.service.signalr.net"
+                        },
+                        {
+                          "name": "AzureWebJobsStorage__accountName",
+                          "value": "mgv2funcabc123def456"
+                        },
+                        {
+                          "name": "COSMOSDB_COOKS_CONTAINER_NAME",
+                          "value": "cooks"
+                        },
+                        {
+                          "name": "COSMOSDB_DATABASE_NAME",
+                          "value": "meatgeek-v2-dev-db"
+                        },
+                        {
+                          "name": "COSMOSDB__accountEndpoint",
+                          "value": "https://mgv2-cosmos.documents.azure.com:443/"
+                        },
+                        {
+                          "name": "IOTHUB_EVENTS__fullyQualifiedNamespace",
+                          "value": "mgv2-eventhub-ns.servicebus.windows.net"
+                        }
+                      ],
+                      "cors": {
+                        "allowedOrigins": [
+                          "https://app.meatgeek.com"
+                        ],
+                        "supportCredentials": false
+                      },
+                      "minTlsVersion": "1.2",
+                      "scmMinTlsVersion": "1.2"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "_fixture_note": "HAR-15 secret-gate fixture \u2014 the azapi site's deployment storage endpoint carries a SAS token (sig=). The endpoint is a body.properties string leaf, marker-classified like the former storage_container_endpoint. The gate must FAIL."
+}

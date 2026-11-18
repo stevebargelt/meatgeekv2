@@ -119,13 +119,16 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
     });
 
     it('uses identity-based Flex deployment storage (no account key in state)', () => {
-      // MG-24 Flex revision: the hosting model moved from azurerm_linux_function_app
-      // (whose `storage_uses_managed_identity = true` no longer exists) to
-      // azurerm_function_app_flex_consumption. MI-authenticated deployment storage is
-      // now expressed by the pair below, against a blobContainer on a storage account
-      // that KEEPS shared-key access disabled — so no account key can leak into state.
-      expect(live).toMatch(/storage_authentication_type\s*=\s*"SystemAssignedIdentity"/);
-      expect(live).toMatch(/storage_container_type\s*=\s*"blobContainer"/);
+      // MG-24 Flex revision, HAR-15 owner: the site is an azapi Microsoft.Web/sites
+      // resource, so MI-authenticated deployment storage is expressed in its
+      // functionAppConfig — a blobContainer authenticated as the system-assigned
+      // identity, on a storage account that KEEPS shared-key access disabled — so
+      // no account key can leak into state.
+      expect(live).toMatch(/deployment\s*=\s*\{\s*storage\s*=\s*\{\s*type\s*=\s*"blobContainer"/);
+      expect(live).toMatch(/authentication\s*=\s*\{\s*type\s*=\s*"SystemAssignedIdentity"\s*\}/);
+      // The connection-string deployment auth path (which keeps a shared-key
+      // connection string in an app setting) is never configured.
+      expect(live).not.toMatch(/StorageAccountConnectionString/);
       expect(live).not.toMatch(/storage_account_access_key/);
       // No raw deployment-storage key: under MI auth `storage_access_key` must be absent.
       expect(live).not.toMatch(/storage_access_key\s*=/);
@@ -177,10 +180,12 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       );
       // The Flex deployment endpoint is composed from the deterministic account-name
       // local — the control-plane azapi account exposes NO azurerm
-      // primary_blob_endpoint attribute to interpolate, so a plain SAS-free URL is built.
+      // primary_blob_endpoint attribute to interpolate, so a plain SAS-free URL is
+      // built, and the site's deployment storage uses exactly that local.
       expect(live).toMatch(
-        /storage_container_endpoint\s*=\s*"https:\/\/\$\{local\.functions_storage_account_name\}\.blob\.core\.windows\.net\/\$\{local\.deployment_container_name\}"/
+        /deployment_container_endpoint\s*=\s*"https:\/\/\$\{local\.functions_storage_account_name\}\.blob\.core\.windows\.net\/\$\{local\.deployment_container_name\}"/
       );
+      expect(live).toMatch(/value\s*=\s*local\.deployment_container_endpoint/);
     });
 
     it('app_settings carry NON-SECRET identity endpoints, not connection strings', () => {
@@ -194,16 +199,15 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       expect(live).not.toMatch(/SIGNALR_CONNECTION_STRING/);
     });
 
-    it('does NOT set FUNCTIONS_WORKER_RUNTIME (or other Flex-forbidden classic settings) — runtime is runtime_name/runtime_version', () => {
+    it('does NOT set FUNCTIONS_WORKER_RUNTIME (or other Flex-forbidden classic settings) — runtime is functionAppConfig.runtime', () => {
       // MG-24 apply defect: a Flex Consumption site REJECTS FUNCTIONS_WORKER_RUNTIME
       // as an app setting (400 BadRequest ExtendedCode 51021). The worker runtime is
-      // declared via the resource's runtime_name/runtime_version fields, not a
+      // declared in the site's functionAppConfig.runtime (HAR-15: azapi body), not a
       // classic-Functions app setting. Guard the leftover cannot creep back.
       expect(live).not.toMatch(/FUNCTIONS_WORKER_RUNTIME/);
       expect(live).not.toMatch(/FUNCTIONS_EXTENSION_VERSION/);
       // The runtime is declared the Flex-native way.
-      expect(live).toMatch(/runtime_name\s*=\s*"node"/);
-      expect(live).toMatch(/runtime_version\s*=\s*"24"/);
+      expect(live).toMatch(/runtime\s*=\s*\{\s*name\s*=\s*"node"\s*version\s*=\s*"24"\s*\}/);
     });
 
     it('wires HOST storage identity-based via the account-name form — no connection string, no service-URI variant (MG-58)', () => {
@@ -242,24 +246,24 @@ describe('MG-24 S1: no plaintext runtime secrets in Terraform state', () => {
       ]);
     });
 
-    it('App Insights ingestion is AAD identity-based — full conn string via the native site_config field, no hardcoded ikey', () => {
+    it('App Insights ingestion is AAD identity-based — full conn string as the one App Insights app setting, no hardcoded ikey', () => {
       // Host authenticates telemetry with an AAD token, not an ingestion key.
       expect(live).toMatch(/APPLICATIONINSIGHTS_AUTHENTICATION_STRING"\s*=\s*"Authorization=AAD"/);
-      // MG-24 item 2 + second-plan no-op fix: the FULL TF-managed connection
-      // string (InstrumentationKey included — Microsoft's required
-      // destination-resource identifier) is wired via the Flex resource's NATIVE
-      // site_config.application_insights_connection_string field, NOT an
-      // app_setting. The Flex provider reflects the conn string into that native
-      // field, so binding it as an app_setting produced a perpetual second-plan
-      // diff; the native field is what makes the app plan as a no-op. It is safe
-      // ONLY because local_authentication_enabled=false on the AI resource
-      // (asserted below) and is enforced on this site_config field by the
-      // tf-plan-secret-inspection gate.
+      // MG-24 item 2: the FULL TF-managed connection string (InstrumentationKey
+      // included — Microsoft's required destination-resource identifier) reaches
+      // the app as APPLICATIONINSIGHTS_CONNECTION_STRING. Under azurerm it went
+      // through the native site_config field, which the provider turned into this
+      // same setting on the wire; since HAR-15 azapi sends the settings collection
+      // verbatim, so it is declared directly. It is safe ONLY because
+      // local_authentication_enabled=false on the AI resource (asserted below), and
+      // the tf-plan-secret-inspection gate enforces that coupling on this setting.
       expect(live).toMatch(
-        /application_insights_connection_string\s*=\s*var\.application_insights_connection_string/
+        /"APPLICATIONINSIGHTS_CONNECTION_STRING"\s*=\s*var\.application_insights_connection_string/
       );
-      // It must NOT be duplicated back into app_settings (the exact drift removed).
-      expect(live).not.toMatch(/"APPLICATIONINSIGHTS_CONNECTION_STRING"\s*=/);
+      // ONE sink for the connection string: the var is read exactly once, and no
+      // bare instrumentation-key setting is published beside it.
+      expect(live.match(/var\.application_insights_connection_string/g)).toHaveLength(1);
+      expect(live).not.toMatch(/APPINSIGHTS_INSTRUMENTATIONKEY/);
       // The value flows from the module VAR — never a hardcoded literal
       // InstrumentationKey= / ikey nor any OTHER service's secret attribute.
       expect(live).not.toMatch(/InstrumentationKey=/);
@@ -420,38 +424,47 @@ describe('MG-24 S2: Function App HTTP posture', () => {
   });
 
   it('App Service Authentication is default-DENY (require auth, reject anonymous)', () => {
+    // HAR-15: Easy Auth is the site's config/authsettingsV2, an azapi resource of
+    // its own (it was the azurerm resource's auth_settings_v2 block).
     const live = stripComments(read('modules/functions/main.tf'));
-    expect(live).toMatch(/auth_settings_v2/);
-    expect(live).toMatch(/require_authentication\s*=\s*true/);
+    expect(live).toMatch(
+      /resource\s+"azapi_resource"\s+"function_app_auth"\s*\{\s*type\s*=\s*"Microsoft\.Web\/sites\/config@[^"]+"\s*name\s*=\s*"authsettingsV2"\s*parent_id\s*=\s*azapi_resource\.function_app\.id/
+    );
+    expect(live).toMatch(/platform\s*=\s*\{\s*enabled\s*=\s*true/);
+    expect(live).toMatch(/requireAuthentication\s*=\s*true/);
     // Unauthenticated requests are rejected (401/403), never allowed through.
-    expect(live).toMatch(/unauthenticated_action\s*=\s*"Return(401|403)"/);
-    expect(live).not.toMatch(/unauthenticated_action\s*=\s*"AllowAnonymous"/);
+    expect(live).toMatch(/unauthenticatedClientAction\s*=\s*"Return(401|403)"/);
+    expect(live).not.toMatch(/unauthenticatedClientAction\s*=\s*"AllowAnonymous"/);
   });
 
   it('Easy Auth is FAIL-CLOSED when unconfigured (plan precondition refuses an anonymous app)', () => {
-    // MG-24 item 3: an unconfigured Function App must not ship anonymous. The
-    // auth_settings_v2 block is present ONLY when the Entra API registration is
-    // configured (for_each gated on the client id), and a lifecycle precondition
-    // REFUSES the plan when it is empty — so default-deny is enforced at plan
-    // time rather than by an anonymous fallthrough.
+    // MG-24 item 3: an unconfigured Function App must not ship anonymous. A
+    // lifecycle precondition on the authsettingsV2 resource REFUSES the plan when
+    // the Entra API registration client id is empty — so default-deny is enforced
+    // at plan time rather than by an anonymous fallthrough. (HAR-15: the
+    // preconditions moved with Easy Auth to azapi_resource.function_app_auth.)
     const live = stripComments(read('modules/functions/main.tf'));
-    // Provider block is conditionally present on the configured client id.
-    expect(live).toMatch(
-      /for_each\s*=\s*var\.auth_active_directory_client_id\s*==\s*""\s*\?\s*\[\]\s*:\s*\[1\]/
-    );
-    // Fail-closed precondition: empty client id => plan refused.
-    expect(live).toMatch(/precondition\s*\{/);
-    expect(live).toMatch(/condition\s*=\s*var\.auth_active_directory_client_id\s*!=\s*""/);
+    const authBlock = live.slice(live.indexOf('resource "azapi_resource" "function_app_auth"'));
+    expect(authBlock).toMatch(/^resource "azapi_resource" "function_app_auth"/);
+    // Fail-closed preconditions: empty client id => plan refused; a client id
+    // without tenant, audience or calling-client allowlist => plan refused.
+    expect(authBlock).toMatch(/precondition\s*\{/);
+    expect(authBlock).toMatch(/condition\s*=\s*var\.auth_active_directory_client_id\s*!=\s*""/);
+    expect(authBlock).toMatch(/var\.auth_active_directory_tenant_id\s*!=\s*""/);
+    expect(authBlock).toMatch(/length\(var\.auth_allowed_audiences\)\s*>\s*0/);
+    expect(authBlock).toMatch(/length\(var\.auth_allowed_client_app_ids\)\s*>\s*0/);
   });
 
   it('Easy Auth is bearer-token VALIDATION only — token store disabled, NO client secret', () => {
     // MG-24 item 3: this is API/bearer-token validation, not an interactive
-    // sign-in flow. No token-at-rest (token_store_enabled=false) and no client
+    // sign-in flow. No token-at-rest (tokenStore.enabled=false) and no client
     // secret anywhere (no secret materialized into state).
     const live = stripComments(read('modules/functions/main.tf'));
-    expect(live).toMatch(/token_store_enabled\s*=\s*false/);
-    expect(live).not.toMatch(/client_secret/);
-    expect(live).toMatch(/allowed_applications\s*=/);
+    expect(live).toMatch(/tokenStore\s*=\s*\{\s*enabled\s*=\s*false/);
+    expect(live).not.toMatch(/client_secret|clientSecret/i);
+    expect(live).toMatch(/allowedApplications\s*=/);
+    // No browser challenge: a clean 401 for a bearer-only API.
+    expect(live).toMatch(/disableWWWAuthenticate\s*=\s*true/);
   });
 
   it('allowed_applications validates the CALLING client, NOT the API registration (MG-24 item 1 corrective)', () => {
@@ -460,13 +473,14 @@ describe('MG-24 S2: Function App HTTP posture', () => {
     // API registration's own client id. Binding [var.auth_active_directory_client_id]
     // (the API, which is the callee) is the exact bug this corrects.
     const funcLive = stripComments(read('modules/functions/main.tf'));
-    expect(funcLive).toMatch(/allowed_applications\s*=\s*var\.auth_allowed_client_app_ids/);
+    // (HAR-15: the authsettingsV2 body spells it allowedApplications.)
+    expect(funcLive).toMatch(/allowedApplications\s*=\s*var\.auth_allowed_client_app_ids/);
     expect(funcLive).not.toMatch(
-      /allowed_applications\s*=\s*\[\s*var\.auth_active_directory_client_id\s*\]/
+      /allowedApplications\s*=\s*\[\s*var\.auth_active_directory_client_id\s*\]/
     );
-    // client_id + allowed_audiences still carry the API registration / App ID URI.
-    expect(funcLive).toMatch(/client_id\s*=\s*var\.auth_active_directory_client_id/);
-    expect(funcLive).toMatch(/allowed_audiences\s*=\s*var\.auth_allowed_audiences/);
+    // clientId + allowedAudiences still carry the API registration / App ID URI.
+    expect(funcLive).toMatch(/clientId\s*=\s*var\.auth_active_directory_client_id/);
+    expect(funcLive).toMatch(/allowedAudiences\s*=\s*var\.auth_allowed_audiences/);
     // The module declares the calling-client allowlist var, defaulted to the
     // Azure CLI public client (the caller for the operator token flow).
     const funcVars = stripComments(read('modules/functions/variables.tf'));
@@ -494,9 +508,11 @@ describe('MG-24 S2: Function App HTTP posture', () => {
     // to describe what it PREVENTS, so a naive /anonymous/i scan would be a false
     // positive here; we instead assert the concrete carve-out shapes are absent.
     const live = stripComments(read('modules/functions/main.tf'));
-    expect(live).not.toMatch(/excluded_paths/);
-    expect(live).not.toMatch(/require_authentication\s*=\s*false/);
-    expect(live).not.toMatch(/unauthenticated_action\s*=\s*"AllowAnonymous"/);
+    expect(live).not.toMatch(/excluded_paths|excludedPaths/);
+    expect(live).not.toMatch(
+      /require_authentication\s*=\s*false|requireAuthentication\s*=\s*false/
+    );
+    expect(live).not.toMatch(/unauthenticatedClientAction\s*=\s*"AllowAnonymous"/);
     expect(live).not.toMatch(/"\/health"|path\s*=\s*"\/health/);
   });
 });
@@ -2192,5 +2208,252 @@ describe('MG-58 guard 4: the live host-storage gate (assert-live-host-storage.sh
       expect(real.code).toBe(1);
       expect(real.both).toMatch(/expected the JSON 'array'/);
     });
+  });
+});
+
+/**
+ * HAR-15 — azapi is the SOLE owner of the Function App site.
+ *
+ * The pinned azurerm Flex resource wrote a scalar `AzureWebJobsStorage`
+ * connection string (empty AccountKey) into the site's settings on every create
+ * and update, whatever storage_authentication_type said, and hid it on read
+ * (MG-58 ADR). HAR-15 removes the cause: azapi_resource.function_app PUTs the
+ * COMPLETE settings collection and azapi_resource.function_app_auth owns
+ * config/authsettingsV2. These specs pin the three things that make that safe:
+ * one writer, no scalar key in the declared collection, and a migration that
+ * hands the live site over without recreating it.
+ */
+describe('HAR-15: azapi is the sole owner of the Function App site', () => {
+  const GATE = path.join(INFRA, 'scripts', 'tf-static-checks.sh');
+  const FUNC = 'modules/functions/main.tf';
+
+  function copyInfra(dst: string): void {
+    fs.cpSync(INFRA, dst, {
+      recursive: true,
+      filter: (src: string) => {
+        const base = path.basename(src);
+        return base !== '.terraform' && base !== '.nx' && base !== 'node_modules';
+      },
+    });
+  }
+
+  function gateWith(mutate: (dst: string) => void): { code: number; out: string } {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'har15-gate-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      copyInfra(dst);
+      mutate(dst);
+      const r = spawnSync('bash', [GATE, dst], { encoding: 'utf8' });
+      return { code: r.status ?? 1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  function plantSetting(dst: string, line: string): void {
+    const file = path.join(dst, FUNC);
+    const src = fs.readFileSync(file, 'utf8');
+    const anchor =
+      /^(\s*)"AzureWebJobsStorage__accountName"\s*=\s*local\.functions_storage_account_name$/m;
+    expect(src).toMatch(anchor);
+    fs.writeFileSync(
+      file,
+      src.replace(anchor, (m, ws) => `${m}\n${ws}${line}`)
+    );
+  }
+
+  it('no azurerm resource writes Microsoft.Web/sites anywhere in the stack', () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (['.terraform', '.nx', 'node_modules'].includes(e.name)) continue;
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.tf')) {
+          const live = stripComments(fs.readFileSync(p, 'utf8'));
+          if (
+            /resource\s+"azurerm_(function_app_flex_consumption|((linux|windows)_)?(function_app|web_app)(_slot)?|app_service(_slot)?)"/.test(
+              live
+            )
+          ) {
+            offenders.push(path.relative(INFRA, p));
+          }
+        }
+      }
+    };
+    walk(INFRA);
+    expect(offenders).toEqual([]);
+  });
+
+  it('the old azurerm resource is named only by the removed block', () => {
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (['.terraform', '.nx', 'node_modules'].includes(e.name)) continue;
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.tf')) {
+          fs.readFileSync(p, 'utf8')
+            .split('\n')
+            .forEach((l, i) => {
+              if (l.includes('azurerm_function_app_flex_consumption')) {
+                hits.push(`${path.relative(INFRA, p)}:${i + 1}:${l.trim()}`);
+              }
+            });
+        }
+      }
+    };
+    walk(INFRA);
+    expect(hits).toEqual([
+      'main.tf:' +
+        (read('main.tf')
+          .split('\n')
+          .findIndex(l => l.includes('azurerm_function_app_flex_consumption')) +
+          1) +
+        ':from = module.azure_functions.azurerm_function_app_flex_consumption.main',
+    ]);
+  });
+
+  it('the root forgets the azurerm site without destroying it and imports the same site into azapi', () => {
+    const live = stripComments(read('main.tf'));
+    expect(live).toMatch(
+      /removed\s*\{\s*from\s*=\s*module\.azure_functions\.azurerm_function_app_flex_consumption\.main\s*lifecycle\s*\{\s*destroy\s*=\s*false\s*\}\s*\}/
+    );
+    // Both imports are gated on the adopt toggle and take their ids from the
+    // module (derived from THIS environment's names), never a literal id.
+    expect(live).toMatch(
+      /import\s*\{\s*for_each\s*=\s*var\.adopt_existing_function_app\s*\?\s*toset\(\["site"\]\)\s*:\s*toset\(\[\]\)\s*to\s*=\s*module\.azure_functions\.azapi_resource\.function_app\s*id\s*=\s*module\.azure_functions\.function_app_import_ids\.site\s*\}/
+    );
+    expect(live).toMatch(
+      /import\s*\{\s*for_each\s*=\s*var\.adopt_existing_function_app\s*\?\s*toset\(\["auth"\]\)\s*:\s*toset\(\[\]\)\s*to\s*=\s*module\.azure_functions\.azapi_resource\.function_app_auth\s*id\s*=\s*module\.azure_functions\.function_app_import_ids\.auth\s*\}/
+    );
+    expect(live).not.toMatch(/\/subscriptions\/[0-9a-f-]{36}/i);
+    // Dev adopts (its state holds the azurerm site); prod is greenfield and
+    // must not try to import a site that does not exist.
+    expect(read('environments/dev.tfvars')).toMatch(/^adopt_existing_function_app\s*=\s*true$/m);
+    expect(stripComments(read('environments/prod.tfvars'))).not.toMatch(
+      /adopt_existing_function_app\s*=\s*true/
+    );
+    const vars = stripComments(read('variables.tf'));
+    expect(vars).toMatch(
+      /variable\s+"adopt_existing_function_app"\s*\{[\s\S]*?type\s*=\s*bool[\s\S]*?default\s*=\s*false/
+    );
+  });
+
+  it('the module derives the import ids from its inputs, at the api-version its resources use', () => {
+    const live = stripComments(read(FUNC));
+    expect(live).toMatch(
+      /function_app_resource_id\s*=\s*"\$\{var\.resource_group_id\}\/providers\/Microsoft\.Web\/sites\/\$\{local\.function_app_name\}"/
+    );
+    expect(live).toMatch(/type\s*=\s*"Microsoft\.Web\/sites@\$\{local\.web_api_version\}"/);
+    expect(live).toMatch(/type\s*=\s*"Microsoft\.Web\/sites\/config@\$\{local\.web_api_version\}"/);
+    const outputs = stripComments(read('modules/functions/outputs.tf'));
+    expect(outputs).toMatch(
+      /site\s*=\s*"\$\{local\.function_app_resource_id\}\?api-version=\$\{local\.web_api_version\}"/
+    );
+    expect(outputs).toMatch(
+      /auth\s*=\s*"\$\{local\.function_app_resource_id\}\/config\/authsettingsV2\?api-version=\$\{local\.web_api_version\}"/
+    );
+    // Every output the root and the workflows read keeps its name and is wired
+    // from the azapi site.
+    for (const name of [
+      'function_app_id',
+      'function_app_name',
+      'function_app_url',
+      'hostname',
+      'identity_principal_id',
+    ]) {
+      expect(outputs).toMatch(
+        new RegExp(`output\\s+"${name}"\\s*\\{[^}]*azapi_resource\\.function_app\\.`)
+      );
+    }
+  });
+
+  it('the static gate PASSES on the committed infra', () => {
+    expect(gateWith(() => undefined).code).toBe(0);
+  });
+
+  it('the static gate FAILS on a scalar AzureWebJobsStorage setting in any letter case', () => {
+    const { code, out } = gateWith(dst => plantSetting(dst, '"azureWebJobsStorage" = "x"'));
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/scalar AzureWebJobsStorage or DEPLOYMENT_STORAGE_CONNECTION_STRING/);
+  });
+
+  it('the static gate FAILS on a DEPLOYMENT_STORAGE_CONNECTION_STRING setting', () => {
+    const { code, out } = gateWith(dst =>
+      plantSetting(dst, '"Deployment_Storage_Connection_String" = "x"')
+    );
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/scalar AzureWebJobsStorage or DEPLOYMENT_STORAGE_CONNECTION_STRING/);
+  });
+
+  it('the static gate FAILS when an azurerm site resource comes back beside the azapi site', () => {
+    const { code, out } = gateWith(dst =>
+      fs.appendFileSync(
+        path.join(dst, FUNC),
+        '\nresource "azurerm_function_app_flex_consumption" "main" {\n}\n'
+      )
+    );
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/declares an azurerm resource that writes Microsoft\.Web\/sites/);
+  });
+
+  it('the static gate FAILS when a second azapi writer targets a Microsoft.Web/sites type', () => {
+    const { code, out } = gateWith(dst =>
+      fs.appendFileSync(
+        path.join(dst, 'main.tf'),
+        '\nresource "azapi_update_resource" "settings" {\n  type = "Microsoft.Web/sites/config@2024-04-01"\n}\n'
+      )
+    );
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/second writer of the site|exactly one writer/);
+  });
+
+  it('the destroy guard clears ONLY a forget whose object the same plan imports (custody transfer)', () => {
+    const guard = path.join(INFRA, 'scripts', 'tf-plan-destroy-guard.sh');
+    const fx = (f: string) => path.join(INFRA, 'scripts', 'fixtures', f);
+    const run = (f: string, authorized?: string) => {
+      const env = { ...process.env };
+      delete env['TF_DESTROY_GUARD_AUTHORIZED_CHANGES'];
+      if (authorized) env['TF_DESTROY_GUARD_AUTHORIZED_CHANGES'] = authorized;
+      const r = spawnSync('bash', [guard, fx(f)], { encoding: 'utf8', env });
+      return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+    };
+    const FORGET = 'forget:module.azure_functions.azurerm_function_app_flex_consumption.main';
+
+    // The real HAR-15 plan shape: forget + import of the same site -> PASS with
+    // no override, and the transfer is printed.
+    const ok = run('destroy-guard-custody-transfer.json');
+    expect(ok.code).toBe(0);
+    expect(ok.out).toMatch(
+      /forget:module\.azure_functions\.azurerm_function_app_flex_consumption\.main -> import:module\.azure_functions\.azapi_resource\.function_app/
+    );
+    // ...and the forget is not a protected change any more, so naming it in an
+    // override is a superset and fails.
+    expect(run('destroy-guard-custody-transfer.json', FORGET).code).toBe(1);
+
+    // Anything looser stays protected.
+    expect(run('destroy-guard-custody-transfer-other-object.json').code).toBe(1);
+    expect(run('destroy-guard-custody-transfer-other-object.json', FORGET).code).toBe(0);
+    expect(run('destroy-guard-custody-transfer-ambiguous.json').code).toBe(1);
+    expect(run('destroy-guard-custody-transfer-replaced-import.json').code).toBe(1);
+    // The generic forget fixture is unaffected.
+    expect(run('destroy-guard-forget.json').code).toBe(1);
+  });
+
+  it('the plan/state secret gate inspects the azapi site body, with fixtures for each reject path', () => {
+    const inspect = read('scripts/tf-plan-secret-inspection.sh');
+    expect(inspect).toMatch(/test\("\^Microsoft\[\.\]Web\/sites@"; "i"\)/);
+    expect(inspect).toMatch(/"deploy_storage_auth"/);
+    const runner = read('scripts/fixtures/run-flex-secret-gate-fixtures.sh');
+    for (const row of [
+      'azapi-site-plan-accepted.json pass auto',
+      'azapi-site-plan-host-storage-connstr.json fail auto',
+      'azapi-site-plan-deploy-connstr-auth.json fail auto',
+      'azapi-site-plan-sas-endpoint.json fail auto',
+      'azapi-site-plan-foreign-ikey.json fail auto',
+    ]) {
+      expect(runner).toContain(row);
+    }
   });
 });

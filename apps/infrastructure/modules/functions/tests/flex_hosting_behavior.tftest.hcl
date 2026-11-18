@@ -6,12 +6,13 @@
 # proves the operator-facing HOSTING behaviour the MG-24 Flex revision introduced
 # and that a future edit could silently regress:
 #
-#   * dev SCALE-TO-ZERO  — always_ready = 0 renders NO always_ready block, so the
+#   * dev SCALE-TO-ZERO  — always_ready = 0 renders NO alwaysReady entry, so the
 #     app bills ~$0 idle (the $50-RG-budget promise).
 #   * prod ALWAYS-READY  — always_ready >= 1 renders exactly one warm "http" group
 #     at the requested instance_count (no cold starts on prod traffic).
 #   * the per-instance scale knobs (instance_memory_in_mb / maximum_instance_count)
-#     flow from the tfvars var straight onto the flex resource.
+#     flow from the tfvars var straight onto the site's
+#     functionAppConfig.scaleAndConcurrency (azapi_resource.function_app, HAR-15).
 #   * Flex-deprecated app settings (WEBSITE_NODE_DEFAULT_VERSION / WEBSITE_CONTENT* /
 #     WEBSITE_TIME_ZONE / WEBSITE_RUN_FROM_PACKAGE) are PRUNED — Flex manages the
 #     runtime + package mount itself and rejects/ignores them.
@@ -51,8 +52,8 @@ variables {
 }
 
 # --- dev SCALE-TO-ZERO -------------------------------------------------------
-# always_ready = 0 (dev.tfvars) must render NO always_ready block. The dynamic
-# block is gated `for_each = var.always_ready > 0 ? [1] : []`, so at 0 the app
+# always_ready = 0 (dev.tfvars) must render an EMPTY alwaysReady list. The list
+# is built from `var.always_ready > 0 ? [var.always_ready] : []`, so at 0 the app
 # has zero pre-warmed instances and bills ~$0 idle. This is the exact "dev scale
 # to zero" acceptance — a regression (e.g. always keeping a warm block) would
 # silently start billing.
@@ -64,17 +65,17 @@ run "dev_always_ready_zero_scales_to_zero" {
     maximum_instance_count = 40
   }
   assert {
-    condition     = length(azurerm_function_app_flex_consumption.main.always_ready) == 0
-    error_message = "dev (always_ready=0) must render NO always_ready block — scale-to-zero, ~$0 idle"
+    condition     = length(azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.alwaysReady) == 0
+    error_message = "dev (always_ready=0) must render NO alwaysReady entry — scale-to-zero, ~$0 idle"
   }
   # The scale knobs still flow onto the resource even with no warm instances.
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.instance_memory_in_mb == 2048
-    error_message = "instance_memory_in_mb must flow from the tfvars var onto the flex resource"
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.instanceMemoryMB == 2048
+    error_message = "instance_memory_in_mb must flow from the tfvars var onto functionAppConfig.scaleAndConcurrency.instanceMemoryMB"
   }
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.maximum_instance_count == 40
-    error_message = "maximum_instance_count must flow from the tfvars var onto the flex resource"
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.maximumInstanceCount == 40
+    error_message = "maximum_instance_count must flow from the tfvars var onto functionAppConfig.scaleAndConcurrency.maximumInstanceCount"
   }
 }
 
@@ -90,20 +91,20 @@ run "prod_always_ready_warm_baseline" {
     maximum_instance_count = 100
   }
   assert {
-    condition     = length(azurerm_function_app_flex_consumption.main.always_ready) == 1
-    error_message = "prod (always_ready>=1) must render exactly one always_ready block (warm baseline)"
+    condition     = length(azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.alwaysReady) == 1
+    error_message = "prod (always_ready>=1) must render exactly one alwaysReady entry (warm baseline)"
   }
   assert {
-    condition     = one(azurerm_function_app_flex_consumption.main.always_ready).name == "http"
+    condition     = one(azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.alwaysReady).name == "http"
     error_message = "the warm group must target the built-in \"http\" group (all HTTP-triggered functions)"
   }
   assert {
-    condition     = one(azurerm_function_app_flex_consumption.main.always_ready).instance_count == 1
+    condition     = one(azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.alwaysReady).instanceCount == 1
     error_message = "the warm group instance_count must equal var.always_ready"
   }
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.maximum_instance_count == 100
-    error_message = "prod maximum_instance_count must flow onto the flex resource"
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.maximumInstanceCount == 100
+    error_message = "prod maximum_instance_count must flow onto functionAppConfig.scaleAndConcurrency.maximumInstanceCount"
   }
 }
 
@@ -114,7 +115,7 @@ run "prod_always_ready_honours_requested_count" {
     always_ready = 3
   }
   assert {
-    condition     = one(azurerm_function_app_flex_consumption.main.always_ready).instance_count == 3
+    condition     = one(azapi_resource.function_app.body.properties.functionAppConfig.scaleAndConcurrency.alwaysReady).instanceCount == 3
     error_message = "always_ready must render the requested warm instance_count verbatim (not clamp to 1)"
   }
 }
@@ -122,21 +123,24 @@ run "prod_always_ready_honours_requested_count" {
 # --- Flex-FORBIDDEN app settings PRUNED --------------------------------------
 # Flex manages the runtime version and the package mount itself; the classic
 # Consumption/Elastic app settings are deprecated-or-rejected and must NOT be set.
-# Assert the concrete keys named in the brief are absent from app_settings.
+# Assert the concrete keys named in the brief are absent from the app settings.
 #
 # FUNCTIONS_WORKER_RUNTIME is the load-bearing one (MG-24 apply defect): a Flex
 # site REJECTS it with 400 BadRequest ExtendedCode 51021, failing the create —
-# the worker runtime is declared via runtime_name/runtime_version, asserted below.
+# the worker runtime is declared in functionAppConfig.runtime, asserted below.
+#
+# HAR-15: these read the settings collection azapi_resource.function_app PUTs.
+# Setting names are matched case-insensitively, as App Service treats them.
 run "flex_deprecated_app_settings_are_pruned" {
   command = plan
   # The apply-breaking key: FUNCTIONS_WORKER_RUNTIME must NOT be an app setting.
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "FUNCTIONS_WORKER_RUNTIME")
-    error_message = "FUNCTIONS_WORKER_RUNTIME is REJECTED on Flex (400 BadRequest 51021) — the runtime is runtime_name/runtime_version, not an app setting"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "functions_worker_runtime")
+    error_message = "FUNCTIONS_WORKER_RUNTIME is REJECTED on Flex (400 BadRequest 51021) — the runtime is functionAppConfig.runtime, not an app setting"
   }
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "FUNCTIONS_EXTENSION_VERSION")
-    error_message = "FUNCTIONS_EXTENSION_VERSION is Flex-managed — must not be in app_settings"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "functions_extension_version")
+    error_message = "FUNCTIONS_EXTENSION_VERSION is Flex-managed — must not be in the app settings"
   }
   # HOST STORAGE (MG-58) — NARROWED, not removed. The old assertion here demanded
   # ZERO keys starting with "AzureWebJobsStorage" on the stated premise that Flex
@@ -152,7 +156,7 @@ run "flex_deprecated_app_settings_are_pruned" {
   # identity-based account-name form is PRESENT (without it the host cannot
   # authenticate to its own storage).
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "AzureWebJobsStorage")
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "azurewebjobsstorage")
     error_message = "The bare AzureWebJobsStorage (connection-string) form must NOT be an app setting — it carries a shared key/SAS and the account sets allowSharedKeyAccess=false. Host storage authenticates by managed identity via AzureWebJobsStorage__accountName"
   }
   # EXACTLY ONE host-storage form. Written as "the set of AzureWebJobsStorage* keys
@@ -160,71 +164,68 @@ run "flex_deprecated_app_settings_are_pruned" {
   # not-contains checks, so it also rejects any OTHER variant nobody thought to
   # name — __blobServiceUri / __queueServiceUri / __tableServiceUri included.
   assert {
-    condition     = [for k in sort(keys(azurerm_function_app_flex_consumption.main.app_settings)) : k if startswith(k, "AzureWebJobsStorage")] == ["AzureWebJobsStorage__accountName"]
+    condition     = [for n in sort([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)]) : n if startswith(n, "azurewebjobsstorage")] == ["azurewebjobsstorage__accountname"]
     error_message = "Host storage must be configured by EXACTLY ONE setting — the identity-based account-name form AzureWebJobsStorage__accountName. No __blobServiceUri/__queueServiceUri/__tableServiceUri variant may be published alongside it: the account-name and service-URI forms are ALTERNATIVES (the service-URI form is for sovereign clouds / custom / private endpoints, and this account is on standard Azure DNS with no private endpoint and no VNet). Publishing both forms, or the wrong one, is its own defect (MG-58)"
   }
   # …and it names the FUNCTIONS STORAGE ACCOUNT. Asserted against the module input
   # rather than a literal restated here (the MG-51 convention), so a rename of the
   # account cannot silently decouple the host from its own storage.
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.app_settings["AzureWebJobsStorage__accountName"] == var.storage_account_name
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["AzureWebJobsStorage__accountName"] == var.storage_account_name
     error_message = "AzureWebJobsStorage__accountName must be the functions storage account NAME (a name, NOT a credential — no key, no SAS, no connection string). Without it the host cannot authenticate to its own required storage: azure.functions.webjobs.storage reports Unhealthy/AuthenticationFailed every ~30s and timer schedule status / singleton leases cannot be persisted (MG-58)"
   }
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "WEBSITE_NODE_DEFAULT_VERSION")
-    error_message = "WEBSITE_NODE_DEFAULT_VERSION is Flex-deprecated (Flex sets runtime_version) — must not be in app_settings"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "website_node_default_version")
+    error_message = "WEBSITE_NODE_DEFAULT_VERSION is Flex-deprecated (Flex sets functionAppConfig.runtime) — must not be in the app settings"
   }
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING")
-    error_message = "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING is Flex-deprecated (no Azure Files content share) — must not be in app_settings"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "website_contentazurefileconnectionstring")
+    error_message = "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING is Flex-deprecated (no Azure Files content share) — must not be in the app settings"
   }
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "WEBSITE_CONTENTSHARE")
-    error_message = "WEBSITE_CONTENTSHARE is Flex-deprecated (no Azure Files content share) — must not be in app_settings"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "website_contentshare")
+    error_message = "WEBSITE_CONTENTSHARE is Flex-deprecated (no Azure Files content share) — must not be in the app settings"
   }
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "WEBSITE_RUN_FROM_PACKAGE")
-    error_message = "WEBSITE_RUN_FROM_PACKAGE is Flex-deprecated (Flex manages the package mount) — must not be in app_settings"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "website_run_from_package")
+    error_message = "WEBSITE_RUN_FROM_PACKAGE is Flex-deprecated (Flex manages the package mount) — must not be in the app settings"
   }
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "WEBSITE_TIME_ZONE")
-    error_message = "WEBSITE_TIME_ZONE is a Flex-deprecated legacy setting — must not be in app_settings"
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "website_time_zone")
+    error_message = "WEBSITE_TIME_ZONE is a Flex-deprecated legacy setting — must not be in the app settings"
   }
   # Positive control: the runtime IS declared via the Flex-native field, not a setting.
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.runtime_name == "node" && azurerm_function_app_flex_consumption.main.runtime_version == "24"
-    error_message = "Flex runtime must be declared node/24 via runtime_name/runtime_version (not a WEBSITE_* app setting)"
+    condition     = azapi_resource.function_app.body.properties.functionAppConfig.runtime.name == "node" && azapi_resource.function_app.body.properties.functionAppConfig.runtime.version == "24"
+    error_message = "Flex runtime must be declared node/24 via functionAppConfig.runtime (not a WEBSITE_* app setting)"
   }
-  # Positive control: pruning the Flex-FORBIDDEN keys must NOT strip the four
+  # Positive control: pruning the Flex-FORBIDDEN keys must NOT strip the
   # identity-based (non-secret endpoint) settings the host needs — an over-eager
   # "prune everything" edit would silently break Cosmos/IoT/SignalR/App Insights
-  # wiring. Assert each REMAINS present in app_settings.
-  # The AAD App Insights auth setting REMAINS in app_settings. The connection
-  # string itself is NOT an app_setting — it is wired via the native
-  # site_config.application_insights_connection_string field (second-plan no-op
-  # fix), so assert it is present there and absent from app_settings.
+  # wiring. Assert each REMAINS present in the app settings.
+  #
+  # HAR-15: the App Insights connection string is an app setting again. Under
+  # azurerm it travelled in the native site_config field (the provider turned it
+  # into this same setting on the wire); azapi sends the collection verbatim, so
+  # it is declared directly and must be present.
   assert {
-    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_AUTHENTICATION_STRING")
+    condition     = contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name], "APPLICATIONINSIGHTS_AUTHENTICATION_STRING")
     error_message = "the AAD-identity App Insights auth setting (APPLICATIONINSIGHTS_AUTHENTICATION_STRING) must REMAIN after pruning the Flex-forbidden keys"
   }
   assert {
-    condition     = !contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "APPLICATIONINSIGHTS_CONNECTION_STRING")
-    error_message = "APPLICATIONINSIGHTS_CONNECTION_STRING must NOT be an app_setting — it is wired via the native site_config field (second-plan no-op fix)"
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["APPLICATIONINSIGHTS_CONNECTION_STRING"] == var.application_insights_connection_string
+    error_message = "the App Insights connection string must REMAIN in the app settings (APPLICATIONINSIGHTS_CONNECTION_STRING = var.application_insights_connection_string)"
   }
   assert {
-    condition     = azurerm_function_app_flex_consumption.main.site_config[0].application_insights_connection_string == var.application_insights_connection_string
-    error_message = "the App Insights connection string must be wired via the native site_config.application_insights_connection_string field"
-  }
-  assert {
-    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "COSMOSDB__accountEndpoint")
+    condition     = contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name], "COSMOSDB__accountEndpoint")
     error_message = "the identity-based COSMOSDB__accountEndpoint setting must REMAIN after pruning the Flex-forbidden keys"
   }
   assert {
-    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "IOTHUB_EVENTS__fullyQualifiedNamespace")
+    condition     = contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name], "IOTHUB_EVENTS__fullyQualifiedNamespace")
     error_message = "the identity-based IOTHUB_EVENTS__fullyQualifiedNamespace setting must REMAIN after pruning the Flex-forbidden keys"
   }
   assert {
-    condition     = contains(keys(azurerm_function_app_flex_consumption.main.app_settings), "AzureSignalRConnectionString__serviceUri")
+    condition     = contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name], "AzureSignalRConnectionString__serviceUri")
     error_message = "the identity-based AzureSignalRConnectionString__serviceUri setting must REMAIN after pruning the Flex-forbidden keys"
   }
 }
@@ -293,4 +294,55 @@ run "rejects_negative_always_ready" {
     always_ready = -1
   }
   expect_failures = [var.always_ready]
+}
+
+# --- The COMPLETE settings collection (HAR-15) --------------------------------
+# A site PUT replaces the whole app settings collection, so the declared list IS
+# the deployed list. Pin it exactly: a setting added here is a deliberate edit to
+# this test, never a side effect. This is also the acceptance assertion for
+# HAR-15: AzureWebJobsStorage__accountName is present, and neither the scalar
+# AzureWebJobsStorage nor DEPLOYMENT_STORAGE_CONNECTION_STRING is, in any case.
+run "app_settings_are_exactly_the_declared_collection" {
+  command = plan
+  assert {
+    condition = jsonencode(sort([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name])) == jsonencode(sort([
+      "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
+      "APPLICATIONINSIGHTS_CONNECTION_STRING",
+      "APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE",
+      "AzureSignalRConnectionString__serviceUri",
+      "AzureWebJobsStorage__accountName",
+      "COSMOSDB_COOKS_CONTAINER_NAME",
+      "COSMOSDB_DATABASE_NAME",
+      "COSMOSDB__accountEndpoint",
+      "IOTHUB_EVENTS__fullyQualifiedNamespace",
+    ]))
+    error_message = "The Function App's app settings must be exactly the declared collection. azapi PUTs this list as the site's COMPLETE settings, so an added or dropped name changes the deployed app"
+  }
+  assert {
+    condition     = contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "azurewebjobsstorage__accountname")
+    error_message = "AzureWebJobsStorage__accountName must be declared (host storage by managed identity, MG-58)"
+  }
+  assert {
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "azurewebjobsstorage")
+    error_message = "The scalar AzureWebJobsStorage setting must not be declared, in any letter case (HAR-15)"
+  }
+  assert {
+    condition     = !contains([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)], "deployment_storage_connection_string")
+    error_message = "DEPLOYMENT_STORAGE_CONNECTION_STRING must not be declared, in any letter case (HAR-15)"
+  }
+  # No two settings may differ only in case: App Service would keep one of
+  # them, and which one is not something this config controls.
+  assert {
+    condition     = length(distinct([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : lower(s.name)])) == length(azapi_resource.function_app.body.properties.siteConfig.appSettings)
+    error_message = "App setting names must be unique case-insensitively"
+  }
+  # CORS and the TLS floor travel in the same siteConfig PUT.
+  assert {
+    condition     = jsonencode(azapi_resource.function_app.body.properties.siteConfig.cors.allowedOrigins) == jsonencode(var.cors_allowed_origins) && azapi_resource.function_app.body.properties.siteConfig.cors.supportCredentials == false
+    error_message = "CORS must be exactly the per-environment allowed origins, without credentials"
+  }
+  assert {
+    condition     = azapi_resource.function_app.body.properties.siteConfig.minTlsVersion == "1.2" && azapi_resource.function_app.body.properties.siteConfig.scmMinTlsVersion == "1.2"
+    error_message = "The app and SCM endpoints must keep a TLS 1.2 floor"
+  }
 }

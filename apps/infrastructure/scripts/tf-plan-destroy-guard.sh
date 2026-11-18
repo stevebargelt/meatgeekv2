@@ -35,6 +35,12 @@
 #             costing money, now managed by nobody and watched by nothing —
 #             with a fully green run. So `forget` is protected too.
 #
+#   ONE NARROW EXCEPTION — CUSTODY TRANSFER (HAR-15). A `forget` whose ARM
+#   object the SAME plan imports into another address is not an orphaning: the
+#   object changes Terraform resource type and stays managed. Exactly one forget
+#   and exactly one benign (no-op/update) import must carry the same id; anything
+#   looser stays protected. See the comment above JQ_PRELUDE in section 3.
+#
 #   ANY OTHER ACTION VERB the plan carries that this gate does not recognize as
 #   benign (`no-op`, `create`, `read`, `update`) is ALSO treated as protected.
 #   A future Terraform release that introduces a new destructive verb must fail
@@ -281,16 +287,58 @@ esac
 # A jq failure here means the change set could not be enumerated — that is an
 # inspection that could not run, so FAIL CLOSED (exit 2) rather than defaulting
 # to "nothing protected".
-JQ_PROTECTED='
+#
+# CUSTODY TRANSFER (HAR-15) — the ONE `forget` this gate does not protect.
+# A forget is dangerous because the object leaves Terraform management. When the
+# SAME plan also IMPORTS the IDENTICAL ARM object into a different address, it
+# does not leave: Terraform hands it from one resource type to another (here,
+# from azurerm_function_app_flex_consumption to azapi_resource) and keeps
+# managing it. Every condition below must hold, or the forget stays protected:
+#   * the entry's actions are exactly ["forget"] and it is not a deposed object;
+#   * its prior state carries a non-empty `id` (change.before.id);
+#   * EXACTLY ONE entry in the plan imports that id (change.importing.id), and
+#     that entry's actions are only no-op/update — an import that is also being
+#     deleted or replaced is not custody;
+#   * EXACTLY ONE forget in the plan carries that id, and the importing entry is
+#     a different address.
+# Ids are compared case-insensitively (ARM resource ids are) with any query
+# string stripped (azapi import ids carry ?api-version=). Nothing else is
+# exempted: a forget with no matching import, an import of a different object,
+# or two forgets of one object are protected exactly as before. Matches are
+# printed below the counts so the transfer is visible in the log.
+JQ_PRELUDE='
   def benign: {"no-op": true, "create": true, "read": true, "update": true};
   def pverb($a):
     if ($a | index("delete")) then "delete"
     elif ($a | index("forget")) then "forget"
     else ([ $a[] | select(benign[.] != true) ] | first)
     end;
-  .resource_changes[]
+  def nid: if type == "string" then (ascii_downcase | sub("[?].*$"; "")) else "" end;
+  . as $doc
+  | [ $doc.resource_changes[]
+      | select((.change.importing.id? | type) == "string")
+      | select([ .change.actions[] | select(. != "no-op" and . != "update") ] | length == 0)
+      | { addr: .address, id: (.change.importing.id | nid) }
+      | select(.id != "") ] as $imports
+  | [ $doc.resource_changes[]
+      | select(.change.actions == ["forget"])
+      | (.change.before.id? | nid) ] as $forgets
+  | def transfer_to($e):
+      ( if ($e.change.actions == ["forget"]) and ($e.deposed == null)
+        then ($e.change.before.id? | nid) else "" end ) as $fid
+      | if $fid == "" then null
+        else ([ $imports[] | select(.id == $fid) ]) as $m
+          | if ($m | length) == 1
+               and ([ $forgets[] | select(. == $fid) ] | length) == 1
+               and $m[0].addr != $e.address
+            then $m[0].addr else null end
+        end;
+'
+
+JQ_PROTECTED="${JQ_PRELUDE}"'
+  $doc.resource_changes[]
   | (.change.actions) as $a
-  | (pverb($a)) as $v
+  | (if transfer_to(.) == null then pverb($a) else null end) as $v
   | select($v != null)
   | ((.deposed // "")) as $d
   | (if $d == "" then "" else "#deposed=" + $d end) as $dsuf
@@ -341,9 +389,20 @@ total_changes="$(printf '%s\n' "${JSON}" | jq -r '
   [.resource_changes[] | select(((.change.actions // []) | index("no-op")) | not)] | length
 ' 2>/dev/null)" || die "cannot inspect: failed to count planned changes from ${SRC}"
 
+TRANSFER_ROWS="$(printf '%s\n' "${JSON}" | jq -r "${JQ_PRELUDE}"'
+  $doc.resource_changes[]
+  | (transfer_to(.)) as $to
+  | select($to != null)
+  | "forget:\(.address) -> import:\($to)"
+' 2>/dev/null)" || die "cannot inspect: failed to enumerate custody transfers from ${SRC}"
+
 echo "tf-plan-destroy-guard: inspecting ${SRC}"
 echo "  planned changes (excluding no-op): ${total_changes}"
 echo "  DESTRUCTIVE / state-orphaning changes: ${protected_count}"
+if [ -n "${TRANSFER_ROWS}" ]; then
+  echo "  custody transfers (forget + import of the SAME ARM object in this plan — the object stays under Terraform management, so these are not protected):"
+  printf '%s\n' "${TRANSFER_ROWS}" | sed 's/^/    → /'
+fi
 
 if [ "${protected_count}" -gt 0 ]; then
   echo

@@ -174,9 +174,16 @@ describe('MG-24 Flex: deprecated settings + legacy plan SKU are gone', () => {
     expect(live).toMatch(/sku_name\s*=\s*"FC1"/);
     // No Y1 (Consumption) or EP1/EP2/EP3 (Elastic Premium) SKU survives in code.
     expect(live).not.toMatch(/sku_name\s*=\s*"(Y1|EP[123])"/);
-    // And the app is the Flex resource type (the linux_function_app is gone).
-    expect(live).toMatch(/resource\s+"azurerm_function_app_flex_consumption"/);
+    // And the app is a Linux function app site owned by azapi (HAR-15): neither
+    // the Y1/EP1 linux_function_app nor the azurerm Flex resource, which injected
+    // a scalar AzureWebJobsStorage connection string on every update.
+    expect(live).toMatch(
+      /resource\s+"azapi_resource"\s+"function_app"\s*\{\s*type\s*=\s*"Microsoft\.Web\/sites@/
+    );
+    expect(live).toMatch(/kind\s*=\s*"functionapp,linux"/);
+    expect(live).toMatch(/serverFarmId\s*=\s*azurerm_service_plan\.functions\.id/);
     expect(live).not.toMatch(/resource\s+"azurerm_linux_function_app"/);
+    expect(live).not.toMatch(/resource\s+"azurerm_function_app_flex_consumption"/);
   });
 });
 
