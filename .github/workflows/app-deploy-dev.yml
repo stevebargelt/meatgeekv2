@@ -1,0 +1,349 @@
+name: Deploy Dev App
+
+# MG-36 / HAR-13 — deploy every green main commit to the DEV Function App, then
+# prove the deployed API works with the live acceptance suite.
+#
+#   CI/CD Pipeline (push to main, green)
+#     -> Apply Dev Infrastructure (workflow_run; applies the same commit)
+#       -> Deploy Dev App (this file; workflow_run)
+#            deploy      publish the API to the dev Function App
+#            acceptance  `nx run api:acceptance` against it, as the same identity
+#
+# Chaining after the infra apply, not after CI, means the infrastructure for a
+# commit (including the Easy Auth caller list the acceptance job depends on) is
+# applied before the API for that commit is published and tested.
+#
+# CREDENTIALS NEVER MEET UNMERGED CODE. The only triggers are workflow_run and
+# workflow_dispatch (main only). `workflow_run` always executes the workflow file
+# from the default branch, and every job checks out a commit that is on main and
+# has a green CI/CD Pipeline push run (verified below, on every trigger).
+#
+# Docs: docs/development/ci-cd.md (Dev app deploy) and
+#       docs/development/live-acceptance.md (the suite).
+on:
+  workflow_run:
+    workflows: ['Apply Dev Infrastructure']
+    types: [completed]
+  # Manual re-run of the current main tip. The deploy job refuses any ref other
+  # than main and any commit without a successful CI/CD Pipeline push run.
+  workflow_dispatch:
+
+# id-token: write  — azure/login and terraform mint an OIDC token for the dev
+#                    app-publish identity (development environment).
+# contents: read   — checkout and the main-tip lookups.
+# actions: read    — look up the commit's CI/CD Pipeline runs.
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+env:
+  NODE_VERSION: '24'
+  # Let corepack download the packageManager-pinned npm without an interactive prompt.
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+  # Same Core Tools pin as app-deploy-prod.yml.
+  FUNC_CORE_TOOLS_VERSION: '4.12.1'
+
+# One dev deploy at a time; never cancel a publish half way. GitHub keeps only
+# the newest pending run in the group, which is the one worth deploying.
+concurrency:
+  group: app-deploy-dev-development
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: development
+    outputs:
+      deployed: ${{ steps.publish.outputs.deployed }}
+      sha: ${{ steps.target.outputs.sha }}
+      hostname: ${{ steps.tfout.outputs.function_app_hostname }}
+      audience: ${{ steps.tfout.outputs.functions_auth_audience }}
+    env:
+      # Terraform reads dev state as the app-publish identity over OIDC. Without
+      # ARM_USE_OIDC the azurerm backend falls back to the az CLI session, which
+      # it refuses for a service principal. bootstrap.sh grants this identity
+      # Storage Blob Data Reader on the tfstate-dev container for this read.
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_CLIENT_ID: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
+      ARM_USE_OIDC: 'true'
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: '0'
+    steps:
+      # Which commit this run deploys. workflow_run: the commit the infra apply
+      # ran for. workflow_dispatch: the dispatched ref, which must be main.
+      - name: Resolve the target commit
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$DISPATCH_REF" != "refs/heads/main" ]; then
+              echo "Refusing: workflow_dispatch is allowed from main only (got $DISPATCH_REF)." >&2
+              exit 1
+            fi
+            SHA="$DISPATCH_SHA"
+          else
+            SHA="$RUN_SHA"
+          fi
+          printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "Could not resolve the commit to deploy — refusing." >&2
+            exit 1
+          }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Target commit: $SHA"
+
+      # The commit must have a successful CI/CD Pipeline run for a push to main.
+      # This is checked on BOTH triggers: an `Apply Dev Infrastructure` run that
+      # skipped as superseded reports main's tip as its head_sha, and that tip's
+      # own CI may have failed or still be running. Dispatch refuses (red);
+      # workflow_run skips (green, nothing deployed) because that commit's own
+      # CI result is what decides whether it ships.
+      - name: Require a green CI/CD Pipeline push run for the commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          COUNT="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&event=push&branch=main&status=success" --jq .total_count)"
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            echo "green=true" >> "$GITHUB_OUTPUT"
+            echo "CI/CD Pipeline succeeded for $SHA on a push to main."
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Refusing: $SHA has no successful CI/CD Pipeline push run on main." >&2
+            exit 1
+          else
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            echo "$SHA has no successful CI/CD Pipeline push run on main — skipping deploy (not a failure)."
+          fi
+
+      # Stale-SHA guard, as in app-deploy-prod.yml: deploy only main's tip.
+      - name: Stale-SHA guard (deploy only the current main tip)
+        id: freshness
+        if: steps.ci.outputs.green == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          CURRENT_TIP="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          echo "Target commit: $SHA"
+          echo "Current main:  $CURRENT_TIP"
+          if [ "$SHA" = "$CURRENT_TIP" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Target is the current main tip — proceeding."
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "main has advanced past the target — skipping deploy (not a failure)."
+          fi
+
+      - name: Checkout the target commit
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        if: steps.freshness.outputs.fresh == 'true'
+        run: corepack enable
+
+      - name: Install dependencies
+        if: steps.freshness.outputs.fresh == 'true'
+        run: npm ci
+
+      - name: Build api
+        if: steps.freshness.outputs.fresh == 'true'
+        run: npx nx build api
+
+      - name: Verify Functions package
+        if: steps.freshness.outputs.fresh == 'true'
+        run: node apps/api/tools/verify-func-package.js dist/apps/api
+
+      # Flex Consumption runs the package as uploaded (--no-build), so its
+      # runtime dependencies must be in it.
+      - name: Install the package's runtime dependencies
+        if: steps.freshness.outputs.fresh == 'true'
+        working-directory: dist/apps/api
+        run: npm install --omit=dev --ignore-scripts
+
+      - name: Pin Azure Functions Core Tools
+        if: steps.freshness.outputs.fresh == 'true'
+        run: npm i -g "azure-functions-core-tools@${FUNC_CORE_TOOLS_VERSION}"
+
+      - name: Setup Terraform
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: '~1.9'
+          terraform_wrapper: false
+
+      # The dev APP-PUBLISH identity: Website Contributor on the dev Function App
+      # plus the Flex deployment-package container role, and read-only on dev
+      # state. Not the infra-apply identity.
+      - name: Azure login (OIDC — dev app-publish identity)
+        if: steps.freshness.outputs.fresh == 'true'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Never hard-code the Function App: read its name, host and the API
+      # audience from the dev Terraform state.
+      - name: Resolve Function App name, host and API audience (Terraform outputs)
+        id: tfout
+        if: steps.freshness.outputs.fresh == 'true'
+        working-directory: apps/infrastructure
+        run: |
+          set -euo pipefail
+          STATE_ACCOUNT="$(scripts/state-account-name.sh "$ARM_SUBSCRIPTION_ID")"
+          terraform init -input=false -reconfigure -lockfile=readonly \
+            -backend-config=environments/backend-dev.hcl \
+            -backend-config="storage_account_name=$STATE_ACCOUNT"
+          for OUT in function_app_name function_app_hostname functions_auth_audience; do
+            VALUE="$(terraform output -raw "$OUT")"
+            if [ -z "$VALUE" ]; then
+              echo "Terraform output $OUT is empty — aborting deploy." >&2
+              exit 1
+            fi
+            echo "$OUT=$VALUE" >> "$GITHUB_OUTPUT"
+            echo "$OUT: $VALUE"
+          done
+
+      # Authoritative freshness gate, right before publish: main can advance
+      # during the build.
+      - name: Re-verify main tip (final freshness gate before publish)
+        id: freshness_final
+        if: steps.freshness.outputs.fresh == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          CURRENT_TIP="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          echo "Target commit: $SHA"
+          echo "Current main:  $CURRENT_TIP"
+          if [ "$SHA" = "$CURRENT_TIP" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Still the current main tip — publishing."
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "main advanced during the build — skipping publish (not a failure)."
+          fi
+
+      # The publish method proven by hand in MG-21. `nx deploy api` does not work
+      # on Flex Consumption. `--javascript` is required because Core Tools reads
+      # the legacy FUNCTIONS_WORKER_RUNTIME setting, which Flex correctly lacks.
+      - name: Publish to the dev Function App
+        id: publish
+        if: steps.freshness.outputs.fresh == 'true' && steps.freshness_final.outputs.fresh == 'true'
+        working-directory: dist/apps/api
+        env:
+          FUNCTION_APP_NAME: ${{ steps.tfout.outputs.function_app_name }}
+        run: |
+          set -euo pipefail
+          func azure functionapp publish "$FUNCTION_APP_NAME" --javascript --no-build
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+  acceptance:
+    needs: deploy
+    # Skipped when the deploy job published nothing (stale or not CI-green).
+    if: needs.deploy.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: development
+    steps:
+      - name: Checkout the deployed commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.deploy.outputs.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Same identity as the publish (owner decision): no new identity. Its
+      # client id is in functions_auth_allowed_client_app_ids in dev.tfvars, so
+      # Easy Auth accepts its app-only token.
+      - name: Azure login (OIDC — dev app-publish identity)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The token is minted, masked and used inside this one step, so it never
+      # reaches $GITHUB_ENV, a step output, or another step's process.
+      - name: Run the live acceptance suite
+        env:
+          ACCEPTANCE_BASE_URL: https://${{ needs.deploy.outputs.hostname }}/api
+          AUDIENCE: ${{ needs.deploy.outputs.audience }}
+        run: |
+          set -euo pipefail
+          ACCEPTANCE_BEARER_TOKEN="$(az account get-access-token --scope "${AUDIENCE}/.default" --query accessToken -o tsv)"
+          echo "::add-mask::${ACCEPTANCE_BEARER_TOKEN}"
+          if [ -z "$ACCEPTANCE_BEARER_TOKEN" ]; then
+            echo "az account get-access-token returned no token for ${AUDIENCE}/.default." >&2
+            exit 1
+          fi
+          export ACCEPTANCE_BEARER_TOKEN
+          npx nx run api:acceptance 2>&1 | tee "$RUNNER_TEMP/acceptance.log"
+
+      # Proof results and the RU-per-route table, also in the run summary.
+      - name: Write the acceptance summary
+        if: always()
+        env:
+          SHA: ${{ needs.deploy.outputs.sha }}
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/acceptance.log"
+          {
+            echo "## Live acceptance — dev"
+            echo
+            echo "Commit \`$SHA\`"
+            echo
+            if [ -s "$LOG" ]; then
+              echo '```'
+              # Proof lines, then the RU table through the totals line. Strip
+              # terminal colour codes so the summary renders cleanly.
+              sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '
+                /^acceptance run / || /^(PASS|FAIL|SKIP) / { print; next }
+                /^RU per route$/ { table = 1 }
+                table { print }
+                /^acceptance: / { table = 0 }
+              '
+              echo '```'
+            else
+              echo "The suite produced no output; see the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

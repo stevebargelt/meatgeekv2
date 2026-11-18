@@ -5,11 +5,12 @@ Function App over HTTPS, as a real Entra-authenticated caller, writes data
 through it, and reads it back. It replaces hand-run "live dev proofs" in
 tickets.
 
-It will run automatically after each dev deploy of the API (that wiring is a
-later ticket; until then, run it by hand as below). Once it is wired, a ticket
-whose behaviour is visible through the API can state its acceptance criterion as
-**"the acceptance run on the merge commit is green"**, backed by a proof the
-ticket adds.
+It runs automatically after each dev deploy of the API: the `acceptance` job in
+`.github/workflows/app-deploy-dev.yml` (see
+[CI/CD → Dev app deploy and live acceptance](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)).
+A ticket whose behaviour is visible through the API can state its acceptance
+criterion as **"the acceptance run on the merge commit is green"**, backed by a
+proof the ticket adds. You can also run it by hand, as below.
 
 ## What it checks today
 
@@ -86,7 +87,12 @@ npx nx run api:acceptance
 The token is a delegated token for the `access_as_user` scope on the dev API
 registration, which the dev Function App's Easy Auth accepts (see
 [Authentication](../api/authentication.md)). Cooks written by the run land in
-**your** user's partition. The target is never cached by Nx, so every invocation
+**your** user's partition.
+
+In CI the caller is the dev app-publish identity instead: the `acceptance` job
+mints an app-only token for `<audience>/.default`, so its cooks land in that
+service principal's partition. The proof results and the RU-per-route table
+also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
 calls the live system.
 
 ## How it is built
