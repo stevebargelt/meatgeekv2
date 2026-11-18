@@ -125,6 +125,74 @@ jobs:
           directory: ./coverage/${{ matrix.project }}
           flags: ${{ matrix.project }}
 
+  # HAR-12 — the API's Cosmos persistence code against a REAL Cosmos emulator,
+  # so partitioning, create conflicts, transactional batches, If-Match replaces,
+  # ORDER BY paging and requestCharge are exercised before merge rather than only
+  # against the hand-written fakes in `nx test api`.
+  #
+  # No credential of any kind: the emulator's account key is a public constant
+  # that lives in the spec file. This job reads no repository secret, requests
+  # no OIDC token permission, and binds no GitHub Environment.
+  #
+  # Engine: the CLASSIC Linux emulator, pinned by digest. The lighter
+  # `vnext-preview` image was evaluated first and rejected: it ignores the page
+  # size on a single-partition ORDER BY query (one page, no continuation token)
+  # and reports requestCharge 0 for every operation inside a transactional batch
+  # — both used by apps/api/src/shared/cosmos/cooks-repository.ts. The classic
+  # engine serves HTTPS with a self-signed certificate; the job trusts that
+  # certificate via NODE_EXTRA_CA_CERTS instead of disabling TLS.
+  api-cosmos-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    services:
+      cosmos:
+        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:9a4f69121f20c1d6502db84625c71ebb441ab61b01880a7b2d3d8031c6dac429
+        ports:
+          - 8081:8081
+        env:
+          AZURE_COSMOS_EMULATOR_PARTITION_COUNT: '3'
+          AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE: 'false'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for the Cosmos emulator (bounded)
+        # Readiness = the emulator logged its final `Started` line (every
+        # partition is up) AND its certificate is downloadable. Bounded at 5
+        # minutes; on timeout the job fails with the emulator's own log tail.
+        env:
+          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
+        run: |
+          cert="$RUNNER_TEMP/cosmos-emulator.pem"
+          if ! timeout 300 bash -c '
+            until docker logs "$COSMOS_CONTAINER_ID" 2>&1 | tr -d "\r" | grep -qx "Started"; do sleep 5; done
+            until curl -skf https://localhost:8081/_explorer/emulator.pem -o "$0"; do sleep 5; done
+          ' "$cert"; then
+            echo "::error::Cosmos emulator not ready within 300s"
+            docker logs --tail 50 "$COSMOS_CONTAINER_ID" || true
+            exit 1
+          fi
+          echo "NODE_EXTRA_CA_CERTS=$cert" >> "$GITHUB_ENV"
+
+      - name: API Cosmos emulator tier
+        env:
+          COSMOS_EMULATOR_ENDPOINT: https://localhost:8081
+        run: npx nx run api:test-emulator
+
   build-typescript:
     runs-on: ubuntu-latest
     needs: setup

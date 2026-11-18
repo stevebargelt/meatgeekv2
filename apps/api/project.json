@@ -79,6 +79,14 @@
         }
       }
     },
+    "test-emulator": {
+      "executor": "@nx/jest:jest",
+      "cache": false,
+      "options": {
+        "jestConfig": "apps/api/jest.emulator.config.ts",
+        "runInBand": true
+      }
+    },
     "deploy": {
       "executor": "nx:run-commands",
       "dependsOn": ["build"],
