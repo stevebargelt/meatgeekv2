@@ -23,6 +23,7 @@ These jobs run on every push and pull request and gate merges into `main` (see [
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `setup`                   | Installs dependencies with `npm ci` and computes affected apps/libs via `npx nx show projects --affected`                                                                                                                                                                                                                                                                                                                                                                                                         | —                                        |
 | `lint-and-test`           | Runs `nx lint <project>` and `nx test <project> --coverage`, then uploads coverage to Codecov. Also runs the V1 Cosmos export tool's real-SDK test tier (MG-49) and the MG-67 IoT device fixture sender's real-SDK test tier, each once per matrix leg, after `npm ci` — see [V1 Cosmos export tool](../../apps/infrastructure/README.md#v1-cosmos-export-tool-mg-48) and [Dev IoT device fixture](../../apps/infrastructure/README.md#dev-iot-device-fixture--device--iot-hub--route--cosmos-mg-67)              | `api`, `web`, `mobile`, `api-interfaces` |
+| `api-cosmos-emulator`     | Runs the API's Cosmos emulator tier (`npx nx run api:test-emulator`) against a classic Cosmos DB emulator started as a service container — see [Cosmos emulator tier](#cosmos-emulator-tier-har-12). Holds no secret, no OIDC token permission and no environment                                                                                                                                                                                                                                                 | —                                        |
 | `build-typescript`        | Runs `nx build <app>` and uploads the `dist/apps/<app>` artifact                                                                                                                                                                                                                                                                                                                                                                                                                                                  | `api`, `web`                             |
 | `build-go`                | Runs `make build`, `make test`, and `make build-arm` for each Go app                                                                                                                                                                                                                                                                                                                                                                                                                                              | `device-controller`, `data-pusher`       |
 | `validate-infrastructure` | The **credentialless** infrastructure gate — see [PR validation](#dev-infrastructure--automated-gitops-reconciliation-mg-23). `assert-credentialless.sh` → `terraform fmt -check -recursive` → `terraform init -backend=false -input=false -lockfile=readonly` → `terraform validate` → `terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard fixtures → V1 Cosmos export tool tests (MG-48) → dev IoT device fixture tests (MG-67) → per-module `terraform test` → OTel config validate | —                                        |
@@ -35,6 +36,39 @@ These jobs run on every push and pull request and gate merges into `main` (see [
 `build-typescript` compiles only the apps that NX builds with `@nx/js:tsc`/bundlers — `api` (Azure Functions) and `web` (React/Vite). `mobile` is a React Native app; it is not `tsc`-built in CI, so it is intentionally **absent** from the `build-typescript` matrix. `mobile` is still linted and tested (it appears in the `lint-and-test` matrix); it is simply not compiled here.
 
 Adding a new buildable TypeScript app? Add it to the `build-typescript` matrix. A new React Native target does **not** belong there — keep it in `lint-and-test` only.
+
+### Cosmos emulator tier (HAR-12)
+
+`nx test api` runs the cooks persistence specs against hand-written fakes, so real Cosmos behaviour — `/userId` partitioning, `409` on a duplicate create, all-or-nothing transactional batches, `If-Match` replaces, single-partition `ORDER BY` paging with continuation tokens, and `requestCharge` — is never exercised by it. The emulator tier fills that gap for the cooks repository.
+
+**What runs.** `apps/api/src/**/*.emulator.spec.ts`, today `apps/api/src/shared/cosmos/cooks-repository.emulator.spec.ts`. It builds a throwaway database and a `cooks` container whose name and partition key path are read from `azurerm_cosmosdb_sql_container.cooks_shared` in `apps/infrastructure/modules/cosmos-db/main.tf`, reaches it through `CosmosAdapter`'s `clientFactory` seam, and runs the unmodified `CooksRepository` on the real `@azure/cosmos` SDK. Cases: start a cook and read it back; a retried start with the same id (MG-84) — sequential and concurrent — creates exactly one cook; a busy device refuses a second cook until the first is stopped; stop and read back stopped, idempotently; concurrent stops converge on one `endTime`; list-by-user returns only that user's cooks, newest first, in pages of 2; every operation reports a numeric `requestCharge` greater than 0. The database is deleted afterwards.
+
+**Targets.** The tier has its own target, `npx nx run api:test-emulator` (`apps/api/jest.emulator.config.ts`, `cache: false`). The default `apps/api/jest.config.ts` ignores `*.emulator.spec.ts`, so `npx nx test api` stays green without an emulator. When no emulator is reachable the tier **fails** (non-zero exit, every case red with an "emulator unreachable" message); it never skips.
+
+**Credentials.** The emulator's well-known account key is a public constant and appears only in the spec file. The deployed path is unchanged — `productionSeams` still builds a `ManagedIdentityCredential`, and no key or connection string exists in non-test code under `apps/api/src`.
+
+**Which emulator, and why.** CI uses the **classic** Linux emulator (`mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator`, pinned by digest in `ci.yml`), not the lighter `vnext-preview` image. `vnext-preview` was tried first and lacks two things `cooks-repository.ts` relies on:
+
+- it ignores the page size on a single-partition `ORDER BY` query — `maxItemCount: 2` over five cooks returns all five in one page with no continuation token;
+- it reports `requestCharge: 0` for every operation inside a transactional batch (the batch total is only in a response header), so a created start reports 0 RU.
+
+The classic engine pages and charges like the service, and all cases pass against it. It serves HTTPS with a self-signed certificate; trust that certificate with `NODE_EXTRA_CA_CERTS` rather than disabling TLS.
+
+**CI.** The `api-cosmos-emulator` job starts the emulator as a service container on port 8081, waits (bounded at 5 minutes) for the emulator's final `Started` log line and for its certificate to download, exports `NODE_EXTRA_CA_CERTS`, then runs `npx nx run api:test-emulator`. It runs on every pull request and every push to `main`.
+
+**Run it locally (Docker).**
+
+```bash
+docker run -d --name cosmos-emulator -p 8081:8081 \
+  -e AZURE_COSMOS_EMULATOR_PARTITION_COUNT=3 \
+  mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+# Wait for the final "Started" line (one to two minutes):
+docker logs -f cosmos-emulator
+curl -sk https://localhost:8081/_explorer/emulator.pem -o /tmp/cosmos-emulator.pem
+NODE_EXTRA_CA_CERTS=/tmp/cosmos-emulator.pem npx nx run api:test-emulator
+```
+
+The classic image is `linux/amd64` only. On Apple Silicon add `--platform linux/amd64`; it runs under Docker Desktop's emulation (slower to start). Point the tier at a different endpoint with `COSMOS_EMULATOR_ENDPOINT` (default `https://localhost:8081`).
 
 ## Deployment
 
@@ -127,6 +161,8 @@ This is a **not-yet**, not a never. CI-run reconciliation is the intended steady
 - `build-go`
 - `validate-infrastructure`
 - `security-scan`
+
+`api-cosmos-emulator` (HAR-12) is **not yet** on this list. Add it once it has a run history on `main` that shows it is stable on GitHub-hosted runners.
 
 `validate-infrastructure` **is** a required check, and under MG-23 it carries the whole _Terraform-side_ pre-merge gate: with no PR-time plan, the credentialless sequence (`assert-credentialless.sh` → `fmt -check` → backend-less `init` → `validate` → `terraform test` → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard fixtures → per-module `terraform test` → OTel config validate) is what stands between a bad infrastructure change and an automatic post-merge apply. It is not quite alone: the `api-interfaces` leg of `lint-and-test` is also required, and it is where the workflow-structure specs (the apply workflow's trigger gating and job reachability, the OIDC subject map, the toolchain pins) and the secret-gate fixture regression actually execute — so a change that quietly rewrote the apply workflow's gating would fail there, not here. Because neither job needs a credential, both run unconditionally on every PR, so there is no "absent on most PRs" problem to work around — which is precisely why they can be required at all, where the old PR-only plan job could not.
 
