@@ -497,4 +497,93 @@ describe('startCookHandler', () => {
       expect(next.messages()).toHaveLength(1);
     });
   });
+
+  describe('HAR-11 — x-meatgeek-request-charge header', () => {
+    function chargeHeader(res: { headers?: unknown }): string | undefined {
+      return (res.headers as Record<string, string> | undefined)?.['x-meatgeek-request-charge'];
+    }
+
+    function failingDeps(error: unknown): StartCookDeps {
+      return {
+        ...authedDeps().deps,
+        getRepository: () => ({
+          startCook: async () => {
+            throw error;
+          },
+        }),
+      };
+    }
+
+    it('reports the RU charge on a 201 create', async () => {
+      const { deps } = authedDeps();
+      const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+      expect(res.status).toBe(201);
+      expect(chargeHeader(res)).toBe('7.42');
+    });
+
+    it('reports the RU charge on a 200 replay, a 422 id reuse and a 409 busy device', async () => {
+      const { deps } = authedDeps();
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+
+      const replay = await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+      const reuse = await startCookHandler(
+        mockRequest({ ...validBody, name: 'Different' }),
+        mockContext().ctx,
+        deps
+      );
+      const busy = await startCookHandler(
+        mockRequest({ ...validBody, id: OTHER_COOK_ID }),
+        mockContext().ctx,
+        deps
+      );
+
+      expect([replay.status, reuse.status, busy.status]).toEqual([200, 422, 409]);
+      expect(chargeHeader(replay)).toBe('2');
+      expect(chargeHeader(reuse)).toBe('2');
+      expect(chargeHeader(busy)).toBe('3');
+    });
+
+    it('reports the charge a failing Cosmos call carried on the 500', async () => {
+      const cosmosError = Object.assign(new Error('https://acct.documents.azure.com throttled'), {
+        code: 429,
+        requestCharge: 1.5,
+      });
+      const res = await startCookHandler(
+        mockRequest(validBody),
+        mockContext().ctx,
+        failingDeps(cosmosError)
+      );
+      expect(res.status).toBe(500);
+      expect(chargeHeader(res)).toBe('1.5');
+    });
+
+    it('omits the header on a 500 whose error reports no charge', async () => {
+      const res = await startCookHandler(
+        mockRequest(validBody),
+        mockContext().ctx,
+        failingDeps(new Error('config missing'))
+      );
+      expect(res.status).toBe(500);
+      expect(chargeHeader(res)).toBeUndefined();
+    });
+
+    it('omits the header when no Cosmos call was made (401, 400)', async () => {
+      const unauth = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
+        ...authedDeps().deps,
+        resolvePrincipal: (): PrincipalResult => ({
+          authenticated: false,
+          reason: 'principal_header_missing',
+        }),
+      });
+      const invalid = await startCookHandler(
+        mockRequest({ ...validBody, id: 'not-a-uuid' }),
+        mockContext().ctx,
+        authedDeps().deps
+      );
+
+      expect([unauth.status, invalid.status]).toEqual([401, 400]);
+      expect(chargeHeader(unauth)).toBeUndefined();
+      expect(chargeHeader(invalid)).toBeUndefined();
+    });
+  });
 });

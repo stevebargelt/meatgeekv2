@@ -349,4 +349,70 @@ describe('stopCookHandler', () => {
     // No local `interface Cook` / `type Cook =` re-declaration.
     expect(source).not.toMatch(/\b(interface|type)\s+Cook\b/);
   });
+
+  describe('HAR-11 — x-meatgeek-request-charge header', () => {
+    function chargeHeader(res: { headers?: unknown }): string | undefined {
+      return (res.headers as Record<string, string> | undefined)?.['x-meatgeek-request-charge'];
+    }
+
+    function stopWith(repo: RepoSpy, resolvePrincipal = authenticatedAs(AUTH_USER_ID)) {
+      return stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
+        resolvePrincipal,
+        getRepository: () => repo,
+      });
+    }
+
+    it('reports the RU charge on a 200 stop, transitioned or already completed', async () => {
+      const stopped = storedCook({ status: 'completed', endTime: '2026-08-24T20:00:00.000Z' });
+      const fresh = await stopWith(
+        fakeRepository(() => ({ cook: stopped, requestCharge: 11.38, transitioned: true }))
+      );
+      const repeat = await stopWith(
+        fakeRepository(() => ({ cook: stopped, requestCharge: 1, transitioned: false }))
+      );
+
+      expect([fresh.status, repeat.status]).toEqual([200, 200]);
+      expect(chargeHeader(fresh)).toBe('11.38');
+      expect(chargeHeader(repeat)).toBe('1');
+    });
+
+    it('reports the RU charge of the read on a 404 miss', async () => {
+      const res = await stopWith(
+        fakeRepository(() => ({ cook: undefined, requestCharge: 1.2, transitioned: false }))
+      );
+      expect(res.status).toBe(404);
+      expect(chargeHeader(res)).toBe('1.2');
+    });
+
+    it('reports the charge a failing Cosmos call carried on the 500, and omits it otherwise', async () => {
+      const charged = await stopWith(
+        fakeRepository(() => {
+          throw Object.assign(new Error('precondition failed'), {
+            code: 412,
+            requestCharge: 2.25,
+          });
+        })
+      );
+      const uncharged = await stopWith(
+        fakeRepository(() => {
+          throw new Error('credential unavailable');
+        })
+      );
+
+      expect([charged.status, uncharged.status]).toEqual([500, 500]);
+      expect(chargeHeader(charged)).toBe('2.25');
+      expect(chargeHeader(uncharged)).toBeUndefined();
+    });
+
+    it('omits the header on a 401, where no Cosmos call was made', async () => {
+      const res = await stopWith(
+        fakeRepository(() => {
+          throw new Error('repository must not be called');
+        }),
+        unauthenticated
+      );
+      expect(res.status).toBe(401);
+      expect(chargeHeader(res)).toBeUndefined();
+    });
+  });
 });

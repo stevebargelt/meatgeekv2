@@ -13,6 +13,7 @@ import {
   unauthenticatedResponse,
 } from '../../shared/auth/principal';
 import type { CooksRepository } from '../../shared/cosmos/cooks-repository';
+import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/request-charge';
 
 /**
  * MG-59 step 4 — start a cook by PERSISTING it through the shared Cosmos
@@ -133,10 +134,21 @@ function startFields(cook: Cook): unknown {
   };
 }
 
-function jsonResponse(status: number, body: unknown, invocationId: string): HttpResponseInit {
+/** A JSON response for a request that reached Cosmos: it carries the RU charge
+ *  header (HAR-11) alongside the request id. */
+function jsonResponse(
+  status: number,
+  body: unknown,
+  invocationId: string,
+  requestCharge: number
+): HttpResponseInit {
   return {
     status,
-    headers: { 'Content-Type': 'application/json', 'X-Request-ID': invocationId },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Request-ID': invocationId,
+      ...requestChargeHeaders(requestCharge),
+    },
     jsonBody: body,
   };
 }
@@ -227,7 +239,8 @@ export async function startCookHandler(
           requestId: context.invocationId,
           activeCookId: result.activeCookId,
         },
-        context.invocationId
+        context.invocationId,
+        requestCharge
       );
     }
 
@@ -245,10 +258,11 @@ export async function startCookHandler(
             message: 'A cook with this id already exists with a different request body.',
             requestId: context.invocationId,
           },
-          context.invocationId
+          context.invocationId,
+          requestCharge
         );
       }
-      return jsonResponse(200, result.cook, context.invocationId);
+      return jsonResponse(200, result.cook, context.invocationId, requestCharge);
     }
 
     const storedCook = result.cook;
@@ -266,17 +280,22 @@ export async function startCookHandler(
     };
     context.extraOutputs.set(signalROutput, [message]);
 
-    return jsonResponse(201, storedCook, context.invocationId);
+    return jsonResponse(201, storedCook, context.invocationId, requestCharge);
   } catch (error) {
     // Sanitized: a fixed message plus a numeric dependency status only. The raw
     // error (which can carry the Cosmos account endpoint) is never logged or
-    // returned. No SignalR envelope was set on this path.
+    // returned. No SignalR envelope was set on this path. A Cosmos error that
+    // reports the failed operation's RU charge has it surfaced in the header;
+    // anything else (no Cosmos call made, or no charge reported) omits it.
     const status = statusCodeOf(error);
     context.error(`Error in startCook (dependency status ${status ?? 'unknown'})`);
 
     return {
       status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...requestChargeHeaders(requestChargeOfError(error)),
+      },
       jsonBody: {
         error: 'INTERNAL_SERVER_ERROR',
         message: 'Failed to start cook',

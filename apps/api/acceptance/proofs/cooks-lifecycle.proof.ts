@@ -1,0 +1,154 @@
+import { randomUUID } from 'crypto';
+
+import type { Cook, CookListResponse, StartCookRequest } from '@meatgeekv2/api-interfaces';
+
+import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
+import { defineProofs } from '../lib/proof';
+
+/**
+ * HAR-11 proofs 2–5 — a cook written through the deployed API reads back, stops,
+ * and reads back as stopped, as the authenticated caller.
+ *
+ * The cook uses a synthetic device id (`acceptance-<runId>`) so it never
+ * collides with a real device's one-active-cook lock, and a client-generated
+ * UUID id as MG-84 requires (the id is the start's idempotency key). Acceptance
+ * cooks are not deleted: there is no delete route yet.
+ */
+
+const COOK_STATUSES = ['planning', 'active', 'paused', 'completed', 'cancelled'];
+const PAGE_LIMIT = 100;
+const MAX_PAGES = 20;
+
+/** Fail unless `value` is shaped like an api-interfaces Cook with no Cosmos
+ *  system property on it. */
+function expectCook(api: AcceptanceApi, response: AcceptanceResponse, value: unknown): Cook {
+  api.check(response, value !== null && typeof value === 'object', 'body is not a JSON object');
+  const cook = value as Record<string, unknown>;
+  for (const field of ['id', 'userId', 'deviceId', 'name', 'startTime']) {
+    api.check(response, typeof cook[field] === 'string', `cook.${field} is not a string`);
+  }
+  api.check(
+    response,
+    COOK_STATUSES.includes(cook['status'] as string),
+    `cook.status ${JSON.stringify(cook['status'])} is not a CookStatus`
+  );
+  // Cosmos system properties (_rid, _self, _etag, _attachments, _ts) all start
+  // with an underscore; no Cook field does.
+  const leaked = Object.keys(cook).filter(key => key.startsWith('_'));
+  api.check(
+    response,
+    leaked.length === 0,
+    `cook carries Cosmos system properties: ${leaked.join(', ')}`
+  );
+  return cook as unknown as Cook;
+}
+
+/** Page through GET /cooks until the cook is found or the list ends. */
+async function findCook(
+  api: AcceptanceApi,
+  cookId: string
+): Promise<{ cook: Cook | undefined; response: AcceptanceResponse }> {
+  let continuationToken: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const query = new URLSearchParams({ limit: String(PAGE_LIMIT) });
+    if (continuationToken !== undefined) {
+      query.set('continuationToken', continuationToken);
+    }
+    const response = await api.request<CookListResponse>({
+      method: 'GET',
+      path: `/cooks?${query.toString()}`,
+      route: '/cooks',
+    });
+    api.expectStatus(response, 200);
+    api.check(response, Array.isArray(response.body?.cooks), 'body.cooks is not an array');
+
+    const match = response.body.cooks.find(cook => cook.id === cookId);
+    if (match) {
+      return { cook: expectCook(api, response, match), response };
+    }
+    if (!response.body.hasMore || !response.body.continuationToken) {
+      return { cook: undefined, response };
+    }
+    continuationToken = response.body.continuationToken;
+  }
+  throw new Error(`cook not found in the first ${MAX_PAGES} pages of GET /cooks`);
+}
+
+export default defineProofs('cooks lifecycle', () => {
+  let started: StartCookRequest | undefined;
+
+  const startedCook = (): StartCookRequest => {
+    if (!started) {
+      throw new Error('no cook was started by an earlier proof');
+    }
+    return started;
+  };
+
+  return [
+    {
+      name: 'POST /cooks starts a cook and returns a Cook',
+      async run(api: AcceptanceApi) {
+        started = {
+          id: randomUUID(),
+          name: `Acceptance ${api.runId}`,
+          deviceId: `acceptance-${api.runId}`,
+          meatType: 'acceptance',
+          notes: 'Synthetic cook written by the live acceptance suite.',
+        };
+        const response = await api.request({ method: 'POST', path: '/cooks', body: started });
+        api.expectStatus(response, '2xx');
+        const cook = expectCook(api, response, response.body);
+        api.check(response, cook.id === started.id, `cook.id ${cook.id} is not the id sent`);
+        api.check(
+          response,
+          cook.deviceId === started.deviceId,
+          'cook.deviceId is not the one sent'
+        );
+        api.check(response, cook.status === 'active', `cook.status is ${cook.status}, not active`);
+      },
+    },
+    {
+      name: 'GET /cooks includes the new cook',
+      async run(api: AcceptanceApi) {
+        const { id } = startedCook();
+        const { cook, response } = await findCook(api, id);
+        api.check(response, cook !== undefined, `cook ${id} is not in the list`);
+        api.check(response, cook.status === 'active', `cook.status is ${cook.status}, not active`);
+      },
+    },
+    {
+      name: 'POST /cooks/{cookId}/stop stops the cook',
+      async run(api: AcceptanceApi) {
+        const { id } = startedCook();
+        const response = await api.request({
+          method: 'POST',
+          path: `/cooks/${encodeURIComponent(id)}/stop`,
+          route: '/cooks/{cookId}/stop',
+        });
+        api.expectStatus(response, '2xx');
+        const cook = expectCook(api, response, response.body);
+        api.check(response, cook.id === id, `cook.id ${cook.id} is not the cook stopped`);
+        api.check(
+          response,
+          cook.status === 'completed',
+          `cook.status is ${cook.status}, not completed`
+        );
+        api.check(response, typeof cook.endTime === 'string', 'cook.endTime is not set');
+      },
+    },
+    {
+      name: 'GET /cooks reads the cook back as stopped',
+      async run(api: AcceptanceApi) {
+        const { id } = startedCook();
+        const { cook, response } = await findCook(api, id);
+        api.check(response, cook !== undefined, `cook ${id} is not in the list`);
+        api.check(
+          response,
+          cook.status === 'completed',
+          `cook.status is ${cook.status}, not completed`
+        );
+        api.check(response, typeof cook.endTime === 'string', 'cook.endTime is not set');
+      },
+    },
+  ];
+});

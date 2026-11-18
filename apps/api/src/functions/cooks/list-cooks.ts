@@ -8,6 +8,7 @@ import {
   MAX_PAGE_SIZE,
   getCooksRepository,
 } from '../../shared/cosmos/cooks-repository';
+import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/request-charge';
 
 /**
  * MG-59 — list a SINGLE authenticated user's persisted cooks.
@@ -120,18 +121,23 @@ export async function getCooksHandler(
       headers: {
         'Content-Type': 'application/json',
         'X-Request-ID': context.invocationId,
+        ...requestChargeHeaders(page.requestCharge),
       },
       jsonBody: response,
     };
-  } catch {
+  } catch (error) {
     // The raw error is intentionally NOT logged or echoed: a Cosmos SDK error can
     // carry the account endpoint. Report a fixed shape keyed by the request id so
     // the failure is still traceable in platform logs without leaking config.
+    // Only the error's numeric RU charge, when Cosmos reported one, is read.
     context.error(`getCooks failed (requestId=${context.invocationId})`);
 
     return {
       status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...requestChargeHeaders(requestChargeOfError(error)),
+      },
       jsonBody: {
         error: 'INTERNAL_SERVER_ERROR',
         message: 'Failed to retrieve cooks',

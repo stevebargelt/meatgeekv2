@@ -14,6 +14,7 @@ import {
   type PrincipalResult,
 } from '../../shared/auth/principal';
 import { CooksRepository, getCooksRepository } from '../../shared/cosmos/cooks-repository';
+import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/request-charge';
 
 /**
  * MG-59 — stop a cook by durably completing the REAL persisted document.
@@ -96,6 +97,7 @@ export async function stopCookHandler(
 
   let stopped: Cook | undefined;
   let transitioned = false;
+  let requestCharge: number;
   try {
     // Read-then-update within the caller's partition. The repository point-reads
     // (userId, cookId) and only replaces the correctly-addressed document when it
@@ -103,16 +105,22 @@ export async function stopCookHandler(
     const result = await deps.getRepository().stopCook(userId, cookId, endTime);
     stopped = result.cook;
     transitioned = result.transitioned;
+    requestCharge = result.requestCharge;
     // RU charge is a bare number — safe to log against the shared 400 RU/s budget.
     context.log(`stopCook request charge: ${result.requestCharge}`);
-  } catch {
+  } catch (error) {
     // A Cosmos/credential error can carry the account host, database, container,
     // or token fragments; it is swallowed and replaced with a fixed class so
-    // nothing leaks. No SignalR message is emitted on failure.
+    // nothing leaks. No SignalR message is emitted on failure. Only the error's
+    // numeric RU charge, when Cosmos reported one, is surfaced.
     context.error('stopCook failed: cosmos_stop_failed');
     return {
       status: 500,
-      headers: { 'Content-Type': 'application/json', 'X-Request-ID': correlationId },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Request-ID': correlationId,
+        ...requestChargeHeaders(requestChargeOfError(error)),
+      },
       jsonBody: {
         error: 'INTERNAL_SERVER_ERROR',
         message: 'Failed to stop cook',
@@ -127,7 +135,11 @@ export async function stopCookHandler(
   if (!stopped) {
     return {
       status: 404,
-      headers: { 'Content-Type': 'application/json', 'X-Request-ID': correlationId },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Request-ID': correlationId,
+        ...requestChargeHeaders(requestCharge),
+      },
       jsonBody: {
         error: 'NOT_FOUND',
         message: 'Cook not found',
@@ -160,6 +172,7 @@ export async function stopCookHandler(
     headers: {
       'Content-Type': 'application/json',
       'X-Request-ID': correlationId,
+      ...requestChargeHeaders(requestCharge),
     },
     jsonBody: stopped,
   };

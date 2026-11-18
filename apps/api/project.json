@@ -65,6 +65,14 @@
     "lint": {
       "executor": "@nx/eslint:lint"
     },
+    "acceptance": {
+      "executor": "@nx/jest:jest",
+      "cache": false,
+      "options": {
+        "jestConfig": "apps/api/acceptance/jest.config.ts",
+        "runInBand": true
+      }
+    },
     "test": {
       "executor": "@nx/jest:jest",
       "outputs": ["{workspaceRoot}/coverage/{projectRoot}"],
