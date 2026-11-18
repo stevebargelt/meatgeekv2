@@ -53,12 +53,29 @@ cooks-collection:
             description: Functions invocation id (correlation handle).
             schema:
               type: string
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/CookListResponse'
       '500':
         description: Server error.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
@@ -99,6 +116,14 @@ cooks-collection:
           X-Request-ID:
             schema:
               type: string
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
@@ -109,6 +134,14 @@ cooks-collection:
           X-Request-ID:
             schema:
               type: string
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
@@ -117,6 +150,15 @@ cooks-collection:
         description: |
           COOK_ALREADY_ACTIVE. The device already has an active cook for this
           user; `activeCookId` names it. Nothing was written.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
@@ -125,6 +167,15 @@ cooks-collection:
         description: |
           COOK_ID_REUSED. A cook with this id exists with a different body.
           Nothing was written.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
@@ -137,6 +188,15 @@ cooks-collection:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
         description: Server error.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
@@ -309,6 +369,14 @@ cook-stop:
             description: Correlation id (propagated X-Request-ID or invocation id).
             schema:
               type: string
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
@@ -321,6 +389,15 @@ cook-stop:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
         description: Server error.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:

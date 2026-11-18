@@ -73,6 +73,8 @@ Every job in both halves gates on the repository variable `vars.DEV_TF_BACKEND_R
 
 **Dev applications** (the Functions API and the web app) are not deployed by this loop — they are owned by their own deploy targets and workflows.
 
+**Live acceptance.** After the API is deployed to dev, the [live acceptance suite](live-acceptance.md) (`npx nx run api:acceptance`) proves the deployed API works — cooks write and read-back as an authenticated caller, with the Cosmos RU each route cost. Running it automatically after each dev deploy is wired by a later ticket; until then it is run by hand. The unit-test self-test of the suite runs in `lint-and-test` as part of `nx test api`.
+
 **Credentials.** **The pull-request path holds no identity at all** — `validate-infrastructure` binds no environment, declares no `id-token: write`, and calls no `azure/login`, so nothing reachable from a PR can authenticate to Azure. Everything that _does_ authenticate runs post-merge or on dispatch.
 
 There are **two** dev identities left, plus prod, all authenticating via **per-environment OIDC** rather than the retired long-lived `AZURE_CREDENTIALS` service-principal secret; each job declares `permissions: id-token: write` scoped to itself. Under MG-23 the _environment_ — not the client id a job happens to pass — is what selects the identity: `development-infra-apply` federates the infra-apply identity, `development` federates the app-publish identity, and `production` federates the prod plan/read identity (which is unchanged by MG-23 and still used by `infra-deploy-prod.yml`). Before MG-23 the dev identities federated the identical `environment:development` subject, so a one-line client-id edit could silently upgrade a low-privilege job to full apply; it no longer can, because the OIDC subject would stop matching and the login would fail closed. Neither dev identity can authenticate to prod's `environment:production`.
@@ -147,5 +149,6 @@ With the pin in place, no manual workaround is needed. Run `corepack enable` onc
 ## Related
 
 - [NX Commands](nx-commands.md) — lint, test, and build commands used by these jobs
+- [Live Acceptance Suite](live-acceptance.md) — proving the deployed API works, and how a ticket adds its own proof
 - [Local Setup](local-setup.md) — getting a workspace building locally, including the buildable-library and per-project ESLint requirements
 - [Monorepo Structure](../architecture/monorepo-structure.md) — how libraries, aliases, and build boundaries fit together

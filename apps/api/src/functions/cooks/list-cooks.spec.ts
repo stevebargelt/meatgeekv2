@@ -304,4 +304,53 @@ describe('getCooksHandler', () => {
     expect(source).not.toContain('user-1');
     expect(source).not.toContain('mockCooks');
   });
+
+  describe('HAR-11 — x-meatgeek-request-charge header', () => {
+    function chargeHeader(res: { headers?: unknown }): string | undefined {
+      return (res.headers as Record<string, string> | undefined)?.['x-meatgeek-request-charge'];
+    }
+
+    it('reports the page RU charge on a 200', async () => {
+      const { getCooksHandler } = loadModule();
+      const { deps: d } = deps(pageOf([sampleCook()], { requestCharge: 3.14 }));
+
+      const res = await getCooksHandler(
+        mockRequest({ principalHeader: encodedPrincipal() }),
+        mockContext().ctx,
+        d
+      );
+
+      expect(res.status).toBe(200);
+      expect(chargeHeader(res)).toBe('3.14');
+    });
+
+    it('reports the charge a failing Cosmos query carried on the 500, and omits it otherwise', async () => {
+      const { getCooksHandler } = loadModule();
+      const charged = await getCooksHandler(
+        mockRequest({ principalHeader: encodedPrincipal() }),
+        mockContext().ctx,
+        deps(Object.assign(new Error('throttled'), { code: 429, requestCharge: 0.5 })).deps
+      );
+      const uncharged = await getCooksHandler(
+        mockRequest({ principalHeader: encodedPrincipal() }),
+        mockContext().ctx,
+        deps(new Error('credential unavailable')).deps
+      );
+
+      expect([charged.status, uncharged.status]).toEqual([500, 500]);
+      expect(chargeHeader(charged)).toBe('0.5');
+      expect(chargeHeader(uncharged)).toBeUndefined();
+    });
+
+    it('omits the header on a 401, where no query was issued', async () => {
+      const { getCooksHandler } = loadModule();
+      const res = await getCooksHandler(
+        mockRequest({}),
+        mockContext().ctx,
+        deps(pageOf([sampleCook()])).deps
+      );
+      expect(res.status).toBe(401);
+      expect(chargeHeader(res)).toBeUndefined();
+    });
+  });
 });
