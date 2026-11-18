@@ -2457,3 +2457,78 @@ describe('HAR-15: azapi is the sole owner of the Function App site', () => {
     }
   });
 });
+
+/**
+ * HAR-16 — the Function App's principal_id stays KNOWN across azapi updates.
+ *
+ * azapi v2.11.0 ModifyPlan (internal/services/azapi_resource.go:581-587) copies
+ * the state identity into the plan only when the planned type AND identity_ids
+ * strictly equal the state's. State holds identity_ids = []; an omitted attribute
+ * plans null, so principal_id went "(known after apply)" and all six role
+ * assignments (principal_id is ForceNew) were planned for replacement — Apply
+ * Dev Infrastructure run 44413716132. The site's identity block therefore
+ * declares identity_ids = [], and static-gate check 9c refuses its removal.
+ */
+describe('HAR-16: the Function App identity declares identity_ids = [] so role assignments are never replaced', () => {
+  const GATE = path.join(INFRA, 'scripts', 'tf-static-checks.sh');
+  const FUNC = 'modules/functions/main.tf';
+  const LINE = /^(\s*)identity_ids\s*=\s*\[\]\s*$/m;
+  const CHECK = /Function App identity declares identity_ids = \[\] so principal_id stays known \(HAR-16\)/;
+
+  function gateWith(mutate: (src: string) => string): { code: number; out: string } {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'har16-gate-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      fs.cpSync(INFRA, dst, {
+        recursive: true,
+        filter: (src: string) => {
+          const base = path.basename(src);
+          return base !== '.terraform' && base !== '.nx' && base !== 'node_modules';
+        },
+      });
+      const file = path.join(dst, FUNC);
+      const before = fs.readFileSync(file, 'utf8');
+      const after = mutate(before);
+      fs.writeFileSync(file, after);
+      const r = spawnSync('bash', [GATE, dst], { encoding: 'utf8' });
+      return { code: r.status ?? 1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  it('the azapi site identity block declares identity_ids = [] beside type = "SystemAssigned"', () => {
+    const live = stripComments(read(FUNC));
+    expect(live).toMatch(
+      /resource\s+"azapi_resource"\s+"function_app"\s*\{[\s\S]*?identity\s*\{\s*type\s*=\s*"SystemAssigned"\s*identity_ids\s*=\s*\[\]\s*\}/
+    );
+  });
+
+  it('the static gate PASSES check 9c on the committed infra', () => {
+    const { code, out } = gateWith(src => src);
+    expect(code).toBe(0);
+    expect(out).toMatch(new RegExp(`✓ pass: ${CHECK.source}`));
+  });
+
+  it('the static gate FAILS check 9c when identity_ids = [] is deleted', () => {
+    const { code, out } = gateWith(src => {
+      expect(src).toMatch(LINE);
+      return src.replace(LINE, '');
+    });
+    expect(code).not.toBe(0);
+    expect(out).toMatch(new RegExp(`✗ FAIL: ${CHECK.source}`));
+    expect(out).toMatch(/identity lacks identity_ids = \[\]/);
+  });
+
+  it('the static gate FAILS check 9c when identity_ids = [] is only a comment', () => {
+    const { code, out } = gateWith(src => src.replace(LINE, (_m, ws) => `${ws}# identity_ids = []`));
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/identity lacks identity_ids = \[\]/);
+  });
+
+  it('the static gate FAILS check 9c when identity_ids is null', () => {
+    const { code, out } = gateWith(src => src.replace(LINE, (_m, ws) => `${ws}identity_ids = null`));
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/identity lacks identity_ids = \[\]/);
+  });
+});

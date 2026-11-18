@@ -189,6 +189,24 @@ run "host_storage_is_managed_identity_only" {
   }
 }
 
+# HAR-16 — the system identity declares identity_ids = [] (an empty LIST, not
+# null). azapi v2.11.0 ModifyPlan (internal/services/azapi_resource.go:581-587)
+# reuses the state identity, and so keeps principal_id KNOWN, only when the
+# planned type AND identity_ids strictly equal the state's. State holds [], so an
+# omitted (null) identity_ids left principal_id unknown and forced replacement of
+# all six role assignments (Apply Dev Infrastructure run 44413716132).
+run "system_identity_keeps_principal_id_known" {
+  command = plan
+  assert {
+    condition     = azapi_resource.function_app.identity[0].type == "SystemAssigned"
+    error_message = "The Function App identity must stay SystemAssigned (HAR-16: identity redesign is out of scope)"
+  }
+  assert {
+    condition     = azapi_resource.function_app.identity[0].identity_ids != null && length(azapi_resource.function_app.identity[0].identity_ids) == 0
+    error_message = "azapi_resource.function_app identity must declare identity_ids = [] (empty list, NOT null/omitted). azapi v2.11.0 copies the state principal_id into the plan only when identity_ids strictly equals the state's []; null leaves principal_id unknown and REPLACES all six role assignments (HAR-16, run 44413716132)"
+  }
+}
+
 # item 2 — the FULL App Insights connection string (InstrumentationKey included)
 # reaches the app as APPLICATIONINSIGHTS_CONNECTION_STRING, and Authorization=AAD
 # makes ingestion identity-based. The ikey is a non-credential because the root
