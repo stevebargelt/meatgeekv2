@@ -13,24 +13,26 @@
 # models is an operator-phase step (MG-53 runs in a container with no Azure creds).
 #
 # WHAT THE GATE PROMISES, AND HOW EACH PROMISE IS PINNED HERE.
-#   * PASS (exit 0) only when ALL FOUR assertions provably ran and held: a manual
+#   * PASS (exit 0) only when ALL THREE assertions provably ran and held: a manual
 #     400 RU/s DATABASE-level offer exists, NO destination container holds a
-#     dedicated offer, temperatures is on /deviceId, and all five destination
-#     definitions are faithful to their source (via the step-3 parity script). The
-#     clean bundle proves this.
+#     dedicated offer, and temperatures is on /deviceId. The clean bundle proves
+#     this. The retired source-definition parity check (HAR-10: MG-54 deleted the
+#     source database) is pinned as retired: the bundles carry no sourceDefinition,
+#     and a leftover one is ignored rather than consumed.
 #   * VIOLATION (exit 3) — a real, provable defect in the destination — on any
 #     single failing assertion: an absent database-level offer, a container holding
-#     a dedicated offer, a mis-partitioned temperatures container, or a definition
-#     drift. One committed fixture per headline defect, each a ONE-FIELD mutation of
-#     its named clean counterpart (proven by the [pair] cases below), plus run-time
-#     derived controls for the autoscale/wrong-RU/definition-drift variants. Each is
+#     a dedicated offer, or a mis-partitioned temperatures container. One committed
+#     fixture per headline defect, each a ONE-FIELD mutation of its named clean
+#     counterpart (proven by the [pair] cases below), plus run-time derived
+#     controls for the autoscale/wrong-RU variants. Each is
 #     asserted to NAME its violating subject on the gate's output. A distinct code
 #     from operational failure so the CI/apply caller can tell a genuine destination
 #     defect apart from "I could not tell".
 #   * FAIL-CLOSED (exit 1) on anything that prevented an assertion from provably
 #     running — a probe that could not run (queryOk=false), a missing/empty/invalid/
 #     wrong-shape bundle, a bundle not carrying EXACTLY the five destination
-#     containers, a malformed container entry, a bad --expected-throughput, or a
+#     containers, a malformed container entry (no throughputProbe, no destination
+#     definition), a bad --expected-throughput, or a
 #     --database-name mismatch. "Cannot tell" is NEVER reported as "nothing wrong".
 #
 # THE PAIRS ARE PROVEN BY MUTATION, NOT BY ASSERTION. Each violation fixture and
@@ -40,8 +42,7 @@
 # scoped defect leak into a clean file — turns the [pair] or [shape] case red
 # BEFORE any exit code changes, which is the point: an exit code cannot detect a
 # control that has quietly stopped controlling anything (a healthy destination is
-# exactly what a PASS looks like). Same precedent as run-live-host-storage and
-# run-cosmos-definition-parity.
+# exactly what a PASS looks like). Same precedent as run-live-host-storage.
 #
 # EXIT CODES ARE ASSERTED EXACTLY, not merely as pass/nonzero. The CI gate / apply
 # job keys off the distinction: 3 means "the destination is provably wrong, stop
@@ -61,12 +62,8 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GATE="${HERE}/../assert-live-shared-throughput.sh"
-PARITY="${HERE}/../cosmos-definition-parity.sh"
 
 [ -f "${GATE}" ] || { echo "FATAL: gate not found: ${GATE}" >&2; exit 2; }
-# The gate invokes the parity comparator for assertion (d); if it were absent the
-# gate would fail closed on EVERY bundle and this harness would be testing nothing.
-[ -f "${PARITY}" ] || { echo "FATAL: parity comparator (step 3) not found next to the gate: ${PARITY}" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "FATAL: jq is required by this harness (and by the gate)" >&2; exit 2; }
 
 # Committed fixtures. Every one is a full read-back bundle.
@@ -114,14 +111,15 @@ PRESENT 0 stdin -
 PRESENT 0 dash -
 "
 
-# 8 table cases + 3 derived violations (drift/autoscale/wrong-RU)
+# 8 table cases + 2 derived violations (autoscale/wrong-RU)
+# + 1 [retired] control (a leftover sourceDefinition is ignored)
 # + 3 derived operational FATALs (db-queryOk/container-queryOk/queryOk-nonbool)
-# + 8 structural fail-closed cases + 3 argument cases (bad-expected/db-name
+# + 9 structural fail-closed cases + 3 argument cases (bad-expected/db-name
 # mismatch/db-name match) + 3 [pair] mutation controls + 1 [shape] control
-# + 1 [defang] control = 30.
+# + 1 [defang] control = 31.
 # Raise this floor whenever a case is added, so the harness cannot quietly run
 # fewer than it advertises.
-MIN_CHECKS_PER_SHELL=30
+MIN_CHECKS_PER_SHELL=31
 
 # Resolve each shell to an ABSOLUTE path.
 SHELL_BINS=""
@@ -141,15 +139,7 @@ OUT="${WORK}/out"
 # Each is a ONE-FIELD mutation of the clean PRESENT baseline, so its exit 3 can
 # only be about the mutated field. Derived (not committed) because the plan's
 # committed set covers the three headline defects; these close the remaining
-# assertion-(a)/(d) shapes without adding near-duplicate files.
-#
-# A definition drift: add an excluded path to ONE container's DESTINATION
-# definition while leaving its source — the parity comparison must DIFF => the
-# gate reports VIOLATION [definition:cooks].
-DRIFT="${WORK}/definition-drift.json"
-jq '(.containers[] | select(.name=="cooks") | .definition.resource.indexingPolicy.excludedPaths)
-      += [{"path": "/secret/?"}]' "${PRESENT}" > "${DRIFT}" \
-  || { echo "FATAL: could not derive the definition-drift control" >&2; exit 2; }
+# assertion-(a) shapes without adding near-duplicate files.
 
 # An AUTOSCALE database offer instead of the intended MANUAL one — a different
 # provisioning shape, a VIOLATION [database-offer].
@@ -179,6 +169,18 @@ QUERYOK_NONBOOL="${WORK}/db-queryok-nonbool.json"
 jq '.database.offerProbe.queryOk = "yes"' "${PRESENT}" > "${QUERYOK_NONBOOL}" \
   || { echo "FATAL: could not derive the queryOk-nonbool control" >&2; exit 2; }
 
+# --- The [retired] control ---------------------------------------------------
+# The source-definition parity assertion is retired (HAR-10). A bundle from an
+# older collector that still carries a sourceDefinition — here one that DIFFERS
+# from its destination definition, which the retired check would have rejected —
+# must still PASS: the field is ignored, never consumed, and its absence (every
+# committed bundle) is never a failure.
+LEGACY_SRCDEF="${WORK}/legacy-source-definition.json"
+jq '(.containers[] | select(.name=="cooks")) |= (.sourceDefinition = (.definition
+      | .resource.indexingPolicy.excludedPaths += [{"path": "/secret/?"}]))' \
+   "${PRESENT}" > "${LEGACY_SRCDEF}" \
+  || { echo "FATAL: could not derive the legacy-sourceDefinition control" >&2; exit 2; }
+
 # --- Structural fail-closed inputs ------------------------------------------
 # Each parses as far as its own class allows and would let an assertion "pass" by
 # never running for a missing/omitted piece if the gate were not fail-closed.
@@ -207,6 +209,13 @@ jq '.containers += [ (.containers[] | select(.name=="cooks")) ]' "${PRESENT}" > 
 MALFORMED="${WORK}/malformed-entry.json"
 jq '(.containers[] | select(.name=="users")) |= del(.throughputProbe)' "${PRESENT}" > "${MALFORMED}" \
   || { echo "FATAL: could not derive malformed-entry" >&2; exit 2; }
+
+# A container entry with no destination definition — assertion (c) and the shape
+# check need it; retiring the SOURCE definition did not make the destination one
+# optional.
+NO_DEFINITION="${WORK}/no-definition.json"
+jq '(.containers[] | select(.name=="temperatures")) |= del(.definition)' "${PRESENT}" > "${NO_DEFINITION}" \
+  || { echo "FATAL: could not derive no-definition" >&2; exit 2; }
 
 # The [defang] control target: the PRESENT bundle with a REAL dedicated offer
 # injected onto one container. Its PASS must depend on assertion (b) having run;
@@ -317,20 +326,12 @@ for shell_bin in ${SHELL_BINS}; do
     fi
   done < "${CASES_FILE}"
 
-  # --- DERIVED VIOLATION cases (exit 3, named subject) ------------------------
+  # --- RETIRED parity control (exit 0) ---------------------------------------
   checks=$((checks + 1))
-  "${shell_bin}" "${GATE}" "${DRIFT}" >"${OUT}" 2>&1
-  code=$?
-  if assert_code "[derived] definition drift" "${EX_VIOLATION}" "${code}"; then
-    if grep -q "VIOLATION \[definition:cooks\]" "${OUT}"; then
-      echo "    · named the violating subject 'definition:cooks'"
-    else
-      echo "  ✗ [derived] definition drift: exit 3 but did NOT name definition:cooks" >&2
-      sed 's/^/      /' "${OUT}" >&2
-      failures=$((failures + 1))
-    fi
-  fi
+  "${shell_bin}" "${GATE}" "${LEGACY_SRCDEF}" >"${OUT}" 2>&1
+  assert_code "[retired] a leftover, differing sourceDefinition is ignored" "${EX_PASS}" "$?"
 
+  # --- DERIVED VIOLATION cases (exit 3, named subject) ------------------------
   checks=$((checks + 1))
   "${shell_bin}" "${GATE}" "${AUTOSCALE}" >"${OUT}" 2>&1
   code=$?
@@ -375,6 +376,7 @@ for shell_bin in ${SHELL_BINS}; do
   checks=$((checks + 1)); assert_fatal "only four of five containers" "${FOUR_CONTAINERS}"
   checks=$((checks + 1)); assert_fatal "duplicated container name" "${DUPLICATE}"
   checks=$((checks + 1)); assert_fatal "malformed container entry (no throughputProbe)" "${MALFORMED}"
+  checks=$((checks + 1)); assert_fatal "malformed container entry (no destination definition)" "${NO_DEFINITION}"
 
   # --- ARGUMENT cases ---------------------------------------------------------
   # A garbage --expected-throughput is the vacuous-PASS class this gate closes: a

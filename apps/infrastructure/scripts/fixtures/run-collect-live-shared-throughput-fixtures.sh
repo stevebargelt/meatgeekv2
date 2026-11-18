@@ -18,8 +18,13 @@
 # from the committed clean bundle fixture shared-throughput-db-offer-present.json,
 # so a CLEAN collection reassembles a bundle the gate must PASS — and a single
 # fake-`az` mutation (a container that returns a dedicated offer, a database whose
-# throughput-show 404s, an auth error, an unreadable container-show) is what flips
-# the end-to-end outcome. The collector's own fail-closed contract (queryOk=false
+# throughput-show 404s, a temperatures container-show off /deviceId, an auth
+# error, an unreadable container-show) is what flips the end-to-end outcome.
+#
+# DESTINATION ONLY. The fake `az` answers a container-show ONLY for the destination
+# database and fails any other, so a collector that regressed to reading the
+# deleted SOURCE database (the retired definition-parity read, HAR-10) dies here
+# rather than passing. The collector's own fail-closed contract (queryOk=false
 # on an UNRECOGNISED az failure; die on an unreadable definition) is pinned here.
 #
 # DUAL SHELL is a security property, not a style one (a collector that ERRORs under
@@ -44,15 +49,14 @@ EX_OP=1
 EX_VIOLATION=3
 
 DEST_DB="meatgeek-v2-dev-shared-db"
-SRC_DB="meatgeek-v2-dev-db"
 ACCOUNT="meatgeekv2devcosmos"
 RG="meatgeek-v2-dev-rg"
 CONTAINERS="cooks users recipes temperatures devices"
 
-# 6 end-to-end scenarios, each contributing 2 checks per shell (five scenarios:
+# 7 end-to-end scenarios, each contributing 2 checks per shell (six scenarios:
 # collector-exit + gate-verdict; the die scenario: collector-exit + no-stdout) =
-# 12 checks per shell. Raise it whenever a case is added.
-MIN_CHECKS_PER_SHELL=12
+# 14 checks per shell. Raise it whenever a case is added.
+MIN_CHECKS_PER_SHELL=14
 
 SHELL_BINS=""
 for cand in bash sh; do
@@ -92,7 +96,11 @@ if [ "${RESOURCE}" = "database" ] && [ "${ACTION}" = "throughput" ]; then
 elif [ "${RESOURCE}" = "container" ] && [ "${ACTION}" = "throughput" ]; then
   key="container-tp-${NAME}"
 elif [ "${RESOURCE}" = "container" ] && [ "${ACTION}" = "show" ]; then
-  if [ "${DBNAME}" = "${FAKE_SRC_DB}" ]; then key="container-show-src-${NAME}"; else key="container-show-dst-${NAME}"; fi
+  if [ "${DBNAME}" != "${FAKE_DEST_DB}" ]; then
+    echo "fake-az: container show against unexpected database '${DBNAME}' — only the destination may be read" >&2
+    exit 92
+  fi
+  key="container-show-dst-${NAME}"
 fi
 [ -n "${key}" ] || { echo "fake-az: could not classify: RESOURCE=${RESOURCE} ACTION=${ACTION}" >&2; exit 90; }
 base="${FAKE_AZ_DIR}/${key}"
@@ -112,7 +120,7 @@ chmod +x "${FAKE_AZ}"
 # stage_clean <dir> — populate a scenario dir with the healthy read-backs, all
 # extracted from the committed clean bundle: db offer present at 400, every
 # container with NO dedicated offer (throughput-show 404s), and each container's
-# destination/source definition as its canned container-show document.
+# destination definition as its canned container-show document.
 stage_clean() {
   sc_dir="$1"
   mkdir -p "${sc_dir}"
@@ -121,8 +129,7 @@ stage_clean() {
     # No dedicated offer: throughput-show exits nonzero with a not-found marker.
     printf '%s\n' '3' > "${sc_dir}/container-tp-${c}.rc"
     printf '%s\n' '(NotFound) Entity with the specified id does not exist in the system.' > "${sc_dir}/container-tp-${c}.err"
-    jq -c --arg n "${c}" '(.containers[] | select(.name==$n) | .definition)'       "${PRESENT}" > "${sc_dir}/container-show-dst-${c}.out"
-    jq -c --arg n "${c}" '(.containers[] | select(.name==$n) | .sourceDefinition)' "${PRESENT}" > "${sc_dir}/container-show-src-${c}.out"
+    jq -c --arg n "${c}" '(.containers[] | select(.name==$n) | .definition)' "${PRESENT}" > "${sc_dir}/container-show-dst-${c}.out"
   done
 }
 
@@ -137,10 +144,10 @@ run_scenario() {
   rs_shell="$1"; rs_dir="$2"; rs_exp_coll="$3"; rs_exp_gate="$4"; rs_label="$5"
   rs_bundle="${WORK}/bundle.json"
   rs_cerr="${WORK}/collector.err"
-  FAKE_AZ_DIR="${rs_dir}" FAKE_SRC_DB="${SRC_DB}" AZ_BIN="${FAKE_AZ}" \
+  FAKE_AZ_DIR="${rs_dir}" FAKE_DEST_DB="${DEST_DB}" AZ_BIN="${FAKE_AZ}" \
     "${rs_shell}" "${COLLECTOR}" \
       --account-name "${ACCOUNT}" --resource-group "${RG}" \
-      --database-name "${DEST_DB}" --source-database-name "${SRC_DB}" \
+      --database-name "${DEST_DB}" \
       --containers "${CONTAINERS}" >"${rs_bundle}" 2>"${rs_cerr}"
   rs_coll_rc=$?
 
@@ -198,6 +205,14 @@ rm -f "${DB_ABSENT}/db-throughput.out"
 printf '%s\n' '3' > "${DB_ABSENT}/db-throughput.rc"
 printf '%s\n' '(NotFound) Entity with the specified id does not exist in the system.' > "${DB_ABSENT}/db-throughput.err"
 
+# The destination temperatures container-show reports a partition key OTHER than
+# /deviceId -> the collector carries it through -> the gate rejects (exit 3).
+MISPART="${WORK}/mispartitioned"
+stage_clean "${MISPART}"
+jq -c '.resource.partitionKey.paths = ["/id"]' "${MISPART}/container-show-dst-temperatures.out" \
+  > "${MISPART}/container-show-dst-temperatures.tmp" \
+  && mv "${MISPART}/container-show-dst-temperatures.tmp" "${MISPART}/container-show-dst-temperatures.out"
+
 # An UNRECOGNISED db throughput-show failure (auth) -> the collector must classify
 # queryOk=false, NOT offerFound=false -> the gate fails closed (exit 1). This is
 # the crux fail-closed property: "could not tell" is never "no offer".
@@ -240,6 +255,7 @@ for shell_bin in ${SHELL_BINS}; do
     run_scenario "${shell_bin}" "${CLEAN}"          0 "${EX_PASS}"      "[clean] healthy destination -> gate PASS"
     run_scenario "${shell_bin}" "${DEDICATED}"      0 "${EX_VIOLATION}" "[violation] recipes holds a dedicated offer -> gate VIOLATION"
     run_scenario "${shell_bin}" "${DB_ABSENT}"      0 "${EX_VIOLATION}" "[violation] no database-level offer -> gate VIOLATION"
+    run_scenario "${shell_bin}" "${MISPART}"        0 "${EX_VIOLATION}" "[violation] temperatures partitioned on /id, not /deviceId -> gate VIOLATION"
     run_scenario "${shell_bin}" "${DB_AUTH}"        0 "${EX_OP}"        "[fail-closed] db offer probe auth error -> queryOk=false -> gate exit 1"
     run_scenario "${shell_bin}" "${CONTAINER_TARGET_NOTFOUND}" 0 "${EX_OP}" "[fail-closed] container probe hits ARM ResourceNotFound (wrong target) -> queryOk=false -> gate exit 1, NOT a false PASS"
     run_scenario "${shell_bin}" "${DEF_UNREADABLE}" "${EX_OP}" 0        "[fail-closed] unreadable container-show -> collector dies, no bundle"

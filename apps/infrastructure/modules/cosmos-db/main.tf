@@ -132,8 +132,9 @@ resource "azurerm_cosmosdb_account" "main" {
 # included/excluded/composite, default_ttl, unique_key) so the destination is a
 # definition-faithful twin. The ONLY intended differences are (1) no per-container
 # throughput and (2) the database-level offer. Definition parity against the live
-# source is proven by scripts/cosmos-definition-parity.sh (MG-53 step 3) and the
-# post-create assertion scripts/assert-live-shared-throughput.sh (step 4).
+# source was checked at MG-53 time; that check was retired once MG-54 deleted the
+# source (HAR-10). The post-create assertion scripts/assert-live-shared-throughput.sh
+# still checks the destination's offers and the temperatures partition key.
 #
 # The composite indexes are copied verbatim from the source and are deliberately
 # NOT redesigned here (recorded for MG-59): they may not serve the routed
@@ -221,7 +222,7 @@ resource "azurerm_cosmosdb_sql_container" "temperatures_shared" {
   partition_key_version = 1
   # No throughput — shared from the database-level offer above. The source
   # temperatures container carries throughput = 400; that is intentionally NOT
-  # reproduced here, and the parity comparison scopes throughput out.
+  # reproduced here.
 
   default_ttl = var.temperature_data_ttl
 

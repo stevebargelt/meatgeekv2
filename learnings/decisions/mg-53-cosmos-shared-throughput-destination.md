@@ -22,6 +22,21 @@
   (the workflow-level spec proving the live gate's own step condition is not
   skipped when the apply step fails part-way — see _RF-2_ below).
 
+> **Amended by HAR-10 (2026-11-18): the source-definition parity check is
+> retired.** MG-54 deleted the source database (`meatgeek`), its five
+> containers and the root `cosmos_db_database_name` output, so the live gate
+> had no source twin left to compare against and failed closed on every dev
+> apply. `scripts/cosmos-definition-parity.sh`, its fixture harness and its CI
+> step are deleted; the collector no longer takes `--source-database-name` or
+> reads the source; the bundle no longer carries `sourceDefinition`; and the
+> apply step resolves only the destination database name. The three
+> destination assertions — a manual 400 RU/s database-level offer, no
+> container holding a dedicated offer, `temperatures_shared` on `/deviceId` —
+> and the fail-closed handling of an unreadable destination are unchanged. The
+> text below describes the parity check as it was at MG-53 time; where it says
+> "four properties", "both databases" or "three fixture harnesses", read three
+> properties, the destination database, and two harnesses.
+
 ## Context
 
 The source database, `azurerm_cosmosdb_sql_database.meatgeek`, was created with
@@ -163,8 +178,8 @@ evaluates the gate's actual condition string under each run state — a failed
 part-way apply, a timeout kill after apply began, a clean apply, and a
 superseded run — rather than asserting the text of the `if:`.
 
-Throughput is **scoped out** of `cosmos-definition-parity.sh`'s comparison by
-design: `az cosmosdb sql container show` does not even return throughput (it
+(Retired by HAR-10 — see the amendment above.) Throughput was **scoped out**
+of `cosmos-definition-parity.sh`'s comparison by design: `az cosmosdb sql container show` does not even return throughput (it
 is a separate offer resource), and the source `temperatures` container
 carries a dedicated 400 RU/s offer while its destination twin carries none —
 that difference is intentional and must never register as a definition diff.
