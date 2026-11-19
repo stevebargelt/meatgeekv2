@@ -187,6 +187,14 @@ locals {
     # restated here. Plain app setting, name not credential.
     "COSMOSDB_COOKS_CONTAINER_NAME" = var.cooks_container_name
 
+    # The other four entity containers in the same shared-throughput database
+    # (HAR-19), published the same way and for the same reason as cooks: each
+    # comes from the cosmos-db module output via the root, never a literal here.
+    "COSMOSDB_DEVICES_CONTAINER_NAME"      = var.devices_container_name
+    "COSMOSDB_TEMPERATURES_CONTAINER_NAME" = var.temperatures_container_name
+    "COSMOSDB_USERS_CONTAINER_NAME"        = var.users_container_name
+    "COSMOSDB_RECIPES_CONTAINER_NAME"      = var.recipes_container_name
+
     # IoT telemetry (Event Hubs-compatible) — identity-based. The fully-qualified
     # namespace is non-secret; the identity is granted Azure Event Hubs Data
     # Receiver in the root module.

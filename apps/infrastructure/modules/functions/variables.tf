@@ -121,6 +121,46 @@ variable "cooks_container_name" {
   }
 }
 
+variable "devices_container_name" {
+  description = "Name of the Terraform-owned Cosmos container the devices handlers read and write (non-secret), published to the app as COSMOSDB_DEVICES_CONTAINER_NAME. Sourced from the cosmos-db module output (destination_container_names.devices), NOT restated as a literal — a second spelling is a source of truth that can silently drift from the deployed container. NO DEFAULT on purpose, same as cooks_container_name: the API has no safe fallback for a container name, so a caller that forgets to wire it must fail at plan time rather than deploy an app pointed at a container that does not exist (HAR-19)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.devices_container_name)) > 0
+    error_message = "devices_container_name must be non-empty — an empty setting is the same defect as an absent one (MG-51/HAR-19)."
+  }
+}
+
+variable "temperatures_container_name" {
+  description = "Name of the Terraform-owned Cosmos container the temperatures handlers read and write (non-secret), published to the app as COSMOSDB_TEMPERATURES_CONTAINER_NAME. Sourced from the cosmos-db module output (destination_container_names.temperatures), NOT restated as a literal — a second spelling is a source of truth that can silently drift from the deployed container. NO DEFAULT on purpose, same as cooks_container_name: the API has no safe fallback for a container name, so a caller that forgets to wire it must fail at plan time rather than deploy an app pointed at a container that does not exist (HAR-19)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.temperatures_container_name)) > 0
+    error_message = "temperatures_container_name must be non-empty — an empty setting is the same defect as an absent one (MG-51/HAR-19)."
+  }
+}
+
+variable "users_container_name" {
+  description = "Name of the Terraform-owned Cosmos container the users handlers read and write (non-secret), published to the app as COSMOSDB_USERS_CONTAINER_NAME. Sourced from the cosmos-db module output (destination_container_names.users), NOT restated as a literal — a second spelling is a source of truth that can silently drift from the deployed container. NO DEFAULT on purpose, same as cooks_container_name: the API has no safe fallback for a container name, so a caller that forgets to wire it must fail at plan time rather than deploy an app pointed at a container that does not exist (HAR-19)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.users_container_name)) > 0
+    error_message = "users_container_name must be non-empty — an empty setting is the same defect as an absent one (MG-51/HAR-19)."
+  }
+}
+
+variable "recipes_container_name" {
+  description = "Name of the Terraform-owned Cosmos container the recipes handlers read and write (non-secret), published to the app as COSMOSDB_RECIPES_CONTAINER_NAME. Sourced from the cosmos-db module output (destination_container_names.recipes), NOT restated as a literal — a second spelling is a source of truth that can silently drift from the deployed container. NO DEFAULT on purpose, same as cooks_container_name: the API has no safe fallback for a container name, so a caller that forgets to wire it must fail at plan time rather than deploy an app pointed at a container that does not exist (HAR-19)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.recipes_container_name)) > 0
+    error_message = "recipes_container_name must be non-empty — an empty setting is the same defect as an absent one (MG-51/HAR-19)."
+  }
+}
+
 variable "eventhub_namespace_fqdn" {
   description = "Fully-qualified Event Hubs namespace hostname (non-secret) for the IoT telemetry stream. Runtime access is identity-based via an Azure Event Hubs Data Receiver role assignment."
   type        = string

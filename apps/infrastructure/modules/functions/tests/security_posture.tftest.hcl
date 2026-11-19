@@ -37,6 +37,10 @@ variables {
   cosmos_account_endpoint                = "https://mgv2dev.documents.azure.com/"
   cosmos_database_name                   = "meatgeek-v2-dev-db"
   cooks_container_name                   = "cooks"
+  devices_container_name                 = "devices"
+  temperatures_container_name            = "temperatures"
+  users_container_name                   = "users"
+  recipes_container_name                 = "recipes"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   # dev/prod tfvars always supply explicit, non-empty CORS origins (no wildcard).
@@ -273,6 +277,30 @@ run "cooks_container_name_reaches_the_app" {
   }
 }
 
+# HAR-19 — the devices, temperatures, users and recipes container names reach
+# the app exactly as the cooks name does: present in the app settings and equal
+# to the module input (root wires each from
+# module.cosmos_db.destination_container_names.<entity>), never a literal.
+run "entity_container_names_reach_the_app" {
+  command = plan
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_DEVICES_CONTAINER_NAME"] == var.devices_container_name
+    error_message = "COSMOSDB_DEVICES_CONTAINER_NAME must be set from var.devices_container_name (HAR-19)"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_TEMPERATURES_CONTAINER_NAME"] == var.temperatures_container_name
+    error_message = "COSMOSDB_TEMPERATURES_CONTAINER_NAME must be set from var.temperatures_container_name (HAR-19)"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_USERS_CONTAINER_NAME"] == var.users_container_name
+    error_message = "COSMOSDB_USERS_CONTAINER_NAME must be set from var.users_container_name (HAR-19)"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_RECIPES_CONTAINER_NAME"] == var.recipes_container_name
+    error_message = "COSMOSDB_RECIPES_CONTAINER_NAME must be set from var.recipes_container_name (HAR-19)"
+  }
+}
+
 # MG-51 negative — an empty database name is refused at plan time. A blank
 # setting deploys an app that cannot resolve a database at all, which is the same
 # outage as the absent setting this ticket fixes; it must not be expressible.
@@ -296,6 +324,50 @@ run "empty_cooks_container_name_is_refused" {
   }
   expect_failures = [
     var.cooks_container_name,
+  ]
+}
+
+# HAR-19 negative — a blank devices container name is refused at plan time, as cooks is.
+run "empty_devices_container_name_is_refused" {
+  command = plan
+  variables {
+    devices_container_name = " "
+  }
+  expect_failures = [
+    var.devices_container_name,
+  ]
+}
+
+# HAR-19 negative — a blank temperatures container name is refused at plan time, as cooks is.
+run "empty_temperatures_container_name_is_refused" {
+  command = plan
+  variables {
+    temperatures_container_name = " "
+  }
+  expect_failures = [
+    var.temperatures_container_name,
+  ]
+}
+
+# HAR-19 negative — a blank users container name is refused at plan time, as cooks is.
+run "empty_users_container_name_is_refused" {
+  command = plan
+  variables {
+    users_container_name = " "
+  }
+  expect_failures = [
+    var.users_container_name,
+  ]
+}
+
+# HAR-19 negative — a blank recipes container name is refused at plan time, as cooks is.
+run "empty_recipes_container_name_is_refused" {
+  command = plan
+  variables {
+    recipes_container_name = " "
+  }
+  expect_failures = [
+    var.recipes_container_name,
   ]
 }
 

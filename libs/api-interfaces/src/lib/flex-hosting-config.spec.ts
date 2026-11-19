@@ -318,3 +318,72 @@ describe('MG-51: the Cosmos database name reaches every consumer from one Terraf
     expect(devEnvironment).not.toMatch(/databaseName:[^\n]*(?:\|\||\?\?)/);
   });
 });
+
+/**
+ * MG-59 / HAR-19 — every entity's Cosmos CONTAINER name reaches the Function App
+ * from the one Terraform output that creates the container.
+ *
+ * The module plan test (security_posture.tftest.hcl) proves each setting renders
+ * from its module input. Only the root can show that input is the cosmos-db
+ * module output rather than a restated literal, so this guard reads both files.
+ * Each entity is its own case: removing any one of the five settings, variables
+ * or root wirings fails that entity's tests.
+ */
+describe('HAR-19: each COSMOSDB_*_CONTAINER_NAME setting is published from module.cosmos_db.destination_container_names', () => {
+  const stripComments = (tf: string) =>
+    tf
+      .split('\n')
+      .filter(l => !/^\s*#/.test(l))
+      .join('\n');
+
+  const ENTITIES = ['cooks', 'devices', 'temperatures', 'users', 'recipes'] as const;
+
+  const root = stripComments(readRepo('apps/infrastructure/main.tf'));
+  const functionsModule = root.match(/module\s+"azure_functions"\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  const live = stripComments(readRepo('apps/infrastructure/modules/functions/main.tf'));
+  const vars = stripComments(readRepo('apps/infrastructure/modules/functions/variables.tf'));
+  const outputs = stripComments(readRepo('apps/infrastructure/modules/cosmos-db/outputs.tf'));
+
+  it('finds the azure_functions module block in the root', () => {
+    expect(functionsModule).toMatch(/source\s*=\s*"\.\/modules\/functions"/);
+  });
+
+  describe.each(ENTITIES)('%s', entity => {
+    const variable = `${entity}_container_name`;
+    const setting = `COSMOSDB_${entity.toUpperCase()}_CONTAINER_NAME`;
+
+    it('the cosmos-db module publishes the container name as an output', () => {
+      const block =
+        outputs.match(/output\s+"destination_container_names"\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+      expect(block).toMatch(
+        new RegExp(`\\b${entity}\\s*=\\s*azurerm_cosmosdb_sql_container\\.${entity}_shared\\.name`)
+      );
+    });
+
+    it('the root wires it from module.cosmos_db.destination_container_names, not a literal', () => {
+      expect(functionsModule).toMatch(
+        new RegExp(
+          `^\\s*${variable}\\s*=\\s*module\\.cosmos_db\\.destination_container_names\\.${entity}\\s*$`,
+          'm'
+        )
+      );
+      expect(root).not.toMatch(new RegExp(`${variable}\\s*=\\s*"`));
+    });
+
+    it('the Functions module publishes it as the app setting', () => {
+      expect(live).toMatch(new RegExp(`"${setting}"\\s*=\\s*var\\.${variable}\\b`));
+    });
+
+    it('the module input is required (no default) and rejects blank values', () => {
+      const block =
+        vars.match(new RegExp(`variable\\s+"${variable}"\\s*\\{[\\s\\S]*?\\n\\}`))?.[0] ?? '';
+      expect(block).not.toBe('');
+      expect(block).not.toMatch(/^\s*default\s*=/m);
+      expect(block).toMatch(
+        new RegExp(
+          `validation\\s*\\{[\\s\\S]*?length\\(trimspace\\(var\\.${variable}\\)\\)\\s*>\\s*0`
+        )
+      );
+    });
+  });
+});

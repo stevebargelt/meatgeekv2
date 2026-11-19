@@ -332,9 +332,15 @@ module "azure_functions" {
   # it in ONE place (modules/cosmos-db/main.tf). Restating the literal "cooks"
   # here would be the second source of truth this block's comments already warn
   # against.
-  cooks_container_name    = module.cosmos_db.destination_container_names.cooks
-  eventhub_namespace_fqdn = module.iot_hub.eventhub_namespace_fqdn
-  signalr_service_uri     = module.signalr.service_uri
+  cooks_container_name = module.cosmos_db.destination_container_names.cooks
+  # The devices, temperatures, users and recipes container names travel the
+  # same way, from the same output, for the same reason (HAR-19).
+  devices_container_name      = module.cosmos_db.destination_container_names.devices
+  temperatures_container_name = module.cosmos_db.destination_container_names.temperatures
+  users_container_name        = module.cosmos_db.destination_container_names.users
+  recipes_container_name      = module.cosmos_db.destination_container_names.recipes
+  eventhub_namespace_fqdn     = module.iot_hub.eventhub_namespace_fqdn
+  signalr_service_uri         = module.signalr.service_uri
 
   # S2 HTTP posture — explicit per-environment CORS + optional Entra ID auth.
   cors_allowed_origins            = var.functions_cors_allowed_origins
