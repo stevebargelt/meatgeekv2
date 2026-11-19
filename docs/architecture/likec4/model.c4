@@ -445,8 +445,11 @@ model {
       description '''
         A software IoT Hub device for dev. It sends synthetic readings as the standing device
         `meatgeek-dev-simulated-smoker` through the data-pusher's own `internal/publish` and
-        `internal/iothub` code: MQTT on 8883, device SAS, QoS 1, the same payload and message
-        properties as the Pi. Built and spawned per run by the acceptance job. Its credential
+        `internal/iothub` code: MQTT on 8883, device SAS, QoS 1, with `messageId`,
+        `$.ct=application/json`, `$.ce=utf-8` and a per-reading `traceparent` (span
+        `simdevice.publish`), as the Pi's readings carry. Unlike the Pi, it sends no
+        `correlation.id` and no cook id: it has no cook. Built and spawned per run by the
+        acceptance job. Its credential
         reaches it only via the `SIMDEVICE_CONNECTION_STRING` env var, fetched per run under
         OIDC as the dev app-publish identity and masked. It is never stored (no repo secret, no
         Key Vault, no hub shared-access policy) and never passed to PR CI.
@@ -484,9 +487,9 @@ model {
   }
 
   // Simulated device (dev acceptance).
-  delivery.simdevice -[event]-> meatgeek.cloud.ingest.iothub 'telemetry as meatgeek-dev-simulated-smoker: messageId, $.ct=application/json, $.ce=utf-8, correlation.id, traceparent' {
+  delivery.simdevice -[event]-> meatgeek.cloud.ingest.iothub 'telemetry as meatgeek-dev-simulated-smoker: messageId, $.ct=application/json, $.ce=utf-8, traceparent' {
     technology 'MQTT 8883, device SAS, QoS 1'
-    description 'The same payload and message properties as the data-pusher, built by the same internal/publish code.'
+    description 'Built by the internal/publish builders of the data-pusher over the same internal/iothub transport, so messageId, $.ct, $.ce and traceparent match the readings of the Pi. No correlation.id and no cook id: simdevice passes an empty correlation and a nil cook id.'
   }
   delivery.acceptance -> meatgeek.cloud.ingest.iothub 'ensure the device identity, read its connection string' {
     technology 'az iot hub device-identity --auth-type login, OIDC'
