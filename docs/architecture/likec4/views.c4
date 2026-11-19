@@ -1,0 +1,254 @@
+views {
+
+  // Applied to every view below: fade what is not built.
+  style element.tag = #notBuilt {
+    color muted
+    opacity 15%
+    border dotted
+  }
+  style element.tag = #decided {
+    color sky
+    border dashed
+  }
+  style element.tag = #retiring {
+    color red
+    border dotted
+  }
+  style element.tag = #scaffold {
+    color amber
+    opacity 25%
+    border dashed
+  }
+
+  view index {
+    title 'MeatGeek V2: landscape'
+    description 'Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Click a box to go down a level.'
+    include *
+    include meatgeek.edge, meatgeek.cloud, meatgeek.mobile, meatgeek.web
+  }
+
+  view system of meatgeek {
+    title 'MeatGeek V2: containers'
+    description 'Everything that runs, plus the realtime decisions of 2026-11-19: sky dashed is decided and not built, red dotted is in the code and being removed, grey dotted is not built with no decision.'
+    include *
+    include edge.*, cloud.*, cloud.ingest.*, cloud.observability.*
+    include pitmaster, smoker, entra
+  }
+
+  view edge of meatgeek.edge {
+    title 'MeatGeek device (Raspberry Pi)'
+    include *
+    include pusher.*
+    include meatgeek.cloud.ingest.iothub, meatgeek.cloud.realtime, meatgeek.cloud.api, meatgeek.cloud.observability.collector
+  }
+
+  view cloud of meatgeek.cloud {
+    title 'MeatGeek cloud (Azure)'
+    include *
+    include ingest.*, observability.*
+    include meatgeek.edge, meatgeek.mobile, meatgeek.web, entra
+  }
+
+  view api of meatgeek.cloud.api {
+    title 'Functions API'
+    description 'Every route is anonymous at the Functions runtime on purpose: Easy Auth has already validated the token.'
+    include *
+    include meatgeek.cloud.data, meatgeek.cloud.realtime, entra, meatgeek.edge.pusher, meatgeek.cloud.observability.appinsights
+  }
+
+  view data of meatgeek.cloud.data {
+    title 'Cosmos DB'
+    description 'Five containers and who touches each.'
+    include *
+    include meatgeek.cloud.api.repos, meatgeek.cloud.ingest.iothub
+  }
+
+  view ingest of meatgeek.cloud.ingest {
+    title 'Ingest'
+    include *
+    include meatgeek.edge.pusher, meatgeek.cloud.data.temperatures, meatgeek.cloud.api.broadcast, meatgeek.cloud.realtime
+  }
+
+  view observability of meatgeek.cloud.observability {
+    title 'Observability'
+    include *
+    include meatgeek.cloud.api, meatgeek.edge.pusher, meatgeek.edge.controller
+  }
+
+  view pipeline of delivery {
+    title 'Delivery pipeline'
+    include *
+    include team, meatgeek, entra
+  }
+
+  view deviceUpdates {
+    title 'Device software updates'
+    description 'How a new build reaches the Pi. Solid: today, by hand over SSH. Grey dotted: over-the-air through Device Update for IoT Hub, not built.'
+    include
+      operator, delivery.ci,
+      meatgeek.edge.controller, meatgeek.edge.pusher, meatgeek.edge.updater,
+      meatgeek.cloud.deviceupdate, meatgeek.cloud.ingest.iothub
+    exclude meatgeek.edge.pusher <-> meatgeek.cloud.ingest.iothub
+    exclude meatgeek.edge.pusher -> meatgeek.edge.controller
+  }
+
+  // ---- Flows ---------------------------------------------------------------
+
+  dynamic view telemetry {
+    title 'Flow: one temperature reading'
+    description 'Today. The storage path is live; the realtime path stops at Event Hub.'
+
+    smoker -> meatgeek.edge.controller 'grill and probe temperatures'
+    meatgeek.edge.pusher.collector -> meatgeek.edge.controller 'GET get_status' {
+      notes 'Local HTTP poll of `/api/robots/MeatGeekBot/commands/get_status`.'
+    }
+    meatgeek.edge.pusher.session -> meatgeek.edge.pusher.collector 'active cook id, correlation id'
+    meatgeek.edge.pusher.collector -> meatgeek.edge.pusher.queue 'enqueue'
+    meatgeek.edge.pusher.queue -> meatgeek.edge.pusher.iot 'drain'
+    meatgeek.edge.pusher.iot -> meatgeek.cloud.ingest.iothub 'publish (MQTT)' {
+      notes '''
+        Message properties carry `correlation.id` (cook-scoped) and the message id.
+        The SAS token is renewed five minutes before it expires.
+      '''
+    }
+    parallel {
+      meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route' {
+        notes '**Live.** IoT Hub writes the document itself, by managed identity. No Function runs.'
+      }
+      meatgeek.cloud.ingest.iothub -> meatgeek.cloud.ingest.eventhub 'eventhub-realtime-route' {
+        notes '**Dead end today.** The route delivers, but the API registers no Event Hub trigger, so nothing reads it. The decided design adds the consumer.'
+        navigateTo liveTemperatureTarget
+      }
+    }
+    meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'history or current reading' {
+      navigateTo readHistory
+    }
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatures 'query by deviceId'
+  }
+
+  dynamic view cookStart {
+    variant sequence
+    title 'Flow: start a cook (today)'
+    description 'POST /cooks as the code does it now. Steps 10 and 11, SignalR to the Pi, have never worked live (MG-29). See the decided design.'
+
+    meatgeek.mobile -> meatgeek.cloud.api.easyauth 'POST /cooks + Entra token'
+    meatgeek.cloud.api.easyauth -> entra 'validate token'
+    meatgeek.cloud.api.easyauth -> meatgeek.cloud.api.principal 'X-MS-CLIENT-PRINCIPAL'
+    meatgeek.cloud.api.principal -> meatgeek.cloud.api.cooks 'userId = tid:oid' {
+      notes 'Missing or incomplete header: 401, no default user.'
+    }
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.repos 'does the caller own this device?'
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.devices 'point read'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.repos 'create cook' {
+      notes 'A device that is not the caller\'s gets 403 `DEVICE_NOT_OWNED`: no write, no event.'
+    }
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.cooks 'insert'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started' {
+      notes 'Sent only after the write succeeds. Delivery is scoped to the device.'
+    }
+    meatgeek.cloud.realtime -> meatgeek.edge.pusher.signalr 'cook_started' {
+      notes 'Being replaced by the device twin.'
+      navigateTo cookStartTarget
+    }
+    meatgeek.edge.pusher.signalr -> meatgeek.edge.pusher.session 'set active cook' {
+      notes 'From here every reading carries this cook id.'
+      navigateTo telemetry
+    }
+  }
+
+  dynamic view readHistory {
+    variant sequence
+    title 'Flow: read temperature history'
+    description 'GET /temperatures/history for a device.'
+
+    meatgeek.mobile -> meatgeek.cloud.api.easyauth 'GET /temperatures/history'
+    meatgeek.cloud.api.easyauth -> meatgeek.cloud.api.principal 'X-MS-CLIENT-PRINCIPAL'
+    meatgeek.cloud.api.principal -> meatgeek.cloud.api.temperatures 'userId'
+    meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'does the caller own this device?'
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.devices 'point read' {
+      notes 'Not owned or not found: 404 `DEVICE_NOT_FOUND`, about 1 RU.'
+    }
+    meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'one page of readings'
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatures 'query, partition = deviceId'
+  }
+
+  // ---- Decided 2026-11-19, not built yet --------------------------------------
+
+  view realtimeTarget {
+    title 'Realtime: the decided design'
+    description 'Two jobs, two patterns. Device state goes by IoT Hub device twin. Push to clients goes Event Hub -> Function -> SignalR. Red dotted is what gets removed.'
+    include
+      meatgeek.cloud.api.cooks, meatgeek.cloud.api.broadcast, meatgeek.cloud.api.negotiate,
+      meatgeek.cloud.ingest.iothub, meatgeek.cloud.ingest.eventhub, meatgeek.cloud.realtime,
+      meatgeek.edge.pusher.twin, meatgeek.edge.pusher.signalr, meatgeek.edge.pusher.session, meatgeek.edge.pusher.iot,
+      meatgeek.cloud.data.temperatures, meatgeek.mobile, meatgeek.web
+  }
+
+  dynamic view cookStartTarget {
+    variant sequence
+    title 'Flow: start a cook (decided design)'
+    description 'The active cook reaches the Pi as device state, through the IoT Hub device twin. Clients hear about it through SignalR.'
+
+    meatgeek.mobile -> meatgeek.cloud.api.cooks 'POST /cooks' {
+      notes 'Sign-in and the ownership check are unchanged.'
+      navigateTo cookStart
+    }
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.data.cooks 'insert cook'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.ingest.iothub 'set desired: active cook, correlation id' {
+      notes 'Only after the write succeeds. The twin keeps it, so nothing is lost if the Pi is offline.'
+    }
+    meatgeek.cloud.ingest.iothub -> meatgeek.edge.pusher.twin 'desired properties' {
+      notes 'Immediately if connected; otherwise on the next connect.'
+    }
+    meatgeek.edge.pusher.twin -> meatgeek.edge.pusher.session 'set active cook'
+    meatgeek.edge.pusher.twin -> meatgeek.cloud.ingest.iothub 'reported: applied' {
+      notes 'The acknowledgement the SignalR path never had.'
+    }
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started'
+    meatgeek.cloud.realtime -> meatgeek.mobile 'cook_started, to the owner only'
+  }
+
+  dynamic view liveTemperatureTarget {
+    variant sequence
+    title 'Flow: a live temperature reaches the app (decided design)'
+    description 'The hot path beside the existing storage path.'
+
+    meatgeek.mobile -> meatgeek.cloud.api.negotiate 'POST /negotiate' {
+      notes 'Grants a connection scoped to devices the caller owns (MG-30).'
+    }
+    meatgeek.mobile -> meatgeek.cloud.realtime 'connect'
+    meatgeek.edge.pusher.iot -> meatgeek.cloud.ingest.iothub 'publish reading'
+    parallel {
+      meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route' {
+        notes 'Unchanged, and already live.'
+      }
+      meatgeek.cloud.ingest.iothub -> meatgeek.cloud.ingest.eventhub 'eventhub-realtime-route' {
+        notes 'Already live; it has had no reader until now.'
+      }
+    }
+    meatgeek.cloud.ingest.eventhub -> meatgeek.cloud.api.broadcast 'Event Hub trigger'
+    meatgeek.cloud.api.broadcast -> meatgeek.cloud.realtime 'send to the device group'
+    meatgeek.cloud.realtime -> meatgeek.mobile 'live temperature'
+  }
+
+  dynamic view mergeToDeploy {
+    title 'Flow: a merge reaches dev'
+    description 'What happens after the Reviewer merges a pull request.'
+
+    team -> delivery.ci 'merge to main' {
+      notes 'The push to `main` starts CI/CD Pipeline.'
+    }
+    delivery.ci -> delivery.apply 'green on main' {
+      notes '''
+        `workflow_run`, so the workflow file that runs is always the one on `main`.
+        If a newer commit has landed, this run ends green **without applying**.
+      '''
+    }
+    delivery.apply -> meatgeek 'terraform apply'
+    delivery.apply -> delivery.deploy 'apply succeeded'
+    delivery.deploy -> meatgeek 'publish the API bundle'
+    delivery.deploy -> delivery.acceptance 'deployed = true'
+    delivery.acceptance -> entra 'get app-only token'
+    delivery.acceptance -> meatgeek 'live probes against the API'
+  }
+}
