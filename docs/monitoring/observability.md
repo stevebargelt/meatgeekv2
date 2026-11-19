@@ -58,30 +58,9 @@ MG-6 lands observability in three buckets. This section is the authoritative sta
 
 ### **Correlation Strategy for Parallel Architecture**
 
-Since MeatGeek V2 uses parallel processing paths, correlation is critical:
+Since MeatGeek V2 routes each reading down parallel paths (storage today, real-time planned), correlation is critical.
 
-```
-Device Temperature Reading
-         │
-         ▼ (correlation.id: abc-123-456)
-    IoT Hub Routes
-         │
-    ┌────┴────┐
-    ▼         ▼
-Storage    Real-time
-Path       Path
-    │         │
-    ▼         ▼
-CosmosDB   SignalR
-    │         │
-    └────┬────┘
-         ▼
-   Client Updates
-
-Target: all paths share one correlation.id for end-to-end tracing.
-Device-side injection is implemented (Bucket A); backend restoration
-onto the correlation.id dimension is not yet wired (Bucket C / MG-24).
-```
+Target: the storage and real-time paths share one `correlation.id` for end-to-end tracing. Device-side injection is implemented (Bucket A): the data pusher puts the cook-scoped `correlation.id` and a per-message `traceparent` on every IoT Hub message, as the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows. Backend restoration onto the `correlation.id` dimension is not yet wired (Bucket C / MG-24); see the [`observability`](https://stevebargelt.github.io/meatgeekv2/#/view/observability/) view for what exports telemetry today.
 
 ## Azure Monitor OpenTelemetry Distribution
 
@@ -267,30 +246,9 @@ export class CorrelationHelper {
 
 ### **End-to-End Tracing Flow**
 
-> **⚠️ Not yet operational end-to-end (Bucket C / MG-24-gated).** This diagram is the **target** flow. Only the device-side half is scaffolded today: `device-controller` and `data-pusher` mint a per-reading W3C trace and **inject a `traceparent` (and `correlation.id`) onto the outbound IoT Hub message** (Bucket A — implemented). The backend continuation hops — `IoT Hub → Azure Function → SignalR / CosmosDB` — are **not exercised in a running system**: the live IoT-Hub receiver Function that would *continue* the trace on the backend is **not built** (Bucket C, blocked on the MG-24 bootstrap), and the restore helper (`extractCorrelation`) is unit-tested but unwired. So everything downstream of `Data Pusher → IoT Hub` in this graph is **not-yet-operational scaffolding**, not live end-to-end preservation.
+> **⚠️ Not yet operational end-to-end (Bucket C / MG-24-gated).** The target is one trace from the device through every backend hop. Only the device-side half is scaffolded today: `device-controller` and `data-pusher` mint a per-reading W3C trace and **inject a `traceparent` (and `correlation.id`) onto the outbound IoT Hub message** (Bucket A — implemented). The backend continuation hops — `IoT Hub → Azure Function → SignalR / CosmosDB` — are **not exercised in a running system**: the live IoT-Hub receiver Function that would *continue* the trace on the backend is **not built** (Bucket C, blocked on the MG-24 bootstrap), and the restore helper (`extractCorrelation`) is unit-tested but unwired. So everything downstream of `Data Pusher → IoT Hub` is **not-yet-operational scaffolding**, not live end-to-end preservation.
 
-```mermaid
-graph LR
-    A[Device Sensor] --> B[Device Controller]
-    B --> C[Data Pusher]
-    C --> D[IoT Hub]
-    D --> E[Storage Path]
-    D --> F[Real-time Path]
-    E --> G[CosmosDB]
-    F --> H[Azure Function]
-    H --> I[SignalR]
-    I --> J[Client Apps]
-    
-    B -.-> K[Trace Start]
-    K -.-> C
-    C -.-> D
-    D -.-> E
-    D -.-> F
-    E -.-> G
-    F -.-> H
-    H -.-> I
-    I -.-> J
-```
+The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows one reading's path and where `traceparent` and `correlation.id` ride on it; the [`observability`](https://stevebargelt.github.io/meatgeekv2/#/view/observability/) view shows where each service exports its telemetry.
 
 ### **Trace Implementation**
 

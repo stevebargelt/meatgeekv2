@@ -73,7 +73,7 @@ The existing Go-based device controller provides a solid foundation:
 | **Data Ingestion** | Azure IoT Hub | Device-to-cloud telemetry |
 | **Processing** | Azure Functions | Serverless data processing |
 | **Storage** | CosmosDB | NoSQL document storage |
-| **Real-time** | SignalR | Live updates to clients |
+| **Real-time** | SignalR | Live updates to clients (decided, not built; see [`realtimeTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/)) |
 | **API** | Azure Functions | REST API with OpenAPI specs |
 | **Mobile** | React Native | Primary user interface |
 | **Web** | React | Secondary interface |
@@ -82,40 +82,9 @@ The existing Go-based device controller provides a solid foundation:
 
 ### Data Flow
 
-```
-┌─────────────────┐    ┌──────────────┐    ┌─────────────────┐
-│ RTD Sensors (5) │───▶│ Device       │───▶│ Data Pusher     │
-│ - Grill         │    │ Controller   │    │ Service         │
-│ - Probe 1-4     │    │ (Go/Gobot)   │    │ (Go + CookID)   │
-└─────────────────┘    └──────────────┘    └─────────────────┘
-                              │                      │
-                              ▼                      ▼
-                    ┌──────────────┐    ┌─────────────────┐
-                    │ LCD Display  │    │ Azure IoT Hub   │
-                    │ (Local UI)   │    │ (Message Routes)│
-                    └──────────────┘    └─────────────────┘
-                                                  │
-                                        ┌─────────┴─────────┐
-                                        ▼                   ▼
-                               ┌─────────────────┐ ┌─────────────────┐
-                               │ Direct Route    │ │ Event Hub Route │
-                               │ → CosmosDB      │ │ → Functions     │
-                               │ (Storage)       │ │ (Real-time)     │
-                               └─────────────────┘ └─────────────────┘
-                                                          │
-                                                          ▼
-┌─────────────────┐    ┌──────────────┐    ┌─────────────────────────┐
-│ Mobile App      │◀───│ SignalR Hub  │◀───│ Lightweight Function    │
-│ (React Native)  │    │ (Real-time)  │    │ (Broadcast Only)        │
-└─────────────────┘    └──────────────┘    └─────────────────────────┘
+What runs today is the [`system` view](https://stevebargelt.github.io/meatgeekv2/#/view/system/) of the architecture site; the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) follows one reading from the RTD sensors through the data pusher and IoT Hub's `cosmos-storage-route` into Cosmos DB, and the [`realtimeTarget` view](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/) shows the decided realtime design. The same views render on GitHub in [Architecture Diagrams](diagrams.md).
 
-┌─────────────────┐    ┌──────────────┐
-│ Web App         │◀───│ REST API     │
-│ (React)         │    │ Functions    │
-└─────────────────┘    └──────────────┘
-```
-
-The Event Hub → Functions → SignalR broadcast path in this picture is **planned, not on `main`**: IoT Hub routes to the Event Hub, but no function consumes it. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet. See [Architecture Diagrams](diagrams.md) for what is on `main`.
+The Event Hub → Functions → SignalR broadcast path is **planned, not on `main`**: IoT Hub routes to the Event Hub, but no function consumes it. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet.
 
 ### Core Components
 
