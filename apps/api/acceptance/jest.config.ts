@@ -16,11 +16,8 @@ export default {
     '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.json' }],
   },
   moduleFileExtensions: ['ts', 'js'],
-  // The whole suite is one jest test. Cold starts on the deployed Function App
-  // take tens of seconds, and a run that tops up the simulated device's volume
-  // (telemetry-volume.proof.ts, HAR-45) sends ~8,700 readings and then waits up
-  // to 15 min for them to be readable. Kept under the acceptance job's 40 min
-  // timeout (app-deploy-dev.yml) so jest, not the job kill, reports an overrun.
-  testTimeout: 35 * 60 * 1000,
+  // The suite's time limit is the third argument of the one test() in
+  // live.acceptance.ts (HAR-46): jest rejects `testTimeout` as a project-config
+  // key ("Unknown option") and ignores it.
   coverageDirectory: '../../../coverage/apps/api-acceptance',
 };

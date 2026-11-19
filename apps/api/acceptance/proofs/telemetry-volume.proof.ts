@@ -11,7 +11,8 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  *   1. `GET /temperatures/history?deviceId=<sim>&limit=1` reads `total` (a
  *      `COUNT(1)` over the device's partition);
  *   2. if it is short of the target, `simdevice --count <target − total +
- *      margin> --interval <interval>` tops it up through IoT Hub;
+ *      margin> --inflight <inflight> --interval <interval>` tops it up through
+ *      IoT Hub;
  *   3. the same `limit=1` request is polled until `total` reaches the target:
  *      the top-up is readable, and the routing backlog it made on the shared
  *      throughput offer has drained before later groups run;
@@ -30,15 +31,20 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  * The volume and pacing. The self-test shrinks these; nothing else should, and
  * there is deliberately no environment variable for them.
  *
- * `intervalMs` — the gap simdevice leaves between sends. The `temperatures`
+ * `intervalMs` — the gap simdevice leaves between send starts. The `temperatures`
  * container has no throughput of its own: it shares ONE 400 RU/s
  * database-level offer with the other four containers
  * (`apps/infrastructure/modules/cosmos-db/main.tf`, `throughput = 400` on the
  * shared database), and IoT Hub's routed writes are paid from that same offer.
  * The top-up may use at most half of it: 200 RU/s. At ~10 RU per routed write
  * that is at most 20 writes/s, so at least 1000 ms / 20 = 50 ms between sends.
- * simdevice waits the interval AFTER each acknowledged publish, so the real
- * rate is lower still, never higher.
+ * With `--inflight` above 1 simdevice starts a send at most once per interval,
+ * whatever the acknowledgement latency, so the rate never exceeds 20/s.
+ *
+ * `inflight` — how many sends may await IoT Hub's acknowledgement at once
+ * (HAR-46). With one, each ~200 ms QoS 1 round trip is paid in series and the
+ * rate is ~5/s, not 20 (8,640 readings took ~30 min). 32 in flight covers a
+ * round trip of up to 32 × 50 ms = 1.6 s, so the interval sets the pace.
  */
 export const VOLUME = {
   /** One long cook: 12 h × 3600 s / 5 s per reading. */
@@ -46,6 +52,7 @@ export const VOLUME = {
   /** Sent on top of the shortfall, for readings that expire during the run. */
   margin: 60,
   intervalMs: 50,
+  inflight: 32,
   /** Step 3: how often `total` is re-read... */
   pollIntervalMs: 10_000,
   /** ...and for how long after the send ends. */
@@ -53,13 +60,14 @@ export const VOLUME = {
 };
 
 /**
- * How long one top-up message may take on top of `intervalMs` (the QoS 1
- * publish round trip to IoT Hub), and how long simdevice may take to connect,
- * before the run is killed: the top-up's time limit is
- * `count × (intervalMs + PUBLISH_ALLOWANCE_MS) + START_ALLOWANCE_MS`.
+ * The top-up's time limit, after which simdevice is killed: the paced send
+ * time (`count × intervalMs`) with half again for slack, plus 120 s to connect
+ * and drain the last acknowledgements. Pipelined sends start at the interval
+ * whatever the publish round trip, so no per-message publish time is assumed.
  */
-const PUBLISH_ALLOWANCE_MS = 100;
-const START_ALLOWANCE_MS = 60_000;
+export function topupTimeLimitMs(count: number): number {
+  return count * VOLUME.intervalMs * 1.5 + 120_000;
+}
 
 /** The API's default page size (`HISTORY_DEFAULT_LIMIT` in get-history.ts). */
 const DEFAULT_PAGE = 100;
@@ -127,10 +135,17 @@ export default defineProofs('telemetry volume', () => {
           return;
         }
         const count = VOLUME.target - totalBefore + VOLUME.margin;
-        const timeoutMs = count * (VOLUME.intervalMs + PUBLISH_ALLOWANCE_MS) + START_ALLOWANCE_MS;
+        const timeoutMs = topupTimeLimitMs(count);
         const started = Date.now();
         const run = await api.runSimDevice(
-          ['--count', String(count), '--interval', `${VOLUME.intervalMs}ms`],
+          [
+            '--count',
+            String(count),
+            '--inflight',
+            String(VOLUME.inflight),
+            '--interval',
+            `${VOLUME.intervalMs}ms`,
+          ],
           { timeoutMs }
         );
         const elapsed = Date.now() - started;

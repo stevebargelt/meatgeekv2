@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -204,6 +205,9 @@ type failingClient struct{ err error }
 func (f failingClient) PublishTelemetry(context.Context, []byte, map[string]string) error {
 	return f.err
 }
+func (f failingClient) PublishTelemetryAsync(context.Context, []byte, map[string]string) (func() error, error) {
+	return func() error { return f.err }, nil
+}
 func (failingClient) Close() error { return nil }
 
 func TestMain_SendFailureExitsNonZeroAndRedacts(t *testing.T) {
@@ -231,6 +235,8 @@ func TestMain_BadFlags(t *testing.T) {
 		{"--count", "0"},
 		{"--interval", "-1s"},
 		{"--interval", "soon"},
+		{"--inflight", "0"},
+		{"--inflight", "-3"},
 		{"--connection-string", validConn},
 		{validConn},
 	} {
@@ -273,5 +279,282 @@ func TestMain_StrictlyIncreasingTimestampsWithFrozenClock(t *testing.T) {
 		if s.Timestamp != want[i] {
 			t.Errorf("line %d timestamp = %q, want %q", i, s.Timestamp, want[i])
 		}
+	}
+}
+
+// ackClient is a mock IoT Hub client whose acknowledgements take ackDelay.
+// It counts how many publishes are awaiting their acknowledgement at once, and
+// fails the acknowledgement of the async publishes and blocking retries it is
+// told to. Messages are identified by their messageId property.
+type ackClient struct {
+	ackDelay time.Duration
+	// failAsync fails the acknowledgement of the n-th async publish (1-based).
+	failAsync map[int]bool
+	// failRetry fails every blocking PublishTelemetry call.
+	failRetry bool
+
+	mu             sync.Mutex
+	asyncCalls     int
+	blockingCalls  int
+	outstanding    int
+	maxOutstanding int
+	starts         []time.Time
+	acked          []string // messageIds acknowledged, in ack order
+}
+
+func (c *ackClient) begin() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.outstanding++
+	if c.outstanding > c.maxOutstanding {
+		c.maxOutstanding = c.outstanding
+	}
+	c.starts = append(c.starts, time.Now())
+	return c.outstanding
+}
+
+func (c *ackClient) end(messageID string, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.outstanding--
+	if ok {
+		c.acked = append(c.acked, messageID)
+	}
+}
+
+func (c *ackClient) PublishTelemetry(_ context.Context, _ []byte, props map[string]string) error {
+	c.mu.Lock()
+	c.blockingCalls++
+	fail := c.failRetry
+	c.mu.Unlock()
+	c.begin()
+	time.Sleep(c.ackDelay)
+	c.end(props["messageId"], !fail)
+	if fail {
+		return errors.New("ack lost again")
+	}
+	return nil
+}
+
+func (c *ackClient) PublishTelemetryAsync(_ context.Context, _ []byte, props map[string]string) (func() error, error) {
+	c.mu.Lock()
+	c.asyncCalls++
+	fail := c.failAsync[c.asyncCalls]
+	c.mu.Unlock()
+	c.begin()
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(c.ackDelay)
+		c.end(props["messageId"], !fail)
+		close(done)
+	}()
+	return func() error {
+		<-done
+		if fail {
+			return errors.New("ack lost")
+		}
+		return nil
+	}, nil
+}
+
+func (*ackClient) Close() error { return nil }
+
+func (c *ackClient) snapshot() (asyncCalls, blockingCalls, maxOutstanding int, starts []time.Time, acked []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.asyncCalls, c.blockingCalls, c.maxOutstanding,
+		append([]time.Time(nil), c.starts...), append([]string(nil), c.acked...)
+}
+
+// sentLines parses stdout into Sent lines, failing on anything else.
+func sentLines(t *testing.T, stdout string) []Sent {
+	t.Helper()
+	var lines []Sent
+	sc := bufio.NewScanner(strings.NewReader(stdout))
+	for sc.Scan() {
+		var s Sent
+		dec := json.NewDecoder(strings.NewReader(sc.Text()))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&s); err != nil {
+			t.Fatalf("stdout line %q is not the documented JSON shape: %v", sc.Text(), err)
+		}
+		lines = append(lines, s)
+	}
+	return lines
+}
+
+func distinctIDs(lines []Sent) map[string]bool {
+	ids := map[string]bool{}
+	for _, l := range lines {
+		ids[l.MessageID] = true
+	}
+	return ids
+}
+
+func runWith(t *testing.T, cli *ackClient, args ...string) runResult {
+	t.Helper()
+	return runMain(t, args, map[string]string{EnvConnectionString: validConn},
+		func(string) (Client, error) { return cli, nil })
+}
+
+// (a) --inflight 1, the default, keeps the old send: one blocking publish at a
+// time, never the async one.
+func TestMain_Inflight1SendsOneAtATime(t *testing.T) {
+	for _, args := range [][]string{{"--count", "5"}, {"--count", "5", "--inflight", "1"}} {
+		cli := &ackClient{ackDelay: 10 * time.Millisecond}
+		res := runWith(t, cli, args...)
+		if res.code != ExitOK {
+			t.Fatalf("%q: exit = %d; stderr=%q", args, res.code, res.stderr)
+		}
+		async, blocking, maxOut, _, _ := cli.snapshot()
+		if async != 0 || blocking != 5 {
+			t.Errorf("%q: async=%d blocking=%d, want 0 and 5", args, async, blocking)
+		}
+		if maxOut != 1 {
+			t.Errorf("%q: max outstanding = %d, want 1", args, maxOut)
+		}
+		if n := len(distinctIDs(sentLines(t, res.stdout))); n != 5 {
+			t.Errorf("%q: %d distinct lines, want 5", args, n)
+		}
+	}
+}
+
+// (b) --count 100 --inflight 8: never more than 8 outstanding, 100 distinct lines.
+func TestMain_InflightCapsOutstandingPublishes(t *testing.T) {
+	cli := &ackClient{ackDelay: 15 * time.Millisecond}
+	res := runWith(t, cli, "--count", "100", "--inflight", "8")
+	if res.code != ExitOK {
+		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
+	}
+	async, blocking, maxOut, _, acked := cli.snapshot()
+	if async != 100 || blocking != 0 {
+		t.Errorf("async=%d blocking=%d, want 100 and 0", async, blocking)
+	}
+	if maxOut > 8 {
+		t.Errorf("max outstanding = %d, want <= 8", maxOut)
+	}
+	if maxOut < 2 {
+		t.Errorf("max outstanding = %d: the sends were not pipelined", maxOut)
+	}
+	lines := sentLines(t, res.stdout)
+	if len(lines) != 100 {
+		t.Fatalf("stdout lines = %d, want 100", len(lines))
+	}
+	if n := len(distinctIDs(lines)); n != 100 {
+		t.Errorf("distinct messageIds = %d, want 100", n)
+	}
+	for _, id := range acked {
+		if !distinctIDs(lines)[id] {
+			t.Errorf("acknowledged %s has no stdout line", id)
+		}
+	}
+	for i, l := range lines {
+		if _, err := time.Parse(timeLayout, l.SentAt); err != nil {
+			t.Errorf("line %d sentAt %q: %v", i, l.SentAt, err)
+		}
+	}
+}
+
+// (c) --interval caps the start rate, whatever the ack latency: starts are at
+// least the interval apart, and a slow ack does not add to the gap.
+func TestMain_IntervalCapsStartRate(t *testing.T) {
+	const interval = 20 * time.Millisecond
+	cli := &ackClient{ackDelay: 100 * time.Millisecond}
+	began := time.Now()
+	res := runWith(t, cli, "--count", "10", "--inflight", "16", "--interval", "20ms")
+	elapsed := time.Since(began)
+	if res.code != ExitOK {
+		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
+	}
+	_, _, _, starts, _ := cli.snapshot()
+	if len(starts) != 10 {
+		t.Fatalf("starts = %d, want 10", len(starts))
+	}
+	// Timer tolerance: a gap may be a little short of the interval only by
+	// clock granularity, never by a whole interval.
+	const slack = 5 * time.Millisecond
+	for i := 1; i < len(starts); i++ {
+		if gap := starts[i].Sub(starts[i-1]); gap < interval-slack {
+			t.Errorf("start %d came %s after start %d, want >= %s", i, gap, i-1, interval)
+		}
+	}
+	if total := starts[9].Sub(starts[0]); total < 9*(interval-slack) {
+		t.Errorf("10 starts spanned %s, want >= %s", total, 9*interval)
+	}
+	// Sequential sends would take >= 10 × (100 ms ack + 20 ms) = 1.2 s.
+	if elapsed > 900*time.Millisecond {
+		t.Errorf("run took %s: the interval was added to the ack latency", elapsed)
+	}
+}
+
+// (d) One failed ack, retried successfully with the blocking publish: exit 0
+// and every line printed.
+func TestMain_FailedAckRetriedOnce(t *testing.T) {
+	cli := &ackClient{ackDelay: 5 * time.Millisecond, failAsync: map[int]bool{7: true}}
+	res := runWith(t, cli, "--count", "20", "--inflight", "4")
+	if res.code != ExitOK {
+		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
+	}
+	async, blocking, _, _, acked := cli.snapshot()
+	if async != 20 || blocking != 1 {
+		t.Errorf("async=%d blocking=%d, want 20 and 1", async, blocking)
+	}
+	lines := sentLines(t, res.stdout)
+	if len(lines) != 20 || len(distinctIDs(lines)) != 20 {
+		t.Errorf("lines = %d (%d distinct), want 20", len(lines), len(distinctIDs(lines)))
+	}
+	if len(acked) != 20 {
+		t.Errorf("acknowledged = %d, want 20", len(acked))
+	}
+}
+
+// (e) An ack that fails twice: stop sending, drain what is in flight, exit 1,
+// and print exactly one line per acknowledged message.
+func TestMain_AckFailingTwiceExits1(t *testing.T) {
+	cli := &ackClient{ackDelay: 10 * time.Millisecond, failAsync: map[int]bool{5: true}, failRetry: true}
+	res := runWith(t, cli, "--count", "100", "--inflight", "8")
+	if res.code != ExitSendFailed {
+		t.Fatalf("exit = %d, want %d; stderr=%q", res.code, ExitSendFailed, res.stderr)
+	}
+	async, blocking, _, _, acked := cli.snapshot()
+	if blocking != 1 {
+		t.Errorf("blocking retries = %d, want 1", blocking)
+	}
+	if async >= 100 {
+		t.Errorf("all %d readings were started: sending did not stop", async)
+	}
+	lines := sentLines(t, res.stdout)
+	if len(lines) != len(acked) {
+		t.Errorf("stdout lines = %d, acknowledged = %d: they must match", len(lines), len(acked))
+	}
+	if len(acked) != async-1 {
+		t.Errorf("acknowledged = %d of %d started: the in-flight sends were not drained", len(acked), async)
+	}
+	ids := distinctIDs(lines)
+	for _, id := range acked {
+		if !ids[id] {
+			t.Errorf("acknowledged %s has no stdout line", id)
+		}
+	}
+	if !strings.Contains(res.stderr, "send reading 5 of 100") || !strings.Contains(res.stderr, "acknowledged") {
+		t.Errorf("stderr should name the failed reading and the acknowledged count: %q", res.stderr)
+	}
+	if strings.Contains(res.stderr, fakeKey) {
+		t.Error("the key leaked into stderr")
+	}
+}
+
+func TestMain_PipelinedSendFailureExitsNonZeroAndRedacts(t *testing.T) {
+	cli := failingClient{err: errors.New("connect failed using " + validConn)}
+	res := runMain(t, []string{"--count", "5", "--inflight", "4"}, map[string]string{EnvConnectionString: validConn},
+		func(string) (Client, error) { return cli, nil })
+	if res.code != ExitSendFailed {
+		t.Fatalf("exit = %d, want %d", res.code, ExitSendFailed)
+	}
+	if res.stdout != "" {
+		t.Errorf("no line may be printed for an unacknowledged message; stdout=%q", res.stdout)
+	}
+	if strings.Contains(res.stderr, fakeKey) || strings.Contains(res.stderr, validConn) {
+		t.Errorf("credential leaked into stderr: %q", res.stderr)
 	}
 }

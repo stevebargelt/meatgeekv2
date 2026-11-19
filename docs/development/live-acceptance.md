@@ -49,7 +49,7 @@ proof the ticket adds. You can also run it by hand, as below.
 |                                  | `GET /temperatures/current/<simulated device>`, every 1 s for at most 120 s                                      | a `200` whose `timestamp` is the sent one (`404 NO_READINGS` or an older reading: poll again); `deviceId` is the device, `grillTemp` a number, no `_` key; prints `METRIC roundtrip-ms` |
 |                                  | `GET /temperatures/history?deviceId=<simulated device>&startTime=<sentAt − 5 min>`                               | `200`; the sent reading is in `readings` (paging with `offset` while `hasMore`), with the same field checks                                                                             |
 | `telemetry-volume.proof.ts`      | `GET /temperatures/history?deviceId=<simulated device>&limit=1`                                                  | `200` with a numeric `total`; prints `METRIC history-total-before`                                                                                                                      |
-|                                  | `simdevice --count <8640 − total + 60> --interval 50ms`, only when `total` < 8,640                               | exit `0` and one JSON line per reading requested; prints `METRIC topup-sent` (`0` when no top-up was needed) and `METRIC topup-ms`                                                      |
+|                                  | `simdevice --count <8640 − total + 60> --inflight 32 --interval 50ms`, only when `total` < 8,640                 | exit `0` and one JSON line per reading requested; prints `METRIC topup-sent` (`0` when no top-up was needed) and `METRIC topup-ms`                                                      |
 |                                  | the same `limit=1` read, every 10 s for at most 15 min after the send                                            | `total` ≥ 8,640, else it fails naming the last `total` and the cap; prints `METRIC history-total`                                                                                       |
 |                                  | `GET /temperatures/history?deviceId=<simulated device>` (default page: 100 from offset 0)                        | `200` with exactly 100 readings; prints `METRIC history-ru-first-page`                                                                                                                  |
 |                                  | the same with `&offset=<total − 100>` (the last page)                                                            | `200` with at least one reading; prints `METRIC history-ru-last-page`                                                                                                                   |
@@ -125,13 +125,19 @@ having registered the device to the caller.
   run, so they all expire together 7 days later: whatever the run frequency,
   expect a full top-up about once a week. In between, `total` stays at or above
   8,640 (the round trip adds one reading a run) and `METRIC topup-sent 0`.
-- **How long it takes.** simdevice waits 50 ms after each acknowledged publish,
-  so a full top-up of ~8,700 readings takes at least 7¼ minutes plus one QoS 1
-  publish round trip per reading: expect roughly 10–15 minutes (`METRIC
-topup-ms` reports it). The proof then waits for the routed writes to be
-  readable, at most 15 minutes. A run without a top-up adds a few seconds. The
-  live run's jest timeout is 35 minutes to fit this (`apps/api/acceptance/jest.config.ts`),
-  under the job's 40.
+- **How long it takes.** The top-up runs `--inflight 32 --interval 50ms`:
+  simdevice starts a send every 50 ms and lets up to 32 await IoT Hub's QoS 1
+  acknowledgement at once, so the ~200 ms publish round trip overlaps the next
+  sends instead of adding to each one. That is 20 readings/s, so a full top-up
+  of ~8,700 readings takes about 7–8 minutes (`METRIC topup-ms` reports it);
+  with one send in flight (the default, `--inflight 1`) it took ~30. simdevice
+  is killed after `count × 50 ms × 1.5 + 120 s` (~13 min for a full top-up),
+  and the failure says how many readings it had sent. The proof then waits for
+  the routed writes to be readable (the drain), at most 15 minutes; at 20
+  writes/s the routing keeps roughly pace, so expect a short drain. A run
+  without a top-up adds a few seconds. The live run's time limit is 35 minutes
+  to fit this (the third argument of the one `test(...)` in
+  `apps/api/acceptance/live.acceptance.ts`), under the job's 40.
 - **Why 50 ms.** The `temperatures` container has no throughput of its own: it
   shares one 400 RU/s database-level offer with the other four containers
   (`apps/infrastructure/modules/cosmos-db/main.tf`), and IoT Hub's routed
@@ -323,7 +329,9 @@ apps/api/acceptance/
   shortens; there is no environment variable for them. For the volume proof the
   stub keeps a reading count for the simulated device; the fake reports a
   top-up to the stub, which makes it readable a batch per poll, or never, and
-  the fake can fail a top-up with exit 1. Its target, margin, interval and poll
+  the fake can fail a top-up with exit 1. The self-test also checks that the
+  top-up passes `--inflight 32 --interval 50ms` and a kill limit of
+  `count × 50 ms × 1.5 + 120 s`. Its target, margin, interval, inflight and poll
   pacing are `VOLUME` in the proof file; the self-test shrinks the target to a
   few hundred readings and the polls to milliseconds.
 - The acceptance code is not part of the API build; `dist/apps/api` contains

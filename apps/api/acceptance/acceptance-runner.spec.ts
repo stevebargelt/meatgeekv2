@@ -21,9 +21,10 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
+import type { AcceptanceApi, SimDeviceOptions } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
-import { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
-import { VOLUME } from './proofs/telemetry-volume.proof';
+import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
+import volumeGroup, { VOLUME } from './proofs/telemetry-volume.proof';
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 
@@ -526,7 +527,7 @@ let fakeDir: string;
  * A stand-in for `simdevice`: a Node script, run through its shebang, that
  * prints one JSON line per reading the way simdevice does, or misbehaves as
  * `mode` says. In `ok` mode it exits 2 unless it got `--count 1` (the round
- * trip) or `--count N --interval D` (a HAR-45 top-up) and the credential
+ * trip) or `--count N --inflight M --interval D` (a HAR-45/46 top-up) and the credential
  * arrived through its environment, so the runner's hand-over is checked too.
  * A top-up is reported to the running stub first, so the stub can serve it.
  * `topup-exit1` sends the round trip's reading but fails a top-up; `hang`
@@ -543,7 +544,7 @@ const line = o => process.stdout.write(JSON.stringify(o) + '\\n');
 const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stringify(SIM_DEVICE)}, timestamp, sentAt: new Date().toISOString() });
 const args = process.argv.slice(2).join(' ');
 const handedOver = conn === ${JSON.stringify(SIM_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.argv.some(a => a.includes(key));
-const topup = /^--count ([1-9][0-9]*) --interval [0-9]+ms$/.exec(args);
+const topup = /^--count ([1-9][0-9]*) --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
 if (mode === 'ok' || mode === 'topup-exit1') {
   if (!handedOver || (args !== '--count 1' && !topup)) {
     process.stderr.write('fake simdevice: bad hand-over: ' + args + '\\n');
@@ -1246,11 +1247,13 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     expect(result.failures).toEqual([]);
     expect(result.exitCode).toBe(0);
     STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
-    expect(stub!.topups).toEqual([['--count', String(count), '--interval', '50ms']]);
+    expect(stub!.topups).toEqual([
+      ['--count', String(count), '--inflight', '32', '--interval', '50ms'],
+    ]);
     expect(
       result.lines.some(line =>
         new RegExp(
-          `^\\s+EXEC\\s+simdevice --count ${count} --interval 50ms\\s+exit 0\\s.*${count} message`
+          `^\\s+EXEC\\s+simdevice --count ${count} --inflight 32 --interval 50ms\\s+exit 0\\s.*${count} message`
         ).test(line)
       )
     ).toBe(true);
@@ -1306,6 +1309,50 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     expect(result.output).not.toContain('more detail');
     expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[2]}`);
     expect(result.output).not.toMatch(/^METRIC (topup-sent|history-total) /m);
+  });
+
+  it('(e) kills the top-up at count × 50 ms × 1.5 + 120 s, with 32 sends in flight', async () => {
+    const before = 40;
+    const count = VOLUME.target - before + VOLUME.margin;
+    stub = await startStub({ simVolume: before, simDrainPerPoll: 1_000 });
+    const calls: { args: readonly string[]; options?: SimDeviceOptions }[] = [];
+    // The real volume proofs, handed an api whose runSimDevice is recorded,
+    // after the round trip that registers the device (as in a full run).
+    const recorded = {
+      name: volumeGroup.name,
+      create: () =>
+        volumeGroup.create().map(proof => ({
+          name: proof.name,
+          run: (api: AcceptanceApi) =>
+            proof.run(
+              Object.assign(Object.create(api) as AcceptanceApi, {
+                runSimDevice(args: readonly string[], options?: SimDeviceOptions) {
+                  calls.push({ args, options });
+                  return api.runSimDevice(args, options);
+                },
+              })
+            ),
+        })),
+    };
+    const lines: string[] = [];
+    const result = await runAcceptance({
+      env: { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() },
+      write: line => lines.push(line),
+      groups: [roundtripGroup, recorded],
+    });
+
+    expect(result.failures).toEqual([]);
+    expect(lines).toContain(`METRIC topup-sent ${count}`);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual([
+      '--count',
+      String(count),
+      '--inflight',
+      '32',
+      '--interval',
+      '50ms',
+    ]);
+    expect(calls[0].options?.timeoutMs).toBe(count * 50 * 1.5 + 120_000);
   });
 
   it('runSimDevice kills a run that outlasts the time limit the proof passes', async () => {

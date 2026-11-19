@@ -225,6 +225,47 @@ func (c *AzureClient) PublishTelemetry(ctx context.Context, payload []byte, prop
 	return nil
 }
 
+// PublishTelemetryAsync starts the same QoS 1 publish as PublishTelemetry
+// (same topic, same connection handling) but returns as soon as the message
+// is handed to the MQTT client, without waiting for IoT Hub's PUBACK. The
+// returned wait blocks until that acknowledgement arrives, the publish timeout
+// (counted from the start) passes, or ctx is done, and returns the outcome.
+//
+// There is no retry here: the caller decides what to do with a failed
+// acknowledgement (simdevice retries once through PublishTelemetry). Several
+// async publishes may be in flight on the one connection at once. The Pi's
+// queue runner does not use this; it keeps PublishTelemetry's one-at-a-time
+// send.
+func (c *AzureClient) PublishTelemetryAsync(ctx context.Context, payload []byte, properties map[string]string) (wait func() error, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	topic := buildPublishTopic(c.conn.DeviceID, properties)
+
+	c.mu.Lock()
+	if err := c.ensureConnectedLocked(); err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	token := c.mqttClient.Publish(topic, 1, false, payload)
+	c.mu.Unlock()
+
+	deadline := time.Now().Add(c.publishTimeout)
+	return func() error {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		select {
+		case <-token.Done():
+			return token.Error()
+		case <-timer.C:
+			return fmt.Errorf("iothub: publish to %s timed out after %s", topic, c.publishTimeout)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}, nil
+}
+
 // Close shuts down the MQTT session if one exists.
 func (c *AzureClient) Close() error {
 	c.mu.Lock()
@@ -312,6 +353,15 @@ func (m *MockClient) PublishTelemetry(_ context.Context, payload []byte, propert
 		"payloadBytes":            len(payload),
 	}).Debug("iothub: MockClient.PublishTelemetry")
 	return nil
+}
+
+// PublishTelemetryAsync records the call exactly as PublishTelemetry does
+// and returns a wait that reports an immediate acknowledgement.
+func (m *MockClient) PublishTelemetryAsync(ctx context.Context, payload []byte, properties map[string]string) (func() error, error) {
+	if err := m.PublishTelemetry(ctx, payload, properties); err != nil {
+		return nil, err
+	}
+	return func() error { return nil }, nil
 }
 
 // Close is a no-op for MockClient.

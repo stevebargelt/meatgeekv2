@@ -165,7 +165,8 @@ dist/simdevice --count 3 --interval 2s
 | ----- | ------- | ------- |
 | `SIMDEVICE_CONNECTION_STRING` (env) | Device-scoped IoT Hub connection string. The **only** source of the credential; there is no flag for it. | (required) |
 | `--count N` | Readings to send | `1` |
-| `--interval D` | Go duration between sends (`500ms`, `2s`) | `0s` |
+| `--interval D` | Go duration between sends (`500ms`, `2s`). With `--inflight` above 1, between send **starts**, so it caps the rate at one send per `D` whatever the acknowledgement latency. | `0s` |
+| `--inflight N` | How many sends may await IoT Hub's QoS 1 acknowledgement at once. `1` is the pusher's own send: publish, wait for the ack, wait `--interval`, repeat. Above 1, sends are pipelined over the one MQTT connection. | `1` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` (env) | Export spans, as for the pusher | (no-op) |
 
 **Stdout** carries nothing but one JSON line per message IoT Hub accepted:
@@ -179,8 +180,17 @@ publish was acknowledged. Both are RFC 3339 UTC with milliseconds. Every
 reading in a run has a distinct `timestamp` and `messageId`. Logs and errors go
 to stderr.
 
+With `--inflight N` above 1 a line is written when that reading's
+acknowledgement arrives, so lines may come out of send order. A failed
+acknowledgement is retried once with the blocking send the pusher uses
+(`PublishTelemetry`); if that fails too, simdevice starts no more sends, waits
+for the ones in flight, and exits `1`. On every path the number of stdout lines
+equals the number of acknowledged readings. The dev acceptance top-up runs
+`--inflight 32 --interval 50ms`: 20 readings/s
+([live-acceptance.md](../../docs/development/live-acceptance.md)).
+
 **Exit codes:** `0` all sent; `1` a send failed (or the run was interrupted) —
-nothing is printed for the failed reading; `2` usage or configuration error,
+nothing is printed for a reading that was not acknowledged; `2` usage or configuration error,
 including a missing or malformed `SIMDEVICE_CONNECTION_STRING`. No output
 contains the connection string or its key: parse errors never echo their
 input, and every error is redacted before it is printed.
