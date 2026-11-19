@@ -30,7 +30,7 @@ model {
       controller = app 'device-controller' {
         #live
         technology 'Go / Gobot, local HTTP API on :3000'
-        description 'Reads the RTD sensors and serves the current status on a local HTTP API. Its OpenTelemetry Go SDK samples every span (AlwaysSample) and exports only when OTEL_EXPORTER_OTLP_ENDPOINT is set.'
+        description 'Reads the five RTD sensors (grill and four probes) every 10 ms, averages each over 5 s, and serves the current status on a local HTTP API. At startup it writes a fixed banner to an I2C LCD; the per-probe LCD readout is commented out. Its OpenTelemetry Go SDK samples every span (AlwaysSample) and exports only when OTEL_EXPORTER_OTLP_ENDPOINT is set.'
         link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/device-controller 'Source'
       }
 
@@ -157,7 +157,11 @@ model {
           the Terraform-owned database and container names (`COSMOSDB_DATABASE_NAME` and one
           `COSMOSDB_*_CONTAINER_NAME` per container). The one exception is the Application
           Insights connection string (`APPLICATIONINSIGHTS_CONNECTION_STRING`), with ingestion
-          itself authenticated by Entra (`Authorization=AAD`).
+          itself authenticated by Entra (`Authorization=AAD`) and sampled at
+          `APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50`. Apart from it, no connection string or
+          key is an app setting or a Terraform output. The Flex deployment package lives in a
+          `blobContainer` reached by the same identity (`SystemAssignedIdentity`); the storage
+          account has shared keys disabled.
         '''
         link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/api 'Source'
 
@@ -232,7 +236,7 @@ model {
       data = store 'Cosmos DB' {
         #live
         technology 'Cosmos DB for NoSQL, one shared-throughput database'
-        description 'One shared-throughput database (400 RU/s), its name Terraform-owned (COSMOSDB_DATABASE_NAME). Access by managed identity only.'
+        description 'One shared-throughput database (400 RU/s), its name Terraform-owned (COSMOSDB_DATABASE_NAME = module.cosmos_db.destination_database_name, the MG-53 shared-throughput destination that the MG-62 cutover moved both dev consumers onto). The setting has no default, so the app can never be deployed pointed at a database that does not exist (MG-51). Access by managed identity only.'
 
         devices = collection 'devices' {
           technology 'partition /id'
@@ -260,7 +264,7 @@ model {
       realtime = service 'SignalR Service' {
         #live
         technology 'Default mode, hub temperatureHub'
-        description 'Terraform sets service_mode = "Default". Today: cook_started and cook_stopped sent to userId = deviceId, aimed at the Pi, never proven live (MG-24 AC5). Decided: push to clients only (live temperatures and cook events).'
+        description 'Terraform sets service_mode = "Default". Today: cook_started and cook_stopped sent to userId = deviceId, aimed at the Pi. The API side shipped in MG-14; the path has never been proven live (MG-24 AC5, procedure in docs/api/signalr-cook-events-smoke.md). Decided: push to clients only (live temperatures and cook events).'
       }
 
       observability = area 'Observability' {
@@ -327,7 +331,7 @@ model {
       description 'The only writer of temperatures. Partition value from {deviceid}.'
     }
 
-    // Realtime path: drawn in docs/architecture/diagrams.md, absent from apps/api/src/main.ts.
+    // Realtime path: absent from apps/api/src/main.ts.
     // Decided: push to clients. Event Hub -> Function -> SignalR -> apps.
     cloud.ingest.eventhub -[decided]-> cloud.api.broadcast 'Event Hub trigger' {
       #decided
@@ -428,7 +432,8 @@ model {
         logged in under OIDC as the dev app-publish identity. It ensures the simulated device
         identity, fetches its connection string per run, masks it (the string and its key)
         and hands it to `simdevice` only through `SIMDEVICE_CONNECTION_STRING`. It copies
-        every `METRIC` line into the run summary.
+        every `METRIC` line into the run summary. The proofs live in
+        `apps/api/acceptance/proofs/`; the two telemetry proofs run in order, round trip first.
       '''
 
       roundtrip = component 'telemetry-roundtrip.proof.ts' {
