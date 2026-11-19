@@ -19,15 +19,33 @@ proof the ticket adds. You can also run it by hand, as below.
 | `cooks-unauthenticated.proof.ts` | `GET /cooks` with no `Authorization` header                                    | `401`                                                                                                                                     |
 | `cooks-lifecycle.proof.ts`       | `POST /cooks` with a new UUID `id` and a synthetic device `acceptance-<runId>` | `2xx`; body is an api-interfaces `Cook` with no Cosmos system property (`_rid`, `_self`, `_etag`, `_attachments`, `_ts`), status `active` |
 |                                  | `GET /cooks`                                                                   | the new cook is listed (pages via `continuationToken`)                                                                                    |
+|                                  | `GET /cooks?deviceId=<device>&status=active`                                   | `200`; returns exactly the new cook, `active`, on that device, in one page                                                                |
 |                                  | `POST /cooks/{cookId}/stop`                                                    | `2xx`; the cook is `completed` with an `endTime`                                                                                          |
 |                                  | `GET /cooks`                                                                   | the cook reads back `completed`                                                                                                           |
+|                                  | `GET /cooks?deviceId=<device>&status=active`                                   | `200`; returns no cook after the stop                                                                                                     |
+| `devices.proof.ts`               | `POST /devices` registering `acceptance-<runId>` with a run-unique name        | `201`; body is an api-interfaces `Device` with the id and name sent, `isActive: true`, `connectionStatus: unknown`                        |
+|                                  | `GET /devices/{id}` for the registered device                                  | `200`; the same device, owned by the registering caller                                                                                   |
+|                                  | `GET /devices`                                                                 | `200`; the device is listed, and every listed device has the caller as owner                                                              |
+|                                  | `PATCH /devices/{id}` with a new `location`                                    | `200`; the device carries the new location                                                                                                |
+|                                  | `GET /devices/{id}` for the registered device                                  | `200`; the patched location reads back                                                                                                    |
+|                                  | `GET /devices/<random uuid>`                                                   | `404`                                                                                                                                     |
 
-Every authenticated cooks response must carry the `x-meatgeek-request-charge`
-header (the Cosmos RU the call cost, as a decimal). A response without it fails
-the proof. Responses that make no Cosmos call, such as a 401, carry no header.
+Every `devices.proof.ts` response body is also checked for keys starting with
+`_` at any depth (Cosmos system properties).
 
-Acceptance cooks are not cleaned up: there is no delete route yet. Each run uses
-its own device id, so runs never trip the one-active-cook-per-device rule.
+Every authenticated cooks and devices response must carry the
+`x-meatgeek-request-charge` header (the Cosmos RU the call cost, as a decimal),
+including the devices `404`, which still costs a point read. A response without
+it fails the proof. Responses that make no Cosmos call, such as a 401, carry no
+header.
+
+Acceptance cooks and devices are not cleaned up: there is no delete route for
+either yet (no `DELETE /cooks`, no `DELETE /devices`). Each run uses its own
+device id, `acceptance-<runId>`. `cooks-lifecycle.proof.ts` starts its cook on
+that id without registering it, so runs never trip the
+one-active-cook-per-device rule. `devices.proof.ts` registers that id as a real
+device with a run-unique name, so runs never collide on device id or on the
+`(userId, name)` pair.
 
 ## Output
 
@@ -106,16 +124,17 @@ apps/api/acceptance/
 │   └── runner.ts               # env check, HTTP client, output, RU table, exit code
 ├── proofs/
 │   ├── cooks-lifecycle.proof.ts
-│   └── cooks-unauthenticated.proof.ts
+│   ├── cooks-unauthenticated.proof.ts
+│   └── devices.proof.ts
 └── acceptance-runner.spec.ts   # self-test, runs under `nx test api`
 ```
 
 - `npx nx test api` never calls a live system. The api unit-test config does not
   match `live.acceptance.ts`. It does run `acceptance-runner.spec.ts`, which
-  starts an in-process stub HTTP server imitating the cooks routes and drives the
-  real runner and the real proof files against it: a passing stub, a wrong status
-  on each route, a missing RU header on each route, missing environment
-  variables, and a server that echoes the token back.
+  starts an in-process stub HTTP server imitating the cooks and devices routes
+  and drives the real runner and the real proof files against it: a passing
+  stub, a wrong status on each route, a missing RU header on each route, missing
+  environment variables, and a server that echoes the token back.
 - The acceptance code is not part of the API build; `dist/apps/api` contains
   none of it.
 - It uses only Node built-ins (`fetch`, `http`, `crypto`); no extra
