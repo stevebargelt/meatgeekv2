@@ -528,7 +528,7 @@ jobs:
       #    principal provisioned by apps/infrastructure/bootstrap/bootstrap.sh:
       #    Contributor scoped ONLY to meatgeek-v2-dev-rg, a CONDITIONED Role Based
       #    Access Control Administrator scoped ONLY to the same resource group
-      #    (the condition allowlists the 8 Terraform-managed role definitions and
+      #    (the condition allowlists the 9 Terraform-managed role definitions and
       #    constrains assignments to service principals), and Storage Blob Data
       #    Contributor scoped ONLY to the tfstate-dev container. It is DISTINCT
       #    from vars.AZURE_APP_DEPLOY_CLIENT_ID (the dev app-publish identity,

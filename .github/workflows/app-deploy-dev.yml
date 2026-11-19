@@ -65,6 +65,9 @@ jobs:
       sha: ${{ steps.target.outputs.sha }}
       hostname: ${{ steps.tfout.outputs.function_app_hostname }}
       audience: ${{ steps.tfout.outputs.functions_auth_audience }}
+      iot_hub_name: ${{ steps.tfout.outputs.iot_hub_name }}
+      iot_hub_hostname: ${{ steps.tfout.outputs.iot_hub_hostname }}
+      simulated_device_id: ${{ steps.tfout.outputs.simulated_device_id }}
     env:
       # Terraform reads dev state as the app-publish identity over OIDC. Without
       # ARM_USE_OIDC the azurerm backend falls back to the az CLI session, which
@@ -209,9 +212,10 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Never hard-code the Function App: read its name, host and the API
-      # audience from the dev Terraform state.
-      - name: Resolve Function App name, host and API audience (Terraform outputs)
+      # Never hard-code the Function App or the hub: read the app's name, host,
+      # the API audience, the IoT Hub name and hostname, and the standing
+      # simulated device id from the dev Terraform state.
+      - name: Resolve Function App, API audience, IoT Hub and simulated device (Terraform outputs)
         id: tfout
         if: steps.freshness.outputs.fresh == 'true'
         working-directory: apps/infrastructure
@@ -221,7 +225,7 @@ jobs:
           terraform init -input=false -reconfigure -lockfile=readonly \
             -backend-config=environments/backend-dev.hcl \
             -backend-config="storage_account_name=$STATE_ACCOUNT"
-          for OUT in function_app_name function_app_hostname functions_auth_audience; do
+          for OUT in function_app_name function_app_hostname functions_auth_audience iot_hub_name iot_hub_hostname simulated_device_id; do
             VALUE="$(terraform output -raw "$OUT")"
             if [ -z "$VALUE" ]; then
               echo "Terraform output $OUT is empty — aborting deploy." >&2
@@ -271,7 +275,8 @@ jobs:
     # Skipped when the deploy job published nothing (stale or not CI-green).
     if: needs.deploy.outputs.deployed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 40, not 15: a later HAR-39 proof sends up to 8,640 readings in one run.
+    timeout-minutes: 40
     environment: development
     steps:
       - name: Checkout the deployed commit
@@ -292,6 +297,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # simdevice (HAR-40) sends readings to IoT Hub as the simulated device.
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/data-pusher/go.mod
+          cache-dependency-path: apps/data-pusher/go.sum
+
+      - name: Build simdevice
+        run: |
+          set -euo pipefail
+          make -C apps/data-pusher build
+          test -x apps/data-pusher/dist/simdevice
+
       # Same identity as the publish (owner decision): no new identity. Its
       # client id is in functions_auth_allowed_client_app_ids in dev.tfvars, so
       # Easy Auth accepts its app-only token.
@@ -302,14 +320,72 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # The token is minted, masked and used inside this one step, so it never
+      # Pinned, never latest. Gives `az iot hub device-identity`.
+      - name: Install the azure-iot CLI extension
+        run: az extension add --name azure-iot --version 1.0.0 --yes
+
+      # The standing simulated device (HAR-39). `--auth-type login` makes az use
+      # this identity's Entra role (IoT Hub Registry Contributor, HAR-42), not
+      # hub keys it cannot list. --hub-name gets the hub's HOSTNAME: with a
+      # hostname, azure-iot goes straight to the hub's data plane; with a bare
+      # name it first looks the hub up through ARM, which that data-plane-only
+      # role cannot read. Only "device not found" (ResourceNotFoundError, az
+      # exit 3) leads to a create; any other error (not authorised, hub
+      # unreachable) fails the step. stdout is discarded: device JSON carries
+      # the device's symmetric keys.
+      - name: Ensure the simulated device exists
+        env:
+          HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
+        run: |
+          set -euo pipefail
+          ERR="$RUNNER_TEMP/device-show.err"
+          RC=0
+          az iot hub device-identity show --hub-name "$HUB" --device-id "$DEVICE" \
+            --auth-type login -o none >/dev/null 2>"$ERR" || RC=$?
+          if [ "$RC" -eq 0 ]; then
+            echo "device $DEVICE: exists"
+          elif [ "$RC" -eq 3 ] || grep -q 'DeviceNotFound' "$ERR"; then
+            az iot hub device-identity create --hub-name "$HUB" --device-id "$DEVICE" \
+              --auth-type login -o none >/dev/null
+            echo "device $DEVICE: created"
+          else
+            echo "az iot hub device-identity show failed (exit $RC), and not because the device is missing:" >&2
+            cat "$ERR" >&2
+            exit 1
+          fi
+
+      # The bearer token and the simulated device's connection string are each
+      # fetched, masked and used inside this one step, so neither ever
       # reaches $GITHUB_ENV, a step output, or another step's process.
+      # Both the full connection string and its SharedAccessKey value are
+      # masked before the suite starts.
       - name: Run the live acceptance suite
         env:
           ACCEPTANCE_BASE_URL: https://${{ needs.deploy.outputs.hostname }}/api
           AUDIENCE: ${{ needs.deploy.outputs.audience }}
+          HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
         run: |
           set -euo pipefail
+          SIMDEVICE_CONNECTION_STRING="$(az iot hub device-identity connection-string show \
+            --hub-name "$HUB" --device-id "$DEVICE" --auth-type login \
+            --query connectionString -o tsv)"
+          if [ -z "$SIMDEVICE_CONNECTION_STRING" ]; then
+            echo "az returned no connection string for device $DEVICE." >&2
+            exit 1
+          fi
+          echo "::add-mask::${SIMDEVICE_CONNECTION_STRING}"
+          SIMDEVICE_KEY="$(printf '%s' "$SIMDEVICE_CONNECTION_STRING" | tr ';' '\n' | sed -n 's/^SharedAccessKey=//p')"
+          if [ -z "$SIMDEVICE_KEY" ]; then
+            echo "The connection string for device $DEVICE has no SharedAccessKey." >&2
+            exit 1
+          fi
+          echo "::add-mask::${SIMDEVICE_KEY}"
+          unset SIMDEVICE_KEY
+          export SIMDEVICE_CONNECTION_STRING
+          export ACCEPTANCE_SIM_DEVICE_ID="$DEVICE"
+          export ACCEPTANCE_SIMDEVICE_BIN="$GITHUB_WORKSPACE/apps/data-pusher/dist/simdevice"
           ACCEPTANCE_BEARER_TOKEN="$(az account get-access-token --scope "${AUDIENCE}/.default" --query accessToken -o tsv)"
           echo "::add-mask::${ACCEPTANCE_BEARER_TOKEN}"
           if [ -z "$ACCEPTANCE_BEARER_TOKEN" ]; then
@@ -319,7 +395,8 @@ jobs:
           export ACCEPTANCE_BEARER_TOKEN
           npx nx run api:acceptance 2>&1 | tee "$RUNNER_TEMP/acceptance.log"
 
-      # Proof results and the RU-per-route table, also in the run summary.
+      # Proof results, METRIC lines and the RU-per-route table, also in the
+      # run summary.
       - name: Write the acceptance summary
         if: always()
         env:
@@ -334,10 +411,11 @@ jobs:
             echo
             if [ -s "$LOG" ]; then
               echo '```'
-              # Proof lines, then the RU table through the totals line. Strip
+              # Proof lines, METRIC lines (e.g. `METRIC roundtrip-ms 2140`),
+              # then the RU table through the totals line. Strip
               # terminal colour codes so the summary renders cleanly.
               sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '
-                /^acceptance run / || /^(PASS|FAIL|SKIP) / { print; next }
+                /^acceptance run / || /^(PASS|FAIL|SKIP) / || /^METRIC / { print; next }
                 /^RU per route$/ { table = 1 }
                 table { print }
                 /^acceptance: / { table = 0 }
