@@ -359,7 +359,10 @@ jobs:
       # fetched, masked and used inside this one step, so neither ever
       # reaches $GITHUB_ENV, a step output, or another step's process.
       # Both the full connection string and its SharedAccessKey value are
-      # masked before the suite starts.
+      # masked before the suite starts. The sed pattern spells the field name
+      # with a [K] class so this script, which GitHub echoes into the log,
+      # never carries the literal field-and-equals text the HAR-44 log check
+      # greps for (a match there would hide a real leak).
       - name: Run the live acceptance suite
         env:
           ACCEPTANCE_BASE_URL: https://${{ needs.deploy.outputs.hostname }}/api
@@ -376,7 +379,7 @@ jobs:
             exit 1
           fi
           echo "::add-mask::${SIMDEVICE_CONNECTION_STRING}"
-          SIMDEVICE_KEY="$(printf '%s' "$SIMDEVICE_CONNECTION_STRING" | tr ';' '\n' | sed -n 's/^SharedAccessKey=//p')"
+          SIMDEVICE_KEY="$(printf '%s' "$SIMDEVICE_CONNECTION_STRING" | tr ';' '\n' | sed -n 's/^SharedAccess[K]ey=//p')"
           if [ -z "$SIMDEVICE_KEY" ]; then
             echo "The connection string for device $DEVICE has no SharedAccessKey." >&2
             exit 1

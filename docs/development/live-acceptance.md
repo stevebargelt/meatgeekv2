@@ -14,38 +14,42 @@ proof the ticket adds. You can also run it by hand, as below.
 
 ## What it checks today
 
-| Proof file                       | Proof                                                                          | Expects                                                                                                                                   |
-| -------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `cooks-unauthenticated.proof.ts` | `GET /cooks` with no `Authorization` header                                    | `401`                                                                                                                                     |
-| `cooks-lifecycle.proof.ts`       | `POST /devices` registering `acceptance-cook-<runId>` with a run-unique name   | `201`; the device id is the one sent                                                                                                      |
-|                                  | `POST /cooks` with a new UUID `id` on `acceptance-cook-<runId>`                | `2xx`; body is an api-interfaces `Cook` with no Cosmos system property (`_rid`, `_self`, `_etag`, `_attachments`, `_ts`), status `active` |
-|                                  | `GET /cooks`                                                                   | the new cook is listed (pages via `continuationToken`)                                                                                    |
-|                                  | `GET /cooks?deviceId=<device>&status=active`                                   | `200`; returns exactly the new cook, `active`, on that device, in one page                                                                |
-|                                  | `POST /cooks/{cookId}/stop`                                                    | `2xx`; the cook is `completed` with an `endTime`                                                                                          |
-|                                  | `GET /cooks`                                                                   | the cook reads back `completed`                                                                                                           |
-|                                  | `GET /cooks?deviceId=<device>&status=active`                                   | `200`; returns no cook after the stop                                                                                                     |
-|                                  | `POST /cooks` on the unregistered `acceptance-unowned-<runId>`                 | `403`; `error` is `DEVICE_NOT_OWNED`                                                                                                      |
-|                                  | `GET /cooks?deviceId=acceptance-unowned-<runId>`                               | `200`; returns no cook (the refused start wrote nothing)                                                                                  |
-| `devices.proof.ts`               | `POST /devices` registering `acceptance-<runId>` with a run-unique name        | `201`; body is an api-interfaces `Device` with the id and name sent, `isActive: true`, `connectionStatus: unknown`                        |
-|                                  | `GET /devices/{id}` for the registered device                                  | `200`; the same device, owned by the registering caller                                                                                   |
-|                                  | `GET /devices`                                                                 | `200`; the device is listed, and every listed device has the caller as owner                                                              |
-|                                  | `PATCH /devices/{id}` with a new `location`                                    | `200`; the device carries the new location                                                                                                |
-|                                  | `GET /devices/{id}` for the registered device                                  | `200`; the patched location reads back                                                                                                    |
-|                                  | `GET /devices/<random uuid>`                                                   | `404`                                                                                                                                     |
-| `recipes.proof.ts`               | `POST /recipes` named `Acceptance recipe <runId>`, `meatType: pork`            | `201`; body is an api-interfaces `Recipe` with the name sent, a server-generated UUID `id`, and `createdAt` equal to `updatedAt`          |
-|                                  | `GET /recipes/{id}` for the new recipe                                         | `200`; the same recipe, owned by the creating caller                                                                                      |
-|                                  | `GET /recipes`                                                                 | `200`; the recipe is listed, and every listed recipe has the caller as owner                                                              |
-|                                  | `PATCH /recipes/{id}` with a new `description`                                 | `200`; the recipe carries the new description; `createdAt` is unchanged                                                                   |
-|                                  | `GET /recipes/{id}` for the new recipe                                         | `200`; the patched description reads back                                                                                                 |
-|                                  | `DELETE /recipes/{id}` for the new recipe                                      | `204`                                                                                                                                     |
-|                                  | `GET /recipes/{id}` for the deleted recipe                                     | `404` with `error: RECIPE_NOT_FOUND`                                                                                                      |
-| `temperatures.proof.ts`          | `POST /devices` registering `acceptance-temp-<runId>` with a run-unique name   | `201`                                                                                                                                     |
-|                                  | `GET /temperatures/current/acceptance-temp-<runId>`                            | `404` with `error: NO_READINGS` (owned, but nothing has been routed for it)                                                               |
-|                                  | `GET /temperatures/current/acceptance-temp-unowned-<runId>` (never registered) | `404` with `error: DEVICE_NOT_FOUND`                                                                                                      |
-|                                  | `GET /temperatures/history?deviceId=acceptance-temp-<runId>`                   | `200`; exactly `{ readings: [], total: 0, offset: 0, limit: 100, hasMore: false }` (owned, nothing routed)                                |
-|                                  | `GET /temperatures/history?deviceId=acceptance-temp-unowned-<runId>`           | `404` with `error: DEVICE_NOT_FOUND`                                                                                                      |
-| `users.proof.ts`                 | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`      | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id  |
-|                                  | `GET /users/me`                                                                | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                 |
+| Proof file                       | Proof                                                                                                            | Expects                                                                                                                                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cooks-unauthenticated.proof.ts` | `GET /cooks` with no `Authorization` header                                                                      | `401`                                                                                                                                                                                   |
+| `cooks-lifecycle.proof.ts`       | `POST /devices` registering `acceptance-cook-<runId>` with a run-unique name                                     | `201`; the device id is the one sent                                                                                                                                                    |
+|                                  | `POST /cooks` with a new UUID `id` on `acceptance-cook-<runId>`                                                  | `2xx`; body is an api-interfaces `Cook` with no Cosmos system property (`_rid`, `_self`, `_etag`, `_attachments`, `_ts`), status `active`                                               |
+|                                  | `GET /cooks`                                                                                                     | the new cook is listed (pages via `continuationToken`)                                                                                                                                  |
+|                                  | `GET /cooks?deviceId=<device>&status=active`                                                                     | `200`; returns exactly the new cook, `active`, on that device, in one page                                                                                                              |
+|                                  | `POST /cooks/{cookId}/stop`                                                                                      | `2xx`; the cook is `completed` with an `endTime`                                                                                                                                        |
+|                                  | `GET /cooks`                                                                                                     | the cook reads back `completed`                                                                                                                                                         |
+|                                  | `GET /cooks?deviceId=<device>&status=active`                                                                     | `200`; returns no cook after the stop                                                                                                                                                   |
+|                                  | `POST /cooks` on the unregistered `acceptance-unowned-<runId>`                                                   | `403`; `error` is `DEVICE_NOT_OWNED`                                                                                                                                                    |
+|                                  | `GET /cooks?deviceId=acceptance-unowned-<runId>`                                                                 | `200`; returns no cook (the refused start wrote nothing)                                                                                                                                |
+| `devices.proof.ts`               | `POST /devices` registering `acceptance-<runId>` with a run-unique name                                          | `201`; body is an api-interfaces `Device` with the id and name sent, `isActive: true`, `connectionStatus: unknown`                                                                      |
+|                                  | `GET /devices/{id}` for the registered device                                                                    | `200`; the same device, owned by the registering caller                                                                                                                                 |
+|                                  | `GET /devices`                                                                                                   | `200`; the device is listed, and every listed device has the caller as owner                                                                                                            |
+|                                  | `PATCH /devices/{id}` with a new `location`                                                                      | `200`; the device carries the new location                                                                                                                                              |
+|                                  | `GET /devices/{id}` for the registered device                                                                    | `200`; the patched location reads back                                                                                                                                                  |
+|                                  | `GET /devices/<random uuid>`                                                                                     | `404`                                                                                                                                                                                   |
+| `recipes.proof.ts`               | `POST /recipes` named `Acceptance recipe <runId>`, `meatType: pork`                                              | `201`; body is an api-interfaces `Recipe` with the name sent, a server-generated UUID `id`, and `createdAt` equal to `updatedAt`                                                        |
+|                                  | `GET /recipes/{id}` for the new recipe                                                                           | `200`; the same recipe, owned by the creating caller                                                                                                                                    |
+|                                  | `GET /recipes`                                                                                                   | `200`; the recipe is listed, and every listed recipe has the caller as owner                                                                                                            |
+|                                  | `PATCH /recipes/{id}` with a new `description`                                                                   | `200`; the recipe carries the new description; `createdAt` is unchanged                                                                                                                 |
+|                                  | `GET /recipes/{id}` for the new recipe                                                                           | `200`; the patched description reads back                                                                                                                                               |
+|                                  | `DELETE /recipes/{id}` for the new recipe                                                                        | `204`                                                                                                                                                                                   |
+|                                  | `GET /recipes/{id}` for the deleted recipe                                                                       | `404` with `error: RECIPE_NOT_FOUND`                                                                                                                                                    |
+| `temperatures.proof.ts`          | `POST /devices` registering `acceptance-temp-<runId>` with a run-unique name                                     | `201`                                                                                                                                                                                   |
+|                                  | `GET /temperatures/current/acceptance-temp-<runId>`                                                              | `404` with `error: NO_READINGS` (owned, but nothing has been routed for it)                                                                                                             |
+|                                  | `GET /temperatures/current/acceptance-temp-unowned-<runId>` (never registered)                                   | `404` with `error: DEVICE_NOT_FOUND`                                                                                                                                                    |
+|                                  | `GET /temperatures/history?deviceId=acceptance-temp-<runId>`                                                     | `200`; exactly `{ readings: [], total: 0, offset: 0, limit: 100, hasMore: false }` (owned, nothing routed)                                                                              |
+|                                  | `GET /temperatures/history?deviceId=acceptance-temp-unowned-<runId>`                                             | `404` with `error: DEVICE_NOT_FOUND`                                                                                                                                                    |
+| `telemetry-roundtrip.proof.ts`   | `POST /devices` registering the simulated device (`ACCEPTANCE_SIM_DEVICE_ID`) as `Simulated smoker (acceptance)` | `201`, or `409 DEVICE_CONFLICT` then `GET /devices/{id}` `200` (already the caller's); `409` then `404` fails (someone else owns it)                                                    |
+|                                  | `simdevice --count 1` (one reading through IoT Hub, as the simulated device)                                     | exit `0` and exactly one JSON line on stdout, with a `timestamp` and `sentAt`                                                                                                           |
+|                                  | `GET /temperatures/current/<simulated device>`, every 1 s for at most 120 s                                      | a `200` whose `timestamp` is the sent one (`404 NO_READINGS` or an older reading: poll again); `deviceId` is the device, `grillTemp` a number, no `_` key; prints `METRIC roundtrip-ms` |
+|                                  | `GET /temperatures/history?deviceId=<simulated device>&startTime=<sentAt − 5 min>`                               | `200`; the sent reading is in `readings` (paging with `offset` while `hasMore`), with the same field checks                                                                             |
+| `users.proof.ts`                 | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`                                        | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id                                                |
+|                                  | `GET /users/me`                                                                                                  | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                                                               |
 
 Every `devices.proof.ts`, `recipes.proof.ts` and `users.proof.ts` response body is also checked for
 keys starting with `_` at any depth (Cosmos system properties).
@@ -73,9 +77,26 @@ collide on device id or on the `(userId, name)` pair. The cooks proof's last
 two steps use `acceptance-unowned-<runId>`, which is never registered.
 
 `temperatures.proof.ts` registers its own device, `acceptance-temp-<runId>`, and
-is read-only otherwise: nothing in the suite writes telemetry (only IoT Hub
-does), so a fresh device always answers `NO_READINGS` for its current reading
-and an empty first page for its history.
+is read-only otherwise. Telemetry only ever arrives through IoT Hub, and the
+suite sends it only as the simulated device, so a fresh `acceptance-temp-<runId>`
+device keeps answering `NO_READINGS` for its current reading and an empty first
+page for its history: that proof keeps proving the empty answers.
+
+`telemetry-roundtrip.proof.ts` (HAR-44, MG-79's live criterion) is the one proof
+that writes telemetry. It sends one reading through IoT Hub the way the Pi does,
+by running `simdevice` (`apps/data-pusher`, see its
+[README](../../apps/data-pusher/README.md#simdevice-a-software-device-for-dev)),
+which builds the payload and message properties with data-pusher's own code and
+sends as the standing simulated device `meatgeek-dev-simulated-smoker`. The
+reading travels hub → route → Cosmos `temperatures` and is read back through
+both temperatures routes, matched on the body `timestamp` simdevice reports.
+Unlike the run-unique devices, this device is the same on every run: the first
+run registers it to the acceptance identity (`201`), later runs get
+`409 DEVICE_CONFLICT` and confirm with `GET /devices/{id}` (which answers `404`
+for a device someone else owns) that it is still the caller's. Its readings are
+not deleted; they expire on the `temperatures` container TTL. The history
+window opens five minutes before `sentAt`: the routes window on the hub's
+enqueued time, which is never before the send.
 
 `recipes.proof.ts` cleans up after itself: it creates one recipe named
 `Acceptance recipe <runId>`, and its sixth step deletes it. If an earlier step
@@ -114,21 +135,49 @@ RU per route
 acceptance: 3 passed, 1 failed, 1 skipped
 ```
 
+A `simdevice` run is one `EXEC` line, with its exit code, duration and the
+number of JSON lines it printed:
+
+```
+RUN  telemetry round-trip › simdevice --count 1 sends one reading through IoT Hub
+  EXEC   simdevice --count 1            exit 0  1840 ms  1 message(s)
+PASS telemetry round-trip › simdevice --count 1 sends one reading through IoT Hub
+RUN  telemetry round-trip › GET /temperatures/current/{deviceId} returns the sent reading
+  GET    /temperatures/current/{deviceId} 404    212 ms  RU 3.86
+  GET    /temperatures/current/{deviceId} 200    198 ms  RU 3.86
+METRIC roundtrip-ms 2140
+PASS telemetry round-trip › GET /temperatures/current/{deviceId} returns the sent reading
+```
+
+`METRIC <name> <value>` lines report a measurement, not a pass/fail. Today there
+is one: `METRIC roundtrip-ms <n>`, the milliseconds from simdevice's `sentAt`
+(IoT Hub acknowledged the publish) to the `GET /temperatures/current` response
+that first carried the reading. It is the device → hub → route → Cosmos → API
+latency, overstated by up to one poll interval (1 s). There is no threshold on
+it; the number is the deliverable. The CI job copies every line starting with
+`METRIC ` into the run summary. Proofs print one with `api.metric(name, value)`.
+
 Any failed proof makes the process exit non-zero, and the `FAIL` line names the
-proof, the route, and the status received. The bearer token is never printed:
-the suite logs no request or response headers or bodies (only a bare upper-case
-`error` code from an error body), and masks the token value in every line as a
-second guard.
+proof, the route and the status received (or `simdevice → exit <code>` when
+simdevice was the last thing it ran). Secrets are never printed: the suite logs
+no request or response headers or bodies (only a bare upper-case `error` code
+from an error body), never prints simdevice's stdout or stderr raw (stdout is
+parsed as JSON lines; of stderr only the first line is reported, on failure),
+and masks in every line, as a second guard, the bearer token, the
+`SIMDEVICE_CONNECTION_STRING` value, and its `SharedAccessKey` value.
 
 ## Running it locally against dev
 
-The suite takes exactly two inputs, both from the environment. If either is
-missing it fails at once and names the variable; it never skips silently.
+The suite takes five inputs, all from the environment. If any is missing it
+fails at once and names the variable; it never skips silently.
 
-| Variable                  | Value                                                                  |
-| ------------------------- | ---------------------------------------------------------------------- |
-| `ACCEPTANCE_BASE_URL`     | The API root, including `/api`, e.g. `https://<function-app-host>/api` |
-| `ACCEPTANCE_BEARER_TOKEN` | An Entra access token for the API audience                             |
+| Variable                      | Value                                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `ACCEPTANCE_BASE_URL`         | The API root, including `/api`, e.g. `https://<function-app-host>/api`                                 |
+| `ACCEPTANCE_BEARER_TOKEN`     | An Entra access token for the API audience                                                             |
+| `SIMDEVICE_CONNECTION_STRING` | The simulated device's IoT Hub connection string. Only the runner reads it; simdevice inherits it      |
+| `ACCEPTANCE_SIM_DEVICE_ID`    | The simulated device's id, `meatgeek-dev-simulated-smoker` in dev                                      |
+| `ACCEPTANCE_SIMDEVICE_BIN`    | Path to the built `simdevice` binary, e.g. `$PWD/apps/data-pusher/dist/simdevice` (absolute is safest) |
 
 ```bash
 az login   # once, as a user the dev tenant knows
@@ -141,17 +190,45 @@ export ACCEPTANCE_BEARER_TOKEN=$(az account get-access-token \
   --scope api://348570b2-44e5-41a6-ad15-2a7032366130/access_as_user \
   --query accessToken -o tsv)
 
+# The telemetry round-trip: build simdevice (needs Go) and point at it.
+make -C apps/data-pusher build
+export ACCEPTANCE_SIMDEVICE_BIN="$PWD/apps/data-pusher/dist/simdevice"
+export ACCEPTANCE_SIM_DEVICE_ID=meatgeek-dev-simulated-smoker
+
+# The device credential, straight into the environment. Needs the azure-iot
+# extension (az extension add --name azure-iot) and IoT Hub Registry
+# Contributor on the dev hub for your az login.
+HUB_HOST=$(az iot hub list -g meatgeek-v2-dev-rg --query '[0].properties.hostName' -o tsv)
+export SIMDEVICE_CONNECTION_STRING=$(az iot hub device-identity connection-string show \
+  --hub-name "$HUB_HOST" --device-id "$ACCEPTANCE_SIM_DEVICE_ID" --auth-type login \
+  --query connectionString -o tsv)
+
 npx nx run api:acceptance
 ```
+
+Never paste the connection string into a file (`.env`, a script, a ticket):
+it is a live device key. Keep it in your shell's environment and let it go
+with the shell. `--auth-type login` makes `az` use your Entra role on the hub
+(`IoT Hub Registry Contributor`) rather than hub keys; without that role the
+fetch fails and the run stops at once, naming `SIMDEVICE_CONNECTION_STRING`.
+The device must already exist; the CI job creates it if it does not (see
+[CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)), so in practice it
+does.
 
 The token is a delegated token for the `access_as_user` scope on the dev API
 registration, which the dev Function App's Easy Auth accepts (see
 [Authentication](../api/authentication.md)). Cooks written by the run land in
-**your** user's partition.
+**your** user's partition. So does the simulated device's registration: if the
+CI identity already owns `meatgeek-dev-simulated-smoker`, the round-trip's first
+step fails for you (`409` then `404`), which is that proof working as designed.
+Point `ACCEPTANCE_SIM_DEVICE_ID` and the connection string at a device of your
+own to run it by hand.
 
 In CI the caller is the dev app-publish identity instead: the `acceptance` job
 mints an app-only token for `<audience>/.default`, so its cooks land in that
-service principal's partition. The proof results and the RU-per-route table
+service principal's partition. The same job builds simdevice, ensures the
+simulated device exists and hands the suite its masked connection string (see
+[CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)). The proof results and the RU-per-route table
 also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
 calls the live system.
 
@@ -164,12 +241,13 @@ apps/api/acceptance/
 ├── lib/
 │   ├── checks.ts               # shared response checks (system properties, error code)
 │   ├── proof.ts                # the proof contract: defineProofs, AcceptanceApi
-│   └── runner.ts               # env check, HTTP client, output, RU table, exit code
+│   └── runner.ts               # env check, HTTP client, simdevice, redaction, output, RU table
 ├── proofs/
 │   ├── cooks-lifecycle.proof.ts
 │   ├── cooks-unauthenticated.proof.ts
 │   ├── devices.proof.ts
 │   ├── recipes.proof.ts
+│   ├── telemetry-roundtrip.proof.ts
 │   ├── temperatures.proof.ts
 │   └── users.proof.ts
 └── acceptance-runner.spec.ts   # self-test, runs under `nx test api`
@@ -177,14 +255,20 @@ apps/api/acceptance/
 
 - `npx nx test api` never calls a live system. The api unit-test config does not
   match `live.acceptance.ts`. It does run `acceptance-runner.spec.ts`, which
-  starts an in-process stub HTTP server imitating the cooks, devices, temperatures and users routes
-  and drives the real runner and the real proof files against it: a passing
-  stub, a wrong status on each route, a missing RU header on each route, missing
-  environment variables, and a server that echoes the token back.
+  starts an in-process stub HTTP server imitating the cooks, devices, recipes,
+  temperatures and users routes and drives the real runner and the real proof
+  files against it: a passing stub, a wrong status on each route, a missing RU
+  header on each route, missing environment variables, and a server that echoes
+  the token back. `simdevice` is replaced by a small Node script the test writes
+  to a temp dir: it prints one JSON line, exits 1, or prints the connection
+  string to stdout and stderr; the stub makes the reading readable after a few
+  polls, never, or registers the simulated device to someone else. The poll
+  interval and cap are `ROUNDTRIP_POLL` in the proof file, which the self-test
+  shortens; there is no environment variable for them.
 - The acceptance code is not part of the API build; `dist/apps/api` contains
   none of it.
-- It uses only Node built-ins (`fetch`, `http`, `crypto`); no extra
-  dependencies.
+- It uses only Node built-ins (`fetch`, `http`, `crypto`, `child_process`); no
+  extra dependencies.
 
 ## Adding a proof for your ticket
 
@@ -226,6 +310,11 @@ apps/api/acceptance/
      `check` can narrow types.
    - Name synthetic data with `api.runId` (e.g. `acceptance-${api.runId}`) so
      reruns never collide. Do not touch real devices or other users' data.
+   - To send telemetry, `api.runSimDevice(['--count', '1'])` runs simdevice as
+     `api.simulatedDeviceId` and resolves to its exit code, its stdout as parsed
+     JSON lines, and its first stderr line, redacted. A proof never reads
+     `process.env` for the device credential; only the runner does.
+   - `api.metric('roundtrip-ms', 2140)` prints `METRIC roundtrip-ms 2140`.
 
 3. **Make the stub serve it.** The self-test runs every proof file against the
    stub in `acceptance-runner.spec.ts`. If your proof calls a route the stub does

@@ -1,3 +1,4 @@
+import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { readdirSync } from 'fs';
 import { join } from 'path';
@@ -11,6 +12,7 @@ import {
   ProofFailure,
   ProofGroup,
   RequestOptions,
+  SimDeviceRun,
 } from './proof';
 
 /**
@@ -19,13 +21,30 @@ import {
  * caller whose token is ACCEPTANCE_BEARER_TOKEN, and reports per request and
  * per route. It never prints the token or any header carrying it: every output
  * line passes through a redactor that masks the token value as well.
+ *
+ * HAR-44: it also runs `simdevice` (ACCEPTANCE_SIMDEVICE_BIN) for proofs, as the
+ * simulated device ACCEPTANCE_SIM_DEVICE_ID. The device credential,
+ * SIMDEVICE_CONNECTION_STRING, is read here and nowhere else: the child inherits
+ * it through its environment, never its command line, and the redactor masks
+ * both the whole connection string and its SharedAccessKey value.
  */
 
-export const REQUIRED_ENV = ['ACCEPTANCE_BASE_URL', 'ACCEPTANCE_BEARER_TOKEN'] as const;
+export const REQUIRED_ENV = [
+  'ACCEPTANCE_BASE_URL',
+  'ACCEPTANCE_BEARER_TOKEN',
+  'SIMDEVICE_CONNECTION_STRING',
+  'ACCEPTANCE_SIM_DEVICE_ID',
+  'ACCEPTANCE_SIMDEVICE_BIN',
+] as const;
 
 export const PROOFS_DIR = join(__dirname, '..', 'proofs');
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/** A `simdevice` run longer than this is killed. One reading takes seconds. */
+const SIMDEVICE_TIMEOUT_MS = 120_000;
+
+const REDACTED = '[redacted]';
 
 export interface RunOptions {
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -95,6 +114,74 @@ function errorCodeOf(body: unknown): string | undefined {
   return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : undefined;
 }
 
+/**
+ * A function masking every secret in a line: the bearer token, the device
+ * connection string, and its SharedAccessKey value (with and without the
+ * `SharedAccessKey=` prefix). Longest first, so a whole connection string is
+ * one mask rather than a mangled partial.
+ */
+export function makeRedactor(token: string, connectionString: string): (line: string) => string {
+  const key = connectionString
+    .split(';')
+    .map(part => part.trim())
+    .find(part => /^SharedAccessKey=/i.test(part))
+    ?.slice('SharedAccessKey='.length);
+  const secrets = [token, connectionString, ...(key ? [`SharedAccessKey=${key}`, key] : [])]
+    .filter(secret => secret.length > 0)
+    .sort((a, b) => b.length - a.length);
+  return line => secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line);
+}
+
+/** Run `bin` with `args`, reducing its output to a {@link SimDeviceRun}. */
+function runChild(
+  bin: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  redact: (line: string) => string
+): Promise<{ readonly run: SimDeviceRun; readonly durationMs: number }> {
+  return new Promise((resolve, reject) => {
+    const started = performance.now();
+    // stdio is piped, never inherited: nothing the child prints reaches the log raw.
+    const child = spawn(bin, [...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    const timer = setTimeout(() => child.kill('SIGKILL'), SIMDEVICE_TIMEOUT_MS);
+    child.on('error', error => {
+      clearTimeout(timer);
+      const code = (error as NodeJS.ErrnoException).code;
+      reject(new Error(`simdevice could not be started${code ? ` (${code})` : ''}`));
+    });
+    child.on('close', exitCode => {
+      clearTimeout(timer);
+      const messages: unknown[] = [];
+      let unparsedLines = 0;
+      for (const line of Buffer.concat(stdout).toString('utf8').split('\n')) {
+        if (line.trim() === '') continue;
+        try {
+          messages.push(JSON.parse(line));
+        } catch {
+          unparsedLines += 1;
+        }
+      }
+      const first = Buffer.concat(stderr)
+        .toString('utf8')
+        .split('\n')
+        .find(line => line.trim() !== '');
+      resolve({
+        run: {
+          exitCode,
+          messages,
+          unparsedLines,
+          stderrFirstLine: first === undefined ? undefined : redact(first.trim()),
+        },
+        durationMs: Math.round(performance.now() - started),
+      });
+    });
+  });
+}
+
 export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   const env = options.env;
   const missing = REQUIRED_ENV.filter(name => !env[name] || env[name]?.trim() === '');
@@ -108,7 +195,11 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
 
   const token = (env['ACCEPTANCE_BEARER_TOKEN'] as string).trim();
   const rawBaseUrl = (env['ACCEPTANCE_BASE_URL'] as string).trim();
-  const write = (line: string) => options.write(line.split(token).join('[redacted]'));
+  const connectionString = (env['SIMDEVICE_CONNECTION_STRING'] as string).trim();
+  const simulatedDeviceId = (env['ACCEPTANCE_SIM_DEVICE_ID'] as string).trim();
+  const simdeviceBin = (env['ACCEPTANCE_SIMDEVICE_BIN'] as string).trim();
+  const redact = makeRedactor(token, connectionString);
+  const write = (line: string) => options.write(redact(line));
 
   let baseUrl: string;
   try {
@@ -136,15 +227,55 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   /** The request in flight for the current proof, so an unexpected throw
    *  (network error, timeout, bad JSON) is still attributed to a route. */
   let lastRequest: { method: HttpMethod; route: string; status?: number } | undefined;
+  /** Set while a proof's last action was a simdevice run, for the same reason. */
+  let lastExec: { exitCode?: number | null } | undefined;
+
+  /** `simdevice → exit N` when the proof's last action was a simdevice run.
+   *  (A function, so the compiler does not narrow lastExec across `await`.) */
+  const execWhere = (): string | undefined => {
+    if (!lastExec) return undefined;
+    const { exitCode } = lastExec;
+    return `simdevice → ${exitCode === undefined ? 'not started' : `exit ${exitCode ?? 'killed'}`}`;
+  };
+
+  // The child gets the runner's own environment for PATH and tracing, plus the
+  // device credential; never the bearer token, which it has no use for.
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    SIMDEVICE_CONNECTION_STRING: connectionString,
+  };
+  delete childEnv['ACCEPTANCE_BEARER_TOKEN'];
 
   const api: AcceptanceApi = {
     runId,
+    simulatedDeviceId,
+
+    async runSimDevice(args: readonly string[]): Promise<SimDeviceRun> {
+      lastRequest = undefined;
+      lastExec = {};
+      const { run, durationMs } = await runChild(simdeviceBin, args, childEnv, redact);
+      lastExec.exitCode = run.exitCode;
+      write(
+        `  ${'EXEC'.padEnd(6)} ${`simdevice ${args.join(' ')}`.padEnd(30)}` +
+          ` ${`exit ${run.exitCode ?? 'killed'}`.padEnd(7)} ${`${durationMs} ms`.padStart(6)}` +
+          `  ${run.messages.length} message(s)`
+      );
+      return run;
+    },
+
+    metric(name: string, value: number) {
+      if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || !Number.isFinite(value)) {
+        throw new Error(`invalid metric ${JSON.stringify(name)} ${value}`);
+      }
+      write(`METRIC ${name} ${value}`);
+    },
 
     async request<T>(request: RequestOptions): Promise<AcceptanceResponse<T>> {
       const authenticated = request.authenticated ?? true;
       const expectCharge = request.expectRequestCharge ?? true;
       const route = request.route ?? request.path.split('?')[0];
       lastRequest = { method: request.method, route };
+      lastExec = undefined;
 
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (authenticated) {
@@ -243,7 +374,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     try {
       proofs = group.create();
     } catch (error) {
-      const line = `FAIL ${group.name} — could not create proofs: ${describeError(error)}`;
+      const line = redact(`FAIL ${group.name} — could not create proofs: ${describeError(error)}`);
       write(line);
       failures.push(line);
       continue;
@@ -259,6 +390,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       }
 
       lastRequest = undefined;
+      lastExec = undefined;
       write(`RUN  ${label}`);
       try {
         await proof.run(api);
@@ -269,10 +401,10 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
         const at = error instanceof ProofFailure && error.response ? error.response : lastRequest;
         const where = at
           ? `${at.method} ${at.route} → ${at.status === undefined ? 'no response' : at.status}`
-          : 'before any request';
-        const line = `FAIL ${label} — ${where}: ${describeError(error)}`;
+          : (execWhere() ?? 'before any request');
+        const line = redact(`FAIL ${label} — ${where}: ${describeError(error)}`);
         write(line);
-        failures.push(line.split(token).join('[redacted]'));
+        failures.push(line);
       }
     }
   }
