@@ -1,4 +1,4 @@
-// MeatGeek V2 — LikeC4 prototype (first cut).
+// MeatGeek V2 — LikeC4 model. Checked by `npm run check` (likec4 validate + scripts/check-honesty.mjs).
 
 specification {
   element actor {
@@ -81,4 +81,7 @@ specification {
   deploymentNode host
   deploymentNode resourceGroup
   deploymentNode saas
+  deploymentNode runner {
+    notation 'CI runner (GitHub Actions)'
+  }
 }

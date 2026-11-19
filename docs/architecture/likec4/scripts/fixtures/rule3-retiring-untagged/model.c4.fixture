@@ -1,0 +1,6 @@
+// Violates rule 3: a relationship of kind retiring without the #retiring tag.
+model {
+  a = box 'A' { #live }
+  b = box 'B' { #retiring }
+  a -[retiring]-> b 'untagged retiring'
+}

@@ -1,0 +1,8 @@
+{
+  "exit": 1,
+  "count": 1,
+  "includes": [
+    "rule 1: view index edge p -> q",
+    "touches #decided but draws relationship p.c -[plain]-> q"
+  ]
+}

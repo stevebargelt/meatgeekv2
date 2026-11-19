@@ -1,0 +1,38 @@
+// Passes: decided and not-built work is drawn with its own kinds; a #decided element appears
+// in a flow, and an unbacked step touches it, only in a Target view; and a plain edge to a
+// #notBuilt element is drawn only in deviceUpdates, which rule 1 exempts.
+model {
+  a = box 'A' { #live }
+  b = box 'B' { #live }
+  c = box 'C' { #decided }
+  d = box 'D' { #notBuilt }
+  r = box 'R' { #retiring }
+  x = box 'X' { #notBuilt }
+  a -> b 'live'
+  a -[event]-> b 'event'
+  a -[decided]-> c 'decided' { #decided }
+  a -[planned]-> d 'planned' { #notBuilt }
+  r -[retiring]-> b 'retiring' { #retiring }
+  a -> x 'plain, drawn only in exempt views'
+}
+views {
+  view index {
+    include *
+    exclude x
+  }
+  dynamic view flow {
+    a -> b 'live step'
+    r -> b 'retiring step'
+    a -> d 'planned step'
+  }
+  dynamic view flowTarget {
+    a -> c 'decided step'
+    c -> b 'unbacked step in a Target view'
+  }
+  view deviceUpdates {
+    include a, x
+  }
+  view updatesTarget {
+    include a, x
+  }
+}

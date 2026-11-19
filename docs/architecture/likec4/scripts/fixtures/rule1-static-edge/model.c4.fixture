@@ -1,0 +1,9 @@
+// Violates rule 1: a current-state view draws a plain (live) relationship to a #notBuilt element.
+model {
+  a = box 'A' { #live }
+  d = box 'D' { #notBuilt }
+  a -> d 'drawn as live'
+}
+views {
+  view index { include * }
+}

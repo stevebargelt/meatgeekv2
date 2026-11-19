@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "count": 1,
+  "includes": [
+    "rule 2: dynamic view flow step step-01 a -> c 'decided step': target c is tagged #decided"
+  ]
+}

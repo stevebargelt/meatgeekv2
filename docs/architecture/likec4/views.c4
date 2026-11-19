@@ -33,6 +33,7 @@ views {
     include *
     include edge.*, cloud.*, cloud.ingest.*, cloud.observability.*
     include pitmaster, smoker, entra
+    include delivery.simdevice
   }
 
   view edge of meatgeek.edge {
@@ -47,37 +48,62 @@ views {
     include *
     include ingest.*, observability.*
     include meatgeek.edge, meatgeek.mobile, meatgeek.web, entra
+    include delivery.simdevice, operator
   }
 
   view api of meatgeek.cloud.api {
     title 'Functions API'
-    description 'Every route is anonymous at the Functions runtime on purpose: Easy Auth has already validated the token.'
+    description '''
+      Every route is anonymous at the Functions runtime on purpose: Easy Auth (default-deny,
+      Return401) has already validated the token. The cook, device and temperature routes first
+      call `getDeviceOwnership`, one point read on `devices`. For a device the caller does not
+      own: cooks start/stop answer `403 DEVICE_NOT_OWNED` (no write, no event), `GET`/`PATCH
+      /devices/{id}` answer 404, and temperatures current/history answer `404 DEVICE_NOT_FOUND`.
+    '''
     include *
-    include meatgeek.cloud.data, meatgeek.cloud.realtime, entra, meatgeek.edge.pusher, meatgeek.cloud.observability.appinsights
+    include meatgeek.cloud.data.*, meatgeek.cloud.realtime, entra, meatgeek.edge.pusher, meatgeek.cloud.observability.appinsights
   }
 
   view data of meatgeek.cloud.data {
     title 'Cosmos DB'
-    description 'Five containers and who touches each.'
+    description '''
+      Five containers in one shared-throughput database, their partition keys, and who touches
+      each: `devices /id`, `temperatures /deviceId`, `cooks /userId`, `users /id`,
+      `recipes /userId`. The ownership check `getDeviceOwnership` is one point read on
+      `devices`. IoT Hub's `cosmos-storage-route` is the only writer of `temperatures`, with
+      the partition value taken from `{deviceid}`; its device-side writers are the Pi
+      data-pusher and the dev simulated device.
+    '''
     include *
-    include meatgeek.cloud.api.repos, meatgeek.cloud.ingest.iothub
+    include meatgeek.cloud.api.repos, meatgeek.cloud.api.ownership, meatgeek.cloud.ingest.iothub
+    include meatgeek.edge.pusher, delivery.simdevice
   }
 
   view ingest of meatgeek.cloud.ingest {
     title 'Ingest'
     include *
     include meatgeek.edge.pusher, meatgeek.cloud.data.temperatures, meatgeek.cloud.api.broadcast, meatgeek.cloud.realtime
+    include delivery.simdevice, delivery.acceptance
   }
 
   view observability of meatgeek.cloud.observability {
     title 'Observability'
+    description '''
+      The API exports straight to Application Insights at a 0.5 sampling ratio. The Go
+      services sample every span (`AlwaysSample`) and export OTLP/HTTP to the collector, which
+      is off by default (`enable_native_otlp = false`); with no `OTEL_EXPORTER_OTLP_ENDPOINT`
+      they export nothing. Four metric alerts and three activity-log alerts notify one action
+      group; the budgets email through their own `contact_emails`.
+    '''
     include *
     include meatgeek.cloud.api, meatgeek.edge.pusher, meatgeek.edge.controller
+    include meatgeek.cloud.ingest.iothub, meatgeek.cloud.data, meatgeek.cloud.realtime, operator
   }
 
   view pipeline of delivery {
     title 'Delivery pipeline'
     include *
+    include acceptance.*
     include team, meatgeek, entra
   }
 
@@ -96,24 +122,40 @@ views {
 
   dynamic view telemetry {
     title 'Flow: one temperature reading'
-    description 'Today. The storage path is live; the realtime path stops at Event Hub.'
+    description '''
+      Today. The storage path is live; the realtime path stops at Event Hub.
+      Two correlation axes ride on each reading. `correlation.id` is cook-scoped: it comes from
+      the `CorrelationContext.id` of the `cook_started` envelope (see `cookStart`), is held in
+      `correlationHolder` and is stamped on every message for the whole cook. `traceparent` is
+      per message, from the `publisher.publish` span; no Function reads it back.
+    '''
 
     smoker -> meatgeek.edge.controller 'grill and probe temperatures'
     meatgeek.edge.pusher.collector -> meatgeek.edge.controller 'GET get_status' {
-      notes 'Local HTTP poll of `/api/robots/MeatGeekBot/commands/get_status`.'
+      notes 'Local HTTP poll of `/api/robots/MeatGeekBot/commands/get_status`, every 5 s.'
     }
-    meatgeek.edge.pusher.session -> meatgeek.edge.pusher.collector 'active cook id, correlation id'
+    meatgeek.edge.pusher.session -> meatgeek.edge.pusher.collector 'active cook id, correlation id' {
+      notes '''
+        `cookId = cooksession.ActiveCookID()` and `queueRecord.Correlation = correlationHolder.Get()`.
+        Until the live SignalR path is proven (MG-24 AC5), the cook id comes from
+        `cooksession.Reconcile` against the REST API at startup.
+      '''
+    }
     meatgeek.edge.pusher.collector -> meatgeek.edge.pusher.queue 'enqueue'
     meatgeek.edge.pusher.queue -> meatgeek.edge.pusher.iot 'drain'
-    meatgeek.edge.pusher.iot -> meatgeek.cloud.ingest.iothub 'publish (MQTT)' {
+    meatgeek.edge.pusher.tracing -> meatgeek.edge.pusher.iot 'publisher.publish span, traceparent' {
+      notes 'Every message gets its own span and `traceparent` (W3C Trace Context), sampled always.'
+    }
+    meatgeek.edge.pusher.iot -> meatgeek.cloud.ingest.iothub 'publish (MQTT 8883, QoS 1)' {
       notes '''
-        Message properties carry `correlation.id` (cook-scoped) and the message id.
-        The SAS token is renewed five minutes before it expires.
+        Message properties: `messageId`, `$.ct=application/json`, `$.ce=utf-8`,
+        `correlation.id` (cook-scoped) and `traceparent` (per message).
+        Device SAS, renewed five minutes before it expires.
       '''
     }
     parallel {
       meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route' {
-        notes '**Live.** IoT Hub writes the document itself, by managed identity. No Function runs.'
+        notes '**Live.** IoT Hub writes the document itself, by managed identity, partition value from `{deviceid}`. No Function runs, so nothing reads `traceparent` back.'
       }
       meatgeek.cloud.ingest.iothub -> meatgeek.cloud.ingest.eventhub 'eventhub-realtime-route' {
         notes '**Dead end today.** The route delivers, but the API registers no Event Hub trigger, so nothing reads it. The decided design adds the consumer.'
@@ -129,7 +171,14 @@ views {
   dynamic view cookStart {
     variant sequence
     title 'Flow: start a cook (today)'
-    description 'POST /cooks as the code does it now. Steps 10 and 11, SignalR to the Pi, have never worked live (MG-29). See the decided design.'
+    description '''
+      POST /cooks as the code does it now. The SignalR steps to the Pi have never worked live:
+      the live path awaits the MG-24 SignalR Service bootstrap (AC5) and the Go client does not
+      speak the API negotiate handshake (MG-29). Until then `cooksession.Reconcile` against the
+      REST API at startup is the practical cook-id source (last step). See the decided design.
+      This is where the cook-scoped correlation axis starts: the `cook_started` envelope's
+      `CorrelationContext.id` becomes the `correlation.id` on every reading of the cook.
+    '''
 
     meatgeek.mobile -> meatgeek.cloud.api.easyauth 'POST /cooks + Entra token'
     meatgeek.cloud.api.easyauth -> entra 'validate token'
@@ -137,22 +186,29 @@ views {
     meatgeek.cloud.api.principal -> meatgeek.cloud.api.cooks 'userId = tid:oid' {
       notes 'Missing or incomplete header: 401, no default user.'
     }
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.repos 'does the caller own this device?'
-    meatgeek.cloud.api.repos -> meatgeek.cloud.data.devices 'point read'
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.repos 'create cook' {
-      notes 'A device that is not the caller\'s gets 403 `DEVICE_NOT_OWNED`: no write, no event.'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.ownership 'does the caller own this device?'
+    meatgeek.cloud.api.ownership -> meatgeek.cloud.data.devices 'point read' {
+      notes '`getDeviceOwnership`. A foreign or unregistered device gets 403 `DEVICE_NOT_OWNED`: no write, no event.'
     }
-    meatgeek.cloud.api.repos -> meatgeek.cloud.data.cooks 'insert'
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started' {
-      notes 'Sent only after the write succeeds. Delivery is scoped to the device.'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.repos 'create cook'
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.cooks 'insert, partition = caller userId'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started to userId = deviceId' {
+      notes '''
+        Sent only after the write succeeds, on hub `temperatureHub`, to `userId = deviceId`.
+        The envelope carries `correlation: CorrelationContext { id }`, taken from the request's
+        `X-Request-ID` or the invocation id.
+      '''
     }
     meatgeek.cloud.realtime -> meatgeek.edge.pusher.signalr 'cook_started' {
-      notes 'Being replaced by the device twin.'
+      notes 'Never proven live (MG-24 AC5). Being replaced by the device twin.'
       navigateTo cookStartTarget
     }
-    meatgeek.edge.pusher.signalr -> meatgeek.edge.pusher.session 'set active cook' {
-      notes 'From here every reading carries this cook id.'
+    meatgeek.edge.pusher.signalr -> meatgeek.edge.pusher.session 'set active cook and correlation.id' {
+      notes '`cooksession.Store.SetActiveCookID` and `correlationHolder.Set`. From here every reading carries this cook id and `correlation.id`.'
       navigateTo telemetry
+    }
+    meatgeek.edge.pusher.session -> meatgeek.cloud.api.cooks 'GET /cooks?deviceId&status=active' {
+      notes 'What actually sets the cook id today: `cooksession.Reconcile` on data-pusher startup.'
     }
   }
 
@@ -164,12 +220,18 @@ views {
     meatgeek.mobile -> meatgeek.cloud.api.easyauth 'GET /temperatures/history'
     meatgeek.cloud.api.easyauth -> meatgeek.cloud.api.principal 'X-MS-CLIENT-PRINCIPAL'
     meatgeek.cloud.api.principal -> meatgeek.cloud.api.temperatures 'userId'
-    meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'does the caller own this device?'
-    meatgeek.cloud.api.repos -> meatgeek.cloud.data.devices 'point read' {
-      notes 'Not owned or not found: 404 `DEVICE_NOT_FOUND`, about 1 RU.'
+    meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.ownership 'does the caller own this device?'
+    meatgeek.cloud.api.ownership -> meatgeek.cloud.data.devices 'point read' {
+      notes '`getDeviceOwnership`. Not owned or not found: 404 `DEVICE_NOT_FOUND`, about 1 RU.'
     }
     meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'one page of readings'
-    meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatures 'query, partition = deviceId'
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatures 'COUNT(1), then one page; partition = deviceId' {
+      notes '''
+        Every request pays a `COUNT(1)` over the device partition for `total`, and the page is
+        `OFFSET`/`LIMIT`, whose cost grows with the skip. Measured: see `telemetryProof`.
+      '''
+      navigateTo telemetryProof
+    }
   }
 
   // ---- Decided 2026-11-19, not built yet --------------------------------------
@@ -231,6 +293,64 @@ views {
     meatgeek.cloud.realtime -> meatgeek.mobile 'live temperature'
   }
 
+  dynamic view telemetryProof {
+    variant sequence
+    title 'Flow: live telemetry proof (dev acceptance)'
+    description '''
+      Every Deploy Dev App acceptance job proves the telemetry path end to end:
+      `telemetry-roundtrip.proof.ts`, then `telemetry-volume.proof.ts`. `simdevice` sends as
+      `meatgeek-dev-simulated-smoker` (MQTT 8883, device SAS, QoS 1, the data-pusher's own
+      publish code); no Function is in the write path.
+
+      Measured (single dev samples, not targets): `roundtrip-ms` 1211 (run 44603121177) and
+      1235 (run 44612029684); in run 44612029684, `history-total` 8700,
+      `history-ru-first-page` 11.95 RU (limit 100, offset 0), `history-ru-last-page` 24.12 RU
+      (limit 100, offset 8600), `history-ru-max-page` 238.26 RU (12 h window, limit 5000),
+      `topup-sent`/`topup-ms` 2175 / 109996 (~19.8 readings/s). `OFFSET` cost grows with the
+      skip, because Cosmos still reads the skipped readings, and every history request pays a
+      `COUNT(1)` over the device partition.
+    '''
+
+    delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices (meatgeek-dev-simulated-smoker)' {
+      notes 'Register or 409: 201 if new; 409 `DEVICE_CONFLICT` if already registered, then `GET /devices/{id}` must answer 200.'
+    }
+    delivery.acceptance.roundtrip -> delivery.simdevice 'simdevice --count 1'
+    delivery.simdevice -> meatgeek.cloud.ingest.iothub 'one reading, MQTT QoS 1' {
+      notes 'Properties `messageId`, `$.ct=application/json`, `$.ce=utf-8`, `traceparent`.'
+    }
+    meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route'
+    delivery.acceptance.roundtrip -> meatgeek.cloud.api.temperatures 'GET /temperatures/current/{id}' {
+      notes 'Polled every 1 s, 120 s cap, until it returns the sent reading. Prints `METRIC roundtrip-ms`: 1211 and 1235.'
+    }
+    meatgeek.cloud.api.temperatures -> meatgeek.cloud.data.temperatures 'newest reading by iothub-enqueuedtime'
+    delivery.acceptance.roundtrip -> meatgeek.cloud.api.temperatures 'GET /temperatures/history?startTime=...' {
+      notes 'The page holds the sent reading.'
+    }
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history?limit=1' {
+      notes 'Reads `total` for the simulated device.'
+    }
+    delivery.acceptance.volume -> delivery.simdevice 'simdevice --count N --inflight 32 --interval 50ms' {
+      notes 'Only if `total` is below 8,640 (12 h at one every 5 s). N = 8,640 - total + 60. Measured `topup-sent`/`topup-ms` 2175 / 109996, ~19.8 readings/s.'
+    }
+    delivery.simdevice -> meatgeek.cloud.ingest.iothub 'N readings, MQTT QoS 1'
+    meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route'
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history?limit=1, until total >= 8640' {
+      notes 'Polled every 10 s, 15 min cap. Measured `history-total` 8700.'
+    }
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'history, limit 100, offset 0' {
+      notes '`history-ru-first-page` 11.95 RU.'
+    }
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'history, limit 100, last offset' {
+      notes '`history-ru-last-page` 24.12 RU at offset 8600: `OFFSET` cost grows with the skip.'
+    }
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'history, 12 h window, limit 5000' {
+      notes '`history-ru-max-page` 238.26 RU for 5000 readings.'
+    }
+    meatgeek.cloud.api.temperatures -> meatgeek.cloud.data.temperatures 'COUNT(1) + OFFSET/LIMIT page, per request' {
+      notes 'Every history request pays a `COUNT(1)` over the device partition for its `total`. The job copies every `METRIC` line into the run summary.'
+    }
+  }
+
   dynamic view mergeToDeploy {
     title 'Flow: a merge reaches dev'
     description 'What happens after the Reviewer merges a pull request.'
@@ -250,5 +370,9 @@ views {
     delivery.deploy -> delivery.acceptance 'deployed = true'
     delivery.acceptance -> entra 'get app-only token'
     delivery.acceptance -> meatgeek 'live probes against the API'
+    delivery.acceptance -> delivery.simdevice 'spawns simdevice' {
+      notes 'Live telemetry round trip and volume proofs through IoT Hub.'
+      navigateTo telemetryProof
+    }
   }
 }

@@ -1,0 +1,14 @@
+// Violates rule 1: the drawn ends are untagged parents, but the edge stands for a plain
+// relationship from a #decided child the view does not show.
+model {
+  p = box 'P' {
+    c = box 'C' { #decided }
+  }
+  q = box 'Q' { #live }
+  p.c -> q 'live from a decided child'
+}
+views {
+  view index {
+    include p, q
+  }
+}

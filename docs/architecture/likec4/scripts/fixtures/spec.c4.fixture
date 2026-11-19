@@ -1,0 +1,12 @@
+// Shared by every fixture: the same tags and relationship kinds as ../../spec.c4.
+specification {
+  element box
+  tag live
+  tag notBuilt
+  tag decided
+  tag retiring
+  relationship planned
+  relationship decided
+  relationship retiring
+  relationship event
+}

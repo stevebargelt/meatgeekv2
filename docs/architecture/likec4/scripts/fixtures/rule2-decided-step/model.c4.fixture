@@ -1,0 +1,12 @@
+// Violates rule 2: a current-state flow (id not ending in Target) steps through a #decided
+// element, even along a correctly-kinded decided relationship.
+model {
+  a = box 'A' { #live }
+  c = box 'C' { #decided }
+  a -[decided]-> c 'decided' { #decided }
+}
+views {
+  dynamic view flow {
+    a -> c 'decided step'
+  }
+}

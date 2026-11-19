@@ -49,9 +49,16 @@ npm --prefix docs/architecture/likec4 run check
 
 or, from inside this directory, `npm run check`. It runs `likec4 validate .`,
 which exits `0` when the model is valid and `1` on any error (for example a
-relationship to an element that does not exist). Run it before you push; CI will
-run the same script. Further checks will be appended to `check` over time, so
-always call the script rather than `likec4 validate` directly.
+relationship to an element that does not exist), then `scripts/check-honesty.mjs`,
+which enforces the honesty convention below and exits `1` naming every offender.
+Run it before you push; CI will run the same script. Further checks will be
+appended to `check` over time, so always call the script rather than
+`likec4 validate` directly.
+
+`npm run check:selftest` proves the honesty check itself: it runs the checker on
+each fixture under `scripts/fixtures/` (stored as `*.c4.fixture` so they never
+join the real model) and passes only if every violating fixture is rejected and
+the clean one is accepted.
 
 ## The honesty convention
 
@@ -82,6 +89,18 @@ path as if it were live. Decided designs go in their own views, whose id ends in
 `Target` (for example `realtimeTarget`, `cookStartTarget`). A current-state view
 may still include a `#decided` or `#notBuilt` element, because the view styles
 render those dashed or faded, but its flows describe only what runs today.
+
+`scripts/check-honesty.mjs` enforces this. It fails when:
+
+1. a view whose id does not end in `Target` (and is not `deviceUpdates`) draws an
+   edge touching a `#decided` or `#notBuilt` element with a relationship that is
+   not of kind `decided`, `planned` or `retiring` (a flow step with no model
+   relationship behind it counts as live);
+2. a flow whose id does not end in `Target` has a step from or to a `#decided`
+   element;
+3. a `decided` relationship lacks `#decided`, a `planned` one lacks `#notBuilt`,
+   or a `retiring` one lacks `#retiring`. Tag the relationship as well as giving
+   it the kind.
 
 ## Add an element
 
@@ -116,7 +135,9 @@ Then connect it, inside the `model` block, with the relationship kind that
 matches its state:
 
 ```likec4
-meatgeek.cloud.api.alerts -[planned]-> meatgeek.mobile 'push notification'
+meatgeek.cloud.api.alerts -[planned]-> meatgeek.mobile 'push notification' {
+  #notBuilt
+}
 ```
 
 When the element ships, change its tag to `#live` and the relationship to a plain
