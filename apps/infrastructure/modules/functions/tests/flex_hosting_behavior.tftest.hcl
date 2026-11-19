@@ -43,6 +43,10 @@ variables {
   cosmos_account_endpoint                = "https://mgv2dev.documents.azure.com/"
   cosmos_database_name                   = "meatgeek-v2-dev-db"
   cooks_container_name                   = "cooks"
+  devices_container_name                 = "devices"
+  temperatures_container_name            = "temperatures"
+  users_container_name                   = "users"
+  recipes_container_name                 = "recipes"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   cors_allowed_origins                   = ["http://localhost:4200"]
@@ -314,6 +318,10 @@ run "app_settings_are_exactly_the_declared_collection" {
       "AzureWebJobsStorage__accountName",
       "COSMOSDB_COOKS_CONTAINER_NAME",
       "COSMOSDB_DATABASE_NAME",
+      "COSMOSDB_DEVICES_CONTAINER_NAME",
+      "COSMOSDB_RECIPES_CONTAINER_NAME",
+      "COSMOSDB_TEMPERATURES_CONTAINER_NAME",
+      "COSMOSDB_USERS_CONTAINER_NAME",
       "COSMOSDB__accountEndpoint",
       "IOTHUB_EVENTS__fullyQualifiedNamespace",
       "MEATGEEK_ENVIRONMENT",

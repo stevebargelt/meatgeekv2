@@ -449,6 +449,14 @@ COSMOSDB_DATABASE_NAME=<cosmos-database-name>
 # rather than shipping a cooks adapter pointed at a container that does not exist.
 COSMOSDB_COOKS_CONTAINER_NAME=<cosmos-cooks-container-name>
 
+# The other entity containers in the same database (HAR-19), published the same
+# way: Terraform-owned (module.cosmos_db.destination_container_names.<entity>),
+# required, no default. Not read by the API yet (HAR-18 follow-ups).
+COSMOSDB_DEVICES_CONTAINER_NAME=<cosmos-devices-container-name>
+COSMOSDB_TEMPERATURES_CONTAINER_NAME=<cosmos-temperatures-container-name>
+COSMOSDB_USERS_CONTAINER_NAME=<cosmos-users-container-name>
+COSMOSDB_RECIPES_CONTAINER_NAME=<cosmos-recipes-container-name>
+
 # IoT telemetry (Event Hubs-compatible) — identity-based. NON-SECRET
 # fully-qualified namespace only; the managed identity holds Azure Event Hubs
 # Data Receiver.
