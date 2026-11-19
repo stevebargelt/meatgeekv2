@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "count": 1,
+  "includes": [
+    "rule 3: relationship a -[decided]-> b 'untagged decided' is of kind decided but lacks the #decided tag"
+  ]
+}

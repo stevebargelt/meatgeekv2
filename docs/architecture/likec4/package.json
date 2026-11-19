@@ -5,7 +5,8 @@
   "description": "MeatGeek V2 architecture model (LikeC4). Source of truth for architecture diagrams.",
   "license": "MIT",
   "scripts": {
-    "check": "likec4 validate .",
+    "check": "likec4 validate . && node scripts/check-honesty.mjs",
+    "check:selftest": "node scripts/selftest-honesty.mjs",
     "start": "likec4 start .",
     "build": "likec4 build . -o dist"
   },

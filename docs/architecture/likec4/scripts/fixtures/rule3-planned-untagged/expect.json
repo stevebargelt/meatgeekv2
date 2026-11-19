@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "count": 1,
+  "includes": [
+    "rule 3: relationship a -[planned]-> b 'untagged planned' is of kind planned but lacks the #notBuilt tag"
+  ]
+}

@@ -1,0 +1,10 @@
+// Violates rule 1: a current-state flow steps to a #notBuilt element with no planned relationship behind it.
+model {
+  a = box 'A' { #live }
+  d = box 'D' { #notBuilt }
+}
+views {
+  dynamic view flow {
+    a -> d 'unbacked step'
+  }
+}

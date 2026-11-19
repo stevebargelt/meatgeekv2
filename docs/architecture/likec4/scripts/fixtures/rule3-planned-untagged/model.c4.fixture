@@ -1,0 +1,6 @@
+// Violates rule 3: a relationship of kind planned without the #notBuilt tag.
+model {
+  a = box 'A' { #live }
+  b = box 'B' { #notBuilt }
+  a -[planned]-> b 'untagged planned'
+}

@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "count": 1,
+  "includes": ["rule 1: view index edge a -> d 'drawn as live' touches #notBuilt"]
+}

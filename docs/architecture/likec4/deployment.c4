@@ -4,21 +4,48 @@ deployment {
 
     host pi 'Raspberry Pi' {
       technology 'linux/arm64, one per smoker'
+      description 'Binaries cross-compiled with nx build-arm and copied over SSH (make deploy-to-pi).'
       controller = instanceOf meatgeek.edge.controller
-      pusher = instanceOf meatgeek.edge.pusher
+      pusher = instanceOf meatgeek.edge.pusher {
+        description '''
+          env: `IOTHUB_CONNECTION_STRING`, `SIGNALR_HUB_URL`, `API_BASE_URL`,
+          `OTEL_EXPORTER_OTLP_ENDPOINT`. Queue at `/var/lib/meatgeek-pusher/queue`, cook state at
+          `cooksession.DefaultStatePath` (`/var/lib/meatgeek-pusher/cooksession.json`).
+        '''
+      }
     }
 
     resourceGroup rg 'Azure resource group (dev)' {
       technology 'Terraform: apps/infrastructure'
       iothub = instanceOf meatgeek.cloud.ingest.iothub
-      eventhub = instanceOf meatgeek.cloud.ingest.eventhub
+      eventhub = instanceOf meatgeek.cloud.ingest.eventhub {
+        description 'Event Hub temperature-data, 2 partitions, no consumer yet.'
+      }
       api = instanceOf meatgeek.cloud.api {
-        technology 'Flex Consumption FC1, managed identity'
+        technology 'Flex Consumption FC1, Node 24, system-assigned managed identity'
+        description '''
+          App settings: non-secret identity-based endpoints plus the Terraform-owned database and
+          container names; the Application Insights connection string is the one exception.
+          Easy Auth is default-deny.
+        '''
       }
       cosmos = instanceOf meatgeek.cloud.data
-      signalr = instanceOf meatgeek.cloud.realtime
+      signalr = instanceOf meatgeek.cloud.realtime {
+        technology 'service_mode = "Default", hub temperatureHub'
+      }
       appinsights = instanceOf meatgeek.cloud.observability.appinsights
       logs = instanceOf meatgeek.cloud.observability.logs
+      workbook = instanceOf meatgeek.cloud.observability.workbook
+      actionGroup = instanceOf meatgeek.cloud.observability.actionGroup
+    }
+
+    runner ci 'GitHub Actions runner' {
+      technology 'Deploy Dev App, acceptance job, environment development'
+      description 'Logs in under OIDC as the dev app-publish identity, which holds IoT Hub Registry Contributor on the dev hub (dev only).'
+      acceptance = instanceOf delivery.acceptance
+      simdevice = instanceOf delivery.simdevice {
+        description 'Built per run from apps/data-pusher. SIMDEVICE_CONNECTION_STRING fetched per run, masked, never stored.'
+      }
     }
 
     saas identity 'Microsoft Entra' {
@@ -30,7 +57,7 @@ deployment {
 views {
   deployment view devDeployment {
     title 'Deployment: dev'
-    description 'What runs where.'
+    description 'What runs where. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance job.'
     include dev.**
   }
 }

@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "count": 1,
+  "includes": [
+    "rule 3: relationship a -[retiring]-> b 'untagged retiring' is of kind retiring but lacks the #retiring tag"
+  ]
+}

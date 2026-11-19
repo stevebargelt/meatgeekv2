@@ -1,0 +1,6 @@
+// Violates rule 3: a relationship of kind decided without the #decided tag.
+model {
+  a = box 'A' { #live }
+  b = box 'B' { #decided }
+  a -[decided]-> b 'untagged decided'
+}
