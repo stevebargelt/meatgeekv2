@@ -5,12 +5,15 @@
   "description": "MeatGeek V2 architecture model (LikeC4). Source of truth for architecture diagrams.",
   "license": "MIT",
   "scripts": {
-    "check": "likec4 validate . && node scripts/check-honesty.mjs",
+    "check": "likec4 validate . && node scripts/check-honesty.mjs && node scripts/check-mermaid.mjs && node scripts/gen-diagrams.mjs --check",
     "check:selftest": "node scripts/selftest-honesty.mjs",
+    "gen:diagrams": "node scripts/gen-diagrams.mjs",
     "start": "likec4 start .",
     "build": "likec4 build . -o dist"
   },
   "devDependencies": {
-    "likec4": "1.61.0"
+    "jsdom": "31.0.1",
+    "likec4": "1.61.0",
+    "mermaid": "11.17.2"
   }
 }
