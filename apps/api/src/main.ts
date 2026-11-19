@@ -21,6 +21,11 @@ import { registerDeviceHandler } from './functions/devices/register-device';
 import { updateDeviceHandler } from './functions/devices/update-device';
 import { getUserProfileHandler } from './functions/users/get-user-profile';
 import { putUserProfileHandler } from './functions/users/put-user-profile';
+import { listRecipesHandler } from './functions/recipes/list-recipes';
+import { createRecipeHandler } from './functions/recipes/create-recipe';
+import { getRecipeHandler } from './functions/recipes/get-recipe';
+import { updateRecipeHandler } from './functions/recipes/update-recipe';
+import { deleteRecipeHandler } from './functions/recipes/delete-recipe';
 import { cosmosHealthHandler } from './functions/health/cosmos-health';
 import {
   STORAGE_HEARTBEAT_SCHEDULE,
@@ -131,6 +136,44 @@ app.http('putUserProfile', {
   authLevel: 'anonymous',
   route: 'users/me',
   handler: putUserProfileHandler,
+});
+
+// HAR-36 (MG-82): the caller's recipes, private to the owner. The recipes
+// container is partitioned on /userId, so every call stays in the caller's
+// partition.
+app.http('listRecipes', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'recipes',
+  handler: listRecipesHandler,
+});
+
+app.http('createRecipe', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'recipes',
+  handler: createRecipeHandler,
+});
+
+app.http('getRecipe', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'recipes/{id}',
+  handler: getRecipeHandler,
+});
+
+app.http('updateRecipe', {
+  methods: ['PATCH'],
+  authLevel: 'anonymous',
+  route: 'recipes/{id}',
+  handler: updateRecipeHandler,
+});
+
+app.http('deleteRecipe', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'recipes/{id}',
+  handler: deleteRecipeHandler,
 });
 
 // Cosmos health probe (MG-51). Registered alongside the business endpoints on

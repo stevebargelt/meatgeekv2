@@ -151,6 +151,7 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
         devicesContainerName: tfContainer.name,
         temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: 'unused-by-this-tier',
+        recipesContainerName: 'unused-by-this-tier',
       },
       {
         credentialFactory: () => unusedCredential,

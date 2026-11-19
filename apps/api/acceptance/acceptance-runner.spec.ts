@@ -1,7 +1,7 @@
 /**
  * HAR-11 — self-test for the live acceptance suite. Runs under ordinary
  * `nx test api`, never against a deployed system: it starts an in-process HTTP
- * stub that imitates the cooks, devices, temperatures and users routes and drives the REAL runner and the REAL
+ * stub that imitates the cooks, devices, recipes, temperatures and users routes and drives the REAL runner and the REAL
  * proof files (discovered from ./proofs) against it.
  */
 import { randomUUID } from 'crypto';
@@ -17,7 +17,13 @@ type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
 type TemperatureRoute = 'GET /temperatures/current/{deviceId}' | 'GET /temperatures/history';
 type UserRoute = 'PUT /users/me' | 'GET /users/me';
-type StubRoute = CookRoute | DeviceRoute | TemperatureRoute | UserRoute;
+type RecipeRoute =
+  | 'GET /recipes'
+  | 'POST /recipes'
+  | 'GET /recipes/{id}'
+  | 'PATCH /recipes/{id}'
+  | 'DELETE /recipes/{id}';
+type StubRoute = CookRoute | DeviceRoute | TemperatureRoute | UserRoute | RecipeRoute;
 
 interface StubOptions {
   /** Answer this route with this status (and an RU header) instead. */
@@ -74,6 +80,11 @@ const RU: Record<StubRoute, string> = {
   'GET /temperatures/history': '7.71',
   'PUT /users/me': '14.21',
   'GET /users/me': '3.62',
+  'GET /recipes': '2.94',
+  'POST /recipes': '10.67',
+  'GET /recipes/{id}': '1.02',
+  'PATCH /recipes/{id}': '12.38',
+  'DELETE /recipes/{id}': '10.29',
 };
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -85,10 +96,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return text ? JSON.parse(text) : undefined;
 }
 
-/** An in-process imitation of the deployed cooks, devices, temperatures and users routes under `/api`. */
+/** An in-process imitation of the deployed cooks, devices, recipes, temperatures and users routes under `/api`. */
 async function startStub(options: StubOptions = {}): Promise<Stub> {
   const cooks: StubCook[] = [];
   const devices = new Map<string, StubDevice>();
+  const recipes = new Map<string, Record<string, unknown>>();
   // The acceptance identity's profile persists between runs, as it does in dev.
   let profile: Record<string, unknown> | undefined;
   const requests: Stub['requests'] = [];
@@ -126,6 +138,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       const stopMatch = /^\/api\/cooks\/([^/]+)\/stop$/.exec(url.pathname);
       const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
       const temperatureMatch = /^\/api\/temperatures\/current\/([^/]+)$/.exec(url.pathname);
+      const recipeMatch = /^\/api\/recipes\/([^/]+)$/.exec(url.pathname);
       let route: StubRoute | undefined;
       if (request.method === 'GET' && url.pathname === '/api/cooks') route = 'GET /cooks';
       else if (request.method === 'POST' && url.pathname === '/api/cooks') route = 'POST /cooks';
@@ -143,6 +156,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         route = 'PUT /users/me';
       else if (request.method === 'GET' && url.pathname === '/api/users/me')
         route = 'GET /users/me';
+      else if (request.method === 'GET' && url.pathname === '/api/recipes') route = 'GET /recipes';
+      else if (request.method === 'POST' && url.pathname === '/api/recipes')
+        route = 'POST /recipes';
+      else if (request.method === 'GET' && recipeMatch) route = 'GET /recipes/{id}';
+      else if (request.method === 'PATCH' && recipeMatch) route = 'PATCH /recipes/{id}';
+      else if (request.method === 'DELETE' && recipeMatch) route = 'DELETE /recipes/{id}';
       if (!route) {
         send(404, { error: 'NOT_FOUND' });
         return;
@@ -181,6 +200,51 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           return;
         }
         send(200, profile, route);
+        return;
+      }
+
+      if (route === 'GET /recipes') {
+        send(200, { recipes: [...recipes.values()] }, route);
+        return;
+      }
+      if (route === 'POST /recipes') {
+        const body = (await readJson(request)) as Record<string, unknown>;
+        if (!body?.['name'] || !body['meatType'] || 'id' in body || 'userId' in body) {
+          send(400, { error: 'VALIDATION_ERROR' });
+          return;
+        }
+        const now = new Date().toISOString();
+        const recipe = {
+          ...body,
+          id: randomUUID(),
+          userId: 'stub-tenant:stub-user',
+          createdAt: now,
+          updatedAt: now,
+        };
+        recipes.set(recipe.id, recipe);
+        send(201, recipe, route);
+        return;
+      }
+      if (recipeMatch) {
+        const id = decodeURIComponent(recipeMatch[1]);
+        const recipe = recipes.get(id);
+        if (!recipe) {
+          send(404, { error: 'RECIPE_NOT_FOUND' }, route);
+          return;
+        }
+        if (route === 'DELETE /recipes/{id}') {
+          recipes.delete(id);
+          const headers: Record<string, string> = {};
+          if (options.omitChargeOn !== route) headers[REQUEST_CHARGE_HEADER] = RU[route];
+          response.writeHead(204, headers);
+          response.end();
+          return;
+        }
+        if (route === 'PATCH /recipes/{id}') {
+          const body = (await readJson(request)) as Record<string, unknown>;
+          Object.assign(recipe, body, { updatedAt: new Date().toISOString() });
+        }
+        send(200, recipe, route);
         return;
       }
 
@@ -339,9 +403,16 @@ const TEMPERATURE_ROUTES: TemperatureRoute[] = [
   'GET /temperatures/history',
 ];
 const USER_ROUTES: UserRoute[] = ['PUT /users/me', 'GET /users/me'];
+const RECIPE_ROUTES: RecipeRoute[] = [
+  'POST /recipes',
+  'GET /recipes/{id}',
+  'GET /recipes',
+  'PATCH /recipes/{id}',
+  'DELETE /recipes/{id}',
+];
 
 describe('live acceptance runner (against an in-process stub)', () => {
-  it('(a) exits 0 against a passing stub and reports RU for every cooks, devices, temperatures and users route', async () => {
+  it('(a) exits 0 against a passing stub and reports RU for every cooks, devices, recipes, temperatures and users route', async () => {
     const result = await runAgainstStub();
 
     expect(result.failures).toEqual([]);
@@ -349,9 +420,17 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.output).toMatch(/\d+ passed, 0 failed, 0 skipped/);
 
     // Every authenticated request line carries the RU the stub reported.
-    const requestLines = result.lines.filter(line => /^\s+(GET|POST|PATCH|PUT)\s+\//.test(line));
+    const requestLines = result.lines.filter(line =>
+      /^\s+(GET|POST|PATCH|PUT|DELETE)\s+\//.test(line)
+    );
     expect(requestLines.length).toBeGreaterThanOrEqual(5);
-    for (const route of [...ROUTES, ...DEVICE_ROUTES, ...TEMPERATURE_ROUTES, ...USER_ROUTES]) {
+    for (const route of [
+      ...ROUTES,
+      ...DEVICE_ROUTES,
+      ...TEMPERATURE_ROUTES,
+      ...USER_ROUTES,
+      ...RECIPE_ROUTES,
+    ]) {
       const [method, path] = route.split(' ');
       const lines = requestLines.filter(line =>
         new RegExp(`^\\s+${method}\\s+${escape(path)}\\s`).test(line)
@@ -427,6 +506,52 @@ describe('live acceptance runner (against an in-process stub)', () => {
       expect(result.failures[0]).toContain('users ›');
     }
   );
+
+  it.each(RECIPE_ROUTES)(
+    '(b) exits non-zero and names %s when it returns a wrong status',
+    async route => {
+      const result = await runAgainstStub({ failRoute: { route, status: 503 } });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(`${route} → 503`);
+      expect(result.failures[0]).toContain('recipes ›');
+    }
+  );
+
+  it('(a) runs the recipes proof in order and deletes the recipe it created', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.exitCode).toBe(0);
+    const recipeCalls = stub!.requests
+      .filter(r => r.path.startsWith('/api/recipes'))
+      .map(r => `${r.method} ${r.path.replace(/\/api\/recipes\/[^/?]+/, '/api/recipes/{id}')}`);
+    expect(recipeCalls).toEqual([
+      'POST /api/recipes',
+      'GET /api/recipes/{id}',
+      'GET /api/recipes',
+      'PATCH /api/recipes/{id}',
+      'GET /api/recipes/{id}',
+      'DELETE /api/recipes/{id}',
+      'GET /api/recipes/{id}',
+    ]);
+    // The 204 and the 404 after it both carried their RU.
+    expect(
+      result.lines.some(line => /^\s+DELETE\s+\/recipes\/\{id\}\s+204\s.*RU 10\.29$/.test(line))
+    ).toBe(true);
+    expect(
+      result.lines.some(line => /^\s+GET\s+\/recipes\/\{id\}\s+404\s.*RU 1\.02$/.test(line))
+    ).toBe(true);
+  });
+
+  it('(b) exits non-zero when DELETE /recipes/{id} reports no RU', async () => {
+    const result = await runAgainstStub({ omitChargeOn: 'DELETE /recipes/{id}' });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain('recipes ›');
+    expect(result.failures[0]).toContain('missing x-meatgeek-request-charge header');
+  });
 
   it.each(TEMPERATURE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',

@@ -1,6 +1,7 @@
 import type { RegisterDeviceRequest, TemperatureHistoryResponse } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
+import { expectErrorCode } from '../lib/checks';
 import { defineProofs } from '../lib/proof';
 
 /**
@@ -21,15 +22,6 @@ import { defineProofs } from '../lib/proof';
  * (the runner's default). Acceptance devices are not deleted: there is no delete
  * route.
  */
-
-function expectErrorCode(api: AcceptanceApi, response: AcceptanceResponse, code: string): void {
-  const body = response.body as { error?: unknown } | null;
-  api.check(
-    response,
-    body !== null && typeof body === 'object' && body.error === code,
-    `body.error is ${JSON.stringify(body?.error)}, not ${code}`
-  );
-}
 
 export default defineProofs('temperatures', () => {
   let registered: RegisterDeviceRequest | undefined;

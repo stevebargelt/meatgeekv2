@@ -13,22 +13,27 @@ What `apps/api/src/main.ts` registers with the Functions host today. Everything
 below the next heading describes the target architecture, some of which is not
 yet wired.
 
-| Function                 | Trigger      | Route / schedule                  | Purpose                                         |
-| ------------------------ | ------------ | --------------------------------- | ----------------------------------------------- |
-| `getCooks`               | HTTP `GET`   | `cooks`                           | List cooks                                      |
-| `startCook`              | HTTP `POST`  | `cooks`                           | Start a cook (emits `cook_started` on SignalR)  |
-| `stopCook`               | HTTP `POST`  | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
-| `negotiate`              | HTTP `POST`  | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
-| `getCurrentTemperatures` | HTTP `GET`   | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else) |
-| `getTemperatureHistory`  | HTTP `GET`   | `temperatures/history`            | A page of a caller's device's readings          |
-| `getDevices`             | HTTP `GET`   | `devices`                         | List the caller's devices                       |
-| `registerDevice`         | HTTP `POST`  | `devices`                         | Register a device to the caller                 |
-| `getDevice`              | HTTP `GET`   | `devices/{id}`                    | One of the caller's devices (404 otherwise)     |
-| `updateDevice`           | HTTP `PATCH` | `devices/{id}`                    | Change name / location / configuration          |
-| `getUserProfile`         | HTTP `GET`   | `users/me`                        | The caller's profile (404 until the first PUT)  |
-| `putUserProfile`         | HTTP `PUT`   | `users/me`                        | Create or replace the caller's profile          |
-| `cosmosHealth`           | HTTP `GET`   | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos     |
-| `storageHeartbeat`       | **Timer**    | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path             |
+| Function                 | Trigger       | Route / schedule                  | Purpose                                         |
+| ------------------------ | ------------- | --------------------------------- | ----------------------------------------------- |
+| `getCooks`               | HTTP `GET`    | `cooks`                           | List cooks                                      |
+| `startCook`              | HTTP `POST`   | `cooks`                           | Start a cook (emits `cook_started` on SignalR)  |
+| `stopCook`               | HTTP `POST`   | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
+| `negotiate`              | HTTP `POST`   | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
+| `getCurrentTemperatures` | HTTP `GET`    | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else) |
+| `getTemperatureHistory`  | HTTP `GET`    | `temperatures/history`            | A page of a caller's device's readings          |
+| `getDevices`             | HTTP `GET`    | `devices`                         | List the caller's devices                       |
+| `registerDevice`         | HTTP `POST`   | `devices`                         | Register a device to the caller                 |
+| `getDevice`              | HTTP `GET`    | `devices/{id}`                    | One of the caller's devices (404 otherwise)     |
+| `updateDevice`           | HTTP `PATCH`  | `devices/{id}`                    | Change name / location / configuration          |
+| `getUserProfile`         | HTTP `GET`    | `users/me`                        | The caller's profile (404 until the first PUT)  |
+| `putUserProfile`         | HTTP `PUT`    | `users/me`                        | Create or replace the caller's profile          |
+| `listRecipes`            | HTTP `GET`    | `recipes`                         | List the caller's recipes, newest first         |
+| `createRecipe`           | HTTP `POST`   | `recipes`                         | Create a recipe owned by the caller             |
+| `getRecipe`              | HTTP `GET`    | `recipes/{id}`                    | One of the caller's recipes (404 otherwise)     |
+| `updateRecipe`           | HTTP `PATCH`  | `recipes/{id}`                    | Change any recipe field (409 on a race)         |
+| `deleteRecipe`           | HTTP `DELETE` | `recipes/{id}`                    | Delete one of the caller's recipes              |
+| `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos     |
+| `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path             |
 
 `storageHeartbeat` exists because it is the **only** registration that needs
 `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and
@@ -459,10 +464,12 @@ COSMOSDB_COOKS_CONTAINER_NAME=<cosmos-cooks-container-name>
 # way: Terraform-owned (module.cosmos_db.destination_container_names.<entity>),
 # required, no default. The devices handlers read COSMOSDB_DEVICES_CONTAINER_NAME
 # (HAR-20), GET /temperatures/current and /temperatures/history read
-# COSMOSDB_TEMPERATURES_CONTAINER_NAME (HAR-28, HAR-35) and the users handlers read COSMOSDB_USERS_CONTAINER_NAME (HAR-27); the
-# shared adapter fails loud without each (cosmos_devices_container_not_configured,
-# cosmos_temperatures_container_not_configured, cosmos_users_container_not_configured).
-# Recipes are not read by the API yet (HAR-18 follow-up).
+# COSMOSDB_TEMPERATURES_CONTAINER_NAME (HAR-28, HAR-35), the users handlers read
+# COSMOSDB_USERS_CONTAINER_NAME (HAR-27) and the recipes handlers read
+# COSMOSDB_RECIPES_CONTAINER_NAME (HAR-36); the shared adapter fails loud without
+# each (cosmos_devices_container_not_configured,
+# cosmos_temperatures_container_not_configured, cosmos_users_container_not_configured,
+# cosmos_recipes_container_not_configured).
 COSMOSDB_DEVICES_CONTAINER_NAME=<cosmos-devices-container-name>
 COSMOSDB_TEMPERATURES_CONTAINER_NAME=<cosmos-temperatures-container-name>
 COSMOSDB_USERS_CONTAINER_NAME=<cosmos-users-container-name>

@@ -35,6 +35,7 @@ const COOKS_CONTAINER_SETTING = 'COSMOSDB_COOKS_CONTAINER_NAME';
 const DEVICES_CONTAINER_SETTING = 'COSMOSDB_DEVICES_CONTAINER_NAME';
 const TEMPERATURES_CONTAINER_SETTING = 'COSMOSDB_TEMPERATURES_CONTAINER_NAME';
 const USERS_CONTAINER_SETTING = 'COSMOSDB_USERS_CONTAINER_NAME';
+const RECIPES_CONTAINER_SETTING = 'COSMOSDB_RECIPES_CONTAINER_NAME';
 
 /**
  * The fixed failure vocabulary for configuration. Each names the setting that
@@ -49,7 +50,8 @@ export type CosmosConfigFailure =
   | 'cosmos_cooks_container_not_configured'
   | 'cosmos_devices_container_not_configured'
   | 'cosmos_temperatures_container_not_configured'
-  | 'cosmos_users_container_not_configured';
+  | 'cosmos_users_container_not_configured'
+  | 'cosmos_recipes_container_not_configured';
 
 const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
   [ACCOUNT_ENDPOINT_SETTING]: 'cosmos_account_endpoint_not_configured',
@@ -58,6 +60,7 @@ const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
   [DEVICES_CONTAINER_SETTING]: 'cosmos_devices_container_not_configured',
   [TEMPERATURES_CONTAINER_SETTING]: 'cosmos_temperatures_container_not_configured',
   [USERS_CONTAINER_SETTING]: 'cosmos_users_container_not_configured',
+  [RECIPES_CONTAINER_SETTING]: 'cosmos_recipes_container_not_configured',
 };
 
 /**
@@ -89,6 +92,8 @@ export interface CosmosConfig {
   readonly temperaturesContainerName: string;
   /** HAR-27 (MG-81): the users container, partitioned on `/id` (= the principal's userId). */
   readonly usersContainerName: string;
+  /** HAR-36 (MG-82): the recipes container, partitioned on `/userId` (= the owner). */
+  readonly recipesContainerName: string;
 }
 
 function requireSetting(env: NodeJS.ProcessEnv, settingName: string): string {
@@ -112,6 +117,7 @@ export function resolveCosmosConfig(env: NodeJS.ProcessEnv = process.env): Cosmo
     devicesContainerName: requireSetting(env, DEVICES_CONTAINER_SETTING),
     temperaturesContainerName: requireSetting(env, TEMPERATURES_CONTAINER_SETTING),
     usersContainerName: requireSetting(env, USERS_CONTAINER_SETTING),
+    recipesContainerName: requireSetting(env, RECIPES_CONTAINER_SETTING),
   };
 }
 
@@ -186,6 +192,10 @@ export class CosmosAdapter {
     return this.config.usersContainerName;
   }
 
+  get recipesContainerName(): string {
+    return this.config.recipesContainerName;
+  }
+
   private getClient(): CosmosClient {
     if (!this.client) {
       // credentialFactory runs exactly once; the credential is retained so its
@@ -230,6 +240,11 @@ export class CosmosAdapter {
   /** The users container, addressed by the Terraform-published name. */
   getUsersContainer(): Container {
     return this.getContainer(this.config.usersContainerName);
+  }
+
+  /** The recipes container, addressed by the Terraform-published name. */
+  getRecipesContainer(): Container {
+    return this.getContainer(this.config.recipesContainerName);
   }
 }
 

@@ -1,0 +1,182 @@
+# Recipe schemas (HAR-36 / MG-82).
+# The /recipes routes (apps/api/src/functions/recipes/) return a bare Recipe
+# or {recipes: Recipe[]}. Matches libs/api-interfaces/src/lib/recipe.ts.
+# Recipes are private to their owner: there is no isPublic, rating or
+# cookCount.
+
+RecipeMeatType:
+  type: string
+  enum: [beef, pork, chicken, fish, vegetarian, other]
+
+RecipeCookMethod:
+  type: string
+  enum: [smoke, grill, roast, braise]
+
+Recipe:
+  type: object
+  description: |
+    A recipe owned by the authenticated caller. Stored in the `recipes`
+    container, partitioned on `userId`.
+  required:
+    - id
+    - userId
+    - name
+    - meatType
+    - createdAt
+    - updatedAt
+  additionalProperties: false
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Server-generated on create.
+    userId:
+      type: string
+      description: |
+        Owner: the authenticated caller's `<tenantId>:<objectId>`, set by the
+        server from the Easy Auth principal. Never taken from a request.
+    name:
+      type: string
+      minLength: 1
+      maxLength: 200
+    description:
+      type: string
+      maxLength: 2000
+    meatType:
+      $ref: '#/RecipeMeatType'
+    cookMethod:
+      $ref: '#/RecipeCookMethod'
+    targetTemps:
+      $ref: './cook.yaml#/TargetTemperatures'
+    estimatedDuration:
+      type: number
+      minimum: 0
+      # Greater than 0. Spelled as minimum + not-0 rather than OpenAPI 3.0's
+      # boolean exclusiveMinimum, which the draft-07 Ajv validator rejects.
+      not:
+        enum: [0]
+      description: Hours, greater than 0.
+    instructions:
+      type: array
+      maxItems: 100
+      items:
+        type: string
+        minLength: 1
+        maxLength: 2000
+    tags:
+      type: array
+      maxItems: 20
+      items:
+        type: string
+        minLength: 1
+        maxLength: 50
+    createdAt:
+      $ref: './common.yaml#/ISODateTime'
+    updatedAt:
+      $ref: './common.yaml#/ISODateTime'
+
+RecipeListResponse:
+  type: object
+  description: GET /recipes — the caller's recipes, newest `updatedAt` first.
+  required:
+    - recipes
+  additionalProperties: false
+  properties:
+    recipes:
+      type: array
+      items:
+        $ref: '#/Recipe'
+
+CreateRecipeRequest:
+  type: object
+  description: |
+    Body for POST /recipes. Strings are trimmed. `id`, `userId`, `createdAt`
+    and `updatedAt` are set by the server: a body carrying any of them, or
+    any other unlisted field, is rejected with 400 VALIDATION_ERROR.
+  required:
+    - name
+    - meatType
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      minLength: 1
+      maxLength: 200
+      description: Trimmed; must not be blank.
+    description:
+      type: string
+      maxLength: 2000
+    meatType:
+      $ref: '#/RecipeMeatType'
+    cookMethod:
+      $ref: '#/RecipeCookMethod'
+    targetTemps:
+      $ref: './cook.yaml#/TargetTemperatures'
+    estimatedDuration:
+      type: number
+      minimum: 0
+      # Greater than 0. Spelled as minimum + not-0 rather than OpenAPI 3.0's
+      # boolean exclusiveMinimum, which the draft-07 Ajv validator rejects.
+      not:
+        enum: [0]
+      description: Hours, greater than 0.
+    instructions:
+      type: array
+      maxItems: 100
+      items:
+        type: string
+        minLength: 1
+        maxLength: 2000
+    tags:
+      type: array
+      maxItems: 20
+      items:
+        type: string
+        minLength: 1
+        maxLength: 50
+
+UpdateRecipeRequest:
+  type: object
+  description: |
+    Body for PATCH /recipes/{id}: any of the CreateRecipeRequest fields, at
+    least one. Each field sent replaces the stored value whole (including
+    `targetTemps`); fields not sent are kept. The same server-owned and
+    unknown fields are rejected.
+  minProperties: 1
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      minLength: 1
+      maxLength: 200
+    description:
+      type: string
+      maxLength: 2000
+    meatType:
+      $ref: '#/RecipeMeatType'
+    cookMethod:
+      $ref: '#/RecipeCookMethod'
+    targetTemps:
+      $ref: './cook.yaml#/TargetTemperatures'
+    estimatedDuration:
+      type: number
+      minimum: 0
+      # Greater than 0. Spelled as minimum + not-0 rather than OpenAPI 3.0's
+      # boolean exclusiveMinimum, which the draft-07 Ajv validator rejects.
+      not:
+        enum: [0]
+      description: Hours, greater than 0.
+    instructions:
+      type: array
+      maxItems: 100
+      items:
+        type: string
+        minLength: 1
+        maxLength: 2000
+    tags:
+      type: array
+      maxItems: 20
+      items:
+        type: string
+        minLength: 1
+        maxLength: 50

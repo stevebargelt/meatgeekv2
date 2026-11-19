@@ -13,6 +13,7 @@ spec/
     temperatures.yaml
     devices.yaml
     users.yaml                          # GET/PUT /users/me
+    recipes.yaml                        # /recipes CRUD (HAR-36)
   components/
     schemas/
       common.yaml                       # error envelope, pagination, ISODateTime
@@ -20,6 +21,7 @@ spec/
       temperature.yaml                  # TemperatureReading, alerts, history
       device.yaml                       # Device, configuration, list wrapper
       user.yaml                         # User, preferences, PutUserProfileRequest
+      recipe.yaml                       # Recipe, create/update requests, list wrapper
       signalr-payloads.yaml             # message envelopes for temperatureHub
 ```
 
@@ -112,6 +114,11 @@ shapes:
 | POST        | `devices`                         | `/devices`                         | `devices/register-device.ts`  |
 | GET         | `devices/{id}`                    | `/devices/{id}`                    | `devices/get-device.ts`       |
 | PATCH       | `devices/{id}`                    | `/devices/{id}`                    | `devices/update-device.ts`    |
+| GET         | `recipes`                         | `/recipes`                         | `recipes/list-recipes.ts`     |
+| POST        | `recipes`                         | `/recipes`                         | `recipes/create-recipe.ts`    |
+| GET         | `recipes/{id}`                    | `/recipes/{id}`                    | `recipes/get-recipe.ts`       |
+| PATCH       | `recipes/{id}`                    | `/recipes/{id}`                    | `recipes/update-recipe.ts`    |
+| DELETE      | `recipes/{id}`                    | `/recipes/{id}`                    | `recipes/delete-recipe.ts`    |
 
 Preserved wire-shape quirks:
 
@@ -121,3 +128,5 @@ Preserved wire-shape quirks:
   (NOT wrapped).
 - `GET /devices` wraps the array in `{ devices: [...] }`; `GET`/`PATCH
 /devices/{id}` and `POST /devices` return a bare `Device`.
+- `GET /recipes` wraps the array in `{ recipes: [...] }`; `POST /recipes`, `GET`/`PATCH
+/recipes/{id}` return a bare `Recipe`; `DELETE /recipes/{id}` is `204` with no body.
