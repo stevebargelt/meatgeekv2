@@ -114,14 +114,18 @@ IoT Hub → cosmos-storage-route → CosmosDB
     "probe1Temp": 160.2
     // ... all temperature readings, in the data-pusher wire shape
   },
-  "Properties": { "correlation.id": "corr-xyz", "traceparent": "00-…" },
+  "Properties": { "messageId": "…", "correlation.id": "corr-xyz", "traceparent": "00-…" },
   "SystemProperties": {
     "iothub-connection-device-id": "meatgeek3",
+    "iothub-content-type": "application/json",
+    "iothub-content-encoding": "utf-8",
     "iothub-enqueuedtime": "2025-01-26T10:05:00.123Z"
   },
   "_ts": 1737876300
 }
 ```
+
+`Body` is a JSON object only because the data-pusher sets the content type `application/json` and content encoding `utf-8` system properties on every message (`$.ct` / `$.ce` in the MQTT topic, MG-68). Without both, IoT Hub stores `Body` as a base64 string and the API skips the document.
 
 The API only reads this container. A reading's device is `SystemProperties["iothub-connection-device-id"]`, never `Body.deviceId`, because `Body` is whatever the device chose to send.
 

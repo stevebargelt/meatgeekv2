@@ -33,6 +33,7 @@ import (
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/collector"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/cooksession"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/publish"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/signalr"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
@@ -384,25 +385,15 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 			// ONE trace id across poll -> device -> queue -> publish -> IoT.
 			readingCtx, readingSpan := startReadingSpan(ctx, tracer, sample.Traceparent)
 
-			reading := wire.MapV1ToTemperatureReading(sample.Status, sample.Timestamp, sess.ActiveCookID())
-			readingBytes, mErr := json.Marshal(reading)
+			rec, mErr := buildQueueRecord(readingCtx, sample.Status, sample.Timestamp, sess.ActiveCookID(), q.NextSeq(), corr.Get())
 			if mErr != nil {
-				logrus.WithError(mErr).Error("marshal TemperatureReading failed; dropping sample")
+				logrus.WithError(mErr).Error("build queue record failed; dropping sample")
 				readingSpan.End()
 				continue
 			}
-			rec := queueRecord{
-				Timestamp:   sample.Timestamp,
-				Seq:         q.NextSeq(),
-				Correlation: corr.Get(),
-				// Persist THIS reading's traceparent so the publish span (even
-				// after a restart/recover) continues the same per-reading trace.
-				Traceparent: telemetry.ExtractTraceparent(readingCtx),
-				Payload:     readingBytes,
-			}
 			readingSpan.SetAttributes(telemetry.Dimensions{
 				DeviceID:       deviceID,
-				CookID:         cookIDFromPayload(readingBytes),
+				CookID:         cookIDFromPayload(rec.Payload),
 				CorrelationID:  rec.Correlation,
 				ProcessingPath: "reading-enqueue",
 			}.Attributes()...)
@@ -481,23 +472,24 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	return nil
 }
 
-// buildPublishProperties assembles the IoT Hub message properties for one
-// record: the deterministic messageId, the optional correlation.id
-// (carried since #5), and the injected W3C traceparent from the active
-// span in ctx. The traceparent lets the downstream Functions/API layers
-// continue the distributed trace; correlation.id is retained alongside it.
-func buildPublishProperties(ctx context.Context, deviceID, messageID string, rec queueRecord) map[string]string {
-	props := map[string]string{
-		iothub.MessageIDPropertyName: messageID,
+// buildQueueRecord renders one collected reading into the queue record the
+// enqueuer persists: the TemperatureReading payload (built by the shared
+// publish.ReadingPayload, the same builder simdevice uses) plus the metadata
+// the publisher needs. readingCtx is the per-reading span's context; its
+// traceparent is persisted INTO the record so the publish span (even after a
+// restart/recover) continues the same per-reading trace.
+func buildQueueRecord(readingCtx context.Context, status wire.V1Status, ts time.Time, cookID *string, seq uint64, correlation string) (queueRecord, error) {
+	payload, err := publish.ReadingPayload(status, ts, cookID)
+	if err != nil {
+		return queueRecord{}, err
 	}
-	if rec.Correlation != "" {
-		props[iothub.CorrelationIDPropertyName] = rec.Correlation
-	}
-	// Inject the W3C traceparent (and any tracestate) from the publish
-	// span. When tracing is in no-op/dev mode with a valid span context,
-	// a traceparent is still emitted; with no span it is a no-op.
-	telemetry.InjectTraceContext(ctx, props)
-	return props
+	return queueRecord{
+		Timestamp:   ts,
+		Seq:         seq,
+		Correlation: correlation,
+		Traceparent: telemetry.ExtractTraceparent(readingCtx),
+		Payload:     payload,
+	}, nil
 }
 
 // cookIDFromPayload best-effort extracts the cookId from a rendered
@@ -572,8 +564,8 @@ func runPublisher(
 		// it (not the process span). span.End fires on every loop-continue path.
 		publishCtx, span := tracer.Start(parentCtx, "publisher.publish")
 
-		messageID := wire.MintMessageId(deviceID, rec.Timestamp, rec.Seq)
-		props := buildPublishProperties(publishCtx, deviceID, messageID, rec)
+		messageID := publish.MessageID(deviceID, rec.Timestamp, rec.Seq)
+		props := publish.Properties(publishCtx, messageID, rec.Correlation)
 		// Stamp the six standard custom dimensions on the span so the
 		// exported trace is pivotable on device/cook/correlation/path.
 		span.SetAttributes(telemetry.Dimensions{

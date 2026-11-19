@@ -86,7 +86,7 @@ func SetupTracing(ctx context.Context) (func(), error) {
 
 	return func() {
 		if err := tp.Shutdown(context.Background()); err != nil {
-			fmt.Printf("Error shutting down tracer provider: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error shutting down tracer provider: %v\n", err)
 		}
 	}, nil
 }

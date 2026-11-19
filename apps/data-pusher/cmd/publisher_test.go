@@ -45,6 +45,13 @@ func drainOnePublish(t *testing.T, tracer oteltrace.Tracer, rec queueRecord, dev
 	defer q.Close()
 
 	rec.Seq = q.NextSeq()
+	return enqueueAndPublish(t, tracer, q, rec, deviceID).Properties
+}
+
+// enqueueAndPublish writes rec to q as-is, runs the real publisher loop until it
+// publishes exactly one record against a MockClient, and returns that call.
+func enqueueAndPublish(t *testing.T, tracer oteltrace.Tracer, q *queue.Queue, rec queueRecord, deviceID string) iothub.MockPublishCall {
+	t.Helper()
 	recBytes, err := json.Marshal(rec)
 	if err != nil {
 		t.Fatalf("marshal record: %v", err)
@@ -78,7 +85,7 @@ func drainOnePublish(t *testing.T, tracer oteltrace.Tracer, rec queueRecord, dev
 	if len(calls) != 1 {
 		t.Fatalf("expected exactly 1 publish call, got %d", len(calls))
 	}
-	return calls[0].Properties
+	return calls[0]
 }
 
 // mustReading marshals a minimal TemperatureReading-shaped payload with an
@@ -173,47 +180,6 @@ func TestRunPublisher_InjectsTraceparentAsMessageProperty(t *testing.T) {
 	}
 	if props[iothub.MessageIDPropertyName] == "" {
 		t.Errorf("messageId must still be stamped; got empty")
-	}
-}
-
-func TestBuildPublishProperties_TraceparentAndCorrelation(t *testing.T) {
-	shutdown, err := telemetry.SetupTracing(context.Background())
-	if err != nil {
-		t.Fatalf("SetupTracing: %v", err)
-	}
-	defer shutdown()
-
-	tracer := otel.Tracer("test")
-	ctx, span := tracer.Start(context.Background(), "publisher.publish")
-	defer span.End()
-
-	rec := queueRecord{Correlation: "corr-1", Payload: mustReading(t, "cook-1")}
-	props := buildPublishProperties(ctx, "dev1", "msg-1", rec)
-
-	if props[iothub.MessageIDPropertyName] != "msg-1" {
-		t.Errorf("messageId = %q, want msg-1", props[iothub.MessageIDPropertyName])
-	}
-	if props[iothub.CorrelationIDPropertyName] != "corr-1" {
-		t.Errorf("correlation.id = %q, want corr-1", props[iothub.CorrelationIDPropertyName])
-	}
-	if props[telemetry.TraceParentKey] == "" {
-		t.Errorf("traceparent must be injected")
-	}
-}
-
-func TestBuildPublishProperties_NoCorrelationOmitsKey(t *testing.T) {
-	shutdown, _ := telemetry.SetupTracing(context.Background())
-	defer shutdown()
-
-	tracer := otel.Tracer("test")
-	ctx, span := tracer.Start(context.Background(), "publisher.publish")
-	defer span.End()
-
-	rec := queueRecord{Payload: mustReading(t, "")}
-	props := buildPublishProperties(ctx, "dev1", "msg-1", rec)
-
-	if _, ok := props[iothub.CorrelationIDPropertyName]; ok {
-		t.Errorf("correlation.id key must be omitted when the record has no correlation")
 	}
 }
 
