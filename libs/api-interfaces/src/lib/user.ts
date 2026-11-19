@@ -111,6 +111,19 @@ export interface UpdateUserRequest {
 }
 
 /**
+ * PUT /users/me body (HAR-27 / MG-81): create or replace the caller's profile.
+ * Identity is never part of the body: the profile's id is the authenticated
+ * principal's `"<tid>:<oid>"`, so a body carrying `id` or `userId` is rejected.
+ * `preferences` deep-merges over the stored preferences (or the defaults, on
+ * create): plain objects merge key by key, scalars and arrays replace.
+ */
+export interface PutUserProfileRequest {
+  name: string;
+  email: string;
+  preferences?: Partial<UserPreferences>;
+}
+
+/**
  * Change password request
  */
 export interface ChangePasswordRequest {

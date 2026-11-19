@@ -301,6 +301,7 @@ describe('MG-59 cooks persistence flow', () => {
       status: 'active',
     });
     expect(store.cooks.get(`tenant-owner:owner-oid/${created.id}`)).toMatchObject(created);
+    expect(JSON.stringify(created)).not.toContain('user-1');
     expect(startContext.messages()).toHaveLength(1);
 
     const beforeStop = await getCooksHandler(

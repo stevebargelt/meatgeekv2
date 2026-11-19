@@ -63,7 +63,7 @@ describe('MG-9 cross-surface unification', () => {
         //    the RESOLUTION shows up in the derived temps).
         const cook = CookManager.createCook(
           baseRequest({ meatType: input, targetTemps: undefined }),
-          'user-1'
+          'tid-test:oid-test'
         );
         expect(cook.targetTemps).toEqual({
           grill: MEAT_TYPES.PORK_SHOULDER.defaultGrillTemp,
@@ -80,11 +80,11 @@ describe('MG-9 cross-surface unification', () => {
     it('display-name and key inputs produce the SAME derived targetTemps on cook-manager', () => {
       const fromName = CookManager.createCook(
         baseRequest({ meatType: 'Pork Shoulder', targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       const fromKey = CookManager.createCook(
         baseRequest({ meatType: 'PORK_SHOULDER', targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(fromName.targetTemps).toEqual(fromKey.targetTemps);
     });
@@ -98,7 +98,7 @@ describe('MG-9 cross-surface unification', () => {
       // cook-manager: no MEAT_TYPES config → no derived default temps
       const cook = CookManager.createCook(
         baseRequest({ meatType: unknown, targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.targetTemps).toEqual({ grill: undefined, probe1: undefined });
 
@@ -144,7 +144,7 @@ describe('MG-9 cross-surface unification', () => {
     it('mints distinct UUIDv4-shaped ids across calls (no collision)', () => {
       const ids = new Set<string>();
       for (let i = 0; i < 200; i++) {
-        const cook = CookManager.createCook(baseRequest(), 'user-1');
+        const cook = CookManager.createCook(baseRequest(), 'tid-test:oid-test');
         expect(cook.id).toMatch(UUIDV4_COOK_ID);
         ids.add(cook.id);
       }
@@ -152,8 +152,8 @@ describe('MG-9 cross-surface unification', () => {
     });
 
     it('two back-to-back creates never share an id', () => {
-      const a = CookManager.createCook(baseRequest(), 'user-1');
-      const b = CookManager.createCook(baseRequest(), 'user-1');
+      const a = CookManager.createCook(baseRequest(), 'tid-test:oid-test');
+      const b = CookManager.createCook(baseRequest(), 'tid-test:oid-test');
       expect(a.id).not.toBe(b.id);
       expect(a.id).toMatch(UUIDV4_COOK_ID);
       expect(b.id).toMatch(UUIDV4_COOK_ID);
@@ -165,7 +165,7 @@ describe('MG-9 cross-surface unification', () => {
       const padded = '  Sunday Brisket  ';
       const trimmed = 'Sunday Brisket';
 
-      const cook = CookManager.createCook(baseRequest({ name: padded }), 'user-1');
+      const cook = CookManager.createCook(baseRequest({ name: padded }), 'tid-test:oid-test');
       // stored trimmed
       expect(cook.name).toBe(trimmed);
 
@@ -182,7 +182,7 @@ describe('MG-9 cross-surface unification', () => {
     it('a whitespace-only name is rejected consistently across all surfaces', () => {
       // MG-28: createCook now fails fast on a whitespace-only name (was: stored '')
       // so it can never emit a Cook violating the required non-empty-name invariant.
-      expect(() => CookManager.createCook(baseRequest({ name: '   ' }), 'user-1')).toThrow(
+      expect(() => CookManager.createCook(baseRequest({ name: '   ' }), 'tid-test:oid-test')).toThrow(
         'createCook: cook name must not be empty or whitespace-only'
       );
 

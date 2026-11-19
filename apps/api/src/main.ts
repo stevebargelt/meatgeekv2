@@ -18,6 +18,8 @@ import { getDevicesHandler } from './functions/devices/get-devices';
 import { getDeviceHandler } from './functions/devices/get-device';
 import { registerDeviceHandler } from './functions/devices/register-device';
 import { updateDeviceHandler } from './functions/devices/update-device';
+import { getUserProfileHandler } from './functions/users/get-user-profile';
+import { putUserProfileHandler } from './functions/users/put-user-profile';
 import { cosmosHealthHandler } from './functions/health/cosmos-health';
 import {
   STORAGE_HEARTBEAT_SCHEDULE,
@@ -103,6 +105,22 @@ app.http('updateDevice', {
   authLevel: 'anonymous',
   route: 'devices/{id}',
   handler: updateDeviceHandler,
+});
+
+// HAR-27 (MG-81): the caller's own profile. Identity is the Easy Auth
+// principal; there is no {id} in the route.
+app.http('getUserProfile', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'users/me',
+  handler: getUserProfileHandler,
+});
+
+app.http('putUserProfile', {
+  methods: ['PUT'],
+  authLevel: 'anonymous',
+  route: 'users/me',
+  handler: putUserProfileHandler,
 });
 
 // Cosmos health probe (MG-51). Registered alongside the business endpoints on

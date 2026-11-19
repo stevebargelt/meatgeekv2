@@ -1,0 +1,123 @@
+# User path items (HAR-27 / MG-81).
+#
+# Implementation status — both operations are implemented:
+#   - user-me GET : apps/api/src/functions/users/get-user-profile.ts
+#   - user-me PUT : apps/api/src/functions/users/put-user-profile.ts
+#
+# Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
+# There is no {id} in the route, no userId query parameter and no x-user-id
+# header; a body `id` or `userId` is a 400.
+#
+# Every response that reached Cosmos carries x-meatgeek-request-charge (HAR-11),
+# including the RU of the devices owner query that fills User.devices. A 401 or
+# 400 is answered before any Cosmos call and carries none.
+
+user-me:
+  description: |
+    The authenticated caller's own profile. The user id is `"<tid>:<oid>"`:
+    the Entra tenant id and object id from the token Easy Auth validated. An
+    object id is unique only within its tenant, so the id is meaningful only
+    within that tenant. It is also the profile document's Cosmos id and
+    partition key, so every operation is a point read or write. Email is
+    contact data and is not unique across users.
+  get:
+    operationId: getUserProfile
+    summary: Get the caller's profile
+    description: |
+      Returns the caller's User. `devices` is read from the devices the caller
+      owns. 404 USER_NOT_FOUND until the first PUT /users/me.
+    tags: [users]
+    responses:
+      '200':
+        description: The caller's profile.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/user.yaml#/User'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '404':
+        description: USER_NOT_FOUND — the caller has no profile yet.
+        headers:
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: './devices.yaml#/shared/server-error'
+
+  put:
+    operationId: putUserProfile
+    summary: Create or replace the caller's profile
+    description: |
+      With no profile yet, creates one (201): `createdAt` is now and
+      `preferences` is deep-merged over the defaults. Otherwise replaces it
+      (200), keeping `createdAt` and deep-merging `preferences` over the
+      stored ones; plain objects merge key by key, scalars and arrays
+      replace. The replace is conditioned on the version read (If-Match): if
+      the profile changed in between, the answer is 409 CONCURRENT_UPDATE and
+      the client should read it again and retry.
+    tags: [users]
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/user.yaml#/PutUserProfileRequest'
+    responses:
+      '200':
+        description: The profile existed and was replaced.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/user.yaml#/User'
+      '201':
+        description: The profile was created.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/user.yaml#/User'
+      '400':
+        description: |
+          VALIDATION_ERROR: the body is not valid JSON, carries `id`, `userId`
+          or another unknown field, or breaks a field rule. Answered before
+          any Cosmos call.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '409':
+        description: |
+          CONCURRENT_UPDATE: the profile changed between the read and the
+          write.
+        headers:
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: './devices.yaml#/shared/server-error'

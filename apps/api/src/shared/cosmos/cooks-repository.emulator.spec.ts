@@ -186,6 +186,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
         cooksContainerName: tfContainer.name,
         devicesContainerName: 'unused-by-this-tier',
         temperaturesContainerName: 'unused-by-this-tier',
+        usersContainerName: 'unused-by-this-tier',
       },
       {
         credentialFactory: () => unusedCredential,

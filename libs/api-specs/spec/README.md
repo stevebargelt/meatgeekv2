@@ -12,12 +12,14 @@ spec/
     cooks.yaml                          # path items keyed by route alias
     temperatures.yaml
     devices.yaml
+    users.yaml                          # GET/PUT /users/me
   components/
     schemas/
       common.yaml                       # error envelope, pagination, ISODateTime
       cook.yaml                         # CookStatus, Cook, StartCookRequest, ...
       temperature.yaml                  # TemperatureReading, alerts, history
       device.yaml                       # Device, configuration, list wrapper
+      user.yaml                         # User, preferences, PutUserProfileRequest
       signalr-payloads.yaml             # message envelopes for temperatureHub
 ```
 
