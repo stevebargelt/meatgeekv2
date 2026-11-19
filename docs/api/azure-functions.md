@@ -20,6 +20,7 @@ yet wired.
 | `stopCook`               | HTTP `POST`  | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
 | `negotiate`              | HTTP `POST`  | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
 | `getCurrentTemperatures` | HTTP `GET`   | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else) |
+| `getTemperatureHistory`  | HTTP `GET`   | `temperatures/history`            | A page of a caller's device's readings          |
 | `getDevices`             | HTTP `GET`   | `devices`                         | List the caller's devices                       |
 | `registerDevice`         | HTTP `POST`  | `devices`                         | Register a device to the caller                 |
 | `getDevice`              | HTTP `GET`   | `devices/{id}`                    | One of the caller's devices (404 otherwise)     |
@@ -457,8 +458,8 @@ COSMOSDB_COOKS_CONTAINER_NAME=<cosmos-cooks-container-name>
 # The other entity containers in the same database (HAR-19), published the same
 # way: Terraform-owned (module.cosmos_db.destination_container_names.<entity>),
 # required, no default. The devices handlers read COSMOSDB_DEVICES_CONTAINER_NAME
-# (HAR-20), GET /temperatures/current reads COSMOSDB_TEMPERATURES_CONTAINER_NAME
-# (HAR-28) and the users handlers read COSMOSDB_USERS_CONTAINER_NAME (HAR-27); the
+# (HAR-20), GET /temperatures/current and /temperatures/history read
+# COSMOSDB_TEMPERATURES_CONTAINER_NAME (HAR-28, HAR-35) and the users handlers read COSMOSDB_USERS_CONTAINER_NAME (HAR-27); the
 # shared adapter fails loud without each (cosmos_devices_container_not_configured,
 # cosmos_temperatures_container_not_configured, cosmos_users_container_not_configured).
 # Recipes are not read by the API yet (HAR-18 follow-up).

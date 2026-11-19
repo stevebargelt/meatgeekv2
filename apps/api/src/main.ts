@@ -14,6 +14,7 @@ import { stopCookHandler } from './functions/cooks/stop-cook';
 import { negotiateHandler, signalRConnInfoInput } from './functions/signalr/negotiate';
 import { signalROutput } from './functions/signalr/envelope';
 import { getCurrentTemperaturesHandler } from './functions/temperatures/get-current';
+import { getTemperatureHistoryHandler } from './functions/temperatures/get-history';
 import { getDevicesHandler } from './functions/devices/get-devices';
 import { getDeviceHandler } from './functions/devices/get-device';
 import { registerDeviceHandler } from './functions/devices/register-device';
@@ -77,6 +78,15 @@ app.http('getCurrentTemperatures', {
   authLevel: 'anonymous',
   route: 'temperatures/current/{deviceId}',
   handler: getCurrentTemperaturesHandler,
+});
+
+// HAR-35 (MG-79 part 2): a page of an owned device's readings. The query
+// parameters carry the filter; there is no {deviceId} in the route.
+app.http('getTemperatureHistory', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'temperatures/history',
+  handler: getTemperatureHistoryHandler,
 });
 
 app.http('getDevices', {

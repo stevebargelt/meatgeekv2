@@ -35,6 +35,8 @@ proof the ticket adds. You can also run it by hand, as below.
 | `temperatures.proof.ts`          | `POST /devices` registering `acceptance-temp-<runId>` with a run-unique name   | `201`                                                                                                                                     |
 |                                  | `GET /temperatures/current/acceptance-temp-<runId>`                            | `404` with `error: NO_READINGS` (owned, but nothing has been routed for it)                                                               |
 |                                  | `GET /temperatures/current/acceptance-temp-unowned-<runId>` (never registered) | `404` with `error: DEVICE_NOT_FOUND`                                                                                                      |
+|                                  | `GET /temperatures/history?deviceId=acceptance-temp-<runId>`                   | `200`; exactly `{ readings: [], total: 0, offset: 0, limit: 100, hasMore: false }` (owned, nothing routed)                                |
+|                                  | `GET /temperatures/history?deviceId=acceptance-temp-unowned-<runId>`           | `404` with `error: DEVICE_NOT_FOUND`                                                                                                      |
 | `users.proof.ts`                 | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`      | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id  |
 |                                  | `GET /users/me`                                                                | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                 |
 
@@ -44,8 +46,10 @@ keys starting with `_` at any depth (Cosmos system properties).
 Every authenticated cooks, devices, temperatures and users response must carry the
 `x-meatgeek-request-charge` header (the Cosmos RU the call cost, as a decimal),
 including the devices `404` and the cooks `403`, which still cost a point read,
-and both temperatures `404`s (the ownership point read, plus the readings query
-for `NO_READINGS`). The users figure includes the devices owner query that fills
+both `GET /temperatures/current` `404`s (the ownership point read, plus the
+readings query for `NO_READINGS`), and both `GET /temperatures/history`
+responses (the ownership point read for the `404`; that plus the count and page
+queries for the empty `200`). The users figure includes the devices owner query that fills
 `User.devices`. A response without
 it fails the proof. Responses that make no Cosmos call, such as a 401, carry no
 header.
@@ -62,7 +66,8 @@ two steps use `acceptance-unowned-<runId>`, which is never registered.
 
 `temperatures.proof.ts` registers its own device, `acceptance-temp-<runId>`, and
 is read-only otherwise: nothing in the suite writes telemetry (only IoT Hub
-does), so a fresh device always answers `NO_READINGS`.
+does), so a fresh device always answers `NO_READINGS` for its current reading
+and an empty first page for its history.
 
 The acceptance profile is not cleaned up either: there is no `DELETE /users/me`.
 It is keyed by the caller's identity, so every run writes the same document,
