@@ -1,0 +1,86 @@
+# Publish Architecture Site (HAR-52)
+#
+# Every merge to main builds the LikeC4 architecture model in
+# docs/architecture/likec4 and publishes it to GitHub Pages at
+# https://stevebargelt.github.io/meatgeekv2/. No path filter: every merge
+# publishes, so the site always matches main.
+#
+# The model's `check` script runs before the build, so a model that fails its
+# checks is never published. The site is built with --use-hash-history because
+# GitHub Pages has no SPA fallback: /view/<id> paths would 404 on reload, while
+# hash links (https://stevebargelt.github.io/meatgeekv2/#/view/index/) always
+# resolve.
+#
+# Credentials: none. `id-token: write` exists only so actions/deploy-pages can
+# mint the token the Pages deployment API requires; nothing here logs in to
+# Azure or reads a secret. Because the workflow holds `id-token: write`, every
+# `uses:` is pinned to a full commit SHA (MG-39).
+
+name: Publish Architecture Site
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+  # Let corepack download the packageManager-pinned npm without an interactive prompt.
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: docs/architecture/likec4/package-lock.json
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install pinned likec4
+        run: npm ci --prefix docs/architecture/likec4
+
+      - name: Check architecture model
+        run: npm --prefix docs/architecture/likec4 run check
+
+      - name: Build architecture site
+        run: >-
+          npx --prefix docs/architecture/likec4 likec4 build docs/architecture/likec4
+          -o "${{ runner.temp }}/architecture-site"
+          --base /meatgeekv2/
+          --use-hash-history
+          --title "MeatGeek V2 architecture"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: ${{ runner.temp }}/architecture-site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
