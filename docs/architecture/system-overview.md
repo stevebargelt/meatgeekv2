@@ -115,6 +115,8 @@ The existing Go-based device controller provides a solid foundation:
 └─────────────────┘    └──────────────┘
 ```
 
+The Event Hub → Functions → SignalR broadcast path in this picture is **planned, not on `main`**: IoT Hub routes to the Event Hub, but no function consumes it. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet. See [Architecture Diagrams](diagrams.md) for what is on `main`.
+
 ### Core Components
 
 #### 1. Device Layer
@@ -125,11 +127,13 @@ The existing Go-based device controller provides a solid foundation:
 #### 2. Cloud Infrastructure
 - **IoT Hub**: Device connectivity with **parallel message routing**
   - Direct route → CosmosDB for guaranteed storage
-  - Event Hub route → Functions for real-time processing
+  - Event Hub route → Functions for real-time processing (planned, not on `main`: the route and Event Hub exist, nothing consumes them)
 - **Azure Functions**: Two distinct roles
-  - **Lightweight Functions**: SignalR broadcasting only (no database writes)
+  - **Lightweight Functions**: SignalR broadcasting only (no database writes) (planned, not on `main`)
   - **API Functions**: Cook management and queries
 - **CosmosDB**: Document database receiving telemetry directly from IoT Hub
+
+**API persistence on `main`.** The API reads and writes one shared-throughput Cosmos database, `<prefix>-shared-db`, holding five containers: `devices` (`/id`), `temperatures` (`/deviceId`), `cooks` (`/userId`), `users` (`/id`) and `recipes` (`/userId`). It reaches them with the Function App's system-assigned managed identity, never a key, and finds each one by an app setting: `COSMOSDB_DATABASE_NAME` plus `COSMOSDB_{COOKS,DEVICES,TEMPERATURES,USERS,RECIPES}_CONTAINER_NAME`. `temperatures` is read-only for the API; only IoT Hub's Cosmos route writes it. The caller is the Easy Auth principal `"<tid>:<oid>"`. Routes that name a device first do one point read on `devices` to check the caller owns it: device and temperature routes answer 404 for a foreign or unknown device alike, and cook start and stop answer 403 `DEVICE_NOT_OWNED`. User profiles and recipes live in the caller's own partition.
 - **SignalR**: Real-time communication hub
 - **Application Insights**: Monitoring and observability
 
@@ -155,8 +159,8 @@ The existing Go-based device controller provides a solid foundation:
 ### Parallel Processing Architecture
 - **Dual-path telemetry processing** for resilience and performance
 - **Direct IoT Hub routing** to CosmosDB for guaranteed storage
-- **Event Hub triggers** for lightweight real-time processing
-- **SignalR broadcasts** for immediate client updates
+- **Event Hub triggers** for lightweight real-time processing (planned, not on `main`)
+- **SignalR broadcasts** for immediate client updates (planned, not on `main`; the API emits only cook lifecycle events today)
 - **Cook session events** for business logic coordination
 
 #### Device Cook Session Management

@@ -13,6 +13,8 @@ Device → Data Pusher → IoT Hub → Parallel Routes
                          └─→ Event Hub → Function → SignalR (Real-time)
 ```
 
+The real-time leg (Event Hub → Function → SignalR) is **planned, not on `main`**: IoT Hub routes to the Event Hub today, but no function in `apps/api` consumes it.
+
 ## Detailed Data Flow
 
 ### 1. Device Layer Processing
@@ -71,6 +73,9 @@ endpoint: "meatgeek-temperatures"
 - ✅ **Always available** - Even if Functions are down
 
 #### **Route 2: Real-time Path (Event Hub)**
+
+**Planned, not on `main`.** The `eventhub-realtime-route` and the `temperature-data` Event Hub exist in `apps/infrastructure/modules/iot-hub/main.tf`, but nothing consumes them; the design below is the intended consumer.
+
 ```yaml
 route_name: "RealTimeUpdates"
 source: "DeviceMessages"
@@ -88,36 +93,47 @@ endpoint: "realtime-events"
 ### 3. Storage Path Details
 
 ```
-IoT Hub → Direct Route → CosmosDB
-                         │
-                         └─→ Collection: temperatures
-                             Partition: /cookId
-                             TTL: 2 years
+IoT Hub → cosmos-storage-route → CosmosDB
+                                 │
+                                 └─→ Container: temperatures
+                                     Partition: /deviceId (stamped from {deviceid})
+                                     TTL: default_ttl (var.temperature_data_ttl)
 ```
 
-**Data Organization**:
+**Data Organization**: IoT Hub stores its message envelope, not the bare device payload. The endpoint stamps a top-level `deviceId` from the authenticated device id (`partition_key_template = "{deviceid}"`):
 ```json
-// Stored exactly as received from device
 {
-  "id": "temp-2025-01-26-10-05-00-abc123",
-  "messageType": "temperature",
+  "id": "…",
   "deviceId": "meatgeek3",
-  "cookId": "cook-abc123",
-  "timestamp": "2025-01-26T10:05:00Z", 
-  "grillTemp": 225.5,
-  "probe1Temp": 160.2,
-  // ... all temperature readings
+  "iothub_name": "…",
+  "Body": {
+    "deviceId": "meatgeek3",
+    "cookId": "cook-abc123",
+    "timestamp": "2025-01-26T10:05:00Z",
+    "grillTemp": 225.5,
+    "probe1Temp": 160.2
+    // ... all temperature readings, in the data-pusher wire shape
+  },
+  "Properties": { "correlation.id": "corr-xyz", "traceparent": "00-…" },
+  "SystemProperties": {
+    "iothub-connection-device-id": "meatgeek3",
+    "iothub-enqueuedtime": "2025-01-26T10:05:00.123Z"
+  },
   "_ts": 1737876300
 }
 ```
 
+The API only reads this container. A reading's device is `SystemProperties["iothub-connection-device-id"]`, never `Body.deviceId`, because `Body` is whatever the device chose to send.
+
 **Partitioning Strategy**:
-- **Partition Key**: `/cookId` 
-- **Benefits**: All temperatures for a cook are co-located
-- **Queries**: Efficient retrieval of cook temperature history
-- **Scaling**: Distributes across partitions by cook sessions
+- **Partition Key**: `/deviceId`
+- **Benefits**: All readings for one device are co-located, and the partition value comes from the hub, not the device payload
+- **Queries**: Per device, single-partition: the current reading is the newest by `iothub-enqueuedtime` (`GET /temperatures/current/{deviceId}`); history is a count plus a page ordered by `iothub-enqueuedtime`, with an optional time window and `cookId` as a tag filter on `Body.cookId` (`GET /temperatures/history`)
+- **Ownership**: Both routes first point-read the device in `devices`; a device the caller does not own, or that does not exist, is a 404
 
 ### 4. Real-time Path Details
+
+**Planned, not on `main`.** There is no `broadcastTemperature` function and no `device-{deviceId}` or `cook-{cookId}` SignalR group; the only SignalR output on `main` is the cook lifecycle event described below.
 
 ```
 IoT Hub → Event Hub → Lightweight Function → SignalR
@@ -157,29 +173,31 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
 ### Starting a Cook
 
 ```
-Mobile App → API Function → CosmosDB Cook Record → SignalR Notification → Device
-    │             │              │                    │                    │
-    ▼             ▼              ▼                    ▼                    ▼
-Start Cook    Create Cook     Store cook          Notify device       Cache cookId
-Request       with unique ID   metadata           about new cook      for telemetry
+Client → API Function → Ownership read (devices) → CosmosDB Cook Record → SignalR Notification → Device
+   │          │                 │                          │                     │                  │
+   ▼          ▼                 ▼                          ▼                     ▼                  ▼
+Start Cook  Resolve        403 if the caller          Store cook in        cook_started to     Cache cookId
+Request     principal      does not own the device    caller's partition   userId=deviceId     for telemetry
 ```
 
 **Sequence**:
-1. User starts cook in mobile app
-2. API Function creates cook record in CosmosDB:
+1. A client calls `POST /cooks` with a `deviceId` (the mobile and web apps are scaffolds and do not call the API yet)
+2. The API resolves the caller from the Easy Auth principal, `"<tid>:<oid>"`
+3. The API point-reads the device in the `devices` container. A device registered to someone else, or not registered at all, gets **403 `DEVICE_NOT_OWNED`**: no write, no SignalR event
+4. For an owned device, the API creates the cook record in the `cooks` container, partitioned on the caller's `userId`:
    ```json
    {
      "id": "cook-abc123",
-     "deviceId": "meatgeek3", 
-     "userId": "user-456",
+     "deviceId": "meatgeek3",
+     "userId": "<tid>:<oid>",
      "status": "active",
      "startTime": "2025-01-26T10:00:00Z",
      "name": "Saturday Brisket"
    }
    ```
-3. Function sends SignalR notification to device group
-4. Data Pusher receives notification and caches cookId
-5. All subsequent temperature messages include cookId
+5. After the write, the API emits `cook_started` on the `temperatureHub` SignalR hub to `userId = deviceId`
+6. Data Pusher receives the event and caches cookId (the live SignalR path is pending the MG-24 bootstrap; until then the Data Pusher recovers the active cook from the REST API on startup)
+7. All subsequent temperature messages include cookId
 
 ### During Active Cook
 
@@ -188,10 +206,12 @@ Every 5 seconds:
 Device → Enriched Temps → IoT Hub → Parallel Processing
   │                         │
   ▼                         ├─→ CosmosDB (with cookId)
-cookId cached               └─→ SignalR (real-time updates)
+cookId cached               └─→ SignalR (real-time updates; planned, not on `main`)
 ```
 
 ### Ending a Cook
+
+Stopping goes through the same ownership read: `POST /cooks/{cookId}/stop` on a device the caller does not own is a 403 `DEVICE_NOT_OWNED`.
 
 ```
 Mobile App → API Function → Update Cook Status → SignalR Notification → Device
