@@ -24,6 +24,8 @@ interface StubOptions {
   readonly omitChargeOn?: StubRoute;
   /** Echo the caller's Authorization header back in bodies and headers. */
   readonly echoAuthorization?: boolean;
+  /** Start cooks on any device, registered or not (the pre-HAR-26 behaviour). */
+  readonly allowAnyDevice?: boolean;
 }
 
 interface StubCook {
@@ -185,6 +187,11 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           send(400, { error: 'VALIDATION_ERROR' });
           return;
         }
+        // HAR-26: a cook only starts on a device the caller registered.
+        if (!options.allowAnyDevice && !devices.has(body.deviceId)) {
+          send(403, { error: 'DEVICE_NOT_OWNED' }, route);
+          return;
+        }
         const cook: StubCook = {
           id: body.id,
           userId: 'stub-tenant:stub-user',
@@ -287,9 +294,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // The unauthenticated call is its own row, with no RU.
     expect(summaryRow(result.output, 'GET /cooks (no auth)')).toMatch(/-\s*$/);
 
-    // The proofs used the MG-84 contract: a client UUID id and a synthetic device.
+    // HAR-26: one start on the registered device, one refused on the unowned one.
     const posts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
-    expect(posts).toHaveLength(1);
+    expect(posts).toHaveLength(2);
+    expect(
+      stub!.requests.filter(
+        r => r.method === 'GET' && /^\/api\/cooks\?deviceId=acceptance-unowned-[^&]+$/.test(r.path)
+      )
+    ).toHaveLength(1);
     // MG-87: the reconcile query ran once while the cook was active, once after.
     const filtered = stub!.requests.filter(
       r =>
@@ -312,15 +324,23 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.output).toContain(`FAIL cooks lifecycle`);
   });
 
+  /** HAR-26: the cooks lifecycle also registers its device, so a broken
+   *  POST /devices fails that group too. */
+  const groupsUsing = (route: DeviceRoute): string[] =>
+    route === 'POST /devices' ? ['cooks lifecycle ›', 'devices ›'] : ['devices ›'];
+
   it.each(DEVICE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',
     async route => {
       const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
       expect(result.exitCode).not.toBe(0);
-      expect(result.failures).toHaveLength(1);
-      expect(result.failures[0]).toContain(`${route} → 503`);
-      expect(result.failures[0]).toContain('devices ›');
+      const groups = groupsUsing(route);
+      expect(result.failures).toHaveLength(groups.length);
+      groups.forEach(group => {
+        const failure = result.failures.find(line => line.includes(group));
+        expect(failure).toContain(`${route} → 503`);
+      });
     }
   );
 
@@ -328,9 +348,21 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ omitChargeOn: route });
 
     expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(groupsUsing(route).length);
+    for (const failure of result.failures) {
+      expect(failure).toContain(route);
+      expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    }
+  });
+
+  it('(b) exits non-zero when POST /cooks on an unregistered device is not refused', async () => {
+    // The pre-HAR-26 behaviour: a cook starts on any device.
+    const result = await runAgainstStub({ allowAnyDevice: true });
+
+    expect(result.exitCode).not.toBe(0);
     expect(result.failures).toHaveLength(1);
-    expect(result.failures[0]).toContain(route);
-    expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    expect(result.failures[0]).toContain('unregistered device is 403 DEVICE_NOT_OWNED');
+    expect(result.failures[0]).toContain('POST /cooks → 201: expected 403');
   });
 
   it('(b) exits non-zero when the unauthenticated GET /cooks is not refused', async () => {

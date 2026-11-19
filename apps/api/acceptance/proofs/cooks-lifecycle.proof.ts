@@ -1,6 +1,12 @@
 import { randomUUID } from 'crypto';
 
-import type { Cook, CookListResponse, StartCookRequest } from '@meatgeekv2/api-interfaces';
+import type {
+  Cook,
+  CookListResponse,
+  Device,
+  RegisterDeviceRequest,
+  StartCookRequest,
+} from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { defineProofs } from '../lib/proof';
@@ -11,10 +17,15 @@ import { defineProofs } from '../lib/proof';
  * data-pusher's `deviceId` + `status=active` filter: it finds exactly the new
  * cook while it runs and nothing once it is stopped.
  *
- * The cook uses a synthetic device id (`acceptance-<runId>`) so it never
- * collides with a real device's one-active-cook lock, and a client-generated
- * UUID id as MG-84 requires (the id is the start's idempotency key). Acceptance
- * cooks are not deleted: there is no delete route yet.
+ * HAR-26 (MG-88, MG-83): a cook may only start on a device the caller owns. The
+ * first proof registers `acceptance-cook-<runId>` (a run-unique name too; the
+ * devices proof owns `acceptance-<runId>`) and the lifecycle runs on it. The
+ * last proof starts a cook on `acceptance-unowned-<runId>`, which nobody
+ * registered, and expects 403 DEVICE_NOT_OWNED with no cook written.
+ *
+ * The cook uses a client-generated UUID id as MG-84 requires (the id is the
+ * start's idempotency key). Acceptance devices and cooks are not deleted: there
+ * is no delete route yet.
  */
 
 const COOK_STATUSES = ['planning', 'active', 'paused', 'completed', 'cancelled'];
@@ -52,7 +63,16 @@ async function activeCooksOnDevice(
   api: AcceptanceApi,
   deviceId: string
 ): Promise<{ cooks: Cook[]; response: AcceptanceResponse }> {
-  const query = new URLSearchParams({ deviceId, status: 'active' });
+  return cooksOnDevice(api, deviceId, 'active');
+}
+
+/** The caller's cooks on one device, optionally in one status (first page). */
+async function cooksOnDevice(
+  api: AcceptanceApi,
+  deviceId: string,
+  status?: string
+): Promise<{ cooks: Cook[]; response: AcceptanceResponse }> {
+  const query = new URLSearchParams({ deviceId, ...(status ? { status } : {}) });
   const response = await api.request<CookListResponse>({
     method: 'GET',
     path: `/cooks?${query.toString()}`,
@@ -97,7 +117,15 @@ async function findCook(
 }
 
 export default defineProofs('cooks lifecycle', () => {
+  let device: RegisterDeviceRequest | undefined;
   let started: StartCookRequest | undefined;
+
+  const registeredDevice = (): RegisterDeviceRequest => {
+    if (!device) {
+      throw new Error('no device was registered by an earlier proof');
+    }
+    return device;
+  };
 
   const startedCook = (): StartCookRequest => {
     if (!started) {
@@ -108,12 +136,34 @@ export default defineProofs('cooks lifecycle', () => {
 
   return [
     {
-      name: 'POST /cooks starts a cook and returns a Cook',
+      name: 'POST /devices registers the device the cook runs on',
+      async run(api: AcceptanceApi) {
+        device = {
+          deviceId: `acceptance-cook-${api.runId}`,
+          name: `Acceptance cook ${api.runId}`,
+          model: 'Acceptance Rig',
+          location: 'CI',
+        };
+        const response = await api.request<Device>({
+          method: 'POST',
+          path: '/devices',
+          body: device,
+        });
+        api.expectStatus(response, 201);
+        api.check(
+          response,
+          response.body?.id === device.deviceId,
+          `device.id ${response.body?.id} is not the id sent`
+        );
+      },
+    },
+    {
+      name: 'POST /cooks starts a cook on the owned device and returns a Cook',
       async run(api: AcceptanceApi) {
         started = {
           id: randomUUID(),
           name: `Acceptance ${api.runId}`,
-          deviceId: `acceptance-${api.runId}`,
+          deviceId: registeredDevice().deviceId,
           meatType: 'acceptance',
           notes: 'Synthetic cook written by the live acceptance suite.',
         };
@@ -195,6 +245,39 @@ export default defineProofs('cooks lifecycle', () => {
           response,
           cooks.length === 0,
           `expected no active cook, got [${cooks.map(cook => cook.id).join(', ')}]`
+        );
+      },
+    },
+    {
+      name: 'POST /cooks on an unregistered device is 403 DEVICE_NOT_OWNED',
+      async run(api: AcceptanceApi) {
+        const unowned: StartCookRequest = {
+          id: randomUUID(),
+          name: `Acceptance unowned ${api.runId}`,
+          deviceId: `acceptance-unowned-${api.runId}`,
+          meatType: 'acceptance',
+        };
+        const response = await api.request<{ error?: string }>({
+          method: 'POST',
+          path: '/cooks',
+          body: unowned,
+        });
+        api.expectStatus(response, 403);
+        api.check(
+          response,
+          response.body?.error === 'DEVICE_NOT_OWNED',
+          `error is ${JSON.stringify(response.body?.error)}, not DEVICE_NOT_OWNED`
+        );
+      },
+    },
+    {
+      name: 'GET /cooks?deviceId on the unregistered device returns no cook',
+      async run(api: AcceptanceApi) {
+        const { cooks, response } = await cooksOnDevice(api, `acceptance-unowned-${api.runId}`);
+        api.check(
+          response,
+          cooks.length === 0,
+          `expected no cook, got [${cooks.map(cook => cook.id).join(', ')}]`
         );
       },
     },

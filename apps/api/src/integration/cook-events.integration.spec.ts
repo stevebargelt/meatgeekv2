@@ -158,10 +158,21 @@ const AUTHED_PRINCIPAL = {
   },
 };
 
+/** HAR-26: every device is owned by the caller in this suite (ownership is
+ *  covered in start-cook.spec / stop-cook.spec). */
+async function ownedDevice(userId: string, deviceId: string) {
+  return {
+    status: 'owned' as const,
+    device: { id: deviceId, userId, name: deviceId },
+    requestCharge: 1,
+  };
+}
+
 /** Fake start-cook deps: authenticated, with a repository that echoes the write. */
 function startDeps() {
   return {
     resolvePrincipal: () => AUTHED_PRINCIPAL,
+    getDeviceOwnership: ownedDevice,
     getRepository: () => ({
       // Persist = echo back the document the handler built (what Cosmos returns).
       startCook: async (cook: Cook) => ({ outcome: 'created' as const, cook, requestCharge: 1 }),
@@ -179,7 +190,9 @@ function startDeps() {
 function stopDeps(persisted: Cook | undefined) {
   return {
     resolvePrincipal: () => AUTHED_PRINCIPAL,
+    getDeviceOwnership: ownedDevice,
     getRepository: () => ({
+      getCook: async () => ({ cook: persisted, requestCharge: 1 }),
       stopCook: async (_userId: string, id: string, endTime: string) => ({
         cook: persisted
           ? ({ ...persisted, id, status: 'completed', endTime } as Cook)

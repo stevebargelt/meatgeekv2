@@ -14,7 +14,9 @@ import {
   type PrincipalResult,
 } from '../../shared/auth/principal';
 import { CooksRepository, getCooksRepository } from '../../shared/cosmos/cooks-repository';
-import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/request-charge';
+import { getDeviceOwnership, type DeviceOwnership } from '../../shared/cosmos/devices-repository';
+import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
+import { deviceNotOwnedBody } from './device-ownership';
 
 /**
  * MG-59 — stop a cook by durably completing the REAL persisted document.
@@ -29,6 +31,13 @@ import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/
  * its delivery scope (userId = the cook's deviceId) stays a distinct axis from the
  * persisted identity userId.
  *
+ * HAR-26 (MG-83, MG-88): the cook's device must belong to the caller. The
+ * deviceId is only known from the stored cook, so the handler first point-reads
+ * `(userId, cookId)` in the caller's partition (404 when absent), then point-reads
+ * the device's ownership. A device registered to someone else, or not registered
+ * at all, gets 403 DEVICE_NOT_OWNED with no write and no SignalR output. Only
+ * then does the stop run. The RU header sums every read and write.
+ *
  * Sanitization (MG-51 discipline): a dependency error can carry the account host,
  * the database/container name, or token fragments. None of it reaches a response
  * body or a log line — failures collapse to a fixed error class and the RU charge
@@ -40,22 +49,43 @@ import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/
  * so unit tests exercise the read-then-update path against a fake with no Azure and
  * no credentials.
  */
-export type StopCookRepository = Pick<CooksRepository, 'stopCook'>;
+export type StopCookRepository = Pick<CooksRepository, 'getCook' | 'stopCook'>;
 
 /**
- * The two seams stop-cook resolves the request through: the authenticated
- * principal and the cooks repository. Defaulted to the real implementations; a
- * test injects fakes so neither Easy Auth nor Cosmos is touched.
+ * The seams stop-cook resolves the request through: the authenticated principal,
+ * the cooks repository and the devices ownership read. Defaulted to the real
+ * implementations; a test injects fakes so neither Easy Auth nor Cosmos is
+ * touched.
  */
 export interface StopCookDeps {
   resolvePrincipal: (request: HeaderReader) => PrincipalResult;
   getRepository: () => StopCookRepository;
+  /** HAR-26: who owns `deviceId` relative to `userId` (one point read). */
+  getDeviceOwnership: (userId: string, deviceId: string) => Promise<DeviceOwnership>;
 }
 
 const defaultDeps: StopCookDeps = {
   resolvePrincipal: principalFromRequest,
   getRepository: getCooksRepository,
+  getDeviceOwnership,
 };
+
+function jsonResponse(
+  status: number,
+  body: unknown,
+  correlationId: string,
+  requestCharge: number | undefined
+): HttpResponseInit {
+  return {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Request-ID': correlationId,
+      ...requestChargeHeaders(requestCharge),
+    },
+    jsonBody: body,
+  };
+}
 
 export async function stopCookHandler(
   request: HttpRequest,
@@ -93,59 +123,72 @@ export async function stopCookHandler(
     };
   }
 
-  const endTime = new Date().toISOString();
-
+  let spent = 0;
   let stopped: Cook | undefined;
   let transitioned = false;
-  let requestCharge: number;
   try {
+    // HAR-26: the deviceId is only known from the stored cook. Point-read it in
+    // the caller's partition first. A cook owned by a different principal lives
+    // in a different partition and is invisible here, so a miss also refuses any
+    // cross-tenant addressing attempt.
+    const repository = deps.getRepository();
+    const existing = await repository.getCook(userId, cookId);
+    spent += existing.requestCharge;
+    if (!existing.cook) {
+      return jsonResponse(
+        404,
+        { error: 'NOT_FOUND', message: 'Cook not found', requestId: context.invocationId },
+        correlationId,
+        spent
+      );
+    }
+
+    // HAR-26 (MG-83): the cook's device must still be the caller's. One point
+    // read on the devices container, before any write or SignalR output.
+    const ownership = await deps.getDeviceOwnership(userId, existing.cook.deviceId);
+    spent += ownership.requestCharge;
+    if (ownership.status !== 'owned') {
+      context.log(`stopCook refused: device not owned (requestCharge=${spent} RU)`);
+      return jsonResponse(403, deviceNotOwnedBody(context.invocationId), correlationId, spent);
+    }
+
     // Read-then-update within the caller's partition. The repository point-reads
     // (userId, cookId) and only replaces the correctly-addressed document when it
     // exists — a miss returns `cook: undefined` WITHOUT writing.
-    const result = await deps.getRepository().stopCook(userId, cookId, endTime);
+    const endTime = new Date().toISOString();
+    const result = await repository.stopCook(userId, cookId, endTime);
+    spent += result.requestCharge;
     stopped = result.cook;
     transitioned = result.transitioned;
-    requestCharge = result.requestCharge;
     // RU charge is a bare number — safe to log against the shared 400 RU/s budget.
-    context.log(`stopCook request charge: ${result.requestCharge}`);
+    context.log(`stopCook request charge: ${spent}`);
   } catch (error) {
     // A Cosmos/credential error can carry the account host, database, container,
     // or token fragments; it is swallowed and replaced with a fixed class so
-    // nothing leaks. No SignalR message is emitted on failure. Only the error's
-    // numeric RU charge, when Cosmos reported one, is surfaced.
+    // nothing leaks. No SignalR message is emitted on failure. Only RU numbers
+    // are surfaced: what the completed reads spent plus the error's own charge.
     context.error('stopCook failed: cosmos_stop_failed');
-    return {
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Request-ID': correlationId,
-        ...requestChargeHeaders(requestChargeOfError(error)),
-      },
-      jsonBody: {
+    return jsonResponse(
+      500,
+      {
         error: 'INTERNAL_SERVER_ERROR',
         message: 'Failed to stop cook',
         requestId: context.invocationId,
       },
-    };
+      correlationId,
+      chargeAfterError(spent, error)
+    );
   }
 
-  // Absent in the caller's partition → 404, NO SignalR emit. A cook owned by a
-  // different principal lives in a different partition and is invisible here, so
-  // this also refuses any cross-tenant addressing attempt.
+  // The cook vanished between the read above and the stop (cooks are never
+  // deleted, so this is defensive) → 404, NO SignalR emit.
   if (!stopped) {
-    return {
-      status: 404,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Request-ID': correlationId,
-        ...requestChargeHeaders(requestCharge),
-      },
-      jsonBody: {
-        error: 'NOT_FOUND',
-        message: 'Cook not found',
-        requestId: context.invocationId,
-      },
-    };
+    return jsonResponse(
+      404,
+      { error: 'NOT_FOUND', message: 'Cook not found', requestId: context.invocationId },
+      correlationId,
+      spent
+    );
   }
 
   context.log(`Stopped cook: ${stopped.id}`);
@@ -156,8 +199,8 @@ export async function stopCookHandler(
   // still returned 200 idempotently, but is not re-announced: no new write, no
   // new event. Delivery is scoped to the device's SignalR user group (userId =
   // deviceId) — a DIFFERENT axis from the persisted identity userId, which stays
-  // the authenticated principal. deviceId comes from the persisted cook, not the
-  // caller.
+  // the authenticated principal. deviceId and the payload (MG-31: name,
+  // startTime, ...) come from the persisted cook, not the caller.
   if (transitioned) {
     const message: SignalROutputMessage = {
       target: COOK_STOPPED,
@@ -167,13 +210,5 @@ export async function stopCookHandler(
     context.extraOutputs.set(signalROutput, [message]);
   }
 
-  return {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Request-ID': correlationId,
-      ...requestChargeHeaders(requestCharge),
-    },
-    jsonBody: stopped,
-  };
+  return jsonResponse(200, stopped, correlationId, spent);
 }
