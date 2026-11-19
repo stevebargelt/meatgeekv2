@@ -1437,14 +1437,16 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
     return out;
   }
 
-  it('finds every role assignment in the graph (9 blocks over 8 distinct roles)', () => {
+  it('finds every role assignment in the graph (10 blocks over 9 distinct roles)', () => {
     // Premise guard: if this scan silently matched nothing, the two assertions
     // below would be vacuously green. Pin the shape the MG-23 allowlist is derived
-    // from — 9 azurerm_role_assignment blocks over 8 DISTINCT role definition
+    // from — 10 azurerm_role_assignment blocks over 9 DISTINCT role definition
     // names (Monitoring Metrics Publisher is granted twice, at different scopes:
-    // App Insights for the Function App, the DCR for the OTLP collector).
+    // App Insights for the Function App, the DCR for the OTLP collector). HAR-41
+    // added IoT Hub Registry Contributor, count-disabled until simulated_device_id
+    // is set.
     const found = roleAssignments();
-    expect(found.length).toBe(9);
+    expect(found.length).toBe(10);
 
     const roles = found.map(r => r.body.match(/role_definition_name\s*=\s*"([^"]+)"/)?.[1] ?? '');
     expect(roles).not.toContain('');
@@ -1452,6 +1454,7 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
       [
         'Azure Event Hubs Data Receiver',
         'Azure Event Hubs Data Sender',
+        'IoT Hub Registry Contributor',
         'Monitoring Metrics Publisher',
         'SignalR Service Owner',
         'Storage Blob Data Contributor',

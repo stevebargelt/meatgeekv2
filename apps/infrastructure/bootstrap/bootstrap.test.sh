@@ -1802,7 +1802,7 @@ else ok "build_rbac_admin_condition contains no hardcoded GUID"; fi
 if grep -q 'GUID MISMATCH' "$BOOT"; then
   ok "a committed-vs-live GUID disagreement fails closed"
 else bad "bootstrap must fail closed when a committed GUID disagrees with the live one"; fi
-# The 8 allowlisted role NAMES live in the allowlist file, not inlined here. Two
+# The allowlisted role NAMES live in the allowlist file, not inlined here. Two
 # names are permitted to overlap — 'Storage Blob Data Contributor' and 'Storage
 # Blob Data Owner' — because bootstrap also reasons about blob DATA-PLANE roles
 # on the STATE ACCOUNT (granting the former, and sweeping for both in

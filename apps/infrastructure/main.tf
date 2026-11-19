@@ -494,6 +494,27 @@ resource "azurerm_role_assignment" "functions_app_deploy_publisher" {
   principal_type       = "ServicePrincipal"
 }
 
+# App-deployment identity → IoT Hub device registry (HAR-39 standing simulated
+# device). `IoT Hub Registry Contributor` scoped to the IoT Hub ALONE, not the
+# RG. The dev live acceptance job runs as the app-deploy identity under OIDC; it
+# CREATES the simulated device identity if it is missing and fetches the
+# device's connection string at run time, masked per run. Nothing is stored: no
+# hub shared-access policy, no Key Vault, no repo secret.
+# Guarded by count on BOTH vars: the grant exists only when a simulated device
+# is declared (var.simulated_device_id) AND the app-deploy principal is known.
+# Switched off by default. The role is in bootstrap/tf-managed-role-allowlist.tsv,
+# but the live ABAC condition on the infra-apply identity only learns it when
+# bootstrap.sh is re-run; setting simulated_device_id in a tfvars before that
+# re-run fails the dev apply with AuthorizationFailed. Covered by
+# tests/simulated_device_registry_grant.tftest.hcl.
+resource "azurerm_role_assignment" "simulated_device_registry_contributor" {
+  count                = var.simulated_device_id != "" && var.app_deploy_principal_object_id != "" ? 1 : 0
+  scope                = module.iot_hub.iot_hub_id
+  role_definition_name = "IoT Hub Registry Contributor"
+  principal_id         = var.app_deploy_principal_object_id
+  principal_type       = "ServicePrincipal"
+}
+
 # SignalR Module
 module "signalr" {
   source = "./modules/signalr"
