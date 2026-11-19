@@ -367,3 +367,5 @@ model {
   delivery.acceptance -> meatgeek.cloud.api 'live acceptance probes'
   delivery.acceptance -> entra 'app-only token (OIDC)'
 }
+
+model { brokenSource -> doesNotExist }
