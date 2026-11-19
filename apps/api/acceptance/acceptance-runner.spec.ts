@@ -1,7 +1,7 @@
 /**
  * HAR-11 — self-test for the live acceptance suite. Runs under ordinary
  * `nx test api`, never against a deployed system: it starts an in-process HTTP
- * stub that imitates the cooks and devices routes and drives the REAL runner and the REAL
+ * stub that imitates the cooks, devices and users routes and drives the REAL runner and the REAL
  * proof files (discovered from ./proofs) against it.
  */
 import { randomUUID } from 'crypto';
@@ -15,7 +15,8 @@ const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 
 type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
-type StubRoute = CookRoute | DeviceRoute;
+type UserRoute = 'PUT /users/me' | 'GET /users/me';
+type StubRoute = CookRoute | DeviceRoute | UserRoute;
 
 interface StubOptions {
   /** Answer this route with this status (and an RU header) instead. */
@@ -62,6 +63,8 @@ const RU: Record<StubRoute, string> = {
   'POST /devices': '9.52',
   'GET /devices/{id}': '1',
   'PATCH /devices/{id}': '11.9',
+  'PUT /users/me': '14.21',
+  'GET /users/me': '3.62',
 };
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -73,10 +76,12 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return text ? JSON.parse(text) : undefined;
 }
 
-/** An in-process imitation of the deployed cooks and devices routes under `/api`. */
+/** An in-process imitation of the deployed cooks, devices and users routes under `/api`. */
 async function startStub(options: StubOptions = {}): Promise<Stub> {
   const cooks: StubCook[] = [];
   const devices = new Map<string, StubDevice>();
+  // The acceptance identity's profile persists between runs, as it does in dev.
+  let profile: Record<string, unknown> | undefined;
   const requests: Stub['requests'] = [];
 
   const server: Server = createServer((request, response: ServerResponse) => {
@@ -120,6 +125,10 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         route = 'POST /devices';
       else if (request.method === 'GET' && deviceMatch) route = 'GET /devices/{id}';
       else if (request.method === 'PATCH' && deviceMatch) route = 'PATCH /devices/{id}';
+      else if (request.method === 'PUT' && url.pathname === '/api/users/me')
+        route = 'PUT /users/me';
+      else if (request.method === 'GET' && url.pathname === '/api/users/me')
+        route = 'GET /users/me';
       if (!route) {
         send(404, { error: 'NOT_FOUND' });
         return;
@@ -131,6 +140,33 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           { error: options.echoAuthorization ? `STUB_FAILURE ${authorization}` : 'STUB_FAILURE' },
           route
         );
+        return;
+      }
+
+      if (route === 'PUT /users/me') {
+        const body = (await readJson(request)) as Record<string, unknown>;
+        if (!body?.['name'] || !body['email'] || 'id' in body || 'userId' in body) {
+          send(400, { error: 'VALIDATION_ERROR' });
+          return;
+        }
+        const created = profile === undefined;
+        profile = {
+          id: 'stub-tenant:stub-user',
+          createdAt: (profile?.['createdAt'] as string) ?? new Date().toISOString(),
+          preferences: {},
+          devices: [...devices.keys()],
+          name: body['name'],
+          email: body['email'],
+        };
+        send(created ? 201 : 200, profile, route);
+        return;
+      }
+      if (route === 'GET /users/me') {
+        if (!profile) {
+          send(404, { error: 'USER_NOT_FOUND' }, route);
+          return;
+        }
+        send(200, profile, route);
         return;
       }
 
@@ -262,9 +298,10 @@ const DEVICE_ROUTES: DeviceRoute[] = [
   'GET /devices',
   'PATCH /devices/{id}',
 ];
+const USER_ROUTES: UserRoute[] = ['PUT /users/me', 'GET /users/me'];
 
 describe('live acceptance runner (against an in-process stub)', () => {
-  it('(a) exits 0 against a passing stub and reports RU for every cooks and devices route', async () => {
+  it('(a) exits 0 against a passing stub and reports RU for every cooks, devices and users route', async () => {
     const result = await runAgainstStub();
 
     expect(result.failures).toEqual([]);
@@ -272,9 +309,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.output).toMatch(/\d+ passed, 0 failed, 0 skipped/);
 
     // Every authenticated request line carries the RU the stub reported.
-    const requestLines = result.lines.filter(line => /^\s+(GET|POST|PATCH)\s+\//.test(line));
+    const requestLines = result.lines.filter(line => /^\s+(GET|POST|PATCH|PUT)\s+\//.test(line));
     expect(requestLines.length).toBeGreaterThanOrEqual(5);
-    for (const route of [...ROUTES, ...DEVICE_ROUTES]) {
+    for (const route of [...ROUTES, ...DEVICE_ROUTES, ...USER_ROUTES]) {
       const [method, path] = route.split(' ');
       const lines = requestLines.filter(line =>
         new RegExp(`^\\s+${method}\\s+${escape(path)}\\s`).test(line)
@@ -323,6 +360,42 @@ describe('live acceptance runner (against an in-process stub)', () => {
       expect(result.failures[0]).toContain('devices ›');
     }
   );
+
+  it.each(USER_ROUTES)(
+    '(b) exits non-zero and names %s when it returns a wrong status',
+    async route => {
+      const result = await runAgainstStub({ failRoute: { route, status: 503 } });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(`${route} → 503`);
+      expect(result.failures[0]).toContain('users ›');
+    }
+  );
+
+  it.each(USER_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
+    const result = await runAgainstStub({ omitChargeOn: route });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(route);
+    expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+  });
+
+  it('accepts the profile PUT as a create on the first run and a replace on the next', async () => {
+    stub = await startStub();
+    const env = { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN };
+    const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
+    const lines: string[] = [];
+    const second = await runAcceptance({
+      env,
+      write: line => lines.push(line),
+      runId: `r-${randomUUID()}`,
+    });
+
+    expect([first.exitCode, second.exitCode]).toEqual([0, 0]);
+    expect(lines.some(line => /^\s+PUT\s+\/users\/me\s+200\s/.test(line))).toBe(true);
+  });
 
   it.each(DEVICE_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
     const result = await runAgainstStub({ omitChargeOn: route });

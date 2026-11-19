@@ -18,7 +18,7 @@ const FAKE_NOW_ISO = '2026-01-01T00:00:00.000Z';
 
 const buildCook = (overrides: Partial<Cook> = {}): Cook => ({
   id: 'cook-existing-1',
-  userId: 'user-1',
+  userId: 'tid-test:oid-test',
   deviceId: 'device-1',
   name: 'Test Cook',
   status: COOK_STATUS.PLANNING,
@@ -72,7 +72,7 @@ describe('CookManager', () => {
     it('trims the cook name before storing (agrees with validateCook)', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ name: '  Sunday Brisket  ' }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.name).toBe('Sunday Brisket');
     });
@@ -81,20 +81,20 @@ describe('CookManager', () => {
       // MG-28: Cook.name is a required non-empty field; a whitespace-only name
       // trims to '' and would emit an invalid Cook, so createCook fails fast.
       expect(() =>
-        CookManager.createCook(buildStartRequest({ name: '   ' }), 'user-1')
+        CookManager.createCook(buildStartRequest({ name: '   ' }), 'tid-test:oid-test')
       ).toThrow('createCook: cook name must not be empty or whitespace-only');
     });
 
     it('throws for an empty-string name', () => {
       expect(() =>
-        CookManager.createCook(buildStartRequest({ name: '' }), 'user-1')
+        CookManager.createCook(buildStartRequest({ name: '' }), 'tid-test:oid-test')
       ).toThrow('createCook: cook name must not be empty or whitespace-only');
     });
 
     it('populates default targetTemps from MEAT_TYPES for BRISKET key', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'BRISKET', targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.targetTemps).toEqual({
         grill: MEAT_TYPES.BRISKET.defaultGrillTemp,
@@ -105,7 +105,7 @@ describe('CookManager', () => {
     it('populates default targetTemps from MEAT_TYPES for PORK_SHOULDER key', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'PORK_SHOULDER', targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.targetTemps).toEqual({
         grill: MEAT_TYPES.PORK_SHOULDER.defaultGrillTemp,
@@ -116,7 +116,7 @@ describe('CookManager', () => {
     it('uppercases the meatType when looking up MEAT_TYPES (lowercase input still resolves)', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'brisket', targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.targetTemps).toEqual({
         grill: MEAT_TYPES.BRISKET.defaultGrillTemp,
@@ -127,7 +127,7 @@ describe('CookManager', () => {
     it('resolves the display name "Pork Shoulder" to the PORK_SHOULDER key and populates its default targetTemps', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'Pork Shoulder', targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.targetTemps).toEqual({
         grill: MEAT_TYPES.PORK_SHOULDER.defaultGrillTemp,
@@ -138,7 +138,7 @@ describe('CookManager', () => {
     it('leaves targetTemps grill/probe1 as undefined when meatType cannot be resolved', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'Unicorn Steaks', targetTemps: undefined }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.targetTemps).toEqual({ grill: undefined, probe1: undefined });
     });
@@ -147,13 +147,13 @@ describe('CookManager', () => {
       const overrides = { grill: 250, probe1: 200, probe2: 180 };
       const cook = CookManager.createCook(
         buildStartRequest({ meatType: 'BRISKET', targetTemps: overrides }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.targetTemps).toEqual(overrides);
     });
 
     it('sets status to COOK_STATUS.PLANNING and isPublic to false', () => {
-      const cook = CookManager.createCook(buildStartRequest(), 'user-1');
+      const cook = CookManager.createCook(buildStartRequest(), 'tid-test:oid-test');
       expect(cook.status).toBe(COOK_STATUS.PLANNING);
       expect(cook.isPublic).toBe(false);
     });
@@ -161,13 +161,13 @@ describe('CookManager', () => {
     it('passes notes through unchanged', () => {
       const cook = CookManager.createCook(
         buildStartRequest({ notes: 'wrap at 165' }),
-        'user-1'
+        'tid-test:oid-test'
       );
       expect(cook.notes).toBe('wrap at 165');
     });
 
     it('sets startTime to the current ISO string', () => {
-      const cook = CookManager.createCook(buildStartRequest(), 'user-1');
+      const cook = CookManager.createCook(buildStartRequest(), 'tid-test:oid-test');
       expect(cook.startTime).toBe(FAKE_NOW_ISO);
     });
 

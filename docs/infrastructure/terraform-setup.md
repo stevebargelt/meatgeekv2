@@ -572,8 +572,10 @@ and authenticated-smoke-test procedure.
 > way (**HAR-19**): `COSMOSDB_DEVICES_CONTAINER_NAME`,
 > `COSMOSDB_TEMPERATURES_CONTAINER_NAME`, `COSMOSDB_USERS_CONTAINER_NAME` and
 > `COSMOSDB_RECIPES_CONTAINER_NAME`, each required with no default and wired from
-> `module.cosmos_db.destination_container_names.<entity>`. The API does not read
-> them yet; the handlers move onto Cosmos in follow-up issues under HAR-18.
+> `module.cosmos_db.destination_container_names.<entity>`. The API reads the
+> devices (HAR-20) and users (HAR-27) settings and fails loud without them; the
+> temperatures and recipes handlers move onto Cosmos in follow-up issues under
+> HAR-18.
 >
 > `MEATGEEK_ENVIRONMENT` (**HAR-17**) tells the running app which environment
 > it is in (`dev` or `prod`, from the root's `environment` variable). It is a

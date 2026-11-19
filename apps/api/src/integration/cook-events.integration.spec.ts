@@ -148,7 +148,7 @@ const VALID_START = {
 // touched; the producer envelopes are asserted through the real handler code.
 // ---------------------------------------------------------------------------
 
-/** A fixed authenticated principal (tenant-namespaced userId), never 'user-1'. */
+/** A fixed authenticated principal (tenant-namespaced userId), never 'tid-test:oid-test'. */
 const AUTHED_PRINCIPAL = {
   authenticated: true as const,
   principal: {
@@ -516,7 +516,7 @@ describe('producer/consumer wire-contract parity (apps/data-pusher/internal/sign
   it('emits the wire shape the Go dispatcher expects: cookId present on start, absent on stop', () => {
     const cook: Cook = {
       id: 'cook-42',
-      userId: 'user-1',
+      userId: 'tid-test:oid-test',
       deviceId: 'device-1',
       name: 'Test Cook',
       status: 'active',

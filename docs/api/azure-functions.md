@@ -13,19 +13,21 @@ What `apps/api/src/main.ts` registers with the Functions host today. Everything
 below the next heading describes the target architecture, some of which is not
 yet wired.
 
-| Function                 | Trigger     | Route / schedule                  | Purpose                                         |
-| ------------------------ | ----------- | --------------------------------- | ----------------------------------------------- |
-| `getCooks`               | HTTP `GET`  | `cooks`                           | List cooks                                      |
-| `startCook`              | HTTP `POST` | `cooks`                           | Start a cook (emits `cook_started` on SignalR)  |
-| `stopCook`               | HTTP `POST` | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
-| `negotiate`              | HTTP `POST` | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
-| `getCurrentTemperatures` | HTTP `GET`  | `temperatures/current/{deviceId}` | Latest reading for a device                     |
-| `getDevices`             | HTTP `GET`  | `devices`                         | List the caller's devices                       |
-| `registerDevice`         | HTTP `POST` | `devices`                         | Register a device to the caller                 |
-| `getDevice`              | HTTP `GET`  | `devices/{id}`                    | One of the caller's devices (404 otherwise)     |
-| `updateDevice`           | HTTP `PATCH`| `devices/{id}`                    | Change name / location / configuration          |
-| `cosmosHealth`           | HTTP `GET`  | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos     |
-| `storageHeartbeat`       | **Timer**   | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path             |
+| Function                 | Trigger      | Route / schedule                  | Purpose                                         |
+| ------------------------ | ------------ | --------------------------------- | ----------------------------------------------- |
+| `getCooks`               | HTTP `GET`   | `cooks`                           | List cooks                                      |
+| `startCook`              | HTTP `POST`  | `cooks`                           | Start a cook (emits `cook_started` on SignalR)  |
+| `stopCook`               | HTTP `POST`  | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
+| `negotiate`              | HTTP `POST`  | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
+| `getCurrentTemperatures` | HTTP `GET`   | `temperatures/current/{deviceId}` | Latest reading for a device                     |
+| `getDevices`             | HTTP `GET`   | `devices`                         | List the caller's devices                       |
+| `registerDevice`         | HTTP `POST`  | `devices`                         | Register a device to the caller                 |
+| `getDevice`              | HTTP `GET`   | `devices/{id}`                    | One of the caller's devices (404 otherwise)     |
+| `updateDevice`           | HTTP `PATCH` | `devices/{id}`                    | Change name / location / configuration          |
+| `getUserProfile`         | HTTP `GET`   | `users/me`                        | The caller's profile (404 until the first PUT)  |
+| `putUserProfile`         | HTTP `PUT`   | `users/me`                        | Create or replace the caller's profile          |
+| `cosmosHealth`           | HTTP `GET`   | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos     |
+| `storageHeartbeat`       | **Timer**    | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path             |
 
 `storageHeartbeat` exists because it is the **only** registration that needs
 `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and
@@ -455,9 +457,10 @@ COSMOSDB_COOKS_CONTAINER_NAME=<cosmos-cooks-container-name>
 # The other entity containers in the same database (HAR-19), published the same
 # way: Terraform-owned (module.cosmos_db.destination_container_names.<entity>),
 # required, no default. The devices handlers read COSMOSDB_DEVICES_CONTAINER_NAME
-# (HAR-20) and the shared adapter fails loud without it
-# (cosmos_devices_container_not_configured). The other three are not read by the
-# API yet (HAR-18 follow-ups).
+# (HAR-20) and the users handlers read COSMOSDB_USERS_CONTAINER_NAME (HAR-27); the
+# shared adapter fails loud without either (cosmos_devices_container_not_configured,
+# cosmos_users_container_not_configured). The other two are not read by the API
+# yet (HAR-18 follow-ups).
 COSMOSDB_DEVICES_CONTAINER_NAME=<cosmos-devices-container-name>
 COSMOSDB_TEMPERATURES_CONTAINER_NAME=<cosmos-temperatures-container-name>
 COSMOSDB_USERS_CONTAINER_NAME=<cosmos-users-container-name>

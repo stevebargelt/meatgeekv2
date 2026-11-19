@@ -73,6 +73,24 @@ describe('OpenAPI spec — structural validation', () => {
     ] as OpenAPIV3.ParameterObject[];
     expect(deviceParams.map(param => param.name)).not.toContain('userId');
     expect(deviceParams.map(param => param.name)).not.toContain('x-user-id');
+    // HAR-27 (MG-81): the caller's profile, identity from the principal only.
+    expect(paths['/users/me']?.get).toBeDefined();
+    expect(paths['/users/me']?.put).toBeDefined();
+    const userOperations = [paths['/users/me']?.get, paths['/users/me']?.put];
+    for (const operation of userOperations) {
+      expect(operation?.description ?? '').not.toMatch(/NOT YET IMPLEMENTED/);
+      const names = ((operation?.parameters ?? []) as OpenAPIV3.ParameterObject[]).map(
+        param => param.name,
+      );
+      expect(names).not.toContain('userId');
+      expect(names).not.toContain('x-user-id');
+    }
+    expect(Object.keys(paths['/users/me']?.put?.responses ?? {}).sort()).toEqual(
+      ['200', '201', '400', '401', '409', '500'],
+    );
+    expect(Object.keys(paths['/users/me']?.get?.responses ?? {}).sort()).toEqual(
+      ['200', '401', '404', '500'],
+    );
   });
 
   it('every operation has a unique operationId (codegen-friendly)', async () => {

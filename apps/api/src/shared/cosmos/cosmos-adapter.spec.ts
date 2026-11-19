@@ -28,6 +28,7 @@ const ENDPOINT_SETTING = 'COSMOSDB__accountEndpoint';
 const DATABASE_SETTING = 'COSMOSDB_DATABASE_NAME';
 const COOKS_CONTAINER_SETTING = 'COSMOSDB_COOKS_CONTAINER_NAME';
 const DEVICES_CONTAINER_SETTING = 'COSMOSDB_DEVICES_CONTAINER_NAME';
+const USERS_CONTAINER_SETTING = 'COSMOSDB_USERS_CONTAINER_NAME';
 
 // Realistic-shaped values used ONLY to prove they never surface in an error or
 // log line. If a test's asserted message ever contained one of these, the leak
@@ -36,12 +37,14 @@ const ACCOUNT_ENDPOINT = 'https://mgv2-secret-account.documents.azure.com/';
 const DATABASE_NAME = 'meatgeek-v2-dev-db';
 const COOKS_CONTAINER = 'cooks';
 const DEVICES_CONTAINER = 'devices';
+const USERS_CONTAINER = 'users';
 
 const VALID_ENV = {
   [ENDPOINT_SETTING]: ACCOUNT_ENDPOINT,
   [DATABASE_SETTING]: DATABASE_NAME,
   [COOKS_CONTAINER_SETTING]: COOKS_CONTAINER,
   [DEVICES_CONTAINER_SETTING]: DEVICES_CONTAINER,
+  [USERS_CONTAINER_SETTING]: USERS_CONTAINER,
 };
 
 const CONFIG: CosmosConfig = {
@@ -49,6 +52,7 @@ const CONFIG: CosmosConfig = {
   databaseName: DATABASE_NAME,
   cooksContainerName: COOKS_CONTAINER,
   devicesContainerName: DEVICES_CONTAINER,
+  usersContainerName: USERS_CONTAINER,
 };
 
 /** Re-imports the module with a given env, mirroring the MG-51 health spec. */
@@ -126,6 +130,7 @@ describe('MG-59 shared Cosmos adapter', () => {
         [DATABASE_SETTING]: undefined,
         [COOKS_CONTAINER_SETTING]: undefined,
         [DEVICES_CONTAINER_SETTING]: undefined,
+        [USERS_CONTAINER_SETTING]: undefined,
       });
       expect(load).not.toThrow();
     });
@@ -135,6 +140,7 @@ describe('MG-59 shared Cosmos adapter', () => {
       DATABASE_SETTING,
       COOKS_CONTAINER_SETTING,
       DEVICES_CONTAINER_SETTING,
+      USERS_CONTAINER_SETTING,
     ]) {
       it(`imports cleanly but getCosmosAdapter() throws when ${missing} is absent`, () => {
         const mod = loadAdapterModule({ ...VALID_ENV, [missing]: undefined })();
@@ -272,6 +278,37 @@ describe('MG-59 shared Cosmos adapter', () => {
       expect(thrown).toBeInstanceOf(mod.CosmosConfigError);
       expect(thrown?.code).toBe('cosmos_devices_container_not_configured');
       expect(thrown?.message).toContain(DEVICES_CONTAINER_SETTING);
+      expect(thrown?.message).not.toContain(ACCOUNT_ENDPOINT);
+      expect(thrown?.message).not.toContain(DATABASE_NAME);
+    });
+
+    it('HAR-27: addresses the configured users container by name', () => {
+      const mod = loadValid();
+      const { seams, double } = seamsWith();
+      const adapter = new mod.CosmosAdapter(CONFIG, seams);
+
+      const container = adapter.getUsersContainer();
+
+      expect(double.client.database).toHaveBeenCalledWith(DATABASE_NAME);
+      expect(double.containerReads).toEqual([USERS_CONTAINER]);
+      expect(container).toBe(double.container);
+      expect(adapter.usersContainerName).toBe(USERS_CONTAINER);
+    });
+
+    it('HAR-27: a missing users container setting fails with its own fixed code', () => {
+      const mod = loadValid();
+      let thrown: InstanceType<typeof mod.CosmosConfigError> | undefined;
+      try {
+        mod.resolveCosmosConfig({
+          ...VALID_ENV,
+          [USERS_CONTAINER_SETTING]: '  ',
+        } as NodeJS.ProcessEnv);
+      } catch (error) {
+        thrown = error as InstanceType<typeof mod.CosmosConfigError>;
+      }
+      expect(thrown).toBeInstanceOf(mod.CosmosConfigError);
+      expect(thrown?.code).toBe('cosmos_users_container_not_configured');
+      expect(thrown?.message).toContain(USERS_CONTAINER_SETTING);
       expect(thrown?.message).not.toContain(ACCOUNT_ENDPOINT);
       expect(thrown?.message).not.toContain(DATABASE_NAME);
     });
