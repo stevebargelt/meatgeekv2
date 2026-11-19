@@ -7,6 +7,11 @@
  * HAR-44: `simdevice` is replaced by a small Node script written to a temp dir
  * (see {@link writeFakeSimdevice}); the stub serves the reading it "sent" for
  * the simulated device once a few polls have gone by.
+ *
+ * HAR-45: the stub also keeps a volume of readings for the simulated device.
+ * A fake top-up run tells the stub how many it "sent" (an unauthenticated POST
+ * to `/api/__simdevice/sent`, which only the stub has), and the stub makes them
+ * readable over the next few `limit=1` polls, or never.
  */
 import { randomUUID } from 'crypto';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
@@ -18,6 +23,7 @@ import { join } from 'path';
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
 import { runAcceptance, RunResult } from './lib/runner';
 import { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
+import { VOLUME } from './proofs/telemetry-volume.proof';
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 
@@ -34,7 +40,7 @@ const OLDER_READINGS = [
 ];
 const SIM_HISTORY_PAGE = 2;
 
-type FakeMode = 'ok' | 'exit1' | 'leak-stderr' | 'leak-stdout';
+type FakeMode = 'ok' | 'exit1' | 'topup-exit1' | 'hang' | 'leak-stderr' | 'leak-stdout';
 
 type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
@@ -71,6 +77,14 @@ interface StubOptions {
   readonly simServedTimestamp?: string;
   /** The simulated device is registered to someone else: POST is 409, GET 404. */
   readonly simOwnedByOther?: boolean;
+  /** HAR-45: readings the simulated device's volume starts with. Default
+   *  `VOLUME.target`, so no top-up is needed. */
+  readonly simVolume?: number;
+  /** HAR-45: how many top-up readings become readable per `limit=1` poll.
+   *  Default all of them at the next poll. */
+  readonly simDrainPerPoll?: number;
+  /** HAR-45: top-up readings never become readable. */
+  readonly simTopupNeverRouted?: boolean;
 }
 
 interface StubCook {
@@ -98,6 +112,10 @@ interface StubDevice {
 interface Stub {
   readonly baseUrl: string;
   readonly requests: Array<{ method: string; path: string; authorization?: string }>;
+  /** HAR-45: the arguments of each top-up the fake simdevice reported. */
+  readonly topups: string[][];
+  /** HAR-45: the `total` each `limit=1` read of the simulated device returned. */
+  readonly volumeTotals: number[];
   close(): Promise<void>;
 }
 
@@ -149,10 +167,23 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   const simVisibleFromPoll = options.simVisibleFromPoll ?? 3;
   const simRouted = () => !options.simNeverRouted && simPolls >= simVisibleFromPoll;
   const simServed = options.simServedTimestamp ?? SIM_TIMESTAMP;
+  const topups: string[][] = [];
+  const volumeTotals: number[] = [];
+  let simStored = options.simVolume ?? VOLUME.target;
+  let simPending = 0;
 
   const server: Server = createServer((request, response: ServerResponse) => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://stub');
+      if (request.method === 'POST' && url.pathname === '/api/__simdevice/sent') {
+        // HAR-45: the fake simdevice reporting a top-up. Not an API route.
+        const { args } = (await readJson(request)) as { args: string[] };
+        topups.push(args);
+        simPending += Number(args[args.indexOf('--count') + 1]);
+        response.writeHead(204);
+        response.end();
+        return;
+      }
       const authorization = request.headers['authorization'];
       requests.push({
         method: request.method ?? '',
@@ -312,10 +343,45 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         const code = owned ? 'NO_READINGS' : 'DEVICE_NOT_FOUND';
         send(404, { error: options.temperatureErrorCode ?? code }, route);
       } else if (route === 'GET /temperatures/history') {
+        /** One page of the simulated device's volume, `simStored` readings. */
+        const sendVolumePage = (limitParam: string | null) => {
+          const limit = Number(limitParam ?? '100');
+          const offset = Number(url.searchParams.get('offset') ?? '0');
+          const size = Math.max(0, Math.min(limit, simStored - offset));
+          const readings = Array.from({ length: size }, (_, i) =>
+            simReading(new Date(Date.UTC(2026, 10, 12) + (offset + i) * 5000).toISOString())
+          );
+          send(
+            200,
+            { readings, total: simStored, offset, limit, hasMore: offset + limit < simStored },
+            route
+          );
+        };
         // An owned device has an empty first page; anything else is not found.
         const deviceId = url.searchParams.get('deviceId') ?? '';
         if (!devices.has(deviceId)) {
           send(404, { error: 'DEVICE_NOT_FOUND' }, route);
+          return;
+        }
+        if (deviceId === SIM_DEVICE && !url.searchParams.has('startTime')) {
+          // HAR-45: the volume, read without a window. A `limit=1` read is a
+          // poll: top-up readings become readable a batch at a time.
+          const limitParam = url.searchParams.get('limit');
+          if (limitParam === '1' && !options.simTopupNeverRouted) {
+            const routed = Math.min(simPending, options.simDrainPerPoll ?? simPending);
+            simPending -= routed;
+            simStored += routed;
+          }
+          if (limitParam === '1') {
+            volumeTotals.push(simStored);
+          }
+          sendVolumePage(limitParam);
+          return;
+        }
+        if (deviceId === SIM_DEVICE && url.searchParams.has('limit')) {
+          // HAR-45: the max page, `limit=5000` over a window; the stub does not
+          // filter on the window.
+          sendVolumePage(url.searchParams.get('limit'));
           return;
         }
         if (deviceId === SIM_DEVICE) {
@@ -437,6 +503,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   return {
     baseUrl: `http://127.0.0.1:${port}/api`,
     requests,
+    topups,
+    volumeTotals,
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
   };
 }
@@ -456,26 +524,51 @@ let fakeDir: string;
 
 /**
  * A stand-in for `simdevice`: a Node script, run through its shebang, that
- * prints one JSON line the way simdevice does, or misbehaves as `mode` says.
- * In `ok` mode it exits 2 unless it got `--count 1` and the credential arrived
- * through its environment, so the runner's hand-over is checked too.
+ * prints one JSON line per reading the way simdevice does, or misbehaves as
+ * `mode` says. In `ok` mode it exits 2 unless it got `--count 1` (the round
+ * trip) or `--count N --interval D` (a HAR-45 top-up) and the credential
+ * arrived through its environment, so the runner's hand-over is checked too.
+ * A top-up is reported to the running stub first, so the stub can serve it.
+ * `topup-exit1` sends the round trip's reading but fails a top-up; `hang`
+ * never exits.
  */
 function writeFakeSimdevice(mode: FakeMode): string {
   const path = join(fakeDir, `simdevice-${mode}`);
+  const notifyUrl = stub ? `${stub.baseUrl}/__simdevice/sent` : '';
   const script = `#!${process.execPath}
 const mode = ${JSON.stringify(mode)};
 const conn = process.env.SIMDEVICE_CONNECTION_STRING || '';
 const key = (conn.split(';').find(p => p.startsWith('SharedAccessKey=')) || '').slice(16);
 const line = o => process.stdout.write(JSON.stringify(o) + '\\n');
 const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stringify(SIM_DEVICE)}, timestamp, sentAt: new Date().toISOString() });
-if (mode === 'ok') {
-  const args = process.argv.slice(2).join(' ');
-  if (args !== '--count 1' || conn !== ${JSON.stringify(SIM_CONNECTION_STRING)} || process.env.ACCEPTANCE_BEARER_TOKEN || process.argv.some(a => a.includes(key))) {
+const args = process.argv.slice(2).join(' ');
+const handedOver = conn === ${JSON.stringify(SIM_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.argv.some(a => a.includes(key));
+const topup = /^--count ([1-9][0-9]*) --interval [0-9]+ms$/.exec(args);
+if (mode === 'ok' || mode === 'topup-exit1') {
+  if (!handedOver || (args !== '--count 1' && !topup)) {
     process.stderr.write('fake simdevice: bad hand-over: ' + args + '\\n');
     process.exit(2);
   }
-  process.stderr.write('connected\\n');
-  line(reading(${JSON.stringify(SIM_TIMESTAMP)}));
+  if (!topup) {
+    process.stderr.write('connected\\n');
+    line(reading(${JSON.stringify(SIM_TIMESTAMP)}));
+  } else if (mode === 'topup-exit1') {
+    process.stderr.write('send reading 3 of ' + topup[1] + ': connection lost\\nmore detail\\n');
+    process.exit(1);
+  } else {
+    fetch(${JSON.stringify(notifyUrl)}, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: process.argv.slice(2) }),
+    }).then(() => {
+      for (let i = 0; i < Number(topup[1]); i++) line(reading(new Date(Date.UTC(2026, 10, 19) + i * 50).toISOString()));
+    }, () => {
+      process.stderr.write('fake simdevice: could not report the top-up\\n');
+      process.exit(3);
+    });
+  }
+} else if (mode === 'hang') {
+  setInterval(() => undefined, 1000);
 } else if (mode === 'exit1') {
   process.stderr.write('send failed: connection refused\\nmore detail\\n');
   process.exit(1);
@@ -514,16 +607,25 @@ async function runAgainstStub(options: StubOptions = {}, mode: FakeMode = 'ok'):
 }
 
 const realPoll = { ...ROUNDTRIP_POLL };
+const realVolume = { ...VOLUME };
 
 beforeAll(() => {
   fakeDir = mkdtempSync(join(tmpdir(), 'acceptance-simdevice-'));
   // The round-trip proof polls every 1 s for up to 120 s live; here, far less.
   ROUNDTRIP_POLL.intervalMs = 5;
   ROUNDTRIP_POLL.capMs = 300;
+  // HAR-45: a long cook is 8,640 readings, re-read every 10 s for up to 15 min
+  // live. Here a few hundred (still over the 100-reading default page), and
+  // polls in milliseconds. The send interval is left as it is live.
+  VOLUME.target = 240;
+  VOLUME.margin = 6;
+  VOLUME.pollIntervalMs = 5;
+  VOLUME.pollCapMs = 300;
 });
 
 afterAll(() => {
   Object.assign(ROUNDTRIP_POLL, realPoll);
+  Object.assign(VOLUME, realVolume);
   rmSync(fakeDir, { recursive: true, force: true });
 });
 
@@ -638,7 +740,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
       expect(result.exitCode).not.toBe(0);
       const groups = groupsUsing(route);
-      expect(result.failures).toHaveLength(groups.length);
+      // HAR-45: the volume group relies on the round trip's registration, so a
+      // refused POST /devices leaves it reading an unregistered device.
+      const volume = result.failures.filter(line => line.startsWith('FAIL telemetry volume ›'));
+      expect(volume).toHaveLength(route === 'POST /devices' ? 1 : 0);
+      volume.forEach(failure =>
+        expect(failure).toContain('GET /temperatures/history → 404: expected 200, got 404')
+      );
+      expect(result.failures).toHaveLength(groups.length + volume.length);
       groups.forEach(group => {
         const failure = result.failures.find(line => line.includes(group));
         expect(failure).toContain(`${route} → 503`);
@@ -704,8 +813,13 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.failures[0]).toContain('missing x-meatgeek-request-charge header');
   });
 
-  /** HAR-44: the telemetry round-trip reads both temperatures routes too. */
-  const TEMPERATURE_GROUPS = ['FAIL temperatures ›', 'FAIL telemetry round-trip ›'];
+  /** HAR-44: the telemetry round-trip reads both temperatures routes too;
+   *  HAR-45: the telemetry volume group reads history only. */
+  const temperatureGroups = (route: TemperatureRoute): string[] => [
+    'FAIL temperatures ›',
+    'FAIL telemetry round-trip ›',
+    ...(route === 'GET /temperatures/history' ? ['FAIL telemetry volume ›'] : []),
+  ];
 
   it.each(TEMPERATURE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',
@@ -713,8 +827,8 @@ describe('live acceptance runner (against an in-process stub)', () => {
       const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
       expect(result.exitCode).not.toBe(0);
-      expect(result.failures).toHaveLength(TEMPERATURE_GROUPS.length);
-      TEMPERATURE_GROUPS.forEach(group => {
+      expect(result.failures).toHaveLength(temperatureGroups(route).length);
+      temperatureGroups(route).forEach(group => {
         const failure = result.failures.find(line => line.startsWith(group));
         expect(failure).toContain(`${route} → 503`);
       });
@@ -753,8 +867,8 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ omitChargeOn: route });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(TEMPERATURE_GROUPS.length);
-    TEMPERATURE_GROUPS.forEach(group => {
+    expect(result.failures).toHaveLength(temperatureGroups(route).length);
+    temperatureGroups(route).forEach(group => {
       const failure = result.failures.find(line => line.startsWith(group));
       expect(failure).toContain(route);
       expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
@@ -938,7 +1052,7 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     ]) {
       expect(result.lines).toContain(`PASS ${GROUP} ${step}`);
     }
-    const metrics = result.lines.filter(line => line.startsWith('METRIC '));
+    const metrics = result.lines.filter(line => line.startsWith('METRIC roundtrip-ms '));
     expect(metrics).toHaveLength(1);
     expect(metrics[0]).toMatch(/^METRIC roundtrip-ms \d+$/);
     expect(result.lines.some(line => /^\s+EXEC\s+simdevice --count 1\s+exit 0\s/.test(line))).toBe(
@@ -951,10 +1065,12 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     );
     expect(current).toHaveLength(4);
     // History was paged (two per page) until the sent reading turned up, from a
-    // window opening five minutes before the send.
+    // window opening five minutes before the send. (The volume group's reads
+    // carry a `limit` or no window.)
     const history = stub!.requests
       .filter(r => r.path.startsWith(`/api/temperatures/history?deviceId=${SIM_DEVICE}&`))
-      .map(r => new URL(r.path, 'http://stub').searchParams);
+      .map(r => new URL(r.path, 'http://stub').searchParams)
+      .filter(params => params.has('startTime') && !params.has('limit'));
     expect(history.map(params => params.get('offset'))).toEqual([null, '2']);
     const opened = Date.parse(history[0].get('startTime') ?? '');
     expect(Date.now() - opened).toBeGreaterThanOrEqual(5 * 60 * 1000);
@@ -994,7 +1110,7 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     expect(result.output).toContain(
       `SKIP ${GROUP} GET /temperatures/history holds the sent reading`
     );
-    expect(result.output).not.toMatch(/^METRIC /m);
+    expect(result.output).not.toMatch(/^METRIC roundtrip-ms /m);
   });
 
   it('(c) fails with the exit code when simdevice exits 1', async () => {
@@ -1063,5 +1179,161 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     expect(failures[0]).toContain('not to the caller');
     // simdevice was never run for someone else's device.
     expect(result.output).not.toMatch(/^\s+EXEC\s/m);
+  });
+});
+
+describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () => {
+  const GROUP = 'telemetry volume ›';
+  const STEPS = [
+    'GET /temperatures/history?limit=1 reads the simulated device volume',
+    'simdevice tops the volume up to one long cook when it is short',
+    'GET /temperatures/history?limit=1 reaches one long cook of readings',
+    'GET /temperatures/history pages report their request charge at that volume',
+  ];
+  const volumeFailures = (result: Run) =>
+    result.failures.filter(line => line.startsWith(`FAIL ${GROUP}`));
+  const metric = (result: Run, name: string) =>
+    result.lines.filter(line => line.startsWith(`METRIC ${name} `));
+  /** The volume group's history reads of the simulated device, as query params. */
+  const volumeReads = () =>
+    stub!.requests
+      .filter(r => r.path.startsWith(`/api/temperatures/history?deviceId=${SIM_DEVICE}`))
+      .map(r => new URL(r.path, 'http://stub').searchParams)
+      .filter(params => !params.has('startTime') || params.has('limit'));
+
+  it('(a) measures without a top-up when the volume is already at the target', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    // No simdevice top-up: the only run is the round trip's.
+    expect(stub!.topups).toEqual([]);
+    expect(result.lines.filter(line => /^\s+EXEC\s/.test(line))).toHaveLength(1);
+    expect(metric(result, 'history-total-before')).toEqual([
+      `METRIC history-total-before ${VOLUME.target}`,
+    ]);
+    expect(metric(result, 'topup-sent')).toEqual(['METRIC topup-sent 0']);
+    expect(metric(result, 'history-total')).toEqual([`METRIC history-total ${VOLUME.target}`]);
+    // The stub charges 7.71 RU for every history read.
+    for (const name of ['history-ru-first-page', 'history-ru-last-page', 'history-ru-max-page']) {
+      expect(metric(result, name)).toEqual([`METRIC ${name} 7.71`]);
+    }
+    expect(metric(result, 'history-max-page-readings')).toEqual([
+      `METRIC history-max-page-readings ${VOLUME.target}`,
+    ]);
+
+    // Read, poll once, then the three pages: first, last (offset total − 100),
+    // and 5000 over the last 12 h.
+    const reads = volumeReads();
+    expect(reads.map(params => params.toString().replace(/^deviceId=[^&]+&?/, ''))).toEqual([
+      'limit=1',
+      'limit=1',
+      '',
+      `offset=${VOLUME.target - 100}`,
+      expect.stringMatching(/^startTime=[^&]+&limit=5000$/),
+    ]);
+    const opened = Date.parse(reads[4].get('startTime') ?? '');
+    expect(Date.now() - opened).toBeGreaterThanOrEqual(12 * 60 * 60 * 1000);
+    expect(Date.now() - opened).toBeLessThan(12 * 60 * 60 * 1000 + 60 * 1000);
+  });
+
+  it('(b) tops up a short volume at the paced interval and waits for it to be readable', async () => {
+    const before = 40;
+    const count = VOLUME.target - before + VOLUME.margin;
+    const result = await runAgainstStub({ simVolume: before, simDrainPerPoll: 80 });
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    expect(stub!.topups).toEqual([['--count', String(count), '--interval', '50ms']]);
+    expect(
+      result.lines.some(line =>
+        new RegExp(
+          `^\\s+EXEC\\s+simdevice --count ${count} --interval 50ms\\s+exit 0\\s.*${count} message`
+        ).test(line)
+      )
+    ).toBe(true);
+    expect(metric(result, 'history-total-before')).toEqual([
+      `METRIC history-total-before ${before}`,
+    ]);
+    expect(metric(result, 'topup-sent')).toEqual([`METRIC topup-sent ${count}`]);
+    expect(metric(result, 'topup-ms')).toHaveLength(1);
+    expect(metric(result, 'topup-ms')[0]).toMatch(/^METRIC topup-ms \d+$/);
+    // The total rose across the polls, 80 a poll, until it reached the target.
+    expect(stub!.volumeTotals).toEqual([before, 120, 200, before + count]);
+    expect(metric(result, 'history-total')).toEqual([`METRIC history-total ${before + count}`]);
+    expect(metric(result, 'history-ru-first-page')).toHaveLength(1);
+    expect(metric(result, 'history-ru-last-page')).toHaveLength(1);
+    expect(metric(result, 'history-ru-max-page')).toHaveLength(1);
+    // The last page is read at the fresh total.
+    expect(
+      volumeReads().some(params => params.get('offset') === String(before + count - 100))
+    ).toBe(true);
+  });
+
+  it('(c) fails naming the cap and the last total when the volume never reaches the target', async () => {
+    const result = await runAgainstStub({ simVolume: 40, simTopupNeverRouted: true });
+
+    expect(result.exitCode).not.toBe(0);
+    const failures = volumeFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`${GROUP} ${STEPS[2]}`);
+    expect(failures[0]).toContain('GET /temperatures/history → 200');
+    expect(failures[0]).toContain(
+      `total is 40, short of ${VOLUME.target}, after the ${VOLUME.pollCapMs / 1000} s cap`
+    );
+    expect(stub!.volumeTotals.length).toBeGreaterThan(2);
+    expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[3]}`);
+    expect(result.output).not.toMatch(/^METRIC history-(total|ru-[a-z-]+) /m);
+    // Only this group failed.
+    expect(result.failures).toEqual(failures);
+  });
+
+  it('(d) fails with the exit code when simdevice exits 1 during the top-up', async () => {
+    const result = await runAgainstStub({ simVolume: 40 }, 'topup-exit1');
+
+    expect(result.exitCode).not.toBe(0);
+    const failures = volumeFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(result.failures).toEqual(failures);
+    expect(failures[0]).toContain(`${GROUP} ${STEPS[1]}`);
+    expect(failures[0]).toContain('simdevice → exit 1');
+    expect(failures[0]).toContain(
+      `simdevice exited 1, expected 0 (0 of ${VOLUME.target - 40 + VOLUME.margin} message(s) sent): ` +
+        `send reading 3 of ${VOLUME.target - 40 + VOLUME.margin}: connection lost`
+    );
+    expect(result.output).not.toContain('more detail');
+    expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[2]}`);
+    expect(result.output).not.toMatch(/^METRIC (topup-sent|history-total) /m);
+  });
+
+  it('runSimDevice kills a run that outlasts the time limit the proof passes', async () => {
+    stub = await startStub();
+    const lines: string[] = [];
+    let exitCode: number | null | undefined;
+    const result = await runAcceptance({
+      env: { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv('hang') },
+      write: line => lines.push(line),
+      groups: [
+        {
+          name: 'slow simdevice',
+          create: () => [
+            {
+              name: 'a hung simdevice is killed at the limit',
+              run: async api => {
+                ({ exitCode } = await api.runSimDevice(['--count', '1'], { timeoutMs: 200 }));
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(exitCode).toBeNull();
+    expect(lines.some(line => /^\s+EXEC\s+simdevice --count 1\s+exit killed\s/.test(line))).toBe(
+      true
+    );
   });
 });

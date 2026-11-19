@@ -53,6 +53,12 @@ export interface SimDeviceRun {
   readonly stderrFirstLine: string | undefined;
 }
 
+export interface SimDeviceOptions {
+  /** Kill the run after this long. Default 120 s, plenty for a few readings;
+   *  a long top-up (HAR-45) passes its own. */
+  readonly timeoutMs?: number;
+}
+
 /** What a proof is handed: a client bound to the deployed API and the run id. */
 export interface AcceptanceApi {
   /** Unique per run; use it to name synthetic data (e.g. `acceptance-<runId>`). */
@@ -63,8 +69,9 @@ export interface AcceptanceApi {
   /** Run the `simdevice` binary (ACCEPTANCE_SIMDEVICE_BIN) with `args`. The
    *  runner hands it the device credential through its environment; a proof
    *  never sees the credential. Resolves on exit whatever the exit code;
-   *  rejects only if the binary cannot be started. */
-  runSimDevice(args: readonly string[]): Promise<SimDeviceRun>;
+   *  rejects only if the binary cannot be started. A run longer than
+   *  `options.timeoutMs` (default 120 s) is killed: `exitCode` is `null`. */
+  runSimDevice(args: readonly string[], options?: SimDeviceOptions): Promise<SimDeviceRun>;
   /** Print `METRIC <name> <value>`. The CI job copies these lines to the run
    *  summary. `name` is lower-case kebab-case; `value` a finite number. */
   metric(name: string, value: number): void;
