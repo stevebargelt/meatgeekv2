@@ -1,5 +1,10 @@
 import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import type { Cook, CookListResponse, ListCooksRequest } from '@meatgeekv2/api-interfaces';
+import type {
+  Cook,
+  CookListResponse,
+  CookStatus,
+  ListCooksRequest,
+} from '@meatgeekv2/api-interfaces';
 
 import { principalFromRequest, unauthenticatedResponse } from '../../shared/auth/principal';
 import {
@@ -21,6 +26,15 @@ import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/
  * ../../shared/auth/principal): a caller-supplied `userId` is read solely to be
  * discarded, because honoring it would let any caller page another tenant's
  * cooks. Unauthenticated requests are rejected BEFORE any query is issued.
+ *
+ * FILTERS (MG-87)
+ * `deviceId` and `status` narrow the caller's own cooks and combine with AND.
+ * The data-pusher's reconcile asks for `deviceId=<id>&status=active` and treats
+ * the first cook as authoritative, so the filters must be honoured, not ignored.
+ * Both are validated before any query: `status` must be a CookStatus and
+ * `deviceId` a non-empty opaque string of at most
+ * {@link MAX_DEVICE_ID_LENGTH} characters. Anything else is a 400 that spends
+ * no RU. Neither filter can widen the query beyond the caller's partition.
  *
  * PAGINATION — CONTINUATION TOKEN, NEVER OFFSET
  * The cooks container draws on a database-level 400 RU/s shared offer that the
@@ -45,9 +59,35 @@ import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/
  * shared-throughput budget, never alongside the principal's identity.
  */
 
-/** The recognised pagination inputs. A caller-supplied `userId` is deliberately
- *  NOT part of this shape — identity is never taken from the query. */
-type ListCooksQuery = Pick<ListCooksRequest, 'limit' | 'continuationToken'>;
+/** The recognised query inputs. A caller-supplied `userId` is deliberately NOT
+ *  part of this shape — identity is never taken from the query. */
+type ListCooksQuery = Pick<ListCooksRequest, 'limit' | 'continuationToken' | 'deviceId' | 'status'>;
+
+/** Longest `deviceId` filter accepted. Device ids are opaque; this only bounds
+ *  what a caller can make the query carry. */
+export const MAX_DEVICE_ID_LENGTH = 128;
+
+/** Every CookStatus. A Record so the compiler fails if the union gains or loses
+ *  a member and this list is not updated with it. */
+const COOK_STATUSES: Record<CookStatus, true> = {
+  planning: true,
+  active: true,
+  paused: true,
+  completed: true,
+  cancelled: true,
+};
+
+function isCookStatus(value: string): value is CookStatus {
+  return Object.prototype.hasOwnProperty.call(COOK_STATUSES, value);
+}
+
+function validationError(message: string, requestId: string): HttpResponseInit {
+  return {
+    status: 400,
+    headers: { 'Content-Type': 'application/json' },
+    jsonBody: { error: 'VALIDATION_ERROR', message, requestId },
+  };
+}
 
 /** Mirrors the repository's clamp so the reported `limit` matches the page the
  *  repository actually served. Kept local rather than exported from the
@@ -88,10 +128,31 @@ export async function getCooksHandler(
   // to be discarded. The authenticated principal is the sole partition axis.
   void request.query.get('userId');
 
+  // MG-87 filters, validated before any query so a bad one spends no RU.
+  const statusParam = request.query.get('status');
+  if (statusParam !== null && !isCookStatus(statusParam)) {
+    return validationError(
+      `status must be one of: ${Object.keys(COOK_STATUSES).join(', ')}`,
+      context.invocationId
+    );
+  }
+  const deviceIdParam = request.query.get('deviceId');
+  if (
+    deviceIdParam !== null &&
+    (deviceIdParam.length === 0 || deviceIdParam.length > MAX_DEVICE_ID_LENGTH)
+  ) {
+    return validationError(
+      `deviceId must be 1 to ${MAX_DEVICE_ID_LENGTH} characters`,
+      context.invocationId
+    );
+  }
+
   const limitParam = request.query.get('limit');
   const query: ListCooksQuery = {
     limit: limitParam !== null ? Number(limitParam) : undefined,
     continuationToken: request.query.get('continuationToken') ?? undefined,
+    deviceId: deviceIdParam ?? undefined,
+    status: statusParam ?? undefined,
   };
 
   try {
@@ -99,6 +160,8 @@ export async function getCooksHandler(
     const page = await repository.listCooksByUser(userId, {
       maxItemCount: query.limit,
       continuationToken: query.continuationToken,
+      deviceId: query.deviceId,
+      status: query.status,
     });
 
     const cooks: Cook[] = page.cooks;

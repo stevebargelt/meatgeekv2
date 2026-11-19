@@ -14,6 +14,14 @@ cooks-collection:
       apps/api/src/functions/cooks/list-cooks.ts (CookListResponse — bare
       cook array under `cooks` with limit/hasMore/continuationToken, NOT
       wrapped in ApiResponse). Each cook carries only Cook contract fields.
+
+      Filters (MG-87): `deviceId` and `status` narrow the list and combine
+      with AND, so `?deviceId=<id>&status=active` returns only the caller's
+      active cook on that device. Newest first; paged by continuation token.
+      An invalid filter is rejected before any read:
+        - 400 VALIDATION_ERROR: `status` is not a CookStatus.
+        - 400 VALIDATION_ERROR: `deviceId` is empty or longer than 128
+          characters.
     tags: [cooks]
     parameters:
       - name: userId
@@ -24,9 +32,23 @@ cooks-collection:
           caller's cooks. The mock server uses it as a filter.
         schema:
           type: string
+      - name: deviceId
+        in: query
+        required: false
+        description: |
+          Only cooks on this device. Opaque; 1 to 128 characters, otherwise
+          400 VALIDATION_ERROR. Combines with `status` by AND. The device is
+          not checked for ownership: the list is always the caller's own cooks.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
       - name: status
         in: query
         required: false
+        description: |
+          Only cooks in this status; any other value is 400 VALIDATION_ERROR.
+          Combines with `deviceId` by AND.
         schema:
           $ref: '../components/schemas/cook.yaml#/CookStatus'
       - name: limit
@@ -65,6 +87,15 @@ cooks-collection:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/CookListResponse'
+      '400':
+        description: |
+          Invalid filter: `status` is not a CookStatus, or `deviceId` is empty
+          or longer than 128 characters. No read is issued, so there is no
+          x-meatgeek-request-charge header.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
         description: Server error.
         headers:

@@ -5,8 +5,9 @@ import type {
   OperationInput,
   OperationResponse,
   RequestOptions,
+  SqlParameter,
 } from '@azure/cosmos';
-import type { Cook } from '@meatgeekv2/api-interfaces';
+import type { Cook, CookStatus } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
 
@@ -234,6 +235,10 @@ export interface ListCooksOptions {
   readonly maxItemCount?: number;
   /** Opaque token from a prior page's {@link CookPage.continuationToken}. */
   readonly continuationToken?: string;
+  /** MG-87: only cooks on this device. Combines with {@link status} by AND. */
+  readonly deviceId?: string;
+  /** MG-87: only cooks in this status. Combines with {@link deviceId} by AND. */
+  readonly status?: CookStatus;
 }
 
 /** Clamps a requested page size into the safe range. */
@@ -555,17 +560,36 @@ export class CooksRepository {
    * continuation token — never an offset, which would re-charge skipped
    * documents against the shared pool. `userId` is the partition axis and the
    * ONLY thing that scopes this query; a caller cannot widen it.
+   *
+   * MG-87: optional `deviceId` / `status` filters narrow the page further. Each
+   * is a bound parameter, never concatenated into the SQL, and they combine with
+   * AND. The query stays in the caller's partition and keeps the newest-first
+   * order and continuation-token paging.
+   *
+   * Not done: a point-read fast path for `deviceId` + `status=active` through the
+   * MG-84 `active-device:<deviceId>` lock document. It would save a query, but the
+   * filtered single-partition query is cheap at this scale and keeps one code
+   * path. Revisit if the data-pusher's reconcile shows up in the RU budget.
    */
   async listCooksByUser(userId: string, options: ListCooksOptions = {}): Promise<CookPage> {
     const maxItemCount = clampPageSize(options.maxItemCount);
 
+    // MG-84: device lock documents share the partition; only cooks are listed.
+    const predicates = ['c.userId = @userId', 'NOT IS_DEFINED(c.docType)'];
+    const parameters: SqlParameter[] = [{ name: '@userId', value: userId }];
+    if (options.deviceId !== undefined) {
+      predicates.push('c.deviceId = @deviceId');
+      parameters.push({ name: '@deviceId', value: options.deviceId });
+    }
+    if (options.status !== undefined) {
+      predicates.push('c.status = @status');
+      parameters.push({ name: '@status', value: options.status });
+    }
+
     const iterator = this.container.items.query<StoredCook>(
       {
-        // MG-84: device lock documents share the partition; only cooks are listed.
-        query:
-          'SELECT * FROM c WHERE c.userId = @userId AND NOT IS_DEFINED(c.docType) ' +
-          'ORDER BY c.startTime DESC',
-        parameters: [{ name: '@userId', value: userId }],
+        query: `SELECT * FROM c WHERE ${predicates.join(' AND ')} ORDER BY c.startTime DESC`,
+        parameters,
       },
       {
         partitionKey: userId,
