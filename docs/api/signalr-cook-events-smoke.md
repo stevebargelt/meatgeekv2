@@ -176,9 +176,14 @@ curl -sS -X POST "https://<funcapp>/api/cooks" \
   -d "{\"id\":\"${COOK_ID}\",\"name\":\"AC5 smoke\",\"deviceId\":\"<deviceId>\",\"meatType\":\"brisket\"}"
 ```
 
+`<deviceId>` must be a device registered to the caller (`POST /devices`);
+otherwise the start is refused with **403 `DEVICE_NOT_OWNED`** and nothing is
+written or emitted (HAR-26).
+
 Expected — response is **HTTP 201** with the persisted cook document, including
 `id: ${COOK_ID}` and `status: "active"`. A **409 `COOK_ALREADY_ACTIVE`** means
-the device already has an active cook for this user; its id is in
+the device already has an active cook (one per user and device; since only
+the owner can start one, in effect one per device); its id is in
 `activeCookId`. Stop it (step 5) and start again. On the SignalR side, `startCook`
 emits a message with `target: cook_started` scoped to `userId = <deviceId>`, and
 the envelope carries `cookId = <the new cook id>` (see `buildCookEnvelope` —

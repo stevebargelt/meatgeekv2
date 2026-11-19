@@ -6,6 +6,9 @@
  * the Cosmos Container calls the repository makes, so the flow verifies the
  * production partition-key/query wiring without requiring an Azure account in
  * CI. It intentionally does not mock any handler, auth, or repository method.
+ *
+ * HAR-26: the device ownership check runs through the real DevicesRepository on
+ * an in-memory devices container, seeded with devices the OWNER registered.
  */
 import type { Container } from '@azure/cosmos';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
@@ -17,9 +20,16 @@ import { stopCookHandler } from '../functions/cooks/stop-cook';
 import { signalROutput, type SignalROutputMessage } from '../functions/signalr/envelope';
 import { principalFromRequest } from '../shared/auth/principal';
 import { CooksRepository } from '../shared/cosmos/cooks-repository';
+import { DevicesRepository } from '../shared/cosmos/devices-repository';
+import { FakeDevicesContainer } from '../shared/cosmos/fake-devices-container.testing';
 
 const OWNER = { tenantId: 'tenant-owner', objectId: 'owner-oid' };
 const OTHER = { tenantId: 'tenant-other', objectId: 'other-oid' };
+
+/** Devices the OWNER registered (HAR-26: a cook may only start on one of these). */
+const OWNER_DEVICES = ['grill-1', 'grill-2', 'grill-7', 'grill-8', 'grill-9'];
+/** A device registered to OTHER. */
+const OTHER_DEVICE = 'grill-other';
 
 function principalHeader(identity: typeof OWNER): string {
   return Buffer.from(
@@ -239,8 +249,20 @@ function containerContract() {
     }),
   };
 
+  const devicesContainer = new FakeDevicesContainer();
+  const seedDevice = (device: { id: string; userId: string; name: string }) =>
+    devicesContainer.seed(device);
+  for (const id of OWNER_DEVICES) {
+    seedDevice({ id, userId: 'tenant-owner:owner-oid', name: id });
+  }
+  seedDevice({ id: OTHER_DEVICE, userId: 'tenant-other:other-oid', name: OTHER_DEVICE });
+  const devices = new DevicesRepository(devicesContainer.asContainer());
+
   return {
     repository: new CooksRepository(container as unknown as Container),
+    getDeviceOwnership: (userId: string, deviceId: string) =>
+      devices.getDeviceOwnership(userId, deviceId),
+    reassignDevice: (id: string, userId: string) => seedDevice({ id, userId, name: id }),
     cooks,
     queryCalls,
     replaceBodies,
@@ -264,7 +286,11 @@ describe('MG-59 cooks persistence flow', () => {
         },
       }),
       startContext.context,
-      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+      }
     );
 
     expect(started.status).toBe(201);
@@ -289,7 +315,11 @@ describe('MG-59 cooks persistence flow', () => {
     const stopped = await stopCookHandler(
       request({ identity: OWNER, params: { cookId: created.id } }),
       stopContext.context,
-      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+      }
     );
     expect(stopped.status).toBe(200);
     expect(stopped.jsonBody).toMatchObject({ id: created.id, status: 'completed' });
@@ -321,7 +351,11 @@ describe('MG-59 cooks persistence flow', () => {
         },
       }),
       context('owner-start').context,
-      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+      }
     );
     const created = ownerStart.jsonBody as Cook;
     const intruderContext = context('other-stop');
@@ -329,7 +363,11 @@ describe('MG-59 cooks persistence flow', () => {
     const response = await stopCookHandler(
       request({ identity: OTHER, params: { cookId: created.id } }),
       intruderContext.context,
-      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+      }
     );
 
     expect(response.status).toBe(404);
@@ -353,7 +391,11 @@ describe('MG-59 cooks persistence flow', () => {
         },
       }),
       startContext.context,
-      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+      }
     );
     const created = started.jsonBody as Cook;
     // The store really does carry the system properties the responses must not.
@@ -366,12 +408,20 @@ describe('MG-59 cooks persistence flow', () => {
     const stopped = await stopCookHandler(
       request({ identity: OWNER, params: { cookId: created.id } }),
       stopContext.context,
-      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+      }
     );
     const stoppedAgain = await stopCookHandler(
       request({ identity: OWNER, params: { cookId: created.id } }),
       context('stop-again').context,
-      { resolvePrincipal: principalFromRequest, getRepository: () => store.repository }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+      }
     );
 
     expect([started.status, listed.status, stopped.status, stoppedAgain.status]).toEqual([
@@ -405,6 +455,7 @@ describe('MG-84 retry-safe start through the real repository', () => {
   const startDeps = (store: ReturnType<typeof containerContract>) => ({
     resolvePrincipal: principalFromRequest,
     getRepository: () => store.repository,
+    getDeviceOwnership: store.getDeviceOwnership,
   });
   const body = (id: string, deviceId = 'grill-1') => ({
     id,
@@ -546,5 +597,72 @@ describe('MG-84 retry-safe start through the real repository', () => {
     }
     expect(underscoreKeyPaths(x.messages)).toEqual([]);
     expect(JSON.stringify(x.messages)).not.toContain('docType');
+  });
+});
+
+describe('HAR-26 device ownership through the real repositories', () => {
+  const deps = (store: ReturnType<typeof containerContract>) => ({
+    resolvePrincipal: principalFromRequest,
+    getRepository: () => store.repository,
+    getDeviceOwnership: store.getDeviceOwnership,
+  });
+  const startOn = (
+    store: ReturnType<typeof containerContract>,
+    deviceId: string,
+    identity = OWNER
+  ) => {
+    const ctx = context(`start-${deviceId}`);
+    return startCookHandler(
+      request({
+        identity,
+        body: {
+          id: '6c7d8e9f-0a1b-4c2d-9e3f-5a6b7c8d9e0f',
+          name: 'Brisket',
+          deviceId,
+          meatType: 'brisket',
+        },
+      }),
+      ctx.context,
+      deps(store)
+    ).then(response => ({ response, messages: ctx.messages() }));
+  };
+
+  it.each([
+    ['registered to another user', OTHER_DEVICE],
+    ['not registered', 'grill-unregistered'],
+  ])(
+    'a start on a device %s is 403 with no cook, no lock and no emit',
+    async (_label, deviceId) => {
+      const store = containerContract();
+
+      const { response, messages } = await startOn(store, deviceId);
+
+      expect(response.status).toBe(403);
+      expect((response.jsonBody as { error: string }).error).toBe('DEVICE_NOT_OWNED');
+      expect(store.cooks.size).toBe(0);
+      expect(messages).toEqual([]);
+    }
+  );
+
+  it('a cook whose device the caller no longer owns cannot be stopped', async () => {
+    const store = containerContract();
+    const { response } = await startOn(store, 'grill-1');
+    const created = response.jsonBody as Cook;
+    // The device is now someone else's (no transfer route exists; model it in
+    // the store).
+    store.reassignDevice('grill-1', 'tenant-other:other-oid');
+    const ctx = context('stop-foreign');
+
+    const stopped = await stopCookHandler(
+      request({ identity: OWNER, params: { cookId: created.id } }),
+      ctx.context,
+      deps(store)
+    );
+
+    expect(stopped.status).toBe(403);
+    expect(ctx.messages()).toEqual([]);
+    expect(store.cooks.get(`tenant-owner:owner-oid/${created.id}`)).toMatchObject({
+      status: 'active',
+    });
   });
 });

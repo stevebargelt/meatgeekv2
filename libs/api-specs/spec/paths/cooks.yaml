@@ -128,9 +128,17 @@ cooks-collection:
           nothing is emitted.
         - 422 COOK_ID_REUSED: the id exists with a different body.
         - 409 COOK_ALREADY_ACTIVE: the device already has an active cook for
-          this user. One active cook per device; stop it first.
+          this user. One active cook per user and device; since only the
+          device's owner can start a cook on it (below), that is in effect one
+          active cook per device. Stop it first.
         - 400 VALIDATION_ERROR: a required field is missing or `id` is not a
           UUID.
+        - 403 DEVICE_NOT_OWNED (HAR-26, MG-88): `deviceId` is not a device the
+          caller registered. Checked with one point read on the devices
+          container after validation and before any write: no cook, no device
+          lock, no `cook_started`. A device registered to someone else and an
+          unregistered device get the same body, so the answer does not reveal
+          whether another user owns the id.
     tags: [cooks]
     requestBody:
       required: true
@@ -177,6 +185,24 @@ cooks-collection:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/Cook'
+      '403':
+        description: |
+          DEVICE_NOT_OWNED. The device is not registered to the caller (it
+          belongs to someone else, or nobody registered it; the body is the
+          same either way). Nothing was written and nothing was emitted.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '409':
         description: |
           COOK_ALREADY_ACTIVE. The device already has an active cook for this
@@ -359,16 +385,22 @@ cook-stop:
     operationId: stopCook
     summary: Stop an active cook
     description: |
-      Moves cook id=`{cookId}` to `completed`, sets endTime to now(), and emits
-      a `cook_stopped` SignalR message on the device's user group. Mirrors the
-      SHIPPED handler apps/api/src/functions/cooks/stop-cook.ts: validates
-      `deviceId` presence (400 VALIDATION_ERROR if missing) and returns 200 with
-      the completed Cook directly (NOT wrapped in ApiResponse). The emitted
-      cook is a synthetic placeholder — the cook is not yet persisted (DEC-3).
-      No 404 is documented: the handler synthesizes the Cook from the path
-      `cookId` and performs no lookup, so a not-found response is unreachable
-      today. A 404 not-found will be introduced once cook persistence/lookup
-      lands (tracked as MG-31).
+      Moves the caller's cook id=`{cookId}` to `completed`, sets endTime to
+      now(), and emits a `cook_stopped` SignalR message on the device's user
+      group. Mirrors apps/api/src/functions/cooks/stop-cook.ts:
+        - The request has no body; the handler never reads one. The device is
+          the one stored on the cook.
+        - The cook is point-read in the caller's partition. Absent there
+          (never started, or another user's) is 404 NOT_FOUND.
+        - HAR-26 (MG-83): the stored cook's device must be registered to the
+          caller. If it belongs to someone else, or is not registered, the
+          answer is 403 DEVICE_NOT_OWNED with no write and no
+          `cook_stopped`.
+        - Otherwise the stop is written and 200 returns the completed Cook
+          directly (NOT wrapped in ApiResponse). `cook_stopped` carries the
+          persisted cook (MG-31) and is emitted only by the call that made the
+          transition; stopping an already-completed cook returns it again with
+          200 and emits nothing.
     tags: [cooks]
     parameters:
       - name: cookId
@@ -377,24 +409,9 @@ cook-stop:
         description: Id of the cook to stop (route is cooks/{cookId}/stop).
         schema:
           type: string
-    requestBody:
-      required: true
-      description: |
-        Handler requires `deviceId` (scopes the emitted cook_stopped SignalR
-        message to the device's user group); missing deviceId is a 400.
-      content:
-        application/json:
-          schema:
-            type: object
-            additionalProperties: false
-            required:
-              - deviceId
-            properties:
-              deviceId:
-                type: string
     responses:
       '200':
-        description: Cook now completed.
+        description: Cook now completed (or already was).
         headers:
           X-Request-ID:
             description: Correlation id (propagated X-Request-ID or invocation id).
@@ -412,8 +429,35 @@ cook-stop:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/Cook'
-      '400':
-        description: Validation failure (missing deviceId).
+      '403':
+        description: |
+          DEVICE_NOT_OWNED. The cook's device is not registered to the caller
+          (it belongs to someone else, or nobody registered it; the body is the
+          same either way). Nothing was written and nothing was emitted.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '404':
+        description: NOT_FOUND. No cook with this id in the caller's partition.
+        headers:
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
         content:
           application/json:
             schema:
