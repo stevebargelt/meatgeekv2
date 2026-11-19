@@ -200,6 +200,17 @@ locals {
     # Receiver in the root module.
     "IOTHUB_EVENTS__fullyQualifiedNamespace" = var.eventhub_namespace_fqdn
 
+    # The API's own consumer group on the temperature-data Event Hub (HAR-56).
+    # The live-reading broadcast trigger reads from it through the namespace
+    # setting above, so no second Event Hub connection setting is needed. A name,
+    # not a credential.
+    "TEMPERATURE_BROADCAST_CONSUMER_GROUP" = var.temperature_broadcast_consumer_group
+
+    # IoT Hub service hostname (HAR-56), where the API writes device twin desired
+    # properties under its managed identity. Non-secret; the identity is granted
+    # IoT Hub Twin Contributor in the root module, which ships switched off.
+    "IOTHUB_SERVICE_HOSTNAME" = var.iothub_service_hostname
+
     # SignalR — identity-based. Service URI is non-secret; the identity is
     # granted SignalR Service Owner in the root module.
     "AzureSignalRConnectionString__serviceUri" = var.signalr_service_uri

@@ -138,7 +138,7 @@ model {
         eventhub = stream 'Event Hub: temperature-data' {
           #live
           technology '2 partitions'
-          description 'Provisioned and receiving every message. Nothing reads it today: no function in apps/api consumes it, though the Function App holds its namespace setting. Its consumer is decided but not built.'
+          description 'Provisioned and receiving every message. Nothing reads it today: no function in apps/api consumes it, though the Function App holds its namespace setting and its own consumer group, `api-broadcast` (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). Its consumer is decided but not built.'
         }
 
         iothub -[event]-> eventhub 'eventhub-realtime-route' {
@@ -155,7 +155,10 @@ model {
           endpoints (`COSMOSDB__accountEndpoint`, `IOTHUB_EVENTS__fullyQualifiedNamespace`,
           `AzureSignalRConnectionString__serviceUri`, `AzureWebJobsStorage__accountName`) plus
           the Terraform-owned database and container names (`COSMOSDB_DATABASE_NAME` and one
-          `COSMOSDB_*_CONTAINER_NAME` per container). The one exception is the Application
+          `COSMOSDB_*_CONTAINER_NAME` per container), the IoT Hub host
+          (`IOTHUB_SERVICE_HOSTNAME`) and its Event Hub consumer group
+          (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). Nothing reads those last two yet, and the
+          identity's IoT Hub Twin Contributor grant ships switched off. The one exception is the Application
           Insights connection string (`APPLICATIONINSIGHTS_CONNECTION_STRING`), with ingestion
           itself authenticated by Entra (`Authorization=AAD`) and sampled at
           `APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50`. Apart from it, no connection string or
