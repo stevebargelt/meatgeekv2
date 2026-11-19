@@ -16,7 +16,11 @@ export default {
     '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.json' }],
   },
   moduleFileExtensions: ['ts', 'js'],
-  // Cold starts on the deployed Function App can take tens of seconds.
-  testTimeout: 10 * 60 * 1000,
+  // The whole suite is one jest test. Cold starts on the deployed Function App
+  // take tens of seconds, and a run that tops up the simulated device's volume
+  // (telemetry-volume.proof.ts, HAR-45) sends ~8,700 readings and then waits up
+  // to 15 min for them to be readable. Kept under the acceptance job's 40 min
+  // timeout (app-deploy-dev.yml) so jest, not the job kill, reports an overrun.
+  testTimeout: 35 * 60 * 1000,
   coverageDirectory: '../../../coverage/apps/api-acceptance',
 };

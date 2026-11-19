@@ -12,6 +12,7 @@ import {
   ProofFailure,
   ProofGroup,
   RequestOptions,
+  SimDeviceOptions,
   SimDeviceRun,
 } from './proof';
 
@@ -41,7 +42,8 @@ export const PROOFS_DIR = join(__dirname, '..', 'proofs');
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-/** A `simdevice` run longer than this is killed. One reading takes seconds. */
+/** A `simdevice` run longer than this is killed, unless the proof passes its
+ *  own limit. One reading takes seconds. */
 const SIMDEVICE_TIMEOUT_MS = 120_000;
 
 const REDACTED = '[redacted]';
@@ -137,7 +139,8 @@ function runChild(
   bin: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
-  redact: (line: string) => string
+  redact: (line: string) => string,
+  timeoutMs: number
 ): Promise<{ readonly run: SimDeviceRun; readonly durationMs: number }> {
   return new Promise((resolve, reject) => {
     const started = performance.now();
@@ -147,7 +150,7 @@ function runChild(
     const stderr: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-    const timer = setTimeout(() => child.kill('SIGKILL'), SIMDEVICE_TIMEOUT_MS);
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.on('error', error => {
       clearTimeout(timer);
       const code = (error as NodeJS.ErrnoException).code;
@@ -250,10 +253,19 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     runId,
     simulatedDeviceId,
 
-    async runSimDevice(args: readonly string[]): Promise<SimDeviceRun> {
+    async runSimDevice(
+      args: readonly string[],
+      simOptions?: SimDeviceOptions
+    ): Promise<SimDeviceRun> {
       lastRequest = undefined;
       lastExec = {};
-      const { run, durationMs } = await runChild(simdeviceBin, args, childEnv, redact);
+      const { run, durationMs } = await runChild(
+        simdeviceBin,
+        args,
+        childEnv,
+        redact,
+        simOptions?.timeoutMs ?? SIMDEVICE_TIMEOUT_MS
+      );
       lastExec.exitCode = run.exitCode;
       write(
         `  ${'EXEC'.padEnd(6)} ${`simdevice ${args.join(' ')}`.padEnd(30)}` +

@@ -48,6 +48,12 @@ proof the ticket adds. You can also run it by hand, as below.
 |                                  | `simdevice --count 1` (one reading through IoT Hub, as the simulated device)                                     | exit `0` and exactly one JSON line on stdout, with a `timestamp` and `sentAt`                                                                                                           |
 |                                  | `GET /temperatures/current/<simulated device>`, every 1 s for at most 120 s                                      | a `200` whose `timestamp` is the sent one (`404 NO_READINGS` or an older reading: poll again); `deviceId` is the device, `grillTemp` a number, no `_` key; prints `METRIC roundtrip-ms` |
 |                                  | `GET /temperatures/history?deviceId=<simulated device>&startTime=<sentAt − 5 min>`                               | `200`; the sent reading is in `readings` (paging with `offset` while `hasMore`), with the same field checks                                                                             |
+| `telemetry-volume.proof.ts`      | `GET /temperatures/history?deviceId=<simulated device>&limit=1`                                                  | `200` with a numeric `total`; prints `METRIC history-total-before`                                                                                                                      |
+|                                  | `simdevice --count <8640 − total + 60> --interval 50ms`, only when `total` < 8,640                               | exit `0` and one JSON line per reading requested; prints `METRIC topup-sent` (`0` when no top-up was needed) and `METRIC topup-ms`                                                      |
+|                                  | the same `limit=1` read, every 10 s for at most 15 min after the send                                            | `total` ≥ 8,640, else it fails naming the last `total` and the cap; prints `METRIC history-total`                                                                                       |
+|                                  | `GET /temperatures/history?deviceId=<simulated device>` (default page: 100 from offset 0)                        | `200` with exactly 100 readings; prints `METRIC history-ru-first-page`                                                                                                                  |
+|                                  | the same with `&offset=<total − 100>` (the last page)                                                            | `200` with at least one reading; prints `METRIC history-ru-last-page`                                                                                                                   |
+|                                  | the same with `&startTime=<now − 12 h>&limit=5000` (the largest page one request returns)                        | `200`; prints `METRIC history-ru-max-page` and `METRIC history-max-page-readings`                                                                                                       |
 | `users.proof.ts`                 | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`                                        | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id                                                |
 |                                  | `GET /users/me`                                                                                                  | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                                                               |
 
@@ -97,6 +103,46 @@ for a device someone else owns) that it is still the caller's. Its readings are
 not deleted; they expire on the `temperatures` container TTL. The history
 window opens five minutes before `sentAt`: the routes window on the hub's
 enqueued time, which is never before the send.
+
+`telemetry-volume.proof.ts` (HAR-45, MG-79's last deferred criterion) measures
+what `GET /temperatures/history` costs at the volume one long cook writes:
+12 hours at one reading every 5 seconds, **8,640 readings**. It reads the
+simulated device's `total`, tops it up through IoT Hub with `simdevice` when it
+is short, waits until the readings are readable, and prints the request charge
+of three pages: the first default page, the last default page (Cosmos `OFFSET`
+cost grows with the rows skipped), and the largest page one request returns
+(`limit=5000`, over the last 12 hours). The numbers are the deliverable; there
+is no threshold on them. It relies on the round-trip proof, which runs first,
+having registered the device to the caller.
+
+- **Why a top-up.** The volume cannot be loaded once by hand: readings expire on
+  the dev `temperatures` container TTL, 7 days (`temperature_data_ttl_days` in
+  `apps/infrastructure/environments/dev.tfvars`). Each run restores it when it
+  is short, sending the shortfall plus 60 for readings that expire during the
+  run.
+- **When it happens.** On the first run, and then on the first run after the
+  previous top-up's readings expire. A top-up writes its readings within one
+  run, so they all expire together 7 days later: whatever the run frequency,
+  expect a full top-up about once a week. In between, `total` stays at or above
+  8,640 (the round trip adds one reading a run) and `METRIC topup-sent 0`.
+- **How long it takes.** simdevice waits 50 ms after each acknowledged publish,
+  so a full top-up of ~8,700 readings takes at least 7¼ minutes plus one QoS 1
+  publish round trip per reading: expect roughly 10–15 minutes (`METRIC
+topup-ms` reports it). The proof then waits for the routed writes to be
+  readable, at most 15 minutes. A run without a top-up adds a few seconds. The
+  live run's jest timeout is 35 minutes to fit this (`apps/api/acceptance/jest.config.ts`),
+  under the job's 40.
+- **Why 50 ms.** The `temperatures` container has no throughput of its own: it
+  shares one 400 RU/s database-level offer with the other four containers
+  (`apps/infrastructure/modules/cosmos-db/main.tf`), and IoT Hub's routed
+  writes are paid from it. The top-up may use at most half: 200 RU/s at ~10 RU
+  per routed write is 20 writes/s, a 50 ms gap. Waiting for `total` to reach
+  the target also drains the routing backlog before later groups run on the
+  same offer.
+- **The max-page figure needs its reading count.** The last 12 hours hold a
+  full page only on a run that has just topped up; on other runs they hold the
+  few round-trip readings since. `METRIC history-max-page-readings` says which
+  it was.
 
 `recipes.proof.ts` cleans up after itself: it creates one recipe named
 `Acceptance recipe <runId>`, and its sixth step deletes it. If an earlier step
@@ -149,12 +195,21 @@ METRIC roundtrip-ms 2140
 PASS telemetry round-trip › GET /temperatures/current/{deviceId} returns the sent reading
 ```
 
-`METRIC <name> <value>` lines report a measurement, not a pass/fail. Today there
-is one: `METRIC roundtrip-ms <n>`, the milliseconds from simdevice's `sentAt`
-(IoT Hub acknowledged the publish) to the `GET /temperatures/current` response
-that first carried the reading. It is the device → hub → route → Cosmos → API
-latency, overstated by up to one poll interval (1 s). There is no threshold on
-it; the number is the deliverable. The CI job copies every line starting with
+`METRIC <name> <value>` lines report a measurement, not a pass/fail:
+
+| Metric                      | Proof file                     | Value                                                                                                                                                                          |
+| --------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `roundtrip-ms`              | `telemetry-roundtrip.proof.ts` | ms from simdevice's `sentAt` (IoT Hub acknowledged the publish) to the `GET /temperatures/current` response that first carried the reading; overstated by up to one poll (1 s) |
+| `history-total-before`      | `telemetry-volume.proof.ts`    | the simulated device's history `total` when the run starts                                                                                                                     |
+| `topup-sent`                | `telemetry-volume.proof.ts`    | readings the top-up sent; `0` when none was needed                                                                                                                             |
+| `topup-ms`                  | `telemetry-volume.proof.ts`    | how long the top-up's simdevice run took; `0` when none was needed                                                                                                             |
+| `history-total`             | `telemetry-volume.proof.ts`    | the `total` the pages below were measured at (≥ 8,640)                                                                                                                         |
+| `history-ru-first-page`     | `telemetry-volume.proof.ts`    | RU of `GET /temperatures/history` with the default page (100, offset 0)                                                                                                        |
+| `history-ru-last-page`      | `telemetry-volume.proof.ts`    | RU of the same at `offset = total − 100`                                                                                                                                       |
+| `history-ru-max-page`       | `telemetry-volume.proof.ts`    | RU of `limit=5000` with `startTime` 12 h ago                                                                                                                                   |
+| `history-max-page-readings` | `telemetry-volume.proof.ts`    | how many readings that max page returned                                                                                                                                       |
+
+There are no thresholds on them; the numbers are the deliverable. The CI job copies every line starting with
 `METRIC ` into the run summary. Proofs print one with `api.metric(name, value)`.
 
 Any failed proof makes the process exit non-zero, and the `FAIL` line names the
@@ -248,6 +303,7 @@ apps/api/acceptance/
 │   ├── devices.proof.ts
 │   ├── recipes.proof.ts
 │   ├── telemetry-roundtrip.proof.ts
+│   ├── telemetry-volume.proof.ts
 │   ├── temperatures.proof.ts
 │   └── users.proof.ts
 └── acceptance-runner.spec.ts   # self-test, runs under `nx test api`
@@ -264,7 +320,12 @@ apps/api/acceptance/
   string to stdout and stderr; the stub makes the reading readable after a few
   polls, never, or registers the simulated device to someone else. The poll
   interval and cap are `ROUNDTRIP_POLL` in the proof file, which the self-test
-  shortens; there is no environment variable for them.
+  shortens; there is no environment variable for them. For the volume proof the
+  stub keeps a reading count for the simulated device; the fake reports a
+  top-up to the stub, which makes it readable a batch per poll, or never, and
+  the fake can fail a top-up with exit 1. Its target, margin, interval and poll
+  pacing are `VOLUME` in the proof file; the self-test shrinks the target to a
+  few hundred readings and the polls to milliseconds.
 - The acceptance code is not part of the API build; `dist/apps/api` contains
   none of it.
 - It uses only Node built-ins (`fetch`, `http`, `crypto`, `child_process`); no
@@ -313,7 +374,9 @@ apps/api/acceptance/
    - To send telemetry, `api.runSimDevice(['--count', '1'])` runs simdevice as
      `api.simulatedDeviceId` and resolves to its exit code, its stdout as parsed
      JSON lines, and its first stderr line, redacted. A proof never reads
-     `process.env` for the device credential; only the runner does.
+     `process.env` for the device credential; only the runner does. A run is
+     killed after 120 s; a long one passes its own limit,
+     `api.runSimDevice(args, { timeoutMs })`.
    - `api.metric('roundtrip-ms', 2140)` prints `METRIC roundtrip-ms 2140`.
 
 3. **Make the stub serve it.** The self-test runs every proof file against the
