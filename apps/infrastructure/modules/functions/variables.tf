@@ -1,5 +1,14 @@
 # Azure Functions Module Variables
 
+variable "environment" {
+  description = "Environment name (dev, prod). Published to the app as the non-secret MEATGEEK_ENVIRONMENT setting (HAR-17). NO DEFAULT: a caller that forgets it must fail at plan time rather than label the app with the wrong environment."
+  type        = string
+  validation {
+    condition     = contains(["dev", "prod"], var.environment)
+    error_message = "environment must be one of: dev, prod."
+  }
+}
+
 variable "resource_prefix" {
   description = "Prefix for resource names"
   type        = string

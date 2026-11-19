@@ -2532,3 +2532,110 @@ describe('HAR-16: the Function App identity declares identity_ids = [] so role a
     expect(out).toMatch(/identity lacks identity_ids = \[\]/);
   });
 });
+
+/**
+ * HAR-17 — the dev apply converges: config/authsettingsV2 ignores ONLY the tags
+ * ARM echoes from the parent site.
+ *
+ * GET of Microsoft.Web/sites/config/authsettingsV2 returns the site's tags. azapi
+ * v2.11.0 Read (internal/services/azapi_resource.go:1068-1070) stores them and
+ * ModifyPlan (:663-666, tagsWithDefaultTags :1422-1461) plans an unset `tags` as
+ * null, so the final drift plan of Apply Dev Infrastructure run 44418353799 showed
+ * `tags {...} -> null` right after the apply. `tags = var.tags` is refused by
+ * azapi's embedded schema, so the resource declares
+ * lifecycle { ignore_changes = [tags] } and static-gate check 9d refuses its
+ * removal or any widening of it. The same change adds MEATGEEK_ENVIRONMENT, the
+ * Terraform-made setting change that proves goal HAR-9 item 7.
+ */
+describe('HAR-17: the Easy Auth config ignores only the parent-echoed tags, and MEATGEEK_ENVIRONMENT reaches the app', () => {
+  const GATE = path.join(INFRA, 'scripts', 'tf-static-checks.sh');
+  const FUNC = 'modules/functions/main.tf';
+  const LINE = /^(\s*)ignore_changes\s*=\s*\[tags\]\s*$/m;
+  const CHECK = /Function App Easy Auth config ignores only the parent-echoed tags \(HAR-17\)/;
+
+  function gateWith(mutate: (src: string) => string): { code: number; out: string } {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'har17-gate-'));
+    try {
+      const dst = path.join(tmp, 'infrastructure');
+      fs.cpSync(INFRA, dst, {
+        recursive: true,
+        filter: (src: string) => {
+          const base = path.basename(src);
+          return base !== '.terraform' && base !== '.nx' && base !== 'node_modules';
+        },
+      });
+      const file = path.join(dst, FUNC);
+      const before = fs.readFileSync(file, 'utf8');
+      const after = mutate(before);
+      fs.writeFileSync(file, after);
+      const r = spawnSync('bash', [GATE, dst], { encoding: 'utf8' });
+      return { code: r.status ?? 1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  function authBlock(tf: string): string {
+    const m = /^resource\s+"azapi_resource"\s+"function_app_auth"\s*\{[\s\S]*?\n\}\n/m.exec(tf);
+    expect(m).not.toBeNull();
+    return m ? m[0] : '';
+  }
+
+  it('the azapi authsettingsV2 resource declares ignore_changes = [tags] and nothing else is ignored anywhere in the module', () => {
+    const live = stripComments(read(FUNC));
+    const auth = authBlock(live);
+    expect(auth).toMatch(/lifecycle\s*\{\s*ignore_changes\s*=\s*\[tags\]/);
+    expect(live.match(/^\s*ignore_changes\s*=/gm) ?? []).toHaveLength(1);
+    // tags are not declared on the resource or in its body: azapi's embedded
+    // schema for Microsoft.Web/sites/config has no tags property.
+    expect(auth).not.toMatch(/^\s*tags\s*=/m);
+  });
+
+  it('MEATGEEK_ENVIRONMENT is a plain app setting from var.environment', () => {
+    const live = stripComments(read(FUNC));
+    expect(live).toMatch(/^\s*"MEATGEEK_ENVIRONMENT"\s*=\s*var\.environment\s*$/m);
+    expect(stripComments(read('main.tf'))).toMatch(
+      /module\s+"azure_functions"\s*\{[\s\S]*?^\s*environment\s*=\s*var\.environment\s*$/m
+    );
+  });
+
+  it('the static gate PASSES check 9d on the committed infra', () => {
+    const { code, out } = gateWith(src => src);
+    expect(code).toBe(0);
+    expect(out).toMatch(new RegExp(`✓ pass: ${CHECK.source}`));
+  });
+
+  it('the static gate FAILS check 9d when ignore_changes = [tags] is deleted', () => {
+    const { code, out } = gateWith(src => {
+      expect(src).toMatch(LINE);
+      return src.replace(LINE, '');
+    });
+    expect(code).not.toBe(0);
+    expect(out).toMatch(new RegExp(`✗ FAIL: ${CHECK.source}`));
+    expect(out).toMatch(/function_app_auth lacks lifecycle \{ ignore_changes = \[tags\] \}/);
+  });
+
+  it('the static gate FAILS check 9d when ignore_changes = [tags] is only a comment', () => {
+    const { code, out } = gateWith(src =>
+      src.replace(LINE, (_m, ws) => `${ws}# ignore_changes = [tags]`)
+    );
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/function_app_auth lacks lifecycle \{ ignore_changes = \[tags\] \}/);
+  });
+
+  it('the static gate FAILS check 9d when the ignore list is widened to body', () => {
+    const { code, out } = gateWith(src =>
+      src.replace(LINE, (_m, ws) => `${ws}ignore_changes = [tags, body]`)
+    );
+    expect(code).not.toBe(0);
+    expect(out).toMatch(new RegExp(`✗ FAIL: ${CHECK.source}`));
+  });
+
+  it('the static gate FAILS check 9d when a second ignore_changes is added beside tags', () => {
+    const { code, out } = gateWith(src =>
+      src.replace(LINE, (m, ws) => `${m}\n${ws}ignore_changes = [body]`)
+    );
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/function_app_auth ignores more than tags/);
+  });
+});

@@ -32,6 +32,7 @@ mock_provider "azapi" {}
 # id, explicit CORS, Node-24-shaped inputs. Individual runs override only the knob
 # under test so each behaviour is exercised in isolation.
 variables {
+  environment                            = "dev"
   resource_prefix                        = "meatgeek-v2-dev"
   global_suffix                          = "abc123def456"
   resource_group_name                    = "meatgeek-v2-dev-rg"
@@ -315,6 +316,7 @@ run "app_settings_are_exactly_the_declared_collection" {
       "COSMOSDB_DATABASE_NAME",
       "COSMOSDB__accountEndpoint",
       "IOTHUB_EVENTS__fullyQualifiedNamespace",
+      "MEATGEEK_ENVIRONMENT",
     ]))
     error_message = "The Function App's app settings must be exactly the declared collection. azapi PUTs this list as the site's COMPLETE settings, so an added or dropped name changes the deployed app"
   }

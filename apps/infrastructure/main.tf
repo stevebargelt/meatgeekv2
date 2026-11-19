@@ -283,6 +283,9 @@ module "cosmos_db" {
 module "azure_functions" {
   source = "./modules/functions"
 
+  # Published to the app as MEATGEEK_ENVIRONMENT (HAR-17).
+  environment = var.environment
+
   resource_prefix     = local.resource_prefix
   global_suffix       = local.global_name_suffix
   resource_group_name = azurerm_resource_group.main.name

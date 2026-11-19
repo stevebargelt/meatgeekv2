@@ -567,6 +567,20 @@ and authenticated-smoke-test procedure.
 > default, Terraform-owned (`module.cosmos_db.destination_container_names.cooks`),
 > read by the cooks persistence code itself rather than restated as a literal,
 > so the fail-loud cooks adapter and the deployed container cannot drift.
+>
+> `MEATGEEK_ENVIRONMENT` (**HAR-17**) tells the running app which environment
+> it is in (`dev` or `prod`, from the root's `environment` variable). It is a
+> plain label, not a credential.
+>
+> The Easy Auth config (`azapi_resource.function_app_auth`, ARM
+> `config/authsettingsV2`) carries `lifecycle { ignore_changes = [tags] }` and
+> nothing else is ignored. ARM's GET of that proxy resource echoes the parent
+> site's tags, azapi stores them, and azapi's schema refuses `tags` on
+> `Microsoft.Web/sites/config`, so without it every dev apply planned
+> `tags -> null` forever and failed its final drift plan (**HAR-17**).
+> Static check 9d and the `auth_config_ignores_echoed_parent_tags` module test
+> refuse its removal.
+>
 > Each data
 > service's key does still exist as an inherent **computed attribute** in state
 > (true of any TF-managed resource); the control is to render those keys

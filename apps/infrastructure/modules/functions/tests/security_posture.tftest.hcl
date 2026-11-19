@@ -26,6 +26,7 @@ mock_provider "azurerm" {}
 mock_provider "azapi" {}
 
 variables {
+  environment                            = "dev"
   resource_prefix                        = "meatgeek-v2-dev"
   global_suffix                          = "abc123def456"
   resource_group_name                    = "meatgeek-v2-dev-rg"
@@ -433,4 +434,80 @@ run "import_ids_name_the_site_this_module_manages" {
     condition     = startswith(azapi_resource.function_app.type, "Microsoft.Web/sites@") && startswith(azapi_resource.function_app_auth.type, "Microsoft.Web/sites/config@")
     error_message = "The site and its Easy Auth config must be Microsoft.Web/sites and Microsoft.Web/sites/config resources"
   }
+}
+
+# HAR-17 — config/authsettingsV2 ignores ONLY the tags ARM echoes from the parent
+# site. GET of that proxy resource returns the site's tags, azapi v2.11.0 Read
+# stores them, and an unset `tags` plans null, so without ignore_changes the dev
+# apply's final drift plan can never converge (Apply Dev Infrastructure run
+# 44418353799). `tags = var.tags` is not an option: azapi's embedded schema for
+# Microsoft.Web/sites/config has no `tags` and refuses it at validate time.
+#
+# A mocked provider cannot reproduce azapi's ModifyPlan (it is the real
+# provider's tagsWithDefaultTags that plans null), and a lifecycle argument is not
+# an expression a test can reference. So the first assertion reads the module
+# source this run plans: the function_app_auth block must carry exactly
+# `ignore_changes = [tags]` on a code line (a commented-out line does not match),
+# and must not ignore body or identity. The plan-level assertions pin the rest of
+# the contract: the request body declares no tags (schema validation would refuse
+# them) and the site still carries var.tags, the value ARM echoes.
+run "auth_config_ignores_echoed_parent_tags" {
+  command = plan
+  assert {
+    condition = can(regex(
+      "(?m)^[ \\t]*ignore_changes[ \\t]*=[ \\t]*\\[[ \\t]*tags[ \\t]*\\][ \\t]*$",
+      regex("(?s)resource \"azapi_resource\" \"function_app_auth\" \\{.*?\\n\\}\\n", file("${path.module}/main.tf"))
+    ))
+    error_message = "azapi_resource.function_app_auth must declare lifecycle { ignore_changes = [tags] }. ARM echoes the parent site's tags on config/authsettingsV2 and azapi plans an unset tags as null, so without it every dev apply fails its final drift plan (HAR-17, run 44418353799)"
+  }
+  assert {
+    condition     = length(regexall("(?m)^[ \\t]*ignore_changes[ \\t]*=", regex("(?s)resource \"azapi_resource\" \"function_app_auth\" \\{.*?\\n\\}\\n", file("${path.module}/main.tf")))) == 1
+    error_message = "azapi_resource.function_app_auth must have exactly one ignore_changes, and it must be [tags]: body, identity and every other attribute stay managed (HAR-17)"
+  }
+  assert {
+    condition     = !contains(keys(azapi_resource.function_app_auth.body), "tags")
+    error_message = "config/authsettingsV2's body must not declare tags: azapi's embedded schema for Microsoft.Web/sites/config has no tags property"
+  }
+  assert {
+    condition     = azapi_resource.function_app.tags == var.tags
+    error_message = "The site must carry var.tags; ARM echoes them on config/authsettingsV2, which is why that resource ignores tags"
+  }
+}
+
+# HAR-17 — MEATGEEK_ENVIRONMENT tells the running app its environment. A plain,
+# non-secret label from the module input, never a literal restated here. Its
+# arrival through Terraform is goal HAR-9 item 7's setting-change proof.
+run "meatgeek_environment_reaches_the_app" {
+  command = plan
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["MEATGEEK_ENVIRONMENT"] == var.environment
+    error_message = "MEATGEEK_ENVIRONMENT must be in the site's app settings, set from var.environment (HAR-17)"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["MEATGEEK_ENVIRONMENT"] == "dev"
+    error_message = "With environment = \"dev\" the app must see MEATGEEK_ENVIRONMENT = \"dev\""
+  }
+}
+
+run "meatgeek_environment_follows_prod" {
+  command = plan
+  variables {
+    environment = "prod"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["MEATGEEK_ENVIRONMENT"] == "prod"
+    error_message = "With environment = \"prod\" the app must see MEATGEEK_ENVIRONMENT = \"prod\""
+  }
+}
+
+# Only dev and prod are environments; anything else is refused at plan time
+# rather than published to the app as a label nobody expects.
+run "unknown_environment_is_refused" {
+  command = plan
+  variables {
+    environment = "staging"
+  }
+  expect_failures = [
+    var.environment,
+  ]
 }
