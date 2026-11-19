@@ -33,6 +33,7 @@ const ACCOUNT_ENDPOINT_SETTING = 'COSMOSDB__accountEndpoint';
 const DATABASE_NAME_SETTING = 'COSMOSDB_DATABASE_NAME';
 const COOKS_CONTAINER_SETTING = 'COSMOSDB_COOKS_CONTAINER_NAME';
 const DEVICES_CONTAINER_SETTING = 'COSMOSDB_DEVICES_CONTAINER_NAME';
+const USERS_CONTAINER_SETTING = 'COSMOSDB_USERS_CONTAINER_NAME';
 
 /**
  * The fixed failure vocabulary for configuration. Each names the setting that
@@ -45,13 +46,15 @@ export type CosmosConfigFailure =
   | 'cosmos_account_endpoint_not_configured'
   | 'cosmos_database_name_not_configured'
   | 'cosmos_cooks_container_not_configured'
-  | 'cosmos_devices_container_not_configured';
+  | 'cosmos_devices_container_not_configured'
+  | 'cosmos_users_container_not_configured';
 
 const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
   [ACCOUNT_ENDPOINT_SETTING]: 'cosmos_account_endpoint_not_configured',
   [DATABASE_NAME_SETTING]: 'cosmos_database_name_not_configured',
   [COOKS_CONTAINER_SETTING]: 'cosmos_cooks_container_not_configured',
   [DEVICES_CONTAINER_SETTING]: 'cosmos_devices_container_not_configured',
+  [USERS_CONTAINER_SETTING]: 'cosmos_users_container_not_configured',
 };
 
 /**
@@ -78,6 +81,8 @@ export interface CosmosConfig {
   readonly cooksContainerName: string;
   /** HAR-20 (MG-80): the devices container, partitioned on `/id` (= deviceId). */
   readonly devicesContainerName: string;
+  /** HAR-27 (MG-81): the users container, partitioned on `/id` (= the principal's userId). */
+  readonly usersContainerName: string;
 }
 
 function requireSetting(env: NodeJS.ProcessEnv, settingName: string): string {
@@ -99,6 +104,7 @@ export function resolveCosmosConfig(env: NodeJS.ProcessEnv = process.env): Cosmo
     databaseName: requireSetting(env, DATABASE_NAME_SETTING),
     cooksContainerName: requireSetting(env, COOKS_CONTAINER_SETTING),
     devicesContainerName: requireSetting(env, DEVICES_CONTAINER_SETTING),
+    usersContainerName: requireSetting(env, USERS_CONTAINER_SETTING),
   };
 }
 
@@ -165,6 +171,10 @@ export class CosmosAdapter {
     return this.config.devicesContainerName;
   }
 
+  get usersContainerName(): string {
+    return this.config.usersContainerName;
+  }
+
   private getClient(): CosmosClient {
     if (!this.client) {
       // credentialFactory runs exactly once; the credential is retained so its
@@ -199,6 +209,11 @@ export class CosmosAdapter {
   /** The devices container, addressed by the Terraform-published name. */
   getDevicesContainer(): Container {
     return this.getContainer(this.config.devicesContainerName);
+  }
+
+  /** The users container, addressed by the Terraform-published name. */
+  getUsersContainer(): Container {
+    return this.getContainer(this.config.usersContainerName);
   }
 }
 

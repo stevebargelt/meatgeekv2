@@ -5,7 +5,7 @@ info:
   version: 0.1.0
   description: |
     OpenAPI source-of-truth for the MeatGeek V2 platform. Covers the Phase-1
-    HTTP surface (cooks, temperatures, devices) plus the SignalR message
+    HTTP surface (cooks, temperatures, devices, users) plus the SignalR message
     payloads used for real-time push.
 
     ## SignalR transport note
@@ -21,11 +21,11 @@ info:
 
     ## Source-of-truth note
 
-    Routes for the nine currently-implemented HTTP endpoints
+    Routes for the eleven currently-implemented HTTP endpoints
     (GET /cooks, POST /cooks, POST /cooks/{cookId}/stop,
     POST /negotiate, GET /temperatures/current/{deviceId},
     GET /devices, POST /devices, GET /devices/{id},
-    PATCH /devices/{id}) match `apps/api/src/main.ts` route templates
+    PATCH /devices/{id}, GET /users/me, PUT /users/me) match `apps/api/src/main.ts` route templates
     character-for-character — these are the contract. Endpoints whose
     description starts with `NOT YET IMPLEMENTED -` represent the planned
     Phase-1/Phase-2 surface; handlers will follow.
@@ -49,6 +49,8 @@ tags:
     description: Live and historical temperature readings.
   - name: devices
     description: BBQ device registration, configuration, and status.
+  - name: users
+    description: The authenticated caller's own profile.
 
 paths:
   /cooks:
@@ -76,6 +78,8 @@ paths:
     $ref: './paths/devices.yaml#/devices-collection'
   /devices/{id}:
     $ref: './paths/devices.yaml#/device-item'
+  /users/me:
+    $ref: './paths/users.yaml#/user-me'
 
 components:
   schemas:
@@ -142,6 +146,16 @@ components:
       $ref: './components/schemas/device.yaml#/UpdateDeviceRequest'
     DeviceStatus:
       $ref: './components/schemas/device.yaml#/DeviceStatus'
+
+    # User
+    User:
+      $ref: './components/schemas/user.yaml#/User'
+    UserPreferences:
+      $ref: './components/schemas/user.yaml#/UserPreferences'
+    NotificationPreferences:
+      $ref: './components/schemas/user.yaml#/NotificationPreferences'
+    PutUserProfileRequest:
+      $ref: './components/schemas/user.yaml#/PutUserProfileRequest'
 
     # SignalR payloads — message envelopes for the temperatureHub channel,
     # not HTTP endpoints. See info.description for the transport note.

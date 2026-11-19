@@ -169,7 +169,7 @@ describe('MG-27 — ADC=0 is ROUTED through convertAdcToTemperature (white-box p
 
 describe('MG-27 — createCook name is always a trimmed, defined string', () => {
   it('trims surrounding whitespace from a padded name', () => {
-    const cook = CookManager.createCook(baseRequest({ name: '  Sunday Brisket  ' }), 'user-1');
+    const cook = CookManager.createCook(baseRequest({ name: '  Sunday Brisket  ' }), 'tid-test:oid-test');
     expect(cook.name).toBe('Sunday Brisket');
   });
 
@@ -180,7 +180,7 @@ describe('MG-27 — createCook name is always a trimmed, defined string', () => 
     ['NoTrimNeeded', 'NoTrimNeeded'],
     ['a', 'a'],
   ])('name %p is stored as the defined string %p', (input, expected) => {
-    const cook = CookManager.createCook(baseRequest({ name: input }), 'user-1');
+    const cook = CookManager.createCook(baseRequest({ name: input }), 'tid-test:oid-test');
     expect(typeof cook.name).toBe('string');
     expect(cook.name).toBe(expected);
     // Guards the removed `?.trim() ?? request.name` dead path: never undefined.
@@ -189,7 +189,7 @@ describe('MG-27 — createCook name is always a trimmed, defined string', () => 
 
   it('the stored name is a defined string for any valid StartCookRequest', () => {
     for (const name of ['Brisket', '  Pork  ', 'Ribs', 'x']) {
-      const cook = CookManager.createCook(baseRequest({ name }), 'user-1');
+      const cook = CookManager.createCook(baseRequest({ name }), 'tid-test:oid-test');
       expect(typeof cook.name).toBe('string');
       expect(cook.name).toBe(name.trim());
     }
@@ -198,7 +198,7 @@ describe('MG-27 — createCook name is always a trimmed, defined string', () => 
   // MG-28: a whitespace-only name trims to '' and would violate Cook.name's
   // required non-empty invariant, so createCook fails fast instead of emitting it.
   it('throws for a whitespace-only name rather than storing an empty string', () => {
-    expect(() => CookManager.createCook(baseRequest({ name: '   ' }), 'user-1')).toThrow(
+    expect(() => CookManager.createCook(baseRequest({ name: '   ' }), 'tid-test:oid-test')).toThrow(
       'createCook: cook name must not be empty or whitespace-only'
     );
   });

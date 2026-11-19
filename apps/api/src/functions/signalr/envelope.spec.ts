@@ -11,7 +11,7 @@ const UUID_RE =
 const cook: CookRef & { status: string } = {
   id: 'cook-123',
   deviceId: 'meatgeek3',
-  userId: 'user-1',
+  userId: 'tid-test:oid-test',
   status: 'active',
 };
 
@@ -24,7 +24,7 @@ describe('buildCookEnvelope', () => {
     // ISO-8601 round-trips exactly through Date.
     expect(new Date(envelope.timestamp).toISOString()).toBe(envelope.timestamp);
     expect(envelope.deviceId).toBe('meatgeek3');
-    expect(envelope.userId).toBe('user-1');
+    expect(envelope.userId).toBe('tid-test:oid-test');
   });
 
   it('on cook_started sets BOTH envelope.cookId and payload.id to cook.id', () => {

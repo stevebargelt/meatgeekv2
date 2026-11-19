@@ -1,0 +1,192 @@
+# User schemas (HAR-27 / MG-81).
+# GET and PUT /users/me return a bare User (see
+# apps/api/src/functions/users/). Matches the User interface in
+# libs/api-interfaces/src/lib/user.ts, minus the two fields this API does not
+# set yet (lastLogin, subscription), which are never returned.
+
+User:
+  type: object
+  description: |
+    The authenticated caller's profile. `id` is the caller's Entra identity,
+    `"<tenantId>:<objectId>"`; `devices` is not stored on the profile but read
+    from the devices the caller owns on every request.
+  required:
+    - id
+    - email
+    - name
+    - preferences
+    - devices
+    - createdAt
+  additionalProperties: false
+  properties:
+    id:
+      type: string
+      description: |
+        `"<tenantId>:<objectId>"` from the Easy Auth principal. Also the Cosmos
+        partition key. Meaningful only within that Entra tenant.
+    email:
+      type: string
+      maxLength: 254
+      description: Contact address. Not unique across users.
+    name:
+      type: string
+      minLength: 1
+      maxLength: 100
+    preferences:
+      $ref: '#/UserPreferences'
+    devices:
+      type: array
+      description: Ids of the devices the caller owns, sorted by device name.
+      items:
+        type: string
+    createdAt:
+      type: string
+      format: date-time
+      description: Set when the profile is first created; never changed.
+
+UserPreferences:
+  type: object
+  description: |
+    The caller's settings. On create, the supplied preferences are
+    deep-merged over DEFAULT_USER_PREFERENCES
+    (apps/api/src/shared/cosmos/users-repository.ts), so every field below is
+    present. Stored keys outside this schema are kept and returned.
+  required:
+    - temperatureUnit
+    - timeZone
+    - notifications
+    - defaultTargetTemps
+    - privacy
+    - display
+  properties:
+    temperatureUnit:
+      type: string
+      enum: [fahrenheit, celsius]
+    timeZone:
+      type: string
+      description: IANA time zone name. Defaults to `UTC`.
+    notifications:
+      $ref: '#/NotificationPreferences'
+    defaultTargetTemps:
+      type: object
+      description: Target temperatures keyed by meat type.
+      additionalProperties:
+        type: object
+        required: [grill, meat]
+        properties:
+          grill:
+            type: number
+          meat:
+            type: number
+    privacy:
+      type: object
+      required: [shareData, publicProfile, allowAnalytics]
+      properties:
+        shareData:
+          type: boolean
+        publicProfile:
+          type: boolean
+        allowAnalytics:
+          type: boolean
+    display:
+      type: object
+      required: [theme, compactMode, showAdvancedMetrics]
+      properties:
+        theme:
+          type: string
+          enum: [light, dark, auto]
+        compactMode:
+          type: boolean
+        showAdvancedMetrics:
+          type: boolean
+
+NotificationPreferences:
+  type: object
+  required:
+    - tempAlerts
+    - cookComplete
+    - deviceOffline
+    - weeklyReports
+    - productUpdates
+    - pushNotifications
+    - email
+    - sms
+  properties:
+    tempAlerts:
+      type: boolean
+    cookComplete:
+      type: boolean
+    deviceOffline:
+      type: boolean
+    weeklyReports:
+      type: boolean
+    productUpdates:
+      type: boolean
+    pushNotifications:
+      type: object
+      required: [enabled, sound, vibration, quietHours]
+      properties:
+        enabled:
+          type: boolean
+        sound:
+          type: boolean
+        vibration:
+          type: boolean
+        quietHours:
+          type: object
+          required: [enabled, startTime, endTime]
+          properties:
+            enabled:
+              type: boolean
+            startTime:
+              type: string
+              description: HH:MM
+            endTime:
+              type: string
+              description: HH:MM
+    email:
+      type: object
+      required: [enabled, frequency]
+      properties:
+        enabled:
+          type: boolean
+        frequency:
+          type: string
+          enum: [immediate, hourly, daily]
+    sms:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        phoneNumber:
+          type: string
+
+PutUserProfileRequest:
+  type: object
+  description: |
+    Body for PUT /users/me. Identity is never part of the body: a body
+    carrying `id` or `userId`, or any other unlisted field, is rejected with
+    400 VALIDATION_ERROR.
+  required:
+    - name
+    - email
+  additionalProperties: false
+  properties:
+    name:
+      type: string
+      minLength: 1
+      maxLength: 100
+      description: Trimmed; must not be blank.
+    email:
+      type: string
+      maxLength: 254
+      pattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
+      description: Trimmed. Not checked for uniqueness.
+    preferences:
+      type: object
+      description: |
+        Any part of UserPreferences. Deep-merged over the stored preferences
+        (or DEFAULT_USER_PREFERENCES on create): plain objects merge key by
+        key; scalars and arrays replace. Must be an object if present.
+      additionalProperties: true
