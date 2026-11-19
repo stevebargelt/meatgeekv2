@@ -19,7 +19,7 @@ deployment {
       technology 'Terraform: apps/infrastructure'
       iothub = instanceOf meatgeek.cloud.ingest.iothub
       eventhub = instanceOf meatgeek.cloud.ingest.eventhub {
-        description 'Event Hub temperature-data, 2 partitions, no consumer yet.'
+        description 'Event Hub temperature-data, 2 partitions, consumer group api-broadcast, no consumer yet.'
       }
       api = instanceOf meatgeek.cloud.api {
         technology 'Flex Consumption FC1, Node 24, system-assigned managed identity'

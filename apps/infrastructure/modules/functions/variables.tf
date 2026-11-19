@@ -172,6 +172,16 @@ variable "signalr_service_uri" {
   default     = ""
 }
 
+variable "iothub_service_hostname" {
+  description = "IoT Hub hostname (non-secret, e.g. <name>.azure-devices.net), published as IOTHUB_SERVICE_HOSTNAME. The API writes device twins there under the Function App's managed identity."
+  type        = string
+}
+
+variable "temperature_broadcast_consumer_group" {
+  description = "Name of the API's consumer group on the temperature-data Event Hub (non-secret), published as TEMPERATURE_BROADCAST_CONSUMER_GROUP."
+  type        = string
+}
+
 # --- HTTP posture (S2) ------------------------------------------------------
 
 variable "cors_allowed_origins" {

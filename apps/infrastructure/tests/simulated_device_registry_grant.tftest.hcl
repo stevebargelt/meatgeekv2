@@ -25,12 +25,13 @@ mock_provider "time" {}
 override_module {
   target = module.iot_hub
   outputs = {
-    iot_hub_id              = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Devices/IotHubs/meatgeek-v2-dev-iothub"
-    iot_hub_name            = "meatgeek-v2-dev-iothub"
-    hostname                = "meatgeek-v2-dev-iothub.azure-devices.net"
-    identity_principal_id   = "33333333-3333-3333-3333-333333333333"
-    eventhub_namespace_id   = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.EventHub/namespaces/meatgeek-v2-dev-ehns"
-    eventhub_namespace_fqdn = "meatgeek-v2-dev-ehns.servicebus.windows.net"
+    iot_hub_id                                = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.Devices/IotHubs/meatgeek-v2-dev-iothub"
+    iot_hub_name                              = "meatgeek-v2-dev-iothub"
+    hostname                                  = "meatgeek-v2-dev-iothub.azure-devices.net"
+    identity_principal_id                     = "33333333-3333-3333-3333-333333333333"
+    eventhub_namespace_id                     = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.EventHub/namespaces/meatgeek-v2-dev-ehns"
+    eventhub_namespace_fqdn                   = "meatgeek-v2-dev-ehns.servicebus.windows.net"
+    temperature_broadcast_consumer_group_name = "api-broadcast"
   }
 }
 

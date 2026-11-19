@@ -370,3 +370,19 @@ variable "simulated_device_id" {
     error_message = "simulated_device_id must be empty or 1-128 characters of A-Z, a-z, 0-9, \".\", \"_\", \":\" or \"-\" (the API's device-id rule)."
   }
 }
+
+# IoT Hub device-twin writer grant for the Function App identity (HAR-56, goal
+# HAR-55). When true, this apply grants the Function App's system-assigned
+# identity `IoT Hub Twin Contributor` on the hub (see
+# azurerm_role_assignment.functions_iothub_twin_contributor in main.tf).
+#
+# Leave FALSE until bootstrap.sh has been re-run with `IoT Hub Twin Contributor`
+# in bootstrap/tf-managed-role-allowlist.tsv: the infra-apply identity's ABAC
+# condition only permits allowlisted roles, so setting this before that re-run
+# fails every dev apply with AuthorizationFailed. See
+# docs/infrastructure/bootstrap-runbook.md.
+variable "api_device_twin_writer_enabled" {
+  description = "When true, grants the Function App identity IoT Hub Twin Contributor on the IoT Hub so the API can write device twin desired properties. Default false skips the grant. Requires a bootstrap.sh re-run first (role allowlist)."
+  type        = bool
+  default     = false
+}

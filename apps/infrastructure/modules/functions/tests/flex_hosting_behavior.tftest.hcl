@@ -49,6 +49,8 @@ variables {
   recipes_container_name                 = "recipes"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
+  iothub_service_hostname                = "meatgeek-v2-dev-iothub-abc123def456.azure-devices.net"
+  temperature_broadcast_consumer_group   = "api-broadcast"
   cors_allowed_origins                   = ["http://localhost:4200"]
   auth_active_directory_client_id        = "11111111-1111-1111-1111-111111111111"
   auth_active_directory_tenant_id        = "22222222-2222-2222-2222-222222222222"

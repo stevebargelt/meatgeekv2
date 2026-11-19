@@ -342,6 +342,16 @@ module "azure_functions" {
   eventhub_namespace_fqdn     = module.iot_hub.eventhub_namespace_fqdn
   signalr_service_uri         = module.signalr.service_uri
 
+  # IoT Hub service endpoint and the live-reading broadcast consumer group
+  # (HAR-56, goal HAR-55). Both non-secret. The hostname is where the API writes
+  # device twins under its managed identity (functions_iothub_twin_contributor,
+  # below). The consumer group is the API's own reader on the temperature-data
+  # Event Hub; its trigger connects through the existing
+  # IOTHUB_EVENTS__fullyQualifiedNamespace setting and the Azure Event Hubs Data
+  # Receiver grant, so it adds no Event Hub setting and no role.
+  iothub_service_hostname              = module.iot_hub.hostname
+  temperature_broadcast_consumer_group = module.iot_hub.temperature_broadcast_consumer_group_name
+
   # S2 HTTP posture — explicit per-environment CORS + optional Entra ID auth.
   cors_allowed_origins            = var.functions_cors_allowed_origins
   auth_active_directory_client_id = var.functions_auth_client_id
@@ -512,6 +522,25 @@ resource "azurerm_role_assignment" "simulated_device_registry_contributor" {
   scope                = module.iot_hub.iot_hub_id
   role_definition_name = "IoT Hub Registry Contributor"
   principal_id         = var.app_deploy_principal_object_id
+  principal_type       = "ServicePrincipal"
+}
+
+# Function App identity → IoT Hub device twins (HAR-56, goal HAR-55). The API
+# writes the active cook into each device twin's desired properties under its
+# managed identity, so it needs `IoT Hub Twin Contributor` scoped to the IoT Hub
+# ALONE, not the RG. Read/write on twins only: no device registry, no device
+# keys, no cloud-to-device messages.
+# Guarded by count on var.api_device_twin_writer_enabled and switched off by
+# default. The role is in bootstrap/tf-managed-role-allowlist.tsv, but the live
+# ABAC condition on the infra-apply identity only learns it when bootstrap.sh is
+# re-run; setting api_device_twin_writer_enabled in a tfvars before that re-run
+# fails every dev apply with AuthorizationFailed. Covered by
+# tests/api_device_twin_writer_grant.tftest.hcl.
+resource "azurerm_role_assignment" "functions_iothub_twin_contributor" {
+  count                = var.api_device_twin_writer_enabled ? 1 : 0
+  scope                = module.iot_hub.iot_hub_id
+  role_definition_name = "IoT Hub Twin Contributor"
+  principal_id         = module.azure_functions.identity_principal_id
   principal_type       = "ServicePrincipal"
 }
 

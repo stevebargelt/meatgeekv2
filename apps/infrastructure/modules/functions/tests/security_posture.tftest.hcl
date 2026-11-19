@@ -43,6 +43,8 @@ variables {
   recipes_container_name                 = "recipes"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
+  iothub_service_hostname                = "meatgeek-v2-dev-iothub-abc123def456.azure-devices.net"
+  temperature_broadcast_consumer_group   = "api-broadcast"
   # dev/prod tfvars always supply explicit, non-empty CORS origins (no wildcard).
   cors_allowed_origins = ["http://localhost:4200"]
   # Configured (real dev/prod) auth path — a non-empty API registration client id.
