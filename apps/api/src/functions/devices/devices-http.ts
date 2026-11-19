@@ -10,7 +10,7 @@ import {
   getDevicesRepository,
   type DevicesRepository,
 } from '../../shared/cosmos/devices-repository';
-import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/request-charge';
+import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
 
 /**
  * HAR-20 (MG-80) — what the four devices handlers share: their injection seam
@@ -123,20 +123,25 @@ function failureCode(error: unknown): string {
   return 'cosmos_failure';
 }
 
-/** The sanitized 500. Carries the RU the failed operation reported, if any. */
+/**
+ * The sanitized 500. Carries `chargeAfterError(spent, error)`: the RU of
+ * earlier Cosmos calls in the same request plus whatever the failed operation
+ * reported, and no header when neither is known.
+ */
 export function serverError(
   operation: string,
   message: string,
   error: unknown,
   correlationId: string,
-  context: InvocationContext
+  context: InvocationContext,
+  spent = 0
 ): HttpResponseInit {
   context.error(`${operation} failed: ${failureCode(error)}`);
   return jsonResponse(
     500,
     errorBody('INTERNAL_SERVER_ERROR', message, context),
     correlationId,
-    requestChargeOfError(error)
+    chargeAfterError(spent, error)
   );
 }
 

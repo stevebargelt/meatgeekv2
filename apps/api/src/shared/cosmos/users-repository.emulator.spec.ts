@@ -145,6 +145,7 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
         databaseName,
         cooksContainerName: 'unused-by-this-tier',
         devicesContainerName: tfDevices.name,
+        temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: tfUsers.name,
       },
       {

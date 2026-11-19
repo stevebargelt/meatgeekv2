@@ -1,7 +1,9 @@
 # Temperature path items.
 #
 # Implementation status:
-#   - temperatures-current : GET implemented (apps/api/src/functions/temperatures/get-current.ts)
+#   - temperatures-current : GET implemented on the real temperatures container
+#                            (apps/api/src/functions/temperatures/get-current.ts,
+#                            HAR-28 / MG-79 part 1).
 #   - temperatures-history : NOT YET IMPLEMENTED.
 #
 # History endpoint documents STRICT cookId tag-match semantics: a `?cookId=X`
@@ -13,44 +15,80 @@
 temperatures-current:
   get:
     operationId: getCurrentTemperatures
-    summary: Get the latest temperature reading for a device
+    summary: Get the latest temperature reading for a device the caller owns
     description: |
-      Returns the most recent TemperatureReading for the device. Mirrors
-      apps/api/src/functions/temperatures/get-current.ts: response body is
-      a BARE TemperatureReading (NOT wrapped in ApiResponse) — clients
-      consume the object directly. Returns 400 VALIDATION_ERROR if the
-      path parameter is missing (handled at framework level — included
-      for completeness).
+      Returns the most recent TemperatureReading for a device the
+      authenticated caller owns, as a BARE TemperatureReading (NOT wrapped in
+      ApiResponse).
+
+      Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
+      The device must be registered to the caller (POST /devices); a device
+      that does not exist and one owned by someone else both answer
+      404 DEVICE_NOT_FOUND with the same body.
+
+      Readings are the documents IoT Hub routes into the `temperatures`
+      container (partitioned on /deviceId). The newest is chosen by the hub's
+      `iothub-enqueuedtime`, with one single-partition query.
+
+      Trust rule (MG-73): the reading's `deviceId` is the hub-authenticated
+      `SystemProperties["iothub-connection-device-id"]`, never the
+      device-supplied `Body.deviceId`. A stored document whose hub identity is
+      not this device, or whose body is not a JSON object, is skipped.
+      `timestamp` is the device's `Body.timestamp` when it parses as a date,
+      else the hub's enqueued time. A temperature that is not a finite number
+      is omitted.
+
+      Every response that reached Cosmos, the 404s included, carries
+      x-meatgeek-request-charge: the device ownership read plus the readings
+      query. A 401 or 400 is answered before any Cosmos call and carries none.
     tags: [temperatures]
     parameters:
       - name: deviceId
         in: path
         required: true
+        description: |
+          The device id: 1-128 characters of A-Z, a-z, 0-9, ".", "_", ":" or
+          "-" (the POST /devices rule).
         schema:
           type: string
     responses:
       '200':
-        description: Latest sample for the device.
+        description: Latest reading for the device.
         headers:
           X-Request-ID:
             schema:
               type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/temperature.yaml#/TemperatureReading'
       '400':
-        description: Missing deviceId parameter.
+        description: |
+          VALIDATION_ERROR: the deviceId is not a valid device id. Answered
+          before any Cosmos call.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '404':
+        description: |
+          DEVICE_NOT_FOUND: no such device, or it belongs to someone else (the
+          two are indistinguishable on purpose).
+          NO_READINGS: the caller owns the device, but no reading for it has
+          been stored.
+        headers:
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        description: Server error.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+        $ref: './devices.yaml#/shared/server-error'
 
 temperatures-history:
   get:

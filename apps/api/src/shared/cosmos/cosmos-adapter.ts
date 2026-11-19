@@ -33,6 +33,7 @@ const ACCOUNT_ENDPOINT_SETTING = 'COSMOSDB__accountEndpoint';
 const DATABASE_NAME_SETTING = 'COSMOSDB_DATABASE_NAME';
 const COOKS_CONTAINER_SETTING = 'COSMOSDB_COOKS_CONTAINER_NAME';
 const DEVICES_CONTAINER_SETTING = 'COSMOSDB_DEVICES_CONTAINER_NAME';
+const TEMPERATURES_CONTAINER_SETTING = 'COSMOSDB_TEMPERATURES_CONTAINER_NAME';
 const USERS_CONTAINER_SETTING = 'COSMOSDB_USERS_CONTAINER_NAME';
 
 /**
@@ -47,6 +48,7 @@ export type CosmosConfigFailure =
   | 'cosmos_database_name_not_configured'
   | 'cosmos_cooks_container_not_configured'
   | 'cosmos_devices_container_not_configured'
+  | 'cosmos_temperatures_container_not_configured'
   | 'cosmos_users_container_not_configured';
 
 const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
@@ -54,6 +56,7 @@ const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
   [DATABASE_NAME_SETTING]: 'cosmos_database_name_not_configured',
   [COOKS_CONTAINER_SETTING]: 'cosmos_cooks_container_not_configured',
   [DEVICES_CONTAINER_SETTING]: 'cosmos_devices_container_not_configured',
+  [TEMPERATURES_CONTAINER_SETTING]: 'cosmos_temperatures_container_not_configured',
   [USERS_CONTAINER_SETTING]: 'cosmos_users_container_not_configured',
 };
 
@@ -81,6 +84,9 @@ export interface CosmosConfig {
   readonly cooksContainerName: string;
   /** HAR-20 (MG-80): the devices container, partitioned on `/id` (= deviceId). */
   readonly devicesContainerName: string;
+  /** HAR-28 (MG-79): the temperatures container IoT Hub routes telemetry into,
+   *  partitioned on `/deviceId`. Read-only to the API. */
+  readonly temperaturesContainerName: string;
   /** HAR-27 (MG-81): the users container, partitioned on `/id` (= the principal's userId). */
   readonly usersContainerName: string;
 }
@@ -104,6 +110,7 @@ export function resolveCosmosConfig(env: NodeJS.ProcessEnv = process.env): Cosmo
     databaseName: requireSetting(env, DATABASE_NAME_SETTING),
     cooksContainerName: requireSetting(env, COOKS_CONTAINER_SETTING),
     devicesContainerName: requireSetting(env, DEVICES_CONTAINER_SETTING),
+    temperaturesContainerName: requireSetting(env, TEMPERATURES_CONTAINER_SETTING),
     usersContainerName: requireSetting(env, USERS_CONTAINER_SETTING),
   };
 }
@@ -171,6 +178,10 @@ export class CosmosAdapter {
     return this.config.devicesContainerName;
   }
 
+  get temperaturesContainerName(): string {
+    return this.config.temperaturesContainerName;
+  }
+
   get usersContainerName(): string {
     return this.config.usersContainerName;
   }
@@ -209,6 +220,11 @@ export class CosmosAdapter {
   /** The devices container, addressed by the Terraform-published name. */
   getDevicesContainer(): Container {
     return this.getContainer(this.config.devicesContainerName);
+  }
+
+  /** The temperatures container, addressed by the Terraform-published name. */
+  getTemperaturesContainer(): Container {
+    return this.getContainer(this.config.temperaturesContainerName);
   }
 
   /** The users container, addressed by the Terraform-published name. */
