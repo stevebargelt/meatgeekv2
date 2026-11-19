@@ -19,7 +19,7 @@ yet wired.
 | `startCook`              | HTTP `POST` | `cooks`                           | Start a cook (emits `cook_started` on SignalR)  |
 | `stopCook`               | HTTP `POST` | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
 | `negotiate`              | HTTP `POST` | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
-| `getCurrentTemperatures` | HTTP `GET`  | `temperatures/current/{deviceId}` | Latest reading for a device                     |
+| `getCurrentTemperatures` | HTTP `GET`  | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else) |
 | `getDevices`             | HTTP `GET`  | `devices`                         | List the caller's devices                       |
 | `registerDevice`         | HTTP `POST` | `devices`                         | Register a device to the caller                 |
 | `getDevice`              | HTTP `GET`  | `devices/{id}`                    | One of the caller's devices (404 otherwise)     |
@@ -455,9 +455,11 @@ COSMOSDB_COOKS_CONTAINER_NAME=<cosmos-cooks-container-name>
 # The other entity containers in the same database (HAR-19), published the same
 # way: Terraform-owned (module.cosmos_db.destination_container_names.<entity>),
 # required, no default. The devices handlers read COSMOSDB_DEVICES_CONTAINER_NAME
-# (HAR-20) and the shared adapter fails loud without it
-# (cosmos_devices_container_not_configured). The other three are not read by the
-# API yet (HAR-18 follow-ups).
+# (HAR-20) and GET /temperatures/current reads COSMOSDB_TEMPERATURES_CONTAINER_NAME
+# (HAR-28); the shared adapter fails loud without either
+# (cosmos_devices_container_not_configured /
+# cosmos_temperatures_container_not_configured). Users and recipes are not read
+# by the API yet (HAR-18 follow-ups).
 COSMOSDB_DEVICES_CONTAINER_NAME=<cosmos-devices-container-name>
 COSMOSDB_TEMPERATURES_CONTAINER_NAME=<cosmos-temperatures-container-name>
 COSMOSDB_USERS_CONTAINER_NAME=<cosmos-users-container-name>

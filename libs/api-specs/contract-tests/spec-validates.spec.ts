@@ -73,6 +73,27 @@ describe('OpenAPI spec — structural validation', () => {
     ] as OpenAPIV3.ParameterObject[];
     expect(deviceParams.map(param => param.name)).not.toContain('userId');
     expect(deviceParams.map(param => param.name)).not.toContain('x-user-id');
+
+    // HAR-28 (MG-79 part 1): the current reading is real, behind ownership.
+    const current = paths['/temperatures/current/{deviceId}']?.get;
+    expect(current?.description ?? '').not.toMatch(/NOT YET IMPLEMENTED/);
+    expect(Object.keys(current?.responses ?? {}).sort()).toEqual([
+      '200',
+      '400',
+      '401',
+      '404',
+      '500',
+    ]);
+    const currentOk = current?.responses?.['200'] as OpenAPIV3.ResponseObject;
+    const currentMissing = current?.responses?.['404'] as OpenAPIV3.ResponseObject;
+    expect(currentOk.headers?.['x-meatgeek-request-charge']).toBeDefined();
+    expect(currentMissing.headers?.['x-meatgeek-request-charge']).toBeDefined();
+    expect(currentMissing.description).toMatch(/DEVICE_NOT_FOUND/);
+    expect(currentMissing.description).toMatch(/NO_READINGS/);
+    expect(current?.description).toMatch(/iothub-connection-device-id/);
+    expect(
+      ((current?.parameters ?? []) as OpenAPIV3.ParameterObject[]).map(param => param.name)
+    ).toEqual(['deviceId']);
   });
 
   it('every operation has a unique operationId (codegen-friendly)', async () => {

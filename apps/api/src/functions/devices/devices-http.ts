@@ -123,20 +123,30 @@ function failureCode(error: unknown): string {
   return 'cosmos_failure';
 }
 
-/** The sanitized 500. Carries the RU the failed operation reported, if any. */
+/**
+ * The sanitized 500. Carries the RU the failed operation reported, plus
+ * `spentBefore` (the RU of earlier Cosmos calls in the same request), when
+ * either is known.
+ */
 export function serverError(
   operation: string,
   message: string,
   error: unknown,
   correlationId: string,
-  context: InvocationContext
+  context: InvocationContext,
+  spentBefore?: number
 ): HttpResponseInit {
   context.error(`${operation} failed: ${failureCode(error)}`);
+  const failedCharge = requestChargeOfError(error);
+  const requestCharge =
+    failedCharge === undefined && spentBefore === undefined
+      ? undefined
+      : (spentBefore ?? 0) + (failedCharge ?? 0);
   return jsonResponse(
     500,
     errorBody('INTERNAL_SERVER_ERROR', message, context),
     correlationId,
-    requestChargeOfError(error)
+    requestCharge
   );
 }
 

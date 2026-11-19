@@ -29,13 +29,18 @@ proof the ticket adds. You can also run it by hand, as below.
 |                                  | `PATCH /devices/{id}` with a new `location`                                    | `200`; the device carries the new location                                                                                                |
 |                                  | `GET /devices/{id}` for the registered device                                  | `200`; the patched location reads back                                                                                                    |
 |                                  | `GET /devices/<random uuid>`                                                   | `404`                                                                                                                                     |
+| `temperatures.proof.ts`          | `POST /devices` registering `acceptance-temp-<runId>` with a run-unique name   | `201`                                                                                                                                     |
+|                                  | `GET /temperatures/current/acceptance-temp-<runId>`                            | `404` with `error: NO_READINGS` (owned, but nothing has been routed for it)                                                               |
+|                                  | `GET /temperatures/current/acceptance-temp-unowned-<runId>` (never registered) | `404` with `error: DEVICE_NOT_FOUND`                                                                                                      |
 
 Every `devices.proof.ts` response body is also checked for keys starting with
 `_` at any depth (Cosmos system properties).
 
-Every authenticated cooks and devices response must carry the
+Every authenticated cooks, devices and temperatures response must carry the
 `x-meatgeek-request-charge` header (the Cosmos RU the call cost, as a decimal),
-including the devices `404`, which still costs a point read. A response without
+including the devices `404`, which still costs a point read, and both
+temperatures `404`s (the ownership point read, plus the readings query for
+`NO_READINGS`). A response without
 it fails the proof. Responses that make no Cosmos call, such as a 401, carry no
 header.
 
@@ -46,6 +51,10 @@ that id without registering it, so runs never trip the
 one-active-cook-per-device rule. `devices.proof.ts` registers that id as a real
 device with a run-unique name, so runs never collide on device id or on the
 `(userId, name)` pair.
+
+`temperatures.proof.ts` registers its own device, `acceptance-temp-<runId>`, and
+is read-only otherwise: nothing in the suite writes telemetry (only IoT Hub
+does), so a fresh device always answers `NO_READINGS`.
 
 ## Output
 
@@ -125,13 +134,14 @@ apps/api/acceptance/
 ├── proofs/
 │   ├── cooks-lifecycle.proof.ts
 │   ├── cooks-unauthenticated.proof.ts
-│   └── devices.proof.ts
+│   ├── devices.proof.ts
+│   └── temperatures.proof.ts
 └── acceptance-runner.spec.ts   # self-test, runs under `nx test api`
 ```
 
 - `npx nx test api` never calls a live system. The api unit-test config does not
   match `live.acceptance.ts`. It does run `acceptance-runner.spec.ts`, which
-  starts an in-process stub HTTP server imitating the cooks and devices routes
+  starts an in-process stub HTTP server imitating the cooks, devices and temperatures routes
   and drives the real runner and the real proof files against it: a passing
   stub, a wrong status on each route, a missing RU header on each route, missing
   environment variables, and a server that echoes the token back.

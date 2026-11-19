@@ -1,7 +1,7 @@
 /**
  * HAR-11 — self-test for the live acceptance suite. Runs under ordinary
  * `nx test api`, never against a deployed system: it starts an in-process HTTP
- * stub that imitates the cooks and devices routes and drives the REAL runner and the REAL
+ * stub that imitates the cooks, devices and temperatures routes and drives the REAL runner and the REAL
  * proof files (discovered from ./proofs) against it.
  */
 import { randomUUID } from 'crypto';
@@ -15,13 +15,16 @@ const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 
 type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
-type StubRoute = CookRoute | DeviceRoute;
+type TemperatureRoute = 'GET /temperatures/current/{deviceId}';
+type StubRoute = CookRoute | DeviceRoute | TemperatureRoute;
 
 interface StubOptions {
   /** Answer this route with this status (and an RU header) instead. */
   readonly failRoute?: { readonly route: StubRoute; readonly status: number };
   /** Answer this route normally but without the RU header. */
   readonly omitChargeOn?: StubRoute;
+  /** Answer every GET /temperatures/current with a 404 carrying this code. */
+  readonly temperatureErrorCode?: string;
   /** Echo the caller's Authorization header back in bodies and headers. */
   readonly echoAuthorization?: boolean;
 }
@@ -62,6 +65,7 @@ const RU: Record<StubRoute, string> = {
   'POST /devices': '9.52',
   'GET /devices/{id}': '1',
   'PATCH /devices/{id}': '11.9',
+  'GET /temperatures/current/{deviceId}': '3.86',
 };
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -73,7 +77,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return text ? JSON.parse(text) : undefined;
 }
 
-/** An in-process imitation of the deployed cooks and devices routes under `/api`. */
+/** An in-process imitation of the deployed cooks, devices and temperatures routes under `/api`. */
 async function startStub(options: StubOptions = {}): Promise<Stub> {
   const cooks: StubCook[] = [];
   const devices = new Map<string, StubDevice>();
@@ -111,6 +115,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
 
       const stopMatch = /^\/api\/cooks\/([^/]+)\/stop$/.exec(url.pathname);
       const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
+      const temperatureMatch = /^\/api\/temperatures\/current\/([^/]+)$/.exec(url.pathname);
       let route: StubRoute | undefined;
       if (request.method === 'GET' && url.pathname === '/api/cooks') route = 'GET /cooks';
       else if (request.method === 'POST' && url.pathname === '/api/cooks') route = 'POST /cooks';
@@ -120,6 +125,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         route = 'POST /devices';
       else if (request.method === 'GET' && deviceMatch) route = 'GET /devices/{id}';
       else if (request.method === 'PATCH' && deviceMatch) route = 'PATCH /devices/{id}';
+      else if (request.method === 'GET' && temperatureMatch)
+        route = 'GET /temperatures/current/{deviceId}';
       if (!route) {
         send(404, { error: 'NOT_FOUND' });
         return;
@@ -134,7 +141,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         return;
       }
 
-      if (route === 'GET /devices') {
+      if (route === 'GET /temperatures/current/{deviceId}') {
+        // Nothing writes telemetry in the stub: an owned device has no readings.
+        const owned = devices.has(decodeURIComponent(temperatureMatch![1]));
+        const code = owned ? 'NO_READINGS' : 'DEVICE_NOT_FOUND';
+        send(404, { error: options.temperatureErrorCode ?? code }, route);
+      } else if (route === 'GET /devices') {
         send(200, { devices: [...devices.values()] }, route);
       } else if (route === 'POST /devices') {
         const body = (await readJson(request)) as Partial<StubDevice> & { deviceId?: string };
@@ -262,9 +274,15 @@ const DEVICE_ROUTES: DeviceRoute[] = [
   'GET /devices',
   'PATCH /devices/{id}',
 ];
+const TEMPERATURE_ROUTES: TemperatureRoute[] = ['GET /temperatures/current/{deviceId}'];
+
+/** The failures from one proof group, e.g. `devices`. */
+function failuresOf(result: RunResult, group: string): string[] {
+  return result.failures.filter(failure => failure.startsWith(`FAIL ${group} ›`));
+}
 
 describe('live acceptance runner (against an in-process stub)', () => {
-  it('(a) exits 0 against a passing stub and reports RU for every cooks and devices route', async () => {
+  it('(a) exits 0 against a passing stub and reports RU for every cooks, devices and temperatures route', async () => {
     const result = await runAgainstStub();
 
     expect(result.failures).toEqual([]);
@@ -274,7 +292,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // Every authenticated request line carries the RU the stub reported.
     const requestLines = result.lines.filter(line => /^\s+(GET|POST|PATCH)\s+\//.test(line));
     expect(requestLines.length).toBeGreaterThanOrEqual(5);
-    for (const route of [...ROUTES, ...DEVICE_ROUTES]) {
+    for (const route of [...ROUTES, ...DEVICE_ROUTES, ...TEMPERATURE_ROUTES]) {
       const [method, path] = route.split(' ');
       const lines = requestLines.filter(line =>
         new RegExp(`^\\s+${method}\\s+${escape(path)}\\s`).test(line)
@@ -318,19 +336,63 @@ describe('live acceptance runner (against an in-process stub)', () => {
       const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
       expect(result.exitCode).not.toBe(0);
-      expect(result.failures).toHaveLength(1);
-      expect(result.failures[0]).toContain(`${route} → 503`);
-      expect(result.failures[0]).toContain('devices ›');
+      // temperatures.proof.ts registers its own device, so POST /devices also
+      // fails that group; the devices group must fail exactly once either way.
+      const devices = failuresOf(result, 'devices');
+      expect(devices).toHaveLength(1);
+      expect(devices[0]).toContain(`${route} → 503`);
+      expect(result.failures).toHaveLength(route === 'POST /devices' ? 2 : 1);
     }
   );
 
-  it.each(DEVICE_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
+  it.each(TEMPERATURE_ROUTES)(
+    '(b) exits non-zero and names %s when it returns a wrong status',
+    async route => {
+      const result = await runAgainstStub({ failRoute: { route, status: 503 } });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(`${route} → 503`);
+      expect(result.failures[0]).toContain('temperatures ›');
+    }
+  );
+
+  it.each([
+    // Every answer NO_READINGS: the unowned-device proof must fail.
+    ['NO_READINGS', 'DEVICE_NOT_FOUND'],
+    // Every answer DEVICE_NOT_FOUND: the registered-device proof must fail.
+    ['DEVICE_NOT_FOUND', 'NO_READINGS'],
+  ])(
+    '(b) exits non-zero when GET /temperatures/current always answers 404 %s',
+    async (answered, expected) => {
+      const result = await runAgainstStub({ temperatureErrorCode: answered });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain('FAIL temperatures ›');
+      expect(result.failures[0]).toContain('GET /temperatures/current/{deviceId} → 404');
+      expect(result.failures[0]).toContain(`body.error is "${answered}", not ${expected}`);
+    }
+  );
+
+  it.each(TEMPERATURE_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
     const result = await runAgainstStub({ omitChargeOn: route });
 
     expect(result.exitCode).not.toBe(0);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0]).toContain(route);
     expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+  });
+
+  it.each(DEVICE_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
+    const result = await runAgainstStub({ omitChargeOn: route });
+
+    expect(result.exitCode).not.toBe(0);
+    const devices = failuresOf(result, 'devices');
+    expect(devices).toHaveLength(1);
+    expect(devices[0]).toContain(route);
+    expect(devices[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    expect(result.failures).toHaveLength(route === 'POST /devices' ? 2 : 1);
   });
 
   it('(b) exits non-zero when the unauthenticated GET /cooks is not refused', async () => {
