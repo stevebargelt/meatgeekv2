@@ -55,6 +55,24 @@ describe('OpenAPI spec — structural validation', () => {
     expect(paths['/temperatures/current/{deviceId}']?.get).toBeDefined();
     expect(paths['/devices']).toBeDefined();
     expect(paths['/devices']?.get).toBeDefined();
+    // HAR-20 (MG-80): register, get, and patch are live.
+    expect(paths['/devices']?.post).toBeDefined();
+    expect(paths['/devices/{id}']?.get).toBeDefined();
+    expect(paths['/devices/{id}']?.patch).toBeDefined();
+    for (const operation of [
+      paths['/devices']?.post,
+      paths['/devices/{id}']?.get,
+      paths['/devices/{id}']?.patch,
+    ]) {
+      expect(operation?.description ?? '').not.toMatch(/NOT YET IMPLEMENTED/);
+    }
+    // Identity comes only from the principal: no userId parameter anywhere.
+    const deviceParams = [
+      ...(paths['/devices']?.get?.parameters ?? []),
+      ...(paths['/devices']?.post?.parameters ?? []),
+    ] as OpenAPIV3.ParameterObject[];
+    expect(deviceParams.map(param => param.name)).not.toContain('userId');
+    expect(deviceParams.map(param => param.name)).not.toContain('x-user-id');
   });
 
   it('every operation has a unique operationId (codegen-friendly)', async () => {

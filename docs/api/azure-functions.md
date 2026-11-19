@@ -20,7 +20,10 @@ yet wired.
 | `stopCook`               | HTTP `POST` | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)   |
 | `negotiate`              | HTTP `POST` | `negotiate`                       | SignalR client negotiate, scoped per `deviceId` |
 | `getCurrentTemperatures` | HTTP `GET`  | `temperatures/current/{deviceId}` | Latest reading for a device                     |
-| `getDevices`             | HTTP `GET`  | `devices`                         | List devices                                    |
+| `getDevices`             | HTTP `GET`  | `devices`                         | List the caller's devices                       |
+| `registerDevice`         | HTTP `POST` | `devices`                         | Register a device to the caller                 |
+| `getDevice`              | HTTP `GET`  | `devices/{id}`                    | One of the caller's devices (404 otherwise)     |
+| `updateDevice`           | HTTP `PATCH`| `devices/{id}`                    | Change name / location / configuration          |
 | `cosmosHealth`           | HTTP `GET`  | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos     |
 | `storageHeartbeat`       | **Timer**   | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path             |
 
@@ -451,7 +454,10 @@ COSMOSDB_COOKS_CONTAINER_NAME=<cosmos-cooks-container-name>
 
 # The other entity containers in the same database (HAR-19), published the same
 # way: Terraform-owned (module.cosmos_db.destination_container_names.<entity>),
-# required, no default. Not read by the API yet (HAR-18 follow-ups).
+# required, no default. The devices handlers read COSMOSDB_DEVICES_CONTAINER_NAME
+# (HAR-20) and the shared adapter fails loud without it
+# (cosmos_devices_container_not_configured). The other three are not read by the
+# API yet (HAR-18 follow-ups).
 COSMOSDB_DEVICES_CONTAINER_NAME=<cosmos-devices-container-name>
 COSMOSDB_TEMPERATURES_CONTAINER_NAME=<cosmos-temperatures-container-name>
 COSMOSDB_USERS_CONTAINER_NAME=<cosmos-users-container-name>

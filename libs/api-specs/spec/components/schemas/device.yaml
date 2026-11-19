@@ -1,5 +1,5 @@
 # Device schemas.
-# Quirk preserved: GET /devices wraps the array in {devices: [...]} (see
+# GET /devices wraps the array in {devices: [...]} (see
 # apps/api/src/functions/devices/get-devices.ts) rather than returning a
 # bare array. That wrapper lives in paths/devices.yaml; this file defines
 # only the inner entities.
@@ -15,17 +15,23 @@ Device:
     - name
     - model
     - isActive
+    - connectionStatus
   additionalProperties: false
   properties:
     id:
       type: string
-      description: Device hardware id (e.g., 'meatgeek3').
+      description: Device hardware id (e.g., 'meatgeek3'). Also the Cosmos partition key.
+      pattern: '^[A-Za-z0-9._:-]{1,128}$'
     userId:
       type: string
+      description: |
+        Owner: the authenticated caller's `<tenantId>:<objectId>`, set by the
+        server from the Easy Auth principal. Never taken from a request.
     name:
       type: string
-      minLength: 3
-      maxLength: 30
+      minLength: 1
+      maxLength: 100
+      description: Unique among one owner's devices.
     model:
       type: string
       description: Hardware model string (e.g., 'MeatGeek V1').
@@ -107,9 +113,9 @@ DeviceConfiguration:
 DeviceListResponse:
   type: object
   description: |
-    Response envelope for GET /devices. Preserves the existing handler's
-    quirk of wrapping the array under a `devices` key rather than returning
-    a bare array (see apps/api/src/functions/devices/get-devices.ts).
+    Response envelope for GET /devices: the array is wrapped under a
+    `devices` key rather than returned bare (see
+    apps/api/src/functions/devices/get-devices.ts).
   required:
     - devices
   additionalProperties: false
@@ -119,19 +125,101 @@ DeviceListResponse:
       items:
         $ref: '#/Device'
 
+DeviceConfigurationPatch:
+  type: object
+  description: |
+    A partial DeviceConfiguration, as sent to POST /devices and PATCH
+    /devices/{id}. Every field is optional, `alertSettings` included, and each
+    one sent replaces only that field. On POST, required DeviceConfiguration
+    fields left out are filled from DEFAULT_DEVICE_CONFIGURATION
+    (fahrenheit, 30 s polling, thresholds 0, sounds and push off). Unknown
+    fields are rejected with 400.
+  additionalProperties: false
+  properties:
+    grillProbeCorrection:
+      type: number
+      format: double
+    probe1Correction:
+      type: number
+      format: double
+    probe2Correction:
+      type: number
+      format: double
+    probe3Correction:
+      type: number
+      format: double
+    probe4Correction:
+      type: number
+      format: double
+    temperatureUnit:
+      $ref: './common.yaml#/TemperatureUnit'
+    pollingInterval:
+      type: integer
+      minimum: 1
+      maximum: 3600
+    alertSettings:
+      type: object
+      additionalProperties: false
+      properties:
+        highTempThreshold:
+          type: number
+          format: double
+        lowTempThreshold:
+          type: number
+          format: double
+        enableSounds:
+          type: boolean
+        enablePushNotifications:
+          type: boolean
+
+RegisterDeviceRequest:
+  type: object
+  description: |
+    Body for POST /devices. The owner is the authenticated caller; a body
+    `userId` (or any other unlisted field) is rejected with 400.
+  required:
+    - deviceId
+    - name
+    - model
+  additionalProperties: false
+  properties:
+    deviceId:
+      type: string
+      pattern: '^[A-Za-z0-9._:-]{1,128}$'
+    name:
+      type: string
+      minLength: 1
+      maxLength: 100
+      description: Trimmed; must not be blank.
+    model:
+      type: string
+      minLength: 1
+      maxLength: 100
+    location:
+      type: string
+      minLength: 1
+      maxLength: 200
+    configuration:
+      $ref: '#/DeviceConfigurationPatch'
+
 UpdateDeviceRequest:
   type: object
-  description: Body for PATCH /devices/{id}. All fields optional partial-update.
+  description: |
+    Body for PATCH /devices/{id}. All fields optional, at least one required.
+    `configuration` merges field by field over the stored configuration.
   additionalProperties: false
+  minProperties: 1
   properties:
     name:
       type: string
-      minLength: 3
-      maxLength: 30
+      minLength: 1
+      maxLength: 100
     location:
       type: string
+      minLength: 1
+      maxLength: 200
     configuration:
-      $ref: '#/DeviceConfiguration'
+      $ref: '#/DeviceConfigurationPatch'
 
 DeviceStatus:
   type: object

@@ -15,6 +15,9 @@ import { negotiateHandler, signalRConnInfoInput } from './functions/signalr/nego
 import { signalROutput } from './functions/signalr/envelope';
 import { getCurrentTemperaturesHandler } from './functions/temperatures/get-current';
 import { getDevicesHandler } from './functions/devices/get-devices';
+import { getDeviceHandler } from './functions/devices/get-device';
+import { registerDeviceHandler } from './functions/devices/register-device';
+import { updateDeviceHandler } from './functions/devices/update-device';
 import { cosmosHealthHandler } from './functions/health/cosmos-health';
 import {
   STORAGE_HEARTBEAT_SCHEDULE,
@@ -79,6 +82,27 @@ app.http('getDevices', {
   authLevel: 'anonymous',
   route: 'devices',
   handler: getDevicesHandler,
+});
+
+app.http('registerDevice', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'devices',
+  handler: registerDeviceHandler,
+});
+
+app.http('getDevice', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'devices/{id}',
+  handler: getDeviceHandler,
+});
+
+app.http('updateDevice', {
+  methods: ['PATCH'],
+  authLevel: 'anonymous',
+  route: 'devices/{id}',
+  handler: updateDeviceHandler,
 });
 
 // Cosmos health probe (MG-51). Registered alongside the business endpoints on

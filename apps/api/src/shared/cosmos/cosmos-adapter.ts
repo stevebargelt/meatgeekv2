@@ -20,7 +20,7 @@ import type { TokenCredential } from '@azure/core-auth';
  * tooling can inject DefaultAzureCredential deliberately; the deployed path
  * never can.
  *
- * Configuration is fail-loud at module load (MG-51 pattern): the three settings
+ * Configuration is fail-loud at module load (MG-51 pattern): the settings
  * Terraform publishes are read from process.env directly and THROW on
  * missing/blank, inventing no default. This deliberately does NOT route through
  * environments/environment.ts, whose `|| 'meatgeek'` database fallback (MG-55,
@@ -32,6 +32,7 @@ import type { TokenCredential } from '@azure/core-auth';
 const ACCOUNT_ENDPOINT_SETTING = 'COSMOSDB__accountEndpoint';
 const DATABASE_NAME_SETTING = 'COSMOSDB_DATABASE_NAME';
 const COOKS_CONTAINER_SETTING = 'COSMOSDB_COOKS_CONTAINER_NAME';
+const DEVICES_CONTAINER_SETTING = 'COSMOSDB_DEVICES_CONTAINER_NAME';
 
 /**
  * The fixed failure vocabulary for configuration. Each names the setting that
@@ -43,12 +44,14 @@ const COOKS_CONTAINER_SETTING = 'COSMOSDB_COOKS_CONTAINER_NAME';
 export type CosmosConfigFailure =
   | 'cosmos_account_endpoint_not_configured'
   | 'cosmos_database_name_not_configured'
-  | 'cosmos_cooks_container_not_configured';
+  | 'cosmos_cooks_container_not_configured'
+  | 'cosmos_devices_container_not_configured';
 
 const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
   [ACCOUNT_ENDPOINT_SETTING]: 'cosmos_account_endpoint_not_configured',
   [DATABASE_NAME_SETTING]: 'cosmos_database_name_not_configured',
   [COOKS_CONTAINER_SETTING]: 'cosmos_cooks_container_not_configured',
+  [DEVICES_CONTAINER_SETTING]: 'cosmos_devices_container_not_configured',
 };
 
 /**
@@ -73,6 +76,8 @@ export interface CosmosConfig {
   readonly accountEndpoint: string;
   readonly databaseName: string;
   readonly cooksContainerName: string;
+  /** HAR-20 (MG-80): the devices container, partitioned on `/id` (= deviceId). */
+  readonly devicesContainerName: string;
 }
 
 function requireSetting(env: NodeJS.ProcessEnv, settingName: string): string {
@@ -84,7 +89,7 @@ function requireSetting(env: NodeJS.ProcessEnv, settingName: string): string {
 }
 
 /**
- * Reads the three Terraform-owned settings from process.env directly and throws
+ * Reads the Terraform-owned settings from process.env directly and throws
  * on the first missing/blank one. Exported so the fail-loud contract can be
  * exercised in a unit test without touching Azure.
  */
@@ -93,6 +98,7 @@ export function resolveCosmosConfig(env: NodeJS.ProcessEnv = process.env): Cosmo
     accountEndpoint: requireSetting(env, ACCOUNT_ENDPOINT_SETTING),
     databaseName: requireSetting(env, DATABASE_NAME_SETTING),
     cooksContainerName: requireSetting(env, COOKS_CONTAINER_SETTING),
+    devicesContainerName: requireSetting(env, DEVICES_CONTAINER_SETTING),
   };
 }
 
@@ -155,6 +161,10 @@ export class CosmosAdapter {
     return this.config.cooksContainerName;
   }
 
+  get devicesContainerName(): string {
+    return this.config.devicesContainerName;
+  }
+
   private getClient(): CosmosClient {
     if (!this.client) {
       // credentialFactory runs exactly once; the credential is retained so its
@@ -184,6 +194,11 @@ export class CosmosAdapter {
   /** The cooks container, addressed by the Terraform-published name. */
   getCooksContainer(): Container {
     return this.getContainer(this.config.cooksContainerName);
+  }
+
+  /** The devices container, addressed by the Terraform-published name. */
+  getDevicesContainer(): Container {
+    return this.getContainer(this.config.devicesContainerName);
   }
 }
 

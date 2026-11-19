@@ -175,7 +175,7 @@ describe('MG-58: the storage heartbeat is the host-storage proof path', () => {
       });
     });
 
-    it('leaves the seven HTTP registrations in place', () => {
+    it('leaves the ten HTTP registrations in place', () => {
       expect(httpRegistrations).toEqual([
         'getCooks',
         'startCook',
@@ -183,6 +183,9 @@ describe('MG-58: the storage heartbeat is the host-storage proof path', () => {
         'negotiate',
         'getCurrentTemperatures',
         'getDevices',
+        'registerDevice',
+        'getDevice',
+        'updateDevice',
         'cosmosHealth',
       ]);
     });

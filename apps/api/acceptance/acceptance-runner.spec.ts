@@ -1,7 +1,7 @@
 /**
  * HAR-11 — self-test for the live acceptance suite. Runs under ordinary
  * `nx test api`, never against a deployed system: it starts an in-process HTTP
- * stub that imitates the cooks routes and drives the REAL runner and the REAL
+ * stub that imitates the cooks and devices routes and drives the REAL runner and the REAL
  * proof files (discovered from ./proofs) against it.
  */
 import { randomUUID } from 'crypto';
@@ -13,7 +13,9 @@ import { runAcceptance, RunResult } from './lib/runner';
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 
-type StubRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
+type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
+type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
+type StubRoute = CookRoute | DeviceRoute;
 
 interface StubOptions {
   /** Answer this route with this status (and an RU header) instead. */
@@ -36,6 +38,16 @@ interface StubCook {
   notes?: string;
 }
 
+interface StubDevice {
+  id: string;
+  userId: string;
+  name: string;
+  model: string;
+  location?: string;
+  isActive: boolean;
+  connectionStatus: string;
+}
+
 interface Stub {
   readonly baseUrl: string;
   readonly requests: Array<{ method: string; path: string; authorization?: string }>;
@@ -46,6 +58,10 @@ const RU: Record<StubRoute, string> = {
   'GET /cooks': '2.83',
   'POST /cooks': '11.43',
   'POST /cooks/{cookId}/stop': '20.1',
+  'GET /devices': '3.11',
+  'POST /devices': '9.52',
+  'GET /devices/{id}': '1',
+  'PATCH /devices/{id}': '11.9',
 };
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -57,9 +73,10 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return text ? JSON.parse(text) : undefined;
 }
 
-/** An in-process imitation of the deployed cooks routes under `/api`. */
+/** An in-process imitation of the deployed cooks and devices routes under `/api`. */
 async function startStub(options: StubOptions = {}): Promise<Stub> {
   const cooks: StubCook[] = [];
+  const devices = new Map<string, StubDevice>();
   const requests: Stub['requests'] = [];
 
   const server: Server = createServer((request, response: ServerResponse) => {
@@ -93,10 +110,16 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       }
 
       const stopMatch = /^\/api\/cooks\/([^/]+)\/stop$/.exec(url.pathname);
+      const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
       let route: StubRoute | undefined;
       if (request.method === 'GET' && url.pathname === '/api/cooks') route = 'GET /cooks';
       else if (request.method === 'POST' && url.pathname === '/api/cooks') route = 'POST /cooks';
       else if (request.method === 'POST' && stopMatch) route = 'POST /cooks/{cookId}/stop';
+      else if (request.method === 'GET' && url.pathname === '/api/devices') route = 'GET /devices';
+      else if (request.method === 'POST' && url.pathname === '/api/devices')
+        route = 'POST /devices';
+      else if (request.method === 'GET' && deviceMatch) route = 'GET /devices/{id}';
+      else if (request.method === 'PATCH' && deviceMatch) route = 'PATCH /devices/{id}';
       if (!route) {
         send(404, { error: 'NOT_FOUND' });
         return;
@@ -111,7 +134,43 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         return;
       }
 
-      if (route === 'GET /cooks') {
+      if (route === 'GET /devices') {
+        send(200, { devices: [...devices.values()] }, route);
+      } else if (route === 'POST /devices') {
+        const body = (await readJson(request)) as Partial<StubDevice> & { deviceId?: string };
+        if (!body?.deviceId || !/^[A-Za-z0-9._:-]{1,128}$/.test(body.deviceId) || !body.name) {
+          send(400, { error: 'VALIDATION_ERROR' });
+          return;
+        }
+        if (devices.has(body.deviceId)) {
+          send(409, { error: 'DEVICE_CONFLICT' }, route);
+          return;
+        }
+        const device: StubDevice = {
+          id: body.deviceId,
+          userId: 'stub-tenant:stub-user',
+          name: body.name,
+          model: body.model ?? '',
+          location: body.location,
+          isActive: true,
+          connectionStatus: 'unknown',
+        };
+        devices.set(device.id, device);
+        send(201, device, route);
+      } else if (route === 'GET /devices/{id}' || route === 'PATCH /devices/{id}') {
+        const device = devices.get(decodeURIComponent(deviceMatch![1]));
+        if (!device) {
+          send(404, { error: 'NOT_FOUND' }, route);
+          return;
+        }
+        if (route === 'PATCH /devices/{id}') {
+          const body = (await readJson(request)) as Partial<StubDevice>;
+          Object.assign(device, body.name ? { name: body.name } : {}, {
+            location: body.location ?? device.location,
+          });
+        }
+        send(200, device, route);
+      } else if (route === 'GET /cooks') {
         // Honours the MG-87 filters, as the deployed route does.
         const deviceId = url.searchParams.get('deviceId');
         const status = url.searchParams.get('status');
@@ -196,10 +255,16 @@ function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const ROUTES: StubRoute[] = ['POST /cooks', 'GET /cooks', 'POST /cooks/{cookId}/stop'];
+const ROUTES: CookRoute[] = ['POST /cooks', 'GET /cooks', 'POST /cooks/{cookId}/stop'];
+const DEVICE_ROUTES: DeviceRoute[] = [
+  'POST /devices',
+  'GET /devices/{id}',
+  'GET /devices',
+  'PATCH /devices/{id}',
+];
 
 describe('live acceptance runner (against an in-process stub)', () => {
-  it('(a) exits 0 against a passing stub and reports RU for every cooks route', async () => {
+  it('(a) exits 0 against a passing stub and reports RU for every cooks and devices route', async () => {
     const result = await runAgainstStub();
 
     expect(result.failures).toEqual([]);
@@ -207,9 +272,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.output).toMatch(/\d+ passed, 0 failed, 0 skipped/);
 
     // Every authenticated request line carries the RU the stub reported.
-    const requestLines = result.lines.filter(line => /^\s+(GET|POST)\s+\//.test(line));
+    const requestLines = result.lines.filter(line => /^\s+(GET|POST|PATCH)\s+\//.test(line));
     expect(requestLines.length).toBeGreaterThanOrEqual(5);
-    for (const route of ROUTES) {
+    for (const route of [...ROUTES, ...DEVICE_ROUTES]) {
       const [method, path] = route.split(' ');
       const lines = requestLines.filter(line =>
         new RegExp(`^\\s+${method}\\s+${escape(path)}\\s`).test(line)
@@ -245,6 +310,27 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.failures[0]).toContain(`${route} → 503`);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
     expect(result.output).toContain(`FAIL cooks lifecycle`);
+  });
+
+  it.each(DEVICE_ROUTES)(
+    '(b) exits non-zero and names %s when it returns a wrong status',
+    async route => {
+      const result = await runAgainstStub({ failRoute: { route, status: 503 } });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(`${route} → 503`);
+      expect(result.failures[0]).toContain('devices ›');
+    }
+  );
+
+  it.each(DEVICE_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
+    const result = await runAgainstStub({ omitChargeOn: route });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(route);
+    expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
   });
 
   it('(b) exits non-zero when the unauthenticated GET /cooks is not refused', async () => {
