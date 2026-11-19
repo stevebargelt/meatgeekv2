@@ -66,6 +66,9 @@ interface StubOptions {
   readonly simVisibleFromPoll?: number;
   /** The sent reading never reaches the simulated device's current or history. */
   readonly simNeverRouted?: boolean;
+  /** The body `timestamp` the stub serves for the sent reading, when it is
+   *  spelled differently from the one the fake simdevice prints. */
+  readonly simServedTimestamp?: string;
   /** The simulated device is registered to someone else: POST is 409, GET 404. */
   readonly simOwnedByOther?: boolean;
 }
@@ -145,6 +148,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   let simPolls = 0;
   const simVisibleFromPoll = options.simVisibleFromPoll ?? 3;
   const simRouted = () => !options.simNeverRouted && simPolls >= simVisibleFromPoll;
+  const simServed = options.simServedTimestamp ?? SIM_TIMESTAMP;
 
   const server: Server = createServer((request, response: ServerResponse) => {
     void (async () => {
@@ -296,7 +300,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           // HAR-44: the simulated device's reading arrives after a few polls.
           simPolls += 1;
           if (simRouted()) {
-            send(200, simReading(SIM_TIMESTAMP), route);
+            send(200, simReading(simServed), route);
           } else if (simPolls === 1) {
             send(404, { error: 'NO_READINGS' }, route);
           } else {
@@ -321,7 +325,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
             send(400, { error: 'VALIDATION_ERROR' });
             return;
           }
-          const all = [...OLDER_READINGS, ...(simRouted() ? [SIM_TIMESTAMP] : [])].map(simReading);
+          const all = [...OLDER_READINGS, ...(simRouted() ? [simServed] : [])].map(simReading);
           const offset = Number(url.searchParams.get('offset') ?? '0');
           send(
             200,
@@ -957,6 +961,24 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     expect(Date.now() - opened).toBeLessThan(6 * 60 * 1000);
     // Polls go through api.request, so they are in the RU table.
     expect(summaryRow(result.output, 'GET /temperatures/current/{deviceId}')).toBeDefined();
+  });
+
+  it('(a) matches the sent timestamp as an instant: printed …33.120Z, served …33.12Z', async () => {
+    // simdevice prints three fractional digits; the payload (Go RFC3339Nano)
+    // and so the API drop trailing zeros.
+    const served = SIM_TIMESTAMP.replace('.120Z', '.12Z');
+    expect(served).not.toBe(SIM_TIMESTAMP);
+    const result = await runAgainstStub({ simServedTimestamp: served });
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    expect(result.lines).toContain(
+      `PASS ${GROUP} GET /temperatures/current/{deviceId} returns the sent reading`
+    );
+    expect(result.lines).toContain(
+      `PASS ${GROUP} GET /temperatures/history holds the sent reading`
+    );
+    expect(result.lines.filter(line => line.startsWith('METRIC roundtrip-ms '))).toHaveLength(1);
   });
 
   it('(b) fails naming the cap when the reading never appears', async () => {

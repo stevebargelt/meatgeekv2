@@ -21,7 +21,7 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  *      using data-pusher's own payload and property code (the runner starts it
  *      and hands it the credential; this file never sees it);
  *   3. `GET /temperatures/current/{deviceId}` is polled until it returns that
- *      reading, matched on its body `timestamp`, then `METRIC roundtrip-ms` is
+ *      reading, matched on its body `timestamp` as an instant, then `METRIC roundtrip-ms` is
  *      printed: send acknowledgement (`sentAt`) to that `200`;
  *   4. `GET /temperatures/history` from `sentAt − 5 min` (the window is on the
  *      hub's enqueued time, never before the send) holds the same reading.
@@ -49,6 +49,15 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 const isDate = (value: unknown): value is string =>
   typeof value === 'string' && !Number.isNaN(Date.parse(value));
+
+/**
+ * True when `value` is the same instant as `sent`. Compared as instants, not
+ * strings: simdevice prints `timestamp` with three fractional digits
+ * (`…05.120Z`), but the payload is Go's RFC3339Nano, which drops trailing
+ * zeros (`…05.12Z`), and the API returns the payload's string verbatim.
+ */
+const sameInstant = (value: unknown, sent: string): boolean =>
+  isDate(value) && Date.parse(value) === Date.parse(sent);
 
 /** Fail unless `value` is the sent reading in its contract shape. */
 function expectSentReading(
@@ -161,7 +170,7 @@ export default defineProofs('telemetry round-trip', () => {
           });
           const arrivedAt = Date.now();
           last = response;
-          if (response.status === 200 && response.body?.timestamp === timestamp) {
+          if (response.status === 200 && sameInstant(response.body?.timestamp, timestamp)) {
             expectSentReading(api, response, response.body, deviceId);
             api.metric('roundtrip-ms', arrivedAt - Date.parse(sentAt));
             return;
@@ -208,7 +217,7 @@ export default defineProofs('telemetry round-trip', () => {
           api.expectStatus(response, 200);
           const readings = response.body?.readings;
           api.check(response, Array.isArray(readings), 'body.readings is not an array');
-          const match = readings.find(reading => reading?.timestamp === timestamp);
+          const match = readings.find(reading => sameInstant(reading?.timestamp, timestamp));
           if (match) {
             expectSentReading(api, response, match, deviceId);
             return;
