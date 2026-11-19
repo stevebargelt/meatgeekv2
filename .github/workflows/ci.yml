@@ -724,3 +724,34 @@ jobs:
         with:
           args: --severity-threshold=high
         continue-on-error: true
+
+  # HAR-50. Validates the LikeC4 architecture model in docs/architecture/likec4
+  # at the version pinned by that directory's package.json and lockfile (never
+  # an unpinned or @latest install). It calls the `check` script rather than
+  # `likec4 validate` directly, so checks later appended to that script run here
+  # without another workflow edit. Independent of `setup` and deliberately
+  # without a path filter: it is fast, and a skipped job would look green.
+  architecture-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: docs/architecture/likec4/package-lock.json
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install pinned likec4
+        run: npm ci --prefix docs/architecture/likec4
+
+      - name: Validate architecture model
+        run: npm --prefix docs/architecture/likec4 run check
