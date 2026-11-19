@@ -12,6 +12,9 @@ A comprehensive BBQ temperature monitoring and cook management system built with
 ## 📋 Documentation Structure
 
 ### Architecture & Design
+- **[Architecture site](https://stevebargelt.github.io/meatgeekv2/)** - The interactive LikeC4 model, published from `docs/architecture/likec4/` on every merge to `main`
+- **[Architecture diagrams](architecture/diagrams.md)** - Generated from the model and rendered on GitHub
+- **[Architecture model](architecture/likec4/README.md)** - How to preview the site locally and add an element, a view or a flow
 - **[System Overview](architecture/system-overview.md)** - High-level architecture, design decisions, and technology choices
 - **[Monorepo Structure](architecture/monorepo-structure.md)** - NX workspace organization and project relationships
 - **[Data Flow](architecture/data-flow.md)** - End-to-end data processing pipeline from device to client
@@ -64,11 +67,7 @@ MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time a
 
 ## 🔄 Data Flow Summary
 
-```
-RTD Sensors → Device Controller → Data Pusher → Azure IoT Hub → Azure Functions → CosmosDB
-                                                                      ↓
-                                                              SignalR Hub → Client Apps
-```
+The device controller reads the RTD sensors, and the data pusher stamps each reading with the active cook and sends it to Azure IoT Hub. IoT Hub's `cosmos-storage-route` writes each reading straight into the Cosmos DB `temperatures` container, with no Function in the path; its `eventhub-realtime-route` feeds an Event Hub that nothing reads yet. The API (Azure Functions) reads that history and serves cooks. See the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) for one reading's path.
 
 ## 📱 Applications
 

@@ -247,7 +247,9 @@ model {
           description '''
             Only writer: IoT Hub `cosmos-storage-route`, partition value from `{deviceid}` (the
             authenticated device, never the payload). Device-side writers: the Pi data-pusher
-            and, in dev, the simulated device. The API only reads it.
+            and, in dev, the simulated device. The API only reads it. Readings expire by
+            container `default_ttl` = `temperature_data_ttl_days` × 86400 s (dev 7 days,
+            prod 90).
           '''
         }
         cooks = collection 'cooks' {

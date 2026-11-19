@@ -6,12 +6,7 @@ MeatGeek V2 uses a **parallel processing architecture** where temperature teleme
 
 ## High-Level Flow
 
-```
-Device → Data Pusher → IoT Hub → Parallel Routes
-                         │
-                         ├─→ Direct Route → CosmosDB (Storage)
-                         └─→ Event Hub → Function → SignalR (Real-time)
-```
+The [`ingest`](https://stevebargelt.github.io/meatgeekv2/#/view/ingest/) and [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) views show this flow: IoT Hub routes each message both directly to Cosmos DB (storage) and to an Event Hub (real-time).
 
 The real-time leg (Event Hub → Function → SignalR) is **planned, not on `main`**: IoT Hub routes to the Event Hub today, but no function in `apps/api` consumes it.
 
@@ -19,17 +14,12 @@ The real-time leg (Event Hub → Function → SignalR) is **planned, not on `mai
 
 ### 1. Device Layer Processing
 
-```
-RTD Sensors → Device Controller → Data Pusher → IoT Hub
-    ↓              ↓                 ↓
- 5 temp         Averaging        Enrichment    
- readings      (100 samples)     + CookID      
-```
+The [`edge`](https://stevebargelt.github.io/meatgeekv2/#/view/edge/) view shows the device layer: 5 RTD readings, averaged in the Device Controller, enriched with the cookId by the Data Pusher, sent to IoT Hub.
 
 **Device Controller (Enhanced)**:
 - Reads 5 RTD sensors every 10ms
 - Maintains 100-sample averaging queues
-- Updates LCD display every 5 seconds
+- Writes a startup banner to the LCD (the per-probe readout is commented out in `main.go`)
 - Provides HTTP API for Data Pusher
 
 **Data Pusher Service (New)**:
@@ -92,13 +82,7 @@ endpoint: "realtime-events"
 
 ### 3. Storage Path Details
 
-```
-IoT Hub → cosmos-storage-route → CosmosDB
-                                 │
-                                 └─→ Container: temperatures
-                                     Partition: /deviceId (stamped from {deviceid})
-                                     TTL: default_ttl (var.temperature_data_ttl)
-```
+See the [`data`](https://stevebargelt.github.io/meatgeekv2/#/view/data/) view. IoT Hub's `cosmos-storage-route` writes into the `temperatures` container, partitioned on `/deviceId` with the value stamped from `{deviceid}`. Readings expire by the container's `default_ttl`, set from `temperature_data_ttl_days` × 86400 s (`var.temperature_data_ttl`; 7 days in dev, 90 in prod).
 
 **Data Organization**: IoT Hub stores its message envelope, not the bare device payload. The endpoint stamps a top-level `deviceId` from the authenticated device id (`partition_key_template = "{deviceid}"`):
 ```json
@@ -141,11 +125,7 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 
 **Planned, not on `main`.** There is no `broadcastTemperature` function and no `device-{deviceId}` or `cook-{cookId}` SignalR group; the only SignalR output on `main` is the cook lifecycle event described below.
 
-```
-IoT Hub → Event Hub → Lightweight Function → SignalR
-                          │
-                          └─→ Broadcasts only (no storage)
-```
+The [`liveTemperatureTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/liveTemperatureTarget/) and [`realtimeTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/) views show the decided design.
 
 **Function Implementation**:
 ```typescript
@@ -178,13 +158,7 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
 
 ### Starting a Cook
 
-```
-Client → API Function → Ownership read (devices) → CosmosDB Cook Record → SignalR Notification → Device
-   │          │                 │                          │                     │                  │
-   ▼          ▼                 ▼                          ▼                     ▼                  ▼
-Start Cook  Resolve        403 if the caller          Store cook in        cook_started to     Cache cookId
-Request     principal      does not own the device    caller's partition   userId=deviceId     for telemetry
-```
+The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view shows this sequence.
 
 **Sequence**:
 1. A client calls `POST /cooks` with a `deviceId` (the mobile and web apps are scaffolds and do not call the API yet)
@@ -207,24 +181,13 @@ Request     principal      does not own the device    caller's partition   userI
 
 ### During Active Cook
 
-```
-Every 5 seconds:
-Device → Enriched Temps → IoT Hub → Parallel Processing
-  │                         │
-  ▼                         ├─→ CosmosDB (with cookId)
-cookId cached               └─→ SignalR (real-time updates; planned, not on `main`)
-```
+Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId; IoT Hub stores it in Cosmos DB (the SignalR real-time leg is planned, not on `main`). See the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view.
 
 ### Ending a Cook
 
 Stopping goes through the same ownership read: `POST /cooks/{cookId}/stop` on a device the caller does not own is a 403 `DEVICE_NOT_OWNED`.
 
-```
-Mobile App → API Function → Update Cook Status → SignalR Notification → Device
-                                │                     │                  │
-                                ▼                     ▼                  ▼
-                          Mark completed         Notify device      Clear cookId
-```
+For an owned device the API marks the cook completed and emits `cook_stopped` on `temperatureHub` to `userId = deviceId`, and the Data Pusher clears its cached cookId when that event arrives (the same SignalR path to the Pi as `cook_started`, which has not been proven live). The path has the same shape as starting a cook; see the [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view.
 
 ## Cook-Temperature Association Strategy
 
