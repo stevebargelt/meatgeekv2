@@ -575,13 +575,14 @@ for a deployable dev environment. It is an identifier, not a secret.
 IoT Hub alone. The dev live acceptance job runs as that identity, creates the
 standing simulated device if it is missing, and fetches the device's connection
 string at run time (masked, never stored). The grant is `count`-guarded on
-**both** `simulated_device_id` and `app_deploy_principal_object_id`, and ships
-**off**: neither `dev.tfvars` nor `prod.tfvars` sets `simulated_device_id`.
+**both** `simulated_device_id` and `app_deploy_principal_object_id`. It shipped
+**off** in HAR-41; dev turned it on in HAR-42 (below), and `prod.tfvars` still
+does not set `simulated_device_id`.
 
 `IoT Hub Registry Contributor` is in
 [`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)
-with GUID `PENDING`, but the infra-apply identity's live ABAC condition only
-learns a role when `bootstrap.sh` is re-run. So, in this order:
+(shipped with GUID `PENDING`), but the infra-apply identity's live ABAC condition
+only learns a role when `bootstrap.sh` is re-run. So, in this order:
 
 1. Re-run `./bootstrap.sh` as the operator. It resolves the role's GUID live and
    reconciles the condition in place. Commit the resolved allowlist it prints.
@@ -591,6 +592,12 @@ learns a role when `bootstrap.sh` is re-run. So, in this order:
 Setting `simulated_device_id` before step 1 makes every `Apply Dev
 Infrastructure` run on `main` fail with `AuthorizationFailed` on the role
 assignment create.
+
+**Done for dev (HAR-42).** The owner re-ran `bootstrap.sh` from `main`
+(`e24e764`) on 2026-11-19. It resolved `IoT Hub Registry Contributor` to
+`4ea46cd5-c1b2-4a8e-910b-273211f9ce47`, which is now committed in the allowlist,
+and `dev.tfvars` sets `simulated_device_id = "meatgeek-dev-simulated-smoker"`, so
+the dev grant is on. Prod still does not set it.
 
 ### Dev app / API authentication registration (item 3)
 
