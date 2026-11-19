@@ -326,7 +326,9 @@ run "app_settings_are_exactly_the_declared_collection" {
       "COSMOSDB_USERS_CONTAINER_NAME",
       "COSMOSDB__accountEndpoint",
       "IOTHUB_EVENTS__fullyQualifiedNamespace",
+      "IOTHUB_SERVICE_HOSTNAME",
       "MEATGEEK_ENVIRONMENT",
+      "TEMPERATURE_BROADCAST_CONSUMER_GROUP",
     ]))
     error_message = "The Function App's app settings must be exactly the declared collection. azapi PUTs this list as the site's COMPLETE settings, so an added or dropped name changes the deployed app"
   }

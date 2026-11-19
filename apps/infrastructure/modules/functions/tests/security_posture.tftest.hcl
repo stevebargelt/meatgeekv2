@@ -574,6 +574,21 @@ run "meatgeek_environment_follows_prod" {
   }
 }
 
+# HAR-56 — the IoT Hub host the API writes device twins to, and the API's own
+# consumer group on the temperature-data Event Hub. Both plain, non-secret
+# settings from module inputs, never literals restated in the module.
+run "iothub_hostname_and_broadcast_consumer_group_reach_the_app" {
+  command = plan
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["IOTHUB_SERVICE_HOSTNAME"] == var.iothub_service_hostname
+    error_message = "IOTHUB_SERVICE_HOSTNAME must be in the site's app settings, set from var.iothub_service_hostname (HAR-56)"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["TEMPERATURE_BROADCAST_CONSUMER_GROUP"] == var.temperature_broadcast_consumer_group
+    error_message = "TEMPERATURE_BROADCAST_CONSUMER_GROUP must be in the site's app settings, set from var.temperature_broadcast_consumer_group (HAR-56)"
+  }
+}
+
 # Only dev and prod are environments; anything else is refused at plan time
 # rather than published to the app as a label nobody expects.
 run "unknown_environment_is_refused" {
