@@ -13,7 +13,9 @@ import {
   unauthenticatedResponse,
 } from '../../shared/auth/principal';
 import type { CooksRepository } from '../../shared/cosmos/cooks-repository';
-import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/request-charge';
+import { getDeviceOwnership, type DeviceOwnership } from '../../shared/cosmos/devices-repository';
+import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
+import { deviceNotOwnedBody } from './device-ownership';
 
 /**
  * MG-59 step 4 — start a cook by PERSISTING it through the shared Cosmos
@@ -36,6 +38,15 @@ import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/
  *   - 409 COOK_ALREADY_ACTIVE: another cook is active on this device for this
  *     user (one active cook per device), with its id in `activeCookId`.
  *
+ * HAR-26 (MG-88, MG-83) checks the device first. A cook may only start on a
+ * device the caller owns (a registered device whose `userId` is the caller's).
+ * Ownership is one point read on the devices container, made before any write
+ * or SignalR output. A device that belongs to someone else and a device that is
+ * not registered both get the same 403 DEVICE_NOT_OWNED, so the answer does not
+ * reveal whether another user owns the id. Since only the owner can start a
+ * cook on a device, "one active cook per (user, device)" is in effect one active
+ * cook per device.
+ *
  * The `Cook` and `StartCookRequest` shapes are the canonical ones from
  * @meatgeekv2/api-interfaces — there is no local re-declaration here.
  */
@@ -52,15 +63,17 @@ import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/
 export type { Cook, StartCookRequest } from '@meatgeekv2/api-interfaces';
 
 /**
- * Injection seam. Production wires the real Easy Auth principal reader and the
- * adapter-backed cooks repository; unit tests pass fakes so no Azure, no
- * credentials, and no network are touched. `getRepository` is only asked for the
- * one method this handler uses (the start batch), so a test double can be a bare
- * object.
+ * Injection seam. Production wires the real Easy Auth principal reader, the
+ * adapter-backed cooks repository and the devices ownership read; unit tests
+ * pass fakes so no Azure, no credentials, and no network are touched.
+ * `getRepository` is only asked for the one method this handler uses (the start
+ * batch), so a test double can be a bare object.
  */
 export interface StartCookDeps {
   resolvePrincipal(request: HeaderReader): PrincipalResult;
   getRepository(): Pick<CooksRepository, 'startCook'>;
+  /** HAR-26: who owns `deviceId` relative to `userId` (one point read). */
+  getDeviceOwnership(userId: string, deviceId: string): Promise<DeviceOwnership>;
 }
 
 /**
@@ -85,6 +98,7 @@ function resolveCooksRepository(): Pick<CooksRepository, 'startCook'> {
 const defaultDeps: StartCookDeps = {
   resolvePrincipal: principalFromRequest,
   getRepository: resolveCooksRepository,
+  getDeviceOwnership,
 };
 
 /**
@@ -160,6 +174,9 @@ export async function startCookHandler(
 ): Promise<HttpResponseInit> {
   context.log('Processing startCook request');
 
+  // RU spent by the Cosmos calls that completed, so a later failure still
+  // reports them (HAR-11).
+  let spent = 0;
   try {
     // Authenticate FIRST. An unauthenticated caller does no work: no body parse,
     // no write, no SignalR emit. The userId that partitions the cook comes ONLY
@@ -201,6 +218,21 @@ export async function startCookHandler(
       };
     }
 
+    // HAR-26 (MG-88, MG-83): the caller must own the device. One point read on
+    // the devices container, before any write and before any SignalR output.
+    // Foreign and unknown devices share one 403 body.
+    const ownership = await deps.getDeviceOwnership(userId, body.deviceId);
+    spent += ownership.requestCharge;
+    if (ownership.status !== 'owned') {
+      context.log(`startCook refused: device not owned (requestCharge=${spent} RU)`);
+      return jsonResponse(
+        403,
+        deviceNotOwnedBody(context.invocationId),
+        context.invocationId,
+        spent
+      );
+    }
+
     // The new cook. Its `userId` is the authenticated principal — this is BOTH
     // the ownership identity and the Cosmos partition value, so the document
     // lands in the caller's partition and nowhere else.
@@ -224,12 +256,13 @@ export async function startCookHandler(
     // throws to the catch and NO envelope is ever set. The cook and its device
     // lock are written in one transactional batch (see CooksRepository.startCook).
     const result = await deps.getRepository().startCook(newCook);
-    const { requestCharge } = result;
+    const requestCharge = spent + result.requestCharge;
 
     // RU charge is a bare number — safe to log for the shared-throughput budget.
     context.log(`startCook ${result.outcome} (requestCharge=${requestCharge} RU)`);
 
-    // MG-84 D2: one active cook per (user, device). Nothing was written.
+    // MG-84 D2: one active cook per device (per (user, device), and only the
+    // owner can start one). Nothing was written.
     if (result.outcome === 'deviceBusy') {
       return jsonResponse(
         409,
@@ -284,9 +317,9 @@ export async function startCookHandler(
   } catch (error) {
     // Sanitized: a fixed message plus a numeric dependency status only. The raw
     // error (which can carry the Cosmos account endpoint) is never logged or
-    // returned. No SignalR envelope was set on this path. A Cosmos error that
-    // reports the failed operation's RU charge has it surfaced in the header;
-    // anything else (no Cosmos call made, or no charge reported) omits it.
+    // returned. No SignalR envelope was set on this path. The header carries the
+    // RU of the calls that completed (the ownership read) plus any charge the
+    // failing Cosmos error reported; with neither, it is omitted.
     const status = statusCodeOf(error);
     context.error(`Error in startCook (dependency status ${status ?? 'unknown'})`);
 
@@ -294,7 +327,7 @@ export async function startCookHandler(
       status: 500,
       headers: {
         'Content-Type': 'application/json',
-        ...requestChargeHeaders(requestChargeOfError(error)),
+        ...requestChargeHeaders(chargeAfterError(spent, error)),
       },
       jsonBody: {
         error: 'INTERNAL_SERVER_ERROR',

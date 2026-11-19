@@ -32,3 +32,17 @@ export function requestChargeOfError(error: unknown): number | undefined {
   const charge = (error as { requestCharge?: unknown } | null | undefined)?.requestCharge;
   return typeof charge === 'number' && Number.isFinite(charge) ? charge : undefined;
 }
+
+/**
+ * HAR-26 — the charge to report on a failed request that made earlier Cosmos
+ * calls: the RU those calls spent plus whatever the failing error reported.
+ * `undefined` (no header) only when nothing was spent and the error reported no
+ * charge, so a 500 before any Cosmos work still omits the header.
+ */
+export function chargeAfterError(spent: number, error: unknown): number | undefined {
+  const failed = requestChargeOfError(error);
+  if (failed === undefined) {
+    return spent > 0 ? spent : undefined;
+  }
+  return spent + failed;
+}

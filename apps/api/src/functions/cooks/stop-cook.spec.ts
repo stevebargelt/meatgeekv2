@@ -10,6 +10,8 @@
  *     REAL persisted final state (no synthetic name/startTime/meatType);
  *   - an unauthenticated request writes nothing and emits nothing;
  *   - a miss in the caller's partition is a 404 with no emit;
+ *   - HAR-26: a cook whose device the caller does not own (foreign or unknown)
+ *     is a 403 DEVICE_NOT_OWNED with no write and no emit;
  *   - a Cosmos failure is a sanitized 5xx with no emit;
  *   - COOK_STOPPED is emitted ONLY after a successful update, scoped to
  *     userId = the persisted deviceId.
@@ -32,6 +34,7 @@ import { join } from 'path';
 
 import type { SignalROutputMessage } from '../signalr/envelope';
 import type { HeaderReader, PrincipalResult } from '../../shared/auth/principal';
+import type { DeviceOwnership } from '../../shared/cosmos/devices-repository';
 
 type CookMessage = SignalROutputMessage<Cook>;
 
@@ -79,6 +82,11 @@ function storedCook(overrides: Partial<Cook> = {}): Cook {
 
 interface RepoSpy {
   readonly calls: Array<{ userId: string; id: string; endTime: string }>;
+  readonly getCalls: Array<{ userId: string; id: string }>;
+  getCook: (
+    userId: string,
+    id: string
+  ) => Promise<{ cook: Cook | undefined; requestCharge: number }>;
   stopCook: (
     userId: string,
     id: string,
@@ -86,20 +94,35 @@ interface RepoSpy {
   ) => Promise<{ cook: Cook | undefined; requestCharge: number; transitioned: boolean }>;
 }
 
+/** RU the fake point read of the cook reports. */
+const GET_COOK_CHARGE = 1;
+/** RU the fake ownership read reports. */
+const OWNERSHIP_CHARGE = 1;
+
 /**
- * A fake repository. `behavior` decides the outcome (a persisted stopped cook, a
- * miss, or a throw) while `calls` records the exact addressing the handler used.
+ * A fake repository. `getCook` returns `existing` (the stored cook the handler
+ * reads to learn its device; `null` is a miss). `behavior` decides the
+ * stop's outcome (a persisted stopped cook, or a throw). `calls` and `getCalls`
+ * record the exact addressing the handler used.
  */
 function fakeRepository(
   behavior: (
     userId: string,
     id: string,
     endTime: string
-  ) => { cook: Cook | undefined; requestCharge: number; transitioned: boolean }
+  ) => { cook: Cook | undefined; requestCharge: number; transitioned: boolean },
+  existing: Cook | null = storedCook(),
+  getCookCharge = GET_COOK_CHARGE
 ): RepoSpy {
   const calls: RepoSpy['calls'] = [];
+  const getCalls: RepoSpy['getCalls'] = [];
   return {
     calls,
+    getCalls,
+    getCook: async (userId, id) => {
+      getCalls.push({ userId, id });
+      return { cook: existing ?? undefined, requestCharge: getCookCharge };
+    },
     stopCook: async (userId, id, endTime) => {
       calls.push({ userId, id, endTime });
       return behavior(userId, id, endTime);
@@ -113,6 +136,31 @@ function authenticatedAs(userId: string): (request: HeaderReader) => PrincipalRe
     principal: { userId, objectId: 'oid-aaaa', tenantId: 'tenant-abc' },
   });
 }
+
+/**
+ * HAR-26: a fake devices ownership read. Every device is `owned` by the caller
+ * unless `statuses` says otherwise; `calls` records each read.
+ */
+function fakeOwnership(statuses: Record<string, 'foreign' | 'unknown'> = {}) {
+  const calls: Array<{ userId: string; deviceId: string }> = [];
+  return {
+    calls,
+    getDeviceOwnership: async (userId: string, deviceId: string): Promise<DeviceOwnership> => {
+      calls.push({ userId, deviceId });
+      const status = statuses[deviceId];
+      if (status) {
+        return { status, requestCharge: OWNERSHIP_CHARGE };
+      }
+      return {
+        status: 'owned',
+        device: { id: deviceId, userId, name: deviceId } as never,
+        requestCharge: OWNERSHIP_CHARGE,
+      };
+    },
+  };
+}
+
+const owned = fakeOwnership().getDeviceOwnership;
 
 const unauthenticated: (request: HeaderReader) => PrincipalResult = () => ({
   authenticated: false,
@@ -169,6 +217,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      getDeviceOwnership: owned,
     });
 
     // Addressed by (authenticated userId, cookId) — the partition contract.
@@ -210,6 +259,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      getDeviceOwnership: owned,
     });
 
     expect(repo.calls[0].userId).not.toBe('user-1');
@@ -231,6 +281,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      getDeviceOwnership: owned,
     });
 
     expect(res.status).toBe(200);
@@ -250,6 +301,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: unauthenticated,
       getRepository: () => repo,
+      getDeviceOwnership: owned,
     });
 
     expect(res.status).toBe(401);
@@ -262,22 +314,28 @@ describe('stopCookHandler', () => {
   it('returns 404 with no emit when the cook is absent in the caller partition', async () => {
     const { ctx, messages } = mockContext();
     // A miss: the read found nothing in this partition, so nothing is written.
-    const repo = fakeRepository(() => ({
-      cook: undefined,
-      requestCharge: 1.2,
-      transitioned: false,
-    }));
+    const repo = fakeRepository(
+      () => {
+        throw new Error('stopCook must not be called for a missing cook');
+      },
+      null,
+      1.2
+    );
+    const ownership = fakeOwnership();
 
     const res = await stopCookHandler(mockRequest('cook-missing'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      getDeviceOwnership: ownership.getDeviceOwnership,
     });
 
     expect(res.status).toBe(404);
     // The read WAS attempted, addressed to the caller's partition...
-    expect(repo.calls).toHaveLength(1);
-    expect(repo.calls[0].userId).toBe(AUTH_USER_ID);
-    // ...but no SignalR message was emitted.
+    expect(repo.getCalls).toEqual([{ userId: AUTH_USER_ID, id: 'cook-missing' }]);
+    // ...but nothing was written, no device was looked up, and no SignalR
+    // message was emitted.
+    expect(repo.calls).toHaveLength(0);
+    expect(ownership.calls).toHaveLength(0);
     expect(messages()).toBeUndefined();
   });
 
@@ -293,6 +351,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      getDeviceOwnership: owned,
     });
 
     expect(res.status).toBe(500);
@@ -329,7 +388,11 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(
       mockRequest('cook-abc', { 'x-ms-client-principal': header }),
       ctx,
-      { resolvePrincipal: principalFromRequest, getRepository: () => repo }
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => repo,
+        getDeviceOwnership: owned,
+      }
     );
 
     expect(res.status).toBe(200);
@@ -350,15 +413,142 @@ describe('stopCookHandler', () => {
     expect(source).not.toMatch(/\b(interface|type)\s+Cook\b/);
   });
 
+  describe('HAR-26 — only the device owner can stop a cook (MG-83, MG-88)', () => {
+    it('owned device: reads the cook, then its device ownership, then stops and emits cook_stopped', async () => {
+      const { ctx, messages } = mockContext();
+      const repo = fakeRepository((userId, id, endTime) => ({
+        cook: { ...storedCook(), userId, id, status: 'completed', endTime },
+        requestCharge: 4,
+        transitioned: true,
+      }));
+      const ownership = fakeOwnership();
+
+      const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
+        resolvePrincipal: authenticatedAs(AUTH_USER_ID),
+        getRepository: () => repo,
+        getDeviceOwnership: ownership.getDeviceOwnership,
+      });
+
+      expect(res.status).toBe(200);
+      expect(repo.getCalls).toEqual([{ userId: AUTH_USER_ID, id: 'cook-abc' }]);
+      // The device comes from the STORED cook, checked for the caller.
+      expect(ownership.calls).toEqual([{ userId: AUTH_USER_ID, deviceId: 'meatgeek3' }]);
+      expect(repo.calls).toHaveLength(1);
+      expect(messages()).toHaveLength(1);
+      expect(messages()![0].target).toBe('cook_stopped');
+    });
+
+    it.each(['foreign', 'unknown'] as const)(
+      '%s device: 403 DEVICE_NOT_OWNED, no write, no SignalR output',
+      async status => {
+        const { ctx, messages } = mockContext();
+        const repo = fakeRepository(() => {
+          throw new Error('stopCook must not be called for a device the caller does not own');
+        });
+
+        const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
+          resolvePrincipal: authenticatedAs(AUTH_USER_ID),
+          getRepository: () => repo,
+          getDeviceOwnership: fakeOwnership({ meatgeek3: status }).getDeviceOwnership,
+        });
+
+        expect(res.status).toBe(403);
+        expect(res.jsonBody).toEqual({
+          error: 'DEVICE_NOT_OWNED',
+          message: 'The device is not registered to the caller.',
+          requestId: INVOCATION_ID,
+        });
+        expect(repo.calls).toHaveLength(0);
+        expect(messages()).toBeUndefined();
+      }
+    );
+
+    it('missing principal: 401 before any read', async () => {
+      const repo = fakeRepository(() => {
+        throw new Error('stopCook must not be called');
+      });
+      const ownership = fakeOwnership();
+      const res = await stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
+        resolvePrincipal: unauthenticated,
+        getRepository: () => repo,
+        getDeviceOwnership: ownership.getDeviceOwnership,
+      });
+      expect(res.status).toBe(401);
+      expect(repo.getCalls).toHaveLength(0);
+      expect(ownership.calls).toHaveLength(0);
+      expect(repo.calls).toHaveLength(0);
+    });
+
+    it('ownership read failure: sanitized 500, no write, no SignalR output', async () => {
+      const { ctx, messages } = mockContext();
+      const repo = fakeRepository(() => {
+        throw new Error('stopCook must not be called');
+      });
+      const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
+        resolvePrincipal: authenticatedAs(AUTH_USER_ID),
+        getRepository: () => repo,
+        getDeviceOwnership: async () => {
+          throw new Error('request to https://mgv2-secret-account.documents.azure.com failed');
+        },
+      });
+      expect(res.status).toBe(500);
+      expect(JSON.stringify(res)).not.toContain('documents.azure.com');
+      expect(repo.calls).toHaveLength(0);
+      expect(messages()).toBeUndefined();
+    });
+  });
+
+  describe('MG-31 — cook_stopped carries the persisted cook', () => {
+    it('emits the stored name and startTime, which appear nowhere in the request', async () => {
+      const { ctx, messages } = mockContext();
+      // Values only the repository knows. The request carries just the cook id
+      // in the path, no body (mockRequest's json() throws), and no other header.
+      const persistedName = 'Persisted Pork Shoulder 7f3a';
+      const persistedStart = '2026-03-14T05:26:53.000Z';
+      const stored = storedCook({
+        id: 'cook-mg31',
+        name: persistedName,
+        startTime: persistedStart,
+      });
+      const repo = fakeRepository(
+        (_userId, _id, endTime) => ({
+          cook: { ...stored, status: 'completed', endTime },
+          requestCharge: 1,
+          transitioned: true,
+        }),
+        stored
+      );
+      const request = mockRequest('cook-mg31');
+
+      const res = await stopCookHandler(request, ctx, {
+        resolvePrincipal: authenticatedAs(AUTH_USER_ID),
+        getRepository: () => repo,
+        getDeviceOwnership: owned,
+      });
+
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(request)).not.toContain(persistedName);
+      expect(JSON.stringify(request)).not.toContain(persistedStart);
+      const payload = messages()![0].arguments[0].payload;
+      expect(payload.name).toBe(persistedName);
+      expect(payload.startTime).toBe(persistedStart);
+    });
+  });
+
   describe('HAR-11 — x-meatgeek-request-charge header', () => {
     function chargeHeader(res: { headers?: unknown }): string | undefined {
       return (res.headers as Record<string, string> | undefined)?.['x-meatgeek-request-charge'];
     }
 
-    function stopWith(repo: RepoSpy, resolvePrincipal = authenticatedAs(AUTH_USER_ID)) {
+    function stopWith(
+      repo: RepoSpy,
+      resolvePrincipal = authenticatedAs(AUTH_USER_ID),
+      getDeviceOwnership = owned
+    ) {
       return stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
         resolvePrincipal,
         getRepository: () => repo,
+        getDeviceOwnership,
       });
     }
 
@@ -372,19 +562,24 @@ describe('stopCookHandler', () => {
       );
 
       expect([fresh.status, repeat.status]).toEqual([200, 200]);
-      expect(chargeHeader(fresh)).toBe('11.38');
-      expect(chargeHeader(repeat)).toBe('1');
+      // The cook read (1) and the ownership read (1) plus the stop.
+      expect(chargeHeader(fresh)).toBe('13.38');
+      expect(chargeHeader(repeat)).toBe('3');
     });
 
     it('reports the RU charge of the read on a 404 miss', async () => {
       const res = await stopWith(
-        fakeRepository(() => ({ cook: undefined, requestCharge: 1.2, transitioned: false }))
+        fakeRepository(
+          () => ({ cook: undefined, requestCharge: 0, transitioned: false }),
+          null,
+          1.2
+        )
       );
       expect(res.status).toBe(404);
       expect(chargeHeader(res)).toBe('1.2');
     });
 
-    it('reports the charge a failing Cosmos call carried on the 500, and omits it otherwise', async () => {
+    it('reports the completed reads plus the charge a failing Cosmos call carried on the 500', async () => {
       const charged = await stopWith(
         fakeRepository(() => {
           throw Object.assign(new Error('precondition failed'), {
@@ -400,8 +595,36 @@ describe('stopCookHandler', () => {
       );
 
       expect([charged.status, uncharged.status]).toEqual([500, 500]);
-      expect(chargeHeader(charged)).toBe('2.25');
-      expect(chargeHeader(uncharged)).toBeUndefined();
+      expect(chargeHeader(charged)).toBe('4.25');
+      expect(chargeHeader(uncharged)).toBe('2');
+    });
+
+    it('omits the header on a 500 when the first read fails without a charge', async () => {
+      const repo = fakeRepository(() => ({
+        cook: undefined,
+        requestCharge: 0,
+        transitioned: false,
+      }));
+      const res = await stopWith({
+        ...repo,
+        getCook: async () => {
+          throw new Error('credential unavailable');
+        },
+      });
+      expect(res.status).toBe(500);
+      expect(chargeHeader(res)).toBeUndefined();
+    });
+
+    it('reports both reads on a 403', async () => {
+      const res = await stopWith(
+        fakeRepository(() => {
+          throw new Error('stopCook must not be called');
+        }),
+        authenticatedAs(AUTH_USER_ID),
+        fakeOwnership({ meatgeek3: 'foreign' }).getDeviceOwnership
+      );
+      expect(res.status).toBe(403);
+      expect(chargeHeader(res)).toBe('2');
     });
 
     it('omits the header on a 401, where no Cosmos call was made', async () => {

@@ -10,6 +10,7 @@ import type { StartCookDeps } from './start-cook';
 import type { SignalROutputMessage } from '../signalr/envelope';
 import type { StartCookResult } from '../../shared/cosmos/cooks-repository';
 import type { PrincipalResult } from '../../shared/auth/principal';
+import type { DeviceOwnership } from '../../shared/cosmos/devices-repository';
 
 const INVOCATION_ID = 'inv-42';
 
@@ -115,8 +116,37 @@ function fakeRepository(opts: { echoResource?: boolean } = {}) {
   };
 }
 
+/** RU the fake ownership read reports, so tests can see it summed into the header. */
+const OWNERSHIP_CHARGE = 1;
+
+/**
+ * HAR-26: a fake devices ownership read. Every device is `owned` by the caller
+ * unless `statuses` says otherwise; `calls` records each read.
+ */
+function fakeOwnership(statuses: Record<string, 'foreign' | 'unknown'> = {}) {
+  const calls: Array<{ userId: string; deviceId: string }> = [];
+  return {
+    calls,
+    getDeviceOwnership: async (userId: string, deviceId: string): Promise<DeviceOwnership> => {
+      calls.push({ userId, deviceId });
+      const status = statuses[deviceId];
+      if (status) {
+        return { status, requestCharge: OWNERSHIP_CHARGE };
+      }
+      return {
+        status: 'owned',
+        device: { id: deviceId, userId, name: deviceId } as never,
+        requestCharge: OWNERSHIP_CHARGE,
+      };
+    },
+  };
+}
+
 /** Deps that authenticate as PRINCIPAL_USER_ID and capture repository writes. */
-function authedDeps(repo = fakeRepository()): {
+function authedDeps(
+  repo = fakeRepository(),
+  ownership = fakeOwnership()
+): {
   deps: StartCookDeps;
   writes: Cook[];
 } {
@@ -130,6 +160,7 @@ function authedDeps(repo = fakeRepository()): {
       },
     }),
     getRepository: () => repo,
+    getDeviceOwnership: ownership.getDeviceOwnership,
   };
   return { deps, writes: repo.writes };
 }
@@ -202,6 +233,7 @@ describe('startCookHandler', () => {
         reason: 'principal_header_missing',
       }),
       getRepository: () => repo,
+      getDeviceOwnership: fakeOwnership().getDeviceOwnership,
     };
 
     const res = await startCookHandler(mockRequest(validBody), ctx, deps);
@@ -232,6 +264,7 @@ describe('startCookHandler', () => {
           });
         },
       }),
+      getDeviceOwnership: fakeOwnership().getDeviceOwnership,
     };
 
     const res = await startCookHandler(mockRequest(validBody), ctx, deps);
@@ -498,6 +531,118 @@ describe('startCookHandler', () => {
     });
   });
 
+  describe('HAR-26 — only the device owner can start a cook (MG-88, MG-83)', () => {
+    it('owned device: reads ownership for the caller and device, writes the cook, returns 201', async () => {
+      const repo = fakeRepository();
+      const ownership = fakeOwnership();
+      const { deps } = authedDeps(repo, ownership);
+      const { ctx, messages } = mockContext();
+
+      const res = await startCookHandler(mockRequest(validBody), ctx, deps);
+
+      expect(res.status).toBe(201);
+      expect(ownership.calls).toEqual([{ userId: PRINCIPAL_USER_ID, deviceId: 'meatgeek3' }]);
+      expect(repo.writes).toHaveLength(1);
+      expect(messages()).toHaveLength(1);
+    });
+
+    it.each(['foreign', 'unknown'] as const)(
+      '%s device: 403 DEVICE_NOT_OWNED, no startCook call, no SignalR output',
+      async status => {
+        const startCook = jest.fn();
+        const { deps } = authedDeps(fakeRepository(), fakeOwnership({ meatgeek3: status }));
+        const { ctx, messages } = mockContext();
+
+        const res = await startCookHandler(mockRequest(validBody), ctx, {
+          ...deps,
+          getRepository: () => ({ startCook }),
+        });
+
+        expect(res.status).toBe(403);
+        expect(res.jsonBody).toEqual({
+          error: 'DEVICE_NOT_OWNED',
+          message: 'The device is not registered to the caller.',
+          requestId: INVOCATION_ID,
+        });
+        expect(startCook).not.toHaveBeenCalled();
+        expect(messages()).toBeUndefined();
+      }
+    );
+
+    it('foreign and unknown devices get byte-identical responses', async () => {
+      const foreign = await startCookHandler(
+        mockRequest(validBody),
+        mockContext().ctx,
+        authedDeps(fakeRepository(), fakeOwnership({ meatgeek3: 'foreign' })).deps
+      );
+      const unknown = await startCookHandler(
+        mockRequest(validBody),
+        mockContext().ctx,
+        authedDeps(fakeRepository(), fakeOwnership({ meatgeek3: 'unknown' })).deps
+      );
+      expect(JSON.stringify(foreign)).toBe(JSON.stringify(unknown));
+    });
+
+    it('missing principal: 401 before any ownership read', async () => {
+      const ownership = fakeOwnership();
+      const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
+        ...authedDeps(fakeRepository(), ownership).deps,
+        resolvePrincipal: (): PrincipalResult => ({
+          authenticated: false,
+          reason: 'principal_header_missing',
+        }),
+      });
+      expect(res.status).toBe(401);
+      expect(ownership.calls).toHaveLength(0);
+    });
+
+    it('invalid body: 400 before any ownership read', async () => {
+      const ownership = fakeOwnership();
+      const res = await startCookHandler(
+        mockRequest({ ...validBody, meatType: undefined }),
+        mockContext().ctx,
+        authedDeps(fakeRepository(), ownership).deps
+      );
+      expect(res.status).toBe(400);
+      expect(ownership.calls).toHaveLength(0);
+    });
+
+    it('ownership read failure: sanitized 500, no write, no SignalR output', async () => {
+      const repo = fakeRepository();
+      const { ctx, messages } = mockContext();
+      const res = await startCookHandler(mockRequest(validBody), ctx, {
+        ...authedDeps(repo).deps,
+        getDeviceOwnership: async () => {
+          throw Object.assign(new Error('request to https://acct.documents.azure.com failed'), {
+            code: 503,
+          });
+        },
+      });
+
+      expect(res.status).toBe(500);
+      expect(res.jsonBody).toEqual({
+        error: 'INTERNAL_SERVER_ERROR',
+        message: 'Failed to start cook',
+        requestId: INVOCATION_ID,
+      });
+      expect(JSON.stringify(res)).not.toContain('documents.azure.com');
+      expect(repo.writes).toHaveLength(0);
+      expect(messages()).toBeUndefined();
+    });
+
+    it('a second cook on an owned busy device is still 409 (MG-84 unchanged)', async () => {
+      const repo = fakeRepository();
+      const { deps } = authedDeps(repo);
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+      const res = await startCookHandler(
+        mockRequest({ ...validBody, id: OTHER_COOK_ID }),
+        mockContext().ctx,
+        deps
+      );
+      expect(res.status).toBe(409);
+    });
+  });
+
   describe('HAR-11 — x-meatgeek-request-charge header', () => {
     function chargeHeader(res: { headers?: unknown }): string | undefined {
       return (res.headers as Record<string, string> | undefined)?.['x-meatgeek-request-charge'];
@@ -518,7 +663,8 @@ describe('startCookHandler', () => {
       const { deps } = authedDeps();
       const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
       expect(res.status).toBe(201);
-      expect(chargeHeader(res)).toBe('7.42');
+      // The ownership read (1) plus the create batch (7.42).
+      expect(chargeHeader(res)).toBe('8.42');
     });
 
     it('reports the RU charge on a 200 replay, a 422 id reuse and a 409 busy device', async () => {
@@ -538,12 +684,13 @@ describe('startCookHandler', () => {
       );
 
       expect([replay.status, reuse.status, busy.status]).toEqual([200, 422, 409]);
-      expect(chargeHeader(replay)).toBe('2');
-      expect(chargeHeader(reuse)).toBe('2');
-      expect(chargeHeader(busy)).toBe('3');
+      // Each adds the ownership read (1) to the repository's charge.
+      expect(chargeHeader(replay)).toBe('3');
+      expect(chargeHeader(reuse)).toBe('3');
+      expect(chargeHeader(busy)).toBe('4');
     });
 
-    it('reports the charge a failing Cosmos call carried on the 500', async () => {
+    it('reports the ownership read plus the charge a failing Cosmos call carried on the 500', async () => {
       const cosmosError = Object.assign(new Error('https://acct.documents.azure.com throttled'), {
         code: 429,
         requestCharge: 1.5,
@@ -554,17 +701,35 @@ describe('startCookHandler', () => {
         failingDeps(cosmosError)
       );
       expect(res.status).toBe(500);
-      expect(chargeHeader(res)).toBe('1.5');
+      expect(chargeHeader(res)).toBe('2.5');
     });
 
-    it('omits the header on a 500 whose error reports no charge', async () => {
+    it('reports only the ownership read on a 500 whose error reports no charge', async () => {
       const res = await startCookHandler(
         mockRequest(validBody),
         mockContext().ctx,
         failingDeps(new Error('config missing'))
       );
       expect(res.status).toBe(500);
+      expect(chargeHeader(res)).toBe('1');
+    });
+
+    it('omits the header on a 500 when the ownership read fails without a charge', async () => {
+      const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
+        ...authedDeps().deps,
+        getDeviceOwnership: async () => {
+          throw new Error('config missing');
+        },
+      });
+      expect(res.status).toBe(500);
       expect(chargeHeader(res)).toBeUndefined();
+    });
+
+    it('reports the ownership read on a 403', async () => {
+      const { deps } = authedDeps(fakeRepository(), fakeOwnership({ meatgeek3: 'unknown' }));
+      const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+      expect(res.status).toBe(403);
+      expect(chargeHeader(res)).toBe('1');
     });
 
     it('omits the header when no Cosmos call was made (401, 400)', async () => {
