@@ -568,6 +568,30 @@ validates and plans (both role assignments are skipped via `count`), but the
 resulting Function App has nothing that can publish to it, so it is **required**
 for a deployable dev environment. It is an identifier, not a secret.
 
+### Simulated device registry grant — re-run bootstrap BEFORE setting `simulated_device_id` (HAR-39)
+
+`main.tf` declares `azurerm_role_assignment.simulated_device_registry_contributor`:
+`IoT Hub Registry Contributor` for the same app-deploy identity, scoped to the
+IoT Hub alone. The dev live acceptance job runs as that identity, creates the
+standing simulated device if it is missing, and fetches the device's connection
+string at run time (masked, never stored). The grant is `count`-guarded on
+**both** `simulated_device_id` and `app_deploy_principal_object_id`, and ships
+**off**: neither `dev.tfvars` nor `prod.tfvars` sets `simulated_device_id`.
+
+`IoT Hub Registry Contributor` is in
+[`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)
+with GUID `PENDING`, but the infra-apply identity's live ABAC condition only
+learns a role when `bootstrap.sh` is re-run. So, in this order:
+
+1. Re-run `./bootstrap.sh` as the operator. It resolves the role's GUID live and
+   reconciles the condition in place. Commit the resolved allowlist it prints.
+2. Only then set `simulated_device_id = "<device id>"` in
+   `environments/dev.tfvars`.
+
+Setting `simulated_device_id` before step 1 makes every `Apply Dev
+Infrastructure` run on `main` fail with `AuthorizationFailed` on the role
+assignment create.
+
 ### Dev app / API authentication registration (item 3)
 
 To unblock the MG-21 **authenticated** smoke test, the bootstrap also provisions

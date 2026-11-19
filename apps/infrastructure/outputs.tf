@@ -116,3 +116,11 @@ output "development_urls" {
     app_insights    = "https://portal.azure.com/#@/resource${azurerm_application_insights.main.id}"
   }
 }
+
+# Standing simulated device id (HAR-39). Non-secret: an id, not a key. Empty when
+# var.simulated_device_id is unset. The acceptance job reads it together with
+# iot_hub_name to create the device and fetch its key at run time.
+output "simulated_device_id" {
+  description = "IoT Hub device id of the standing simulated device (empty when unset)"
+  value       = var.simulated_device_id
+}

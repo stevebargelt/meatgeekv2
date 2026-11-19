@@ -342,3 +342,31 @@ variable "adopt_existing_function_app" {
   type        = bool
   default     = false
 }
+
+# Standing simulated device (HAR-39). The IoT Hub device id the dev live
+# acceptance job uses. Non-secret: it is an id, not a key. The job runs as the
+# app-publish identity above, CREATES the device identity if it is missing and
+# fetches its connection string at run time under OIDC — nothing is stored. When
+# set together with app_deploy_principal_object_id, this apply grants that
+# identity `IoT Hub Registry Contributor` on the hub (see
+# azurerm_role_assignment.simulated_device_registry_contributor in main.tf).
+#
+# Leave EMPTY until bootstrap.sh has been re-run with `IoT Hub Registry
+# Contributor` in bootstrap/tf-managed-role-allowlist.tsv: the infra-apply
+# identity's ABAC condition only permits allowlisted roles, so setting this
+# before that re-run fails every dev apply with AuthorizationFailed. See
+# docs/infrastructure/bootstrap-runbook.md.
+#
+# The validation mirrors the API's DEVICE_ID_PATTERN
+# (apps/api/src/shared/cosmos/devices-repository.ts), so the device the
+# acceptance job pushes as is one the API will accept a read for.
+variable "simulated_device_id" {
+  description = "IoT Hub device id of the standing simulated device the dev live acceptance job creates and pushes as. When non-empty AND app_deploy_principal_object_id is non-empty, this apply grants the app-deploy identity IoT Hub Registry Contributor on the hub. Empty (default) skips the grant. Requires a bootstrap.sh re-run first (role allowlist)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.simulated_device_id == "" || can(regex("^[A-Za-z0-9._:-]{1,128}$", var.simulated_device_id))
+    error_message = "simulated_device_id must be empty or 1-128 characters of A-Z, a-z, 0-9, \".\", \"_\", \":\" or \"-\" (the API's device-id rule)."
+  }
+}
