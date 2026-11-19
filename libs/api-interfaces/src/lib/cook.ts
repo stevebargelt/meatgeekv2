@@ -73,6 +73,9 @@ export interface UpdateCookRequest {
  */
 export interface ListCooksRequest {
   userId?: string;
+  /** Only cooks on this device (opaque, 1–128 characters). ANDs with `status`. */
+  deviceId?: string;
+  /** Only cooks in this status. ANDs with `deviceId`. */
   status?: CookStatus;
   meatType?: string;
   sortBy?: 'startTime' | 'duration' | 'rating';

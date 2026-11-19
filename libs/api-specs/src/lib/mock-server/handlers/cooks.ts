@@ -77,6 +77,7 @@ function decodeContinuation(token: string | undefined): number {
 
 function listCooks(req: Request, res: Response): void {
   const userId = (req.query['userId'] as string) || undefined;
+  const deviceId = (req.query['deviceId'] as string) || undefined;
   const status = (req.query['status'] as Cook['status']) || undefined;
   // Same clamp as the deployed API (MAX_PAGE_SIZE = 100).
   const limit = Math.min(req.query['limit'] !== undefined ? Number(req.query['limit']) : 20, 100);
@@ -84,6 +85,7 @@ function listCooks(req: Request, res: Response): void {
 
   let filtered = cookStore;
   if (userId) filtered = filtered.filter((c) => c.userId === userId);
+  if (deviceId) filtered = filtered.filter((c) => c.deviceId === deviceId);
   if (status) filtered = filtered.filter((c) => c.status === status);
 
   const page = filtered.slice(start, start + limit);

@@ -15,6 +15,8 @@
 import type { Container } from '@azure/cosmos';
 import type { Cook } from '@meatgeekv2/api-interfaces';
 
+import type { ListCooksOptions } from './cooks-repository';
+
 const VALID_ENV = {
   COSMOSDB__accountEndpoint: 'https://mgv2-secret-account.documents.azure.com/',
   COSMOSDB_DATABASE_NAME: 'meatgeek-v2-dev-db',
@@ -687,6 +689,55 @@ describe('MG-59 cooks repository', () => {
 
       expect(calls.queries[0].options.partitionKey).toBe(USER_B);
       expect(calls.readAll).toBe(0);
+    });
+
+    describe('MG-87 — deviceId / status filters', () => {
+      type Spec = { query: string; parameters: Array<{ name: string; value: unknown }> };
+
+      async function specFor(options: ListCooksOptions) {
+        const { container, calls } = fakeContainer();
+        await new mod.CooksRepository(container).listCooksByUser(USER_A, options);
+        expect(calls.queries[0].options.partitionKey).toBe(USER_A);
+        return calls.queries[0].spec as Spec;
+      }
+
+      it('adds no filter predicate when neither is given', async () => {
+        const spec = await specFor({});
+        expect(spec.query).toBe(
+          'SELECT * FROM c WHERE c.userId = @userId AND NOT IS_DEFINED(c.docType) ' +
+            'ORDER BY c.startTime DESC'
+        );
+      });
+
+      it('binds both filters as parameters, ANDed, keeping the lock exclusion and order', async () => {
+        const hostile = "x' OR 1=1 --";
+        const spec = await specFor({ deviceId: hostile, status: 'active' });
+        expect(spec.query).toBe(
+          'SELECT * FROM c WHERE c.userId = @userId AND NOT IS_DEFINED(c.docType) ' +
+            'AND c.deviceId = @deviceId AND c.status = @status ORDER BY c.startTime DESC'
+        );
+        // Caller input reaches Cosmos only as a parameter value, never as SQL.
+        expect(spec.query).not.toContain(hostile);
+        expect(spec.parameters).toEqual([
+          { name: '@userId', value: USER_A },
+          { name: '@deviceId', value: hostile },
+          { name: '@status', value: 'active' },
+        ]);
+      });
+
+      it('binds deviceId alone', async () => {
+        const spec = await specFor({ deviceId: 'grill-1' });
+        expect(spec.query).toContain('AND c.deviceId = @deviceId ORDER BY');
+        expect(spec.query).not.toContain('@status');
+        expect(spec.parameters).toContainEqual({ name: '@deviceId', value: 'grill-1' });
+      });
+
+      it('binds status alone', async () => {
+        const spec = await specFor({ status: 'completed' });
+        expect(spec.query).toContain('AND c.status = @status ORDER BY');
+        expect(spec.query).not.toContain('@deviceId');
+        expect(spec.parameters).toContainEqual({ name: '@status', value: 'completed' });
+      });
     });
   });
 

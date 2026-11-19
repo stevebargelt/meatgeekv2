@@ -7,7 +7,9 @@ import { defineProofs } from '../lib/proof';
 
 /**
  * HAR-11 proofs 2–5 — a cook written through the deployed API reads back, stops,
- * and reads back as stopped, as the authenticated caller.
+ * and reads back as stopped, as the authenticated caller. MG-87 adds the
+ * data-pusher's `deviceId` + `status=active` filter: it finds exactly the new
+ * cook while it runs and nothing once it is stopped.
  *
  * The cook uses a synthetic device id (`acceptance-<runId>`) so it never
  * collides with a real device's one-active-cook lock, and a client-generated
@@ -41,6 +43,26 @@ function expectCook(api: AcceptanceApi, response: AcceptanceResponse, value: unk
     `cook carries Cosmos system properties: ${leaked.join(', ')}`
   );
   return cook as unknown as Cook;
+}
+
+/** MG-87: the data-pusher's reconcile query — the caller's active cooks on one
+ *  device. Returns every cook on the first page (a device holds at most one
+ *  active cook, so one page is the whole answer). */
+async function activeCooksOnDevice(
+  api: AcceptanceApi,
+  deviceId: string
+): Promise<{ cooks: Cook[]; response: AcceptanceResponse }> {
+  const query = new URLSearchParams({ deviceId, status: 'active' });
+  const response = await api.request<CookListResponse>({
+    method: 'GET',
+    path: `/cooks?${query.toString()}`,
+    route: '/cooks',
+  });
+  api.expectStatus(response, 200);
+  api.check(response, Array.isArray(response.body?.cooks), 'body.cooks is not an array');
+  api.check(response, response.body.hasMore === false, 'filtered list unexpectedly has more pages');
+  const cooks = response.body.cooks.map(cook => expectCook(api, response, cook));
+  return { cooks, response };
 }
 
 /** Page through GET /cooks until the cook is found or the list ends. */
@@ -117,6 +139,20 @@ export default defineProofs('cooks lifecycle', () => {
       },
     },
     {
+      name: 'GET /cooks?deviceId&status=active returns exactly the new cook',
+      async run(api: AcceptanceApi) {
+        const { id, deviceId } = startedCook();
+        const { cooks, response } = await activeCooksOnDevice(api, deviceId);
+        api.check(
+          response,
+          cooks.length === 1 && cooks[0].id === id,
+          `expected only cook ${id}, got [${cooks.map(cook => cook.id).join(', ')}]`
+        );
+        api.check(response, cooks[0].deviceId === deviceId, 'cook.deviceId is not the filter');
+        api.check(response, cooks[0].status === 'active', 'cook.status is not active');
+      },
+    },
+    {
       name: 'POST /cooks/{cookId}/stop stops the cook',
       async run(api: AcceptanceApi) {
         const { id } = startedCook();
@@ -148,6 +184,18 @@ export default defineProofs('cooks lifecycle', () => {
           `cook.status is ${cook.status}, not completed`
         );
         api.check(response, typeof cook.endTime === 'string', 'cook.endTime is not set');
+      },
+    },
+    {
+      name: 'GET /cooks?deviceId&status=active returns no cook after the stop',
+      async run(api: AcceptanceApi) {
+        const { deviceId } = startedCook();
+        const { cooks, response } = await activeCooksOnDevice(api, deviceId);
+        api.check(
+          response,
+          cooks.length === 0,
+          `expected no active cook, got [${cooks.map(cook => cook.id).join(', ')}]`
+        );
       },
     },
   ];

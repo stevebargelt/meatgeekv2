@@ -384,4 +384,77 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     expect(other.cooks.every(cook => cook.userId === otherUserId)).toBe(true);
     expectPositiveCharge(other.requestCharge);
   });
+  it('MG-87: filters by deviceId and status, never returning a lock document', async () => {
+    const userId = `user-${randomUUID()}`;
+    const deviceX = `grill-x-${randomUUID().slice(0, 8)}`;
+    const deviceY = `grill-y-${randomUUID().slice(0, 8)}`;
+    const base = Date.parse('2026-02-01T00:00:00.000Z');
+    const at = (hour: number) => new Date(base + hour * 3_600_000).toISOString();
+
+    // Device X: two completed cooks, then one active (which holds X's lock).
+    const xDoneOld = newCook(userId, { deviceId: deviceX, startTime: at(0) });
+    const xDoneNew = newCook(userId, { deviceId: deviceX, startTime: at(1) });
+    const xActive = newCook(userId, { deviceId: deviceX, startTime: at(4) });
+    // Device Y: one completed cook, then one active (which holds Y's lock).
+    const yDone = newCook(userId, { deviceId: deviceY, startTime: at(2) });
+    const yActive = newCook(userId, { deviceId: deviceY, startTime: at(3) });
+
+    for (const cook of [xDoneOld, xDoneNew, yDone]) {
+      expect((await repository.startCook(cook)).outcome).toBe('created');
+      await repository.stopCook(userId, cook.id, new Date().toISOString());
+    }
+    for (const cook of [xActive, yActive]) {
+      expect((await repository.startCook(cook)).outcome).toBe('created');
+    }
+    // Another caller's active cook on device X must never appear.
+    await repository.startCook(newCook(`user-${randomUUID()}`, { deviceId: deviceX }));
+
+    // The partition really does hold both active-device lock documents.
+    const locks = (await partitionDocuments(container, userId)).filter(
+      doc => doc.docType === ACTIVE_DEVICE_LOCK_DOC_TYPE
+    );
+    expect(locks.map(doc => doc.id).sort()).toEqual(
+      [activeDeviceLockId(deviceX), activeDeviceLockId(deviceY)].sort()
+    );
+    const lockIds = new Set(locks.map(doc => doc.id));
+
+    /** Every id the filtered list returns, across all pages, newest first. */
+    async function listIds(filters: { deviceId?: string; status?: Cook['status'] }) {
+      const ids: string[] = [];
+      let continuationToken: string | undefined;
+      let pages = 0;
+      do {
+        const page = await repository.listCooksByUser(userId, {
+          ...filters,
+          maxItemCount: 2,
+          continuationToken,
+        });
+        expectPositiveCharge(page.requestCharge);
+        for (const cook of page.cooks) {
+          expect(cook.userId).toBe(userId);
+          expect(lockIds.has(cook.id)).toBe(false);
+          expect((cook as unknown as { docType?: string }).docType).toBeUndefined();
+          if (filters.deviceId !== undefined) expect(cook.deviceId).toBe(filters.deviceId);
+          if (filters.status !== undefined) expect(cook.status).toBe(filters.status);
+        }
+        ids.push(...page.cooks.map(cook => cook.id));
+        continuationToken = page.continuationToken;
+        pages += 1;
+      } while (continuationToken && pages < 10);
+      return ids;
+    }
+
+    // The data-pusher's reconcile query: only X's active cook.
+    expect(await listIds({ deviceId: deviceX, status: 'active' })).toEqual([xActive.id]);
+    // Each single filter returns exactly the matching cooks, newest first.
+    expect(await listIds({ deviceId: deviceX })).toEqual([xActive.id, xDoneNew.id, xDoneOld.id]);
+    expect(await listIds({ deviceId: deviceY })).toEqual([yActive.id, yDone.id]);
+    expect(await listIds({ status: 'active' })).toEqual([xActive.id, yActive.id]);
+    expect(await listIds({ status: 'completed' })).toEqual([yDone.id, xDoneNew.id, xDoneOld.id]);
+    // No filter: all five cooks and still no lock document.
+    expect(await listIds({})).toEqual([xActive.id, yActive.id, yDone.id, xDoneNew.id, xDoneOld.id]);
+    // Filters that match nothing return an empty page, not an error.
+    expect(await listIds({ deviceId: deviceY, status: 'paused' })).toEqual([]);
+    expect(await listIds({ deviceId: `grill-${randomUUID()}` })).toEqual([]);
+  });
 });

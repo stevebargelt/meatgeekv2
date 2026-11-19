@@ -112,7 +112,13 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       }
 
       if (route === 'GET /cooks') {
-        const sorted = [...cooks].sort((a, b) => b.startTime.localeCompare(a.startTime));
+        // Honours the MG-87 filters, as the deployed route does.
+        const deviceId = url.searchParams.get('deviceId');
+        const status = url.searchParams.get('status');
+        const sorted = cooks
+          .filter(cook => deviceId === null || cook.deviceId === deviceId)
+          .filter(cook => status === null || cook.status === status)
+          .sort((a, b) => b.startTime.localeCompare(a.startTime));
         send(200, { cooks: sorted, limit: 100, hasMore: false }, route);
       } else if (route === 'POST /cooks') {
         const body = (await readJson(request)) as Partial<StubCook>;
@@ -219,6 +225,12 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // The proofs used the MG-84 contract: a client UUID id and a synthetic device.
     const posts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
     expect(posts).toHaveLength(1);
+    // MG-87: the reconcile query ran once while the cook was active, once after.
+    const filtered = stub!.requests.filter(
+      r =>
+        r.method === 'GET' && /^\/api\/cooks\?deviceId=acceptance-[^&]+&status=active$/.test(r.path)
+    );
+    expect(filtered).toHaveLength(2);
     // The unauthenticated proof sent no Authorization header; all others did.
     const anonymous = stub!.requests.filter(r => r.authorization === undefined);
     expect(anonymous).toHaveLength(1);

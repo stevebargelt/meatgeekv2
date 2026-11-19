@@ -305,6 +305,108 @@ describe('getCooksHandler', () => {
     expect(source).not.toContain('mockCooks');
   });
 
+  describe('MG-87 — deviceId and status filters', () => {
+    async function list(query: Record<string, string>) {
+      const { getCooksHandler } = loadModule();
+      const { deps: d, calls } = deps(pageOf([sampleCook()]));
+      const res = await getCooksHandler(
+        mockRequest({ principalHeader: encodedPrincipal(), query }),
+        mockContext().ctx,
+        d
+      );
+      return { res, calls };
+    }
+
+    it('passes no filter when neither is sent', async () => {
+      const { res, calls } = await list({});
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].options.deviceId).toBeUndefined();
+      expect(calls[0].options.status).toBeUndefined();
+    });
+
+    it('passes deviceId alone', async () => {
+      const { res, calls } = await list({ deviceId: 'meatgeek3' });
+      expect(res.status).toBe(200);
+      expect(calls[0].options).toMatchObject({ deviceId: 'meatgeek3' });
+      expect(calls[0].options.status).toBeUndefined();
+    });
+
+    it('passes status alone', async () => {
+      const { res, calls } = await list({ status: 'completed' });
+      expect(res.status).toBe(200);
+      expect(calls[0].options).toMatchObject({ status: 'completed' });
+      expect(calls[0].options.deviceId).toBeUndefined();
+    });
+
+    it('passes both, on the authenticated partition, alongside paging', async () => {
+      const { res, calls } = await list({
+        deviceId: 'meatgeek3',
+        status: 'active',
+        limit: '5',
+        continuationToken: 'ct-prev',
+        userId: 'someone-elses-tenant',
+      });
+      expect(res.status).toBe(200);
+      expect(calls).toEqual([
+        {
+          userId: EXPECTED_USER_ID,
+          options: {
+            maxItemCount: 5,
+            continuationToken: 'ct-prev',
+            deviceId: 'meatgeek3',
+            status: 'active',
+          },
+        },
+      ]);
+    });
+
+    it.each(['ACTIVE', 'done', '', 'active ', 'toString', '__proto__'])(
+      'rejects status %j with 400 and no repository call',
+      async status => {
+        const { res, calls } = await list({ status });
+        expect(res.status).toBe(400);
+        expect(calls).toHaveLength(0);
+        expect(res.jsonBody).toMatchObject({ error: 'VALIDATION_ERROR', requestId: 'inv-42' });
+        expect(
+          (res.headers as Record<string, string>)['x-meatgeek-request-charge']
+        ).toBeUndefined();
+      }
+    );
+
+    it('rejects an over-long deviceId with 400 and no repository call', async () => {
+      const { res, calls } = await list({ deviceId: 'd'.repeat(129) });
+      expect(res.status).toBe(400);
+      expect(calls).toHaveLength(0);
+      expect(res.jsonBody).toMatchObject({ error: 'VALIDATION_ERROR' });
+      expect((res.headers as Record<string, string>)['x-meatgeek-request-charge']).toBeUndefined();
+    });
+
+    it('accepts a deviceId of exactly 128 characters', async () => {
+      const { res, calls } = await list({ deviceId: 'd'.repeat(128) });
+      expect(res.status).toBe(200);
+      expect(calls[0].options.deviceId).toHaveLength(128);
+    });
+
+    it('rejects an empty deviceId with 400 and no repository call', async () => {
+      const { res, calls } = await list({ deviceId: '' });
+      expect(res.status).toBe(400);
+      expect(calls).toHaveLength(0);
+    });
+
+    it('checks identity before the filters: an unauthenticated bad filter is a 401', async () => {
+      const { getCooksHandler } = loadModule();
+      const { deps: d, calls } = deps(pageOf([sampleCook()]));
+      const res = await getCooksHandler(
+        mockRequest({ query: { status: 'bogus' } }),
+        mockContext().ctx,
+        d
+      );
+      expect(res.status).toBe(401);
+      expect(calls).toHaveLength(0);
+    });
+  });
+
   describe('HAR-11 — x-meatgeek-request-charge header', () => {
     function chargeHeader(res: { headers?: unknown }): string | undefined {
       return (res.headers as Record<string, string> | undefined)?.['x-meatgeek-request-charge'];
