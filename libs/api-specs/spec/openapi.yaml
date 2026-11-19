@@ -21,10 +21,11 @@ info:
 
     ## Source-of-truth note
 
-    Routes for the six currently-implemented HTTP endpoints
+    Routes for the nine currently-implemented HTTP endpoints
     (GET /cooks, POST /cooks, POST /cooks/{cookId}/stop,
     POST /negotiate, GET /temperatures/current/{deviceId},
-    GET /devices) match `apps/api/src/main.ts` route templates
+    GET /devices, POST /devices, GET /devices/{id},
+    PATCH /devices/{id}) match `apps/api/src/main.ts` route templates
     character-for-character — these are the contract. Endpoints whose
     description starts with `NOT YET IMPLEMENTED -` represent the planned
     Phase-1/Phase-2 surface; handlers will follow.
@@ -83,6 +84,8 @@ components:
       $ref: './components/schemas/common.yaml#/ErrorCode'
     ErrorResponse:
       $ref: './components/schemas/common.yaml#/ErrorResponse'
+    UnauthenticatedError:
+      $ref: './components/schemas/common.yaml#/UnauthenticatedError'
     CookAlreadyActiveError:
       $ref: './components/schemas/common.yaml#/CookAlreadyActiveError'
     Pagination:
@@ -131,6 +134,10 @@ components:
       $ref: './components/schemas/device.yaml#/DeviceConfiguration'
     DeviceListResponse:
       $ref: './components/schemas/device.yaml#/DeviceListResponse'
+    DeviceConfigurationPatch:
+      $ref: './components/schemas/device.yaml#/DeviceConfigurationPatch'
+    RegisterDeviceRequest:
+      $ref: './components/schemas/device.yaml#/RegisterDeviceRequest'
     UpdateDeviceRequest:
       $ref: './components/schemas/device.yaml#/UpdateDeviceRequest'
     DeviceStatus:

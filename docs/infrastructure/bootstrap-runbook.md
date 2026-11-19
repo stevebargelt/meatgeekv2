@@ -954,17 +954,15 @@ APP_ID_URI="$(az ad app show --id "$API_APP_ID" --query 'identifierUris[0]' -o t
 # anonymous carve-out on this Function App — so it does not change the
 # no-token / wrong-audience behaviour under test here; devices is used below
 # because it is the route this procedure was already written against.
-# The getDevicesHandler REQUIRES a user id — read from the `userId` query param
-# or the `x-user-id` header — and returns HTTP 400 "User ID is required" without
-# one. So the VALID-token call must carry it, or it 400s instead of 2xx. The id
-# is a DUMMY smoke value read straight from the query/header; it need NOT match
-# the token subject (this API does not cross-check the two). All three calls hit
-# the same URL so the only variable is the token.
-DEVICES_URL="https://${FUNC}.azurewebsites.net/api/devices?userId=smoke-test"
+# getDevices lists the CALLER's devices: the owner comes only from the Easy Auth
+# principal, never from a query parameter or header (HAR-20 / MG-80). A valid
+# token therefore gets 200 with `{ "devices": [...] }` (possibly empty). All
+# three calls hit the same URL so the only variable is the token.
+DEVICES_URL="https://${FUNC}.azurewebsites.net/api/devices"
 
 # 1. No token → MUST be rejected (default-deny proven). Easy Auth rejects at the
-#    platform layer BEFORE the function runs, so the userId in the query string
-#    is never even reached — the rejection is purely the missing token:
+#    platform layer BEFORE the function runs — the rejection is purely the
+#    missing token:
 curl -s -o /dev/null -w '%{http_code}\n' "$DEVICES_URL"
 #   → 401/403
 
@@ -973,17 +971,15 @@ TOKEN="$(az account get-access-token \
   --scope "$APP_ID_URI/access_as_user" \
   --query accessToken -o tsv)"
 
-# 3. Valid token, correct audience, WITH the required user id → MUST be 2xx:
+# 3. Valid token, correct audience → MUST be 2xx:
 curl -s -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer ${TOKEN}" \
   "$DEVICES_URL"
 #   → 200
-#   (equivalently, drop the ?userId=… and pass the id as a header instead:
-#    -H "x-user-id: smoke-test" against .../api/devices)
 
 # 4. Wrong audience → MUST be rejected (401/403). Acquire a token for a DIFFERENT
 #    scope (e.g. ARM) and confirm Easy Auth rejects it BEFORE the function runs
-#    (so, exactly like step 1, the userId never comes into play):
+#    (exactly like step 1):
 WRONG="$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)"
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer ${WRONG}" \
   "$DEVICES_URL"

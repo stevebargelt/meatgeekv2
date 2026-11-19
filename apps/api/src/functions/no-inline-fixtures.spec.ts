@@ -56,7 +56,6 @@ const SELF = 'no-inline-fixtures.spec.ts';
  * Sorted, one entity per line, low merge hazard.
  */
 const STILL_MOCKED_ALLOWLIST: readonly string[] = [
-  'devices/get-devices.ts', // MG-80 — devices onto real persistence, then drop this line
   'temperatures/get-current.ts', // MG-79 — temperatures onto real persistence, then drop this line
   // MG-81 (users) / MG-82 (recipes) add their still-mocked handlers here when
   // those handlers land, and MG-82 deletes this allowlist + guard once empty.

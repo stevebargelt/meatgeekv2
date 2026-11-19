@@ -97,16 +97,19 @@ docker run --rm -v "$(pwd)":/work deepmap/oapi-codegen:latest \
 
 ## Currently-implemented routes
 
-These four routes are wired up in `apps/api/src/main.ts`. The spec MUST stay
+These routes are wired up in `apps/api/src/main.ts`. The spec MUST stay
 character-for-character aligned with their route templates and response
 shapes:
 
-| HTTP method | Route template (main.ts)           | OpenAPI path                       | Handler |
-|-------------|------------------------------------|------------------------------------|---------|
-| GET         | `cooks`                            | `/cooks`                           | `cooks/list-cooks.ts` |
-| POST        | `cooks`                            | `/cooks`                           | `cooks/start-cook.ts` |
-| GET         | `temperatures/current/{deviceId}`  | `/temperatures/current/{deviceId}` | `temperatures/get-current.ts` |
-| GET         | `devices`                          | `/devices`                         | `devices/get-devices.ts` |
+| HTTP method | Route template (main.ts)          | OpenAPI path                       | Handler                       |
+| ----------- | --------------------------------- | ---------------------------------- | ----------------------------- |
+| GET         | `cooks`                           | `/cooks`                           | `cooks/list-cooks.ts`         |
+| POST        | `cooks`                           | `/cooks`                           | `cooks/start-cook.ts`         |
+| GET         | `temperatures/current/{deviceId}` | `/temperatures/current/{deviceId}` | `temperatures/get-current.ts` |
+| GET         | `devices`                         | `/devices`                         | `devices/get-devices.ts`      |
+| POST        | `devices`                         | `/devices`                         | `devices/register-device.ts`  |
+| GET         | `devices/{id}`                    | `/devices/{id}`                    | `devices/get-device.ts`       |
+| PATCH       | `devices/{id}`                    | `/devices/{id}`                    | `devices/update-device.ts`    |
 
 Preserved wire-shape quirks:
 
@@ -114,4 +117,5 @@ Preserved wire-shape quirks:
 - `POST /cooks` returns the created `Cook` directly at 201 (NOT wrapped).
 - `GET /temperatures/current/{deviceId}` returns a bare `TemperatureReading`
   (NOT wrapped).
-- `GET /devices` wraps the array in `{ devices: [...] }`.
+- `GET /devices` wraps the array in `{ devices: [...] }`; `GET`/`PATCH
+/devices/{id}` and `POST /devices` return a bare `Device`.

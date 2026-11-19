@@ -17,6 +17,8 @@ ErrorCode:
     - CONFLICT
     - COOK_ALREADY_ACTIVE
     - COOK_ID_REUSED
+    - DEVICE_CONFLICT
+    - CONCURRENT_UPDATE
     - INTERNAL_SERVER_ERROR
     - SERVICE_UNAVAILABLE
 
@@ -41,6 +43,33 @@ ErrorResponse:
       description: |
         Echoes Functions' InvocationContext.invocationId. Used as the correlation
         id for log/trace lookup and for X-Request-ID response header parity.
+
+UnauthenticatedError:
+  type: object
+  description: |
+    401 body when the request carries no usable Easy Auth principal
+    (X-MS-CLIENT-PRINCIPAL missing, unparseable, or without oid/tid claims).
+    Matches unauthenticatedResponse in apps/api/src/shared/auth/principal.ts.
+    `reason` is a fixed code; it never carries identity material.
+  required:
+    - error
+    - reason
+    - requestId
+  additionalProperties: false
+  properties:
+    error:
+      type: string
+      enum:
+        - UNAUTHENTICATED
+    reason:
+      type: string
+      enum:
+        - principal_header_missing
+        - principal_header_unparseable
+        - principal_object_id_missing
+        - principal_tenant_id_missing
+    requestId:
+      type: string
 
 CookAlreadyActiveError:
   type: object
