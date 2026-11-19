@@ -1,6 +1,6 @@
 # MeatGeek V2 — Architecture Diagrams
 
-These five diagrams show what is on `main` and nothing else: a component,
+These six diagrams show what is on `main` and nothing else: a component,
 route or edge that the code and Terraform on `main` do not have is left out,
 not drawn in a special style.
 
@@ -20,7 +20,10 @@ and emits cook lifecycle events to SignalR. The mobile and web apps are
 scaffolds that make no API or SignalR calls yet. The Go OTel SDKs export
 OTLP to an OpenTelemetry Collector whose Terraform module is on `main` but
 off by default (`enable_native_otlp = false`); with no
-`OTEL_EXPORTER_OTLP_ENDPOINT` set they export nothing.
+`OTEL_EXPORTER_OTLP_ENDPOINT` set they export nothing. A software device,
+`simdevice` as `meatgeek-dev-simulated-smoker`, runs in the dev acceptance
+job and sends the same messages as the Pi's data-pusher, and each run reads
+them back through the API.
 
 ```mermaid
 flowchart TB
@@ -53,10 +56,18 @@ flowchart TB
 
     Clients[Mobile + Web<br/>scaffolds, no API calls yet]
 
+    subgraph CI["GitHub Actions - dev acceptance job (environment development)"]
+        SimDev["simdevice<br/>Go, data-pusher internal/publish + iothub<br/>device meatgeek-dev-simulated-smoker"]
+        Accept["live acceptance suite<br/>nx run api:acceptance"]
+    end
+
     Sensors --> DC
     DC --> LCD
     DC -- "HTTP poll 5s" --> DP
-    DP -- "telemetry +<br/>correlation.id property" --> IoTHub
+    DP -- "telemetry, $.ct/$.ce JSON +<br/>correlation.id property" --> IoTHub
+    Accept -- "spawns; credential via env only" --> SimDev
+    SimDev -- "telemetry, same payload + properties as data-pusher" --> IoTHub
+    Accept -- "HTTPS, app-only token<br/>devices, temperatures current/history" --> Funcs
 
     IoTHub -- "cosmos route<br/>writes temperatures, partition {deviceid}" --> Cosmos
     IoTHub -- "route: eventhub-realtime-route" --> EventHub
@@ -88,7 +99,13 @@ with its system-assigned managed identity and gets one app setting per
 Cosmos container. The Event Hub namespace is provisioned and the Function
 App holds its namespace setting, but no function in `apps/api` consumes it.
 The OTel Collector Container App comes from the `native-otlp` module, which
-is count-guarded off by default.
+is count-guarded off by default. In the `Deploy Dev App` acceptance job the
+dev app-publish identity holds `IoT Hub Registry Contributor` on the dev hub
+through `azurerm_role_assignment.simulated_device_registry_contributor`,
+which exists only when `simulated_device_id` is set (only `dev.tfvars` sets
+it, to `meatgeek-dev-simulated-smoker`); it ensures the device identity and
+reads its connection string per run, so no device credential is stored
+anywhere.
 
 ```mermaid
 flowchart LR
@@ -125,8 +142,16 @@ flowchart LR
         clients[Mobile + Web<br/>scaffolds, no API calls yet]
     end
 
+    subgraph CIRunner["GitHub Actions runner - Deploy Dev App, acceptance job, environment development"]
+        direction TB
+        simBin["simdevice binary<br/>built per run from apps/data-pusher<br/>SIMDEVICE_CONNECTION_STRING fetched per run, masked"]
+        ciId["dev app-publish identity, OIDC<br/>IoT Hub Registry Contributor on the hub, dev only"]
+    end
+
     dpBin -- "AMQP/MQTT" --> iotMgd
     dpBin -- "WebSocket" --> signalrMgd
+    simBin -- "MQTT 8883, device SAS" --> iotMgd
+    ciId -- "ensure device identity; read its connection string<br/>--auth-type login" --> iotMgd
     iotMgd -- "eventhub-realtime-route" --> ehMgd
     iotMgd -- "cosmos-storage-route" --> cosmosMgd
     apiBin -- "identity-based (RBAC)" --> cosmosMgd
@@ -333,7 +358,8 @@ flowchart TB
 containers it touches, and the ownership point read on `devices` that the
 cook, device and temperature routes do first.
 Status codes on an edge are what a caller gets for a device it does not own;
-IoT Hub is the only writer of `temperatures`.
+IoT Hub is the only writer of `temperatures`; its device-side writers are the
+Pi's data-pusher and, in dev, the simulated device.
 
 ```mermaid
 flowchart LR
@@ -359,7 +385,7 @@ flowchart LR
         cRecipes[("recipes<br/>/userId")]
     end
 
-    iot["IoT Hub cosmos-storage-route<br/>partition from {deviceid}"]
+    iot["IoT Hub cosmos-storage-route<br/>partition from {deviceid}<br/>device-side writers: Pi data-pusher, dev simulated device"]
 
     caller --> Routes
 
@@ -376,6 +402,95 @@ flowchart LR
 
     iot -- "only writer" --> cTemps
 ```
+
+---
+
+## 6. Live telemetry proof (dev acceptance)
+
+**Legend.** Every `Deploy Dev App` run's acceptance job proves the telemetry
+path end to end with `apps/api/acceptance/proofs/telemetry-roundtrip.proof.ts`
+and `telemetry-volume.proof.ts`, which run in that order. The suite calls the
+deployed API with an app-only token and spawns `simdevice`
+(`apps/data-pusher/cmd/simdevice`), which sends as the standing device
+`meatgeek-dev-simulated-smoker` through the data-pusher's own
+`internal/publish` and `internal/iothub` code: MQTT on 8883, device SAS,
+QoS 1, with `messageId`, `traceparent` and `$.ct=application/json` /
+`$.ce=utf-8` on every message. Its credential reaches it only through the
+`SIMDEVICE_CONNECTION_STRING` environment variable. No Function is in the
+write path: IoT Hub's `cosmos-storage-route` writes the reading into
+`temperatures`, and the API reads it back. The round-trip proof times the
+send until `GET /temperatures/current/{id}` returns the sent reading and
+prints `METRIC roundtrip-ms`. The volume proof tops the device up to one long
+cook's worth of readings (12 h at one every 5 s = 8,640) and prints the
+request charge of three history pages. The job copies every `METRIC` line
+into the run summary.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Suite as acceptance suite
+    participant Sim as simdevice
+    participant IoT as IoT Hub
+    participant Cos as CosmosDB temperatures
+    participant API as Functions API
+
+    Note over Suite,API: telemetry-roundtrip.proof.ts
+    Suite->>API: POST /devices (meatgeek-dev-simulated-smoker)
+    alt not yet registered
+        API-->>Suite: 201
+    else already registered
+        API-->>Suite: 409
+        Suite->>API: GET /devices/{id}
+        API-->>Suite: 200
+    end
+    Suite->>Sim: simdevice --count 1
+    Sim->>IoT: one reading, MQTT QoS 1
+    IoT->>Cos: cosmos-storage-route
+    loop every 1 s, 120 s cap
+        Suite->>API: GET /temperatures/current/{id}
+        API->>Cos: newest reading by iothub-enqueuedtime
+        API-->>Suite: 200, the sent reading
+    end
+    Note over Suite: METRIC roundtrip-ms
+    Suite->>API: GET /temperatures/history?startTime=...
+    API-->>Suite: 200, page holds the sent reading
+
+    Note over Suite,API: telemetry-volume.proof.ts
+    Suite->>API: GET /temperatures/history?limit=1
+    API-->>Suite: 200, total
+    opt total below 8,640
+        Suite->>Sim: simdevice --count N --inflight 32 --interval 50ms<br/>N = 8,640 - total + 60
+        Sim->>IoT: N readings, MQTT QoS 1
+        IoT->>Cos: cosmos-storage-route
+    end
+    loop every 10 s, 15 min cap, until total reaches 8,640
+        Suite->>API: GET /temperatures/history?limit=1
+        API-->>Suite: 200, total
+    end
+    Suite->>API: GET /temperatures/history, limit 100, offset 0
+    Suite->>API: GET /temperatures/history, limit 100, last offset
+    Suite->>API: GET /temperatures/history, 12 h window, limit 5000
+    API-->>Suite: three pages with their request charge
+    Note over Suite: METRIC history-ru-first-page, -last-page, -max-page
+```
+
+**Measured.** Single dev samples, not targets, read from the `Deploy Dev App`
+run logs; each run's summary carries the current values.
+
+| Metric | Value | Run |
+|---|---|---|
+| `roundtrip-ms` | 1211 | 44603121177 |
+| `roundtrip-ms` | 1235 | 44612029684 |
+| `history-total` | 8700 | 44612029684 |
+| `history-ru-first-page` (limit 100, offset 0) | 11.95 RU | 44612029684 |
+| `history-ru-last-page` (limit 100, offset 8600) | 24.12 RU | 44612029684 |
+| `history-ru-max-page` (12 h window, limit 5000, 5000 readings) | 238.26 RU | 44612029684 |
+| `topup-sent` / `topup-ms` | 2175 / 109996 (~19.8 readings/s) | 44612029684 |
+
+A history page's `OFFSET` cost grows with the skip: the same 100-reading page
+costs 11.95 RU at offset 0 and 24.12 RU at offset 8,600, because Cosmos still
+reads the skipped readings. Every history request also pays a `COUNT(1)` over
+the device's partition for its `total`.
 
 ---
 
@@ -415,3 +530,9 @@ flowchart LR
   `docs/api/signalr-cook-events-smoke.md`), `cooksession.Reconcile` against
   the REST API at startup remains the practical cook-id source. Diagram 3
   calls this out in the cook-start step.
+- **The simulated device's credential**: the dev acceptance job fetches
+  `meatgeek-dev-simulated-smoker`'s connection string per run under OIDC as
+  the dev app-publish identity, masks it (the string and its key), and holds
+  it only in the acceptance suite step's environment. It is never stored —
+  no repo secret, no Key Vault, no hub shared-access policy — and never
+  passed to PR CI (`ci.yml`).

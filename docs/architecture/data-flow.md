@@ -127,6 +127,8 @@ IoT Hub → cosmos-storage-route → CosmosDB
 
 `Body` is a JSON object only because the data-pusher sets the content type `application/json` and content encoding `utf-8` system properties on every message (`$.ct` / `$.ce` in the MQTT topic, MG-68). Without both, IoT Hub stores `Body` as a base64 string and the API skips the document.
 
+The dev simulated device (`meatgeek-dev-simulated-smoker`, sent by `simdevice` from the dev acceptance job through the data-pusher's own publish code) takes this same route, with the same payload and properties.
+
 The API only reads this container. A reading's device is `SystemProperties["iothub-connection-device-id"]`, never `Body.deviceId`, because `Body` is whatever the device chose to send.
 
 **Partitioning Strategy**:
@@ -294,10 +296,20 @@ func (dp *DataPusher) enrichTemperatureData(temps TemperatureReading) Temperatur
 - **Real-time Path**: Batch processing in Functions
 - **Combined**: Parallel processing maximizes throughput
 
-### Latency  
-- **Storage**: ~100ms (direct route)
-- **Real-time**: ~500ms (Event Hub + Function + SignalR)
-- **Client Updates**: Sub-second for temperature changes
+### Latency
+- **Storage**: ~1.2 s from send to readable through the API, measured in dev by `apps/api/acceptance/proofs/telemetry-roundtrip.proof.ts` (`METRIC roundtrip-ms`): 1211 ms (run 44603121177) and 1235 ms (run 44612029684). It times one `simdevice` reading from send, through IoT Hub's `cosmos-storage-route`, until `GET /temperatures/current/{deviceId}` returns it. Single dev samples, not targets; each `Deploy Dev App` run's summary carries the current value.
+- **Real-time and client updates**: not measured; the Event Hub has no consumer on `main` and no client calls the API yet.
+
+### History read cost
+Measured in dev by `apps/api/acceptance/proofs/telemetry-volume.proof.ts` (run 44612029684) on the simulated device holding 8700 readings (`history-total`; the proof tops it up to at least one 12 h cook at one reading every 5 s, 8,640):
+
+| Request | Request charge |
+|---|---|
+| `GET /temperatures/history`, limit 100, offset 0 (`history-ru-first-page`) | 11.95 RU |
+| `GET /temperatures/history`, limit 100, offset 8600 (`history-ru-last-page`) | 24.12 RU |
+| `GET /temperatures/history`, 12 h window, limit 5000, 5000 readings (`history-ru-max-page`) | 238.26 RU |
+
+`OFFSET` cost grows with the skip: the same 100-reading page costs 11.95 RU at offset 0 and 24.12 RU at offset 8,600. Every history request also pays the `COUNT(1)` over the device's partition that fills `total`. These are single dev samples, not targets; each run's summary carries the current values.
 
 ### Cost Optimization
 - **Reduced Function executions** (no storage operations)
