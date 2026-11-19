@@ -1,0 +1,15 @@
+{
+  "name": "@meatgeekv2/architecture-model",
+  "version": "0.0.0",
+  "private": true,
+  "description": "MeatGeek V2 architecture model (LikeC4). Source of truth for architecture diagrams.",
+  "license": "MIT",
+  "scripts": {
+    "check": "likec4 validate .",
+    "start": "likec4 start .",
+    "build": "likec4 build . -o dist"
+  },
+  "devDependencies": {
+    "likec4": "1.61.0"
+  }
+}

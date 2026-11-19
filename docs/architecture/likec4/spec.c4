@@ -1,0 +1,84 @@
+// MeatGeek V2 — LikeC4 prototype (first cut).
+
+specification {
+  element actor {
+    style { shape person; color sky }
+  }
+  element system
+  element external {
+    style { color muted }
+  }
+  element area {
+    notation 'Grouping (a place where things run)'
+  }
+  element app
+  element service {
+    notation 'Azure managed service'
+    style { color indigo }
+  }
+  element component
+  element store {
+    style { shape storage; color green }
+  }
+  element collection {
+    notation 'Cosmos container'
+    style { shape cylinder; color green }
+  }
+  element stream {
+    style { shape queue; color indigo }
+  }
+  element mobileapp {
+    style { shape mobile }
+  }
+  element webapp {
+    style { shape browser }
+  }
+  element workflow {
+    notation 'GitHub Actions workflow'
+    style { color slate }
+  }
+
+  // Honesty markers: what the code on main actually does today.
+  tag live {
+    color green
+  }
+  tag scaffold {
+    color amber
+  }
+  tag notBuilt {
+    color gray
+  }
+  // Owner decisions of 2026-11-19 (realtime). Not in the code yet.
+  tag decided {
+    color sky
+  }
+  tag retiring {
+    color red
+  }
+
+  relationship planned {
+    notation 'Not built, and no decision to build it yet'
+    line dotted
+    color gray
+  }
+  relationship decided {
+    notation 'Decided 2026-11-19, to be built'
+    line dashed
+    color sky
+  }
+  relationship retiring {
+    notation 'In the code today, to be removed'
+    line dotted
+    color red
+  }
+  relationship event {
+    notation 'Asynchronous message'
+    line dashed
+    color amber
+  }
+
+  deploymentNode environment
+  deploymentNode host
+  deploymentNode resourceGroup
+  deploymentNode saas
+}

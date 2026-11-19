@@ -1,0 +1,369 @@
+model {
+
+  pitmaster = actor 'Pitmaster' {
+    description 'Runs a cook on a pellet smoker and watches it from a phone or browser.'
+  }
+
+  team = actor 'Paperclip team' {
+    description 'Lead, Engineer and Reviewer agents. They open, review and merge pull requests.'
+  }
+
+  operator = actor 'Operator' {
+    description 'Whoever has SSH access to a Pi and owner rights in Azure. Today that is one person at a workstation.'
+  }
+
+  smoker = external 'Pellet smoker' {
+    description 'The physical grill: one grill RTD sensor and four food probes.'
+  }
+
+  entra = external 'Microsoft Entra ID' {
+    description 'Issues the access tokens that the API accepts.'
+  }
+
+  meatgeek = system 'MeatGeek V2' {
+    description 'BBQ temperature monitoring: readings from the smoker to the cloud, cooks, devices and recipes per user.'
+
+    edge = area 'MeatGeek device' {
+      technology 'Raspberry Pi, linux/arm64'
+      description 'The MeatGeek hardware: a Raspberry Pi mounted on each smoker and wired to its temperature sensors.'
+
+      controller = app 'device-controller' {
+        #live
+        technology 'Go / Gobot'
+        description 'Reads the RTD sensors and serves the current status on a local HTTP API.'
+        link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/device-controller 'Source'
+      }
+
+      pusher = app 'data-pusher' {
+        #live
+        technology 'Go'
+        description 'Polls the controller, queues readings on disk and publishes them to IoT Hub.'
+        link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/data-pusher 'Source'
+
+        collector = component 'collector' {
+          description 'Polls the controller status endpoint and stamps each reading with the active cook.'
+        }
+        queue = component 'disk queue' {
+          description 'Segment files on disk, so readings survive a restart or an outage.'
+        }
+        iot = component 'iothub client' {
+          technology 'MQTT (paho), SAS token'
+          description 'Publishes device-to-cloud telemetry; renews its SAS token before expiry.'
+        }
+        signalr = component 'signalr client' {
+          #retiring
+          description 'Listens for cook_started and cook_stopped. It does not yet speak the API negotiate handshake (MG-29), so this has never worked live. To be removed.'
+        }
+        twin = component 'twin client' {
+          #decided
+          description 'Reads the device twin desired properties on connect and on change, and reports what it applied. An offline Pi catches up on reconnect.'
+        }
+        session = component 'cooksession' {
+          description 'Holds the active cook id and correlation id. Reconciles against the API on startup.'
+        }
+        tracing = component 'telemetry' {
+          technology 'OpenTelemetry Go SDK, OTLP/HTTP'
+          description 'Exports spans only when OTEL_EXPORTER_OTLP_ENDPOINT is set.'
+        }
+
+        collector -> queue 'enqueues readings'
+        queue -> iot 'drains in order'
+        signalr -[retiring]-> session 'sets active cook and correlation id'
+        twin -[decided]-> session 'sets active cook and correlation id'
+        session -> collector 'cook id and correlation id'
+      }
+
+      pusher.collector -> controller 'GET get_status' {
+        technology 'HTTP, local'
+      }
+
+      updater = app 'update agent' {
+        #notBuilt
+        technology 'Device Update for IoT Hub agent'
+        description 'Would receive an update through IoT Hub, install the new packages, restart the services and report the result. Nothing like it runs on the Pi today.'
+      }
+      updater -[planned]-> controller 'installs, restarts' {
+        #notBuilt
+      }
+      updater -[planned]-> pusher 'installs, restarts' {
+        #notBuilt
+      }
+    }
+
+    cloud = area 'MeatGeek cloud' {
+      technology 'Azure'
+      description 'Everything that runs in Azure: ingest, the API, storage, realtime and observability.'
+
+      deviceupdate = service 'Device Update for IoT Hub' {
+        #notBuilt
+        description 'Azure over-the-air update service: versions per device, groups, staged rollout, rollback. The direction the owner favours (2026-11-19); not verified in detail and not built.'
+      }
+
+      ingest = area 'Ingest' {
+        iothub = service 'IoT Hub' {
+          #live
+          description 'Two routes, both with condition true: one to Cosmos, one to Event Hub.'
+        }
+        eventhub = stream 'Event Hub: temperature-data' {
+          #live
+          description 'Provisioned and receiving every message. Nothing reads it today; its consumer is decided but not built.'
+        }
+
+        iothub -[event]-> eventhub 'eventhub-realtime-route'
+      }
+
+      api = app 'Functions API' {
+        #live
+        technology 'TypeScript, Node 24, Azure Functions Flex Consumption'
+        description 'HTTP API for cooks, devices, temperatures, recipes and user profiles.'
+        link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/api 'Source'
+
+        easyauth = component 'Easy Auth' {
+          technology 'App Service Authentication'
+          description 'Validates the Entra token at the platform edge and injects X-MS-CLIENT-PRINCIPAL.'
+        }
+        principal = component 'principal' {
+          description 'The only source of the caller identity: tid:oid from the injected header. Fails closed.'
+        }
+        cooks = component 'cooks' {
+          description 'GET /cooks, POST /cooks, POST /cooks/{cookId}/stop'
+        }
+        devices = component 'devices' {
+          description 'GET and POST /devices, GET and PATCH /devices/{id}'
+        }
+        temperatures = component 'temperatures' {
+          description 'GET /temperatures/current/{deviceId}, GET /temperatures/history'
+        }
+        recipes = component 'recipes' {
+          description 'GET and POST /recipes, GET, PATCH and DELETE /recipes/{id}'
+        }
+        users = component 'users' {
+          description 'GET and PUT /users/me'
+        }
+        negotiate = component 'negotiate' {
+          description 'POST /negotiate: hands a client its SignalR connection details. Decided: scope it to devices the caller owns (MG-30).'
+        }
+        health = component 'health' {
+          description 'GET /health/cosmos, and a timer that proves host storage authenticates.'
+        }
+        repos = component 'cosmos repositories' {
+          description 'One repository per container, over a shared adapter that uses the managed identity.'
+        }
+        otel = component 'telemetry' {
+          technology '@azure/monitor-opentelemetry'
+        }
+        broadcast = component 'realtime broadcast' {
+          #decided
+          description 'An Event Hub-triggered Function that sends each reading to the SignalR group for its device. Decided, not built: no such trigger is registered in main.ts today.'
+        }
+
+        easyauth -> principal 'X-MS-CLIENT-PRINCIPAL'
+        principal -> cooks 'userId'
+        principal -> devices 'userId'
+        principal -> temperatures 'userId'
+        principal -> recipes 'userId'
+        principal -> users 'userId'
+        cooks -> repos 'device ownership check, then write'
+        devices -> repos
+        temperatures -> repos 'ownership check, then query'
+        recipes -> repos
+        users -> repos
+        health -> repos 'probe'
+      }
+
+      data = store 'Cosmos DB' {
+        #live
+        technology 'Cosmos DB for NoSQL'
+        description 'One shared database; access by managed identity only.'
+
+        devices = collection 'devices' {
+          technology 'partition /id'
+        }
+        temperatures = collection 'temperatures' {
+          technology 'partition /deviceId'
+          description 'Written by the IoT Hub route, not by the API.'
+        }
+        cooks = collection 'cooks' {
+          technology 'partition /userId'
+        }
+        users = collection 'users' {
+          technology 'partition /id'
+        }
+        recipes = collection 'recipes' {
+          technology 'partition /userId'
+        }
+      }
+
+      realtime = service 'SignalR Service' {
+        #live
+        technology 'Default mode'
+        description 'Today: cook events aimed at the Pi, never proven live. Decided: push to clients only (live temperatures and cook events).'
+      }
+
+      observability = area 'Observability' {
+        appinsights = service 'Application Insights' {
+          technology 'workspace-based'
+        }
+        logs = service 'Log Analytics' {
+          description 'Diagnostic settings from IoT Hub, Cosmos, SignalR and the Function App.'
+        }
+        collector = service 'OTLP collector' {
+          #notBuilt
+          technology 'Container App'
+          description 'Terraform is written but switched off (enable_native_otlp = false). No span from the Pi has reached App Insights.'
+        }
+        alerts = service 'Alerts and budgets' {
+          description 'Metric alerts, activity-log alerts and cost budgets, to one action group.'
+        }
+
+        collector -[planned]-> appinsights 'forwards'
+        appinsights -> logs 'stores in'
+        appinsights -> alerts 'metric alerts'
+      }
+    }
+
+    mobile = mobileapp 'Mobile app' {
+      #scaffold
+      technology 'React Native'
+      description 'A welcome screen only. It makes no API calls yet.'
+    }
+    web = webapp 'Web app' {
+      #scaffold
+      technology 'React, Vite'
+      description 'A welcome screen only. It makes no API calls yet.'
+    }
+
+    // Telemetry: the storage path is live end to end.
+    edge.pusher.iot -[event]-> cloud.ingest.iothub 'telemetry, correlation.id' {
+      technology 'MQTT'
+    }
+    cloud.ingest.iothub -[event]-> cloud.data.temperatures 'cosmos-storage-route' {
+      technology 'identity-based, no Function in the path'
+    }
+
+    // Realtime path: drawn in docs/architecture/diagrams.md, absent from apps/api/src/main.ts.
+    // Decided: push to clients. Event Hub -> Function -> SignalR -> apps.
+    cloud.ingest.eventhub -[decided]-> cloud.api.broadcast 'Event Hub trigger' {
+      #decided
+    }
+    cloud.api.broadcast -[decided]-> cloud.realtime 'each reading, to its device group' {
+      #decided
+    }
+    cloud.realtime -[decided]-> mobile 'live temperatures, cook events' {
+      #decided
+    }
+    cloud.realtime -[decided]-> web 'live temperatures, cook events' {
+      #decided
+    }
+
+    // Decided: the active cook is device state, carried by the IoT Hub device twin.
+    cloud.api.cooks -[decided]-> cloud.ingest.iothub 'set twin desired properties' {
+      #decided
+      description 'Active cook id and correlation id, set only after the Cosmos write succeeds.'
+    }
+    cloud.ingest.iothub -[decided]-> edge.pusher.twin 'desired properties' {
+      #decided
+      description 'Delivered now if the Pi is connected, or when it next connects.'
+    }
+    edge.pusher.twin -[decided]-> cloud.ingest.iothub 'reported properties' {
+      #decided
+      description 'What the Pi applied, so the cloud can see it took effect.'
+    }
+
+    // Cook lifecycle.
+    cloud.api.cooks -[event]-> cloud.realtime 'cook_started, cook_stopped' {
+      technology 'SignalR output binding'
+      description 'Emitted only after the Cosmos write succeeds.'
+    }
+    cloud.realtime -[retiring]-> edge.pusher.signalr 'cook lifecycle events' {
+      #retiring
+      description 'No acknowledgement, and an event sent while the Pi is offline is lost.'
+    }
+    edge.pusher.session -> cloud.api.cooks 'GET /cooks?deviceId&status=active' {
+      description 'On startup, to recover the active cook after a restart or a missed event. With the twin this becomes a fallback or goes away.'
+    }
+
+    // API to data.
+    cloud.api.repos -> cloud.data.devices 'read, write'
+    cloud.api.repos -> cloud.data.cooks 'read, write'
+    cloud.api.repos -> cloud.data.users 'read, write'
+    cloud.api.repos -> cloud.data.recipes 'read, write'
+    cloud.api.repos -> cloud.data.temperatures 'read only'
+
+    // Observability.
+    cloud.api.otel -> cloud.observability.appinsights 'traces, 50% sampled'
+    edge.pusher.tracing -[planned]-> cloud.observability.collector 'OTLP/HTTP' {
+      #notBuilt
+      description 'The exporter is in the code; it is a no-op until an endpoint is configured.'
+    }
+    edge.controller -[planned]-> cloud.observability.collector 'OTLP/HTTP' {
+      #notBuilt
+    }
+
+    // Clients: not wired yet.
+    mobile -[planned]-> cloud.api 'REST' {
+      #notBuilt
+    }
+    web -[planned]-> cloud.api 'REST' {
+      #notBuilt
+    }
+    mobile -[decided]-> cloud.api.negotiate 'negotiate' {
+      #decided
+    }
+  }
+
+  delivery = system 'Delivery pipeline' {
+    description 'GitHub Actions on meatgeekv2. Credentials never meet unmerged code.'
+
+    ci = workflow 'CI/CD Pipeline' {
+      description 'On every pull request and push to main: lint and test, Cosmos emulator tests, builds, Terraform validation, security scan.'
+    }
+    apply = workflow 'Apply Dev Infrastructure' {
+      description 'Started by a green CI run on main. A run for a superseded commit succeeds without applying.'
+    }
+    deploy = workflow 'Deploy Dev App' {
+      description 'Started by a successful apply. Publishes the API bundle for the commit that was applied.'
+    }
+    acceptance = workflow 'Acceptance' {
+      description 'A job in Deploy Dev App: live probes against the deployed API with an app-only token.'
+    }
+
+    ci -[event]-> apply 'workflow_run, main only'
+    apply -[event]-> deploy 'workflow_run'
+    deploy -> acceptance 'needs: deploy'
+  }
+
+  // Device software updates. Today: by hand. Not built: over the air.
+  operator -> meatgeek.edge.pusher 'make deploy-to-pi' {
+    technology 'scp, then systemd restart, over SSH'
+    description 'The only way a new build reaches a Pi today. One device at a time, from a machine that can reach it.'
+  }
+  operator -> meatgeek.edge.controller 'make deploy-to-pi' {
+    technology 'scp, then systemd restart, over SSH'
+  }
+  delivery.ci -[planned]-> meatgeek.cloud.deviceupdate 'publishes signed packages' {
+    #notBuilt
+    description 'CI already builds the ARM64 binaries on every merge and keeps them as workflow artifacts. Nothing delivers them.'
+  }
+  meatgeek.cloud.deviceupdate -[planned]-> meatgeek.cloud.ingest.iothub 'deployment to a device group' {
+    #notBuilt
+  }
+  meatgeek.cloud.ingest.iothub -[planned]-> meatgeek.edge.updater 'update available' {
+    #notBuilt
+  }
+  meatgeek.edge.updater -[planned]-> meatgeek.cloud.ingest.iothub 'installed version, result' {
+    #notBuilt
+  }
+
+  // Landscape.
+  pitmaster -> smoker 'cooks on'
+  pitmaster -> meatgeek.mobile 'monitors a cook'
+  pitmaster -> meatgeek.web 'reviews cooks'
+  smoker -> meatgeek.edge.controller 'RTD sensor readings'
+  meatgeek.cloud.api.easyauth -> entra 'validates access tokens'
+  team -> delivery.ci 'pull requests'
+  delivery.apply -> meatgeek 'terraform apply (dev)'
+  delivery.deploy -> meatgeek.cloud.api 'publishes the bundle'
+  delivery.acceptance -> meatgeek.cloud.api 'live acceptance probes'
+  delivery.acceptance -> entra 'app-only token (OIDC)'
+}

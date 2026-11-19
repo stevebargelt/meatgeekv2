@@ -1,0 +1,36 @@
+deployment {
+  environment dev 'Dev' {
+    description 'The only environment that is deployed automatically.'
+
+    host pi 'Raspberry Pi' {
+      technology 'linux/arm64, one per smoker'
+      controller = instanceOf meatgeek.edge.controller
+      pusher = instanceOf meatgeek.edge.pusher
+    }
+
+    resourceGroup rg 'Azure resource group (dev)' {
+      technology 'Terraform: apps/infrastructure'
+      iothub = instanceOf meatgeek.cloud.ingest.iothub
+      eventhub = instanceOf meatgeek.cloud.ingest.eventhub
+      api = instanceOf meatgeek.cloud.api {
+        technology 'Flex Consumption FC1, managed identity'
+      }
+      cosmos = instanceOf meatgeek.cloud.data
+      signalr = instanceOf meatgeek.cloud.realtime
+      appinsights = instanceOf meatgeek.cloud.observability.appinsights
+      logs = instanceOf meatgeek.cloud.observability.logs
+    }
+
+    saas identity 'Microsoft Entra' {
+      entra = instanceOf entra
+    }
+  }
+}
+
+views {
+  deployment view devDeployment {
+    title 'Deployment: dev'
+    description 'What runs where.'
+    include dev.**
+  }
+}
