@@ -465,11 +465,16 @@ DEVICE_NOT_FOUND`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Temperatures -. "`query readings`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Recipes -.-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Users -.-> MeatgeekCloudApi.Repos
+  MeatgeekCloudApi.Negotiate -. "`list devices by owner`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Health -. "`probe`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Easyauth -. "`validates access tokens`" .-> Entra
   MeatgeekCloudApi.Cooks -. "`set twin desired properties`" .-> MeatgeekCloudIngest
   MeatgeekCloudApi.Cooks -. "`cook_started, cook_stopped
-to userId = deviceId`" .-> MeatgeekCloudRealtime
+to the owning userId`" .-> MeatgeekCloudRealtime
+  MeatgeekCloudApi.Devices -. "`add owner to device-
+{id} on register`" .-> MeatgeekCloudRealtime
+  MeatgeekCloudApi.Negotiate -. "`reset groups to owned
+devices, mint client token`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Broadcast -. "`each reading, to its device group`" .-> MeatgeekCloudRealtime
   MeatgeekCloudIngest -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudApi.Ownership -. "`point read`" .-> MeatgeekCloudData.Devices
@@ -499,10 +504,10 @@ deviceId&status=active
   class MeatgeekCloudObservability.Appinsights,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.Temperatures,MeatgeekCloudData.Devices,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,24,25,26,27,28,29,31,34,35,36 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,3,20,22,30,32 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 21,23 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 33 stroke:#AC4D39
+  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,23,24,27,28,29,30,31,32,34,37,38,39 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,3,21,25,33,35 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 22,26 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 36 stroke:#AC4D39
 ```
 
 ## Cosmos DB
@@ -1224,8 +1229,8 @@ graph TB
   subgraph MeatgeekCloud["`MeatGeek cloud`"]
     subgraph MeatgeekCloud.Api["`Functions API`"]
       MeatgeekCloud.Api.Cooks@{ shape: rectangle, label: "cooks" }
-      MeatgeekCloud.Api.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
       MeatgeekCloud.Api.Negotiate@{ shape: rectangle, label: "negotiate" }
+      MeatgeekCloud.Api.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
     end
     subgraph MeatgeekCloud.Ingest["`Ingest`"]
       MeatgeekCloud.Ingest.Iothub@{ shape: rectangle, label: "IoT Hub" }
@@ -1250,8 +1255,10 @@ graph TB
   MeatgeekCloud.Ingest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloud.Ingest.Eventhub
   MeatgeekCloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloud.Api.Broadcast
   MeatgeekCloud.Api.Cooks -. "`cook_started, cook_stopped
-to userId = deviceId`" .-> MeatgeekCloud.Realtime
+to the owning userId`" .-> MeatgeekCloud.Realtime
   MeatgeekCloud.Api.Broadcast -. "`each reading, to its device group`" .-> MeatgeekCloud.Realtime
+  MeatgeekCloud.Api.Negotiate -. "`reset groups to owned
+devices, mint client token`" .-> MeatgeekCloud.Realtime
   MeatgeekCloud.Ingest.Iothub -. "`desired properties`" .-> MeatgeekEdge.Pusher.Twin
   MeatgeekEdge.Pusher.Twin -. "`reported properties`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Realtime -. "`cook lifecycle events`" .-> MeatgeekEdge.Pusher.Signalr
@@ -1269,7 +1276,7 @@ $.ct=application/json, $.ce=utf-
   MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekWeb
   MeatgeekWeb -. "`REST`" .-> MeatgeekCloud.Api
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekEdge.Pusher.Iot,MeatgeekCloud.Api.Cooks,MeatgeekEdge.Pusher.Session,MeatgeekCloud.Api.Negotiate primary
+  class MeatgeekEdge.Pusher.Iot,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Negotiate,MeatgeekEdge.Pusher.Session primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime indigo
   classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
@@ -1280,11 +1287,11 @@ $.ct=application/json, $.ce=utf-
   class MeatgeekMobile,MeatgeekWeb amber
   classDef red fill:#AC4D39,stroke:#853A2D,color:#FBD3CB
   class MeatgeekEdge.Pusher.Signalr red
-  linkStyle 0,2,4,5,6,8,13,14,15 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,3,11,12 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 7,9 stroke:#AC4D39
-  linkStyle 10 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 16 stroke:#8D8D8D
+  linkStyle 0,2,4,6,7,9,14,15,16 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,3,12,13 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 5,11 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 8,10 stroke:#AC4D39
+  linkStyle 17 stroke:#8D8D8D
 ```
 
 ## Flow: start a cook (decided design)

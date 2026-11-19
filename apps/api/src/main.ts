@@ -11,7 +11,7 @@ initializeTelemetry();
 import { getCooksHandler } from './functions/cooks/list-cooks';
 import { startCookHandler } from './functions/cooks/start-cook';
 import { stopCookHandler } from './functions/cooks/stop-cook';
-import { negotiateHandler, signalRConnInfoInput } from './functions/signalr/negotiate';
+import { negotiateHandler } from './functions/signalr/negotiate';
 import { signalROutput } from './functions/signalr/envelope';
 import { getCurrentTemperaturesHandler } from './functions/temperatures/get-current';
 import { getTemperatureHistoryHandler } from './functions/temperatures/get-history';
@@ -65,16 +65,18 @@ app.http('stopCook', {
 // anonymous end-to-end. Adding a per-function key here would be a competing,
 // redundant auth gate — do NOT do it.
 //
-// DEC-4: per-device scoping uses userId = deviceId, taken from the request
-// `deviceId` query param (see signalRConnInfoInput). The caller is
-// authenticated at the platform layer, but device ownership is not yet bound to
-// the caller's identity — a caller could negotiate for a deviceId they do not
-// own. Binding ownership to identity is tracked as MG-30.
+// DEC-4 (HAR-57, MG-30): a negotiated connection is scoped to the caller, not
+// to a device the caller names. The handler takes the userId from the Easy Auth
+// principal ("<tid>:<oid>"), mints the client token for that userId through the
+// SignalR data-plane REST API (managed identity; the SignalR connection-info
+// input binding cannot express this userId), and resets the user's group membership
+// to `device-{id}` for exactly the devices the caller owns. Any `deviceId` query
+// parameter is ignored. Cook events (startCook, stopCook) are sent to the owning
+// user's userId; device readings go to the `device-{id}` groups.
 app.http('negotiate', {
   methods: ['POST'],
   authLevel: 'anonymous',
   route: 'negotiate',
-  extraInputs: [signalRConnInfoInput],
   handler: negotiateHandler,
 });
 

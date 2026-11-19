@@ -301,14 +301,14 @@ export async function startCookHandler(
     const storedCook = result.cook;
 
     // Emit AFTER the successful write. Correlation id propagates from the inbound
-    // request when present, else the Functions invocation id. NOTE the two
-    // distinct userId axes: the message-level `userId` scopes SignalR DELIVERY to
-    // the device's user group (=deviceId), which is deliberately NOT the
-    // persisted identity userId above.
+    // request when present, else the Functions invocation id. The message-level
+    // `userId` scopes SignalR DELIVERY to the cook's owner: the authenticated
+    // principal, whose ownership of the device was checked above (HAR-57,
+    // MG-30). Never the deviceId; the Pi gets its cook from the device twin.
     const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
     const message: SignalROutputMessage = {
       target: COOK_STARTED,
-      userId: body.deviceId,
+      userId,
       arguments: [buildCookEnvelope(COOK_STARTED, storedCook, correlationId)],
     };
     context.extraOutputs.set(signalROutput, [message]);

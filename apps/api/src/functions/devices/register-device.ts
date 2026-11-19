@@ -3,6 +3,7 @@ import type { Device } from '@meatgeekv2/api-interfaces';
 
 import { unauthenticatedResponse } from '../../shared/auth/principal';
 import { mergeDeviceConfiguration } from '../../shared/cosmos/devices-repository';
+import { deviceGroup, SignalRUnavailableError } from '../../shared/signalr/signalr-management';
 import { validateRegisterDevice } from './device-requests';
 import {
   correlationIdOf,
@@ -26,6 +27,11 @@ import {
  *   - 400 VALIDATION_ERROR: a bad body (no Cosmos call);
  *   - 409 DEVICE_CONFLICT: the id exists (whoever owns it) or the caller already
  *     has a device with that name. Fixed text; it does not say which.
+ *
+ * HAR-57 (MG-30): after a successful create, the owner's SignalR user joins the
+ * `device-{id}` group so connections they already hold get the new device's
+ * readings. A failure there is logged as a fixed code and the 201 stands: the
+ * next negotiate resets the owner's groups from the devices container anyway.
  */
 export async function registerDeviceHandler(
   request: HttpRequest,
@@ -69,6 +75,7 @@ export async function registerDeviceHandler(
     if (result.outcome === 'conflict') {
       return deviceConflict(correlationId, context, result.requestCharge);
     }
+    await joinDeviceGroup(deps, result.device.id, device.userId, context);
     return jsonResponse(201, result.device, correlationId, result.requestCharge);
   } catch (error) {
     return serverError(
@@ -78,5 +85,21 @@ export async function registerDeviceHandler(
       correlationId,
       context
     );
+  }
+}
+
+/** Adds the owner to the device's SignalR group. Never throws: a failure is a
+ *  sanitized warning, since the next negotiate restores membership. */
+async function joinDeviceGroup(
+  deps: DevicesHandlerDeps,
+  deviceId: string,
+  userId: string,
+  context: InvocationContext
+): Promise<void> {
+  try {
+    await deps.getSignalR().addUserToGroup(deviceGroup(deviceId), userId);
+  } catch (error) {
+    const code = error instanceof SignalRUnavailableError ? error.code : 'signalr_failure';
+    context.warn(`registerDevice: device group join failed: ${code}`);
   }
 }

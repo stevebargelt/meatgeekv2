@@ -6,21 +6,20 @@
  * contract END-TO-END through the REAL app wiring:
  *
  *   1. main.ts's app.http() registrations are captured (routes, methods, and
- *      the shared signalR input/output bindings) and the registered handlers
- *      are driven with mock requests/context — proving the handler a real
- *      request would hit emits the right SignalR message on the right binding.
- *   2. The emitted envelopes are JSON-serialized exactly as the Functions
- *      SignalR output binding would put them on the wire, then cross-checked
- *      against the Go data-pusher CONSUMER contract
- *      (apps/data-pusher/internal/signalr) — event-name strings and the
- *      cookId-omitted-on-stop rule are read straight out of the Go source so
- *      the two sides cannot silently drift.
+ *      the shared signalR output binding) and the registered handlers are
+ *      driven with mock requests/context — proving the handler a real request
+ *      would hit emits the right SignalR message on the right binding.
+ *   2. HAR-57 (MG-30): cook events are delivered to the OWNER (message userId =
+ *      the authenticated principal's userId), never to userId = deviceId, and
+ *      negotiate scopes a connection to the caller's own device groups whatever
+ *      `deviceId` query parameter the caller sends.
  *
- * No live SignalR Service is involved; the bindings are mocked. AC5 (live
- * end-to-end smoke) is out of scope here and blocked on the MG-24 bootstrap.
+ * The emitted envelopes are JSON-serialized exactly as the Functions SignalR
+ * output binding would put them on the wire. No live SignalR Service is
+ * involved: the output binding is mocked and negotiate's SignalR client is a
+ * recording stub. The live negotiate proof is
+ * apps/api/acceptance/proofs/signalr-negotiate.proof.ts.
  */
-import { readFileSync, existsSync } from 'fs';
-import { dirname, resolve } from 'path';
 import { HttpRequest, InvocationContext } from '@azure/functions';
 import {
   signalROutput,
@@ -30,13 +29,14 @@ import {
   COOK_STOPPED,
   HUB_NAME,
 } from '../functions/signalr/envelope';
-import { signalRConnInfoInput } from '../functions/signalr/negotiate';
+import type { NegotiateDeps } from '../functions/signalr/negotiate';
+import type { SignalRManagementPort } from '../shared/signalr/signalr-management';
 import { Cook } from '../functions/cooks/start-cook';
 
 // ---------------------------------------------------------------------------
 // Capture main.ts's app.http() registrations by mocking the Functions `app`
-// object while keeping the real `input`/`output` generic-binding builders (so
-// signalROutput / signalRConnInfoInput keep their real object identity).
+// object while keeping the real `output` generic-binding builder (so
+// signalROutput keeps its real object identity).
 // ---------------------------------------------------------------------------
 interface HttpRegistration {
   methods: string[];
@@ -97,15 +97,14 @@ function mockRequest(opts: {
 interface CapturingContext {
   ctx: InvocationContext;
   messages: () => SignalROutputMessage<Cook>[] | undefined;
-  connInfoReads: () => number;
 }
 
-function mockContext(connectionInfo?: unknown): CapturingContext {
+function mockContext(): CapturingContext {
   let captured: SignalROutputMessage<Cook>[] | undefined;
-  let reads = 0;
   const ctx = {
     invocationId: INVOCATION_ID,
     log: () => undefined,
+    warn: () => undefined,
     error: () => undefined,
     // Output binding: the runtime matches set() to a binding by object
     // identity, so only capture when the shared signalROutput is used.
@@ -116,18 +115,8 @@ function mockContext(connectionInfo?: unknown): CapturingContext {
         }
       },
     },
-    // Input binding: negotiate reads its SignalRConnectionInfo from here.
-    extraInputs: {
-      get: (input: unknown) => {
-        if (input === signalRConnInfoInput) {
-          reads += 1;
-          return connectionInfo;
-        }
-        return undefined;
-      },
-    },
   } as unknown as InvocationContext;
-  return { ctx, messages: () => captured, connInfoReads: () => reads };
+  return { ctx, messages: () => captured };
 }
 
 const VALID_START = {
@@ -183,9 +172,8 @@ function startDeps() {
 /**
  * Fake stop-cook deps. `persisted` models the durable cook the repository
  * point-reads and completes; `undefined` models a cook absent in the caller's
- * partition (a 404). The stopped cook keeps the persisted `deviceId` — the axis
- * the COOK_STOPPED envelope is delivered on — which under the new contract comes
- * from PERSISTENCE, not from the request body.
+ * partition (a 404). The stopped cook keeps the persisted `deviceId`, which the
+ * COOK_STOPPED envelope carries; delivery goes to the owner, not the device.
  */
 function stopDeps(persisted: Cook | undefined) {
   return {
@@ -194,9 +182,7 @@ function stopDeps(persisted: Cook | undefined) {
     getRepository: () => ({
       getCook: async () => ({ cook: persisted, requestCharge: 1 }),
       stopCook: async (_userId: string, id: string, endTime: string) => ({
-        cook: persisted
-          ? ({ ...persisted, id, status: 'completed', endTime } as Cook)
-          : undefined,
+        cook: persisted ? ({ ...persisted, id, status: 'completed', endTime } as Cook) : undefined,
         requestCharge: 1,
         transitioned: persisted !== undefined,
       }),
@@ -204,7 +190,7 @@ function stopDeps(persisted: Cook | undefined) {
   };
 }
 
-/** The persisted active cook a stop reads back (deviceId is the delivery axis). */
+/** The persisted active cook a stop reads back. */
 function persistedActiveCook(): Cook {
   return {
     id: 'persisted-id',
@@ -266,22 +252,20 @@ describe('main.ts SignalR producer registrations', () => {
     expect(reg.extraOutputs).toContain(signalROutput);
   });
 
-  it('registers negotiate as POST /negotiate with the signalR connection-info input binding', () => {
+  it('registers negotiate as POST /negotiate with no SignalR input binding (HAR-57)', () => {
     const reg = mockRegistrations['negotiate'];
     expect(reg).toBeDefined();
     expect(reg.methods).toEqual(['POST']);
     expect(reg.route).toBe('negotiate');
-    expect(reg.extraInputs).toContain(signalRConnInfoInput);
+    // The SignalR connection-info input binding cannot express the principal's
+    // "<tid>:<oid>" userId; negotiate mints its token through the REST client.
+    expect(reg.extraInputs ?? []).toEqual([]);
   });
 
-  it('binds both producers to the same temperatureHub SignalR hub', () => {
-    // output.generic()/input.generic() preserve their options, so the hub
-    // name is inspectable and must agree across producer + negotiate.
+  it('binds the producers to the temperatureHub SignalR hub', () => {
+    // output.generic() preserves its options, so the hub name is inspectable.
     expect((signalROutput as unknown as { hubName: string }).hubName).toBe(HUB_NAME);
-    expect((signalRConnInfoInput as unknown as { hubName: string }).hubName).toBe(HUB_NAME);
     expect(HUB_NAME).toBe('temperatureHub');
-    // negotiate scopes the connection to the device's user group.
-    expect((signalRConnInfoInput as unknown as { userId: string }).userId).toBe('{query.deviceId}');
   });
 });
 
@@ -289,7 +273,7 @@ describe('main.ts SignalR producer registrations', () => {
 // B. cook_started, driven through the registered handler.
 // ---------------------------------------------------------------------------
 describe('POST /cooks (startCook) — cook_started producer', () => {
-  it('emits exactly one cook_started envelope on group userId=deviceId with correlation from X-Request-ID', async () => {
+  it('emits exactly one cook_started envelope to the owner (userId = principal) with correlation from X-Request-ID', async () => {
     const { ctx, messages } = mockContext();
     const res = await invokeStart(
       mockRequest({ body: VALID_START, headers: { 'X-Request-ID': 'req-xyz' } }),
@@ -300,7 +284,9 @@ describe('POST /cooks (startCook) — cook_started producer', () => {
     expect(msgs).toHaveLength(1);
     const [msg] = msgs!;
     expect(msg.target).toBe('cook_started');
-    expect(msg.userId).toBe(VALID_START.deviceId); // group = userId = deviceId
+    // HAR-57: delivered to the owner, never to userId = deviceId.
+    expect(msg.userId).toBe(AUTHED_PRINCIPAL.principal.userId);
+    expect(msg.userId).not.toBe(VALID_START.deviceId);
 
     const env = msg.arguments[0];
     expect(env.type).toBe('cook_started');
@@ -329,22 +315,28 @@ describe('POST /cooks (startCook) — cook_started producer', () => {
     ['name', { deviceId: 'meatgeek3', meatType: 'brisket' }],
     ['deviceId', { name: 'x', meatType: 'brisket' }],
     ['meatType', { name: 'x', deviceId: 'meatgeek3' }],
-  ])('returns 400 and emits NO message when %s is missing (authenticated)', async (_field, body) => {
-    // Authenticated (via injected deps) but invalid: validation still returns 400
-    // and emits nothing. The auth gate is upstream of validation, so a missing
-    // field is a 400, not a 401.
-    const { ctx, messages } = mockContext();
-    const res = await invokeStart(mockRequest({ body }), ctx);
-    expect((res as { status: number }).status).toBe(400);
-    expect(messages()).toBeUndefined();
-  });
+  ])(
+    'returns 400 and emits NO message when %s is missing (authenticated)',
+    async (_field, body) => {
+      // Authenticated (via injected deps) but invalid: validation still returns 400
+      // and emits nothing. The auth gate is upstream of validation, so a missing
+      // field is a 400, not a 401.
+      const { ctx, messages } = mockContext();
+      const res = await invokeStart(mockRequest({ body }), ctx);
+      expect((res as { status: number }).status).toBe(400);
+      expect(messages()).toBeUndefined();
+    }
+  );
 
   it('returns 401 and emits NO message when the request is unauthenticated', async () => {
     // The persisted userId comes ONLY from the authenticated principal; an
     // unauthenticated caller is rejected before any write or SignalR emit.
     const { ctx, messages } = mockContext();
     const unauthDeps = {
-      resolvePrincipal: () => ({ authenticated: false as const, reason: 'principal_header_missing' as const }),
+      resolvePrincipal: () => ({
+        authenticated: false as const,
+        reason: 'principal_header_missing' as const,
+      }),
       getRepository: () => ({
         startCook: async () => {
           throw new Error('must not be called when unauthenticated');
@@ -365,7 +357,7 @@ describe('POST /cooks (startCook) — cook_started producer', () => {
 // C. cook_stopped, driven through the registered handler.
 // ---------------------------------------------------------------------------
 describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () => {
-  it('emits one cook_stopped envelope on group userId=deviceId with top-level cookId OMITTED', async () => {
+  it('emits one cook_stopped envelope to the owner (userId = principal) with top-level cookId OMITTED', async () => {
     const { ctx, messages } = mockContext();
     const res = await invokeStop(
       mockRequest({
@@ -379,7 +371,10 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
     expect(msgs).toHaveLength(1);
     const [msg] = msgs!;
     expect(msg.target).toBe('cook_stopped');
-    expect(msg.userId).toBe('meatgeek3'); // group = userId = deviceId
+    // HAR-57: delivered to the owner, never to userId = deviceId.
+    expect(msg.userId).toBe(AUTHED_PRINCIPAL.principal.userId);
+    expect(msg.userId).not.toBe('meatgeek3');
+    expect(msg.arguments[0].deviceId).toBe('meatgeek3');
 
     const env = msg.arguments[0];
     // Top-level cookId must be ABSENT (not undefined-valued) on stop.
@@ -391,14 +386,14 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
 
     // The stop payload is the PERSISTED cook read back and completed; it is a
     // schema-VALID Cook: name >= 3 chars, startTime a parseable ISO-8601
-    // date-time. The Go consumer keys off payload.id and ignores name/startTime.
+    // date-time.
     expect(env.payload.name.length).toBeGreaterThanOrEqual(3);
     expect(Number.isNaN(Date.parse(env.payload.startTime))).toBe(false);
 
     expect((res as { status: number }).status).toBe(200);
   });
 
-  it('serializes cook_stopped with no cookId key on the wire (matches Go omitempty pointer)', async () => {
+  it('serializes cook_stopped with no cookId key on the wire', async () => {
     const { ctx, messages } = mockContext();
     await invokeStop(mockRequest({ params: { cookId: 'cook-99' } }), ctx);
     // What the SignalR output binding actually puts on the wire.
@@ -432,7 +427,10 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
   it('returns 401 and emits NO message when the request is unauthenticated', async () => {
     const { ctx, messages } = mockContext();
     const unauthDeps = {
-      resolvePrincipal: () => ({ authenticated: false as const, reason: 'principal_header_missing' as const }),
+      resolvePrincipal: () => ({
+        authenticated: false as const,
+        reason: 'principal_header_missing' as const,
+      }),
       getRepository: () => ({
         stopCook: async () => {
           throw new Error('must not be called when unauthenticated');
@@ -450,83 +448,80 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
 });
 
 // ---------------------------------------------------------------------------
-// D. negotiate, driven through the registered handler.
+// D. negotiate, driven through the registered handler (HAR-57, MG-30).
 // ---------------------------------------------------------------------------
-describe('POST /negotiate — SignalR connection info', () => {
-  const handler = () => mockRegistrations['negotiate'].handler;
-  const STUB_CONN_INFO = {
-    url: 'https://example.service.signalr.net/client/?hub=temperatureHub',
-    accessToken: 'stub-access-token',
-  };
+describe('POST /negotiate — a connection scoped to the caller', () => {
+  const CLIENT_URL = 'https://example.service.signalr.net/client/?hub=temperatureHub';
 
-  it('returns 200 with the SignalRConnectionInfo from the input binding for a deviceId', async () => {
-    const { ctx } = mockContext(STUB_CONN_INFO);
-    const res = await handler()(mockRequest({ query: { deviceId: 'meatgeek3' } }), ctx);
-    expect((res as { status: number }).status).toBe(200);
-    expect((res as { jsonBody: unknown }).jsonBody).toBe(STUB_CONN_INFO);
+  function negotiateDeps(ownedDeviceIds: string[]) {
+    const calls: string[] = [];
+    const signalR: SignalRManagementPort = {
+      async removeUserFromAllGroups(userId) {
+        calls.push(`removeAll ${userId}`);
+      },
+      async addUserToGroup(group, userId) {
+        calls.push(`add ${group} ${userId}`);
+      },
+      async generateClientToken(userId) {
+        calls.push(`token ${userId}`);
+        return { url: CLIENT_URL, accessToken: `token-for:${userId}` };
+      },
+    };
+    const deps = {
+      resolvePrincipal: () => AUTHED_PRINCIPAL,
+      getRepository: () => ({
+        listDevicesByOwner: async (userId: string) => ({
+          devices: ownedDeviceIds.map(id => ({ id, userId, name: id })),
+          requestCharge: 1,
+        }),
+      }),
+      getSignalR: () => signalR,
+    } as unknown as NegotiateDeps;
+    return { deps, calls };
+  }
+
+  function invokeNegotiate(req: HttpRequest, deps: NegotiateDeps) {
+    const handler = mockRegistrations['negotiate'].handler as unknown as (
+      r: HttpRequest,
+      c: InvocationContext,
+      d: NegotiateDeps
+    ) => Promise<{ status: number; jsonBody: unknown }>;
+    return handler(req, mockContext().ctx, deps);
+  }
+
+  it("returns a token for the principal and joins only the caller's device groups", async () => {
+    const { deps, calls } = negotiateDeps(['meatgeek3']);
+    const res = await invokeNegotiate(mockRequest({}), deps);
+
+    const userId = AUTHED_PRINCIPAL.principal.userId;
+    expect(res.status).toBe(200);
+    expect(res.jsonBody).toEqual({ url: CLIENT_URL, accessToken: `token-for:${userId}` });
+    expect(calls).toEqual([
+      `removeAll ${userId}`,
+      `add device-meatgeek3 ${userId}`,
+      `token ${userId}`,
+    ]);
   });
 
-  it('returns 400 VALIDATION_ERROR when deviceId is absent (no connection info issued)', async () => {
-    const { ctx, connInfoReads } = mockContext(STUB_CONN_INFO);
-    const res = await handler()(mockRequest({ query: {} }), ctx);
-    expect((res as { status: number }).status).toBe(400);
-    expect((res as { jsonBody: { error: string } }).jsonBody.error).toBe('VALIDATION_ERROR');
-    // Rejected before handing back any connection info.
-    expect(connInfoReads()).toBe(0);
+  it('ignores a ?deviceId= for a device the caller does not own', async () => {
+    const { deps, calls } = negotiateDeps(['meatgeek3']);
+    const res = await invokeNegotiate(mockRequest({ query: { deviceId: 'someone-elses' } }), deps);
+
+    expect(res.status).toBe(200);
+    expect(calls.join('\n')).not.toContain('someone-elses');
   });
 });
 
 // ---------------------------------------------------------------------------
-// E. Wire-contract match with the Go data-pusher CONSUMER.
-//    These read the Go source directly so producer/consumer cannot drift.
+// E. Wire shape of the cook envelopes.
 // ---------------------------------------------------------------------------
-describe('producer/consumer wire-contract parity (apps/data-pusher/internal/signalr)', () => {
-  // Walk up from this test file to the repo root (dir that contains apps/), so
-  // the cross-check is robust to where the runner copies the tree.
-  function goSignalrDir(): string {
-    let dir = __dirname;
-    for (let i = 0; i < 12; i++) {
-      const candidate = resolve(dir, 'apps/data-pusher/internal/signalr');
-      if (existsSync(resolve(candidate, 'events.go'))) {
-        return candidate;
-      }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-    throw new Error(
-      'Could not locate apps/data-pusher/internal/signalr/events.go from ' + __dirname
-    );
-  }
-
-  const dir = goSignalrDir();
-  const eventsGo = readFileSync(resolve(dir, 'events.go'), 'utf8');
-  const protocolGo = readFileSync(resolve(dir, 'protocol.go'), 'utf8');
-
-  function goEventType(name: string): string {
-    const m = eventsGo.match(new RegExp(`${name}\\s+EventType\\s*=\\s*"([^"]+)"`));
-    if (!m) throw new Error(`Go const ${name} not found in events.go`);
-    return m[1];
-  }
-
-  it('COOK_STARTED matches the Go EventTypeCookStarted constant', () => {
-    expect(COOK_STARTED).toBe(goEventType('EventTypeCookStarted'));
+describe('cook envelope wire shape', () => {
+  it('uses the cook_started and cook_stopped event names', () => {
     expect(COOK_STARTED).toBe('cook_started');
-  });
-
-  it('COOK_STOPPED matches the Go EventTypeCookStopped constant', () => {
-    expect(COOK_STOPPED).toBe(goEventType('EventTypeCookStopped'));
     expect(COOK_STOPPED).toBe('cook_stopped');
   });
 
-  it('the Go envelope decodes cookId as an omitempty pointer (nil when the producer omits it)', () => {
-    // envelopeArgument in protocol.go: `CookID *string json:"cookId,omitempty"`.
-    // A pointer + omitempty means an absent key decodes to nil — which is
-    // exactly what the producer relies on when it drops cookId on stop.
-    expect(protocolGo).toMatch(/CookID\s+\*string\s+`json:"cookId,omitempty"`/);
-  });
-
-  it('emits the wire shape the Go dispatcher expects: cookId present on start, absent on stop', () => {
+  it('carries cookId on start and omits it on stop', () => {
     const cook: Cook = {
       id: 'cook-42',
       userId: 'tid-test:oid-test',
@@ -537,15 +532,13 @@ describe('producer/consumer wire-contract parity (apps/data-pusher/internal/sign
       meatType: 'brisket',
     };
 
-    // cook_started → Go decodes CookID = &"cook-42" (see TestCookStartedEventPropagates).
     const started = JSON.parse(JSON.stringify(buildCookEnvelope(COOK_STARTED, cook, 'corr-abc')));
     expect(started.type).toBe('cook_started');
     expect(started.cookId).toBe('cook-42');
     expect(started.payload.id).toBe('cook-42');
     expect(started.correlation.id).toBe('corr-abc');
 
-    // cook_stopped → Go decodes CookID = nil (see TestCookStoppedClearsCookID);
-    // the key must be absent, and the cook stays identifiable via payload.id.
+    // The key must be absent, and the cook stays identifiable via payload.id.
     const stopped = JSON.parse(JSON.stringify(buildCookEnvelope(COOK_STOPPED, cook, 'corr-xyz')));
     expect(stopped.type).toBe('cook_stopped');
     expect(Object.keys(stopped)).not.toContain('cookId');

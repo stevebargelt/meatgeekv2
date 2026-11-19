@@ -196,14 +196,14 @@ describe('startCookHandler', () => {
     // MG-84: the id is the one the client sent, not a server-minted one.
     expect(persisted.id).toBe(COOK_ID);
 
-    // Emitted only after the write, scoped to the DEVICE group (=deviceId), a
-    // different axis from the persisted identity userId.
+    // Emitted only after the write, delivered to the OWNER: the authenticated
+    // principal's userId (HAR-57, MG-30), never the deviceId.
     const msgs = messages();
     expect(msgs).toHaveLength(1);
     const [msg] = msgs!;
     expect(msg.target).toBe('cook_started');
-    expect(msg.userId).toBe(validBody.deviceId);
-    expect(msg.userId).not.toBe(PRINCIPAL_USER_ID);
+    expect(msg.userId).toBe(PRINCIPAL_USER_ID);
+    expect(msg.userId).not.toBe(validBody.deviceId);
 
     const envelope = msg.arguments[0];
     expect(envelope.type).toBe('cook_started');

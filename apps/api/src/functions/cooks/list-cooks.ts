@@ -148,7 +148,7 @@ export async function getCooksHandler(
   }
 
   const limitParam = request.query.get('limit');
-  const query: ListCooksQuery = {
+  const filters: ListCooksQuery = {
     limit: limitParam !== null ? Number(limitParam) : undefined,
     continuationToken: request.query.get('continuationToken') ?? undefined,
     deviceId: deviceIdParam ?? undefined,
@@ -158,10 +158,10 @@ export async function getCooksHandler(
   try {
     const repository = deps.getRepository();
     const page = await repository.listCooksByUser(userId, {
-      maxItemCount: query.limit,
-      continuationToken: query.continuationToken,
-      deviceId: query.deviceId,
-      status: query.status,
+      maxItemCount: filters.limit,
+      continuationToken: filters.continuationToken,
+      deviceId: filters.deviceId,
+      status: filters.status,
     });
 
     const cooks: Cook[] = page.cooks;
@@ -172,7 +172,7 @@ export async function getCooksHandler(
 
     const response: CookListResponse = {
       cooks,
-      limit: effectivePageSize(query.limit),
+      limit: effectivePageSize(filters.limit),
       hasMore: page.continuationToken !== undefined,
     };
     if (page.continuationToken !== undefined) {

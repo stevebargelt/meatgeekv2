@@ -1,9 +1,9 @@
 import { output } from '@azure/functions';
 import { randomUUID } from 'crypto';
 
-// SignalR hub + connection-string setting. Kept in one place so the negotiate
-// input binding, the cook output binding, and the local emulator config all
-// agree on the same names.
+// SignalR hub + connection-string setting. Kept in one place so negotiate's
+// management client (shared/signalr), the cook output binding, and the local
+// emulator config all agree on the same names.
 export const HUB_NAME = 'temperatureHub';
 export const SIGNALR_CONNECTION_SETTING = 'AzureSignalRConnectionString';
 
@@ -52,7 +52,8 @@ export interface CookEventEnvelope<T extends CookRef = CookRef> {
 }
 
 // Shape of a single message written to the SignalR output binding. `userId`
-// scopes delivery to the per-device user group (see DEC-4 in main.ts).
+// scopes delivery to that SignalR user: for cook events, the cook's owner, the
+// authenticated principal (see DEC-4 in main.ts).
 export interface SignalROutputMessage<T extends CookRef = CookRef> {
   target: CookEventType;
   userId: string;

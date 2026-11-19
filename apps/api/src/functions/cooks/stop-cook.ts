@@ -28,8 +28,8 @@ import { deviceNotOwnedBody } from './device-ownership';
  * principal, point-reads `(userId, cookId)` in that single partition, transitions
  * it to `completed` with a real `endTime`, and returns the persisted final state.
  * The SignalR COOK_STOPPED envelope is emitted ONLY after that write succeeds, and
- * its delivery scope (userId = the cook's deviceId) stays a distinct axis from the
- * persisted identity userId.
+ * is delivered to the cook's owner: the authenticated principal's userId (HAR-57,
+ * MG-30), never the deviceId.
  *
  * HAR-26 (MG-83, MG-88): the cook's device must belong to the caller. The
  * deviceId is only known from the stored cook, so the handler first point-reads
@@ -197,14 +197,14 @@ export async function stopCookHandler(
   // transition (emit-after-write). An already-completed cook — a retried stop
   // whose first response was lost, or a concurrent stop that lost the race — is
   // still returned 200 idempotently, but is not re-announced: no new write, no
-  // new event. Delivery is scoped to the device's SignalR user group (userId =
-  // deviceId) — a DIFFERENT axis from the persisted identity userId, which stays
-  // the authenticated principal. deviceId and the payload (MG-31: name,
-  // startTime, ...) come from the persisted cook, not the caller.
+  // new event. Delivery is scoped to the owner: the authenticated principal's
+  // userId, whose ownership of the device was checked above (HAR-57, MG-30).
+  // The envelope's deviceId and payload (MG-31: name, startTime, ...) come from
+  // the persisted cook, not the caller.
   if (transitioned) {
     const message: SignalROutputMessage = {
       target: COOK_STOPPED,
-      userId: stopped.deviceId,
+      userId,
       arguments: [buildCookEnvelope(COOK_STOPPED, stopped, correlationId)],
     };
     context.extraOutputs.set(signalROutput, [message]);
