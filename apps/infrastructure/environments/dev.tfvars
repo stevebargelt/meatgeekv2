@@ -198,3 +198,6 @@ manage_subscription_budget = false
 
 # Observability cost control
 ingestion_cap_gb = 2 # Hard daily ingestion cap on Log Analytics workspace
+
+# HAR-39 standing simulated device: the acceptance job creates it and sends as it.
+simulated_device_id = "meatgeek-dev-simulated-smoker"
