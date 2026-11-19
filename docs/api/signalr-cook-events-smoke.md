@@ -210,7 +210,9 @@ After the active cook id is set, the pusher's enqueuer stamps
 > code the active **`cookId` is a field inside the `TemperatureReading`
 > payload body** (`json:"cookId"`), **not** a standalone IoT Hub message
 > property. The IoT Hub **message properties** the publisher stamps are
-> **`messageId`** (`iothub.MessageIDPropertyName = "messageId"`) and, when a
+> **`messageId`** (`iothub.MessageIDPropertyName = "messageId"`), the content
+> type / encoding system properties **`$.ct`** / **`$.ce`**
+> (`application/json` / `utf-8`), **`traceparent`**, and, when a
 > correlation id is present, **`correlation.id`**
 > (`iothub.CorrelationIDPropertyName = "correlation.id"`) — the latter carrying
 > the correlation id propagated from the `cook_started` envelope. Verify the

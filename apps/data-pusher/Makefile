@@ -15,6 +15,9 @@ build:
 	@echo "Building $(BINARY_NAME) for local development..."
 	go build $(LDFLAGS) -o dist/$(BINARY_NAME) cmd/main.go
 	@echo "✅ Build complete: dist/$(BINARY_NAME)"
+	@echo "Building simdevice (host platform only)..."
+	go build -o dist/simdevice ./cmd/simdevice
+	@echo "✅ Build complete: dist/simdevice"
 
 # Cross-compile for Raspberry Pi (ARM64)
 build-arm:

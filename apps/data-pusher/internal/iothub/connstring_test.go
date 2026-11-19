@@ -75,3 +75,31 @@ func TestParseDeviceConnectionString_MissingKey(t *testing.T) {
 		t.Errorf("error should mention SharedAccessKey; got: %v", err)
 	}
 }
+
+// TestParseDeviceConnectionString_ErrorsNeverEchoInput guards that no parse
+// error carries the input or its key: callers (data-pusher, simdevice) print
+// these errors, and a credential must never reach a log or terminal.
+func TestParseDeviceConnectionString_ErrorsNeverEchoInput(t *testing.T) {
+	const key = "ZmFrZS1rZXktZG8tbm90LXVzZS0xMjM0NTY3ODkw"
+	for _, in := range []string{
+		"SharedAccessKey=" + key,
+		"DeviceId=d;SharedAccessKey=" + key,
+		"HostName=h;SharedAccessKey=" + key,
+		"HostName=h;SharedAccessKeyName=iothubowner;SharedAccessKey=" + key,
+		"HostName=h;DeviceId=d;SharedAccessKey=",
+		key,
+		"  ",
+	} {
+		_, err := ParseDeviceConnectionString(in)
+		if err == nil {
+			t.Errorf("expected %q to be rejected", in)
+			continue
+		}
+		if strings.Contains(err.Error(), key) {
+			t.Errorf("parse error echoes the key: %v", err)
+		}
+		if strings.TrimSpace(in) != "" && strings.Contains(err.Error(), in) {
+			t.Errorf("parse error echoes the input: %v", err)
+		}
+	}
+}

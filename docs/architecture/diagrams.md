@@ -218,7 +218,7 @@ sequenceDiagram
     Note over DP: enqueuer attaches:<br/>cookId = cooksession.ActiveCookID()<br/>queueRecord.Correlation = correlationHolder.Get()
     Note over DP: OTel Go SDK starts span publisher.publish and injects traceparent per message
 
-    DP->>IoT: PublishTelemetry payload + properties with messageId, correlation.id=corr-xyz, traceparent=00-traceId-spanId-01
+    DP->>IoT: PublishTelemetry payload + properties with messageId, $.ct=application/json, $.ce=utf-8, correlation.id=corr-xyz, traceparent=00-traceId-spanId-01
 
     IoT->>Cos: cosmos-storage-route<br/>(identity-based, no Function)
     Note over Cos: IoT Hub envelope stored in temperatures /deviceId

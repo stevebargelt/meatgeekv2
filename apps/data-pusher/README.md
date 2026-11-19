@@ -110,8 +110,12 @@ risk; for low-write devices you can stretch `FlushInterval` to reduce wear.
 
 ### IoT Hub message properties
 
-Every published message carries two IoT Hub properties:
+Payload and properties are built in `internal/publish` (`ReadingPayload`,
+`MessageID`, `Properties`), shared by the pusher and [`simdevice`](#simdevice-a-software-device-for-dev).
+Every published message carries:
 
+- `$.ct` = `application/json` and `$.ce` = `utf-8` — the IoT Hub content type and content encoding **system** properties (MG-68). IoT Hub stores a routed body as JSON only when both are set; without them the Cosmos route stores `Body` as a base64 string, which the API skips. On MQTT they ride in the topic property bag as `devices/{id}/messages/events/$.ct=application%2Fjson&$.ce=utf-8&…`: the `$.` keys are literal, only values are URL-encoded (`internal/iothub` `buildPublishTopic`).
+- `traceparent` — W3C trace context of the per-reading publish span (absent only when no span is active).
 - `messageId` — deterministic id minted from `(deviceId, timestamp, sequence)`. The sequence is persisted in the queue so the id stays unique across restarts. Sink-side consumers should upsert on `messageId` (the IoT Hub built-in dedupe window is per-connection only).
 - `correlation.id` — placeholder name for the cross-service correlation id propagation. **The exact property name + propagation contract is finalized in ticket #6**; the constant is defined in a single place (`internal/iothub`) so the rename is one-touch. Do not depend on the literal `correlation.id` name from downstream code yet.
 
@@ -125,13 +129,11 @@ Every published message carries two IoT Hub properties:
 ### Building
 
 ```bash
-make build       # native architecture
-make build-arm   # ARM64 cross-compile for Raspberry Pi
+make build       # native architecture: dist/meatgeek-pusher and dist/simdevice
+make build-arm   # ARM64 cross-compile for Raspberry Pi (pusher only)
 ```
 
-> Note: `nx build data-pusher` and `nx build-arm data-pusher` may fail because
-> of the workspace ESLint config bug tracked in ticket #8. Use direct
-> `make build` / `make build-arm` as the documented workaround until #8 lands.
+`npx nx run data-pusher:build` runs the same `make build`.
 
 ### Local development server
 
@@ -141,6 +143,47 @@ make dev
 
 Runs the pusher against `http://localhost:3000` with the mock IoT Hub client
 (no Azure required) and debug logging on.
+
+### simdevice: a software device for dev
+
+`cmd/simdevice` sends synthetic temperature readings to IoT Hub as **one
+device**, so dev has a standing sender that behaves exactly like a Pi. Each
+reading is a plausible `V1Status` (pit near 225°F, two probes climbing,
+`smokerid` = the connection string's device id) built into a payload and
+properties by the same `internal/publish` functions the pusher uses, then sent
+with the pusher's MQTT client (`iothub.AzureClient`). Tracing is set up the
+same way, so every message carries its own `traceparent`. It does not touch
+the disk queue, SignalR or cook sessions, and sends no device status.
+
+```bash
+make build
+export SIMDEVICE_CONNECTION_STRING='HostName=…;DeviceId=…;SharedAccessKey=…'
+dist/simdevice --count 3 --interval 2s
+```
+
+| Input | Meaning | Default |
+| ----- | ------- | ------- |
+| `SIMDEVICE_CONNECTION_STRING` (env) | Device-scoped IoT Hub connection string. The **only** source of the credential; there is no flag for it. | (required) |
+| `--count N` | Readings to send | `1` |
+| `--interval D` | Go duration between sends (`500ms`, `2s`) | `0s` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` (env) | Export spans, as for the pusher | (no-op) |
+
+**Stdout** carries nothing but one JSON line per message IoT Hub accepted:
+
+```json
+{"messageId":"<64 hex>","deviceId":"sim-device-1","timestamp":"2026-11-19T16:47:33.120Z","sentAt":"2026-11-19T16:47:33.402Z"}
+```
+
+`timestamp` is the reading's `timestamp` in the payload; `sentAt` is when the
+publish was acknowledged. Both are RFC 3339 UTC with milliseconds. Every
+reading in a run has a distinct `timestamp` and `messageId`. Logs and errors go
+to stderr.
+
+**Exit codes:** `0` all sent; `1` a send failed (or the run was interrupted) —
+nothing is printed for the failed reading; `2` usage or configuration error,
+including a missing or malformed `SIMDEVICE_CONNECTION_STRING`. No output
+contains the connection string or its key: parse errors never echo their
+input, and every error is redacted before it is printed.
 
 ### Tests
 
@@ -291,7 +334,7 @@ nullable `*float64` (i.e. JSON `null`) in V2.
 }
 ```
 
-Plus IoT Hub message properties: `messageId`, `correlation.id`.
+Plus IoT Hub message properties: `messageId`, `$.ct`, `$.ce`, `traceparent`, and `correlation.id` when set.
 
 ## Troubleshooting
 
@@ -312,7 +355,7 @@ Plus IoT Hub message properties: `messageId`, `correlation.id`.
 ```bash
 nx test data-pusher       # calls make test
 nx serve data-pusher      # calls make dev
-# nx build / nx build-arm currently blocked by #8 — use make targets directly.
+nx build data-pusher      # calls make build (pusher + simdevice)
 ```
 
 ## Roadmap (other tickets)

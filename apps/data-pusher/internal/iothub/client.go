@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/url"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +35,22 @@ const MessageIDPropertyName = "messageId"
 // telemetry.TraceParentKey; kept here so the property contract is visible
 // alongside the other IoT Hub property names.
 const TraceParentPropertyName = "traceparent"
+
+// ContentTypePropertyName and ContentEncodingPropertyName are the IoT Hub
+// SYSTEM property keys for the message body's content type and encoding, in
+// the form the MQTT topic property bag uses (MG-68). IoT Hub stores a routed
+// body as JSON only when both are set to ContentTypeJSON / ContentEncodingUTF8;
+// otherwise the Cosmos route stores the body as a base64 string.
+const (
+	ContentTypePropertyName     = "$.ct"
+	ContentEncodingPropertyName = "$.ce"
+	ContentTypeJSON             = "application/json"
+	ContentEncodingUTF8         = "utf-8"
+)
+
+// systemPropertyPrefix marks IoT Hub system property keys in the topic
+// property bag. Their keys go on the wire literally (`$.ct`, never `%24.ct`).
+const systemPropertyPrefix = "$."
 
 const (
 	defaultSASTokenTTL     = 1 * time.Hour
@@ -218,10 +236,16 @@ func (c *AzureClient) Close() error {
 	return nil
 }
 
-// buildPublishTopic appends URL-encoded message properties to the
-// device-to-cloud event topic per Azure's MQTT convention:
+// buildPublishTopic appends message properties to the device-to-cloud event
+// topic per Azure's MQTT convention:
 //
 //	devices/<deviceId>/messages/events/<k1>=<v1>&<k2>=<v2>&...
+//
+// Every value is URL-encoded. Application property keys are URL-encoded too,
+// but system property keys (`$.ct`, `$.ce`, ...) are written literally: the
+// documented form is `$.ct=application%2Fjson&$.ce=utf-8`, and IoT Hub does
+// not recognise `%24.ct` as the content-type system property. Pairs are
+// sorted by key so the topic is deterministic.
 //
 // When properties is empty the bare event topic is returned (trailing slash).
 func buildPublishTopic(deviceID string, properties map[string]string) string {
@@ -229,11 +253,26 @@ func buildPublishTopic(deviceID string, properties map[string]string) string {
 	if len(properties) == 0 {
 		return base
 	}
-	vals := url.Values{}
-	for k, v := range properties {
-		vals.Set(k, v)
+	keys := make([]string, 0, len(properties))
+	for k := range properties {
+		keys = append(keys, k)
 	}
-	return base + vals.Encode()
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(base)
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		if strings.HasPrefix(k, systemPropertyPrefix) {
+			b.WriteString(k)
+		} else {
+			b.WriteString(url.QueryEscape(k))
+		}
+		b.WriteByte('=')
+		b.WriteString(url.QueryEscape(properties[k]))
+	}
+	return b.String()
 }
 
 // MockClient implements Client by recording each call. The integration
