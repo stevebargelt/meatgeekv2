@@ -10,5 +10,8 @@ export * from './lib/device';
 // User interfaces
 export * from './lib/user';
 
+// Recipe interfaces
+export * from './lib/recipe';
+
 // Common interfaces
 export * from './lib/common';

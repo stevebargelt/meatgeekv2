@@ -1,0 +1,228 @@
+# Recipe path items (HAR-36 / MG-82).
+#
+# Implementation status — all five operations are implemented:
+#   - recipes-collection GET    : apps/api/src/functions/recipes/list-recipes.ts
+#   - recipes-collection POST   : apps/api/src/functions/recipes/create-recipe.ts
+#   - recipe-item GET           : apps/api/src/functions/recipes/get-recipe.ts
+#   - recipe-item PATCH         : apps/api/src/functions/recipes/update-recipe.ts
+#   - recipe-item DELETE        : apps/api/src/functions/recipes/delete-recipe.ts
+#
+# Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
+# There is no userId query parameter or x-user-id header. Recipes are private
+# to their owner, and the recipes container is partitioned on userId, so every
+# call stays in the caller's own partition: another user's recipe is a plain
+# 404 RECIPE_NOT_FOUND.
+#
+# Every response that reached Cosmos carries x-meatgeek-request-charge (HAR-11).
+# A 401 or 400 is answered before any Cosmos call and carries none.
+
+recipes-collection:
+  get:
+    operationId: listRecipes
+    summary: List the caller's recipes
+    description: |
+      Returns the caller's recipes, newest `updatedAt` first, wrapped under a
+      `recipes` key. One single-partition query. `meatType` narrows the list;
+      an unknown value is 400 VALIDATION_ERROR.
+    tags: [recipes]
+    parameters:
+      - name: meatType
+        in: query
+        required: false
+        schema:
+          $ref: '../components/schemas/recipe.yaml#/RecipeMeatType'
+    responses:
+      '200':
+        description: The caller's recipes (possibly none).
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/recipe.yaml#/RecipeListResponse'
+      '400':
+        $ref: '#/shared/validation-error'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '500':
+        $ref: './devices.yaml#/shared/server-error'
+
+  post:
+    operationId: createRecipe
+    summary: Create a recipe
+    description: |
+      Creates a recipe owned by the caller. The server sets `id` (a new UUID),
+      `userId`, `createdAt` and `updatedAt`. Because the id is
+      server-generated there is no idempotent replay: every successful POST
+      creates a new recipe.
+    tags: [recipes]
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/recipe.yaml#/CreateRecipeRequest'
+    responses:
+      '201':
+        description: The created recipe.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/recipe.yaml#/Recipe'
+      '400':
+        $ref: '#/shared/validation-error'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '500':
+        $ref: './devices.yaml#/shared/server-error'
+
+recipe-item:
+  get:
+    operationId: getRecipe
+    summary: Get one of the caller's recipes
+    description: |
+      Returns the Recipe with id=`{id}` as a bare object, from one point read
+      in the caller's partition.
+    tags: [recipes]
+    parameters:
+      - $ref: '#/shared/recipe-id-parameter'
+    responses:
+      '200':
+        description: The recipe.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/recipe.yaml#/Recipe'
+      '400':
+        $ref: '#/shared/validation-error'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '404':
+        $ref: '#/shared/recipe-not-found'
+      '500':
+        $ref: './devices.yaml#/shared/server-error'
+
+  patch:
+    operationId: updateRecipe
+    summary: Change one of the caller's recipes
+    description: |
+      Partial update: each field sent replaces the stored value whole;
+      `updatedAt` is bumped. The write is conditioned on the version read
+      (If-Match); if the recipe changed in between, the answer is 409
+      CONCURRENT_UPDATE and the client should read it again and retry.
+    tags: [recipes]
+    parameters:
+      - $ref: '#/shared/recipe-id-parameter'
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/recipe.yaml#/UpdateRecipeRequest'
+    responses:
+      '200':
+        description: The updated recipe.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/recipe.yaml#/Recipe'
+      '400':
+        $ref: '#/shared/validation-error'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '404':
+        $ref: '#/shared/recipe-not-found'
+      '409':
+        description: |
+          CONCURRENT_UPDATE: the recipe changed between the read and the write.
+        headers:
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: './devices.yaml#/shared/server-error'
+
+  delete:
+    operationId: deleteRecipe
+    summary: Delete one of the caller's recipes
+    description: One point delete in the caller's partition. No body on success.
+    tags: [recipes]
+    parameters:
+      - $ref: '#/shared/recipe-id-parameter'
+    responses:
+      '204':
+        description: Deleted.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            $ref: './devices.yaml#/shared/request-charge-header'
+      '400':
+        $ref: '#/shared/validation-error'
+      '401':
+        $ref: './devices.yaml#/shared/unauthenticated'
+      '404':
+        $ref: '#/shared/recipe-not-found'
+      '500':
+        $ref: './devices.yaml#/shared/server-error'
+
+# Pieces the operations above share. Not path items: openapi.yaml references
+# only recipes-collection and recipe-item.
+shared:
+  recipe-id-parameter:
+    name: id
+    in: path
+    required: true
+    description: The recipe id, a UUID. Anything else is 400 with no Cosmos call.
+    schema:
+      type: string
+      format: uuid
+
+  validation-error:
+    description: |
+      VALIDATION_ERROR: the body is not valid JSON, carries a server-owned
+      (`id`, `userId`, `createdAt`, `updatedAt`) or unknown field, breaks a
+      field rule, or is an empty patch; or the `{id}` is not a UUID; or the
+      `meatType` filter is unknown. Answered before any Cosmos call.
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+  recipe-not-found:
+    description: |
+      RECIPE_NOT_FOUND: no such recipe in the caller's partition. Another
+      user's recipe answers exactly the same.
+    headers:
+      x-meatgeek-request-charge:
+        $ref: './devices.yaml#/shared/request-charge-header'
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas/common.yaml#/ErrorResponse'

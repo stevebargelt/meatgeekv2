@@ -136,6 +136,35 @@ describe('OpenAPI spec — structural validation', () => {
     expect(Object.keys(paths['/users/me']?.get?.responses ?? {}).sort()).toEqual(
       ['200', '401', '404', '500'],
     );
+
+    // HAR-36 (MG-82): the five recipes routes, identity from the principal only.
+    const recipeOperations: Array<[string, OpenAPIV3.OperationObject | undefined, string[]]> = [
+      ['GET /recipes', paths['/recipes']?.get, ['200', '400', '401', '500']],
+      ['POST /recipes', paths['/recipes']?.post, ['201', '400', '401', '500']],
+      ['GET /recipes/{id}', paths['/recipes/{id}']?.get, ['200', '400', '401', '404', '500']],
+      [
+        'PATCH /recipes/{id}',
+        paths['/recipes/{id}']?.patch,
+        ['200', '400', '401', '404', '409', '500'],
+      ],
+      ['DELETE /recipes/{id}', paths['/recipes/{id}']?.delete, ['204', '400', '401', '404', '500']],
+    ];
+    for (const [route, operation, statuses] of recipeOperations) {
+      expect({ route, defined: operation !== undefined }).toEqual({ route, defined: true });
+      expect(operation?.tags).toEqual(['recipes']);
+      expect(operation?.description ?? '').not.toMatch(/NOT YET IMPLEMENTED/);
+      expect(Object.keys(operation?.responses ?? {}).sort()).toEqual(statuses);
+      const names = ((operation?.parameters ?? []) as OpenAPIV3.ParameterObject[]).map(
+        param => param.name,
+      );
+      expect(names).not.toContain('userId');
+      expect(names).not.toContain('x-user-id');
+      const ok = operation?.responses?.[statuses[0]] as OpenAPIV3.ResponseObject;
+      expect(ok.headers?.['x-meatgeek-request-charge']).toBeDefined();
+    }
+    const recipeMissing = paths['/recipes/{id}']?.get?.responses?.['404'] as OpenAPIV3.ResponseObject;
+    expect(recipeMissing.description).toMatch(/RECIPE_NOT_FOUND/);
+    expect(recipeMissing.headers?.['x-meatgeek-request-charge']).toBeDefined();
   });
 
   it('every operation has a unique operationId (codegen-friendly)', async () => {

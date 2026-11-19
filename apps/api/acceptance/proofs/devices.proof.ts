@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import type { Device, RegisterDeviceRequest } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
+import { expectNoSystemProperties } from '../lib/checks';
 import { defineProofs } from '../lib/proof';
 
 /**
@@ -18,29 +19,6 @@ import { defineProofs } from '../lib/proof';
  */
 
 const CONNECTION_STATUSES = ['online', 'offline', 'unknown'];
-
-/** Every key at any depth that starts with `_` (a Cosmos system property). */
-function underscoreKeys(value: unknown, at = ''): string[] {
-  if (Array.isArray(value)) {
-    return value.flatMap((item, i) => underscoreKeys(item, `${at}[${i}]`));
-  }
-  if (value !== null && typeof value === 'object') {
-    return Object.entries(value).flatMap(([key, member]) => [
-      ...(key.startsWith('_') ? [`${at}.${key}`] : []),
-      ...underscoreKeys(member, `${at}.${key}`),
-    ]);
-  }
-  return [];
-}
-
-function expectNoSystemProperties(api: AcceptanceApi, response: AcceptanceResponse): void {
-  const leaked = underscoreKeys(response.body);
-  api.check(
-    response,
-    leaked.length === 0,
-    `body carries Cosmos system properties: ${leaked.join(', ')}`
-  );
-}
 
 /** Fail unless `value` is shaped like an api-interfaces Device. */
 function expectDevice(api: AcceptanceApi, response: AcceptanceResponse, value: unknown): Device {

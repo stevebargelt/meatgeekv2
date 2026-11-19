@@ -32,6 +32,13 @@ proof the ticket adds. You can also run it by hand, as below.
 |                                  | `PATCH /devices/{id}` with a new `location`                                    | `200`; the device carries the new location                                                                                                |
 |                                  | `GET /devices/{id}` for the registered device                                  | `200`; the patched location reads back                                                                                                    |
 |                                  | `GET /devices/<random uuid>`                                                   | `404`                                                                                                                                     |
+| `recipes.proof.ts`               | `POST /recipes` named `Acceptance recipe <runId>`, `meatType: pork`            | `201`; body is an api-interfaces `Recipe` with the name sent, a server-generated UUID `id`, and `createdAt` equal to `updatedAt`          |
+|                                  | `GET /recipes/{id}` for the new recipe                                         | `200`; the same recipe, owned by the creating caller                                                                                      |
+|                                  | `GET /recipes`                                                                 | `200`; the recipe is listed, and every listed recipe has the caller as owner                                                              |
+|                                  | `PATCH /recipes/{id}` with a new `description`                                 | `200`; the recipe carries the new description; `createdAt` is unchanged                                                                   |
+|                                  | `GET /recipes/{id}` for the new recipe                                         | `200`; the patched description reads back                                                                                                 |
+|                                  | `DELETE /recipes/{id}` for the new recipe                                      | `204`                                                                                                                                     |
+|                                  | `GET /recipes/{id}` for the deleted recipe                                     | `404` with `error: RECIPE_NOT_FOUND`                                                                                                      |
 | `temperatures.proof.ts`          | `POST /devices` registering `acceptance-temp-<runId>` with a run-unique name   | `201`                                                                                                                                     |
 |                                  | `GET /temperatures/current/acceptance-temp-<runId>`                            | `404` with `error: NO_READINGS` (owned, but nothing has been routed for it)                                                               |
 |                                  | `GET /temperatures/current/acceptance-temp-unowned-<runId>` (never registered) | `404` with `error: DEVICE_NOT_FOUND`                                                                                                      |
@@ -40,17 +47,18 @@ proof the ticket adds. You can also run it by hand, as below.
 | `users.proof.ts`                 | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`      | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id  |
 |                                  | `GET /users/me`                                                                | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                 |
 
-Every `devices.proof.ts` and `users.proof.ts` response body is also checked for
+Every `devices.proof.ts`, `recipes.proof.ts` and `users.proof.ts` response body is also checked for
 keys starting with `_` at any depth (Cosmos system properties).
 
-Every authenticated cooks, devices, temperatures and users response must carry the
+Every authenticated cooks, devices, recipes, temperatures and users response must carry the
 `x-meatgeek-request-charge` header (the Cosmos RU the call cost, as a decimal),
 including the devices `404` and the cooks `403`, which still cost a point read,
 both `GET /temperatures/current` `404`s (the ownership point read, plus the
 readings query for `NO_READINGS`), and both `GET /temperatures/history`
 responses (the ownership point read for the `404`; that plus the count and page
 queries for the empty `200`). The users figure includes the devices owner query that fills
-`User.devices`. A response without
+`User.devices`. Every recipes response carries one too, the `DELETE` `204` and the
+`404 RECIPE_NOT_FOUND` after it included (a point delete and a point read). A response without
 it fails the proof. Responses that make no Cosmos call, such as a 401, carry no
 header.
 
@@ -68,6 +76,11 @@ two steps use `acceptance-unowned-<runId>`, which is never registered.
 is read-only otherwise: nothing in the suite writes telemetry (only IoT Hub
 does), so a fresh device always answers `NO_READINGS` for its current reading
 and an empty first page for its history.
+
+`recipes.proof.ts` cleans up after itself: it creates one recipe named
+`Acceptance recipe <runId>`, and its sixth step deletes it. If an earlier step
+fails, the runner skips the rest of the group, so that run's one recipe stays in
+the acceptance identity's partition; its run-unique name says which run left it.
 
 The acceptance profile is not cleaned up either: there is no `DELETE /users/me`.
 It is keyed by the caller's identity, so every run writes the same document,
@@ -149,12 +162,14 @@ apps/api/acceptance/
 ├── jest.config.ts              # its own jest config: matches live.acceptance.ts only
 ├── live.acceptance.ts          # entry point for `nx run api:acceptance`
 ├── lib/
+│   ├── checks.ts               # shared response checks (system properties, error code)
 │   ├── proof.ts                # the proof contract: defineProofs, AcceptanceApi
 │   └── runner.ts               # env check, HTTP client, output, RU table, exit code
 ├── proofs/
 │   ├── cooks-lifecycle.proof.ts
 │   ├── cooks-unauthenticated.proof.ts
 │   ├── devices.proof.ts
+│   ├── recipes.proof.ts
 │   ├── temperatures.proof.ts
 │   └── users.proof.ts
 └── acceptance-runner.spec.ts   # self-test, runs under `nx test api`

@@ -1,43 +1,27 @@
 /**
- * MG-59 step 9 — repo-wide FAIL-CLOSED guard: no HTTP/handler source under
+ * MG-59 / MG-82 — repo-wide FAIL-CLOSED guard: no HTTP/handler source under
  * apps/api/src/functions may return inline fixture / mock data.
  *
  * WHY THIS EXISTS
- * The V2 API shipped for months with handlers that answered 200 from hand-rolled
- * inline mocks (a fabricated device list, a canned temperature reading, a
- * `user-1` tenant stamped onto every cook). MG-59 migrates the COOKS handlers
- * onto real Cosmos persistence; this guard makes that migration STICK. It scans
- * every handler source mechanically and FAILS the build if a non-allowlisted
- * handler carries a fixture marker — so a future edit that quietly re-mocks a
- * cook route (or a brand-new handler that ships with canned data) cannot pass CI.
- * The check does NOT rely on a human noticing a mock in review; it fails closed.
+ * The V2 API once shipped handlers that answered 200 from hand-rolled inline
+ * mocks (a fabricated device list, a canned temperature reading, a `user-1`
+ * tenant stamped onto every cook). Every route is now backed by real Cosmos
+ * persistence: cooks (MG-59), devices (MG-80), users (MG-81), temperatures
+ * (MG-79) and recipes (MG-82). This guard keeps it that way. It scans every
+ * handler source mechanically and FAILS the build if any of them carries a
+ * fixture marker, so an edit that quietly re-mocks a route, or a brand-new
+ * handler that ships with canned data, cannot pass CI. There is no allowlist
+ * and no exemption: every `.ts` file under apps/api/src/functions (other than
+ * specs and declarations) is checked. The check does not rely on a human
+ * noticing a mock in review.
  *
  * HOW IT DETECTS FIXTURES
- * Handler comments legitimately DISCUSS the mocks they removed — the cooks
- * handlers' own docblocks say things like "no longer mints a mock Cook" and "does
- * NOT hardcode `userId: 'user-1'`". So the scanner strips comments FIRST and then
+ * Handler comments legitimately DISCUSS the mocks they removed (e.g. "does NOT
+ * hardcode `userId: 'user-1'`"). So the scanner strips comments FIRST and then
  * matches a small, documented set of markers against the executable code only
- * (see FIXTURE_MARKERS). A marker matching real code — a `user-1` string literal,
- * a `mock*`-named binding, an inline typed-array-of-objects literal, hardcoded
- * decimal telemetry — is treated as an inline fixture.
- *
- * THE SHRINKING ALLOWLIST  (shared cross-ticket artifact — keep it stable)
- * temperatures / devices / users / recipes are NOT migrated yet; their handlers
- * still answer from inline mocks. They are named EXPLICITLY in
- * STILL_MOCKED_ALLOWLIST below so this guard can pass today while still failing
- * closed on the cooks routes (which are deliberately NOT listed). The allowlist
- * is meant to SHRINK, one entry at a time:
- *
- *   MG-79 / MG-80 / MG-81 / MG-82  migrate temperatures / devices / users /
- *   recipes onto real persistence and DELETE their line from the allowlist as
- *   they land. MG-82 removes the final entry and then deletes this guard entirely.
- *
- * Format is one repo-relative path per array element, sorted, one entity per
- * line — so each migrating ticket touches exactly one line and merges cleanly.
- * The `enforces the allowlist shrinks` test below fails closed if a listed
- * handler has ALREADY been de-mocked, forcing its line to be removed rather than
- * left to rot. Cooks handlers are intentionally absent: after MG-59 steps 4-6
- * they carry no fixture markers and must pass on their own.
+ * (see FIXTURE_MARKERS). A marker matching real code — a `user-1` string
+ * literal, a `mock*`-named binding, an inline typed-array-of-objects literal,
+ * hardcoded decimal telemetry — is treated as an inline fixture.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -48,17 +32,6 @@ const FUNCTIONS_ROOT = __dirname;
 /** This guard is itself a `.spec.ts` and is excluded by the spec filter, but name
  *  it explicitly for clarity. */
 const SELF = 'no-inline-fixtures.spec.ts';
-
-/**
- * The not-yet-migrated handlers that are still permitted to answer from inline
- * mocks, keyed by their path relative to apps/api/src/functions. SHRINKING
- * artifact — remove a line when its entity is migrated (see the module docblock).
- * Sorted, one entity per line, low merge hazard.
- */
-const STILL_MOCKED_ALLOWLIST: readonly string[] = [
-  // MG-81 (users) / MG-82 (recipes) add their still-mocked handlers here when
-  // those handlers land, and MG-82 deletes this allowlist + guard once empty.
-].slice();
 
 /**
  * Fixture markers, matched against COMMENT-STRIPPED handler code only. Each is a
@@ -213,66 +186,39 @@ function relFromFunctions(abs: string): string {
   return path.relative(FUNCTIONS_ROOT, abs).split(path.sep).join('/');
 }
 
-describe('MG-59: no handler under apps/api/src/functions returns inline fixture data (fail-closed)', () => {
+describe('MG-59/MG-82: no handler under apps/api/src/functions returns inline fixture data (fail-closed)', () => {
   const allSources = handlerSourceFiles(FUNCTIONS_ROOT).map(abs => ({
     rel: relFromFunctions(abs),
     markers: fixtureMarkersIn(fs.readFileSync(abs, 'utf8')),
   }));
 
-  it('discovers the cooks handlers and they are NOT on the allowlist', () => {
+  it("discovers every entity's handlers, so none can slip past the scan", () => {
     const rels = allSources.map(s => s.rel);
     expect(rels).toEqual(
-      expect.arrayContaining(['cooks/list-cooks.ts', 'cooks/start-cook.ts', 'cooks/stop-cook.ts'])
+      expect.arrayContaining([
+        'cooks/list-cooks.ts',
+        'cooks/start-cook.ts',
+        'cooks/stop-cook.ts',
+        'devices/get-devices.ts',
+        'temperatures/get-current.ts',
+        'users/get-user-profile.ts',
+        'recipes/list-recipes.ts',
+        'recipes/create-recipe.ts',
+        'recipes/get-recipe.ts',
+        'recipes/update-recipe.ts',
+        'recipes/delete-recipe.ts',
+      ])
     );
-    for (const cook of rels.filter(r => r.startsWith('cooks/'))) {
-      expect(STILL_MOCKED_ALLOWLIST).not.toContain(cook);
-    }
   });
 
-  it('every non-allowlisted handler is fixture-free (cooks included)', () => {
+  it('every handler is fixture-free, with no exemption', () => {
     const offenders = allSources
-      .filter(s => !STILL_MOCKED_ALLOWLIST.includes(s.rel))
       .filter(s => s.markers.length > 0)
       .map(s => `${s.rel} [${s.markers.join(', ')}]`);
 
-    // If this fails: either a handler grew an inline fixture (de-mock it and use
-    // the real repository/adapter), or a legitimately-not-yet-migrated handler
-    // needs to be added to STILL_MOCKED_ALLOWLIST above.
+    // If this fails, a handler grew an inline fixture: remove it and read from
+    // the real repository/adapter instead. There is no allowlist to add it to.
     expect(offenders).toEqual([]);
-  });
-
-  it('cooks handlers specifically carry no fixture markers after MG-59 steps 4-6', () => {
-    for (const cook of allSources.filter(s => s.rel.startsWith('cooks/'))) {
-      expect(cook.markers).toEqual([]);
-    }
-  });
-
-  describe('the allowlist is honest and shrinking', () => {
-    it('names only handlers that actually exist', () => {
-      for (const rel of STILL_MOCKED_ALLOWLIST) {
-        expect(fs.existsSync(path.join(FUNCTIONS_ROOT, rel))).toBe(true);
-      }
-    });
-
-    it('is load-bearing: every allowlisted handler still trips a marker (else remove its line)', () => {
-      // Forces the allowlist to SHRINK: once a ticket de-mocks an entry, that file
-      // stops tripping markers and this fails until its line is deleted. A dead
-      // allowlist entry cannot silently mask a future re-mock of that route.
-      const staleClean = STILL_MOCKED_ALLOWLIST.filter(rel => {
-        const abs = path.join(FUNCTIONS_ROOT, rel);
-        return fixtureMarkersIn(fs.readFileSync(abs, 'utf8')).length === 0;
-      });
-      expect(staleClean).toEqual([]);
-    });
-
-    it('documents its shrink path (MG-79/80/81/82, deleted by MG-82)', () => {
-      const self = fs.readFileSync(path.join(FUNCTIONS_ROOT, SELF), 'utf8');
-      expect(self).toMatch(/MG-79/);
-      expect(self).toMatch(/MG-80/);
-      expect(self).toMatch(/MG-81/);
-      expect(self).toMatch(/MG-82/);
-      expect(self).toMatch(/SHRINK/i);
-    });
   });
 
   describe('fails closed when a fixture is reintroduced', () => {
@@ -316,11 +262,11 @@ describe('MG-59: no handler under apps/api/src/functions returns inline fixture 
     });
   });
 
-  describe('fails closed for an unlisted handler that grows a fixture', () => {
+  describe('fails closed for a new handler that grows a fixture', () => {
     it('flags a hypothetical new handler carrying inline data', () => {
-      // Simulates a brand-new handler shipped with canned data and NOT added to
-      // the allowlist: the scanner flags it, so the `every non-allowlisted
-      // handler is fixture-free` assertion above would fail the build.
+      // Simulates a brand-new handler shipped with canned data: the scanner
+      // flags it, so the `every handler is fixture-free` assertion above would
+      // fail the build.
       const newHandler = `
         import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
         export async function getWidgetsHandler(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -328,8 +274,6 @@ describe('MG-59: no handler under apps/api/src/functions returns inline fixture 
           return { status: 200, jsonBody: { widgets } };
         }
       `;
-      const rel = 'widgets/get-widgets.ts';
-      expect(STILL_MOCKED_ALLOWLIST).not.toContain(rel);
       expect(fixtureMarkersIn(newHandler).length).toBeGreaterThan(0);
     });
   });

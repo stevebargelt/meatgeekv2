@@ -1,6 +1,7 @@
 import type { PutUserProfileRequest, User } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
+import { expectNoSystemProperties } from '../lib/checks';
 import { defineProofs } from '../lib/proof';
 
 /**
@@ -17,29 +18,6 @@ import { defineProofs } from '../lib/proof';
  */
 
 const ACCEPTANCE_EMAIL = 'acceptance@example.invalid';
-
-/** Every key at any depth that starts with `_` (a Cosmos system property). */
-function underscoreKeys(value: unknown, at = ''): string[] {
-  if (Array.isArray(value)) {
-    return value.flatMap((item, i) => underscoreKeys(item, `${at}[${i}]`));
-  }
-  if (value !== null && typeof value === 'object') {
-    return Object.entries(value).flatMap(([key, member]) => [
-      ...(key.startsWith('_') ? [`${at}.${key}`] : []),
-      ...underscoreKeys(member, `${at}.${key}`),
-    ]);
-  }
-  return [];
-}
-
-function expectNoSystemProperties(api: AcceptanceApi, response: AcceptanceResponse): void {
-  const leaked = underscoreKeys(response.body);
-  api.check(
-    response,
-    leaked.length === 0,
-    `body carries Cosmos system properties: ${leaked.join(', ')}`
-  );
-}
 
 /** Fail unless the body is shaped like an api-interfaces User. */
 function expectUser(api: AcceptanceApi, response: AcceptanceResponse): User {
