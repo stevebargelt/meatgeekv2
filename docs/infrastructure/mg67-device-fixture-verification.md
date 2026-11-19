@@ -1571,23 +1571,33 @@ halts the procedure, and the log is not committed.
 Each of these is real, each is out of this ticket's scope, and each is recorded
 so it is not rediscovered from scratch.
 
-### 10a. The real producer sets no content type — this proof covers the FIXTURE's message shape only
+### 10a. RESOLVED — the real producer now sets the content type (was: this proof covers the FIXTURE's message shape only)
+
+> **Resolved by MG-68 / [HAR-40](/HAR/issues/HAR-40).** `apps/data-pusher` now
+> sets `$.ct=application/json` and `$.ce=utf-8` on every message:
+> `publish.Properties` (`apps/data-pusher/internal/publish`) adds both system
+> properties alongside `messageId`, `correlation.id` and `traceparent`, and
+> `buildPublishTopic` (`apps/data-pusher/internal/iothub/client.go`) writes the
+> `$.` keys literally (`$.ct=application%2Fjson&$.ce=utf-8`) while still
+> URL-encoding every value and application key. See
+> [`apps/data-pusher/README.md`](../../apps/data-pusher/README.md). The text
+> below is kept as the historical record of the finding as it stood when this
+> procedure was written.
 
 IoT Hub writes a **queryable JSON document** to a Cosmos endpoint only when the
 D2C message declares `$.ct=application/json` and `$.ce=utf-8`. Without them the
 payload lands opaque.
 
-The fixture sets both, explicitly. **`apps/data-pusher` sets neither.**
-`buildPublishProperties` (`apps/data-pusher/cmd/main.go`) emits exactly
-`messageId`, `correlation.id` and `traceparent`, and `buildPublishTopic`
-(`internal/iothub/client.go`) URL-encodes those onto the MQTT topic — no `$.ct`,
-no `$.ce`.
+The fixture sets both, explicitly. _At the time of writing_, `apps/data-pusher`
+set neither: its property builder (then `buildPublishProperties` in
+`apps/data-pusher/cmd/main.go`) emitted exactly `messageId`, `correlation.id`
+and `traceparent`, and `buildPublishTopic` (`internal/iothub/client.go`)
+URL-encoded those onto the MQTT topic — no `$.ct`, no `$.ce`.
 
-**So a green run of this procedure proves the route carries the _fixture's_
-message shape. It does not prove the data-pusher's messages land as JSON
-documents.** That is a latent defect, and it is genuinely separate work: fixing a
-live producer under cover of a verification ticket is how unreviewed producer
-changes ship. File it and cite this section.
+**So a green run of this procedure proved the route carries the _fixture's_
+message shape; it did not by itself prove the data-pusher's messages land as JSON
+documents.** That latent defect was filed as MG-68 and fixed separately rather
+than under cover of this verification ticket.
 
 ### 10b. The same messages also fan out to `eventhub-realtime-route`
 
