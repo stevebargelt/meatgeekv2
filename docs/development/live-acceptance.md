@@ -14,41 +14,46 @@ proof the ticket adds. You can also run it by hand, as below.
 
 ## What it checks today
 
-| Proof file                       | Proof                                                                          | Expects                                                                                                                                   |
-| -------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `cooks-unauthenticated.proof.ts` | `GET /cooks` with no `Authorization` header                                    | `401`                                                                                                                                     |
-| `cooks-lifecycle.proof.ts`       | `POST /cooks` with a new UUID `id` and a synthetic device `acceptance-<runId>` | `2xx`; body is an api-interfaces `Cook` with no Cosmos system property (`_rid`, `_self`, `_etag`, `_attachments`, `_ts`), status `active` |
-|                                  | `GET /cooks`                                                                   | the new cook is listed (pages via `continuationToken`)                                                                                    |
-|                                  | `GET /cooks?deviceId=<device>&status=active`                                   | `200`; returns exactly the new cook, `active`, on that device, in one page                                                                |
-|                                  | `POST /cooks/{cookId}/stop`                                                    | `2xx`; the cook is `completed` with an `endTime`                                                                                          |
-|                                  | `GET /cooks`                                                                   | the cook reads back `completed`                                                                                                           |
-|                                  | `GET /cooks?deviceId=<device>&status=active`                                   | `200`; returns no cook after the stop                                                                                                     |
-| `devices.proof.ts`               | `POST /devices` registering `acceptance-<runId>` with a run-unique name        | `201`; body is an api-interfaces `Device` with the id and name sent, `isActive: true`, `connectionStatus: unknown`                        |
-|                                  | `GET /devices/{id}` for the registered device                                  | `200`; the same device, owned by the registering caller                                                                                   |
-|                                  | `GET /devices`                                                                 | `200`; the device is listed, and every listed device has the caller as owner                                                              |
-|                                  | `PATCH /devices/{id}` with a new `location`                                    | `200`; the device carries the new location                                                                                                |
-|                                  | `GET /devices/{id}` for the registered device                                  | `200`; the patched location reads back                                                                                                    |
-|                                  | `GET /devices/<random uuid>`                                                   | `404`                                                                                                                                     |
-| `users.proof.ts`                 | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`      | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id  |
-|                                  | `GET /users/me`                                                                | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                 |
+| Proof file                       | Proof                                                                        | Expects                                                                                                                                   |
+| -------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `cooks-unauthenticated.proof.ts` | `GET /cooks` with no `Authorization` header                                  | `401`                                                                                                                                     |
+| `cooks-lifecycle.proof.ts`       | `POST /devices` registering `acceptance-cook-<runId>` with a run-unique name | `201`; the device id is the one sent                                                                                                      |
+|                                  | `POST /cooks` with a new UUID `id` on `acceptance-cook-<runId>`              | `2xx`; body is an api-interfaces `Cook` with no Cosmos system property (`_rid`, `_self`, `_etag`, `_attachments`, `_ts`), status `active` |
+|                                  | `GET /cooks`                                                                 | the new cook is listed (pages via `continuationToken`)                                                                                    |
+|                                  | `GET /cooks?deviceId=<device>&status=active`                                 | `200`; returns exactly the new cook, `active`, on that device, in one page                                                                |
+|                                  | `POST /cooks/{cookId}/stop`                                                  | `2xx`; the cook is `completed` with an `endTime`                                                                                          |
+|                                  | `GET /cooks`                                                                 | the cook reads back `completed`                                                                                                           |
+|                                  | `GET /cooks?deviceId=<device>&status=active`                                 | `200`; returns no cook after the stop                                                                                                     |
+|                                  | `POST /cooks` on the unregistered `acceptance-unowned-<runId>`               | `403`; `error` is `DEVICE_NOT_OWNED`                                                                                                      |
+|                                  | `GET /cooks?deviceId=acceptance-unowned-<runId>`                             | `200`; returns no cook (the refused start wrote nothing)                                                                                  |
+| `devices.proof.ts`               | `POST /devices` registering `acceptance-<runId>` with a run-unique name      | `201`; body is an api-interfaces `Device` with the id and name sent, `isActive: true`, `connectionStatus: unknown`                        |
+|                                  | `GET /devices/{id}` for the registered device                                | `200`; the same device, owned by the registering caller                                                                                   |
+|                                  | `GET /devices`                                                               | `200`; the device is listed, and every listed device has the caller as owner                                                              |
+|                                  | `PATCH /devices/{id}` with a new `location`                                  | `200`; the device carries the new location                                                                                                |
+|                                  | `GET /devices/{id}` for the registered device                                | `200`; the patched location reads back                                                                                                    |
+|                                  | `GET /devices/<random uuid>`                                                 | `404`                                                                                                                                     |
+| `users.proof.ts`                 | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`    | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id  |
+|                                  | `GET /users/me`                                                              | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                 |
 
 Every `devices.proof.ts` and `users.proof.ts` response body is also checked for
 keys starting with `_` at any depth (Cosmos system properties).
 
 Every authenticated cooks, devices and users response must carry the
 `x-meatgeek-request-charge` header (the Cosmos RU the call cost, as a decimal),
-including the devices `404`, which still costs a point read. The users figure
-includes the devices owner query that fills `User.devices`. A response without
+including the devices `404` and the cooks `403`, which still cost a point read. The
+users figure includes the devices owner query that fills `User.devices`. A response without
 it fails the proof. Responses that make no Cosmos call, such as a 401, carry no
 header.
 
 Acceptance cooks and devices are not cleaned up: there is no delete route for
 either yet (no `DELETE /cooks`, no `DELETE /devices`). Each run uses its own
-device id, `acceptance-<runId>`. `cooks-lifecycle.proof.ts` starts its cook on
-that id without registering it, so runs never trip the
-one-active-cook-per-device rule. `devices.proof.ts` registers that id as a real
-device with a run-unique name, so runs never collide on device id or on the
-`(userId, name)` pair.
+device ids. `devices.proof.ts` registers `acceptance-<runId>`.
+`cooks-lifecycle.proof.ts` registers `acceptance-cook-<runId>` and runs the
+cook lifecycle on it, because a cook may only start on a device the caller
+owns (HAR-26); a fresh device per run also means runs never trip the
+one-active-cook-per-device rule. Both register a run-unique name, so runs never
+collide on device id or on the `(userId, name)` pair. The cooks proof's last
+two steps use `acceptance-unowned-<runId>`, which is never registered.
 
 The acceptance profile is not cleaned up either: there is no `DELETE /users/me`.
 It is keyed by the caller's identity, so every run writes the same document,
@@ -63,9 +68,9 @@ One line per request, then a per-route RU table and a total:
 
 ```
 acceptance run 20261118153521-6cacc5 against https://<function-app-host>/api
-RUN  cooks lifecycle › POST /cooks starts a cook and returns a Cook
+RUN  cooks lifecycle › POST /cooks starts a cook on the owned device and returns a Cook
   POST   /cooks                         201    412 ms  RU 11.43
-PASS cooks lifecycle › POST /cooks starts a cook and returns a Cook
+PASS cooks lifecycle › POST /cooks starts a cook on the owned device and returns a Cook
 ...
 RUN  cooks lifecycle › POST /cooks/{cookId}/stop stops the cook
   POST   /cooks/{cookId}/stop           500    233 ms  RU 20.1
