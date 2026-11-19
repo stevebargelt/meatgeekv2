@@ -37,10 +37,37 @@ export interface AcceptanceResponse<T = unknown> {
   readonly body: T;
 }
 
+/**
+ * The outcome of one `simdevice` run (HAR-44). Nothing here is the child's raw
+ * output: stdout is reduced to the JSON values it printed, stderr to its first
+ * line, redacted.
+ */
+export interface SimDeviceRun {
+  /** The process exit code; `null` if it was killed (e.g. it ran too long). */
+  readonly exitCode: number | null;
+  /** One parsed value per stdout line that is JSON, in order. */
+  readonly messages: readonly unknown[];
+  /** How many non-empty stdout lines were not JSON. Their text is dropped. */
+  readonly unparsedLines: number;
+  /** The first non-empty stderr line, with the device credential masked. */
+  readonly stderrFirstLine: string | undefined;
+}
+
 /** What a proof is handed: a client bound to the deployed API and the run id. */
 export interface AcceptanceApi {
   /** Unique per run; use it to name synthetic data (e.g. `acceptance-<runId>`). */
   readonly runId: string;
+  /** The standing simulated device `simdevice` sends as
+   *  (ACCEPTANCE_SIM_DEVICE_ID), e.g. `meatgeek-dev-simulated-smoker`. */
+  readonly simulatedDeviceId: string;
+  /** Run the `simdevice` binary (ACCEPTANCE_SIMDEVICE_BIN) with `args`. The
+   *  runner hands it the device credential through its environment; a proof
+   *  never sees the credential. Resolves on exit whatever the exit code;
+   *  rejects only if the binary cannot be started. */
+  runSimDevice(args: readonly string[]): Promise<SimDeviceRun>;
+  /** Print `METRIC <name> <value>`. The CI job copies these lines to the run
+   *  summary. `name` is lower-case kebab-case; `value` a finite number. */
+  metric(name: string, value: number): void;
   request<T = unknown>(options: RequestOptions): Promise<AcceptanceResponse<T>>;
   /** Fail unless the status matches: an exact code, or `'2xx'`. */
   expectStatus(response: AcceptanceResponse, expected: number | '2xx'): void;

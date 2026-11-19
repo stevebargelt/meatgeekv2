@@ -3,15 +3,38 @@
  * `nx test api`, never against a deployed system: it starts an in-process HTTP
  * stub that imitates the cooks, devices, recipes, temperatures and users routes and drives the REAL runner and the REAL
  * proof files (discovered from ./proofs) against it.
+ *
+ * HAR-44: `simdevice` is replaced by a small Node script written to a temp dir
+ * (see {@link writeFakeSimdevice}); the stub serves the reading it "sent" for
+ * the simulated device once a few polls have gone by.
  */
 import { randomUUID } from 'crypto';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import { AddressInfo } from 'net';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
 import { runAcceptance, RunResult } from './lib/runner';
+import { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
+
+const SIM_DEVICE = 'meatgeek-dev-simulated-smoker';
+const SIM_KEY = 'c2VjcmV0LXNpbS1kZXZpY2Uta2V5LWZvci10ZXN0cw==';
+const SIM_CONNECTION_STRING = `HostName=stub-hub.azure-devices.net;DeviceId=${SIM_DEVICE};SharedAccessKey=${SIM_KEY}`;
+/** The body `timestamp` the fake simdevice reports and the stub serves. */
+const SIM_TIMESTAMP = '2026-11-19T16:47:33.120Z';
+/** Readings the stub's history holds for the simulated device before the sent one. */
+const OLDER_READINGS = [
+  '2026-11-19T16:40:00.000Z',
+  '2026-11-19T16:41:00.000Z',
+  '2026-11-19T16:42:00.000Z',
+];
+const SIM_HISTORY_PAGE = 2;
+
+type FakeMode = 'ok' | 'exit1' | 'leak-stderr' | 'leak-stdout';
 
 type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
@@ -38,6 +61,16 @@ interface StubOptions {
   readonly echoAuthorization?: boolean;
   /** Start cooks on any device, registered or not (the pre-HAR-26 behaviour). */
   readonly allowAnyDevice?: boolean;
+  /** The simulated device's current reading is the sent one from this poll on
+   *  (1-based). Earlier polls answer 404 NO_READINGS, then an older reading. */
+  readonly simVisibleFromPoll?: number;
+  /** The sent reading never reaches the simulated device's current or history. */
+  readonly simNeverRouted?: boolean;
+  /** The body `timestamp` the stub serves for the sent reading, when it is
+   *  spelled differently from the one the fake simdevice prints. */
+  readonly simServedTimestamp?: string;
+  /** The simulated device is registered to someone else: POST is 409, GET 404. */
+  readonly simOwnedByOther?: boolean;
 }
 
 interface StubCook {
@@ -67,6 +100,14 @@ interface Stub {
   readonly requests: Array<{ method: string; path: string; authorization?: string }>;
   close(): Promise<void>;
 }
+
+const simReading = (timestamp: string) => ({
+  deviceId: SIM_DEVICE,
+  timestamp,
+  grillTemp: 225.4,
+  probe1Temp: 151.2,
+  probe2Temp: 149.8,
+});
 
 const RU: Record<StubRoute, string> = {
   'GET /cooks': '2.83',
@@ -104,6 +145,10 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   // The acceptance identity's profile persists between runs, as it does in dev.
   let profile: Record<string, unknown> | undefined;
   const requests: Stub['requests'] = [];
+  let simPolls = 0;
+  const simVisibleFromPoll = options.simVisibleFromPoll ?? 3;
+  const simRouted = () => !options.simNeverRouted && simPolls >= simVisibleFromPoll;
+  const simServed = options.simServedTimestamp ?? SIM_TIMESTAMP;
 
   const server: Server = createServer((request, response: ServerResponse) => {
     void (async () => {
@@ -249,8 +294,21 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       }
 
       if (route === 'GET /temperatures/current/{deviceId}') {
-        // Nothing writes telemetry in the stub: an owned device has no readings.
-        const owned = devices.has(decodeURIComponent(temperatureMatch![1]));
+        const deviceId = decodeURIComponent(temperatureMatch![1]);
+        const owned = devices.has(deviceId);
+        if (owned && deviceId === SIM_DEVICE) {
+          // HAR-44: the simulated device's reading arrives after a few polls.
+          simPolls += 1;
+          if (simRouted()) {
+            send(200, simReading(simServed), route);
+          } else if (simPolls === 1) {
+            send(404, { error: 'NO_READINGS' }, route);
+          } else {
+            send(200, simReading(OLDER_READINGS[OLDER_READINGS.length - 1]), route);
+          }
+          return;
+        }
+        // Nothing else writes telemetry in the stub: an owned device has no readings.
         const code = owned ? 'NO_READINGS' : 'DEVICE_NOT_FOUND';
         send(404, { error: options.temperatureErrorCode ?? code }, route);
       } else if (route === 'GET /temperatures/history') {
@@ -258,6 +316,28 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         const deviceId = url.searchParams.get('deviceId') ?? '';
         if (!devices.has(deviceId)) {
           send(404, { error: 'DEVICE_NOT_FOUND' }, route);
+          return;
+        }
+        if (deviceId === SIM_DEVICE) {
+          // HAR-44: older readings plus the sent one, in pages of two.
+          const startTime = url.searchParams.get('startTime');
+          if (!startTime || Number.isNaN(Date.parse(startTime))) {
+            send(400, { error: 'VALIDATION_ERROR' });
+            return;
+          }
+          const all = [...OLDER_READINGS, ...(simRouted() ? [simServed] : [])].map(simReading);
+          const offset = Number(url.searchParams.get('offset') ?? '0');
+          send(
+            200,
+            {
+              readings: all.slice(offset, offset + SIM_HISTORY_PAGE),
+              total: all.length,
+              offset,
+              limit: SIM_HISTORY_PAGE,
+              hasMore: offset + SIM_HISTORY_PAGE < all.length,
+            },
+            route
+          );
           return;
         }
         send(
@@ -273,7 +353,10 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           send(400, { error: 'VALIDATION_ERROR' });
           return;
         }
-        if (devices.has(body.deviceId)) {
+        if (
+          devices.has(body.deviceId) ||
+          (options.simOwnedByOther && body.deviceId === SIM_DEVICE)
+        ) {
           send(409, { error: 'DEVICE_CONFLICT' }, route);
           return;
         }
@@ -369,12 +452,80 @@ async function run(env: Record<string, string | undefined>): Promise<Run> {
   return { ...result, lines, output: lines.join('\n') };
 }
 
+let fakeDir: string;
+
+/**
+ * A stand-in for `simdevice`: a Node script, run through its shebang, that
+ * prints one JSON line the way simdevice does, or misbehaves as `mode` says.
+ * In `ok` mode it exits 2 unless it got `--count 1` and the credential arrived
+ * through its environment, so the runner's hand-over is checked too.
+ */
+function writeFakeSimdevice(mode: FakeMode): string {
+  const path = join(fakeDir, `simdevice-${mode}`);
+  const script = `#!${process.execPath}
+const mode = ${JSON.stringify(mode)};
+const conn = process.env.SIMDEVICE_CONNECTION_STRING || '';
+const key = (conn.split(';').find(p => p.startsWith('SharedAccessKey=')) || '').slice(16);
+const line = o => process.stdout.write(JSON.stringify(o) + '\\n');
+const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stringify(SIM_DEVICE)}, timestamp, sentAt: new Date().toISOString() });
+if (mode === 'ok') {
+  const args = process.argv.slice(2).join(' ');
+  if (args !== '--count 1' || conn !== ${JSON.stringify(SIM_CONNECTION_STRING)} || process.env.ACCEPTANCE_BEARER_TOKEN || process.argv.some(a => a.includes(key))) {
+    process.stderr.write('fake simdevice: bad hand-over: ' + args + '\\n');
+    process.exit(2);
+  }
+  process.stderr.write('connected\\n');
+  line(reading(${JSON.stringify(SIM_TIMESTAMP)}));
+} else if (mode === 'exit1') {
+  process.stderr.write('send failed: connection refused\\nmore detail\\n');
+  process.exit(1);
+} else if (mode === 'leak-stderr') {
+  process.stdout.write(conn + '\\n');
+  process.stderr.write('auth failed for ' + conn + ' key SharedAccessKey=' + key + ' bare ' + key + '\\n');
+  process.exit(1);
+} else {
+  process.stderr.write(conn + '\\n');
+  line({ ...reading(key), messageId: conn });
+}
+`;
+  writeFileSync(path, script);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+/** The HAR-44 variables, with the fake simdevice in `mode`. */
+function simEnv(mode: FakeMode = 'ok'): Record<string, string> {
+  return {
+    SIMDEVICE_CONNECTION_STRING: SIM_CONNECTION_STRING,
+    ACCEPTANCE_SIM_DEVICE_ID: SIM_DEVICE,
+    ACCEPTANCE_SIMDEVICE_BIN: writeFakeSimdevice(mode),
+  };
+}
+
 let stub: Stub | undefined;
 
-async function runAgainstStub(options: StubOptions = {}): Promise<Run> {
+async function runAgainstStub(options: StubOptions = {}, mode: FakeMode = 'ok'): Promise<Run> {
   stub = await startStub(options);
-  return run({ ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN });
+  return run({
+    ACCEPTANCE_BASE_URL: stub.baseUrl,
+    ACCEPTANCE_BEARER_TOKEN: TOKEN,
+    ...simEnv(mode),
+  });
 }
+
+const realPoll = { ...ROUNDTRIP_POLL };
+
+beforeAll(() => {
+  fakeDir = mkdtempSync(join(tmpdir(), 'acceptance-simdevice-'));
+  // The round-trip proof polls every 1 s for up to 120 s live; here, far less.
+  ROUNDTRIP_POLL.intervalMs = 5;
+  ROUNDTRIP_POLL.capMs = 300;
+});
+
+afterAll(() => {
+  Object.assign(ROUNDTRIP_POLL, realPoll);
+  rmSync(fakeDir, { recursive: true, force: true });
+});
 
 afterEach(async () => {
   await stub?.close();
@@ -477,7 +628,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
    *  register their own device, so a broken POST /devices fails them too. */
   const groupsUsing = (route: DeviceRoute): string[] =>
     route === 'POST /devices'
-      ? ['cooks lifecycle ›', 'devices ›', 'temperatures ›']
+      ? ['cooks lifecycle ›', 'devices ›', 'temperatures ›', 'telemetry round-trip ›']
       : ['devices ›'];
 
   it.each(DEVICE_ROUTES)(
@@ -553,15 +704,20 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.failures[0]).toContain('missing x-meatgeek-request-charge header');
   });
 
+  /** HAR-44: the telemetry round-trip reads both temperatures routes too. */
+  const TEMPERATURE_GROUPS = ['FAIL temperatures ›', 'FAIL telemetry round-trip ›'];
+
   it.each(TEMPERATURE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',
     async route => {
       const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
       expect(result.exitCode).not.toBe(0);
-      expect(result.failures).toHaveLength(1);
-      expect(result.failures[0]).toContain(`${route} → 503`);
-      expect(result.failures[0]).toContain('temperatures ›');
+      expect(result.failures).toHaveLength(TEMPERATURE_GROUPS.length);
+      TEMPERATURE_GROUPS.forEach(group => {
+        const failure = result.failures.find(line => line.startsWith(group));
+        expect(failure).toContain(`${route} → 503`);
+      });
     }
   );
 
@@ -597,9 +753,12 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ omitChargeOn: route });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
-    expect(result.failures[0]).toContain(route);
-    expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    expect(result.failures).toHaveLength(TEMPERATURE_GROUPS.length);
+    TEMPERATURE_GROUPS.forEach(group => {
+      const failure = result.failures.find(line => line.startsWith(group));
+      expect(failure).toContain(route);
+      expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    });
   });
 
   it.each(USER_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
@@ -613,7 +772,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
   it('accepts the profile PUT as a create on the first run and a replace on the next', async () => {
     stub = await startStub();
-    const env = { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN };
+    const env = { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() };
     const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
     const lines: string[] = [];
     const second = await runAcceptance({
@@ -652,7 +811,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
     stub = await startStub();
     const lines: string[] = [];
     const result = await runAcceptance({
-      env: { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN },
+      env: { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() },
       write: line => lines.push(line),
       groups: [
         {
@@ -741,10 +900,168 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
   it('starts each run with a fresh synthetic device, so reruns never collide', async () => {
     stub = await startStub();
-    const env = { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN };
+    const env = { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() };
     const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
-    const second = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
+    const lines: string[] = [];
+    const second = await runAcceptance({
+      env,
+      write: line => lines.push(line),
+      runId: `r-${randomUUID()}`,
+    });
 
     expect([first.exitCode, second.exitCode]).toEqual([0, 0]);
+    // HAR-44: the standing simulated device is reused, not re-registered: the
+    // second run's POST is 409 and the GET that follows proves it is the caller's.
+    expect(lines.some(line => /^\s+POST\s+\/devices\s+409\s/.test(line))).toBe(true);
+    expect(lines.some(line => /^\s+GET\s+\/devices\/\{id\}\s+200\s/.test(line))).toBe(true);
+    expect(lines).toContain(
+      'PASS telemetry round-trip › POST /devices registers the simulated device to the caller'
+    );
+  });
+});
+
+describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)', () => {
+  const GROUP = 'telemetry round-trip ›';
+  const telemetryFailures = (result: Run) =>
+    result.failures.filter(line => line.startsWith(`FAIL ${GROUP}`));
+
+  it('(a) passes once the reading is readable after a few polls, and prints METRIC roundtrip-ms', async () => {
+    const result = await runAgainstStub({ simVisibleFromPoll: 4 });
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    for (const step of [
+      'POST /devices registers the simulated device to the caller',
+      'simdevice --count 1 sends one reading through IoT Hub',
+      'GET /temperatures/current/{deviceId} returns the sent reading',
+      'GET /temperatures/history holds the sent reading',
+    ]) {
+      expect(result.lines).toContain(`PASS ${GROUP} ${step}`);
+    }
+    const metrics = result.lines.filter(line => line.startsWith('METRIC '));
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatch(/^METRIC roundtrip-ms \d+$/);
+    expect(result.lines.some(line => /^\s+EXEC\s+simdevice --count 1\s+exit 0\s/.test(line))).toBe(
+      true
+    );
+
+    // A 404 NO_READINGS, then older readings, were polled past.
+    const current = stub!.requests.filter(
+      r => r.path === `/api/temperatures/current/${SIM_DEVICE}`
+    );
+    expect(current).toHaveLength(4);
+    // History was paged (two per page) until the sent reading turned up, from a
+    // window opening five minutes before the send.
+    const history = stub!.requests
+      .filter(r => r.path.startsWith(`/api/temperatures/history?deviceId=${SIM_DEVICE}&`))
+      .map(r => new URL(r.path, 'http://stub').searchParams);
+    expect(history.map(params => params.get('offset'))).toEqual([null, '2']);
+    const opened = Date.parse(history[0].get('startTime') ?? '');
+    expect(Date.now() - opened).toBeGreaterThanOrEqual(5 * 60 * 1000);
+    expect(Date.now() - opened).toBeLessThan(6 * 60 * 1000);
+    // Polls go through api.request, so they are in the RU table.
+    expect(summaryRow(result.output, 'GET /temperatures/current/{deviceId}')).toBeDefined();
+  });
+
+  it('(a) matches the sent timestamp as an instant: printed …33.120Z, served …33.12Z', async () => {
+    // simdevice prints three fractional digits; the payload (Go RFC3339Nano)
+    // and so the API drop trailing zeros.
+    const served = SIM_TIMESTAMP.replace('.120Z', '.12Z');
+    expect(served).not.toBe(SIM_TIMESTAMP);
+    const result = await runAgainstStub({ simServedTimestamp: served });
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    expect(result.lines).toContain(
+      `PASS ${GROUP} GET /temperatures/current/{deviceId} returns the sent reading`
+    );
+    expect(result.lines).toContain(
+      `PASS ${GROUP} GET /temperatures/history holds the sent reading`
+    );
+    expect(result.lines.filter(line => line.startsWith('METRIC roundtrip-ms '))).toHaveLength(1);
+  });
+
+  it('(b) fails naming the cap when the reading never appears', async () => {
+    const result = await runAgainstStub({ simNeverRouted: true });
+
+    expect(result.exitCode).not.toBe(0);
+    const failures = telemetryFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain('GET /temperatures/current/{deviceId} returns the sent reading');
+    expect(failures[0]).toContain(`within the ${ROUNDTRIP_POLL.capMs / 1000} s cap`);
+    expect(failures[0]).toContain('last status 200');
+    expect(failures[0]).toContain(`last timestamp seen "${OLDER_READINGS[2]}"`);
+    expect(result.output).toContain(
+      `SKIP ${GROUP} GET /temperatures/history holds the sent reading`
+    );
+    expect(result.output).not.toMatch(/^METRIC /m);
+  });
+
+  it('(c) fails with the exit code when simdevice exits 1', async () => {
+    const result = await runAgainstStub({}, 'exit1');
+
+    expect(result.exitCode).not.toBe(0);
+    const failures = telemetryFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain('simdevice → exit 1');
+    expect(failures[0]).toContain(
+      'simdevice exited 1, expected 0: send failed: connection refused'
+    );
+    // Only the first stderr line is reported.
+    expect(result.output).not.toContain('more detail');
+  });
+
+  it.each<FakeMode>(['leak-stderr', 'leak-stdout'])(
+    '(d) never prints the connection string or its key when simdevice prints them (%s)',
+    async mode => {
+      const result = await runAgainstStub({}, mode);
+
+      // The leak reached the failure path, and was masked there...
+      expect(result.exitCode).not.toBe(0);
+      expect(telemetryFailures(result)).toHaveLength(1);
+      expect(telemetryFailures(result)[0]).toContain('[redacted]');
+      // ...and nowhere in the output is the credential, its key, or its parts.
+      for (const text of [result.output, ...result.failures]) {
+        expect(text).not.toContain(SIM_CONNECTION_STRING);
+        expect(text).not.toContain(SIM_KEY);
+        expect(text).not.toContain('SharedAccessKey=');
+        expect(text).not.toContain(`DeviceId=${SIM_DEVICE};`);
+      }
+    }
+  );
+
+  it.each(['SIMDEVICE_CONNECTION_STRING', 'ACCEPTANCE_SIM_DEVICE_ID', 'ACCEPTANCE_SIMDEVICE_BIN'])(
+    '(e) fails at once naming %s when it is missing',
+    async name => {
+      stub = await startStub();
+      for (const value of [undefined, '  ']) {
+        const result = await run({
+          ACCEPTANCE_BASE_URL: stub.baseUrl,
+          ACCEPTANCE_BEARER_TOKEN: TOKEN,
+          ...simEnv(),
+          [name]: value,
+        });
+
+        expect(result.exitCode).toBe(2);
+        expect(result.failures).toEqual([
+          `acceptance: ${name} is not set; the live acceptance run needs it`,
+        ]);
+      }
+      // Nothing ran: no request, no simdevice.
+      expect(stub.requests).toHaveLength(0);
+    }
+  );
+
+  it('(f) fails when the simulated device is registered to someone else (409 then 404)', async () => {
+    const result = await runAgainstStub({ simOwnedByOther: true });
+
+    expect(result.exitCode).not.toBe(0);
+    const failures = telemetryFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain('POST /devices registers the simulated device to the caller');
+    expect(failures[0]).toContain('GET /devices/{id} → 404');
+    expect(failures[0]).toContain('not to the caller');
+    // simdevice was never run for someone else's device.
+    expect(result.output).not.toMatch(/^\s+EXEC\s/m);
   });
 });
