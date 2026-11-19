@@ -1,4 +1,4 @@
-import type { RegisterDeviceRequest } from '@meatgeekv2/api-interfaces';
+import type { RegisterDeviceRequest, TemperatureHistoryResponse } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { defineProofs } from '../lib/proof';
@@ -12,7 +12,10 @@ import { defineProofs } from '../lib/proof';
  *   1. register `acceptance-temp-<runId>` (run-unique id and name);
  *   2. its current reading is 404 NO_READINGS (owned, nothing routed);
  *   3. `acceptance-temp-unowned-<runId>`, never registered, is 404
- *      DEVICE_NOT_FOUND.
+ *      DEVICE_NOT_FOUND;
+ *   4. (HAR-35, MG-79 part 2) the new device's history is an empty first page
+ *      `{ readings: [], total: 0, offset: 0, limit: 100, hasMore: false }`;
+ *   5. the unowned device's history is 404 DEVICE_NOT_FOUND.
  *
  * Every step reaches Cosmos, so every response must carry its request charge
  * (the runner's default). Acceptance devices are not deleted: there is no delete
@@ -36,6 +39,13 @@ export default defineProofs('temperatures', () => {
       method: 'GET',
       path: `/temperatures/current/${encodeURIComponent(deviceId)}`,
       route: '/temperatures/current/{deviceId}',
+    });
+
+  const history = (api: AcceptanceApi, deviceId: string) =>
+    api.request<TemperatureHistoryResponse>({
+      method: 'GET',
+      path: `/temperatures/history?deviceId=${encodeURIComponent(deviceId)}`,
+      route: '/temperatures/history',
     });
 
   return [
@@ -66,6 +76,45 @@ export default defineProofs('temperatures', () => {
       name: 'GET /temperatures/current/{deviceId} is 404 DEVICE_NOT_FOUND for an unowned device',
       async run(api: AcceptanceApi) {
         const response = await current(api, `acceptance-temp-unowned-${api.runId}`);
+        api.expectStatus(response, 404);
+        expectErrorCode(api, response, 'DEVICE_NOT_FOUND');
+      },
+    },
+    {
+      name: 'GET /temperatures/history is an empty first page for the new device',
+      async run(api: AcceptanceApi) {
+        if (!registered) {
+          throw new Error('no device was registered by an earlier proof');
+        }
+        const response = await history(api, registered.deviceId);
+        api.expectStatus(response, 200);
+        const expected: TemperatureHistoryResponse = {
+          readings: [],
+          total: 0,
+          offset: 0,
+          limit: 100,
+          hasMore: false,
+        };
+        const body = response.body as unknown;
+        const matches =
+          body !== null &&
+          typeof body === 'object' &&
+          Object.keys(body).sort().join() === Object.keys(expected).sort().join() &&
+          Object.entries(expected).every(
+            ([key, value]) =>
+              JSON.stringify((body as Record<string, unknown>)[key]) === JSON.stringify(value)
+          );
+        api.check(
+          response,
+          matches,
+          `body is ${JSON.stringify(body)}, not ${JSON.stringify(expected)}`
+        );
+      },
+    },
+    {
+      name: 'GET /temperatures/history is 404 DEVICE_NOT_FOUND for an unowned device',
+      async run(api: AcceptanceApi) {
+        const response = await history(api, `acceptance-temp-unowned-${api.runId}`);
         api.expectStatus(response, 404);
         expectErrorCode(api, response, 'DEVICE_NOT_FOUND');
       },

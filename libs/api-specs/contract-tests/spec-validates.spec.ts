@@ -95,6 +95,29 @@ describe('OpenAPI spec — structural validation', () => {
       ((current?.parameters ?? []) as OpenAPIV3.ParameterObject[]).map(param => param.name)
     ).toEqual(['deviceId']);
 
+    // HAR-35 (MG-79 part 2): the history page is real, behind ownership.
+    const history = paths['/temperatures/history']?.get;
+    expect(history).toBeDefined();
+    expect(history?.operationId).toBe('getTemperatureHistory');
+    expect(history?.description ?? '').not.toMatch(/NOT YET IMPLEMENTED/);
+    expect(history?.description).toMatch(/iothub-enqueuedtime/);
+    expect(history?.description).toMatch(/ascending/);
+    expect(Object.keys(history?.responses ?? {}).sort()).toEqual([
+      '200',
+      '400',
+      '401',
+      '404',
+      '500',
+    ]);
+    const historyOk = history?.responses?.['200'] as OpenAPIV3.ResponseObject;
+    const historyMissing = history?.responses?.['404'] as OpenAPIV3.ResponseObject;
+    expect(historyOk.headers?.['x-meatgeek-request-charge']).toBeDefined();
+    expect(historyMissing.headers?.['x-meatgeek-request-charge']).toBeDefined();
+    expect(historyMissing.description).toMatch(/DEVICE_NOT_FOUND/);
+    expect(
+      ((history?.parameters ?? []) as OpenAPIV3.ParameterObject[]).map(param => param.name),
+    ).toEqual(['deviceId', 'cookId', 'startTime', 'endTime', 'limit', 'offset']);
+
     // HAR-27 (MG-81): the caller's profile, identity from the principal only.
     expect(paths['/users/me']?.get).toBeDefined();
     expect(paths['/users/me']?.put).toBeDefined();

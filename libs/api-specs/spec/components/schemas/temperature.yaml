@@ -63,8 +63,9 @@ TemperatureReading:
 TemperatureHistoryResponse:
   type: object
   description: |
-    Response for GET /temperatures/history. NOT YET IMPLEMENTED — see
-    paths/temperatures.yaml for the strict cookId tag-match contract.
+    Response for GET /temperatures/history (HAR-35). See
+    paths/temperatures.yaml for the strict cookId tag-match contract and the
+    enqueued-time window and ordering.
   required:
     - readings
     - total

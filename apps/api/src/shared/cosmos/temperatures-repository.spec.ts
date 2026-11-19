@@ -10,6 +10,8 @@ import {
 import {
   LATEST_READING_QUERY,
   TemperaturesRepository,
+  historyCountQuery,
+  historyPageQuery,
   toTemperatureReading,
 } from './temperatures-repository';
 
@@ -251,5 +253,180 @@ describe('TemperaturesRepository.getLatestReading', () => {
     await expect(
       new TemperaturesRepository(fake.asContainer()).getLatestReading(DEVICE)
     ).rejects.toMatchObject({ statusCode: 503 });
+  });
+});
+
+describe('TemperaturesRepository history queries (HAR-35)', () => {
+  const PREDICATE =
+    'c.deviceId = @deviceId AND c.SystemProperties["iothub-connection-device-id"] = @deviceId ' +
+    'AND IS_OBJECT(c.Body)';
+
+  function seeded() {
+    const fake = new FakeTemperaturesContainer();
+    // Three valid readings, out of insertion order.
+    fake.seed(routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T16:00:20.000Z' }));
+    fake.seed(
+      routedDocument({
+        deviceId: DEVICE,
+        enqueuedTime: '2026-08-14T16:00:00.000Z',
+        body: { deviceId: 'spoofed', timestamp: 'not-a-date', cookId: 'cook-1', grillTemp: 200 },
+      })
+    );
+    fake.seed(
+      routedDocument({
+        deviceId: DEVICE,
+        enqueuedTime: '2026-08-14T16:00:10.000Z',
+        body: { timestamp: '2026-08-14T16:00:09.500Z', cookId: 'cook-1', grillTemp: 210 },
+      })
+    );
+    // Excluded by the predicate: a foreign hub identity, and a non-object Body.
+    fake.seed(
+      routedDocument({
+        deviceId: DEVICE,
+        enqueuedTime: '2026-08-14T16:00:05.000Z',
+        systemDeviceId: 'intruder',
+      })
+    );
+    fake.seed(
+      routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T16:00:06.000Z', body: 'e30=' })
+    );
+    // Another partition.
+    fake.seed(routedDocument({ deviceId: 'grill-2', enqueuedTime: '2026-08-14T16:00:01.000Z' }));
+    return { fake, repository: new TemperaturesRepository(fake.asContainer()) };
+  }
+
+  it('the count query text, parameters and partitionKey', async () => {
+    const { fake, repository } = seeded();
+
+    await repository.countReadings({ deviceId: DEVICE });
+
+    expect(fake.queries).toHaveLength(1);
+    const [query] = fake.queries;
+    expect(query.query).toBe(`SELECT VALUE COUNT(1) FROM c WHERE ${PREDICATE}`);
+    expect(query.parameters).toEqual([{ name: '@deviceId', value: DEVICE }]);
+    expect(query.options['partitionKey']).toBe(DEVICE);
+    expect(query.options).not.toHaveProperty('enableCrossPartitionQuery');
+  });
+
+  it('the page query text, parameters and partitionKey, with every filter', async () => {
+    const { fake, repository } = seeded();
+    const filter = {
+      deviceId: DEVICE,
+      cookId: 'cook-1',
+      startTime: '2026-08-14T16:00:00.000Z',
+      endTime: '2026-08-14T17:00:00.000Z',
+    };
+
+    await repository.getReadingsPage(filter, 5, 50);
+
+    expect(fake.queries).toHaveLength(1);
+    const [query] = fake.queries;
+    const where =
+      `${PREDICATE} AND c.Body.cookId = @cookId ` +
+      'AND c.SystemProperties["iothub-enqueuedtime"] >= @startTime ' +
+      'AND c.SystemProperties["iothub-enqueuedtime"] < @endTime';
+    expect(query.query).toBe(
+      `SELECT * FROM c WHERE ${where} ` +
+        'ORDER BY c.SystemProperties["iothub-enqueuedtime"] ASC OFFSET @offset LIMIT @limit'
+    );
+    expect(query.parameters).toEqual([
+      { name: '@deviceId', value: DEVICE },
+      { name: '@cookId', value: 'cook-1' },
+      { name: '@startTime', value: '2026-08-14T16:00:00.000Z' },
+      { name: '@endTime', value: '2026-08-14T17:00:00.000Z' },
+      { name: '@offset', value: 5 },
+      { name: '@limit', value: 50 },
+    ]);
+    expect(query.options['partitionKey']).toBe(DEVICE);
+    expect(query.options).not.toHaveProperty('enableCrossPartitionQuery');
+    // The count runs over exactly the same predicate and parameters.
+    expect(historyCountQuery(filter)).toEqual({
+      query: `SELECT VALUE COUNT(1) FROM c WHERE ${where}`,
+      parameters: query.parameters.slice(0, 4),
+    });
+    expect(historyPageQuery(filter, 5, 50).query).toBe(query.query);
+  });
+
+  it('total excludes a foreign SystemProperties device id, a non-object Body and other partitions', async () => {
+    const { repository } = seeded();
+
+    expect(await repository.countReadings({ deviceId: DEVICE })).toEqual({
+      total: 3,
+      requestCharge: TEMPERATURES_QUERY_CHARGE,
+    });
+    expect((await repository.countReadings({ deviceId: DEVICE, cookId: 'cook-1' })).total).toBe(2);
+    expect((await repository.countReadings({ deviceId: 'nobody' })).total).toBe(0);
+  });
+
+  it('pages oldest enqueued time first, mapped, ignoring Body.deviceId, with no _ key', async () => {
+    const { repository } = seeded();
+
+    const page = await repository.getReadingsPage({ deviceId: DEVICE }, 0, 100);
+
+    expect(page).toEqual({
+      readings: [
+        // Body.timestamp does not parse: the enqueued time stands in.
+        {
+          deviceId: DEVICE,
+          timestamp: '2026-08-14T16:00:00.000Z',
+          cookId: 'cook-1',
+          grillTemp: 200,
+        },
+        {
+          deviceId: DEVICE,
+          timestamp: '2026-08-14T16:00:09.500Z',
+          cookId: 'cook-1',
+          grillTemp: 210,
+        },
+        { deviceId: DEVICE, timestamp: '2026-08-14T16:00:20.000Z', grillTemp: 225 },
+      ],
+      requestCharge: TEMPERATURES_QUERY_CHARGE,
+    });
+    for (const reading of page.readings) {
+      expect(Object.keys(reading).filter(key => key.startsWith('_'))).toEqual([]);
+    }
+    expect(JSON.stringify(page)).not.toContain('spoofed');
+    expect(JSON.stringify(page)).not.toContain('intruder');
+  });
+
+  it('applies offset and limit after ordering', async () => {
+    const { repository } = seeded();
+
+    const page = await repository.getReadingsPage({ deviceId: DEVICE }, 1, 1);
+
+    expect(page.readings.map(reading => reading.grillTemp)).toEqual([210]);
+  });
+
+  it('drops a document that still maps to null from the page', async () => {
+    const fake = new FakeTemperaturesContainer();
+    // Passes the predicate, but has no usable timestamp anywhere.
+    fake.seed(
+      routedDocument({
+        deviceId: DEVICE,
+        enqueuedTime: 'not-a-date',
+        body: { timestamp: 'also-not-a-date', grillTemp: 1 },
+      })
+    );
+    fake.seed(routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T16:00:00.000Z' }));
+    const repository = new TemperaturesRepository(fake.asContainer());
+
+    expect((await repository.countReadings({ deviceId: DEVICE })).total).toBe(2);
+    const page = await repository.getReadingsPage({ deviceId: DEVICE }, 0, 100);
+    expect(page.readings).toEqual([
+      { deviceId: DEVICE, timestamp: '2026-08-14T16:00:00.000Z', grillTemp: 225 },
+    ]);
+  });
+
+  it('lets a Cosmos failure propagate from either query', async () => {
+    const fake = new FakeTemperaturesContainer();
+    const repository = new TemperaturesRepository(fake.asContainer());
+    fake.failNext(503);
+    await expect(repository.countReadings({ deviceId: DEVICE })).rejects.toMatchObject({
+      statusCode: 503,
+    });
+    fake.failNext(429);
+    await expect(repository.getReadingsPage({ deviceId: DEVICE }, 0, 1)).rejects.toMatchObject({
+      statusCode: 429,
+    });
   });
 });

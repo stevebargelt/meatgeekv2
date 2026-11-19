@@ -21,9 +21,10 @@ info:
 
     ## Source-of-truth note
 
-    Routes for the eleven currently-implemented HTTP endpoints
+    Routes for the twelve currently-implemented HTTP endpoints
     (GET /cooks, POST /cooks, POST /cooks/{cookId}/stop,
     POST /negotiate, GET /temperatures/current/{deviceId},
+    GET /temperatures/history,
     GET /devices, POST /devices, GET /devices/{id},
     PATCH /devices/{id}, GET /users/me, PUT /users/me) match `apps/api/src/main.ts` route templates
     character-for-character — these are the contract. Endpoints whose

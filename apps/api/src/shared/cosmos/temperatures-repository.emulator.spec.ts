@@ -8,6 +8,11 @@
  * c.SystemProperties["iothub-enqueuedtime"] DESC`, reports a real request charge,
  * and returns documents with the system properties the mapping must strip.
  *
+ * HAR-35 (MG-79 part 2) adds the history count and page queries: the real
+ * engine evaluates the predicate (hub identity, `IS_OBJECT(c.Body)`, strict
+ * `Body.cookId`), the string window on `iothub-enqueuedtime`, the ascending
+ * ORDER BY and parameterised `OFFSET @offset LIMIT @limit`.
+ *
  * Run it with `npx nx run api:test-emulator` (jest.emulator.config.ts). It is
  * excluded from `nx test api`. An unreachable emulator FAILS every case; it never
  * skips. See cooks-repository.emulator.spec.ts and docs/development/ci-cd.md for
@@ -311,5 +316,129 @@ describe('HAR-28 temperatures repository against the Cosmos emulator', () => {
     const junk = await repository.getLatestReading(deviceId);
     expect(junk.status).toBe('none');
     expectPositiveCharge(junk.requestCharge);
+  });
+
+  describe('HAR-35 history (count and page)', () => {
+    const deviceId = `emu-hist-${randomUUID()}`;
+    const neighbour = `emu-hist-${randomUUID()}`;
+    const at = (seconds: number) => new Date(Date.UTC(2026, 7, 14, 16, 0, seconds)).toISOString();
+
+    beforeAll(async () => {
+      const documents: RoutedDocument[] = [
+        // Five valid readings, seeded out of order; 0, 20 and 40 carry cook-a.
+        ...[30, 0, 40, 10, 20].map(seconds =>
+          routed({
+            partitionDeviceId: deviceId,
+            enqueuedTime: at(seconds),
+            body: {
+              // A Body.deviceId naming another device is ignored.
+              deviceId: seconds === 10 ? 'spoofed-device' : deviceId,
+              timestamp: at(seconds),
+              grillTemp: 200 + seconds,
+              ...(seconds % 20 === 0 ? { cookId: 'cook-a' } : {}),
+            },
+          })
+        ),
+        // A cookId that only shares a prefix: not a match for cook-a.
+        routed({
+          partitionDeviceId: deviceId,
+          enqueuedTime: at(25),
+          body: { deviceId, timestamp: at(25), grillTemp: 225, cookId: 'cook-ab' },
+        }),
+        // Excluded: a foreign hub identity in this partition.
+        routed({
+          partitionDeviceId: deviceId,
+          hubDeviceId: neighbour,
+          enqueuedTime: at(15),
+          body: { deviceId, timestamp: at(15), grillTemp: 999, cookId: 'cook-a' },
+        }),
+        // Excluded: a non-object Body.
+        routed({
+          partitionDeviceId: deviceId,
+          enqueuedTime: at(35),
+          body: 'eyJncmlsbFRlbXAiOjk5OX0=',
+        }),
+        // Another partition, inside every window: never read.
+        ...[5, 12, 22].map(seconds =>
+          routed({
+            partitionDeviceId: neighbour,
+            enqueuedTime: at(seconds),
+            body: { deviceId: neighbour, timestamp: at(seconds), grillTemp: 300, cookId: 'cook-a' },
+          })
+        ),
+      ];
+      for (const document of documents) {
+        await container.items.create(document);
+      }
+    });
+
+    async function history(
+      filter: { cookId?: string; startTime?: string; endTime?: string },
+      offset = 0,
+      limit = 100
+    ) {
+      const full = { deviceId, ...filter };
+      const count = await repository.countReadings(full);
+      const page = await repository.getReadingsPage(full, offset, limit);
+      expectPositiveCharge(count.requestCharge);
+      expectPositiveCharge(page.requestCharge);
+      for (const reading of page.readings) {
+        expect(reading.deviceId).toBe(deviceId);
+        expect(systemKeys(reading)).toEqual([]);
+        for (const key of ['SystemProperties', 'Properties', 'iothub_name', 'id', 'Body']) {
+          expect(reading).not.toHaveProperty(key);
+        }
+      }
+      return { total: count.total, temps: page.readings.map(reading => reading.grillTemp) };
+    }
+
+    it('counts and returns every valid reading oldest first, excluding foreign identities, non-object bodies and the other partition', async () => {
+      expect(await history({})).toEqual({ total: 6, temps: [200, 210, 220, 225, 230, 240] });
+    });
+
+    it('bounds the window on enqueued time: start inclusive, end exclusive', async () => {
+      expect(await history({ startTime: at(10), endTime: at(30) })).toEqual({
+        total: 3,
+        temps: [210, 220, 225],
+      });
+      expect(await history({ startTime: at(30) })).toEqual({ total: 2, temps: [230, 240] });
+      expect(await history({ endTime: at(10) })).toEqual({ total: 1, temps: [200] });
+    });
+
+    it('matches cookId strictly', async () => {
+      expect(await history({ cookId: 'cook-a' })).toEqual({ total: 3, temps: [200, 220, 240] });
+      expect(await history({ cookId: 'cook-ab' })).toEqual({ total: 1, temps: [225] });
+      expect(await history({ cookId: 'cook' })).toEqual({ total: 0, temps: [] });
+      expect(await history({ cookId: 'cook-a', startTime: at(10), endTime: at(40) })).toEqual({
+        total: 1,
+        temps: [220],
+      });
+    });
+
+    it('pages with OFFSET and LIMIT, total unchanged', async () => {
+      expect(await history({}, 0, 2)).toEqual({ total: 6, temps: [200, 210] });
+      expect(await history({}, 2, 2)).toEqual({ total: 6, temps: [220, 225] });
+      expect(await history({}, 4, 2)).toEqual({ total: 6, temps: [230, 240] });
+      expect(await history({}, 6, 2)).toEqual({ total: 6, temps: [] });
+    });
+
+    it('never reads the other partition', async () => {
+      const other = { deviceId: neighbour };
+      const count = await repository.countReadings(other);
+      const page = await repository.getReadingsPage(other, 0, 100);
+      expect(count.total).toBe(3);
+      expect(page.readings.map(reading => reading.grillTemp)).toEqual([300, 300, 300]);
+      expect(page.readings.every(reading => reading.deviceId === neighbour)).toBe(true);
+    });
+
+    it('is an empty page with a real charge for a device with no documents', async () => {
+      const empty = { deviceId: `emu-hist-${randomUUID()}` };
+      const count = await repository.countReadings(empty);
+      const page = await repository.getReadingsPage(empty, 0, 100);
+      expect(count.total).toBe(0);
+      expect(page.readings).toEqual([]);
+      expectPositiveCharge(count.requestCharge);
+      expectPositiveCharge(page.requestCharge);
+    });
   });
 });

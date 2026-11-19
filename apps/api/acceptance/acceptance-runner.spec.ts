@@ -15,7 +15,7 @@ const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 
 type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
-type TemperatureRoute = 'GET /temperatures/current/{deviceId}';
+type TemperatureRoute = 'GET /temperatures/current/{deviceId}' | 'GET /temperatures/history';
 type UserRoute = 'PUT /users/me' | 'GET /users/me';
 type StubRoute = CookRoute | DeviceRoute | TemperatureRoute | UserRoute;
 
@@ -26,6 +26,8 @@ interface StubOptions {
   readonly omitChargeOn?: StubRoute;
   /** Answer every GET /temperatures/current with a 404 carrying this code. */
   readonly temperatureErrorCode?: string;
+  /** Answer GET /temperatures/history for an owned device with this `total`. */
+  readonly historyTotal?: number;
   /** Echo the caller's Authorization header back in bodies and headers. */
   readonly echoAuthorization?: boolean;
   /** Start cooks on any device, registered or not (the pre-HAR-26 behaviour). */
@@ -69,6 +71,7 @@ const RU: Record<StubRoute, string> = {
   'GET /devices/{id}': '1',
   'PATCH /devices/{id}': '11.9',
   'GET /temperatures/current/{deviceId}': '3.86',
+  'GET /temperatures/history': '7.71',
   'PUT /users/me': '14.21',
   'GET /users/me': '3.62',
 };
@@ -134,6 +137,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'PATCH' && deviceMatch) route = 'PATCH /devices/{id}';
       else if (request.method === 'GET' && temperatureMatch)
         route = 'GET /temperatures/current/{deviceId}';
+      else if (request.method === 'GET' && url.pathname === '/api/temperatures/history')
+        route = 'GET /temperatures/history';
       else if (request.method === 'PUT' && url.pathname === '/api/users/me')
         route = 'PUT /users/me';
       else if (request.method === 'GET' && url.pathname === '/api/users/me')
@@ -184,6 +189,18 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         const owned = devices.has(decodeURIComponent(temperatureMatch![1]));
         const code = owned ? 'NO_READINGS' : 'DEVICE_NOT_FOUND';
         send(404, { error: options.temperatureErrorCode ?? code }, route);
+      } else if (route === 'GET /temperatures/history') {
+        // An owned device has an empty first page; anything else is not found.
+        const deviceId = url.searchParams.get('deviceId') ?? '';
+        if (!devices.has(deviceId)) {
+          send(404, { error: 'DEVICE_NOT_FOUND' }, route);
+          return;
+        }
+        send(
+          200,
+          { readings: [], total: options.historyTotal ?? 0, offset: 0, limit: 100, hasMore: false },
+          route
+        );
       } else if (route === 'GET /devices') {
         send(200, { devices: [...devices.values()] }, route);
       } else if (route === 'POST /devices') {
@@ -317,7 +334,10 @@ const DEVICE_ROUTES: DeviceRoute[] = [
   'GET /devices',
   'PATCH /devices/{id}',
 ];
-const TEMPERATURE_ROUTES: TemperatureRoute[] = ['GET /temperatures/current/{deviceId}'];
+const TEMPERATURE_ROUTES: TemperatureRoute[] = [
+  'GET /temperatures/current/{deviceId}',
+  'GET /temperatures/history',
+];
 const USER_ROUTES: UserRoute[] = ['PUT /users/me', 'GET /users/me'];
 
 describe('live acceptance runner (against an in-process stub)', () => {
@@ -437,6 +457,16 @@ describe('live acceptance runner (against an in-process stub)', () => {
       expect(result.failures[0]).toContain(`body.error is "${answered}", not ${expected}`);
     }
   );
+
+  it('(b) exits non-zero when GET /temperatures/history is not an empty first page', async () => {
+    const result = await runAgainstStub({ historyTotal: 1 });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain('FAIL temperatures ›');
+    expect(result.failures[0]).toContain('GET /temperatures/history → 200');
+    expect(result.failures[0]).toContain('"total":1');
+  });
 
   it.each(TEMPERATURE_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
     const result = await runAgainstStub({ omitChargeOn: route });

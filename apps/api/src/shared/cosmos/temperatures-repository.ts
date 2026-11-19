@@ -1,4 +1,5 @@
 import type { Container } from '@azure/cosmos';
+import type { SqlParameter } from '@azure/cosmos';
 import type { TemperatureReading } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
@@ -53,6 +54,75 @@ export const LATEST_READING_CANDIDATES = 10;
 export const LATEST_READING_QUERY =
   `SELECT TOP ${LATEST_READING_CANDIDATES} * FROM c WHERE c.deviceId = @deviceId ` +
   `ORDER BY c.SystemProperties["${ENQUEUED_TIME}"] DESC`;
+
+/**
+ * HAR-35 (MG-79 part 2) — what a history page is filtered on. `startTime` and
+ * `endTime` must already be normalised with `new Date(x).toISOString()` (UTC,
+ * millisecond precision), the form IoT Hub stamps `iothub-enqueuedtime` in, so
+ * the string comparison in the query is a time comparison.
+ */
+export interface TemperatureHistoryFilter {
+  readonly deviceId: string;
+  /** Strict tag match on `Body.cookId`; not a time window. */
+  readonly cookId?: string;
+  /** Inclusive lower bound on `iothub-enqueuedtime`. */
+  readonly startTime?: string;
+  /** Exclusive upper bound on `iothub-enqueuedtime`. */
+  readonly endTime?: string;
+}
+
+/**
+ * The WHERE clause shared by the history count and page queries, so `total`
+ * and the page agree. It carries everything SQL can express of
+ * {@link toTemperatureReading}'s exclusion rules: the hub identity must be the
+ * partition's device, and `Body` must be a JSON object. The window is on the
+ * hub-stamped enqueued time, never the device-supplied `Body.timestamp`.
+ */
+export function historyPredicate(filter: TemperatureHistoryFilter): {
+  readonly where: string;
+  readonly parameters: SqlParameter[];
+} {
+  const clauses = [
+    'c.deviceId = @deviceId',
+    `c.SystemProperties["${CONNECTION_DEVICE_ID}"] = @deviceId`,
+    'IS_OBJECT(c.Body)',
+  ];
+  const parameters: SqlParameter[] = [{ name: '@deviceId', value: filter.deviceId }];
+  if (filter.cookId !== undefined) {
+    clauses.push('c.Body.cookId = @cookId');
+    parameters.push({ name: '@cookId', value: filter.cookId });
+  }
+  if (filter.startTime !== undefined) {
+    clauses.push(`c.SystemProperties["${ENQUEUED_TIME}"] >= @startTime`);
+    parameters.push({ name: '@startTime', value: filter.startTime });
+  }
+  if (filter.endTime !== undefined) {
+    clauses.push(`c.SystemProperties["${ENQUEUED_TIME}"] < @endTime`);
+    parameters.push({ name: '@endTime', value: filter.endTime });
+  }
+  return { where: clauses.join(' AND '), parameters };
+}
+
+/** `SELECT VALUE COUNT(1)` over the history predicate. */
+export function historyCountQuery(filter: TemperatureHistoryFilter) {
+  const { where, parameters } = historyPredicate(filter);
+  return { query: `SELECT VALUE COUNT(1) FROM c WHERE ${where}`, parameters };
+}
+
+/** One page over the history predicate, oldest enqueued time first. */
+export function historyPageQuery(filter: TemperatureHistoryFilter, offset: number, limit: number) {
+  const { where, parameters } = historyPredicate(filter);
+  return {
+    query:
+      `SELECT * FROM c WHERE ${where} ` +
+      `ORDER BY c.SystemProperties["${ENQUEUED_TIME}"] ASC OFFSET @offset LIMIT @limit`,
+    parameters: [
+      ...parameters,
+      { name: '@offset', value: offset },
+      { name: '@limit', value: limit },
+    ],
+  };
+}
 
 type JsonObject = Record<string, unknown>;
 
@@ -134,6 +204,18 @@ export type LatestReading =
     }
   | { readonly status: 'none'; readonly requestCharge: number };
 
+/** How many documents match a history filter, with the RU the count cost. */
+export interface HistoryCount {
+  readonly total: number;
+  readonly requestCharge: number;
+}
+
+/** One page of history readings, with the RU the page query cost. */
+export interface HistoryPage {
+  readonly readings: TemperatureReading[];
+  readonly requestCharge: number;
+}
+
 export class TemperaturesRepository {
   /**
    * @param container the temperatures container from the shared adapter
@@ -167,6 +249,53 @@ export class TemperaturesRepository {
       }
     }
     return { status: 'none', requestCharge };
+  }
+
+  /**
+   * HAR-35 — how many documents in `filter.deviceId`'s partition match the
+   * history predicate ({@link historyCountQuery}). One single-partition query.
+   *
+   * Callers must have checked that the caller owns the device first.
+   */
+  async countReadings(filter: TemperatureHistoryFilter): Promise<HistoryCount> {
+    const response = await this.container.items
+      .query<number>(historyCountQuery(filter), { partitionKey: filter.deviceId })
+      .fetchAll();
+    const [total] = response.resources;
+    return {
+      total: typeof total === 'number' && Number.isFinite(total) ? total : 0,
+      requestCharge: response.requestCharge,
+    };
+  }
+
+  /**
+   * HAR-35 — one page of the history predicate ({@link historyPageQuery}),
+   * oldest enqueued time first, each document through
+   * {@link toTemperatureReading}. A document that still maps to `null` is
+   * dropped from the page (it stays in {@link countReadings}' total). One
+   * single-partition query; never cross-partition.
+   *
+   * Callers must have checked that the caller owns the device first.
+   */
+  async getReadingsPage(
+    filter: TemperatureHistoryFilter,
+    offset: number,
+    limit: number
+  ): Promise<HistoryPage> {
+    const response = await this.container.items
+      .query<JsonObject>(historyPageQuery(filter, offset, limit), {
+        partitionKey: filter.deviceId,
+        maxItemCount: limit,
+      })
+      .fetchAll();
+    const readings: TemperatureReading[] = [];
+    for (const document of response.resources) {
+      const reading = toTemperatureReading(document, filter.deviceId);
+      if (reading) {
+        readings.push(reading);
+      }
+    }
+    return { readings, requestCharge: response.requestCharge };
   }
 }
 
