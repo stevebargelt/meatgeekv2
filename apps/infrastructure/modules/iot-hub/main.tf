@@ -44,6 +44,8 @@ terraform {
 #   azurerm_iothub_route.eventhub              -> ..._endpoint_eventhub.eventhub_realtime (endpoint_names)
 #   azurerm_iothub_consumer_group.functions    -> iothub.main              (iothub_name)
 #   azurerm_iothub_consumer_group.realtime     -> iothub.main              (iothub_name)
+#   azurerm_eventhub_consumer_group.api_broadcast -> eventhub_namespace.main (namespace_name)
+#   azurerm_eventhub_consumer_group.api_broadcast -> eventhub.temperature_data (eventhub_name)
 #
 # COMPUTED references — these carry replacement natively. No lifecycle block is
 # needed and adding one would be noise, not safety:
@@ -180,6 +182,34 @@ resource "azurerm_eventhub" "temperature_data" {
   # bound to it, dropping the live telemetry path for no reason.
   lifecycle {
     replace_triggered_by = [azurerm_eventhub_namespace.main.id]
+  }
+}
+
+# The API's own reader on the temperature-data Event Hub (HAR-56, goal HAR-55).
+# The Function App's Event Hub trigger pushes each live reading to SignalR from
+# this group, so its checkpoints never compete with any other reader on
+# `$Default`. This is an Event Hubs consumer group on the routed Event Hub, NOT
+# an azurerm_iothub_consumer_group on the hub's built-in `events` endpoint. Read
+# access is the Function App identity's existing Azure Event Hubs Data Receiver
+# grant on the namespace, so it needs no new role.
+resource "azurerm_eventhub_consumer_group" "api_broadcast" {
+  name                = "api-broadcast"
+  namespace_name      = azurerm_eventhub_namespace.main.name
+  eventhub_name       = azurerm_eventhub.temperature_data.name
+  resource_group_name = var.resource_group_name
+
+  # NOT redundant with the name references above — do not delete this. Both
+  # parents are reached by their CONFIGURED names, which are identical before and
+  # after a replacement, so the references order this consumer group but never
+  # plan it for replacement. Azure destroys it with its Event Hub regardless, and
+  # state would then list a consumer group that does not exist (MG-48). The
+  # triggers name each parent's `.id` so an in-place parent update (a tag, a
+  # throughput-unit scale) does not recreate it and reset its checkpoints.
+  lifecycle {
+    replace_triggered_by = [
+      azurerm_eventhub_namespace.main.id,
+      azurerm_eventhub.temperature_data.id,
+    ]
   }
 }
 

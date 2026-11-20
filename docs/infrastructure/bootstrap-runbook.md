@@ -599,6 +599,28 @@ assignment create.
 and `dev.tfvars` sets `simulated_device_id = "meatgeek-dev-simulated-smoker"`, so
 the dev grant is on. Prod still does not set it.
 
+### API device-twin writer grant — re-run bootstrap BEFORE setting `api_device_twin_writer_enabled` (HAR-56)
+
+`main.tf` declares `azurerm_role_assignment.functions_iothub_twin_contributor`:
+`IoT Hub Twin Contributor` for the Function App's system-assigned identity,
+scoped to the IoT Hub alone. The API writes the active cook into device twin
+desired properties under that identity, at the host published as
+`IOTHUB_SERVICE_HOSTNAME`. The grant is `count`-guarded on the bool
+`api_device_twin_writer_enabled`, which defaults to `false` and is set in
+neither tfvars. It shipped **off** in HAR-56.
+
+`IoT Hub Twin Contributor` is in
+[`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)
+with GUID `PENDING`. As with the simulated device grant above, in this order:
+
+1. Re-run `./bootstrap.sh` as the operator. It resolves the role's GUID live and
+   reconciles the condition in place. Commit the resolved allowlist it prints.
+2. Only then set `api_device_twin_writer_enabled = true` in
+   `environments/dev.tfvars`.
+
+Setting it before step 1 makes every `Apply Dev Infrastructure` run on `main`
+fail with `AuthorizationFailed` on the role assignment create.
+
 ### Dev app / API authentication registration (item 3)
 
 To unblock the MG-21 **authenticated** smoke test, the bootstrap also provisions

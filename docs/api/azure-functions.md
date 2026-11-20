@@ -423,6 +423,13 @@ These are exactly the settings Terraform configures on the Function App:
 # Flex Consumption sites"). WEBSITE_NODE_DEFAULT_VERSION is likewise Flex-deprecated
 # and not set (MG-24).
 
+# Host storage — identity-based, account-name form (MG-58). A NAME, not a
+# credential: the host resolves it with the managed identity, so it works with
+# allowSharedKeyAccess=false. The scalar AzureWebJobsStorage connection string is
+# deliberately ABSENT (the host reads it before this form, and with shared keys
+# disabled it kills host storage); the module tests assert both.
+AzureWebJobsStorage__accountName=<functions-storage-account-name>
+
 # Application Insights — identity-based (AAD) telemetry ingestion. The managed
 # identity holds "Monitoring Metrics Publisher" on the App Insights resource and
 # the host authenticates with an AAD token (APPLICATIONINSIGHTS_AUTHENTICATION_STRING,
@@ -479,6 +486,20 @@ COSMOSDB_RECIPES_CONTAINER_NAME=<cosmos-recipes-container-name>
 # fully-qualified namespace only; the managed identity holds Azure Event Hubs
 # Data Receiver.
 IOTHUB_EVENTS__fullyQualifiedNamespace=<iot-eventhub-namespace-fqdn>
+
+# The API's own consumer group on the temperature-data Event Hub (HAR-56), for
+# the live-reading broadcast trigger. A non-secret name, Terraform-owned
+# (module.iot_hub.temperature_broadcast_consumer_group_name, "api-broadcast").
+# The trigger connects through the IOTHUB_EVENTS__ prefix above, so there is no
+# second Event Hub setting. No app code reads it yet (HAR-55).
+TEMPERATURE_BROADCAST_CONSUMER_GROUP=api-broadcast
+
+# IoT Hub service hostname (HAR-56), where the API will write device twin
+# desired properties under its managed identity. Non-secret, Terraform-owned
+# (module.iot_hub.hostname). No app code reads it yet (HAR-55). The identity's
+# IoT Hub Twin Contributor grant ships OFF (api_device_twin_writer_enabled =
+# false) until bootstrap.sh is re-run, so twin writes fail until it is switched on.
+IOTHUB_SERVICE_HOSTNAME=<iot-hub-hostname>
 
 # SignalR — identity-based. NON-SECRET service URI only; the managed identity
 # holds SignalR Service Owner.

@@ -41,7 +41,7 @@ an outcome is exactly how a security control ends up decorative.
 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) → `validate-infrastructure`                | The **only** infrastructure job reachable from a pull request, and it is **CREDENTIALLESS**: `permissions: contents: read` only (no `id-token: write`), no `environment:`, no `azure/login`, no client/subscription id, and an `env:` block pinning `ARM_USE_OIDC` / `ARM_USE_CLI` / `ARM_USE_MSI` / `ARM_USE_AKS_WORKLOAD_IDENTITY` to `'false'`. Runs `assert-credentialless.sh` → `terraform fmt -check -recursive` → `terraform init -backend=false -input=false -lockfile=readonly` → `terraform validate` → `terraform test` (root) → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard fixtures → per-module `terraform test` (`modules/functions`, `modules/iot-hub`, `modules/monitoring`) → OTel config validate. It never reaches `tfstate-dev`.       |
 | [`.github/workflows/infra-apply-dev.yml`](../../.github/workflows/infra-apply-dev.yml)                  | The automatic post-merge apply: checkout the exact CI'd SHA → OIDC login → non-interactive `init` → `plan -out` → secret gate → destroy circuit-breaker → apply **that saved plan** → post-apply state gate (**always-run, not success-gated** — see [§9.4](#94-reading-a-failed-or-partial-apply)) → final drift plan that **fails on drift**.                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | [`bootstrap.sh`](../../apps/infrastructure/bootstrap/bootstrap.sh) → `bootstrap_infra_apply_identity()` | Creates the dev infra-apply SP: RG-scoped Contributor, **conditioned** RBAC Administrator, container-scoped state role. OIDC only, no secret.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| [`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)    | Single source of truth for the 9 Terraform-managed role definitions. Read by bootstrap (to build the condition) **and** by CI check 13 (to diff against the graph).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| [`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)    | Single source of truth for the 10 Terraform-managed role definitions. Read by bootstrap (to build the condition) **and** by CI check 13 (to diff against the graph).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | [`tf-plan-secret-inspection.sh`](../../apps/infrastructure/scripts/tf-plan-secret-inspection.sh)        | Fail-closed credential-value gate. Now an **executed** gate in both workflows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | [`tf-plan-destroy-guard.sh`](../../apps/infrastructure/scripts/tf-plan-destroy-guard.sh)                | Fail-closed destructive-change circuit-breaker. Fails on **any** `delete` (including replacements, and each _deposed_ object individually) and any `forget` (a `removed { destroy = false }` block, which orphans a live resource out of Terraform management) — unless `TF_DESTROY_GUARD_AUTHORIZED_CHANGES` names the exact SET of **action-qualified tokens** reviewed. A count is not an authorization (the same count is met by a different set), and neither is a bare address (`delete:X` and `forget:X` are different decisions). An action verb **outside the modeled set** (`no-op`, `create`, `read`, `update`, `delete`, `forget`) also fails — and is **not** clearable by any override, in either direction; see [§12](#the-recovery-path-workflow_dispatch). |
 | [`modules/monitoring`](../../apps/infrastructure/modules/monitoring/main.tf) activity-log alerts        | Detective controls on `roleAssignments/write`, `userAssignedIdentities/write`, `sqlRoleAssignments/write`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -989,7 +989,7 @@ grep -i 'principalType' /tmp/tf.log           # do NOT print the whole log: it c
 ```
 
 - **Branch A — `principalType` IS present:** nothing to do; the clause is live.
-  Keep the explicit `principal_type = "ServicePrincipal"` on all 10
+  Keep the explicit `principal_type = "ServicePrincipal"` on all 11
   `azurerm_role_assignment` resources anyway — it makes the behaviour a property
   of _our_ configuration rather than of a provider version.
 - **Branch B — it is ABSENT:** the remedy is the explicit
@@ -1032,7 +1032,7 @@ The allowlist holds bare GUIDs; the provider may send
 
 Run **T1**.
 
-- **Branch A — T1 permits all 9 roles:** `GuidEquals` extracts the GUID from the
+- **Branch A — T1 permits all 10 roles:** `GuidEquals` extracts the GUID from the
   path. Done.
 - **Branch B — T1 is denied with `AuthorizationFailed`/condition-not-satisfied
   on every role:** the condition **fails shut**, which is the correct direction
@@ -1772,7 +1772,7 @@ t_ready && echo "preflight OK: sub=$SUB sp=$APPLY_SP_OBJECT_ID"
 
 | ID  | Proves                                                       | Expected                                    |
 | --- | ------------------------------------------------------------ | ------------------------------------------- |
-| T1  | All 9 allowlisted roles can be granted **via Terraform**     | PERMIT                                      |
+| T1  | All 10 allowlisted roles can be granted **via Terraform**    | PERMIT                                      |
 | T2  | Privileged roles cannot be granted at the dev RG             | REJECT                                      |
 | T3  | A declared-`ServicePrincipal` grant to a real **user** (B2)  | REJECT (or documented residual)             |
 | T4  | Delete is constrained by the same allowlist                  | REJECT non-allowlisted / PERMIT allowlisted |
@@ -1780,7 +1780,7 @@ t_ready && echo "preflight OK: sub=$SUB sp=$APPLY_SP_OBJECT_ID"
 | T6  | Allowlist changes actually reconcile the live condition      | Condition CHANGES                           |
 | T7  | Scope reality check — an allowlisted role at RG scope        | PERMIT (accepted, documented)               |
 
-### T1 — PERMIT all 9 allowlisted roles, via Terraform
+### T1 — PERMIT all 10 allowlisted roles, via Terraform
 
 ```hcl
 # /tmp/mg23-acceptance/main.tf
@@ -1803,6 +1803,7 @@ locals {
     "Storage Blob Data Contributor",
     "Azure Event Hubs Data Sender",
     "IoT Hub Registry Contributor",
+    "IoT Hub Twin Contributor",
   ]
 }
 
@@ -1825,7 +1826,7 @@ if t_ready; then
 fi
 ```
 
-- **Expected:** all 9 assignments created.
+- **Expected:** all 10 assignments created.
 - **False green to watch for:** running this with `az role assignment create`
   instead of Terraform. `az` always sends `principalType`; the provider may not
   (B1). An `az`-based pass tells you nothing about whether the real apply works.
@@ -1833,7 +1834,7 @@ fi
   failure on **every** role points at B3 (GUID vs path); failure on **one** role
   points at a wrong GUID for that row of the allowlist.
 
-Keep the 9 assignments in place — T4 consumes them.
+Keep the 10 assignments in place — T4 consumes them.
 
 ### T2 — REJECT the privileged roles at the dev RG
 
@@ -2014,7 +2015,7 @@ fi
 
 Then run T1's Terraform again to restore the `Azure Event Hubs Data Sender`
 assignment deleted in T4b, and finally `terraform destroy` the scratch config to
-clean up all 9.
+clean up all 10.
 
 ### T6 — Allowlist reconcile regression (the frozen-condition bug)
 
@@ -2051,7 +2052,7 @@ elif [ -z "$REPO_ROOT" ] || [ ! -f "$ALLOWLIST" ]; then
 # bootstrap run reconciles the live condition to it. The log reads as a clean
 # revert while the apply identity is left permanently widened.
 elif ! git diff --quiet HEAD -- "$ALLOWLIST"; then
-  echo "REFUSING: $ALLOWLIST differs from HEAD — staged, unstaged, or both. T6 reverts it to the COMMITTED content with 'git checkout HEAD --', which would discard those changes, and it can only claim to restore the 9-role baseline if the baseline IS what is committed. Commit or stash first." >&2
+  echo "REFUSING: $ALLOWLIST differs from HEAD — staged, unstaged, or both. T6 reverts it to the COMMITTED content with 'git checkout HEAD --', which would discard those changes, and it can only claim to restore the 10-role baseline if the baseline IS what is committed. Commit or stash first." >&2
 else
   # Capture BOTH the condition and the assignment ID. The id is what proves the
   # reconcile was IN PLACE rather than a delete+recreate.
@@ -2068,7 +2069,7 @@ else
   if [ -z "$BEFORE" ] || [ -z "$BEFORE_ID" ]; then
     echo "REFUSING: no baseline condition/id captured — T6 would report PASS against an empty BEFORE. Fix the read first; the allowlist is untouched." >&2
   elif ! printf 'Monitoring Reader\tPENDING\n' >> "$ALLOWLIST"; then
-    echo "REFUSING: could not append the temporary 10th role to $ALLOWLIST — nothing was changed and no bootstrap ran." >&2
+    echo "REFUSING: could not append the temporary 11th role to $ALLOWLIST — nothing was changed and no bootstrap ran." >&2
   else
     # THE FLAG IS SET HERE, before the run and not after it: from the moment the
     # file changed, the revert below is mandatory whatever bootstrap does. It is
@@ -2081,7 +2082,7 @@ else
     t6_boot_rc=$?
 
     if [ "$t6_boot_rc" -ne 0 ]; then
-      echo "STOP: bootstrap exited $t6_boot_rc with the 10th role in the allowlist — T6 is NOT evaluated (the condition may be partly written). The revert below still runs, because the file was changed." >&2
+      echo "STOP: bootstrap exited $t6_boot_rc with the 11th role in the allowlist — T6 is NOT evaluated (the condition may be partly written). The revert below still runs, because the file was changed." >&2
     else
       AFTER="$(az role assignment list --assignee "$APPLY_SP_OBJECT_ID" --scope "$RG" \
         --query "[?roleDefinitionName=='$RBAC_ADMIN'].condition | [0]" -o tsv)"

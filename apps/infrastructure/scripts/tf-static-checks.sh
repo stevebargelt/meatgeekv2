@@ -1341,7 +1341,13 @@ name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 # check's discovery regex and block-boundary logic are untouched, and the deleted
 # blocks each carried a proper `.id`-form replace_triggered_by). This lowers the floor
 # back to the pre-MG-53 baseline of 20.
-NAME_REF_PAIR_FLOOR=20
+#
+# HAR-56 added azurerm_eventhub_consumer_group.api_broadcast to
+# modules/iot-hub/main.tf. It reaches two parents by configured name
+# (namespace_name -> azurerm_eventhub_namespace.main, eventhub_name ->
+# azurerm_eventhub.temperature_data), and its replace_triggered_by names both
+# `.id`s. That raises the floor by 2, from 20 to 22.
+NAME_REF_PAIR_FLOOR=22
 
 name_replace_hits=""
 name_ref_pairs=0

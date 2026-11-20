@@ -40,6 +40,11 @@ output "eventhub_name" {
   value       = azurerm_eventhub.temperature_data.name
 }
 
+output "temperature_broadcast_consumer_group_name" {
+  description = "Name of the api-broadcast consumer group on the temperature-data Event Hub (non-secret). The Function App's live-reading broadcast trigger reads from it."
+  value       = azurerm_eventhub_consumer_group.api_broadcast.name
+}
+
 output "identity_principal_id" {
   description = "Principal ID of the IoT Hub system-assigned managed identity (consumed by root to grant Cosmos DB Built-in Data Contributor)"
   value       = azurerm_iothub.main.identity[0].principal_id
