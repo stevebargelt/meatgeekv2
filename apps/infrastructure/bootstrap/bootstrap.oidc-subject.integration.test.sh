@@ -154,6 +154,10 @@ mg42_run() {
           mg42_role="${mg42_all#*--name }"; mg42_role="${mg42_role%% --query*}"
           allowlist_committed_guid "$mg42_role" ;;
         *"role assignment list"*"[0].condition"*) printf '%s' "$mg42_cond" ;;
+        # The acceptance peer's subscription-wide zero-role check (HAR-61): the
+        # only `--all` listing in bootstrap.sh. Empty = the peer holds nothing,
+        # so it reaches its federation step like every other identity.
+        *"role assignment list --assignee"*"--all"*) printf '' ;;
         *"role assignment list"*) echo "/subscriptions/1/providers/Microsoft.Authorization/roleAssignments/ra-1" ;;
         # Any OTHER az verb that mutates is recorded too, so "nothing was
         # provisioned" can be asserted on the call log rather than on a message.
@@ -186,19 +190,21 @@ CUSTOM_PREFIX="repo:${MG42_OWNER}@4857343/${MG42_REPO}@1304558512"
 DEFAULT_PREFIX="repo:${GITHUB_REPO}"
 CUSTOM_BODY="{\"use_default\": false, \"include_claim_keys\": [\"repo\"], \"sub_claim_prefix\": \"${CUSTOM_PREFIX}\"}"
 
-# The three identities, each as: <function> <github-environment> <credential-name>
+# The four identities, each as: <function> <github-environment> <credential-name>
+# The acceptance peer (HAR-61) shares the app-deploy environment by design.
 MG42_IDENTITIES="
 bootstrap_oidc_identity|${PLAN_IDENTITY_ENVIRONMENTS}|github-${PLAN_IDENTITY_ENVIRONMENTS}
 bootstrap_deploy_identity|${APP_DEPLOY_ENVIRONMENT}|github-appdeploy-${APP_DEPLOY_ENVIRONMENT}
+bootstrap_acceptance_peer_identity|${ACCEPTANCE_PEER_ENVIRONMENT}|github-acceptance-peer-${ACCEPTANCE_PEER_ENVIRONMENT}
 bootstrap_infra_apply_identity|${INFRA_APPLY_ENVIRONMENT}|github-infra-apply-${INFRA_APPLY_ENVIRONMENT}
 "
 
-# The suite asserts against all three identities by name; if the map ever grows a
-# fourth, this must be updated rather than silently covering two thirds of it.
+# The suite asserts against all four identities by name; if the map ever grows a
+# fifth, this must be updated rather than silently covering three quarters of it.
 mg42_identity_count="$(printf '%s\n' "$MG42_IDENTITIES" | grep -c '|' || true)"
-[ "$mg42_identity_count" -eq 3 ] \
-  && t_ok "harness covers all THREE federating identities (plan/read, app-deploy, infra-apply)" \
-  || t_bad "expected 3 identities in the MG-42 map, harness models ${mg42_identity_count}"
+[ "$mg42_identity_count" -eq 4 ] \
+  && t_ok "harness covers all FOUR federating identities (plan/read, app-deploy, acceptance peer, infra-apply)" \
+  || t_bad "expected 4 identities in the MG-42 map, harness models ${mg42_identity_count}"
 # PLAN_IDENTITY_ENVIRONMENTS is a LIST; the row above only models it correctly
 # while it holds exactly one environment. Assert that rather than assume it.
 [ "$(printf '%s\n' $PLAN_IDENTITY_ENVIRONMENTS | grep -c . || true)" -eq 1 ] \
@@ -364,8 +370,9 @@ for mg42_row in $MG42_IDENTITIES; do
 done
 
 # The OTHER die inside the composer — an empty GitHub Environment name — driven
-# through the two call sites whose environment is a scalar constant.
+# through the three call sites whose environment is a scalar constant.
 for mg42_pair in "bootstrap_deploy_identity APP_DEPLOY_ENVIRONMENT" \
+                 "bootstrap_acceptance_peer_identity ACCEPTANCE_PEER_ENVIRONMENT" \
                  "bootstrap_infra_apply_identity INFRA_APPLY_ENVIRONMENT"; do
   set -- $mg42_pair
   mg42_fn="$1"; mg42_var="$2"
@@ -403,7 +410,7 @@ mg42_case() {
   mg42_reset
   MG42_GH_BODY="$2"; MG42_GH_STATUS="$3"; MG42_GH_AUTH="$4"
   MG42_GH_LINE="${5-HTTP/2.0 200 OK}"; MG42_GH_FAIL_BODY="${6-}"
-  mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_infra_apply_identity
+  mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_acceptance_peer_identity bootstrap_infra_apply_identity
   if [ "$MG42_STATUS" -ne 0 ] && [ -z "$MG42_MUTATIONS" ]; then
     t_ok "unprovable prefix provisions NOTHING: ${mg42_label}"
   else
@@ -457,37 +464,37 @@ mg42_case "a '4045' status code (not an exact 404)" \
 mg42_case "a 500 status line that MENTIONS a 404 mid-line" \
   'gh: failed' 1 0 'HTTP/2.0 500 upstream HTTP/2.0 404 Not Found'
 
-# THE ANTI-OVER-BROADNESS CONTROL for the group above, on the same three-identity
+# THE ANTI-OVER-BROADNESS CONTROL for the group above, on the same four-identity
 # chain: a GENUINE 404 — an exact 404 on the status line — still falls back and
-# still provisions all three identities on the default prefix. Without this, every
+# still provisions all four identities on the default prefix. Without this, every
 # case above would also pass against a resolver that had simply stopped falling
 # back at all.
 mg42_reset
 MG42_GH_BODY='gh: Not Found (HTTP 404)'; MG42_GH_STATUS=1
 MG42_GH_LINE='HTTP/2.0 404 Not Found'
 MG42_GH_FAIL_BODY='{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}'
-mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_infra_apply_identity
+mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_acceptance_peer_identity bootstrap_infra_apply_identity
 if [ "$MG42_STATUS" -eq 0 ] \
-   && [ "$(mg42_created_subjects | grep -c . || true)" -eq 3 ] \
+   && [ "$(mg42_created_subjects | grep -c . || true)" -eq 4 ] \
    && [ "$(mg42_created_subjects | grep -cv "^${DEFAULT_PREFIX}:environment:" || true)" -eq 0 ]; then
-  t_ok "a GENUINE exact-404 status still falls back and provisions all three identities on '${DEFAULT_PREFIX}' (the anchored check is not over-broad)"
+  t_ok "a GENUINE exact-404 status still falls back and provisions all four identities on '${DEFAULT_PREFIX}' (the anchored check is not over-broad)"
 else
-  t_bad "an exact 404 status must still fall back to '${DEFAULT_PREFIX}' for all three identities (exit ${MG42_STATUS}, subjects: $(mg42_created_subjects | tr '\n' ' '))"
+  t_bad "an exact 404 status must still fall back to '${DEFAULT_PREFIX}' for all four identities (exit ${MG42_STATUS}, subjects: $(mg42_created_subjects | tr '\n' ' '))"
 fi
 
-# ...and the POSITIVE control for the whole group: the same three-identity chain
+# ...and the POSITIVE control for the whole group: the same four-identity chain
 # under a provable prefix DOES provision. Without it, every case above would
 # also pass against a chain that is simply broken.
 mg42_reset
 MG42_GH_BODY="$CUSTOM_BODY"
-mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_infra_apply_identity
+mg42_run bootstrap_oidc_identity bootstrap_deploy_identity bootstrap_acceptance_peer_identity bootstrap_infra_apply_identity
 mg42_all_subjects="$(mg42_created_subjects | sort -u | tr '\n' ' ')"
 if [ "$MG42_STATUS" -eq 0 ] \
-   && [ "$(mg42_created_subjects | grep -c . || true)" -eq 3 ] \
+   && [ "$(mg42_created_subjects | grep -c . || true)" -eq 4 ] \
    && [ "$(mg42_created_subjects | grep -cv "^${CUSTOM_PREFIX}:environment:" || true)" -eq 0 ]; then
-  t_ok "positive control: a PROVABLE prefix provisions all three identities, every subject on the derived prefix"
+  t_ok "positive control: a PROVABLE prefix provisions all four identities, every subject on the derived prefix"
 else
-  t_bad "a provable prefix must provision all three identities on the derived prefix (exit ${MG42_STATUS}, subjects: ${mg42_all_subjects})"
+  t_bad "a provable prefix must provision all four identities on the derived prefix (exit ${MG42_STATUS}, subjects: ${mg42_all_subjects})"
 fi
 # The three subjects are DISTINCT — one environment per identity, so no two
 # identities can be assumed by the same token (MG-23 F8, under the MG-42 prefix).

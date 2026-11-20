@@ -407,6 +407,11 @@ What it creates (and nothing else):
    | `development-infra-apply` (infra-apply-dev.yml `apply`)      | dev **infra-apply**   | `<prefix>:environment:development-infra-apply` | `dev` / `tfstate-dev`    |
    | `development` (app publish)                                  | dev **app-deploy**    | `<prefix>:environment:development`             | `dev` / `tfstate-dev`    |
    | `production` (infra-deploy-prod / app-deploy-prod)           | prod plan/read        | `<prefix>:environment:production`              | `prod` / `tfstate-prod`  |
+   | `development` (shared, HAR-61)                               | dev **acceptance peer** (zero roles) | `<prefix>:environment:development` | none (no state access)   |
+
+   The last row is the one deliberate exception to one-identity-per-environment.
+   See [Dev acceptance peer identity](#dev-acceptance-peer-identity--zero-roles-second-caller-for-har-55-har-61)
+   below for why it is allowed and how bootstrap keeps it narrow.
 
    The bare `gh api` above is for **reading** the current value. If you are
    about to *act* on a prefix — compare a live credential, or create one —
@@ -436,7 +441,9 @@ What it creates (and nothing else):
    environment (`development-infra-apply-recovery`, below). Three federated +
    one approval-only recovery = four total.** The table is the complete set of
    *federated* environments — every environment an identity can log into Azure
-   under — and is deliberately not the complete set of environments.
+   under — and is deliberately not the complete set of environments. The table
+   has four rows for those three environments because two identities share
+   `development` (app-deploy and the zero-role acceptance peer, HAR-61).
 
    There is no PR-reachable environment and no PR-reachable identity: under MG-23 the
    pull-request infrastructure job (`ci.yml` → `validate-infrastructure`) binds
@@ -518,7 +525,8 @@ What it creates (and nothing else):
    Administrator scoped **only** to `meatgeek-v2-dev-rg`, plus Storage Blob Data
    Contributor on `tfstate-dev`); publishing the app is the separate
    `AZURE_APP_DEPLOY_CLIENT_ID` identity's job (above). Three identities, three
-   environments, three privilege levels.
+   environments, three privilege levels. The fourth, the dev acceptance peer
+   (HAR-61), holds no privilege at all and is described in its own section below.
 
 A **V1-safety guard** (`assert_v2_name`) refuses to operate on any name that is
 not unambiguously `meatgeek-v2` / `meatgeekv2`, and explicitly rejects the known
@@ -535,6 +543,7 @@ Environments named `development` and `production`):
 AZURE_CLIENT_ID             = <plan/read appId>        # `production` environment ONLY (MG-23)
 AZURE_APP_DEPLOY_CLIENT_ID  = <app-deployment appId>   # distinct SP; CI/OIDC func-publish only
 AZURE_INFRA_APPLY_CLIENT_ID = <infra-apply appId>      # `development-infra-apply` ONLY (MG-23)
+AZURE_ACCEPTANCE_PEER_CLIENT_ID = <acceptance-peer appId> # `development` ONLY; zero Azure roles (HAR-61)
 AZURE_TENANT_ID             = <tenantId>
 AZURE_SUBSCRIPTION_ID       = <subscriptionId>
 ```
@@ -620,6 +629,65 @@ with GUID `PENDING`. As with the simulated device grant above, in this order:
 
 Setting it before step 1 makes every `Apply Dev Infrastructure` run on `main`
 fail with `AuthorizationFailed` on the role assignment create.
+
+### Dev acceptance peer identity — zero roles, second caller for HAR-55 (HAR-61)
+
+**What it is.** A dedicated Entra app registration and service principal,
+`meatgeek-v2-dev-acceptance-peer`, created by `bootstrap_acceptance_peer_identity`
+in `bootstrap.sh`. It has no client secret. Its only credential is one GitHub
+OIDC federated credential, `github-acceptance-peer-development`, on the
+`<prefix>:environment:development` subject. That is the same subject the
+app-deploy identity uses, because the dev acceptance job in
+`.github/workflows/app-deploy-dev.yml` runs in the `development` environment.
+
+**Why it exists.** Goal HAR-55 needs a live proof that a second caller, one that
+does not own the simulated device, receives nothing from it over SignalR. Until
+now CI had only one identity the dev API accepts (the app-deploy service
+principal), so there was no second caller. The owner chose this option on the
+HAR-55 card.
+
+**Why it holds no roles.** Sharing one OIDC subject between two identities is
+the MG-23 F8 defect: the identity a job gets is then decided only by the client
+id it passes, so a one-line edit could swap a low-privilege identity for a
+high-privilege one. The peer is safe to share `development` only because it has
+no Azure privilege at all. Swapping app-deploy for the peer can only *reduce*
+what the job can do. Bootstrap enforces both halves on every run:
+
+- `assert_federated_environment_map` allows the peer to share
+  `$APP_DEPLOY_ENVIRONMENT` and nothing else (the named constant
+  `ACCEPTANCE_PEER_ENVIRONMENT`). A peer configured for any other environment,
+  or any other identity sharing an environment, still aborts the run.
+- `bootstrap_acceptance_peer_identity` lists the peer's role assignments across
+  the subscription (`az role assignment list --assignee <sp object id> --all`)
+  before it touches the federated credential, and aborts if there is even one.
+  It never grants a role. If you ever see that abort, remove the assignments it
+  names; do not work around the check.
+
+The dev API admits the peer through Easy Auth's allowed client applications
+list, not through any Azure role.
+
+**After the bootstrap run** (the owner re-runs bootstrap once for this and for
+the HAR-56 `IoT Hub Twin Contributor` allowlist row together):
+
+1. The run prints a block headed `dev ACCEPTANCE PEER identity` containing:
+
+   ```
+   AZURE_ACCEPTANCE_PEER_CLIENT_ID = <appId>
+   ```
+
+   Set it as a **variable** (not a secret) on the GitHub `development`
+   environment:
+
+   ```bash
+   gh variable set AZURE_ACCEPTANCE_PEER_CLIENT_ID --env development --body "<appId>"
+   ```
+
+2. Paste the emitted block (the client id and the federated subject line) into
+   the HAR-55 card, so the follow-up issue can wire it up.
+
+The follow-up issue, not bootstrap, then adds the same appId to
+`functions_auth_allowed_client_app_ids` in `environments/dev.tfvars` and teaches
+the acceptance job to sign in as the peer.
 
 ### Dev app / API authentication registration (item 3)
 

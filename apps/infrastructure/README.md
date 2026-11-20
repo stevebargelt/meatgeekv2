@@ -604,12 +604,14 @@ bash scripts/fixtures/run-live-host-storage-fixtures.sh
     [B10](../../docs/infrastructure/mg23-live-acceptance.md#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents),
     and the abort classes around the read are in the
     [bootstrap runbook](../../docs/infrastructure/bootstrap-runbook.md#preconditions-that-abort-before-anything-is-provisioned).
-- **Two separate dev identities, two privilege levels (MG-24 item 4, split
-  further by MG-23).** The **environment**, not the client id a job passes, is
-  what selects the identity — before MG-23 the dev identities federated the
-  identical `environment:development` subject, so a one-line client-id edit could
-  silently upgrade a low-privilege job to full apply. **Neither is reachable from
-  a pull request**: MG-23 removed the PR-time plan identity and its environment
+- **Three dev identities, separated by environment (MG-24 item 4, split
+  further by MG-23; the peer added by HAR-61).** Across environments, the
+  **environment**, not the client id a job passes, is what selects the
+  identity — before MG-23 the dev identities federated the identical
+  `environment:development` subject, so a one-line client-id edit could
+  silently upgrade a low-privilege job to full apply. The one sanctioned
+  exception is the zero-role acceptance peer, which shares `development` with
+  APP-DEPLOYMENT (below). **None is reachable from a pull request**: MG-23 removed the PR-time plan identity and its environment
   outright, and the PR job now holds no Azure identity at all.
   - `development-infra-apply` → the **dev INFRA-APPLY** identity (MG-23),
     OIDC-only with no client secret ever: `Contributor` and a **conditioned**
@@ -621,6 +623,16 @@ bash scripts/fixtures/run-live-host-storage-fixtures.sh
     Function App, so publishing uses this distinct identity granted
     least-privilege publish (`Website Contributor`) scoped to **its Function App
     only** — surfaced as `AZURE_APP_DEPLOY_CLIENT_ID`.
+  - `development` (shared) → the **ACCEPTANCE PEER** identity (HAR-61),
+    `meatgeek-v2-dev-acceptance-peer`: OIDC-only, no secret, and **zero Azure
+    role assignments**. It is the second caller for the HAR-55 cross-user
+    proof. Because it federates the same subject as APP-DEPLOYMENT, **within
+    `development` the client id a job passes does select between the two**.
+    That is safe only because the peer holds no roles: swapping to it can only
+    reduce privilege, bootstrap dies on every run if the peer holds any role,
+    and `assert_federated_environment_map` allows this one collision and no
+    other. Surfaced as `AZURE_ACCEPTANCE_PEER_CLIENT_ID`. See the
+    [bootstrap runbook](../../docs/infrastructure/bootstrap-runbook.md#dev-acceptance-peer-identity--zero-roles-second-caller-for-har-55-har-61).
 
   (The **prod** deploy identity and a prod infra-apply identity are **MG-25**
   deliverables, out of scope here.)

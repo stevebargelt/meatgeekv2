@@ -288,13 +288,15 @@ describe('MG-24/MG-23: OIDC subject consistency (workflow ↔ bootstrap federate
     // every bootstrap re-run rewrote the hand-corrected credential back to it.
     expect(bootstrapSrc).not.toMatch(/subject="repo:\$\{GITHUB_REPO\}:environment:/);
 
-    // All THREE identities — prod plan/read, dev app-deploy, dev infra-apply —
-    // compose through the single helper. Counted, not merely present: a call
-    // site left behind is a credential that still federates the wrong subject.
+    // All FOUR identities — prod plan/read, dev app-deploy, the zero-role dev
+    // acceptance peer (HAR-61, shares the app-deploy environment), dev
+    // infra-apply — compose through the single helper. Counted, not merely
+    // present: a call site left behind is a credential that still federates the
+    // wrong subject.
     const composed = bootstrapSrc.match(
       /^\s*subject="\$\(federated_environment_subject "\$env"\)" \|\| exit 1$/gm
     );
-    expect(composed).toHaveLength(3);
+    expect(composed).toHaveLength(4);
 
     // The composer appends the environment scope and nothing else, so trust
     // stays gated by GitHub Environment protection rules rather than by a ref.
