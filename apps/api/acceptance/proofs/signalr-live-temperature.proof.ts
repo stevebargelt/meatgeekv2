@@ -13,7 +13,6 @@ import {
   describeError,
   expectHubMessage,
   negotiateFailureMessage,
-  startWithRetry,
   within,
 } from '../lib/signalr';
 import type { SentReading } from '../lib/telemetry';
@@ -30,8 +29,7 @@ import { isDate, registerSimulatedDevice, sameInstant, sendOneReading } from '..
  *      round trip does): ownership is what puts the caller in its group;
  *   2. `POST /negotiate` answers 200, after the registration, so the groups it
  *      adds include the device; a `@microsoft/signalr` client with a handler on
- *      target `temperature` connects with the url and token (`start()`; a 429
- *      from the service is retried, HAR-81);
+ *      target `temperature` connects with the url and token (`start()`);
  *   3. `simdevice --count 1` sends one reading; the wall-clock time just before
  *      the send is kept;
  *   4. the client receives, within 90 s, a `temperature` message for the device
@@ -156,8 +154,14 @@ export default defineProofs('signalr live temperature', () => {
         hub = connection;
 
         await stopOnFailure(async () => {
-          // HAR-81: a 429 from the service is retried (1 s, 2 s, 4 s).
-          await startWithRetry(connection, 'start()', secrets);
+          try {
+            await within(connection.start(), CONNECT_TIMEOUT_MS, 'start()');
+          } catch (error) {
+            if (error instanceof ProofFailure) {
+              throw error;
+            }
+            throw new ProofFailure(`start() failed: ${describeError(error, secrets)}`);
+          }
           if (connection.state !== HubConnectionState.Connected) {
             throw new ProofFailure(
               `after start() the connection is ${connection.state}, not Connected`
