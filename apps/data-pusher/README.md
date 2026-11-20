@@ -207,6 +207,8 @@ dist/simdevice --twin --count 3      # read the twin first; readings carry its c
 | `--inflight N` | How many sends may await IoT Hub's QoS 1 acknowledgement at once. `1` is the pusher's own send: publish, wait for the ack, wait `--interval`, repeat. Above 1, sends are pipelined over the one MQTT connection. | `1` |
 | `--twin` | Device twin mode, run through the pusher's own twin code (`iothub.WithCookTwin`) on an in-memory cook session: connect, GET the twin, apply its desired cook and report it, GET the twin again and print it (below), then send `--count` readings carrying the applied `cookId` and `correlation.id`. `--count 0` only reads the twin. | off |
 | `--timeout D` | With `--twin`, how long to wait for the twin (both GETs and the report). No twin response in time exits `1`. | `30s` |
+| `--start T` | With `--step`: stamp reading _i_ (0-based) `T + i × step` instead of the wall clock. `T` is RFC 3339 (`2026-11-01T06:00:07.250Z`), cut to milliseconds. Pacing is unchanged: `--interval` and `--inflight` still decide when each reading is sent. One of `--start`/`--step` without the other exits `2`. | (wall clock) |
+| `--step D` | With `--start`: the gap between consecutive readings' timestamps, at least `1ms` (`5s`). | (none) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` (env) | Export spans, as for the pusher | (no-op) |
 
 **Stdout** carries nothing but one JSON line per message IoT Hub accepted:
@@ -224,8 +226,8 @@ With `--twin`, one line comes first, the twin as read back after the report:
 Ids with no value are `null`. A cook started through the API while simdevice
 was not running shows up here, which is the reconnect case the Pi relies on.
 
-`timestamp` is the reading's `timestamp` in the payload; `sentAt` is when the
-publish was acknowledged. Both are RFC 3339 UTC with milliseconds. Every
+`timestamp` is the reading's `timestamp` in the payload (with `--start`/`--step`,
+the synthetic stamp); `sentAt` is when the publish was acknowledged. Both are RFC 3339 UTC with milliseconds. Every
 reading in a run has a distinct `timestamp` and `messageId`. Logs and errors go
 to stderr.
 
@@ -236,7 +238,9 @@ acknowledgement is retried once with the blocking send the pusher uses
 for the ones in flight, and exits `1`. On every path the number of stdout lines
 equals the number of acknowledged readings. The dev acceptance top-up runs
 `--inflight 32 --interval 50ms`: 20 readings/s
-([live-acceptance.md](../../docs/development/live-acceptance.md)).
+([live-acceptance.md](../../docs/development/live-acceptance.md)). The
+cook-chart proof's one-time top-up adds `--start <cook startTime> --step 5s`, so
+12 hours of readings land in a cook that started minutes ago (HAR-87).
 
 **Exit codes:** `0` all sent; `1` a send failed, the run was interrupted, or
 `--twin` got no twin response within `--timeout` —

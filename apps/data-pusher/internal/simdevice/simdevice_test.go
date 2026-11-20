@@ -558,3 +558,100 @@ func TestMain_PipelinedSendFailureExitsNonZeroAndRedacts(t *testing.T) {
 		t.Errorf("credential leaked into stderr: %q", res.stderr)
 	}
 }
+
+// HAR-87: --start/--step stamp reading i as start + i×step, at millisecond
+// precision, in both the sequential (--inflight 1) and pipelined senders. The
+// wall clock is frozen far from start, so a clock stamp would show.
+func TestMain_StartStepStampsSyntheticTimestamps(t *testing.T) {
+	shutdown, _ := telemetry.SetupTracing(context.Background())
+	defer shutdown()
+	start := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
+	frozen := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	for _, inflight := range []string{"1", "4"} {
+		t.Run("inflight="+inflight, func(t *testing.T) {
+			mock := iothub.NewMockClient()
+			var stdout, stderr bytes.Buffer
+			code := Main(context.Background(), Env{
+				Args: []string{"--count", "6", "--inflight", inflight,
+					"--start", "2026-11-01T06:00:00.000Z", "--step", "5s"},
+				Getenv:    func(string) string { return validConn },
+				Stdout:    &stdout,
+				Stderr:    &stderr,
+				NewClient: func(string) (Client, error) { return mock, nil },
+				Tracer:    otel.Tracer("simdevice-test"),
+				Now:       func() time.Time { return frozen },
+			})
+			if code != ExitOK {
+				t.Fatalf("exit = %d; stderr=%q", code, stderr.String())
+			}
+			lines := sentLines(t, stdout.String())
+			byID := map[string]Sent{}
+			for _, l := range lines {
+				byID[l.MessageID] = l
+			}
+			calls := mock.Calls() // in send-start order: reading 0 first
+			if len(calls) != 6 || len(byID) != 6 {
+				t.Fatalf("calls = %d, distinct lines = %d, want 6 and 6", len(calls), len(byID))
+			}
+			for i, call := range calls {
+				want := start.Add(time.Duration(i) * 5 * time.Second)
+				var reading wire.TemperatureReading
+				if err := json.Unmarshal(call.Payload, &reading); err != nil {
+					t.Fatalf("call %d payload: %v", i, err)
+				}
+				if !reading.Timestamp.Equal(want) {
+					t.Errorf("reading %d payload timestamp = %s, want %s", i, reading.Timestamp, want)
+				}
+				line, ok := byID[call.Properties["messageId"]]
+				if !ok {
+					t.Fatalf("reading %d has no stdout line", i)
+				}
+				if line.Timestamp != want.Format(timeLayout) {
+					t.Errorf("reading %d stdout timestamp = %q, want %q", i, line.Timestamp, want.Format(timeLayout))
+				}
+				if line.SentAt != frozen.Format(timeLayout) {
+					t.Errorf("reading %d sentAt = %q, want the clock %q", i, line.SentAt, frozen.Format(timeLayout))
+				}
+			}
+		})
+	}
+}
+
+// HAR-87: sub-millisecond precision in --start is dropped, and the stamps stay
+// strictly increasing at millisecond precision.
+func TestMain_StartTruncatedToMilliseconds(t *testing.T) {
+	cli := &ackClient{}
+	res := runWith(t, cli, "--count", "3", "--start", "2026-11-01T06:00:00.123456789+02:00", "--step", "1ms")
+	if res.code != ExitOK {
+		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
+	}
+	want := []string{"2026-11-01T04:00:00.123Z", "2026-11-01T04:00:00.124Z", "2026-11-01T04:00:00.125Z"}
+	for i, l := range sentLines(t, res.stdout) {
+		if l.Timestamp != want[i] {
+			t.Errorf("line %d timestamp = %q, want %q", i, l.Timestamp, want[i])
+		}
+	}
+}
+
+// HAR-87: --start without --step, or --step without --start, is a usage error,
+// as are a bad --start and a --step under a millisecond. Nothing is sent.
+func TestMain_StartStepUsageErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"--start", "2026-11-01T06:00:00Z"},
+		{"--step", "5s"},
+		{"--step", "0s"},
+		{"--start", "2026-11-01T06:00:00Z", "--step", "0s"},
+		{"--start", "2026-11-01T06:00:00Z", "--step", "500us"},
+		{"--start", "2026-11-01T06:00:00Z", "--step", "-5s"},
+		{"--start", "yesterday", "--step", "5s"},
+		{"--start", "2026-11-01", "--step", "5s"},
+	} {
+		res := runMain(t, args, map[string]string{EnvConnectionString: validConn}, nil)
+		if res.code != ExitUsage {
+			t.Errorf("args %q: exit = %d, want %d; stderr=%q", args, res.code, ExitUsage, res.stderr)
+		}
+		if len(res.mock.Calls()) != 0 {
+			t.Errorf("args %q: published despite bad usage", args)
+		}
+	}
+}
