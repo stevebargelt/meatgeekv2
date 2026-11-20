@@ -220,10 +220,55 @@ npx nx test web                        # component tests (RTL, MSAL and fetch mo
 npx nx lint web
 npx nx run web:typecheck               # tsc over app and spec sources
 npx nx build web --skip-nx-cache       # dist/apps/web
+npx nx e2e web-e2e                     # browser test of the main path (see below)
 ```
 
 If Nx fails with a socket path that is too long (deep worktree paths), set
 `NX_SOCKET_DIR=/tmp/nx` or `NX_DAEMON=false`.
+
+## Browser tests
+
+`apps/web-e2e` is a Playwright project (Chromium only) with one test,
+`src/main-path.spec.ts`, of the main path in a real browser against the built
+app: sign in, the devices page, start a cook, the live panel waiting, one pushed
+reading making it live, the chart, stop, completed.
+
+```bash
+npx playwright install chromium        # once per machine
+npx nx e2e web-e2e                     # builds web, serves dist/apps/web, runs headless
+npx nx run-many -t lint typecheck -p web-e2e
+```
+
+The `e2e` target runs `nx build web` first, then Playwright's `webServer` serves
+`dist/apps/web` with `vite preview` on port 4300 (it never reuses a server
+already on that port). Run it through Nx: `playwright test` on its own serves
+whatever is in `dist/apps/web`, which may be a stale build. On failure the trace
+and screenshot are kept under `dist/.playwright/web-e2e/test-results`, and the
+HTML report under `dist/.playwright/web-e2e/report`.
+
+It needs no network and no secret. Everything outside the app is faked at the
+network edge, in `src/fakes/`; nothing in `apps/web/src` knows it is under test.
+Every other request off the app's origin is aborted, and the test fails if any
+was made.
+
+| Faked          | How                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/config.json` | Routed to a test config: a fake tenant, client id and scope, and `apiBaseUrl` `https://api.test/api`.                                                                                                                                                                                                                                                                    |
+| Entra ID       | `page.route` on `login.microsoftonline.com`. The app's real MSAL runs `loginRedirect` and the code + PKCE exchange: `authorize` redirects back with a code and the request's `state`; `token` checks the code, client, redirect URI and PKCE verifier, and returns an unsigned id token (the request's `nonce`, `aud` = client id), an access token and a refresh token. |
+| The API        | `page.route` on `https://api.test/api/**`: an in-memory fake of the nine routes the path calls. Response bodies are typed from the generated spec types, so a fake that drifts from `openapi.yaml` fails `web-e2e:typecheck`. It records each request, and the test checks every one carried the fake access token.                                                      |
+| SignalR        | `POST /negotiate` returns `https://hub.test/client/?hub=temperatureHub`. `page.route` answers the client's negotiate with WebSockets only, and `page.routeWebSocket` speaks the JSON hub protocol: the handshake, pings, and the `temperature` message the test pushes.                                                                                                  |
+
+Why at the network edge: the test runs the same bundle Vercel serves, with no
+test-only code path or flag, so it covers the wiring the component tests fake
+(MSAL, `openapi-fetch`, the SignalR client, routing, the chart). Two
+simplifications: a new cook's start is back-dated three minutes so its chart
+already has three one-minute buckets before the pushed reading, and
+`GET /temperatures/current` always answers 404 `NO_READINGS`, so the panel waits
+for the push.
+
+`vite preview` does not send the Content-Security-Policy from `vercel.json`,
+so the page may reach `api.test` and `hub.test` here. That is expected; the
+policy is checked by `src/csp.spec.ts`.
 
 ## Content-Security-Policy
 
