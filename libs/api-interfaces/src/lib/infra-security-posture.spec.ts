@@ -1335,7 +1335,7 @@ describe('MG-24 second-plan no-op: Cosmos indexing + budget window are reconcile
     // round-trips: Azure returns `/*` as declared.
     const excludedPaths = [
       ...cosmos.matchAll(/excluded_path\s*\{\s*path\s*=\s*"([^"]*)"\s*\}/g),
-    ].map((m) => m[1]);
+    ].map(m => m[1]);
     expect(excludedPaths).toEqual(['/*']);
     expect((cosmos.match(/excluded_path/g) ?? []).length).toBe(1);
     const rollups = cosmos.match(
