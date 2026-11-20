@@ -13,6 +13,7 @@ import {
   describeError,
   expectHubMessage,
   negotiateFailureMessage,
+  startConnection,
   within,
 } from '../lib/signalr';
 import type { SentReading } from '../lib/telemetry';
@@ -154,14 +155,7 @@ export default defineProofs('signalr live temperature', () => {
         hub = connection;
 
         await stopOnFailure(async () => {
-          try {
-            await within(connection.start(), CONNECT_TIMEOUT_MS, 'start()');
-          } catch (error) {
-            if (error instanceof ProofFailure) {
-              throw error;
-            }
-            throw new ProofFailure(`start() failed: ${describeError(error, secrets)}`);
-          }
+          await startConnection(connection, 'start()', () => secrets);
           if (connection.state !== HubConnectionState.Connected) {
             throw new ProofFailure(
               `after start() the connection is ${connection.state}, not Connected`

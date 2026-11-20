@@ -3,7 +3,13 @@ import { HubConnectionBuilder, HubConnectionState, LogLevel } from '@microsoft/s
 import type { AcceptanceApi } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { NegotiateBody } from '../lib/signalr';
-import { CONNECT_TIMEOUT_MS, describeError, negotiateFailureMessage, within } from '../lib/signalr';
+import {
+  CONNECT_TIMEOUT_MS,
+  describeError,
+  negotiateFailureMessage,
+  startConnection,
+  within,
+} from '../lib/signalr';
 
 /**
  * HAR-57 (MG-30) — POST /negotiate hands the caller a working SignalR
@@ -67,13 +73,10 @@ export default defineProofs('signalr negotiate', () => {
           .build();
 
         try {
-          await within(hub.start(), CONNECT_TIMEOUT_MS, 'start()');
+          await startConnection(hub, 'start()', () => [url, accessToken]);
         } catch (error) {
           await hub.stop().catch(() => undefined);
-          if (error instanceof ProofFailure) {
-            throw error;
-          }
-          throw new ProofFailure(`start() failed: ${describeError(error, [url, accessToken])}`);
+          throw error;
         }
         if (hub.state !== HubConnectionState.Connected) {
           await hub.stop().catch(() => undefined);
