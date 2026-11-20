@@ -1329,8 +1329,19 @@ describe('MG-24 second-plan no-op: Cosmos indexing + budget window are reconcile
     const cosmos = stripComments(read('modules/cosmos-db/main.tf'));
     // The _etag system exclusion is not persisted by Azure, so declaring it made
     // every plan re-add it. It must be absent from the config now.
-    expect(cosmos).not.toMatch(/excluded_path/);
     expect(cosmos).not.toMatch(/_etag/);
+    // The only excluded_path allowed is the temperature-rollups `/*` exclusion
+    // (HAR-74), which narrows indexing to the chart query's two paths. That one
+    // round-trips: Azure returns `/*` as declared.
+    const excludedPaths = [
+      ...cosmos.matchAll(/excluded_path\s*\{\s*path\s*=\s*"([^"]*)"\s*\}/g),
+    ].map((m) => m[1]);
+    expect(excludedPaths).toEqual(['/*']);
+    expect((cosmos.match(/excluded_path/g) ?? []).length).toBe(1);
+    const rollups = cosmos.match(
+      /resource\s+"azurerm_cosmosdb_sql_container"\s+"temperature_rollups_shared"\s*\{[\s\S]*?\n\}/
+    )?.[0];
+    expect(rollups).toMatch(/excluded_path/);
   });
 
   it('Cosmos diag setting uses concrete metric categories Requests+SLI (Azure expands AllMetrics, forcing a perpetual diff)', () => {
