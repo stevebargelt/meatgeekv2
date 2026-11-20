@@ -147,8 +147,7 @@ go.work
 apps/device-controller/dist/
 apps/data-pusher/dist/
 
-# React Native
-# React Native builds
+# Mobile signing keys and certificates
 *.jks
 *.p8
 *.p12

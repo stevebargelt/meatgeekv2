@@ -2,7 +2,7 @@
 
 OpenAPI 3.0 specifications, mock API server, request/response validation primitives, and contract-testing scaffolding for the MeatGeek V2 API surface.
 
-This library is the **source-of-truth contract** between the Azure Functions backend (`apps/api`), the web/mobile clients (`apps/web`, `apps/mobile`), and the Go device controller / data pusher (`apps/device-controller`, `apps/data-pusher`).
+This library is the **source-of-truth contract** between the Azure Functions backend (`apps/api`), the web client (`apps/web`), the Go device controller / data pusher (`apps/device-controller`, `apps/data-pusher`), and the mobile client. The mobile client is a native iOS (Swift) app that is planned and not built; this contract is the only thing it shares with the web app.
 
 ## Layout
 

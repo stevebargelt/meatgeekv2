@@ -8,7 +8,6 @@ This library contains all the shared TypeScript interfaces used throughout the M
 
 - Azure Functions API
 - React web application  
-- React Native mobile application
 - Shared business logic libraries
 
 ## Interface Categories

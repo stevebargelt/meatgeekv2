@@ -8,7 +8,7 @@ MeatGeek V2 is a comprehensive cloud-based BBQ temperature monitoring and cook m
 
 - **Collect temperature data** from the existing device controller
 - **Store data** in Azure CosmosDB for scalability and global distribution
-- **Provide mobile-first interfaces** with React Native (primary) and React (secondary)
+- **Provide client apps**: a React web app, and a native iOS (Swift) app that is planned and not built
 - **Manage cooking sessions** with historical data tracking and analytics
 - **Enable real-time monitoring** with live temperature updates
 - **Replace NewRelic** with Azure-native monitoring and observability
@@ -76,8 +76,8 @@ The existing Go-based device controller provides a solid foundation:
 | **Real-time** | SignalR (Serverless) | Live temperatures and cook events pushed to clients (on `main` since HAR-60; no app connects yet; see [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/)) |
 | **Device state** | IoT Hub device twin | The active cook, in desired properties; the Pi reports what it applied (HAR-58, HAR-66; see [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/)) |
 | **API** | Azure Functions | REST API with OpenAPI specs |
-| **Mobile** | React Native | Primary user interface |
-| **Web** | React | Secondary interface |
+| **Web** | React | User interface |
+| **Mobile** | Swift (native iOS) | Planned, not built; shares only the OpenAPI contract with the web app |
 | **Infrastructure** | Terraform | Infrastructure as Code |
 | **Monitoring** | Azure Monitor + OTEL | Observability and tracing |
 
@@ -85,7 +85,7 @@ The existing Go-based device controller provides a solid foundation:
 
 What runs today is the [`system` view](https://stevebargelt.github.io/meatgeekv2/#/view/system/) of the architecture site; the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) follows one reading from the RTD sensors through the data pusher and IoT Hub's `cosmos-storage-route` into Cosmos DB, and on through `broadcastTemperature` to SignalR, and the [`cookStart` view](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) shows how a cook reaches the Pi through the device twin. The same views render on GitHub in [Architecture Diagrams](diagrams.md).
 
-The Event Hub → Functions → SignalR broadcast path is **on `main` up to SignalR** since HAR-60: IoT Hub routes to the Event Hub, and the API's `broadcastTemperature` consumes it and pushes each reading to its `device-{id}` SignalR group. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet; the acceptance proofs are the only live SignalR client, and measured a send-to-client delay of 18.4 s (`METRIC signalr-delivery-ms 18424`, run 44673261258). The Pi holds no SignalR connection: it learns its cook from the device twin. Both decisions are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
+The Event Hub → Functions → SignalR broadcast path is **on `main` up to SignalR** since HAR-60: IoT Hub routes to the Event Hub, and the API's `broadcastTemperature` consumes it and pushes each reading to its `device-{id}` SignalR group. The web app is a scaffold that does not call the REST API or SignalR yet, and the native iOS app is not built; the acceptance proofs are the only live SignalR client, and measured a send-to-client delay of 18.4 s (`METRIC signalr-delivery-ms 18424`, run 44673261258). The Pi holds no SignalR connection: it learns its cook from the device twin. Both decisions are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
 
 ### Core Components
 
@@ -108,9 +108,9 @@ The Event Hub → Functions → SignalR broadcast path is **on `main` up to Sign
 - **Application Insights**: Monitoring and observability
 
 #### 3. Client Applications
-- **Mobile App (React Native)**: Primary interface for real-time monitoring
-- **Web App (React)**: Secondary interface with advanced analytics
-- **Shared Libraries**: TypeScript libraries for consistent API integration
+- **Web App (React)**: Interface for real-time monitoring and cook history
+- **Mobile App (native iOS, Swift)**: Planned and not built. It shares no code with the web app; the two clients share only the OpenAPI contract in `libs/api-specs/spec`
+- **Shared Libraries**: TypeScript libraries the web app and API use for consistent API integration
 
 ## Key Design Decisions
 

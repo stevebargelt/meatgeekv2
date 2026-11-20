@@ -77,11 +77,6 @@
         "style": "styled-components",
         "linter": "eslint"
       }
-    },
-    "@nx/react-native": {
-      "application": {
-        "linter": "eslint"
-      }
     }
   },
   "defaultProject": "web",

@@ -16,7 +16,7 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
   - Initialize `meatgeekv2` repository with NX
   - Configure TypeScript, ESLint, Jest, and Prettier
   - Set up project structure for all applications and libraries
-  - Configure NX executors for Go, React Native, and Azure Functions
+  - Configure NX executors for Go, React Native, and Azure Functions (the React Native project was removed in HAR-71)
 
 - [x] **Documentation Structure** 
   - Split comprehensive plan into focused documentation files
@@ -136,7 +136,7 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
   - Cook management cards and forms
   - Device status indicators
   - Loading states and error boundaries
-  - Theme support for mobile and web consistency
+  - Theme support for the web app
 
 #### Real-time Integration (`@meatgeekv2/realtime`)
 - [ ] **SignalR Client Libraries**
@@ -150,13 +150,13 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
   - Real-time temperature line charts
   - Historical cook comparison charts
   - Temperature target indicators
-  - Mobile-optimized chart interactions
+  - Touch-friendly chart interactions for phone browsers
 
 ### Success Criteria
 - **Parallel processing architecture** validated: storage and real-time paths working independently
 - Complete API functionality for cook and temperature management
 - **Device cook session management** working: cookId enrichment and state recovery
-- Shared components demonstrate consistency between mobile and web
+- Shared components give the web app consistent building blocks
 - Real-time temperature updates working end-to-end via lightweight Functions
 - Authentication and authorization protecting API endpoints via Azure Entra Easy Auth
 
@@ -166,9 +166,12 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
 
 ### Week 10-12: Core Mobile Features
 
-#### React Native Application (`apps/mobile`)
+#### Native iOS Application (Swift, planned, not built)
+
+The mobile client is a native iOS app in Swift. It is not an Nx project and shares no TypeScript code with the web app; the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`, from which the iOS app generates its Swift API client.
+
 - [ ] **Navigation and Layout**
-  - React Navigation setup with bottom tabs
+  - SwiftUI navigation with bottom tabs
   - Home dashboard with real-time temperatures
   - Cook management screens (start, monitor, history)
   - Device settings and configuration
@@ -181,8 +184,8 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
 
 #### Real-time Monitoring
 - [ ] **Live Temperature Dashboard**
-  - Real-time temperature displays using `@meatgeekv2/ui-components`
-  - Temperature charts with `@meatgeekv2/charts`
+  - Real-time temperature displays from the SignalR push described alongside the OpenAPI contract
+  - Temperature charts (Swift Charts)
   - Push notifications for temperature alerts
   - Background app refresh for continuous monitoring
 
@@ -207,7 +210,7 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
 - [ ] **Performance and Polish**
   - Offline capability with local data caching
   - Smooth animations and transitions
-  - Accessibility features (VoiceOver, TalkBack support)
+  - Accessibility features (VoiceOver support)
   - Dark mode support matching system preferences
 
 #### Testing and Quality Assurance
@@ -215,7 +218,7 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
   - Unit tests for all business logic
   - Integration tests for API communication
   - E2E tests for critical user flows
-  - Device testing on various iOS and Android devices
+  - Device testing on various iOS devices
 
 ### Success Criteria
 - Mobile app provides complete cook management functionality
