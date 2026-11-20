@@ -130,8 +130,9 @@ func Main(ctx context.Context, env Env) int {
 	timeout := fs.Duration("timeout", defaultTwinTimeout, "with --twin, how long to wait for the twin before exiting 1")
 	startFlag := fs.String("start", "", "with --step, stamp reading i (0-based) start + i×step instead of the wall clock (RFC 3339); pacing still comes from --interval/--inflight")
 	step := fs.Duration("step", 0, "with --start, the gap between consecutive readings' timestamps (Go duration, at least 1ms)")
+	grill := fs.Float64("grill", 0, "send this grill temperature (°F) on every reading instead of the synthetic one, so a reader can tell this run's readings from older ones")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: simdevice [--twin [--timeout DURATION]] [--count N] [--interval DURATION] [--inflight N] [--start RFC3339 --step DURATION]\n"+
+		fmt.Fprintf(fs.Output(), "usage: simdevice [--twin [--timeout DURATION]] [--count N] [--interval DURATION] [--inflight N] [--start RFC3339 --step DURATION] [--grill °F]\n"+
 			"Sends synthetic readings as the IoT Hub device named by $%s.\n", EnvConnectionString)
 		fs.PrintDefaults()
 	}
@@ -161,12 +162,28 @@ func Main(ctx context.Context, env Env) int {
 	}
 	// --start and --step stamp synthetic timestamps (HAR-87); one without the
 	// other is a usage error, not a silent fall-back to the wall clock.
-	stepSet := false
+	stepSet, grillSet := false, false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "step" {
+		switch f.Name {
+		case "step":
 			stepSet = true
+		case "grill":
+			grillSet = true
 		}
 	})
+	if grillSet && (math.IsNaN(*grill) || math.IsInf(*grill, 0)) {
+		return fail(ExitUsage, "--grill must be a finite number, got %v", *grill)
+	}
+	// The status of reading i (0-based): the synthetic curve, with --grill's
+	// value in place of its grill temperature when set.
+	status := func(deviceID string, i int) wire.V1Status {
+		s := SyntheticStatus(deviceID, i)
+		if grillSet {
+			g := *grill
+			s.Temps.GrillTemp = &g
+		}
+		return s
+	}
 	startSet := *startFlag != ""
 	if startSet != stepSet {
 		if startSet {
@@ -264,6 +281,7 @@ func Main(ctx context.Context, env Env) int {
 			interval: *interval,
 			inflight: *inflight,
 			next:     nextTimestamp,
+			status:   status,
 			now:      now,
 			enc:      enc,
 			fail:     fail,
@@ -280,7 +298,7 @@ func Main(ctx context.Context, env Env) int {
 		}
 		ts := nextTimestamp()
 
-		sent, err := sender.Send(ctx, SyntheticStatus(parsed.DeviceID, i), ts, uint64(i+1))
+		sent, err := sender.Send(ctx, status(parsed.DeviceID, i), ts, uint64(i+1))
 		if err != nil {
 			return fail(ExitSendFailed, "send reading %d of %d: %v", i+1, *count, err)
 		}
@@ -319,6 +337,7 @@ type pipeline struct {
 	interval time.Duration
 	inflight int
 	next     func() time.Time // the next reading's timestamp
+	status   func(deviceID string, i int) wire.V1Status
 	now      func() time.Time
 	enc      *json.Encoder
 	fail     func(code int, format string, a ...any) int
@@ -378,7 +397,7 @@ loop:
 		lastStart = time.Now()
 		started++
 
-		msg, err := p.sender.Prepare(ctx, SyntheticStatus(p.sender.DeviceID, i), p.next(), uint64(i+1))
+		msg, err := p.sender.Prepare(ctx, p.status(p.sender.DeviceID, i), p.next(), uint64(i+1))
 		if err != nil {
 			<-slots
 			stop(fmt.Sprintf("build reading %d of %d: %v", i+1, p.count, err))

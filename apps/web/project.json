@@ -6,6 +6,12 @@
     "build": {
       "executor": "@nx/vite:build",
       "outputs": ["{options.outputPath}"],
+      "inputs": [
+        "production",
+        "^production",
+        { "env": "VERCEL_GIT_COMMIT_SHA" },
+        { "env": "GITHUB_SHA" }
+      ],
       "defaultConfiguration": "production",
       "options": {
         "outputPath": "dist/apps/web"

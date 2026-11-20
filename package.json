@@ -76,6 +76,7 @@
     "jest-environment-jsdom": "^30.0.5",
     "nx": "19.8.0",
     "openapi-typescript": "^7.4.4",
+    "otplib": "13.6.0",
     "prettier": "^3.0.0",
     "ts-jest": "^29.1.0",
     "ts-node": "10.9.1"

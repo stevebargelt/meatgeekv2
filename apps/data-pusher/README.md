@@ -209,6 +209,7 @@ dist/simdevice --twin --count 3      # read the twin first; readings carry its c
 | `--timeout D` | With `--twin`, how long to wait for the twin (both GETs and the report). No twin response in time exits `1`. | `30s` |
 | `--start T` | With `--step`: stamp reading _i_ (0-based) `T + i × step` instead of the wall clock. `T` is RFC 3339 (`2026-11-01T06:00:07.250Z`), cut to milliseconds. Pacing is unchanged: `--interval` and `--inflight` still decide when each reading is sent. One of `--start`/`--step` without the other exits `2`. | (wall clock) |
 | `--step D` | With `--start`: the gap between consecutive readings' timestamps, at least `1ms` (`5s`). | (none) |
+| `--grill F` | Send grill temperature `F` (°F) on every reading in place of the synthetic curve, so a reader can tell this run's readings from older ones (the live browser proof, HAR-99). Must be a finite number; otherwise exits `2`. | (synthetic, near 225) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` (env) | Export spans, as for the pusher | (no-op) |
 
 **Stdout** carries nothing but one JSON line per message IoT Hub accepted:
