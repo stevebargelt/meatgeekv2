@@ -325,7 +325,8 @@ no request or response headers or bodies (only a bare upper-case `error` code
 from an error body), never prints simdevice's stdout or stderr raw (stdout is
 parsed as JSON lines; of stderr only the first line is reported, on failure),
 and masks in every line, as a second guard, both bearer tokens, the
-`SIMDEVICE_CONNECTION_STRING` value, and its `SharedAccessKey` value.
+`SIMDEVICE_CONNECTION_STRING` and `SIMDEVICE_CHART_CONNECTION_STRING` values,
+and each one's `SharedAccessKey` value.
 
 ### Contract validation
 
@@ -420,6 +421,12 @@ export SIMDEVICE_CONNECTION_STRING=$(az iot hub device-identity connection-strin
   --hub-name "$HUB_HOST" --device-id "$ACCEPTANCE_SIM_DEVICE_ID" --auth-type login \
   --query connectionString -o tsv)
 
+# Optional (HAR-84): the chart device, for the cook-chart proof.
+export ACCEPTANCE_CHART_DEVICE_ID="${ACCEPTANCE_SIM_DEVICE_ID}-chart"
+export SIMDEVICE_CHART_CONNECTION_STRING=$(az iot hub device-identity connection-string show \
+  --hub-name "$HUB_HOST" --device-id "$ACCEPTANCE_CHART_DEVICE_ID" --auth-type login \
+  --query connectionString -o tsv)
+
 npx nx run api:acceptance
 ```
 
@@ -454,6 +461,34 @@ simulated device exists and hands the suite its masked connection string (see
 [CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)). The proof results and the RU-per-route table
 also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
 calls the live system.
+
+### The chart device (HAR-84)
+
+A second standing IoT Hub device, `<simulated device id>-chart`
+(`meatgeek-dev-simulated-smoker-chart` in dev), is for the cook-chart RU proof
+of goal HAR-71. That proof keeps one active cook running on its device across
+runs, with 12 hours of readings in it. It cannot use the first device:
+`device-twin.proof.ts` starts and stops a cook there on every run, and a
+standing active cook would make that proof's `POST /cooks` fail with `409`.
+The CI job's "Ensure the simulated device exists" step creates the chart device
+if it is missing, the same way as the first (log line `device <id>: created`
+or `device <id>: exists`); its id is derived in the workflow, not in Terraform.
+
+Two more variables name it. They are optional today (no proof uses them yet),
+but set both or neither: one without the other stops the run at once, naming
+both.
+
+| Variable                            | Value                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `ACCEPTANCE_CHART_DEVICE_ID`        | The chart device's id, `meatgeek-dev-simulated-smoker-chart` in dev                               |
+| `SIMDEVICE_CHART_CONNECTION_STRING` | The chart device's IoT Hub connection string. Only the runner reads it, and masks it as the first |
+
+A proof reads the id as `api.chartDeviceId` (`undefined` when the run was not
+given it) and sends as the device with
+`api.runSimDevice(args, { device: 'chart' })`. The runner hands that simdevice
+run the chart credential as its `SIMDEVICE_CONNECTION_STRING`; no simdevice run
+gets the credential of the device it is not sending as. Without the variables,
+a chart run fails as `simdevice (chart) → not started`.
 
 ## How it is built
 

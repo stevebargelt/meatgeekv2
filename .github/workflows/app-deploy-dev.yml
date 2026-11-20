@@ -335,37 +335,48 @@ jobs:
       # exit 3) leads to a create; any other error (not authorised, hub
       # unreachable) fails the step. stdout is discarded: device JSON carries
       # the device's symmetric keys.
+      # HAR-84: a second standing device, <simulated_device_id>-chart, for the
+      # cook-chart RU proof (HAR-71), which keeps one active cook on it across
+      # runs; on the first device that cook would 409 the device-twin proof's
+      # POST /cooks. Same logic, same role; its id is derived here, not in
+      # Terraform.
       - name: Ensure the simulated device exists
         env:
           HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
         run: |
           set -euo pipefail
-          ERR="$RUNNER_TEMP/device-show.err"
-          RC=0
-          az iot hub device-identity show --hub-name "$HUB" --device-id "$DEVICE" \
-            --auth-type login -o none >/dev/null 2>"$ERR" || RC=$?
-          if [ "$RC" -eq 0 ]; then
-            echo "device $DEVICE: exists"
-          elif [ "$RC" -eq 3 ] || grep -q 'DeviceNotFound' "$ERR"; then
-            az iot hub device-identity create --hub-name "$HUB" --device-id "$DEVICE" \
-              --auth-type login -o none >/dev/null
-            echo "device $DEVICE: created"
-          else
-            echo "az iot hub device-identity show failed (exit $RC), and not because the device is missing:" >&2
-            cat "$ERR" >&2
-            exit 1
-          fi
+          ensure_device() {
+            local id="$1" err="$RUNNER_TEMP/device-show.err" rc=0
+            az iot hub device-identity show --hub-name "$HUB" --device-id "$id" \
+              --auth-type login -o none >/dev/null 2>"$err" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "device $id: exists"
+            elif [ "$rc" -eq 3 ] || grep -q 'DeviceNotFound' "$err"; then
+              az iot hub device-identity create --hub-name "$HUB" --device-id "$id" \
+                --auth-type login -o none >/dev/null
+              echo "device $id: created"
+            else
+              echo "az iot hub device-identity show for device $id failed (exit $rc), and not because the device is missing:" >&2
+              cat "$err" >&2
+              exit 1
+            fi
+          }
+          ensure_device "$DEVICE"
+          ensure_device "${DEVICE}-chart"
 
       # The two bearer tokens (app-publish, and the acceptance peer's) and the
-      # simulated device's connection string are each fetched, masked and
-      # used inside this one step, so none ever reaches $GITHUB_ENV, a step
-      # output, or another step's process.
-      # Both the full connection string and its SharedAccessKey value are
-      # masked before the suite starts. The sed pattern spells the field name
-      # with a [K] class so this script, which GitHub echoes into the log,
-      # never carries the literal field-and-equals text the HAR-44 log check
-      # greps for (a match there would hide a real leak).
+      # two standing devices' connection strings (the simulated device's and,
+      # HAR-84, the chart device's) are each fetched, masked and used inside
+      # this one step, so none ever reaches $GITHUB_ENV, a step output, or
+      # another step's process.
+      # For each device, both the full connection string and its
+      # SharedAccessKey value are masked before the suite starts. The sed
+      # pattern spells the field name with a [K] class so this script, which
+      # GitHub echoes into the log, never carries the literal field-and-equals
+      # text the HAR-44 log check greps for (a match there would hide a real
+      # leak). The masks go to stderr, which the runner reads workflow
+      # commands from as well, so the function's stdout is only the string.
       - name: Run the live acceptance suite
         env:
           ACCEPTANCE_BASE_URL: https://${{ needs.deploy.outputs.hostname }}/api
@@ -377,23 +388,37 @@ jobs:
           PEER_CLIENT_ID: ${{ vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID }}
         run: |
           set -euo pipefail
-          SIMDEVICE_CONNECTION_STRING="$(az iot hub device-identity connection-string show \
-            --hub-name "$HUB" --device-id "$DEVICE" --auth-type login \
-            --query connectionString -o tsv)"
-          if [ -z "$SIMDEVICE_CONNECTION_STRING" ]; then
-            echo "az returned no connection string for device $DEVICE." >&2
-            exit 1
-          fi
-          echo "::add-mask::${SIMDEVICE_CONNECTION_STRING}"
-          SIMDEVICE_KEY="$(printf '%s' "$SIMDEVICE_CONNECTION_STRING" | tr ';' '\n' | sed -n 's/^SharedAccess[K]ey=//p')"
-          if [ -z "$SIMDEVICE_KEY" ]; then
-            echo "The connection string for device $DEVICE has no SharedAccessKey." >&2
-            exit 1
-          fi
-          echo "::add-mask::${SIMDEVICE_KEY}"
-          unset SIMDEVICE_KEY
+          # Prints the device's connection string, after masking it and its
+          # key. Run as VAR="$(device_connection_string id)": `exit` leaves only
+          # the subshell, so the caller's `set -e` fails the step.
+          device_connection_string() {
+            local id="$1" conn key
+            conn="$(az iot hub device-identity connection-string show \
+              --hub-name "$HUB" --device-id "$id" --auth-type login \
+              --query connectionString -o tsv)" || {
+              echo "az iot hub device-identity connection-string show failed for device $id." >&2
+              exit 1
+            }
+            if [ -z "$conn" ]; then
+              echo "az returned no connection string for device $id." >&2
+              exit 1
+            fi
+            echo "::add-mask::${conn}" >&2
+            key="$(printf '%s' "$conn" | tr ';' '\n' | sed -n 's/^SharedAccess[K]ey=//p')"
+            if [ -z "$key" ]; then
+              echo "The connection string for device $id has no SharedAccessKey." >&2
+              exit 1
+            fi
+            echo "::add-mask::${key}" >&2
+            printf '%s' "$conn"
+          }
+          SIMDEVICE_CONNECTION_STRING="$(device_connection_string "$DEVICE")"
           export SIMDEVICE_CONNECTION_STRING
           export ACCEPTANCE_SIM_DEVICE_ID="$DEVICE"
+          # HAR-84: the chart device, ensured by the step above.
+          SIMDEVICE_CHART_CONNECTION_STRING="$(device_connection_string "${DEVICE}-chart")"
+          export SIMDEVICE_CHART_CONNECTION_STRING
+          export ACCEPTANCE_CHART_DEVICE_ID="${DEVICE}-chart"
           export ACCEPTANCE_SIMDEVICE_BIN="$GITHUB_WORKSPACE/apps/data-pusher/dist/simdevice"
           ACCEPTANCE_BEARER_TOKEN="$(az account get-access-token --scope "${AUDIENCE}/.default" --query accessToken -o tsv)"
           echo "::add-mask::${ACCEPTANCE_BEARER_TOKEN}"
