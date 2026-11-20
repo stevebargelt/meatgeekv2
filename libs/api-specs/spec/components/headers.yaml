@@ -1,0 +1,21 @@
+# Response headers the handlers set. Referenced from paths/*.yaml and listed in
+# openapi.yaml components.headers.
+
+X-Request-ID:
+  description: |
+    Correlation handle for the call. Most handlers echo the caller's
+    `X-Request-ID` request header when it is sent and otherwise use the
+    Functions invocation id. GET /cooks, POST /cooks and GET /health/cosmos
+    always send the invocation id, which is also the body's `requestId`.
+  schema:
+    type: string
+
+RequestCharge:
+  description: |
+    Cosmos request charge (RU) of the call, as a decimal number exactly as
+    Cosmos reported it (HAR-11). Sent whenever the call reached Cosmos and a
+    charge is known, summed over every Cosmos call the request made. Absent
+    when no Cosmos call was made (a 401, or a 400 answered before any read).
+  schema:
+    type: string
+    example: '7.42'

@@ -338,12 +338,14 @@ nx generate @nx/js:lib temperature-utils --project=data-models
 # Generate new Azure Function
 nx generate @nx/azure:function process-temperature --project=api
 
-# Generate OpenAPI client
-nx run api-specs:generate-client --platform=typescript
-nx run api-specs:generate-client --platform=react-native
+# Generate TypeScript types from the OpenAPI spec (not checked in)
+nx run api-specs:generate-types
 
-# Validate OpenAPI specifications
-nx run api-specs:validate
+# Validate the OpenAPI spec
+nx run api-specs:validate-spec
+
+# Check the spec against the routes main.ts registers (runs in CI)
+nx test api
 ```
 
 ## Performance and Optimization

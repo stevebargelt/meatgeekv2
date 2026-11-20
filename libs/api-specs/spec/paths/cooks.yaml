@@ -1,44 +1,38 @@
-# Cook path items.
-# Top-level keys are referenced from openapi.yaml's `paths` block.
+# Cook path items. Top-level keys are referenced from openapi.yaml's `paths`.
 #
-# Implementation status:
-#   - cooks-collection : GET / POST implemented (apps/api/src/functions/cooks/{list-cooks,start-cook}.ts)
-#   - all others       : NOT YET IMPLEMENTED — descriptions are prefixed accordingly.
+#   - cooks-collection GET  : apps/api/src/functions/cooks/list-cooks.ts
+#   - cooks-collection POST : apps/api/src/functions/cooks/start-cook.ts
+#   - cook-stop POST        : apps/api/src/functions/cooks/stop-cook.ts
+#
+# Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
+# Cooks live in the caller's own partition of the cooks container.
 
 cooks-collection:
   get:
     operationId: listCooks
-    summary: List cook sessions
+    summary: List the caller's cooks
     description: |
-      Returns one page of the authenticated caller's cook sessions. Mirrors
-      apps/api/src/functions/cooks/list-cooks.ts (CookListResponse — bare
-      cook array under `cooks` with limit/hasMore/continuationToken, NOT
-      wrapped in ApiResponse). Each cook carries only Cook contract fields.
+      Returns one page of the authenticated caller's cooks as a
+      CookListResponse: a bare cook array under `cooks` with `limit`,
+      `hasMore` and `continuationToken`. Newest first; paged by continuation
+      token, never offset. Each cook carries only Cook contract fields.
 
       Filters (MG-87): `deviceId` and `status` narrow the list and combine
       with AND, so `?deviceId=<id>&status=active` returns only the caller's
-      active cook on that device. Newest first; paged by continuation token.
-      An invalid filter is rejected before any read:
-        - 400 VALIDATION_ERROR: `status` is not a CookStatus.
-        - 400 VALIDATION_ERROR: `deviceId` is empty or longer than 128
-          characters.
+      active cook on that device. Neither can widen the query beyond the
+      caller's own cooks. An invalid filter is 400 VALIDATION_ERROR before any
+      read.
+
+      There is no `userId` parameter: a `userId` in the query is ignored.
     tags: [cooks]
     parameters:
-      - name: userId
-        in: query
-        required: false
-        description: |
-          Ignored by the deployed API, which lists only the authenticated
-          caller's cooks. The mock server uses it as a filter.
-        schema:
-          type: string
       - name: deviceId
         in: query
         required: false
         description: |
           Only cooks on this device. Opaque; 1 to 128 characters, otherwise
-          400 VALIDATION_ERROR. Combines with `status` by AND. The device is
-          not checked for ownership: the list is always the caller's own cooks.
+          400 VALIDATION_ERROR. The device is not checked for ownership: the
+          list is always the caller's own cooks.
         schema:
           type: string
           minLength: 1
@@ -46,78 +40,59 @@ cooks-collection:
       - name: status
         in: query
         required: false
-        description: |
-          Only cooks in this status; any other value is 400 VALIDATION_ERROR.
-          Combines with `deviceId` by AND.
+        description: Only cooks in this status; any other value is 400 VALIDATION_ERROR.
         schema:
           $ref: '../components/schemas/cook.yaml#/CookStatus'
       - name: limit
         in: query
         required: false
-        description: Page size. Default 20; the API clamps larger values to 100.
+        description: |
+          Page size. Default 20. A value above 100 is clamped to 100; a
+          fraction is rounded down. A value that is not a positive number uses
+          the default rather than failing. The response's `limit` is the size
+          applied.
         schema:
           type: integer
-          minimum: 1
           default: 20
       - name: continuationToken
         in: query
         required: false
         description: |
           Opaque cursor from the previous page's `continuationToken`. Omit for
-          the first page.
+          the first page. A token Cosmos does not accept fails the read (500).
         schema:
           type: string
     responses:
       '200':
-        description: Paginated list of cooks.
+        description: One page of the caller's cooks (possibly empty).
         headers:
           X-Request-ID:
-            description: Functions invocation id (correlation handle).
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/CookListResponse'
       '400':
         description: |
-          Invalid filter: `status` is not a CookStatus, or `deviceId` is empty
-          or longer than 128 characters. No read is issued, so there is no
-          x-meatgeek-request-charge header.
+          VALIDATION_ERROR: `status` is not a CookStatus, or `deviceId` is
+          empty or longer than 128 characters. No read is issued. This
+          response carries neither X-Request-ID nor x-meatgeek-request-charge.
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '401':
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '500':
-        description: Server error.
-        headers:
-          x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+        $ref: '#/shared/cook-server-error'
 
   post:
     operationId: startCook
-    summary: Start a new cook session
+    summary: Start a cook
     description: |
-      Creates a cook in `active` status. Mirrors apps/api/src/functions/cooks/
-      start-cook.ts: validates id/name/deviceId/meatType and returns the Cook
+      Creates a cook in `active` status and returns the persisted Cook
       directly (NOT wrapped in ApiResponse).
 
       Retry-safe (MG-84). The client generates the cook `id` (a UUID) once
@@ -131,8 +106,8 @@ cooks-collection:
           this user. One active cook per user and device; since only the
           device's owner can start a cook on it (below), that is in effect one
           active cook per device. Stop it first.
-        - 400 VALIDATION_ERROR: a required field is missing or `id` is not a
-          UUID.
+        - 400 VALIDATION_ERROR: `name` is missing or blank, `deviceId` or
+          `meatType` is missing or empty, or `id` is not a UUID.
         - 403 DEVICE_NOT_OWNED (HAR-26, MG-88): `deviceId` is not a device the
           caller registered. Checked with one point read on the devices
           container after validation and before any write: no cook, no device
@@ -140,6 +115,9 @@ cooks-collection:
           unregistered device get the same body, so the answer does not reveal
           whether another user owns the id.
         - 503 DEVICE_TWIN_UPDATE_FAILED (HAR-66): see below.
+        - 500 INTERNAL_SERVER_ERROR: a Cosmos failure, or a body that is not
+          valid JSON or is JSON `null` (the handler does not answer those
+          with 400).
 
       Device twin (HAR-66). After a 201, and after a 200 replay, the API sets
       the device's IoT Hub twin desired properties from Cosmos under its
@@ -151,6 +129,10 @@ cooks-collection:
       twin update fails the cook stays created and the answer is 503;
       resending the same request replays (200) and retries the twin update.
       `cook_started` is still emitted when this call created the cook.
+
+      The response's `X-Request-ID` is always the invocation id; the caller's
+      `X-Request-ID` is used only as the twin's and the SignalR message's
+      correlation id.
     tags: [cooks]
     requestBody:
       required: true
@@ -165,16 +147,9 @@ cooks-collection:
           returned unchanged and no `cook_started` is emitted.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
@@ -183,51 +158,35 @@ cooks-collection:
         description: Cook created.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/Cook'
-      '403':
+      '400':
         description: |
-          DEVICE_NOT_OWNED. The device is not registered to the caller (it
-          belongs to someone else, or nobody registered it; the body is the
-          same either way). Nothing was written and nothing was emitted.
-        headers:
-          x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+          VALIDATION_ERROR: `name` missing or blank, `deviceId` or `meatType`
+          missing or empty, or `id` not a UUID. No Cosmos call is made. This
+          response carries neither X-Request-ID nor x-meatgeek-request-charge.
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '401':
+        $ref: '../components/responses.yaml#/Unauthenticated'
+      '403':
+        $ref: '#/shared/device-not-owned'
       '409':
         description: |
           COOK_ALREADY_ACTIVE. The device already has an active cook for this
           user; `activeCookId` names it. Nothing was written.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
@@ -237,24 +196,16 @@ cooks-collection:
           COOK_ID_REUSED. A cook with this id exists with a different body.
           Nothing was written.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '400':
-        description: Validation failure (missing id/name/deviceId/meatType, or id not a UUID).
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: '#/shared/cook-server-error'
       '503':
         description: |
           DEVICE_TWIN_UPDATE_FAILED. The cook was created (or already existed
@@ -262,165 +213,22 @@ cooks-collection:
           names the cook; `reason` is a fixed code. Resend the same request.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
-      '500':
-        description: Server error.
-        headers:
-          x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-
-cook-item:
-  get:
-    operationId: getCook
-    summary: Get a single cook by id
-    description: |
-      NOT YET IMPLEMENTED - Will return the Cook with id=`{id}`. Returns 404
-      with NOT_FOUND if no cook exists.
-    tags: [cooks]
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-    responses:
-      '200':
-        description: Cook found.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/cook.yaml#/Cook'
-      '404':
-        description: Cook not found.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '500':
-        description: Server error.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-
-  patch:
-    operationId: updateCook
-    summary: Patch a cook session
-    description: |
-      NOT YET IMPLEMENTED - Partial update of name/status/targetTemps/notes/
-      rating/endTime. Status transitions are validated server-side (e.g.,
-      cannot move `completed` → `active`).
-    tags: [cooks]
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            $ref: '../components/schemas/cook.yaml#/UpdateCookRequest'
-    responses:
-      '200':
-        description: Updated cook.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/cook.yaml#/Cook'
-      '400':
-        description: Invalid status transition or schema violation.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '404':
-        description: Cook not found.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '500':
-        description: Server error.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-
-cook-start:
-  post:
-    operationId: startExistingCook
-    summary: Transition a planned cook to active
-    description: |
-      NOT YET IMPLEMENTED - Moves cook id=`{id}` from `planning` to `active`.
-      Idempotent: a cook already in `active` returns 200 with the unchanged
-      Cook (no double-start side effects).
-    tags: [cooks]
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-    responses:
-      '200':
-        description: Cook now active.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/cook.yaml#/Cook'
-      '404':
-        description: Cook not found.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '409':
-        description: Invalid status transition (e.g., `completed` → active).
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '500':
-        description: Server error.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
 
 cook-stop:
   post:
     operationId: stopCook
-    summary: Stop an active cook
+    summary: Stop a cook
     description: |
-      Moves the caller's cook id=`{cookId}` to `completed`, sets endTime to
-      now(), and emits a `cook_stopped` SignalR message on the device's user
-      group. Mirrors apps/api/src/functions/cooks/stop-cook.ts:
+      Moves the caller's cook `{cookId}` to `completed`, sets `endTime` to
+      now, and emits `cook_stopped` to the caller. Mirrors
+      apps/api/src/functions/cooks/stop-cook.ts:
         - The request has no body; the handler never reads one. The device is
           the one stored on the cook.
         - The cook is point-read in the caller's partition. Absent there
@@ -437,9 +245,9 @@ cook-stop:
         - HAR-66: after the stop is written, transitioned or not, the device's
           IoT Hub twin desired properties are set from Cosmos under the API's
           managed identity: `activeCookId` and `correlationId` are removed
-          when the device has no active cook. No twin call is made on 401,
-          403, 404 or 500. A device with no IoT Hub identity has no twin, and
-          the normal status is returned. If the twin update fails the cook
+          when the device has no active cook. No twin call is made on 400,
+          401, 403, 404 or 500. A device with no IoT Hub identity has no twin,
+          and the normal status is returned. If the twin update fails the cook
           stays completed and the answer is 503 DEVICE_TWIN_UPDATE_FAILED;
           resending the stop retries the twin update.
     tags: [cooks]
@@ -447,7 +255,9 @@ cook-stop:
       - name: cookId
         in: path
         required: true
-        description: Id of the cook to stop (route is cooks/{cookId}/stop).
+        description: |
+          Id of the cook to stop. Opaque (cooks started before MG-84 have
+          `cook-<epoch-ms>` ids). An id that is only whitespace is 400.
         schema:
           type: string
     responses:
@@ -455,54 +265,40 @@ cook-stop:
         description: Cook now completed (or already was).
         headers:
           X-Request-ID:
-            description: Correlation id (propagated X-Request-ID or invocation id).
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/cook.yaml#/Cook'
-      '403':
+      '400':
         description: |
-          DEVICE_NOT_OWNED. The cook's device is not registered to the caller
-          (it belongs to someone else, or nobody registered it; the body is the
-          same either way). Nothing was written and nothing was emitted.
+          VALIDATION_ERROR: `{cookId}` is blank. No Cosmos call is made.
         headers:
-          x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '401':
+        $ref: '../components/responses.yaml#/Unauthenticated'
+      '403':
+        $ref: '#/shared/device-not-owned'
       '404':
         description: NOT_FOUND. No cook with this id in the caller's partition.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: '../components/responses.yaml#/ServerError'
       '503':
         description: |
           DEVICE_TWIN_UPDATE_FAILED. The cook is completed but the device twin
@@ -510,74 +306,43 @@ cook-stop:
           Resend the stop.
         headers:
           X-Request-ID:
-            description: Correlation id (propagated X-Request-ID or invocation id).
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
-      '500':
-        description: Server error.
-        headers:
-          x-meatgeek-request-charge:
-            description: |
-              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
-              Present whenever the call reached Cosmos; absent when it did not
-              (e.g. a 400 before any read).
-            schema:
-              type: string
-              example: '7.42'
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
 
-cook-history:
-  get:
-    operationId: getCookHistory
-    summary: Get aggregate summary for a completed cook
+# Pieces the operations above share. Not path items: openapi.yaml references
+# only cooks-collection and cook-stop.
+shared:
+  device-not-owned:
     description: |
-      NOT YET IMPLEMENTED - Returns CookSummary statistics for cook
-      id=`{id}`. Only valid for cooks in `completed` status; returns 409
-      CONFLICT for in-progress cooks.
-    tags: [cooks]
-    parameters:
-      - name: id
-        in: path
-        required: true
+      DEVICE_NOT_OWNED. The device is not registered to the caller (it
+      belongs to someone else, or nobody registered it; the body is the same
+      either way). Nothing was written and nothing was emitted.
+    headers:
+      X-Request-ID:
+        $ref: '../components/headers.yaml#/X-Request-ID'
+      x-meatgeek-request-charge:
+        $ref: '../components/headers.yaml#/RequestCharge'
+    content:
+      application/json:
         schema:
-          type: string
-    responses:
-      '200':
-        description: Cook summary.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/cook.yaml#/CookSummary'
-      '404':
-        description: Cook not found.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '409':
-        description: Cook is not yet completed.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
-      '500':
-        description: Server error.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+          $ref: '../components/schemas/common.yaml#/ErrorResponse'
+
+  cook-server-error:
+    description: |
+      INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
+      failure. Carries x-meatgeek-request-charge when the Cosmos calls made
+      before the failure, or the failing call, reported a charge. This
+      response carries no X-Request-ID; the body's `requestId` is the
+      invocation id.
+    headers:
+      x-meatgeek-request-charge:
+        $ref: '../components/headers.yaml#/RequestCharge'
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas/common.yaml#/ErrorResponse'

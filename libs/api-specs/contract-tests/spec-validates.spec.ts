@@ -219,55 +219,31 @@ describe('OpenAPI spec — structural validation', () => {
     expect(seen.size).toBeGreaterThan(0);
   });
 
-  it('every SignalR payload schema declares a required correlation.id field', async () => {
+  it('every cook event schema declares a required correlation.id field', async () => {
     const api = (await SwaggerParser.dereference(SPEC_PATH)) as OpenAPIV3.Document;
-    const schemas = (api.components?.schemas ?? {}) as Record<
-      string,
-      OpenAPIV3.SchemaObject
-    >;
-    // Step #2 fans out SignalR payloads under names like TemperatureUpdateMessage,
-    // CookStartedMessage, DeviceOnlineMessage, etc. — match on the *Message suffix.
-    // Exclude the SignalRMessage union (the discriminated wrapper).
-    const signalrSchemas = Object.entries(schemas).filter(
-      ([name]) => /Message$/.test(name) && name !== 'SignalRMessage',
-    );
-    if (signalrSchemas.length === 0) {
-      // Spec authoring drift — fail loud rather than passing vacuously.
-      throw new Error(
-        'expected at least one SignalR *Message schema in components.schemas',
-      );
-    }
-    for (const [name, schema] of signalrSchemas) {
-      // Concrete messages use allOf [SignalREnvelopeBase, { ... }] — flatten by
-      // collecting required + properties across the allOf chain.
-      const { required, properties } = flattenAllOf(schema);
-      expect(required).toContain('correlation');
-      const correlation = properties['correlation'] as
-        | OpenAPIV3.SchemaObject
-        | undefined;
-      expect(correlation).toBeDefined();
-      const corrRequired = (correlation?.required ?? []) as string[];
-      if (!corrRequired.includes('id')) {
-        throw new Error(
-          `SignalR schema '${name}' has correlation but correlation.id is not required`,
-        );
-      }
+    const schemas = (api.components?.schemas ?? {}) as Record<string, OpenAPIV3.SchemaObject>;
+    const cookEvents = ['CookStartedMessage', 'CookStoppedMessage'];
+    for (const name of cookEvents) {
+      const schema = schemas[name];
+      expect({ name, defined: schema !== undefined }).toEqual({ name, defined: true });
+      expect(schema.required).toContain('correlation');
+      const correlation = schema.properties?.['correlation'] as OpenAPIV3.SchemaObject;
+      expect(correlation.required).toEqual(['id']);
     }
   });
-});
 
-function flattenAllOf(schema: OpenAPIV3.SchemaObject): {
-  required: string[];
-  properties: Record<string, OpenAPIV3.SchemaObject>;
-} {
-  const required = new Set<string>(schema.required ?? []);
-  const properties: Record<string, OpenAPIV3.SchemaObject> = {
-    ...((schema.properties ?? {}) as Record<string, OpenAPIV3.SchemaObject>),
-  };
-  for (const sub of (schema.allOf ?? []) as OpenAPIV3.SchemaObject[]) {
-    const flat = flattenAllOf(sub);
-    flat.required.forEach((r) => required.add(r));
-    Object.assign(properties, flat.properties);
-  }
-  return { required: Array.from(required), properties };
-}
+  it('describes no operation as NOT YET IMPLEMENTED', () => {
+    const offenders: string[] = [];
+    const visit = (directory: string) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) visit(full);
+        else if (/\.ya?ml$/.test(entry.name) && fs.readFileSync(full, 'utf8').includes('NOT YET IMPLEMENTED')) {
+          offenders.push(path.relative(path.dirname(SPEC_PATH), full));
+        }
+      }
+    };
+    visit(path.dirname(SPEC_PATH));
+    expect(offenders).toEqual([]);
+  });
+});

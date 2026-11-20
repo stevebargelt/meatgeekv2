@@ -1,12 +1,9 @@
 # Temperature path items.
 #
-# Implementation status:
-#   - temperatures-current : GET implemented on the real temperatures container
-#                            (apps/api/src/functions/temperatures/get-current.ts,
-#                            HAR-28 / MG-79 part 1).
-#   - temperatures-history : GET implemented on the real temperatures container
-#                            (apps/api/src/functions/temperatures/get-history.ts,
-#                            HAR-35 / MG-79 part 2).
+#   - temperatures-current GET : apps/api/src/functions/temperatures/get-current.ts
+#                                (HAR-28 / MG-79 part 1)
+#   - temperatures-history GET : apps/api/src/functions/temperatures/get-history.ts
+#                                (HAR-35 / MG-79 part 2)
 #
 # History endpoint documents STRICT cookId tag-match semantics: a `?cookId=X`
 # filter returns only readings whose `cookId` field equals X — it does NOT
@@ -50,18 +47,18 @@ temperatures-current:
         required: true
         description: |
           The device id: 1-128 characters of A-Z, a-z, 0-9, ".", "_", ":" or
-          "-" (the POST /devices rule).
+          "-" (the POST /devices rule). Anything else is 400.
         schema:
           type: string
+          pattern: '^[A-Za-z0-9._:-]{1,128}$'
     responses:
       '200':
         description: Latest reading for the device.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
@@ -70,12 +67,15 @@ temperatures-current:
         description: |
           VALIDATION_ERROR: the deviceId is not a valid device id. Answered
           before any Cosmos call.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
         description: |
           DEVICE_NOT_FOUND: no such device, or it belongs to someone else (the
@@ -83,14 +83,16 @@ temperatures-current:
           NO_READINGS: the caller owns the device, but no reading for it has
           been stored.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
 temperatures-history:
   get:
@@ -141,9 +143,11 @@ temperatures-history:
         required: true
         description: |
           Device whose readings to return: 1-128 characters of A-Z, a-z, 0-9,
-          ".", "_", ":" or "-" (the POST /devices rule).
+          ".", "_", ":" or "-" (the POST /devices rule). Missing or anything
+          else is 400.
         schema:
           type: string
+          pattern: '^[A-Za-z0-9._:-]{1,128}$'
       - name: cookId
         in: query
         required: false
@@ -161,26 +165,32 @@ temperatures-history:
           1-128 characters. Not checked against the cooks container.
         schema:
           type: string
+          minLength: 1
+          maxLength: 128
       - name: startTime
         in: query
         required: false
         description: |
           ISO-8601 lower bound (inclusive) on the hub's enqueued time. Must be
-          before `endTime` when both are given.
+          before `endTime` when both are given. The handler accepts any value
+          JavaScript's `Date` parses and normalises it to UTC; anything else
+          is 400.
         schema:
           type: string
           format: date-time
       - name: endTime
         in: query
         required: false
-        description: ISO-8601 upper bound (exclusive) on the hub's enqueued time.
+        description: |
+          ISO-8601 upper bound (exclusive) on the hub's enqueued time. Parsed
+          like `startTime`.
         schema:
           type: string
           format: date-time
       - name: limit
         in: query
         required: false
-        description: Page size. Default 100, max 5000.
+        description: Page size. Default 100. A non-integer or a value outside 1-5000 is 400.
         schema:
           type: integer
           minimum: 1
@@ -189,6 +199,7 @@ temperatures-history:
       - name: offset
         in: query
         required: false
+        description: Readings to skip. Default 0. A non-integer or a negative value is 400.
         schema:
           type: integer
           minimum: 0
@@ -200,10 +211,9 @@ temperatures-history:
           for an owned device with no matching readings.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
@@ -214,22 +224,27 @@ temperatures-history:
           over-long cookId, a startTime or endTime that is not a date, a
           startTime not before endTime, or a limit or offset that is not an
           integer in range. Answered before any Cosmos call.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
         description: |
           DEVICE_NOT_FOUND: no such device, or it belongs to someone else (the
           two are indistinguishable on purpose).
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'

@@ -28,18 +28,17 @@ devices-collection:
         description: The caller's devices (possibly none).
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: '#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/device.yaml#/DeviceListResponse'
       '401':
-        $ref: '#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '500':
-        $ref: '#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
   post:
     operationId: registerDevice
@@ -61,32 +60,33 @@ devices-collection:
         description: The registered device.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: '#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/device.yaml#/Device'
       '400':
-        $ref: '#/shared/validation-error'
+        $ref: '../components/responses.yaml#/DeviceValidationError'
       '401':
-        $ref: '#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '409':
         description: |
           DEVICE_CONFLICT: a device with this id already exists (whoever owns
           it), or the caller already has a device with this name. The text is
           fixed and does not say which.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: '#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        $ref: '#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
 device-item:
   get:
@@ -98,26 +98,25 @@ device-item:
       response does not reveal that another user's device exists.
     tags: [devices]
     parameters:
-      - $ref: '#/shared/device-id-parameter'
+      - $ref: '../components/parameters.yaml#/DeviceIdPath'
     responses:
       '200':
         description: The device.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: '#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/device.yaml#/Device'
       '401':
-        $ref: '#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
-        $ref: '#/shared/device-not-found'
+        $ref: '../components/responses.yaml#/DeviceNotFound'
       '500':
-        $ref: '#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
   patch:
     operationId: updateDevice
@@ -130,7 +129,7 @@ device-item:
       409 CONCURRENT_UPDATE and the client should read it again and retry.
     tags: [devices]
     parameters:
-      - $ref: '#/shared/device-id-parameter'
+      - $ref: '../components/parameters.yaml#/DeviceIdPath'
     requestBody:
       required: true
       content:
@@ -142,92 +141,32 @@ device-item:
         description: The updated device.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: '#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/device.yaml#/Device'
       '400':
-        $ref: '#/shared/validation-error'
+        $ref: '../components/responses.yaml#/DeviceValidationError'
       '401':
-        $ref: '#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
-        $ref: '#/shared/device-not-found'
+        $ref: '../components/responses.yaml#/DeviceNotFound'
       '409':
         description: |
           DEVICE_CONFLICT: the caller already has another device with the new
           name. CONCURRENT_UPDATE: the device changed between the read and the
           write.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: '#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        $ref: '#/shared/server-error'
-
-# Pieces the operations above share. Not path items: openapi.yaml references
-# only devices-collection and device-item.
-shared:
-  request-charge-header:
-    description: |
-      Cosmos request charge (RU) of the call, as a decimal (HAR-11). Present
-      whenever the call reached Cosmos.
-    schema:
-      type: string
-      example: '7.42'
-
-  device-id-parameter:
-    name: id
-    in: path
-    required: true
-    description: The device id (also its Cosmos partition key).
-    schema:
-      type: string
-
-  unauthenticated:
-    description: |
-      No usable Easy Auth principal. Answered before any Cosmos call, so there
-      is no x-meatgeek-request-charge header.
-    content:
-      application/json:
-        schema:
-          $ref: '../components/schemas/common.yaml#/UnauthenticatedError'
-
-  validation-error:
-    description: |
-      VALIDATION_ERROR: the body is not valid JSON, has an unknown field, or
-      breaks a field rule. Answered before any Cosmos call.
-    content:
-      application/json:
-        schema:
-          $ref: '../components/schemas/common.yaml#/ErrorResponse'
-
-  device-not-found:
-    description: |
-      NOT_FOUND: no such device, or it belongs to someone else (the two are
-      indistinguishable on purpose).
-    headers:
-      x-meatgeek-request-charge:
-        $ref: '#/shared/request-charge-header'
-    content:
-      application/json:
-        schema:
-          $ref: '../components/schemas/common.yaml#/ErrorResponse'
-
-  server-error:
-    description: |
-      INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
-      failure. Carries x-meatgeek-request-charge when Cosmos reported a charge.
-    headers:
-      x-meatgeek-request-charge:
-        $ref: '#/shared/request-charge-header'
-    content:
-      application/json:
-        schema:
-          $ref: '../components/schemas/common.yaml#/ErrorResponse'
+        $ref: '../components/responses.yaml#/ServerError'

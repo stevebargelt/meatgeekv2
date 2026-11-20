@@ -1,0 +1,22 @@
+# Path parameters shared by more than one operation. Listed in openapi.yaml
+# components.parameters.
+
+DeviceIdPath:
+  name: id
+  in: path
+  required: true
+  description: |
+    The device id (also its Cosmos partition key). The route does not check
+    its shape: an id that is not one of the caller's devices answers 404.
+  schema:
+    type: string
+
+RecipeIdPath:
+  name: id
+  in: path
+  required: true
+  description: The recipe id, a UUID. Anything else is 400 with no Cosmos call.
+  schema:
+    type: string
+    format: uuid
+    pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
