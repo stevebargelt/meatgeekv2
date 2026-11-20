@@ -184,11 +184,18 @@ If Nx fails with a socket path that is too long (deep worktree paths), set
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `default-src`     | `'self'`                                                                                                                      |
 | `connect-src`     | `'self'`, the API origin, `https://login.microsoftonline.com`, `https://*.service.signalr.net`, `wss://*.service.signalr.net` |
-| `frame-src`       | `https://login.microsoftonline.com` (MSAL's silent token renew)                                                               |
+| `frame-src`       | `'self'`, `https://login.microsoftonline.com` (MSAL's silent token renew; see below)                                          |
 | `img-src`         | `'self' data:`                                                                                                                |
 | `object-src`      | `'none'`                                                                                                                      |
 | `base-uri`        | `'self'`                                                                                                                      |
 | `frame-ancestors` | `'none'`                                                                                                                      |
+
+`frame-src` needs `'self'` as well as the sign-in origin. MSAL's silent renew
+loads `login.microsoftonline.com/authorize` in a hidden iframe, and Entra then
+redirects that iframe back to `redirectUri`, which is this site's own origin
+(`src/auth/msal.ts`). Without `'self'` the browser blocks the redirect, MSAL
+times out with a `BrowserAuthError`, and API calls fail until the user signs
+out.
 
 There is no `style-src` or `script-src`: the build has no inline script or
 style, so `default-src 'self'` covers both.

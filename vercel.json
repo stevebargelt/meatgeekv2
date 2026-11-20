@@ -10,7 +10,7 @@
       "headers": [
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; connect-src 'self' https://meatgeek-v2-dev-func-259d4bf5b628.azurewebsites.net https://login.microsoftonline.com https://*.service.signalr.net wss://*.service.signalr.net; frame-src https://login.microsoftonline.com; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+          "value": "default-src 'self'; connect-src 'self' https://meatgeek-v2-dev-func-259d4bf5b628.azurewebsites.net https://login.microsoftonline.com https://*.service.signalr.net wss://*.service.signalr.net; frame-src 'self' https://login.microsoftonline.com; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
         }
       ]
     }

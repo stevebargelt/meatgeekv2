@@ -43,7 +43,9 @@ describe('Content-Security-Policy (vercel.json)', () => {
     expect(directives.get('connect-src')).toEqual(
       expect.arrayContaining(["'self'", SIGN_IN, ...SIGNALR])
     );
-    expect(directives.get('frame-src')).toEqual([SIGN_IN]);
+    // 'self' because Entra redirects MSAL's silent-renew iframe back to
+    // redirectUri (window.location.origin); without it the iframe is blocked.
+    expect(directives.get('frame-src')).toEqual(["'self'", SIGN_IN]);
     expect(directives.get('img-src')).toEqual(["'self'", 'data:']);
     expect(directives.get('object-src')).toEqual(["'none'"]);
     expect(directives.get('base-uri')).toEqual(["'self'"]);
