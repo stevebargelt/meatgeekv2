@@ -22,6 +22,8 @@ import { principalFromRequest } from '../shared/auth/principal';
 import { CooksRepository } from '../shared/cosmos/cooks-repository';
 import { DevicesRepository } from '../shared/cosmos/devices-repository';
 import { FakeDevicesContainer } from '../shared/cosmos/fake-devices-container.testing';
+import { syncDeviceTwinWith } from '../shared/iothub/device-twin-sync';
+import { FakeTwinHub } from '../shared/iothub/fake-device-twin.testing';
 
 const OWNER = { tenantId: 'tenant-owner', objectId: 'owner-oid' };
 const OTHER = { tenantId: 'tenant-other', objectId: 'other-oid' };
@@ -258,8 +260,19 @@ function containerContract() {
   seedDevice({ id: OTHER_DEVICE, userId: 'tenant-other:other-oid', name: OTHER_DEVICE });
   const devices = new DevicesRepository(devicesContainer.asContainer());
 
+  // HAR-66: every OWNER device has a twin; the sync runs for real against the
+  // real repository and this in-memory hub.
+  const repository = new CooksRepository(container as unknown as Container);
+  const twins = new FakeTwinHub();
+  for (const id of OWNER_DEVICES) {
+    twins.addDevice(id);
+  }
+
   return {
-    repository: new CooksRepository(container as unknown as Container),
+    repository,
+    twins,
+    syncDeviceTwin: (userId: string, deviceId: string, correlationId: string) =>
+      syncDeviceTwinWith({ twin: twins, cooks: repository }, userId, deviceId, correlationId),
     getDeviceOwnership: (userId: string, deviceId: string) =>
       devices.getDeviceOwnership(userId, deviceId),
     reassignDevice: (id: string, userId: string) => seedDevice({ id, userId, name: id }),
@@ -290,6 +303,7 @@ describe('MG-59 cooks persistence flow', () => {
         resolvePrincipal: principalFromRequest,
         getRepository: () => store.repository,
         getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
       }
     );
 
@@ -303,6 +317,11 @@ describe('MG-59 cooks persistence flow', () => {
     expect(store.cooks.get(`tenant-owner:owner-oid/${created.id}`)).toMatchObject(created);
     expect(JSON.stringify(created)).not.toContain('user-1');
     expect(startContext.messages()).toHaveLength(1);
+    // HAR-66: the twin now names the cook, with the start's correlation id.
+    expect(store.twins.desired('grill-7')).toEqual({
+      activeCookId: created.id,
+      correlationId: 'start-request',
+    });
 
     const beforeStop = await getCooksHandler(
       request({ identity: OWNER, query: { userId: 'tenant-other:other-oid', limit: '20' } }),
@@ -320,12 +339,15 @@ describe('MG-59 cooks persistence flow', () => {
         resolvePrincipal: principalFromRequest,
         getRepository: () => store.repository,
         getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
       }
     );
     expect(stopped.status).toBe(200);
     expect(stopped.jsonBody).toMatchObject({ id: created.id, status: 'completed' });
     expect((stopped.jsonBody as Cook).endTime).toEqual(expect.any(String));
     expect(stopContext.messages()).toHaveLength(1);
+    // HAR-66: the stop cleared both desired properties.
+    expect(store.twins.desired('grill-7')).toEqual({});
 
     const finalRead = await getCooksHandler(
       request({ identity: OWNER }),
@@ -356,6 +378,7 @@ describe('MG-59 cooks persistence flow', () => {
         resolvePrincipal: principalFromRequest,
         getRepository: () => store.repository,
         getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
       }
     );
     const created = ownerStart.jsonBody as Cook;
@@ -368,11 +391,17 @@ describe('MG-59 cooks persistence flow', () => {
         resolvePrincipal: principalFromRequest,
         getRepository: () => store.repository,
         getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
       }
     );
 
     expect(response.status).toBe(404);
     expect(intruderContext.messages()).toEqual([]);
+    // HAR-66: the refused stop did not touch the owner's twin.
+    expect(store.twins.desired('grill-8')).toEqual({
+      activeCookId: created.id,
+      correlationId: 'owner-start',
+    });
     expect(store.cooks.get(`tenant-owner:owner-oid/${created.id}`)).toMatchObject({
       status: 'active',
     });
@@ -396,6 +425,7 @@ describe('MG-59 cooks persistence flow', () => {
         resolvePrincipal: principalFromRequest,
         getRepository: () => store.repository,
         getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
       }
     );
     const created = started.jsonBody as Cook;
@@ -413,6 +443,7 @@ describe('MG-59 cooks persistence flow', () => {
         resolvePrincipal: principalFromRequest,
         getRepository: () => store.repository,
         getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
       }
     );
     const stoppedAgain = await stopCookHandler(
@@ -422,6 +453,7 @@ describe('MG-59 cooks persistence flow', () => {
         resolvePrincipal: principalFromRequest,
         getRepository: () => store.repository,
         getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
       }
     );
 
@@ -457,6 +489,7 @@ describe('MG-84 retry-safe start through the real repository', () => {
     resolvePrincipal: principalFromRequest,
     getRepository: () => store.repository,
     getDeviceOwnership: store.getDeviceOwnership,
+    syncDeviceTwin: store.syncDeviceTwin,
   });
   const body = (id: string, deviceId = 'grill-1') => ({
     id,
@@ -606,6 +639,7 @@ describe('HAR-26 device ownership through the real repositories', () => {
     resolvePrincipal: principalFromRequest,
     getRepository: () => store.repository,
     getDeviceOwnership: store.getDeviceOwnership,
+    syncDeviceTwin: store.syncDeviceTwin,
   });
   const startOn = (
     store: ReturnType<typeof containerContract>,

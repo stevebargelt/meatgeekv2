@@ -48,6 +48,52 @@ cook from the IoT Hub device twin.
   (on `cook_started` only), `correlation.id` and the cook as `payload`.
 - The `device-{id}` groups are for device readings, sent by a later issue.
 
+## How the Pi gets its cook: the device twin (HAR-66)
+
+The Pi does not listen to SignalR. `startCook` and `stopCook` write the active
+cook into the device's IoT Hub twin, as desired properties, and data-pusher
+reads them (HAR-58). The twin persists, so a Pi that was offline gets the cook
+when it reconnects.
+
+- **Contract.** `desired.activeCookId` and `desired.correlationId` are strings
+  or absent. The API sends `null` for "absent", which IoT Hub turns into a
+  deleted property. The Pi reports `activeCookId`, `correlationId` and
+  `appliedDesiredVersion`; the API does not read them.
+- **When.** After the Cosmos write: on a 201 start, on a 200 replay of the same
+  start, and on every 200 stop, whether or not that call made the transition.
+  Never on 400, 401, 403, 404, 409, 422 or 500.
+- **What.** The twin follows the device's active cook in Cosmos, not the
+  request: the MG-84 device lock and the non-terminal cook it names (two point
+  reads). With no active cook both properties are removed. With an active cook
+  that the twin already names, the twin's `correlationId` is kept. Otherwise
+  the twin gets the cook id and this request's correlation id (`X-Request-ID`,
+  else the invocation id).
+- **How.** `GET /twins/{id}`, then the Cosmos read, then, only if the twin
+  differs, `PATCH /twins/{id}` with `If-Match` on the etag just read, against
+  `https://${IOTHUB_SERVICE_HOSTNAME}` (api-version `2021-04-12`) with a
+  managed identity token for `https://iothubs.azure.net/.default`. After a
+  PATCH the active cook is read again; if it changed, or the PATCH got 412, the
+  whole attempt repeats, up to 3 attempts. So a late retried stop of cook A
+  after cook B started leaves B, and a slow start that lost to a stop does not
+  bring its cook back.
+- **No twin.** A device with no IoT Hub identity has no twin (`GET` answers
+  404). There is nothing to sync and the normal status is returned. Dev's
+  acceptance devices are like this.
+- **Failure.** If the twin update fails, the cook write stands and the answer is
+  `503 { error: "DEVICE_TWIN_UPDATE_FAILED", message, cookId, reason,
+  requestId }`. `reason` is a fixed code such as `iothub_patch_twin_status_403`;
+  it never names the hub, the device or a token. Resend the same request:
+  a start replays (200) and a stop finds the cook completed, and both sync the
+  twin again. `cook_started` is still emitted when the failed call created the
+  cook, and `cook_stopped` when it completed it.
+- **Prod.** The identity's `IoT Hub Twin Contributor` grant is on in dev only
+  (`api_device_twin_writer_enabled`). Without it every twin call is refused,
+  so in prod a start or stop answers 503 with the cook still written.
+
+The code is `apps/api/src/shared/iothub/device-twin.ts` (the REST client),
+`apps/api/src/shared/iothub/device-twin-sync.ts` (the sync) and
+`apps/api/src/functions/cooks/device-twin-step.ts` (the handlers' 503).
+
 The code is `apps/api/src/functions/signalr/negotiate.ts`,
 `apps/api/src/shared/signalr/signalr-management.ts`,
 `apps/api/src/functions/signalr/envelope.ts`, and the two cook handlers in

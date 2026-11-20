@@ -103,6 +103,8 @@ components:
       $ref: './components/schemas/common.yaml#/CookAlreadyActiveError'
     SignalRUnavailableError:
       $ref: './components/schemas/common.yaml#/SignalRUnavailableError'
+    DeviceTwinUpdateFailedError:
+      $ref: './components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
     Pagination:
       $ref: './components/schemas/common.yaml#/Pagination'
     TemperatureUnit:

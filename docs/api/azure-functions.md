@@ -445,9 +445,14 @@ IOTHUB_EVENTS__fullyQualifiedNamespace=<iot-eventhub-namespace-fqdn>
 # binding expression %TEMPERATURE_BROADCAST_CONSUMER_GROUP%.
 TEMPERATURE_BROADCAST_CONSUMER_GROUP=api-broadcast
 
-# IoT Hub service hostname (HAR-56), where the API will write device twin
-# desired properties under its managed identity. Non-secret, Terraform-owned
-# (module.iot_hub.hostname). No app code reads it yet (HAR-55). The identity's
+# IoT Hub service hostname (HAR-56), a bare hostname such as
+# <name>.azure-devices.net. Non-secret, Terraform-owned (module.iot_hub.hostname).
+# Read by startCook and stopCook (HAR-66), which write the device twin's desired
+# activeCookId / correlationId through the IoT Hub service REST API
+# (api-version 2021-04-12) under the managed identity; see
+# apps/api/src/shared/iothub/device-twin.ts. Missing or not a bare hostname, a
+# start or stop answers 503 DEVICE_TWIN_UPDATE_FAILED with reason
+# iothub_configuration_failed (the cook is still written). The identity's
 # IoT Hub Twin Contributor grant is switched by api_device_twin_writer_enabled
 # (default false): ON in dev since HAR-64, OFF in prod, where twin writes fail.
 IOTHUB_SERVICE_HOSTNAME=<iot-hub-hostname>

@@ -106,6 +106,44 @@ SignalRUnavailableError:
     requestId:
       type: string
 
+DeviceTwinUpdateFailedError:
+  type: object
+  description: |
+    503 body for POST /cooks and POST /cooks/{cookId}/stop when the cook was
+    written to Cosmos but the device twin's desired properties could not be
+    brought in line with it (HAR-66). The cook stays committed; retrying the
+    same request (same cook id, or the same stop) converges. `cookId` is the
+    cook that was written. `reason` is a fixed code: an IoT Hub failure as
+    `iothub_<operation>_status_<n>` or `iothub_<operation>_failed`
+    (operations `configuration`, `credential`, `get_twin`, `patch_twin`;
+    `iothub_patch_twin_status_412` when every attempt lost the etag race),
+    `iothub_failure`, `cosmos_active_cook_read_failed`,
+    `device_twin_sync_contended`, `device_twin_sync_unconfigured` or
+    `device_twin_sync_failed`. It never carries the hub host, a device id, a
+    token or the underlying error text.
+  required:
+    - error
+    - message
+    - cookId
+    - reason
+    - requestId
+  additionalProperties: false
+  properties:
+    error:
+      type: string
+      enum:
+        - DEVICE_TWIN_UPDATE_FAILED
+    message:
+      type: string
+    cookId:
+      type: string
+    reason:
+      type: string
+      pattern: '^(iothub_(failure|[a-z_]+_(failed|status_[0-9]{3}))|cosmos_active_cook_read_failed|device_twin_sync_(contended|unconfigured|failed))$'
+      example: iothub_patch_twin_status_412
+    requestId:
+      type: string
+
 CookAlreadyActiveError:
   type: object
   description: |

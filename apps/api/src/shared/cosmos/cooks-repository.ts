@@ -446,6 +446,30 @@ export class CooksRepository {
   }
 
   /**
+   * HAR-66 — the cook that currently holds `deviceId` in the caller's partition,
+   * the value the device twin's `activeCookId` must carry. Two point reads, no
+   * query: the MG-84 lock, then the cook it names. The lock only counts while
+   * that cook is non-terminal; a stale lock (its cook completed, cancelled or
+   * missing) means no active cook.
+   */
+  async getActiveCookIdForDevice(
+    userId: string,
+    deviceId: string
+  ): Promise<{ readonly cookId: string | undefined; readonly requestCharge: number }> {
+    const lock = await this.readDocument<ActiveDeviceLock>(userId, activeDeviceLockId(deviceId));
+    let requestCharge = lock.requestCharge;
+    if (!lock.document) {
+      return { cookId: undefined, requestCharge };
+    }
+    const holder = await this.readCookWithEtag(userId, lock.document.cookId);
+    requestCharge += holder.requestCharge;
+    if (!holder.document || isTerminal(holder.document.status)) {
+      return { cookId: undefined, requestCharge };
+    }
+    return { cookId: lock.document.cookId, requestCharge };
+  }
+
+  /**
    * Read-then-update stop transition with OPTIMISTIC CONCURRENCY. Point-reads the
    * cook in the caller's partition; if it is absent there, returns `cook:
    * undefined` (a 404 for the handler) WITHOUT writing. Otherwise transitions it

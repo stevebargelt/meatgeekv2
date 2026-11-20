@@ -60,6 +60,8 @@ const { stopCookHandler } = require('./stop-cook') as typeof import('./stop-cook
 const { signalROutput } = require('../signalr/envelope') as typeof import('../signalr/envelope');
 const { principalFromRequest } =
   require('../../shared/auth/principal') as typeof import('../../shared/auth/principal');
+const { DeviceTwinSyncError } =
+  require('../../shared/iothub/device-twin-sync') as typeof import('../../shared/iothub/device-twin-sync');
 
 // The authenticated principal a valid request resolves to: a tenant-namespaced
 // Entra object id, exactly what shared/auth/principal produces. Deliberately not
@@ -162,6 +164,38 @@ function fakeOwnership(statuses: Record<string, 'foreign' | 'unknown'> = {}) {
 
 const owned = fakeOwnership().getDeviceOwnership;
 
+/** HAR-66: a recorded call to the injected device twin sync. */
+interface TwinSyncCall {
+  readonly userId: string;
+  readonly deviceId: string;
+  readonly correlationId: string;
+}
+
+/**
+ * HAR-66: a fake device twin sync. It records each call; with `failWith` it
+ * throws a DeviceTwinSyncError with that reason (from the handler's own module
+ * graph, so the handler's instanceof check matches).
+ */
+function fakeTwinSync(failWith?: string) {
+  const calls: TwinSyncCall[] = [];
+  return {
+    calls,
+    sync: async (userId: string, deviceId: string, correlationId: string) => {
+      calls.push({ userId, deviceId, correlationId });
+      if (failWith !== undefined) {
+        throw new DeviceTwinSyncError(failWith, TWIN_FAILURE_CHARGE);
+      }
+      return { outcome: 'patched' as const, requestCharge: 0 };
+    },
+  };
+}
+
+/** RU a failing fake sync reports, so tests can see it summed into the header. */
+const TWIN_FAILURE_CHARGE = 2;
+
+/** The default for tests that are not about the twin. */
+const noTwinSync = fakeTwinSync().sync;
+
 const unauthenticated: (request: HeaderReader) => PrincipalResult = () => ({
   authenticated: false,
   reason: 'principal_header_missing',
@@ -217,6 +251,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: owned,
     });
 
@@ -262,6 +297,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: owned,
     });
 
@@ -284,6 +320,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: owned,
     });
 
@@ -304,6 +341,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: unauthenticated,
       getRepository: () => repo,
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: owned,
     });
 
@@ -329,6 +367,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-missing'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: ownership.getDeviceOwnership,
     });
 
@@ -354,6 +393,7 @@ describe('stopCookHandler', () => {
     const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
       resolvePrincipal: authenticatedAs(AUTH_USER_ID),
       getRepository: () => repo,
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: owned,
     });
 
@@ -394,6 +434,7 @@ describe('stopCookHandler', () => {
       {
         resolvePrincipal: principalFromRequest,
         getRepository: () => repo,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership: owned,
       }
     );
@@ -429,6 +470,7 @@ describe('stopCookHandler', () => {
       const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
         resolvePrincipal: authenticatedAs(AUTH_USER_ID),
         getRepository: () => repo,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership: ownership.getDeviceOwnership,
       });
 
@@ -452,6 +494,7 @@ describe('stopCookHandler', () => {
         const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
           resolvePrincipal: authenticatedAs(AUTH_USER_ID),
           getRepository: () => repo,
+          syncDeviceTwin: noTwinSync,
           getDeviceOwnership: fakeOwnership({ meatgeek3: status }).getDeviceOwnership,
         });
 
@@ -474,6 +517,7 @@ describe('stopCookHandler', () => {
       const res = await stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
         resolvePrincipal: unauthenticated,
         getRepository: () => repo,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership: ownership.getDeviceOwnership,
       });
       expect(res.status).toBe(401);
@@ -490,6 +534,7 @@ describe('stopCookHandler', () => {
       const res = await stopCookHandler(mockRequest('cook-abc'), ctx, {
         resolvePrincipal: authenticatedAs(AUTH_USER_ID),
         getRepository: () => repo,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership: async () => {
           throw new Error('request to https://mgv2-secret-account.documents.azure.com failed');
         },
@@ -526,6 +571,7 @@ describe('stopCookHandler', () => {
       const res = await stopCookHandler(request, ctx, {
         resolvePrincipal: authenticatedAs(AUTH_USER_ID),
         getRepository: () => repo,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership: owned,
       });
 
@@ -551,6 +597,7 @@ describe('stopCookHandler', () => {
       return stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
         resolvePrincipal,
         getRepository: () => repo,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership,
       });
     }
@@ -639,6 +686,162 @@ describe('stopCookHandler', () => {
       );
       expect(res.status).toBe(401);
       expect(chargeHeader(res)).toBeUndefined();
+    });
+  });
+
+  describe('HAR-66 — the device twin is synced after the stop write', () => {
+    const completedCook = (endTime: string) =>
+      ({ ...storedCook(), id: 'cook-abc', status: 'completed', endTime }) as Cook;
+    const transitioning = () =>
+      fakeRepository((_userId, _id, endTime) => ({
+        cook: completedCook(endTime),
+        requestCharge: 4,
+        transitioned: true,
+      }));
+    const alreadyCompleted = () =>
+      fakeRepository(() => ({
+        cook: completedCook('2026-08-24T20:00:00.000Z'),
+        requestCharge: 1,
+        transitioned: false,
+      }));
+
+    function depsWith(repo: RepoSpy, twin: ReturnType<typeof fakeTwinSync>) {
+      return {
+        resolvePrincipal: authenticatedAs(AUTH_USER_ID),
+        getRepository: () => repo,
+        getDeviceOwnership: owned,
+        syncDeviceTwin: twin.sync,
+      };
+    }
+
+    it('syncs after a transitioned stop with the owner, the stored device and the correlation id', async () => {
+      const twin = fakeTwinSync();
+      const { ctx, messages } = mockContext();
+
+      const res = await stopCookHandler(
+        mockRequest('cook-abc', { 'X-Request-ID': 'req-stop-1' }),
+        ctx,
+        depsWith(transitioning(), twin)
+      );
+
+      expect(res.status).toBe(200);
+      expect(twin.calls).toEqual([
+        { userId: AUTH_USER_ID, deviceId: 'meatgeek3', correlationId: 'req-stop-1' },
+      ]);
+      expect(messages()).toHaveLength(1);
+    });
+
+    it('syncs after an already-completed stop too, so a retried stop heals the twin', async () => {
+      const twin = fakeTwinSync();
+      const { ctx, messages } = mockContext();
+
+      const res = await stopCookHandler(
+        mockRequest('cook-abc'),
+        ctx,
+        depsWith(alreadyCompleted(), twin)
+      );
+
+      expect(res.status).toBe(200);
+      expect(twin.calls).toEqual([
+        { userId: AUTH_USER_ID, deviceId: 'meatgeek3', correlationId: INVOCATION_ID },
+      ]);
+      // cook_stopped emission is unchanged: nothing on a non-transition.
+      expect(messages()).toBeUndefined();
+    });
+
+    it('makes no twin call on 401', async () => {
+      const twin = fakeTwinSync();
+      const res = await stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
+        ...depsWith(transitioning(), twin),
+        resolvePrincipal: unauthenticated,
+      });
+      expect(res.status).toBe(401);
+      expect(twin.calls).toEqual([]);
+    });
+
+    it('makes no twin call on 404', async () => {
+      const twin = fakeTwinSync();
+      const repo = fakeRepository(
+        () => ({ cook: undefined, requestCharge: 1, transitioned: false }),
+        null
+      );
+      const res = await stopCookHandler(
+        mockRequest('cook-abc'),
+        mockContext().ctx,
+        depsWith(repo, twin)
+      );
+      expect(res.status).toBe(404);
+      expect(twin.calls).toEqual([]);
+    });
+
+    it.each(['foreign', 'unknown'] as const)(
+      'makes no twin call on 403 (%s device)',
+      async status => {
+        const twin = fakeTwinSync();
+        const res = await stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
+          ...depsWith(transitioning(), twin),
+          getDeviceOwnership: fakeOwnership({ meatgeek3: status }).getDeviceOwnership,
+        });
+        expect(res.status).toBe(403);
+        expect(twin.calls).toEqual([]);
+      }
+    );
+
+    it('makes no twin call when the Cosmos stop write fails', async () => {
+      const twin = fakeTwinSync();
+      const repo = fakeRepository(() => {
+        throw Object.assign(new Error('cosmos down'), { statusCode: 503 });
+      });
+      const res = await stopCookHandler(
+        mockRequest('cook-abc'),
+        mockContext().ctx,
+        depsWith(repo, twin)
+      );
+      expect(res.status).toBe(500);
+      expect(twin.calls).toEqual([]);
+    });
+
+    it('a sync failure answers 503 with the cook completed and cook_stopped still emitted', async () => {
+      const repo = transitioning();
+      const twin = fakeTwinSync('iothub_get_twin_status_401');
+      const { ctx, messages } = mockContext();
+
+      const res = await stopCookHandler(
+        mockRequest('cook-abc', { 'X-Request-ID': 'req-stop-2' }),
+        ctx,
+        depsWith(repo, twin)
+      );
+
+      expect(res.status).toBe(503);
+      expect(res.jsonBody).toEqual({
+        error: 'DEVICE_TWIN_UPDATE_FAILED',
+        message: expect.any(String),
+        cookId: 'cook-abc',
+        reason: 'iothub_get_twin_status_401',
+        requestId: INVOCATION_ID,
+      });
+      // The stop was written before the sync ran.
+      expect(repo.calls).toHaveLength(1);
+      expect(messages()).toHaveLength(1);
+      expect(messages()![0].target).toBe('cook_stopped');
+      const headers = res.headers as Record<string, string>;
+      expect(headers['X-Request-ID']).toBe('req-stop-2');
+      // RU: the cook read + ownership read + the stop + what the sync spent.
+      expect(headers['x-meatgeek-request-charge']).toBe(
+        String(GET_COOK_CHARGE + OWNERSHIP_CHARGE + 4 + TWIN_FAILURE_CHARGE)
+      );
+    });
+
+    it('an unexpected sync error still answers a sanitized 503', async () => {
+      const res = await stopCookHandler(mockRequest('cook-abc'), mockContext().ctx, {
+        ...depsWith(transitioning(), fakeTwinSync()),
+        syncDeviceTwin: async () => {
+          throw new Error('https://meatgeek-dev-iothub.azure-devices.net/twins/meatgeek3 failed');
+        },
+      });
+      expect(res.status).toBe(503);
+      expect((res.jsonBody as { reason: string }).reason).toBe('device_twin_sync_failed');
+      expect(JSON.stringify(res)).not.toContain('azure-devices');
     });
   });
 });

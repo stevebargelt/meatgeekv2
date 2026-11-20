@@ -336,6 +336,76 @@ describe('MG-59 cooks repository', () => {
     });
   });
 
+  describe('HAR-66 getActiveCookIdForDevice — two point reads, no query', () => {
+    const LOCK_ID = 'active-device:meatgeek3';
+    const lockFor = (cookId: string) => ({
+      id: LOCK_ID,
+      userId: USER_A,
+      docType: 'activeDeviceLock',
+      deviceId: 'meatgeek3',
+      cookId,
+    });
+
+    it('reads the lock, then the cook it names, both in the caller partition', async () => {
+      const { container, calls, staged } = fakeContainer();
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-7') });
+      staged.readResponse = {
+        resource: sampleCook({ id: 'cook-7', status: 'active' }),
+        requestCharge: 1.25,
+      };
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.getActiveCookIdForDevice(USER_A, 'meatgeek3');
+
+      expect(result).toEqual({ cookId: 'cook-7', requestCharge: 2.25 });
+      expect(calls.itemAddresses).toEqual([
+        { id: LOCK_ID, partitionKey: USER_A },
+        { id: 'cook-7', partitionKey: USER_A },
+      ]);
+      expect(calls.queries).toHaveLength(0);
+      expect(calls.readAll).toBe(0);
+    });
+
+    it.each(['active', 'paused', 'planning'] as const)('a %s holder counts', async status => {
+      const { container, staged } = fakeContainer();
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-7') });
+      staged.readResponse = { resource: sampleCook({ id: 'cook-7', status }) };
+      const repo = new mod.CooksRepository(container);
+      expect((await repo.getActiveCookIdForDevice(USER_A, 'meatgeek3')).cookId).toBe('cook-7');
+    });
+
+    it.each([
+      ['completed', { resource: sampleCook({ id: 'cook-7', status: 'completed' }) }],
+      ['cancelled', { resource: sampleCook({ id: 'cook-7', status: 'cancelled' }) }],
+      ['missing', { resource: undefined, statusCode: 404 }],
+    ])('a stale lock (holder %s) means no active cook', async (_label, holderRead) => {
+      const { container, staged } = fakeContainer();
+      staged.locks.set(LOCK_ID, { resource: lockFor('cook-7') });
+      staged.readResponse = holderRead;
+      const repo = new mod.CooksRepository(container);
+      expect((await repo.getActiveCookIdForDevice(USER_A, 'meatgeek3')).cookId).toBeUndefined();
+    });
+
+    it('no lock means no active cook, after one read', async () => {
+      const { container, calls } = fakeContainer();
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.getActiveCookIdForDevice(USER_A, 'meatgeek3');
+
+      expect(result).toEqual({ cookId: undefined, requestCharge: 1 });
+      expect(calls.itemAddresses).toEqual([{ id: LOCK_ID, partitionKey: USER_A }]);
+    });
+
+    it('propagates a read failure other than 404', async () => {
+      const { container, staged } = fakeContainer();
+      staged.readError = Object.assign(new Error('throttled'), { statusCode: 429 });
+      const repo = new mod.CooksRepository(container);
+      await expect(repo.getActiveCookIdForDevice(USER_A, 'meatgeek3')).rejects.toMatchObject({
+        statusCode: 429,
+      });
+    });
+  });
+
   describe('getCook — single-partition point read', () => {
     it('addresses the document by (id, userId) — no cross-partition scan', async () => {
       const { container, calls, staged } = fakeContainer();

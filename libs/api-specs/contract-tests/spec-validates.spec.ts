@@ -162,6 +162,32 @@ describe('OpenAPI spec — structural validation', () => {
       const ok = operation?.responses?.[statuses[0]] as OpenAPIV3.ResponseObject;
       expect(ok.headers?.['x-meatgeek-request-charge']).toBeDefined();
     }
+    // HAR-66: start and stop answer 503 DEVICE_TWIN_UPDATE_FAILED when the
+    // cook was written but the device twin was not updated.
+    for (const operation of [paths['/cooks']?.post, paths['/cooks/{cookId}/stop']?.post]) {
+      const unavailable = operation?.responses?.['503'] as OpenAPIV3.ResponseObject | undefined;
+      expect(unavailable?.description).toMatch(/DEVICE_TWIN_UPDATE_FAILED/);
+      expect(unavailable?.headers?.['x-meatgeek-request-charge']).toBeDefined();
+      const body = unavailable?.content?.['application/json']?.schema as OpenAPIV3.SchemaObject;
+      expect(body.required).toEqual(['error', 'message', 'cookId', 'reason', 'requestId']);
+      expect((body.properties?.['error'] as OpenAPIV3.SchemaObject).enum).toEqual([
+        'DEVICE_TWIN_UPDATE_FAILED',
+      ]);
+      const reason = new RegExp(
+        (body.properties?.['reason'] as OpenAPIV3.SchemaObject).pattern ?? '^$'
+      );
+      for (const code of [
+        'iothub_patch_twin_status_412',
+        'iothub_get_twin_failed',
+        'iothub_configuration_failed',
+        'iothub_failure',
+        'cosmos_active_cook_read_failed',
+        'device_twin_sync_contended',
+        'device_twin_sync_failed',
+      ]) {
+        expect(code).toMatch(reason);
+      }
+    }
     const recipeMissing = paths['/recipes/{id}']?.get?.responses?.['404'] as OpenAPIV3.ResponseObject;
     expect(recipeMissing.description).toMatch(/RECIPE_NOT_FOUND/);
     expect(recipeMissing.headers?.['x-meatgeek-request-charge']).toBeDefined();

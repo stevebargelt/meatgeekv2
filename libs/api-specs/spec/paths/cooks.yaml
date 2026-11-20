@@ -139,6 +139,18 @@ cooks-collection:
           lock, no `cook_started`. A device registered to someone else and an
           unregistered device get the same body, so the answer does not reveal
           whether another user owns the id.
+        - 503 DEVICE_TWIN_UPDATE_FAILED (HAR-66): see below.
+
+      Device twin (HAR-66). After a 201, and after a 200 replay, the API sets
+      the device's IoT Hub twin desired properties from Cosmos under its
+      managed identity: `activeCookId` is the device's active cook and
+      `correlationId` is this request's `X-Request-ID` (else the invocation
+      id), or the twin's existing one when it already names that cook. No
+      twin call is made on 400, 401, 403, 409, 422 or 500. A device with no
+      IoT Hub identity has no twin, and the normal status is returned. If the
+      twin update fails the cook stays created and the answer is 503;
+      resending the same request replays (200) and retries the twin update.
+      `cook_started` is still emitted when this call created the cook.
     tags: [cooks]
     requestBody:
       required: true
@@ -243,6 +255,27 @@ cooks-collection:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '503':
+        description: |
+          DEVICE_TWIN_UPDATE_FAILED. The cook was created (or already existed
+          with the same body) but the device twin was not updated. `cookId`
+          names the cook; `reason` is a fixed code. Resend the same request.
+        headers:
+          X-Request-ID:
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
       '500':
         description: Server error.
         headers:
@@ -401,6 +434,14 @@ cook-stop:
           persisted cook (MG-31) and is emitted only by the call that made the
           transition; stopping an already-completed cook returns it again with
           200 and emits nothing.
+        - HAR-66: after the stop is written, transitioned or not, the device's
+          IoT Hub twin desired properties are set from Cosmos under the API's
+          managed identity: `activeCookId` and `correlationId` are removed
+          when the device has no active cook. No twin call is made on 401,
+          403, 404 or 500. A device with no IoT Hub identity has no twin, and
+          the normal status is returned. If the twin update fails the cook
+          stays completed and the answer is 503 DEVICE_TWIN_UPDATE_FAILED;
+          resending the stop retries the twin update.
     tags: [cooks]
     parameters:
       - name: cookId
@@ -462,6 +503,28 @@ cook-stop:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '503':
+        description: |
+          DEVICE_TWIN_UPDATE_FAILED. The cook is completed but the device twin
+          was not updated. `cookId` names the cook; `reason` is a fixed code.
+          Resend the stop.
+        headers:
+          X-Request-ID:
+            description: Correlation id (propagated X-Request-ID or invocation id).
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            description: |
+              Cosmos request charge (RU) of the call, as a decimal (HAR-11).
+              Present whenever the call reached Cosmos; absent when it did not
+              (e.g. a 400 before any read).
+            schema:
+              type: string
+              example: '7.42'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
       '500':
         description: Server error.
         headers:
