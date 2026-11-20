@@ -77,6 +77,10 @@ export interface SimDeviceOptions {
   /** Kill the run after this long. Default 120 s, plenty for a few readings;
    *  a long top-up (HAR-45) passes its own. */
   readonly timeoutMs?: number;
+  /** HAR-84: which standing device to send as. `'chart'` uses the chart
+   *  device's credential and throws if it is not configured
+   *  (`chartDeviceId` is undefined). Default the simulated device. */
+  readonly device?: 'simulated' | 'chart';
 }
 
 /** What a proof is handed: a client bound to the deployed API and the run id. */
@@ -86,6 +90,12 @@ export interface AcceptanceApi {
   /** The standing simulated device `simdevice` sends as
    *  (ACCEPTANCE_SIM_DEVICE_ID), e.g. `meatgeek-dev-simulated-smoker`. */
   readonly simulatedDeviceId: string;
+  /** HAR-84: the second standing device the cook-chart proof keeps one active
+   *  cook on (ACCEPTANCE_CHART_DEVICE_ID), e.g.
+   *  `meatgeek-dev-simulated-smoker-chart`. Undefined when the run was not given
+   *  it; a proof that needs it must check. Send as it with
+   *  `runSimDevice(args, { device: 'chart' })`. */
+  readonly chartDeviceId: string | undefined;
   /** Run the `simdevice` binary (ACCEPTANCE_SIMDEVICE_BIN) with `args`. The
    *  runner hands it the device credential through its environment; a proof
    *  never sees the credential. Resolves on exit whatever the exit code;

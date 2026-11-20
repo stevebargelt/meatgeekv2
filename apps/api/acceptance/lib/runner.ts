@@ -42,6 +42,15 @@ import {
  * that status's schema and a declared X-Request-ID header must be present. A
  * mismatch fails the proof. The run ends with a `CONTRACT validated …` line and
  * `METRIC contract-validated-responses`.
+ *
+ * HAR-84: a second standing device, the chart device, for the cook-chart RU
+ * proof, which keeps one active cook running on it across runs. Its id and
+ * credential (ACCEPTANCE_CHART_DEVICE_ID, SIMDEVICE_CHART_CONNECTION_STRING)
+ * are optional: set both or neither. When set, `api.chartDeviceId` names it and
+ * `runSimDevice(args, { device: 'chart' })` runs simdevice with the chart
+ * credential as its SIMDEVICE_CONNECTION_STRING. The redactor masks it as it
+ * masks the first device's, and no simdevice child is handed the credential of
+ * the device it is not sending as.
  */
 
 export const REQUIRED_ENV = [
@@ -51,6 +60,13 @@ export const REQUIRED_ENV = [
   'SIMDEVICE_CONNECTION_STRING',
   'ACCEPTANCE_SIM_DEVICE_ID',
   'ACCEPTANCE_SIMDEVICE_BIN',
+] as const;
+
+/** HAR-84: the chart device's id and credential. Optional, but set both or
+ *  neither: one without the other stops the run before anything is sent. */
+export const CHART_DEVICE_ENV = [
+  'ACCEPTANCE_CHART_DEVICE_ID',
+  'SIMDEVICE_CHART_CONNECTION_STRING',
 ] as const;
 
 export const PROOFS_DIR = join(__dirname, '..', 'proofs');
@@ -136,20 +152,24 @@ function errorCodeOf(body: unknown): string | undefined {
 
 /**
  * A function masking every secret in a line: the bearer tokens (the owner's and
- * the peer's), the device connection string, and its SharedAccessKey value (with
- * and without the `SharedAccessKey=` prefix). Longest first, so a whole
- * connection string is one mask rather than a mangled partial.
+ * the peer's), each device connection string (the standing device's and, when
+ * set, the chart device's), and each one's SharedAccessKey value (with and
+ * without the `SharedAccessKey=` prefix). Longest first, so a whole connection
+ * string is one mask rather than a mangled partial.
  */
 export function makeRedactor(
   tokens: readonly string[],
-  connectionString: string
+  connectionStrings: readonly string[]
 ): (line: string) => string {
-  const key = connectionString
-    .split(';')
-    .map(part => part.trim())
-    .find(part => /^SharedAccessKey=/i.test(part))
-    ?.slice('SharedAccessKey='.length);
-  const secrets = [...tokens, connectionString, ...(key ? [`SharedAccessKey=${key}`, key] : [])]
+  const keyed = connectionStrings.flatMap(connectionString => {
+    const key = connectionString
+      .split(';')
+      .map(part => part.trim())
+      .find(part => /^SharedAccessKey=/i.test(part))
+      ?.slice('SharedAccessKey='.length);
+    return [connectionString, ...(key ? [`SharedAccessKey=${key}`, key] : [])];
+  });
+  const secrets = [...tokens, ...keyed]
     .filter(secret => secret.length > 0)
     .sort((a, b) => b.length - a.length);
   return line => secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line);
@@ -217,13 +237,30 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     return { exitCode: 2, failures };
   }
 
+  const isSet = (name: string) => (env[name]?.trim() ?? '') !== '';
+  const chartSet = CHART_DEVICE_ENV.filter(isSet);
+  if (chartSet.length === 1) {
+    const [given] = chartSet;
+    const absent = CHART_DEVICE_ENV.find(name => name !== given) as string;
+    const line = `acceptance: ${given} is set but ${absent} is not; the chart device needs both or neither`;
+    options.write(line);
+    return { exitCode: 2, failures: [line] };
+  }
+
   const token = (env['ACCEPTANCE_BEARER_TOKEN'] as string).trim();
   const peerToken = (env['ACCEPTANCE_PEER_BEARER_TOKEN'] as string).trim();
   const rawBaseUrl = (env['ACCEPTANCE_BASE_URL'] as string).trim();
   const connectionString = (env['SIMDEVICE_CONNECTION_STRING'] as string).trim();
   const simulatedDeviceId = (env['ACCEPTANCE_SIM_DEVICE_ID'] as string).trim();
   const simdeviceBin = (env['ACCEPTANCE_SIMDEVICE_BIN'] as string).trim();
-  const redact = makeRedactor([token, peerToken], connectionString);
+  const chartDeviceId =
+    chartSet.length > 0 ? (env['ACCEPTANCE_CHART_DEVICE_ID'] as string).trim() : undefined;
+  const chartConnectionString =
+    chartSet.length > 0 ? (env['SIMDEVICE_CHART_CONNECTION_STRING'] as string).trim() : undefined;
+  const redact = makeRedactor(
+    [token, peerToken],
+    [connectionString, ...(chartConnectionString ? [chartConnectionString] : [])]
+  );
   const write = (line: string) => options.write(redact(line));
 
   let baseUrl: string;
@@ -262,28 +299,32 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
    *  (network error, timeout, bad JSON) is still attributed to a route. */
   let lastRequest: { method: HttpMethod; route: string; as: Caller; status?: number } | undefined;
   /** Set while a proof's last action was a simdevice run, for the same reason. */
-  let lastExec: { exitCode?: number | null } | undefined;
+  let lastExec: { exitCode?: number | null; label: string } | undefined;
 
   /** `simdevice → exit N` when the proof's last action was a simdevice run.
    *  (A function, so the compiler does not narrow lastExec across `await`.) */
   const execWhere = (): string | undefined => {
     if (!lastExec) return undefined;
-    const { exitCode } = lastExec;
-    return `simdevice → ${exitCode === undefined ? 'not started' : `exit ${exitCode ?? 'killed'}`}`;
+    const { exitCode, label } = lastExec;
+    return `${label} → ${exitCode === undefined ? 'not started' : `exit ${exitCode ?? 'killed'}`}`;
   };
 
   // The child gets the runner's own environment for PATH and tracing, plus the
-  // device credential; never a bearer token, which it has no use for.
-  const childEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    SIMDEVICE_CONNECTION_STRING: connectionString,
-  };
-  delete childEnv['ACCEPTANCE_BEARER_TOKEN'];
-  delete childEnv['ACCEPTANCE_PEER_BEARER_TOKEN'];
+  // credential of the device it sends as; never a bearer token, which it has
+  // no use for, nor the other device's credential.
+  const baseChildEnv: NodeJS.ProcessEnv = { ...process.env };
+  delete baseChildEnv['ACCEPTANCE_BEARER_TOKEN'];
+  delete baseChildEnv['ACCEPTANCE_PEER_BEARER_TOKEN'];
+  delete baseChildEnv['SIMDEVICE_CHART_CONNECTION_STRING'];
+  const childEnvFor = (credential: string): NodeJS.ProcessEnv => ({
+    ...baseChildEnv,
+    SIMDEVICE_CONNECTION_STRING: credential,
+  });
 
   const api: AcceptanceApi = {
     runId,
     simulatedDeviceId,
+    chartDeviceId,
     contract,
 
     async runSimDevice(
@@ -291,17 +332,25 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       simOptions?: SimDeviceOptions
     ): Promise<SimDeviceRun> {
       lastRequest = undefined;
-      lastExec = {};
+      const chart = simOptions?.device === 'chart';
+      const label = chart ? 'simdevice (chart)' : 'simdevice';
+      lastExec = { label };
+      if (chart && chartConnectionString === undefined) {
+        throw new Error(
+          'the chart device is not configured: ACCEPTANCE_CHART_DEVICE_ID and ' +
+            'SIMDEVICE_CHART_CONNECTION_STRING are not set'
+        );
+      }
       const { run, durationMs } = await runChild(
         simdeviceBin,
         args,
-        childEnv,
+        childEnvFor(chart ? (chartConnectionString as string) : connectionString),
         redact,
         simOptions?.timeoutMs ?? SIMDEVICE_TIMEOUT_MS
       );
       lastExec.exitCode = run.exitCode;
       write(
-        `  ${'EXEC'.padEnd(6)} ${`simdevice ${args.join(' ')}`.padEnd(30)}` +
+        `  ${'EXEC'.padEnd(6)} ${`${label} ${args.join(' ')}`.padEnd(30)}` +
           ` ${`exit ${run.exitCode ?? 'killed'}`.padEnd(7)} ${`${durationMs} ms`.padStart(6)}` +
           `  ${run.messages.length} message(s)`
       );
