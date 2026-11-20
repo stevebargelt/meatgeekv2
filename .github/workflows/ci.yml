@@ -293,26 +293,19 @@ jobs:
       #   * api  — app-deploy-prod.yml does not want it anyway: it rebuilds from
       #     source at the CI'd SHA (`npx nx build api`), which is the stronger
       #     property (the deployed bytes are reproducible from the commit).
-      #   * web  — the web frontend DOES have a deploy path, and it is unaffected
-      #     by this removal. apps/web/project.json defines a `deploy` target
-      #     (`nx deploy web --args="--env=<env>"` -> `az staticwebapp deploy
-      #     --source-location ./dist/apps/web`). It is OPERATOR-RUN from a
-      #     workstation against a LOCAL build: the target has no `dependsOn`, so
-      #     it publishes whatever is already in dist/apps/web, and since nothing
-      #     in this repo downloads a CI artifact it never consumed this upload.
-      #     Removing the upload therefore does not touch its input chain.
+      #   * web  — nothing consumes the web build output either. No workflow in
+      #     this repo deploys the web frontend: Vercel's Git integration builds
+      #     apps/web independently, from the repo at each push to main (repo-root
+      #     vercel.json), and serves dev's production address,
+      #     https://meatgeekv2-web.vercel.app. No Vercel token is stored in
+      #     GitHub and Vercel never sees a CI artifact (HAR-76, goal HAR-71).
+      #     There is no prod web app; app-deploy-prod.yml is API-only by design.
       #
-      #     STATED PRECISELY, because an earlier revision of this comment got it
-      #     wrong: what the repo lacks is a web deploy WORKFLOW, not a web deploy
-      #     PATH. There is no Static Web Apps workflow and app-deploy-prod.yml is
-      #     API-only by design, so the frontend ships by an operator running the
-      #     command above — but it does ship, and claiming otherwise sent a reader
-      #     looking for a capability that was there all along. AUTOMATING a web
-      #     deploy is out of scope for MG-23 (a security ticket); that scope call
-      #     is recorded here so it stays a decision rather than an oversight
-      #     rediscovered later. app-deploy-prod.yml's header and
-      #     docs/development/nx-commands.md carry the matching statement, and the
-      #     three must stay consistent.
+      #     Before HAR-76 the web project had an operator-run `deploy` target
+      #     that published a local build to an Azure Static Web App. HAR-76
+      #     removed it; there is no Static Web App. app-deploy-prod.yml's header
+      #     carries the matching statement, and the two files must stay
+      #     consistent.
       # `nx build web` still RUNS above, so web keeps its compile-time CI signal.
       #
       # build-go's upload is deliberately LEFT ALONE — it is equally unconsumed
