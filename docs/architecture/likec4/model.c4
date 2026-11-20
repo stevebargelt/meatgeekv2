@@ -138,7 +138,7 @@ model {
         eventhub = stream 'Event Hub: temperature-data' {
           #live
           technology '2 partitions'
-          description 'Provisioned and receiving every message. Nothing reads it today: no function in apps/api consumes it, though the Function App holds its namespace setting and its own consumer group, `api-broadcast` (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). Its consumer is decided but not built.'
+          description 'Provisioned and receiving every message. Read by broadcastTemperature in apps/api (HAR-60) on the API consumer group, `api-broadcast` (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`), identity-based.'
         }
 
         iothub -[event]-> eventhub 'eventhub-realtime-route' {
@@ -157,7 +157,8 @@ model {
           the Terraform-owned database and container names (`COSMOSDB_DATABASE_NAME` and one
           `COSMOSDB_*_CONTAINER_NAME` per container), the IoT Hub host
           (`IOTHUB_SERVICE_HOSTNAME`) and its Event Hub consumer group
-          (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). Nothing reads those last two yet, and the
+          (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). broadcastTemperature reads the consumer group;
+          nothing reads `IOTHUB_SERVICE_HOSTNAME` yet, and the
           identity's IoT Hub Twin Contributor grant ships switched off. The one exception is the Application
           Insights connection string (`APPLICATIONINSIGHTS_CONNECTION_STRING`), with ingestion
           itself authenticated by Entra (`Authorization=AAD`) and sampled at
@@ -212,8 +213,8 @@ model {
           technology '@azure/monitor-opentelemetry, samplingRatio 0.5'
         }
         broadcast = component 'realtime broadcast' {
-          #decided
-          description 'An Event Hub-triggered Function that sends each reading to the SignalR group for its device. Decided, not built: no such trigger is registered in main.ts today.'
+          technology 'Event Hub trigger, cardinality many; SignalR output binding'
+          description 'broadcastTemperature (HAR-60): sends each reading on temperature-data to device-{id}, the device taken from the hub-stamped iothub-connection-device-id, the reading mapped by toTemperatureReading (the same mapper as GET /temperatures/current) plus enqueuedTimeUtc. Bad events are skipped and counted, never thrown.'
         }
 
         easyauth -> principal 'X-MS-CLIENT-PRINCIPAL'
@@ -346,13 +347,13 @@ model {
       technology 'REST api-version 2024-12-01, managed identity'
     }
 
-    // Realtime path: absent from apps/api/src/main.ts.
-    // Decided: push to clients. Event Hub -> Function -> SignalR -> apps.
-    cloud.ingest.eventhub -[decided]-> cloud.api.broadcast 'Event Hub trigger' {
-      #decided
+    // Realtime path: push to clients. Event Hub -> Function -> SignalR -> apps.
+    // The Function (HAR-60) is built; the apps that receive it are not.
+    cloud.ingest.eventhub -[event]-> cloud.api.broadcast 'Event Hub trigger' {
+      technology 'consumer group api-broadcast, identity-based'
     }
-    cloud.api.broadcast -[decided]-> cloud.realtime 'each reading, to its device group' {
-      #decided
+    cloud.api.broadcast -> cloud.realtime 'each reading, to its device group' {
+      technology 'SignalR output binding, target temperature'
     }
     cloud.realtime -[decided]-> mobile 'live temperatures, cook events' {
       #decided

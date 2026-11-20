@@ -63,6 +63,9 @@ jest.mock('@azure/functions', () => {
       // throws before any HTTP registration lands. The timer's own wiring is
       // asserted in functions/health/storage-heartbeat.spec.ts.
       timer: () => undefined,
+      // HAR-60: main.ts registers the broadcastTemperature Event Hub trigger;
+      // its wiring is asserted in broadcast-temperature.integration.spec.ts.
+      eventHub: () => undefined,
     },
   };
 });

@@ -158,7 +158,7 @@ views {
         notes '**Live.** IoT Hub writes the document itself, by managed identity, partition value from `{deviceid}`. No Function runs, so nothing reads `traceparent` back.'
       }
       meatgeek.cloud.ingest.iothub -> meatgeek.cloud.ingest.eventhub 'eventhub-realtime-route' {
-        notes '**Dead end today.** The route delivers, but the API registers no Event Hub trigger, so nothing reads it. The decided design adds the consumer.'
+        notes '**Live.** broadcastTemperature (HAR-60), an Event Hub trigger in the API on the `api-broadcast` consumer group, reads it and pushes each reading to its `device-{id}` SignalR group.'
         navigateTo liveTemperatureTarget
       }
     }

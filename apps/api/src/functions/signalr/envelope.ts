@@ -1,4 +1,5 @@
 import { output } from '@azure/functions';
+import type { TemperatureReading } from '@meatgeekv2/api-interfaces';
 import { randomUUID } from 'crypto';
 
 // SignalR hub + connection-string setting. Kept in one place so negotiate's
@@ -60,6 +61,27 @@ export interface SignalROutputMessage<T extends CookRef = CookRef> {
   arguments: [CookEventEnvelope<T>];
 }
 
+// HAR-60: the SignalR target a live reading is pushed on. Clients subscribe with
+// `connection.on('temperature', …)`.
+export const TEMPERATURE = 'temperature';
+
+// A live reading as pushed: exactly what GET /temperatures/current would return
+// for the same message (toTemperatureReading), plus the Event Hub enqueued time
+// so a client can measure delivery delay.
+export interface LiveTemperaturePayload extends TemperatureReading {
+  enqueuedTimeUtc: string;
+}
+
+// Shape of a single group-scoped message written to the SignalR output binding
+// by broadcastTemperature. `groupName` is always `device-{deviceId}` (see
+// deviceGroup in shared/signalr): negotiate puts each user in the groups of the
+// devices they own, so a reading reaches exactly the device's owner(s).
+export interface SignalRGroupMessage {
+  target: typeof TEMPERATURE;
+  groupName: string;
+  arguments: [LiveTemperaturePayload];
+}
+
 // Build a cook-lifecycle envelope. The envelope-level cookId is the
 // "currently-active cook id": it equals the payload cook's id on cook_started
 // and is OMITTED entirely on cook_stopped (there is no active cook after a
@@ -84,8 +106,8 @@ export function buildCookEnvelope<T extends CookRef>(
   };
 }
 
-// Shared SignalR output binding, registered on every cook-lifecycle producer
-// (startCook, stopCook) in main.ts. It lives here — not in main.ts — so the
+// Shared SignalR output binding, registered on every SignalR producer in main.ts:
+// the cook-lifecycle producers (startCook, stopCook) and broadcastTemperature. It lives here — not in main.ts — so the
 // handlers can reference the exact same FunctionOutput object they emit through
 // without importing the app entrypoint (which would create an import cycle and
 // pull app.http registrations into unit tests). The Functions runtime matches

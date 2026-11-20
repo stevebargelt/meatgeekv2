@@ -64,14 +64,14 @@ endpoint: "meatgeek-temperatures"
 
 #### **Route 2: Real-time Path (Event Hub)**
 
-**Planned, not on `main`.** The `eventhub-realtime-route` and the `temperature-data` Event Hub exist in `apps/infrastructure/modules/iot-hub/main.tf`, but nothing consumes them; the design below is the intended consumer.
+**On `main` since HAR-60.** The `eventhub-realtime-route` and the `temperature-data` Event Hub are defined in `apps/infrastructure/modules/iot-hub/main.tf`; the API's `broadcastTemperature` consumes them (see [§4](#4-real-time-path-details)).
 
 ```yaml
-route_name: "RealTimeUpdates"
+route_name: "eventhub-realtime-route"
 source: "DeviceMessages"
-condition: "messageType = 'temperature'"  
+condition: "true"
 endpoint_type: "eventhub"
-endpoint: "realtime-events"
+endpoint: "eventhub-realtime"   # -> temperature-data
 ```
 
 **Benefits**:
@@ -123,36 +123,18 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 
 ### 4. Real-time Path Details
 
-**Planned, not on `main`.** There is no `broadcastTemperature` function and no `device-{deviceId}` or `cook-{cookId}` SignalR group; the only SignalR output on `main` is the cook lifecycle event described below.
+**On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's SignalR group through the SignalR output binding on `temperatureHub`. The client apps that receive it are not built yet, and there is no `cook-{cookId}` group.
 
 The [`liveTemperatureTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/liveTemperatureTarget/) and [`realtimeTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/) views show the decided design.
 
-**Function Implementation**:
-```typescript
-// Simplified function - broadcast only
-export const broadcastTemperature: EventHubHandler = async (messages, context) => {
-  const signalRService = new SignalRService();
-  
-  // Process messages in batch
-  const promises = messages.map(async (eventData) => {
-    const temp = EventDataAdapter.extractTemperatureData(eventData);
-    
-    // Broadcast to device group (all users watching this device)
-    await signalRService.sendToGroup(`device-${temp.deviceId}`, 'temperature', temp);
-    
-    // If part of active cook, broadcast to cook group  
-    if (temp.cookId) {
-      await signalRService.sendToGroup(`cook-${temp.cookId}`, 'temperature', temp);
-    }
-  });
-  
-  await Promise.all(promises);
-};
-```
+**What is sent** (`apps/api/src/functions/signalr/broadcast-temperature.ts`):
+- One message per event: target `temperature`, group `device-{deviceId}`, one argument — the `TemperatureReading` plus `enqueuedTimeUtc` (the Event Hub enqueued time, ISO 8601).
+- The device is the hub-stamped `iothub-connection-device-id` system property, never `Body.deviceId`.
+- The reading is `toTemperatureReading` of the event shaped as the stored IoT Hub document, so it equals what `GET /temperatures/current` returns for the same message.
+- An event with no device id, a non-JSON body or no timestamp is skipped and counted, never thrown; each batch logs `broadcastTemperature sent=<n> skipped=<m>`.
 
 **SignalR Groups**:
-- `device-{deviceId}`: All users monitoring a device
-- `cook-{cookId}`: All users following a specific cook session
+- `device-{deviceId}`: the device's owners. negotiate resets a user's groups to the devices they own; `registerDevice` adds the new owner.
 
 ## Cook Session Management Flow
 
@@ -261,7 +243,7 @@ func (dp *DataPusher) enrichTemperatureData(temps TemperatureReading) Temperatur
 
 ### Latency
 - **Storage**: ~1.2 s from send to readable through the API, measured in dev by `apps/api/acceptance/proofs/telemetry-roundtrip.proof.ts` (`METRIC roundtrip-ms`): 1211 ms (run 44603121177) and 1235 ms (run 44612029684). It times one `simdevice` reading from send, through IoT Hub's `cosmos-storage-route`, until `GET /temperatures/current/{deviceId}` returns it. Single dev samples, not targets; each `Deploy Dev App` run's summary carries the current value.
-- **Real-time and client updates**: not measured; the Event Hub has no consumer on `main` and no client calls the API yet.
+- **Real-time and client updates**: not measured. `broadcastTemperature` consumes the Event Hub and stamps each push with `enqueuedTimeUtc` so a client can measure delay, but no client receives the pushes or calls the API yet.
 
 ### History read cost
 Measured in dev by `apps/api/acceptance/proofs/telemetry-volume.proof.ts` (run 44612029684) on the simulated device holding 8700 readings (`history-total`; the proof tops it up to at least one 12 h cook at one reading every 5 s, 8,640):

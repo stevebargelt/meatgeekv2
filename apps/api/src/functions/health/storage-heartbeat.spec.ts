@@ -44,6 +44,10 @@ jest.mock('@azure/functions', () => {
       timer: (name: string, registration: TimerRegistration) => {
         timerRegistrations[name] = registration;
       },
+      // HAR-60: main.ts also registers the broadcastTemperature Event Hub
+      // trigger. This suite is about the timer, so it is swallowed; its wiring
+      // is asserted in broadcast-temperature.integration.spec.ts.
+      eventHub: () => undefined,
     },
   };
 });
