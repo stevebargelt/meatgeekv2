@@ -6,6 +6,7 @@ import {
   distinctiveGrillF,
   grillText,
   isAncestorCommit,
+  livePanelConnection,
   msLeftInTotpWindow,
   normalizeTotpSecret,
   parseVersionJson,
@@ -336,5 +337,37 @@ describe('the pushed reading', () => {
 describe('redact', () => {
   it('replaces every secret', () => {
     expect(redact('key=abcd1234 and abcd1234', ['abcd1234'])).toBe('key=[redacted] and [redacted]');
+  });
+});
+
+describe('livePanelConnection (step 5)', () => {
+  it('is connected while waiting for a first reading or live', () => {
+    expect(livePanelConnection('waiting', 'Waiting')).toBe('connected');
+    expect(livePanelConnection('live', 'Live')).toBe('connected');
+  });
+
+  it("is connected when the backfill is the last run's old reading on a standing device", () => {
+    // HAR-101, Deploy Dev App run 44833909340: the panel connected, backfilled
+    // a reading from the previous run and opened stale.
+    expect(livePanelConnection('stale', 'No reading for 24 min 13 s')).toBe('connected');
+    expect(livePanelConnection('stale', 'No reading for 31 s')).toBe('connected');
+  });
+
+  it('is not connected while connecting, reconnecting or signed out', () => {
+    expect(livePanelConnection('connecting', 'Connecting…')).toBe(
+      'not connected (data-state connecting, badge "Connecting…")'
+    );
+    expect(livePanelConnection('stale', 'Reconnecting…')).toBe(
+      'not connected (data-state stale, badge "Reconnecting…")'
+    );
+    expect(livePanelConnection('stale', 'Sign in again')).toBe(
+      'not connected (data-state stale, badge "Sign in again")'
+    );
+  });
+
+  it('is not connected for a missing panel or badge copy it does not know', () => {
+    expect(livePanelConnection(null, null)).toBe('not connected (data-state none, badge "")');
+    expect(livePanelConnection('stale', 'No reading for')).toMatch(/^not connected/);
+    expect(livePanelConnection('stale', 'Offline')).toMatch(/^not connected/);
   });
 });

@@ -301,3 +301,21 @@ export function redact(text: string, secrets: readonly string[]): string {
     .filter(secret => secret.length >= 4)
     .reduce((out, secret) => out.split(secret).join('[redacted]'), text);
 }
+
+/**
+ * Whether the cook page's live panel is connected to the hub, from its
+ * `data-state` and badge text (docs/applications/web-app.md, "Live panel").
+ *
+ * `waiting` and `live` are connected. `stale` covers both a connected panel
+ * whose backfilled reading is old ("No reading for …", the usual case on a
+ * standing device the last run left a reading on) and a lost connection
+ * ("Reconnecting…", "Sign in again"); only the first is connected. Anything
+ * else, including `connecting` and badge copy this does not know, is not.
+ * Returns `connected`, or what the panel shows, for the failure message.
+ */
+export function livePanelConnection(state: string | null, badge: string | null): string {
+  const text = (badge ?? '').trim();
+  if (state === 'waiting' || state === 'live') return 'connected';
+  if (state === 'stale' && /^No reading for \S/.test(text)) return 'connected';
+  return `not connected (data-state ${state ?? 'none'}, badge "${text}")`;
+}
