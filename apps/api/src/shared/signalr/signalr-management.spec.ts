@@ -9,7 +9,6 @@ import type { AccessToken, TokenCredential } from '@azure/core-auth';
 
 import {
   CLIENT_TOKEN_MINUTES,
-  deviceGroup,
   MAX_ATTEMPTS,
   RETRY_AFTER_CAP_MS,
   RETRY_BACKOFF_MS,
@@ -110,6 +109,13 @@ const status =
   () =>
     new Response(null, { status: code, headers });
 
+/** A 200 answer :generateToken accepts. */
+const tokenOk = () =>
+  new Response(JSON.stringify({ token: 'minted' }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
 async function failure(promise: Promise<unknown>): Promise<SignalRUnavailableError> {
   try {
     await promise;
@@ -119,12 +125,6 @@ async function failure(promise: Promise<unknown>): Promise<SignalRUnavailableErr
   }
   throw new Error('expected a SignalRUnavailableError');
 }
-
-describe('deviceGroup', () => {
-  it('is device-<deviceId>', () => {
-    expect(deviceGroup('meatgeek3')).toBe('device-meatgeek3');
-  });
-});
 
 describe('SignalRManagementClient.generateClientToken', () => {
   it('POSTs :generateToken for the userId with a 60-minute lifetime and the api-version', async () => {
@@ -167,45 +167,11 @@ describe('SignalRManagementClient.generateClientToken', () => {
   });
 });
 
-describe('SignalRManagementClient group operations', () => {
-  it('removeUserFromAllGroups DELETEs /users/{user}/groups with the user URL-encoded', async () => {
-    const { client: c, fetchStub } = client();
-
-    await c.removeUserFromAllGroups(USER_ID);
-
-    const [call] = fetchStub.calls;
-    expect(call.method).toBe('DELETE');
-    expect(call.url.pathname).toBe(`/api/hubs/${HUB}/users/tid-1234%3Aoid-5678/groups`);
-    expect(call.url.searchParams.get('api-version')).toBe(SIGNALR_API_VERSION);
-    expect(call.authorization).toBe('Bearer mi-token');
-  });
-
-  it('addUserToGroup PUTs /users/{user}/groups/{group} with both segments URL-encoded', async () => {
-    // HAR-59: the versioned API's AddUserToGroup is /users/{user}/groups/{group};
-    // /groups/{group}/users/{user} is not a route in 2022-06-01 or later.
-    const { client: c, fetchStub } = client();
-
-    await c.addUserToGroup('device-a:b/c', USER_ID);
-
-    const [call] = fetchStub.calls;
-    expect(call.method).toBe('PUT');
-    expect(call.url.pathname).toBe(
-      `/api/hubs/${HUB}/users/tid-1234%3Aoid-5678/groups/device-a%3Ab%2Fc`
-    );
-    expect(call.url.searchParams.get('api-version')).toBe(SIGNALR_API_VERSION);
-    expect([...call.url.searchParams.keys()].sort()).toEqual(['api-version']);
-  });
-});
-
 describe('SignalRManagementClient retries throttling (HAR-80)', () => {
   it('429 then 200 succeeds after one retry', async () => {
-    const {
-      client: c,
-      fetchStub,
-      sleepStub,
-    } = client(stubFetch(sequence(status(429), status(200))));
+    const { client: c, fetchStub, sleepStub } = client(stubFetch(sequence(status(429), tokenOk)));
 
-    await c.addUserToGroup('device-x', USER_ID);
+    await c.generateClientToken(USER_ID);
 
     expect(fetchStub.calls).toHaveLength(2);
     expect(sleepStub.waits).toEqual([RETRY_BACKOFF_MS[0]]);
@@ -219,31 +185,31 @@ describe('SignalRManagementClient retries throttling (HAR-80)', () => {
   it('503 four times throws signalr_<op>_status_503 after exactly 4 fetches', async () => {
     const { client: c, fetchStub, sleepStub } = client(stubFetch(status(503)));
 
-    const error = await failure(c.removeUserFromAllGroups(USER_ID));
+    const error = await failure(c.generateClientToken(USER_ID));
 
     expect(MAX_ATTEMPTS).toBe(4);
     expect(fetchStub.calls).toHaveLength(4);
     expect(sleepStub.waits).toHaveLength(3);
-    expect(error.code).toBe('signalr_remove_user_from_all_groups_status_503');
+    expect(error.code).toBe('signalr_generate_token_status_503');
     expect(error.status).toBe(503);
   });
 
   it('Retry-After: 1 waits 1000 ms', async () => {
     const { client: c, sleepStub } = client(
-      stubFetch(sequence(status(429, { 'Retry-After': '1' }), status(200)))
+      stubFetch(sequence(status(429, { 'Retry-After': '1' }), tokenOk))
     );
 
-    await c.addUserToGroup('device-x', USER_ID);
+    await c.generateClientToken(USER_ID);
 
     expect(sleepStub.waits).toEqual([1000]);
   });
 
   it('Retry-After: 30 is capped at 2000 ms', async () => {
     const { client: c, sleepStub } = client(
-      stubFetch(sequence(status(429, { 'Retry-After': '30' }), status(200)))
+      stubFetch(sequence(status(429, { 'Retry-After': '30' }), tokenOk))
     );
 
-    await c.addUserToGroup('device-x', USER_ID);
+    await c.generateClientToken(USER_ID);
 
     expect(RETRY_AFTER_CAP_MS).toBe(2000);
     expect(sleepStub.waits).toEqual([2000]);
@@ -252,29 +218,27 @@ describe('SignalRManagementClient retries throttling (HAR-80)', () => {
   it('with no Retry-After the waits are 200, 400, 800 ms', async () => {
     const { client: c, fetchStub, sleepStub } = client(stubFetch(status(429)));
 
-    const error = await failure(c.addUserToGroup('device-x', USER_ID));
+    const error = await failure(c.generateClientToken(USER_ID));
 
     expect(sleepStub.waits).toEqual([200, 400, 800]);
     expect(fetchStub.calls).toHaveLength(4);
-    expect(error.code).toBe('signalr_add_user_to_group_status_429');
+    expect(error.code).toBe('signalr_generate_token_status_429');
   });
 
   it('a 403 throws after exactly 1 fetch and no wait', async () => {
     const { client: c, fetchStub, sleepStub } = client(stubFetch(status(403)));
 
-    const error = await failure(c.addUserToGroup('device-x', USER_ID));
+    const error = await failure(c.generateClientToken(USER_ID));
 
     expect(fetchStub.calls).toHaveLength(1);
     expect(sleepStub.waits).toEqual([]);
-    expect(error.code).toBe('signalr_add_user_to_group_status_403');
+    expect(error.code).toBe('signalr_generate_token_status_403');
   });
 
   it('gives each retry a fresh timeout signal', async () => {
-    const { client: c, fetchStub } = client(
-      stubFetch(sequence(status(503), status(429), status(200)))
-    );
+    const { client: c, fetchStub } = client(stubFetch(sequence(status(503), status(429), tokenOk)));
 
-    await c.addUserToGroup('device-x', USER_ID);
+    await c.generateClientToken(USER_ID);
 
     const signals = fetchStub.calls.map(call => call.signal);
     expect(signals).toHaveLength(3);
@@ -319,13 +283,8 @@ describe('SignalRManagementClient on the wire (real fetch, loopback server)', ()
         transferEncoding: req.headers['transfer-encoding'],
         authorization: req.headers.authorization,
       });
-      if (req.method === 'POST') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ token: 'wire-token' }));
-      } else {
-        res.writeHead(req.method === 'DELETE' ? 204 : 200);
-        res.end();
-      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ token: 'wire-token' }));
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -335,30 +294,23 @@ describe('SignalRManagementClient on the wire (real fetch, loopback server)', ()
     await new Promise<void>(resolve => server.close(() => resolve()));
   });
 
-  it('sends the three calls with the documented paths, api-version and Content-Length: 0', async () => {
+  it('sends the token call with the documented path, api-version and Content-Length: 0', async () => {
     const c = new SignalRManagementClient(base, HUB, {
       credential: stubCredential().credential,
       fetch: (input, init) => fetch(input, init),
     });
 
-    await c.removeUserFromAllGroups(USER_ID);
-    await c.addUserToGroup('device-meatgeek3', USER_ID);
     const connection = await c.generateClientToken(USER_ID);
 
     expect(connection.accessToken).toBe('wire-token');
     const version = `api-version=${SIGNALR_API_VERSION}`;
     expect(seen.map(({ method, path }) => `${method} ${path}`)).toEqual([
-      `DELETE /api/hubs/${HUB}/users/tid-1234%3Aoid-5678/groups?${version}`,
-      `PUT /api/hubs/${HUB}/users/tid-1234%3Aoid-5678/groups/device-meatgeek3?${version}`,
       `POST /api/hubs/${HUB}/:generateToken?userId=tid-1234%3Aoid-5678&minutesToExpire=60&${version}`,
     ]);
-    const [, put, post] = seen;
-    expect(put.contentLength).toBe('0');
+    const [post] = seen;
     expect(post.contentLength).toBe('0');
-    for (const call of seen) {
-      expect(call.transferEncoding).toBeUndefined();
-      expect(call.authorization).toBe('Bearer mi-token');
-    }
+    expect(post.transferEncoding).toBeUndefined();
+    expect(post.authorization).toBe('Bearer mi-token');
   });
 });
 
@@ -376,8 +328,8 @@ describe('SignalRManagementClient failures are sanitized', () => {
     const { client: c } = client(
       stubFetch(() => new Response(`forbidden for ${USER_ID} on ${host}`, { status: 403 }))
     );
-    const error = await failure(c.addUserToGroup('device-x', USER_ID));
-    expect(error.code).toBe('signalr_add_user_to_group_status_403');
+    const error = await failure(c.generateClientToken(USER_ID));
+    expect(error.code).toBe('signalr_generate_token_status_403');
     expect(error.status).toBe(403);
     expectSanitized(error);
   });
@@ -386,8 +338,8 @@ describe('SignalRManagementClient failures are sanitized', () => {
     const { client: c } = client(
       stubFetch(() => new TypeError(`fetch failed: getaddrinfo ENOTFOUND ${host}`))
     );
-    const error = await failure(c.removeUserFromAllGroups(USER_ID));
-    expect(error.code).toBe('signalr_remove_user_from_all_groups_failed');
+    const error = await failure(c.generateClientToken(USER_ID));
+    expect(error.code).toBe('signalr_generate_token_failed');
     expect(error.status).toBeUndefined();
     expectSanitized(error);
   });

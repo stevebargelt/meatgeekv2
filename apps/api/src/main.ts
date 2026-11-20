@@ -83,10 +83,10 @@ app.http('stopCook', {
 // to a device the caller names. The handler takes the userId from the Easy Auth
 // principal ("<tid>:<oid>"), mints the client token for that userId through the
 // SignalR data-plane REST API (managed identity; the SignalR connection-info
-// input binding cannot express this userId), and resets the user's group membership
-// to `device-{id}` for exactly the devices the caller owns. Any `deviceId` query
-// parameter is ignored. Cook events (startCook, stopCook) are sent to the owning
-// user's userId; device readings go to the `device-{id}` groups.
+// input binding cannot express this userId). It makes no other SignalR call: every
+// message is addressed to a userId (HAR-81). Any `deviceId` query parameter is
+// ignored. Cook events (startCook, stopCook) are sent to the owning user's userId;
+// device readings go to the device owner's userId.
 app.http('negotiate', {
   methods: ['POST'],
   authLevel: 'anonymous',
@@ -96,8 +96,8 @@ app.http('negotiate', {
 
 // HAR-60: live readings by push. IoT Hub routes every device message to the
 // temperature-data event hub; this trigger reads it on the API's own consumer
-// group and sends each reading to its device's `device-{id}` SignalR group, the
-// groups negotiate puts each owner in. The connection is identity-based
+// group and sends each reading to its device's owner, by userId, after one point
+// read of the device per batch (HAR-81). The connection is identity-based
 // (IOTHUB_EVENTS__fullyQualifiedNamespace; the app identity holds Azure Event
 // Hubs Data Receiver), so no Event Hub key is in app settings.
 app.eventHub('broadcastTemperature', {

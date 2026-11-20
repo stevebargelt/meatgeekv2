@@ -17,7 +17,9 @@ import {
  *
  *   1. `POST /negotiate` answers 200 with a `url` and an `accessToken` (minted
  *      by the API through the SignalR data-plane REST API under managed
- *      identity). It reads the caller's devices, so it reports its RU.
+ *      identity). Since HAR-81 it reads no devices and makes no SignalR call
+ *      but the token, so it carries no request charge: the proof checks the
+ *      header is absent, so a Cosmos read creeping back in shows here.
  *   2. A `@microsoft/signalr` client opens a connection with that url and token
  *      (`accessTokenFactory`), and `start()` resolves: the service accepted the
  *      token the API minted.
@@ -27,7 +29,7 @@ import {
  * off, so neither can reach the run output.
  *
  * HAR-59: when negotiate answers anything but 200, the failure line carries the
- * body's `reason` (e.g. `signalr_add_user_to_group_status_404`), so the run log
+ * body's `reason` (e.g. `signalr_generate_token_status_429`), so the run log
  * names the SignalR call that failed and its status. Only a reason of the fixed
  * `signalr_…` shape is printed; anything else is reported as unrecognised.
  */
@@ -39,11 +41,20 @@ export default defineProofs('signalr negotiate', () => {
     {
       name: 'POST /negotiate returns a url and an accessToken',
       async run(api: AcceptanceApi) {
-        const response = await api.request<NegotiateBody>({ method: 'POST', path: '/negotiate' });
+        const response = await api.request<NegotiateBody>({
+          method: 'POST',
+          path: '/negotiate',
+          expectRequestCharge: false,
+        });
         api.check(
           response,
           response.status === 200,
           negotiateFailureMessage(response.status, response.body)
+        );
+        api.check(
+          response,
+          response.headers.get('x-meatgeek-request-charge') === null,
+          'negotiate reported a request charge: it should read no devices (HAR-81)'
         );
         const body = response.body;
         api.check(response, body !== null && typeof body === 'object', 'body is not a JSON object');
