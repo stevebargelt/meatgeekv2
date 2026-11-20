@@ -604,7 +604,15 @@ end in a real browser:
    is opened and stopped through the UI.
 5. **Start a cook** through the UI, named `acceptance web <run id>` (the
    GitHub run id, or a UTC timestamp locally). Its page opens and the live
-   panel is `waiting` or `live`.
+   panel is connected: `waiting`, `live`, or `stale` with a "No reading for …"
+   badge. The web device is a standing device, so the panel backfills the last
+   run's reading and a run more than 90 s after the previous one opens stale
+   while connected; step 6 proves a fresh reading arrives. "Connecting…",
+   "Reconnecting…" and "Sign in again" fail the step. The check is
+   `expectLivePanelConnected` in `apps/web-e2e/live/live-panel.ts`, and the
+   mocked browser test `apps/web-e2e/src/live-panel-connected.spec.ts` runs it
+   against the built app with an old reading seeded and with negotiate
+   answering 401.
 6. **A pushed reading.** simdevice sends 10 readings, 1 s apart, as the web
    device, with a grill value no earlier run is likely to have left on screen
    (300.0 to 399.9 °F, from the run's start time; `simdevice --grill`). Within

@@ -7,6 +7,7 @@ import {
   waitForBuild,
   type LiveEnv,
 } from './helpers';
+import { expectLivePanelConnected } from './live-panel';
 import { signInWithMicrosoft } from './microsoft-sign-in';
 import { startSimDevice, type SimDeviceRun } from './simdevice';
 
@@ -218,11 +219,9 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
       cookId = decodeURIComponent(new URL(page.url()).pathname.split('/').pop() as string);
       log(`Started cook ${cookId} (${cookName})`);
       await expect(page.getByRole('heading', { name: cookName })).toBeVisible();
-      await expect(panel, 'the live panel is not connected').toHaveAttribute(
-        'data-state',
-        /^(waiting|live)$/,
-        { timeout: 30_000 }
-      );
+      // A standing device keeps the last run's reading, so a connected panel
+      // can open stale. Step 6 proves a fresh reading arrives.
+      await expectLivePanelConnected(panel, 30_000);
     });
 
     await test.step('6. a pushed reading reaches the screen', async () => {

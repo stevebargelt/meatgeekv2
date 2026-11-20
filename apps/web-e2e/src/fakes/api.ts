@@ -9,6 +9,7 @@ export type Cook = Schemas['Cook'];
 export type CookChart = Schemas['CookChart'];
 export type StartCookRequest = Schemas['StartCookRequest'];
 export type SignalRConnectionInfo = Schemas['SignalRConnectionInfo'];
+export type TemperatureReading = Schemas['TemperatureReading'];
 
 /**
  * The JSON body the spec declares for one operation and status. Every
@@ -46,6 +47,10 @@ export interface FakeApiOptions {
   device: Device;
   /** The SignalR connection info POST /negotiate returns. */
   negotiate: SignalRConnectionInfo;
+  /** The stored reading GET /temperatures/current answers; none (404) if unset. */
+  currentReading?: TemperatureReading;
+  /** Answer POST /negotiate with this error status instead of the connection info. */
+  negotiateError?: 401;
 }
 
 /**
@@ -122,6 +127,8 @@ export class FakeApi {
       return cook ? reply(200, this.chart(cook)) : reply(404, notFound('NOT_FOUND'));
     }
     if (method === 'GET' && (params = match(/^\/temperatures\/current\/([^/]+)$/))) {
+      const stored = this.options.currentReading;
+      if (stored && params[0] === this.options.device.id) return reply(200, stored);
       // No reading is stored: the live panel waits for the one the test pushes.
       return reply(
         404,
@@ -129,6 +136,8 @@ export class FakeApi {
       );
     }
     if (method === 'POST' && path === '/negotiate') {
+      const error = this.options.negotiateError;
+      if (error) return reply(error, unauthenticated());
       return reply(200, this.negotiate());
     }
 
@@ -202,6 +211,10 @@ export class FakeApi {
 }
 
 type ErrorResponse = Json<'getCook', 404>;
+
+function unauthenticated(): ErrorResponse {
+  return { error: 'UNAUTHENTICATED', message: 'Unauthenticated.', requestId: randomUUID() };
+}
 
 function notFound(error: ErrorResponse['error']): ErrorResponse {
   return { error, message: `Not found (${error}).`, requestId: randomUUID() };
