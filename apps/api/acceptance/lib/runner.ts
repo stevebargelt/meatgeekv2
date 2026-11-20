@@ -7,6 +7,7 @@ import { REQUEST_CHARGE_HEADER } from '../../src/shared/cosmos/request-charge';
 import {
   AcceptanceApi,
   AcceptanceResponse,
+  Caller,
   HttpMethod,
   Proof,
   ProofFailure,
@@ -28,11 +29,17 @@ import {
  * SIMDEVICE_CONNECTION_STRING, is read here and nowhere else: the child inherits
  * it through its environment, never its command line, and the redactor masks
  * both the whole connection string and its SharedAccessKey value.
+ *
+ * HAR-67: a proof may also send a request as the acceptance peer, a second
+ * caller with no devices, whose token is ACCEPTANCE_PEER_BEARER_TOKEN
+ * (`request({ ..., as: 'peer' })`). The redactor masks that token too, and the
+ * simdevice child gets neither token.
  */
 
 export const REQUIRED_ENV = [
   'ACCEPTANCE_BASE_URL',
   'ACCEPTANCE_BEARER_TOKEN',
+  'ACCEPTANCE_PEER_BEARER_TOKEN',
   'SIMDEVICE_CONNECTION_STRING',
   'ACCEPTANCE_SIM_DEVICE_ID',
   'ACCEPTANCE_SIMDEVICE_BIN',
@@ -117,18 +124,21 @@ function errorCodeOf(body: unknown): string | undefined {
 }
 
 /**
- * A function masking every secret in a line: the bearer token, the device
- * connection string, and its SharedAccessKey value (with and without the
- * `SharedAccessKey=` prefix). Longest first, so a whole connection string is
- * one mask rather than a mangled partial.
+ * A function masking every secret in a line: the bearer tokens (the owner's and
+ * the peer's), the device connection string, and its SharedAccessKey value (with
+ * and without the `SharedAccessKey=` prefix). Longest first, so a whole
+ * connection string is one mask rather than a mangled partial.
  */
-export function makeRedactor(token: string, connectionString: string): (line: string) => string {
+export function makeRedactor(
+  tokens: readonly string[],
+  connectionString: string
+): (line: string) => string {
   const key = connectionString
     .split(';')
     .map(part => part.trim())
     .find(part => /^SharedAccessKey=/i.test(part))
     ?.slice('SharedAccessKey='.length);
-  const secrets = [token, connectionString, ...(key ? [`SharedAccessKey=${key}`, key] : [])]
+  const secrets = [...tokens, connectionString, ...(key ? [`SharedAccessKey=${key}`, key] : [])]
     .filter(secret => secret.length > 0)
     .sort((a, b) => b.length - a.length);
   return line => secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line);
@@ -197,11 +207,12 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   }
 
   const token = (env['ACCEPTANCE_BEARER_TOKEN'] as string).trim();
+  const peerToken = (env['ACCEPTANCE_PEER_BEARER_TOKEN'] as string).trim();
   const rawBaseUrl = (env['ACCEPTANCE_BASE_URL'] as string).trim();
   const connectionString = (env['SIMDEVICE_CONNECTION_STRING'] as string).trim();
   const simulatedDeviceId = (env['ACCEPTANCE_SIM_DEVICE_ID'] as string).trim();
   const simdeviceBin = (env['ACCEPTANCE_SIMDEVICE_BIN'] as string).trim();
-  const redact = makeRedactor(token, connectionString);
+  const redact = makeRedactor([token, peerToken], connectionString);
   const write = (line: string) => options.write(redact(line));
 
   let baseUrl: string;
@@ -229,7 +240,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
 
   /** The request in flight for the current proof, so an unexpected throw
    *  (network error, timeout, bad JSON) is still attributed to a route. */
-  let lastRequest: { method: HttpMethod; route: string; status?: number } | undefined;
+  let lastRequest: { method: HttpMethod; route: string; as: Caller; status?: number } | undefined;
   /** Set while a proof's last action was a simdevice run, for the same reason. */
   let lastExec: { exitCode?: number | null } | undefined;
 
@@ -242,12 +253,13 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   };
 
   // The child gets the runner's own environment for PATH and tracing, plus the
-  // device credential; never the bearer token, which it has no use for.
+  // device credential; never a bearer token, which it has no use for.
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     SIMDEVICE_CONNECTION_STRING: connectionString,
   };
   delete childEnv['ACCEPTANCE_BEARER_TOKEN'];
+  delete childEnv['ACCEPTANCE_PEER_BEARER_TOKEN'];
 
   const api: AcceptanceApi = {
     runId,
@@ -285,13 +297,14 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     async request<T>(request: RequestOptions): Promise<AcceptanceResponse<T>> {
       const authenticated = request.authenticated ?? true;
       const expectCharge = request.expectRequestCharge ?? true;
+      const as: Caller = request.as ?? 'owner';
       const route = request.route ?? request.path.split('?')[0];
-      lastRequest = { method: request.method, route };
+      lastRequest = { method: request.method, route, as };
       lastExec = undefined;
 
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (authenticated) {
-        headers['Authorization'] = `Bearer ${token}`;
+        headers['Authorization'] = `Bearer ${as === 'peer' ? peerToken : token}`;
       }
       if (request.body !== undefined) {
         headers['Content-Type'] = 'application/json';
@@ -324,7 +337,8 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
           ? parsedCharge
           : undefined;
 
-      const key = `${request.method} ${route}${authenticated ? '' : ' (no auth)'}`;
+      const who = authenticated ? (as === 'peer' ? ' (peer)' : '') : ' (no auth)';
+      const key = `${request.method} ${route}${who}`;
       const entry = totals.get(key) ?? { calls: 0, charged: 0, totalRu: 0 };
       entry.calls += 1;
       if (requestCharge !== undefined) {
@@ -334,13 +348,15 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       totals.set(key, entry);
 
       write(
-        `  ${request.method.padEnd(6)} ${route.padEnd(30)} ${String(response.status).padEnd(4)}` +
+        `  ${request.method.padEnd(6)} ${`${route}${as === 'peer' ? ' (peer)' : ''}`.padEnd(30)}` +
+          ` ${String(response.status).padEnd(4)}` +
           ` ${`${latencyMs} ms`.padStart(8)}  RU ${requestCharge === undefined ? '-' : formatRu(requestCharge)}`
       );
 
       const result: AcceptanceResponse<T> = {
         method: request.method,
         route,
+        as,
         status: response.status,
         latencyMs,
         requestCharge,
@@ -412,7 +428,8 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
         groupFailed = true;
         const at = error instanceof ProofFailure && error.response ? error.response : lastRequest;
         const where = at
-          ? `${at.method} ${at.route} → ${at.status === undefined ? 'no response' : at.status}`
+          ? `${at.method} ${at.route}${at.as === 'peer' ? ' (peer)' : ''} → ` +
+            `${at.status === undefined ? 'no response' : at.status}`
           : (execWhere() ?? 'before any request');
         const line = redact(`FAIL ${label} — ${where}: ${describeError(error)}`);
         write(line);

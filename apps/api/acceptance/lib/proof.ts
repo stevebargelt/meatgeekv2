@@ -7,6 +7,15 @@
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
+/**
+ * Who a request is sent as (HAR-67). `owner` is the run's caller,
+ * ACCEPTANCE_BEARER_TOKEN: it registers the devices and owns the simulated
+ * device. `peer` is the acceptance peer, ACCEPTANCE_PEER_BEARER_TOKEN: a second
+ * signed-in caller with no devices, for proving one user cannot reach
+ * another's data. A proof never sees either token; it names the caller.
+ */
+export type Caller = 'owner' | 'peer';
+
 export interface RequestOptions {
   readonly method: HttpMethod;
   /** Path relative to ACCEPTANCE_BASE_URL, starting with `/`, query included. */
@@ -16,8 +25,11 @@ export interface RequestOptions {
   readonly route?: string;
   /** JSON request body. */
   readonly body?: unknown;
-  /** Send the bearer token. Default `true`. */
+  /** Send a bearer token. Default `true`. */
   readonly authenticated?: boolean;
+  /** Whose bearer token to send. Default `'owner'`. A peer request is marked
+   *  `(peer)` on its output line, in the RU table and in a FAIL line. */
+  readonly as?: Caller;
   /** Fail the proof when the response lacks a numeric
    *  `x-meatgeek-request-charge` header. Default `true`: every route that
    *  touches Cosmos must report its RU. Set `false` only for a response that
@@ -28,6 +40,8 @@ export interface RequestOptions {
 export interface AcceptanceResponse<T = unknown> {
   readonly method: HttpMethod;
   readonly route: string;
+  /** Who the request was sent as. */
+  readonly as: Caller;
   readonly status: number;
   readonly latencyMs: number;
   /** The `x-meatgeek-request-charge` value, when present and numeric. */
@@ -108,7 +122,8 @@ export function defineProofs(name: string, create: () => readonly Proof[]): Proo
 export class ProofFailure extends Error {
   constructor(
     message: string,
-    readonly response?: Pick<AcceptanceResponse, 'method' | 'route' | 'status'>
+    readonly response?: Pick<AcceptanceResponse, 'method' | 'route' | 'status'> &
+      Partial<Pick<AcceptanceResponse, 'as'>>
   ) {
     super(message);
     this.name = 'ProofFailure';
