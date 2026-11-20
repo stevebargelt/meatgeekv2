@@ -35,8 +35,14 @@ export const SIGNALR_SERVICE_URI_SETTING = 'AzureSignalRConnectionString__servic
 /** The Entra scope for the SignalR data plane. */
 export const SIGNALR_TOKEN_SCOPE = 'https://signalr.azure.com/.default';
 
-/** The data-plane REST API version this client speaks. */
-export const SIGNALR_API_VERSION = '2022-11-01';
+/**
+ * The data-plane REST API version this client speaks (HAR-59). `2024-12-01` is
+ * a published stable version whose reference documents all three operations
+ * this client uses. `2022-11-01`, used before, is a Web PubSub version and is
+ * not a published SignalR one; `:generateToken` first appears in `2023-07-01`.
+ * Source: https://learn.microsoft.com/azure/azure-signalr/swagger/signalr-data-plane-rest-v20241201
+ */
+export const SIGNALR_API_VERSION = '2024-12-01';
 
 /** Lifetime of a client access token minted by negotiate. */
 export const CLIENT_TOKEN_MINUTES = 60;
@@ -168,14 +174,19 @@ export class SignalRManagementClient implements SignalRManagementPort {
     );
   }
 
-  /** `PUT /api/hubs/{hub}/groups/{group}/users/{user}` */
+  /**
+   * `PUT /api/hubs/{hub}/users/{user}/groups/{group}` (HAR-59). The versioned
+   * API has no `/groups/{group}/users/{user}` route; that shape is the legacy
+   * `/api/v1` one. No `ttl`: the user stays in the group whether or not it has
+   * a connection yet, which is what negotiate needs before the client connects.
+   */
   async addUserToGroup(group: string, userId: string): Promise<void> {
     await this.call(
       'add_user_to_group',
       'PUT',
-      `/api/hubs/${encodeURIComponent(this.hub)}/groups/${encodeURIComponent(
-        group
-      )}/users/${encodeURIComponent(userId)}`
+      `/api/hubs/${encodeURIComponent(this.hub)}/users/${encodeURIComponent(
+        userId
+      )}/groups/${encodeURIComponent(group)}`
     );
   }
 

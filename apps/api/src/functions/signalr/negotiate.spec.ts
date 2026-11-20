@@ -197,14 +197,26 @@ describe('negotiateHandler', () => {
     expect(JSON.stringify(withQuery.signalR.calls)).not.toContain('theirs');
   });
 
-  it.each<[Call['op'], unknown]>([
-    ['removeAll', new SignalRUnavailableError('remove_user_from_all_groups', 403)],
-    ['add', new SignalRUnavailableError('add_user_to_group')],
-    ['token', new SignalRUnavailableError('generate_token', 500)],
-    ['token', new Error(`connect ECONNREFUSED https://${SERVICE_HOST}/api/hubs`)],
+  it.each<[Call['op'], unknown, string]>([
+    [
+      'removeAll',
+      new SignalRUnavailableError('remove_user_from_all_groups', 403),
+      'signalr_remove_user_from_all_groups_status_403',
+    ],
+    ['add', new SignalRUnavailableError('add_user_to_group'), 'signalr_add_user_to_group_failed'],
+    [
+      'token',
+      new SignalRUnavailableError('generate_token', 500),
+      'signalr_generate_token_status_500',
+    ],
+    [
+      'token',
+      new Error(`connect ECONNREFUSED https://${SERVICE_HOST}/api/hubs`),
+      'signalr_failure',
+    ],
   ])(
-    'answers 503 SIGNALR_UNAVAILABLE when %s fails, with no endpoint in the body or logs',
-    async (op, failure) => {
+    'answers 503 SIGNALR_UNAVAILABLE when %s fails, with its code as reason and no endpoint in the body or logs',
+    async (op, failure, reason) => {
       const { fake, deps } = setup(signalRStub(op, failure));
       fake.seed(device('grill-1'));
       const { ctx, lines } = context();
@@ -215,8 +227,12 @@ describe('negotiateHandler', () => {
       expect(response.jsonBody).toEqual({
         error: 'SIGNALR_UNAVAILABLE',
         message: 'Real-time updates are unavailable. Try again later.',
+        reason,
         requestId: 'inv-neg',
       });
+      if (failure instanceof SignalRUnavailableError) {
+        expect((response.jsonBody as { reason: string }).reason).toBe(failure.code);
+      }
       const everything = JSON.stringify(response) + lines.join('\n');
       expect(everything).not.toContain(SERVICE_HOST);
       expect(everything).not.toContain('https://');
@@ -224,6 +240,33 @@ describe('negotiateHandler', () => {
       expect(lines.some(l => /negotiate failed: signalr_/.test(l))).toBe(true);
     }
   );
+
+  it('takes only the code from the error: nothing else it carries reaches the body', async () => {
+    // HAR-59: reason is the error's fixed code. Whatever else a thrown
+    // SignalRUnavailableError carries (a message, a cause, extra fields) stays out.
+    const failure = Object.assign(new SignalRUnavailableError('add_user_to_group', 404), {
+      message: `PUT https://${SERVICE_HOST}/api/hubs/temperatureHub/users/${USER_ID} 404`,
+      cause: new Error(`token mi-secret for ${USER_ID}`),
+      endpoint: `https://${SERVICE_HOST}`,
+    });
+    const { fake, deps } = setup(signalRStub('add', failure));
+    fake.seed(device('grill-1'));
+    const { ctx, lines } = context();
+
+    const response = await negotiateHandler(request(), ctx, deps);
+
+    expect(response.status).toBe(503);
+    expect(response.jsonBody).toEqual({
+      error: 'SIGNALR_UNAVAILABLE',
+      message: 'Real-time updates are unavailable. Try again later.',
+      reason: 'signalr_add_user_to_group_status_404',
+      requestId: 'inv-neg',
+    });
+    const everything = JSON.stringify(response) + lines.join('\n');
+    for (const leaked of [SERVICE_HOST, USER_ID, OID, 'mi-secret', 'device-grill-1', 'https://']) {
+      expect(everything).not.toContain(leaked);
+    }
+  });
 
   it('answers 503 when SignalR is not configured (the client getter throws)', async () => {
     const { deps } = setup();
@@ -235,6 +278,7 @@ describe('negotiateHandler', () => {
     const response = await negotiateHandler(request(), ctx, deps);
 
     expect(response.status).toBe(503);
+    expect((response.jsonBody as { reason?: string }).reason).toBe('signalr_configuration_failed');
     expect(lines).toContain('negotiate failed: signalr_configuration_failed');
   });
 

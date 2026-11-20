@@ -17,6 +17,11 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  *
  * Nothing here prints the url or the token, and the client's own logging is
  * off, so neither can reach the run output.
+ *
+ * HAR-59: when negotiate answers anything but 200, the failure line carries the
+ * body's `reason` (e.g. `signalr_add_user_to_group_status_404`), so the run log
+ * names the SignalR call that failed and its status. Only a reason of the fixed
+ * `signalr_…` shape is printed; anything else is reported as unrecognised.
  */
 
 /** How long `start()` and `stop()` may take before the proof fails. */
@@ -25,6 +30,27 @@ const CONNECT_TIMEOUT_MS = 30_000;
 interface NegotiateBody {
   url?: unknown;
   accessToken?: unknown;
+  error?: unknown;
+  reason?: unknown;
+}
+
+/** The shape of every code negotiate puts in a 503 `reason`. */
+const SIGNALR_REASON = /^signalr_[a-z0-9_]{1,80}$/;
+
+/** The failure line for a non-200 negotiate: status, error code and `reason`. */
+function negotiateFailureMessage(status: number, body: unknown): string {
+  const { error, reason } = (body ?? {}) as NegotiateBody;
+  const code =
+    typeof error === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error) ? error : undefined;
+  let why: string;
+  if (reason === undefined) {
+    why = 'no reason in the body';
+  } else if (typeof reason === 'string' && SIGNALR_REASON.test(reason)) {
+    why = `reason ${reason}`;
+  } else {
+    why = 'reason unrecognised, not printed';
+  }
+  return `expected 200, got ${status}${code ? ` (${code})` : ''}; ${why}`;
 }
 
 /** Rejects with a fixed message if `promise` has not settled in `ms`. */
@@ -60,7 +86,11 @@ export default defineProofs('signalr negotiate', () => {
       name: 'POST /negotiate returns a url and an accessToken',
       async run(api: AcceptanceApi) {
         const response = await api.request<NegotiateBody>({ method: 'POST', path: '/negotiate' });
-        api.expectStatus(response, 200);
+        api.check(
+          response,
+          response.status === 200,
+          negotiateFailureMessage(response.status, response.body)
+        );
         const body = response.body;
         api.check(response, body !== null && typeof body === 'object', 'body is not a JSON object');
         api.check(

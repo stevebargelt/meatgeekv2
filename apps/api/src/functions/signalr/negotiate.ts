@@ -38,8 +38,11 @@ import {
  *   - 401 UNAUTHENTICATED: no principal;
  *   - 500 INTERNAL_SERVER_ERROR: the devices read failed;
  *   - 503 SIGNALR_UNAVAILABLE: a SignalR REST call failed or SignalR is not
- *     configured. Neither the body nor the log carries the endpoint or the
- *     underlying error text; the log carries a fixed code.
+ *     configured. `reason` (HAR-59) is the fixed code naming the failed
+ *     operation and, when the service answered, its status, e.g.
+ *     `signalr_add_user_to_group_status_404`; any other error is
+ *     `signalr_failure`. Neither the body nor the log carries the endpoint, a
+ *     user id, a group, a token or the underlying error text.
  */
 
 /** Injection seam. Production wires Easy Auth, the devices repository and the
@@ -137,13 +140,16 @@ export async function negotiateHandler(
       requestCharge
     );
   } catch (error) {
-    const code = error instanceof SignalRUnavailableError ? error.code : 'signalr_failure';
-    context.error(`negotiate failed: ${code}`);
+    // Only the code is read from the error: it is fixed text built from the
+    // operation name and a numeric status (SignalRUnavailableError).
+    const reason = error instanceof SignalRUnavailableError ? error.code : 'signalr_failure';
+    context.error(`negotiate failed: ${reason}`);
     return response(
       503,
       {
         error: 'SIGNALR_UNAVAILABLE',
         message: 'Real-time updates are unavailable. Try again later.',
+        reason,
         requestId: context.invocationId,
       },
       correlationId,
