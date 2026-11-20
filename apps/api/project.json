@@ -76,6 +76,12 @@
     "test": {
       "executor": "@nx/jest:jest",
       "outputs": ["{workspaceRoot}/coverage/{projectRoot}"],
+      "inputs": [
+        "default",
+        "^production",
+        "{workspaceRoot}/jest.preset.js",
+        "{workspaceRoot}/libs/api-specs/spec/**/*"
+      ],
       "options": {
         "jestConfig": "apps/api/jest.config.ts",
         "passWithNoTests": true

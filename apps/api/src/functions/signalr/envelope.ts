@@ -13,9 +13,10 @@ export const SIGNALR_CONNECTION_SETTING = 'AzureSignalRConnectionString';
 // These strings are the wire contract with the Go data-pusher consumer. They
 // MUST match, byte-for-byte, the EventType constants in
 // apps/data-pusher/internal/signalr/events.go (EventTypeCookStarted /
-// EventTypeCookStopped) and the SignalRMessageType enum in
-// libs/api-specs/spec/components/schemas/signalr-payloads.yaml. Changing them
-// here silently breaks the consumer's dispatcher.
+// EventTypeCookStopped) and the `x-signalr.messages` keys in
+// libs/api-specs/spec/openapi.yaml. Changing them here silently breaks the
+// consumer's dispatcher; apps/api/src/contract/contract.spec.ts fails when they
+// and the spec differ.
 export const COOK_STARTED = 'cook_started';
 export const COOK_STOPPED = 'cook_stopped';
 
@@ -34,8 +35,9 @@ export interface CorrelationContext {
   id: string;
 }
 
-// Mirrors SignalREnvelopeBase in signalr-payloads.yaml (the fields the producer
-// stamps). `payload` carries the concrete cook the caller passed in.
+// Described by CookStartedMessage and CookStoppedMessage in
+// libs/api-specs/spec/components/schemas/signalr-payloads.yaml. `payload`
+// carries the concrete cook the caller passed in.
 export interface CookEventEnvelope<T extends CookRef = CookRef> {
   type: CookEventType;
   timestamp: string;

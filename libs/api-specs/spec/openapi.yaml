@@ -2,77 +2,76 @@ openapi: 3.0.3
 
 info:
   title: MeatGeek V2 API
-  version: 0.1.0
+  version: 0.2.0
   description: |
-    OpenAPI source-of-truth for the MeatGeek V2 platform. Covers the Phase-1
-    HTTP surface (cooks, temperatures, devices, users, recipes) plus the SignalR message
-    payloads used for real-time push.
+    The contract between the MeatGeek V2 API and its clients. It describes
+    exactly the HTTP routes `apps/api/src/main.ts` registers and the SignalR
+    messages the API sends, and nothing else.
 
-    ## SignalR transport note
+    ## Drift check
 
-    The schemas under `components/schemas/signalr-payloads.yaml`
-    (TemperatureUpdateMessage, CookStartedMessage, etc.) describe SignalR
-    message payloads, NOT HTTP endpoints; transport is the SignalR
-    `temperatureHub` channel. Clients connect to that hub and receive
-    messages whose envelope matches `SignalRMessage` (a discriminated union
-    keyed on the `type` field). Every envelope MUST carry `correlation.id`
-    so producers and consumers can stitch a single user action through
-    device → IoT Hub → Functions → SignalR → client traces.
+    `npx nx test api` runs `apps/api/src/contract/contract.spec.ts` on every
+    pull request. It fails when a route registered in `main.ts` is missing
+    here or an operation here has no route, when an operation lacks the
+    bearer security or a `401`, when this document does not validate, or when
+    a SignalR message the API builds does not match its `x-signalr` schema.
 
-    ## Source-of-truth note
+    ## Authentication
 
-    Routes for the seventeen currently-implemented HTTP endpoints
-    (GET /cooks, POST /cooks, POST /cooks/{cookId}/stop,
-    POST /negotiate, GET /temperatures/current/{deviceId},
-    GET /temperatures/history,
-    GET /devices, POST /devices, GET /devices/{id},
-    PATCH /devices/{id}, GET /users/me, PUT /users/me,
-    GET /recipes, POST /recipes, GET /recipes/{id},
-    PATCH /recipes/{id}, DELETE /recipes/{id}) match `apps/api/src/main.ts` route templates
-    character-for-character — these are the contract. Endpoints whose
-    description starts with `NOT YET IMPLEMENTED -` represent the planned
-    Phase-1/Phase-2 surface; handlers will follow.
+    Every route sits behind App Service Authentication (Easy Auth). Send an
+    Entra ID access token for the API's audience as `Authorization: Bearer`.
+    Easy Auth validates it before any function runs and answers `401` itself
+    when it is missing or invalid; a handler that runs without a usable
+    principal answers `401 UNAUTHENTICATED`. The caller's identity is always
+    the token's tenant id and object id, `"<tid>:<oid>"`; no route takes a
+    user id.
 
+    ## Errors
+
+    Error bodies are flat: `{error, message, requestId}`, where `error` is an
+    `ErrorCode`, plus the extra fields a variant names (`activeCookId`,
+    `cookId`, `reason`). The `401` body carries `reason` in place of
+    `message`.
+
+    ## SignalR
+
+    The top-level `x-signalr` extension names the hub, the route that
+    negotiates a connection to it, and the messages it carries. Each key under
+    `messages` is a SignalR target (`connection.on('<key>', ...)`) and points
+    to the schema of that target's single argument.
   contact:
     name: MeatGeek V2 team
-    url: https://github.com/your-org/meatgeekv2
   license:
     name: UNLICENSED
 
 servers:
   - url: http://localhost:7071/api
-    description: Local Azure Functions Core Tools (default).
-  - url: http://localhost:4010
-    description: Local mock server (libs/api-specs mock-server).
+    description: Local Azure Functions Core Tools. Every route is under /api.
+
+security:
+  - bearerAuth: []
 
 tags:
   - name: cooks
-    description: Cook session CRUD and lifecycle.
+    description: Start, stop and list the caller's cooks.
   - name: temperatures
-    description: Live and historical temperature readings.
+    description: The latest and historical readings of the caller's devices.
   - name: devices
-    description: BBQ device registration, configuration, and status.
+    description: Register and manage the caller's devices.
   - name: users
     description: The authenticated caller's own profile.
   - name: recipes
     description: The authenticated caller's private recipes.
+  - name: signalr
+    description: Negotiate a SignalR connection for live readings and cook events.
+  - name: health
+    description: Health of the API's own dependencies.
 
 paths:
   /cooks:
     $ref: './paths/cooks.yaml#/cooks-collection'
-  /cooks/{id}:
-    $ref: './paths/cooks.yaml#/cook-item'
-  /cooks/{id}/start:
-    $ref: './paths/cooks.yaml#/cook-start'
-  # Shipped route (apps/api/src/main.ts): cooks/{cookId}/stop — path
-  # template var matches the cook-stop operation's `cookId` path param.
-  # The planned {id} routes above will align their param name when implemented.
   /cooks/{cookId}/stop:
     $ref: './paths/cooks.yaml#/cook-stop'
-  /cooks/{id}/history:
-    $ref: './paths/cooks.yaml#/cook-history'
-  # Shipped route (apps/api/src/main.ts): route 'negotiate', POST — SignalR
-  # handshake handled by apps/api/src/functions/signalr/negotiate.ts.
   /negotiate:
     $ref: './paths/negotiate.yaml#/negotiate'
   /temperatures/current/{deviceId}:
@@ -89,8 +88,60 @@ paths:
     $ref: './paths/recipes.yaml#/recipes-collection'
   /recipes/{id}:
     $ref: './paths/recipes.yaml#/recipe-item'
+  /health/cosmos:
+    $ref: './paths/health.yaml#/health-cosmos'
+
+x-signalr:
+  hub: temperatureHub
+  negotiate: /negotiate
+  messages:
+    temperature:
+      $ref: '#/components/schemas/TemperatureMessage'
+    cook_started:
+      $ref: '#/components/schemas/CookStartedMessage'
+    cook_stopped:
+      $ref: '#/components/schemas/CookStoppedMessage'
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        An Entra ID access token whose audience is the API. App Service
+        Authentication (Easy Auth) validates it before any function runs and
+        passes the validated principal to the handler as
+        `X-MS-CLIENT-PRINCIPAL`.
+
+  headers:
+    X-Request-ID:
+      $ref: './components/headers.yaml#/X-Request-ID'
+    RequestCharge:
+      $ref: './components/headers.yaml#/RequestCharge'
+
+  parameters:
+    DeviceIdPath:
+      $ref: './components/parameters.yaml#/DeviceIdPath'
+    RecipeIdPath:
+      $ref: './components/parameters.yaml#/RecipeIdPath'
+
+  responses:
+    Unauthenticated:
+      $ref: './components/responses.yaml#/Unauthenticated'
+    PlatformUnauthenticated:
+      $ref: './components/responses.yaml#/PlatformUnauthenticated'
+    ServerError:
+      $ref: './components/responses.yaml#/ServerError'
+    DeviceValidationError:
+      $ref: './components/responses.yaml#/DeviceValidationError'
+    DeviceNotFound:
+      $ref: './components/responses.yaml#/DeviceNotFound'
+    RecipeValidationError:
+      $ref: './components/responses.yaml#/RecipeValidationError'
+    RecipeNotFound:
+      $ref: './components/responses.yaml#/RecipeNotFound'
+
   schemas:
     # Common
     ErrorCode:
@@ -105,8 +156,8 @@ components:
       $ref: './components/schemas/common.yaml#/SignalRUnavailableError'
     DeviceTwinUpdateFailedError:
       $ref: './components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
-    Pagination:
-      $ref: './components/schemas/common.yaml#/Pagination'
+    CosmosHealthResponse:
+      $ref: './components/schemas/common.yaml#/CosmosHealthResponse'
     TemperatureUnit:
       $ref: './components/schemas/common.yaml#/TemperatureUnit'
     ConnectionStatus:
@@ -123,26 +174,14 @@ components:
       $ref: './components/schemas/cook.yaml#/Cook'
     StartCookRequest:
       $ref: './components/schemas/cook.yaml#/StartCookRequest'
-    UpdateCookRequest:
-      $ref: './components/schemas/cook.yaml#/UpdateCookRequest'
     CookListResponse:
       $ref: './components/schemas/cook.yaml#/CookListResponse'
-    CookSummary:
-      $ref: './components/schemas/cook.yaml#/CookSummary'
 
     # Temperature
     TemperatureReading:
       $ref: './components/schemas/temperature.yaml#/TemperatureReading'
     TemperatureHistoryResponse:
       $ref: './components/schemas/temperature.yaml#/TemperatureHistoryResponse'
-    TemperatureAlertType:
-      $ref: './components/schemas/temperature.yaml#/TemperatureAlertType'
-    ProbeName:
-      $ref: './components/schemas/temperature.yaml#/ProbeName'
-    TemperatureAlert:
-      $ref: './components/schemas/temperature.yaml#/TemperatureAlert'
-    LiveTemperatureUpdate:
-      $ref: './components/schemas/temperature.yaml#/LiveTemperatureUpdate'
 
     # Device
     Device:
@@ -157,8 +196,6 @@ components:
       $ref: './components/schemas/device.yaml#/RegisterDeviceRequest'
     UpdateDeviceRequest:
       $ref: './components/schemas/device.yaml#/UpdateDeviceRequest'
-    DeviceStatus:
-      $ref: './components/schemas/device.yaml#/DeviceStatus'
 
     # User
     User:
@@ -184,35 +221,14 @@ components:
     UpdateRecipeRequest:
       $ref: './components/schemas/recipe.yaml#/UpdateRecipeRequest'
 
-    # SignalR payloads — message envelopes for the temperatureHub channel,
-    # not HTTP endpoints. See info.description for the transport note.
+    # SignalR: the negotiate response, and the messages listed in x-signalr.
     SignalRConnectionInfo:
       $ref: './components/schemas/signalr-payloads.yaml#/SignalRConnectionInfo'
-    SignalRMessageType:
-      $ref: './components/schemas/signalr-payloads.yaml#/SignalRMessageType'
     CorrelationContext:
       $ref: './components/schemas/signalr-payloads.yaml#/CorrelationContext'
-    SignalREnvelopeBase:
-      $ref: './components/schemas/signalr-payloads.yaml#/SignalREnvelopeBase'
-    TemperatureUpdateMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/TemperatureUpdateMessage'
+    TemperatureMessage:
+      $ref: './components/schemas/signalr-payloads.yaml#/TemperatureMessage'
     CookStartedMessage:
       $ref: './components/schemas/signalr-payloads.yaml#/CookStartedMessage'
     CookStoppedMessage:
       $ref: './components/schemas/signalr-payloads.yaml#/CookStoppedMessage'
-    CookPausedMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/CookPausedMessage'
-    CookResumedMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/CookResumedMessage'
-    DeviceOnlineMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/DeviceOnlineMessage'
-    DeviceOfflineMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/DeviceOfflineMessage'
-    AlertTriggeredMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/AlertTriggeredMessage'
-    SystemNotificationLevel:
-      $ref: './components/schemas/signalr-payloads.yaml#/SystemNotificationLevel'
-    SystemNotificationMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/SystemNotificationMessage'
-    SignalRMessage:
-      $ref: './components/schemas/signalr-payloads.yaml#/SignalRMessage'
