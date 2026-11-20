@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { generateSync } from 'otplib';
+import { createGuardrails, generateSync } from 'otplib';
 
 /**
  * The pure parts of the live browser proof (HAR-99): reading its inputs, the
@@ -122,12 +122,21 @@ export function normalizeTotpSecret(secret: string): string {
 
 export const TOTP_PERIOD_S = 30;
 
+/**
+ * otplib refuses secrets under 16 bytes by default (its `MIN_SECRET_BYTES`, a
+ * rule for secrets you generate). Microsoft generates this one, and an Entra
+ * authenticator-app secret is 16 base32 characters: 10 bytes. We only compute
+ * codes for a secret we were handed, so accept any length.
+ */
+const TOTP_GUARDRAILS = createGuardrails({ MIN_SECRET_BYTES: 1 });
+
 /** The 6-digit RFC 6238 code (SHA-1, 30 s) for `secret` at `nowMs`. */
 export function totpCode(secret: string, nowMs: number, digits = 6): string {
   return generateSync({
     secret: normalizeTotpSecret(secret),
     epoch: Math.floor(nowMs / 1000),
     digits,
+    guardrails: TOTP_GUARDRAILS,
   });
 }
 

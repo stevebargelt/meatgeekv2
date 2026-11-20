@@ -131,6 +131,16 @@ describe('totpCode', () => {
     expect(totpCode('gezd gnbv gy3t qojq gezd gnbv gy3t qojq', 59_000)).toBe('287082');
   });
 
+  // An Entra authenticator-app secret is 16 base32 characters, 10 bytes:
+  // under otplib's default 16-byte minimum. The codes were computed with
+  // node:crypto's HMAC-SHA1, independently of otplib.
+  it.each([
+    [59, '996554'],
+    [1111111109, '071271'],
+  ])('accepts a 10-byte secret, as Entra issues (T=%i)', (seconds, code) => {
+    expect(totpCode('jbsw y3dp ehpk 3pxp', seconds * 1000)).toBe(code);
+  });
+
   it('counts down the 30 s window', () => {
     expect(msLeftInTotpWindow(60_000)).toBe(30_000);
     expect(msLeftInTotpWindow(89_999)).toBe(1);
