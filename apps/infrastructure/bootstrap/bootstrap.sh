@@ -43,6 +43,18 @@
 #      the Terraform-managed role allowlist in tf-managed-role-allowlist.tsv;
 #      Storage Blob Data Contributor on the tfstate-dev container. NO
 #      subscription-wide permission, NO Microsoft Graph permission, no secret.
+#   6. The dev WEB SPA REGISTRATION and the ACCEPTANCE TEST USER (HAR-82). An
+#      AAD app `meatgeek-v2-dev-web` on the SPA platform (auth-code + PKCE; NO
+#      client secret, NO certificate, no implicit grant) with redirect URIs
+#      https://meatgeekv2-web.vercel.app and http://localhost:3000, requesting
+#      the dev API's access_as_user (pre-authorized on the API, MERGED with the
+#      smoke-test callers) and Graph openid/profile/offline_access (admin
+#      consent, tenant-wide). A member user meatgeek-dev-acceptance@<default
+#      domain> with no directory or Azure role, whose generated password and
+#      TOTP key go to GitHub `development` environment secrets on stdin
+#      (ACCEPTANCE_USER_PASSWORD, ACCEPTANCE_USER_TOTP_SECRET). The TOTP key
+#      takes one interactive browser sign-in. Also sets the `development`
+#      variables DEV_WEB_CLIENT_ID and ACCEPTANCE_USER_UPN.
 #
 # TERMS (use these precisely — they name two DIFFERENT things):
 #   MG-24 = Terraform reconciliation, OPERATOR-run apply from a workstation.
@@ -82,7 +94,9 @@
 #     Storage Blob Data Reader on the dev state container — enough to publish
 #     code, nothing more.
 #   * No client secret is ever minted for ANY identity (OIDC federation + Easy
-#     Auth token validation only).
+#     Auth token validation only). The one password this script creates is the
+#     HAR-82 acceptance USER's: it travels only through pipes and a private,
+#     immediately-removed temp file, never through argv or a log.
 #
 # Usage:
 #   az login            # as a subscription Owner/User Access Administrator
@@ -396,6 +410,28 @@ DEV_API_SCOPE_NAME="${DEV_API_SCOPE_NAME:-access_as_user}"
 AZURE_CLI_PUBLIC_CLIENT_ID="04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 SMOKE_TEST_CLIENT_IDS="${SMOKE_TEST_CLIENT_IDS:-${AZURE_CLI_PUBLIC_CLIENT_ID}} ${SMOKE_TEST_CLIENT_ID:-}"
 
+# --- dev WEB SPA registration + acceptance test user (HAR-82) ---------------
+# The browser app (https://meatgeekv2-web.vercel.app) signs users in with
+# auth-code + PKCE against this registration, and Playwright signs in as the
+# acceptance user below. Both are tenant objects, so bootstrap creates them.
+# The redirect URIs are exact and NOT overridable: a redirect URI is where Entra
+# delivers an authorization code, so adding one is a security decision made in a
+# reviewed commit, not from the operator's shell.
+DEV_WEB_APP_NAME="${DEV_WEB_APP_NAME:-meatgeek-v2-dev-web}"
+DEV_WEB_REDIRECT_URIS="https://meatgeekv2-web.vercel.app http://localhost:3000"
+# The GitHub Environment the acceptance job reads the user's credentials from.
+WEB_ACCEPTANCE_ENVIRONMENT="development"
+ACCEPTANCE_USER_NICKNAME="meatgeek-dev-acceptance"
+ACCEPTANCE_USER_DISPLAY_NAME="MeatGeek dev acceptance"
+# Microsoft Graph and its well-known delegated permission ids (identical in
+# every tenant). The SPA asks for exactly these three, and an AllPrincipals
+# grant consents to them tenant-wide so no one meets a consent prompt.
+MS_GRAPH_APP_ID="00000003-0000-0000-c000-000000000000"
+GRAPH_SCOPE_ID_OPENID="37f7f235-527c-4136-accd-4a02d197296e"
+GRAPH_SCOPE_ID_PROFILE="14dad69e-099b-42c9-810b-d002981feec1"
+GRAPH_SCOPE_ID_OFFLINE_ACCESS="7427e0e9-2fba-42fe-b0c0-848c9e6a8182"
+GRAPH_CONSENT_SCOPES="openid profile offline_access"
+
 OIDC_ISSUER="https://token.actions.githubusercontent.com"
 OIDC_AUDIENCE="api://AzureADTokenExchange"
 
@@ -620,7 +656,7 @@ assert_v2_name() {
 # run, not discover them one abort at a time. This list was derived by scanning
 # the external commands this script actually invokes; keep it in sync when a new
 # one is introduced.
-REQUIRED_TOOLS="az gh jq mktemp awk sed sort tr cut grep wc paste rm"
+REQUIRED_TOOLS="az gh jq mktemp awk sed sort tr cut grep wc paste rm head base64"
 
 # The sha1 implementation, resolved ONCE and reused. Linux coreutils provides
 # `sha1sum`; macOS provides `shasum` (and perl's `shasum -a 1`), not `sha1sum`.
@@ -2581,6 +2617,61 @@ dev INFRA-APPLY identity (MG-23) — CI-run automated dev GitOps reconciliation.
 SUMMARY
 }
 
+# The dev API's access_as_user scope id. Derived, never stored: the API step
+# defines the scope under this id and the web step (HAR-82) must reference the
+# SAME id from requiredResourceAccess and preAuthorizedApplications, so both
+# compute it here from the API's appId.
+dev_api_scope_id() {
+  stable_guid "meatgeek-v2-dev-api-${DEV_API_SCOPE_NAME}-$1"
+}
+
+# --------------------------------------------------------------------------
+# Pre-authorize client app ids on the dev API's scope, MERGING (HAR-82).
+#   usage: ensure_api_preauthorized <api-appId> <scope-id> <client-appId>...
+# --------------------------------------------------------------------------
+# Two steps write api.preAuthorizedApplications on the same app: the API step
+# (SMOKE_TEST_CLIENT_IDS) and the web step (the SPA's appId). Graph replaces the
+# whole array on PATCH, so each writer used to erase the other's entry and the
+# result depended on which ran last. This reads what is on the app, adds each
+# requested id (or adds the scope to an existing entry for it), and PATCHes only
+# if that changes anything. It never REMOVES an entry: dropping a caller is a
+# deliberate manual edit, not a side effect of re-running bootstrap.
+ensure_api_preauthorized() {
+  local api_app_id="$1" scope_id="$2"; shift 2
+  local existing merged cid status=0
+  for cid in "$@"; do assert_uuid "$cid" "a pre-authorized client id"; done
+
+  # `show`, not a list: the app exists (the caller just created or found it),
+  # so any non-zero exit is a real error and must not read as "no entries".
+  existing="$(az ad app show --id "$api_app_id" \
+    --query 'api.preAuthorizedApplications' -o json)" || status=$?
+  [ "$status" -eq 0 ] \
+    || die "could not read api.preAuthorizedApplications on the dev API (${api_app_id}) (az exited ${status}). Refusing to PATCH blind: a replacing write could drop a caller that is already pre-authorized."
+  case "$existing" in ""|null) existing="[]" ;; esac
+
+  merged="$(printf '%s' "$existing" | jq -c --arg scope "$scope_id" '
+    reduce $ARGS.positional[] as $id (.;
+      if any(.[]; (.appId | ascii_downcase) == ($id | ascii_downcase))
+      then map(if (.appId | ascii_downcase) == ($id | ascii_downcase)
+               then .delegatedPermissionIds = (((.delegatedPermissionIds // []) + [$scope]) | unique)
+               else . end)
+      else . + [{appId: $id, delegatedPermissionIds: [$scope]}]
+      end)' --args "$@")" \
+    || die "could not merge pre-authorized clients into the dev API's existing list (unexpected JSON from Graph)."
+
+  if [ "$(printf '%s' "$existing" | jq -cS 'sort_by(.appId)')" = "$(printf '%s' "$merged" | jq -cS 'sort_by(.appId)')" ]; then
+    ok "Already pre-authorized for '${DEV_API_SCOPE_NAME}': $*"
+    return 0
+  fi
+
+  az rest --method PATCH \
+    --uri "https://graph.microsoft.com/v1.0/applications(appId='${api_app_id}')" \
+    --headers "Content-Type=application/json" \
+    --body "{\"api\": {\"preAuthorizedApplications\": ${merged}}}" \
+    -o none \
+    || die "failed to pre-authorize [$*] for '${DEV_API_SCOPE_NAME}' on the dev API (Graph preAuthorizedApplications PATCH)"
+}
+
 # --------------------------------------------------------------------------
 # 4. dev ENTRA API AUTH registration (create-if-absent) — MG-24 item 3.
 #    The API app the Function App's Easy Auth validates user/API tokens against.
@@ -2589,7 +2680,7 @@ SUMMARY
 #    wires into environments/dev.tfvars (functions_auth_*).
 # --------------------------------------------------------------------------
 bootstrap_dev_api_registration() {
-  local tenant_id app_id app_uri scope_id preauth_json api_body preauth_body
+  local tenant_id app_id app_uri scope_id api_body
   tenant_id="$(az account show --query tenantId -o tsv)"
 
   log "── dev ENTRA API auth registration ${DEV_API_APP_NAME} (scope ${DEV_API_SCOPE_NAME})"
@@ -2609,14 +2700,14 @@ bootstrap_dev_api_registration() {
 
   app_uri="api://${app_id}"
   # Stable scope id (idempotent — no randomness) so re-runs reuse the scope.
-  scope_id="$(stable_guid "meatgeek-v2-dev-api-${DEV_API_SCOPE_NAME}-${app_id}")"
+  scope_id="$(dev_api_scope_id "$app_id")"
 
   # Pre-authorize the CALLING smoke-test client app id(s) for the access_as_user
   # scope so the MG-21 authenticated smoke test acquires a token without an
   # interactive consent prompt. These MUST match the Function App Easy Auth
   # allowed_applications (functions_auth_allowed_client_app_ids) — the calling
   # client, NOT the API registration. Deduped; empty tokens skipped.
-  local preauth_entries="" cid seen=" " preauth_ids=""
+  local cid seen=" " preauth_ids=""
   for cid in $SMOKE_TEST_CLIENT_IDS; do
     [ -z "$cid" ] && continue
     # Caller-controlled id rendered verbatim into the Graph preAuthorizedApplications
@@ -2626,10 +2717,8 @@ bootstrap_dev_api_registration() {
     case "$seen" in *" $cid "*) continue ;; esac
     seen="${seen}${cid} "
     preauth_ids="${preauth_ids:+${preauth_ids} }${cid}"
-    preauth_entries="${preauth_entries:+${preauth_entries},} { \"appId\": \"${cid}\", \"delegatedPermissionIds\": [\"${scope_id}\"] }"
     log "Pre-authorizing calling client ${cid} for ${DEV_API_SCOPE_NAME}"
   done
-  preauth_json="[ ${preauth_entries} ]"
 
   # Expose the delegated scope + set the App ID URI + v2 access tokens via a
   # Microsoft Graph PATCH (idempotent — the stable scope id makes repeat PATCHes
@@ -2672,23 +2761,13 @@ JSON
   # SECOND Graph PATCH: now that the scope id is PERSISTED on the app, set
   # api.preAuthorizedApplications referencing it. Kept separate from the first
   # PATCH (see above) because delegatedPermissionIds only resolves against
-  # already-existing scopes. Idempotent (the stable scope id converges on
-  # re-run) and fail-loud. Skipped entirely when no calling client ids exist.
-  if [ -n "$preauth_entries" ]; then
-    preauth_body="$(cat <<JSON
-{
-  "api": {
-    "preAuthorizedApplications": ${preauth_json}
-  }
-}
-JSON
-)"
-    az rest --method PATCH \
-      --uri "https://graph.microsoft.com/v1.0/applications(appId='${app_id}')" \
-      --headers "Content-Type=application/json" \
-      --body "$preauth_body" \
-      -o none \
-      || die "failed to pre-authorize calling client(s) [${preauth_ids}] for '${DEV_API_SCOPE_NAME}' (Graph PATCH 2)"
+  # already-existing scopes. MERGED with what is already on the app (HAR-82):
+  # the dev web SPA pre-authorizes itself here too, from its own step, and a
+  # replacing PATCH from either step would drop the other's entry on a re-run.
+  # Skipped when nothing would change, including when no ids are supplied.
+  if [ -n "$preauth_ids" ]; then
+    # shellcheck disable=SC2086  # preauth_ids is a validated, space-separated GUID list.
+    ensure_api_preauthorized "$app_id" "$scope_id" $preauth_ids
     ok "Pre-authorized calling client(s) for '${DEV_API_SCOPE_NAME}': ${preauth_ids}"
   else
     log "No calling client ids supplied — skipping preAuthorizedApplications PATCH"
@@ -2739,6 +2818,424 @@ Wire these into environments/dev.tfvars (functions_auth_*) post-bootstrap:
   the Azure CLI public client (04b07795-8ddb-461a-bbee-02f9e1bf7b46).
   This app is SEPARATE from the OIDC/deployment apps and has NO client secret.
   (See docs/infrastructure/bootstrap-runbook.md for the authenticated smoke test.)
+────────────────────────────────────────────────────────────────────
+SUMMARY
+}
+
+# --------------------------------------------------------------------------
+# 5. dev WEB SPA registration + TOTP-enrolled acceptance test user (HAR-82).
+#
+#     WHAT     An Entra app `meatgeek-v2-dev-web` for the browser app: single
+#              tenant, platform SPA (auth-code + PKCE, no secret needed), the
+#              two exact redirect URIs, no implicit grant, NO client secret and
+#              NO certificate (verified by read-back on every run). It requests
+#              the dev API's access_as_user (pre-authorized on the API, so no
+#              consent prompt) and Graph openid/profile/offline_access
+#              (admin-consented tenant-wide by an AllPrincipals grant).
+#              A member user `meatgeek-dev-acceptance@<default domain>` that
+#              Playwright signs in as. No directory role and no Azure role,
+#              re-verified on every run after the one that creates it, like the
+#              HAR-61 peer.
+#     SECRETS  The user's password and TOTP key go to GitHub `development`
+#              environment SECRETS on stdin: never in argv, never logged. The
+#              password is generated only when the user is created, or with
+#              RESET_ACCEPTANCE_USER_PASSWORD=1. The TOTP key takes one
+#              interactive sign-in (security defaults make the user register
+#              MFA), read with `read -rs`; RESET_ACCEPTANCE_USER_TOTP=1 redoes it.
+#     VARS     DEV_WEB_CLIENT_ID and ACCEPTANCE_USER_UPN, as `development`
+#              environment VARIABLES (identifiers, not secrets).
+# --------------------------------------------------------------------------
+
+# Send a Graph request whose body holds a SECRET (a password). The body arrives
+# on stdin, goes into a private (0600) temp file, and is passed as
+# `--body @file`, so the secret never appears in any process's argv (readable by
+# every local user through ps) and is never logged. The file is removed whether
+# or not the call succeeds. Extra args go to `az rest` (e.g. --query id -o tsv).
+#   usage: printf '%s' "$json" | graph_send_secret_body <METHOD> <uri> [az args...]
+graph_send_secret_body() {
+  local method="$1" uri="$2"; shift 2
+  local f status=0
+  f="$(umask 077 && mktemp)" || die "could not create a private temp file for a Graph request body."
+  if ! cat > "$f"; then rm -f "$f"; die "could not write a Graph request body to a private temp file."; fi
+  az rest --method "$method" --uri "$uri" \
+    --headers "Content-Type=application/json" --body "@${f}" "$@" || status=$?
+  rm -f "$f"
+  return "$status"
+}
+
+# A random password for the acceptance user: 32 characters from /dev/urandom,
+# letters and digits only (so it needs no JSON or shell escaping), and at least
+# one upper-case letter, lower-case letter and digit (Entra's complexity rule
+# wants three of four character classes). Printed to stdout for capture by
+# `$(…)`, which runs in-process: it never becomes an argument of anything.
+new_acceptance_password() {
+  local pw="" tries=0
+  while :; do
+    tries=$((tries+1))
+    pw="$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-32)"
+    if [ "${#pw}" -ge 24 ] && [[ "$pw" =~ [A-Z] ]] && [[ "$pw" =~ [a-z] ]] && [[ "$pw" =~ [0-9] ]]; then
+      printf '%s' "$pw"
+      return 0
+    fi
+    [ "$tries" -lt 5 ] || die "could not generate a password from /dev/urandom (5 attempts gave fewer than 24 usable characters)."
+  done
+}
+
+# Write a value to a GitHub secret on the acceptance environment, from stdin.
+# `gh secret set` with no --body reads the value from stdin, so it is never an
+# argument.   usage: put_acceptance_secret <NAME> <value>
+put_acceptance_secret() {
+  printf '%s' "$2" \
+    | gh secret set "$1" --env "$WEB_ACCEPTANCE_ENVIRONMENT" --repo "$GITHUB_REPO" >/dev/null \
+    || die "failed to write the GitHub secret $1 on the '${WEB_ACCEPTANCE_ENVIRONMENT}' environment of ${GITHUB_REPO}."
+}
+
+# Set a GitHub environment VARIABLE only if it differs (identifiers, not
+# secrets, so the value may be an argument).
+ensure_acceptance_variable() {
+  local name="$1" value="$2" env="$WEB_ACCEPTANCE_ENVIRONMENT" listing current
+  listing="$(gh variable list --env "$env" --repo "$GITHUB_REPO")" \
+    || die "could not list the variables of the GitHub '${env}' environment."
+  current="$(printf '%s\n' "$listing" | awk -F'\t' -v n="$name" '$1 == n { print $2 }')"
+  if [ "$current" = "$value" ]; then
+    ok "GitHub '${env}' variable ${name} already = ${value}"
+    return 0
+  fi
+  gh variable set "$name" --env "$env" --repo "$GITHUB_REPO" --body "$value" >/dev/null \
+    || die "failed to set the GitHub variable ${name} on the '${env}' environment."
+  ok "GitHub '${env}' variable ${name} = ${value}"
+}
+
+# Tenant-wide (AllPrincipals) admin consent for the SPA's Graph scopes, created
+# if absent and widened if it lacks one of them. Never narrowed.
+ensure_graph_admin_consent() {
+  local client_sp_id="$1" graph_sp_id rows grant_id grant_scope s missing="" new_scope
+  graph_sp_id="$(az_discover_unique "the Microsoft Graph service principal" \
+    az ad sp list --filter "appId eq '${MS_GRAPH_APP_ID}'" --query '[].id' -o tsv)" || exit 1
+  [ -n "$graph_sp_id" ] \
+    || die "this tenant has no Microsoft Graph service principal (appId ${MS_GRAPH_APP_ID}), so admin consent cannot be granted."
+
+  rows="$(az_discover "admin-consent grants held by the dev web SPA (${client_sp_id})" \
+    az rest --method GET \
+    --uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?\$filter=clientId%20eq%20'${client_sp_id}'" \
+    --query "value[?resourceId=='${graph_sp_id}' && consentType=='AllPrincipals'].[id, scope]" -o tsv)" || exit 1
+  rows="$(printf '%s\n' "$rows" | grep -v '^[[:space:]]*$' || true)"
+
+  if [ -z "$rows" ]; then
+    # BOUNDED RETRY: on a first run the SPA's service principal was created
+    # moments ago, and Graph can answer "does not exist" for it until the
+    # directory has replicated. Delay overridable only so tests do not sleep.
+    local attempt=1 max_attempts="${WEB_CONSENT_ATTEMPTS:-6}" delay="${WEB_CONSENT_RETRY_DELAY:-5}"
+    until az rest --method POST --uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants" \
+      --headers "Content-Type=application/json" \
+      --body "{\"clientId\": \"${client_sp_id}\", \"consentType\": \"AllPrincipals\", \"resourceId\": \"${graph_sp_id}\", \"scope\": \"${GRAPH_CONSENT_SCOPES}\"}" \
+      -o none; do
+      [ "$attempt" -lt "$max_attempts" ] \
+        || die "failed to grant tenant-wide admin consent for Graph '${GRAPH_CONSENT_SCOPES}' to the dev web SPA after ${max_attempts} attempts. You need a role that may grant consent (Global Administrator, Privileged Role Administrator or Cloud Application Administrator); if you hold one, re-run (the SPA's service principal may still be replicating)."
+      warn "Admin consent POST failed (attempt ${attempt} of ${max_attempts}); retrying in ${delay}s in case the new service principal has not replicated yet."
+      attempt=$((attempt + 1))
+      sleep "$delay"
+    done
+    ok "Admin consent granted tenant-wide for Graph: ${GRAPH_CONSENT_SCOPES}"
+    return 0
+  fi
+
+  [ "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')" -eq 1 ] \
+    || die "the dev web SPA holds more than one AllPrincipals Graph grant; refusing to guess which to update:
+$(printf '%s\n' "$rows" | sed 's/^/    /')"
+  grant_id="$(printf '%s' "$rows" | cut -f1)"
+  grant_scope="$(printf '%s' "$rows" | cut -f2-)"
+  for s in $GRAPH_CONSENT_SCOPES; do
+    case " ${grant_scope} " in *" ${s} "*) ;; *) missing="${missing} ${s}" ;; esac
+  done
+  if [ -z "$missing" ]; then
+    ok "Admin consent already covers Graph: ${GRAPH_CONSENT_SCOPES}"
+    return 0
+  fi
+  new_scope="$(printf '%s %s' "$grant_scope" "$missing" | tr -s ' ' | sed 's/^ //; s/ $//')"
+  az rest --method PATCH --uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/${grant_id}" \
+    --headers "Content-Type=application/json" \
+    --body "{\"scope\": \"${new_scope}\"}" -o none \
+    || die "failed to widen the dev web SPA's admin consent to include:${missing}"
+  ok "Admin consent widened to: ${new_scope}"
+}
+
+# The acceptance user (create-if-absent). Sets the globals ACCEPTANCE_USER_UPN,
+# ACCEPTANCE_USER_CREATED (yes|"") and ACCEPTANCE_USER_FRESH_PASSWORD (the
+# password, ONLY when this run generated it; the TOTP step shows it once and
+# the caller unsets it). Called directly, never inside `$(…)`, so the globals
+# survive.
+ensure_acceptance_user() {
+  local domain upn user_id pw roles dir_roles
+  ACCEPTANCE_USER_CREATED=""
+  ACCEPTANCE_USER_FRESH_PASSWORD=""
+
+  # The tenant's default verified domain, read from Graph rather than written
+  # down, so the UPN follows the tenant.
+  domain="$(az_discover_unique "the tenant's default verified domain" \
+    az rest --method GET --uri "https://graph.microsoft.com/v1.0/domains" \
+    --query 'value[?isDefault].id' -o tsv)" || exit 1
+  [ -n "$domain" ] || die "Graph reports no default verified domain for this tenant, so the acceptance user's UPN cannot be formed."
+  upn="${ACCEPTANCE_USER_NICKNAME}@${domain}"
+  ACCEPTANCE_USER_UPN="$upn"
+
+  user_id="$(az_discover_unique "user '${upn}'" \
+    az ad user list --filter "userPrincipalName eq '${upn}'" --query '[].id' -o tsv)" || exit 1
+
+  if [ -z "$user_id" ]; then
+    log "Creating acceptance test user ${upn}"
+    pw="$(new_acceptance_password)" || exit 1
+    # The secret is written BEFORE the user exists. If the create then fails,
+    # the next run (user still absent) generates a new password and overwrites
+    # the secret. The other order could leave a live user whose password nobody
+    # holds.
+    put_acceptance_secret ACCEPTANCE_USER_PASSWORD "$pw"
+    user_id="$(printf '{"accountEnabled": true, "displayName": "%s", "mailNickname": "%s", "userPrincipalName": "%s", "userType": "Member", "passwordProfile": {"password": "%s", "forceChangePasswordNextSignIn": false}}' \
+        "$ACCEPTANCE_USER_DISPLAY_NAME" "$ACCEPTANCE_USER_NICKNAME" "$upn" "$pw" \
+      | graph_send_secret_body POST "https://graph.microsoft.com/v1.0/users" --query id -o tsv)" \
+      || die "failed to create the acceptance test user ${upn}. ACCEPTANCE_USER_PASSWORD was written first; a re-run creates the user with a new password and rewrites it."
+    ACCEPTANCE_USER_CREATED=yes
+    ACCEPTANCE_USER_FRESH_PASSWORD="$pw"
+    ok "Acceptance test user created: ${upn} (password written to the '${WEB_ACCEPTANCE_ENVIRONMENT}' secret ACCEPTANCE_USER_PASSWORD)"
+  else
+    ok "Acceptance test user already exists: ${upn}"
+    if [ "${RESET_ACCEPTANCE_USER_PASSWORD:-}" = "1" ]; then
+      log "RESET_ACCEPTANCE_USER_PASSWORD=1: setting a new password for ${upn}"
+      pw="$(new_acceptance_password)" || exit 1
+      put_acceptance_secret ACCEPTANCE_USER_PASSWORD "$pw"
+      printf '{"passwordProfile": {"password": "%s", "forceChangePasswordNextSignIn": false}}' "$pw" \
+        | graph_send_secret_body PATCH "https://graph.microsoft.com/v1.0/users/${user_id}" -o none \
+        || die "failed to set the new password on ${upn}. ACCEPTANCE_USER_PASSWORD now holds a password the user does not have; re-run with RESET_ACCEPTANCE_USER_PASSWORD=1."
+      ACCEPTANCE_USER_FRESH_PASSWORD="$pw"
+      ok "Password reset; ACCEPTANCE_USER_PASSWORD rewritten"
+    fi
+  fi
+  pw=""
+  assert_uuid "$user_id" "the acceptance user's object id"
+
+  # A user this run created holds nothing by construction, and reading its
+  # memberOf straight after the create can 404 while the directory replicates.
+  # Every later run checks.
+  if [ "$ACCEPTANCE_USER_CREATED" = "yes" ]; then
+    return 0
+  fi
+
+  # NO PRIVILEGE, enforced on every later run. The password and TOTP key sit in a
+  # GitHub environment secret any workflow in that environment can read; that
+  # is acceptable only while the account can do nothing but use the app.
+  # Filtered client-side on principalId, so no Graph lookup of the assignee.
+  roles="$(az_discover "Azure role assignments held by ${upn}" \
+    az role assignment list --all \
+    --query "[?principalId=='${user_id}'].[roleDefinitionName, scope]" -o tsv)" || exit 1
+  roles="$(printf '%s\n' "$roles" | grep -v '^[[:space:]]*$' || true)"
+  [ -z "$roles" ] || die "the acceptance user ${upn} holds Azure role assignments. It must hold NONE: its credentials live in GitHub secrets. Remove these, then re-run:
+$(printf '%s\n' "$roles" | sed 's/^/    /')"
+  dir_roles="$(az_discover "directory roles held by ${upn}" \
+    az rest --method GET \
+    --uri "https://graph.microsoft.com/v1.0/users/${user_id}/memberOf/microsoft.graph.directoryRole" \
+    --query 'value[].displayName' -o tsv)" || exit 1
+  dir_roles="$(printf '%s\n' "$dir_roles" | grep -v '^[[:space:]]*$' || true)"
+  [ -z "$dir_roles" ] || die "the acceptance user ${upn} holds Entra directory roles. It must hold NONE: its credentials live in GitHub secrets. Remove these, then re-run:
+$(printf '%s\n' "$dir_roles" | sed 's/^/    /')"
+  ok "Acceptance user holds no Azure role and no directory role (verified)"
+}
+
+# Whether this run can prompt a person. A function so the tests can stand in a
+# terminal; the real check is "stdin is a TTY".
+acceptance_totp_interactive() { [ -t 0 ]; }
+
+# One-time TOTP enrolment. Sets ACCEPTANCE_TOTP_STATUS for the summary.
+enrol_acceptance_user_totp() {
+  local env="$WEB_ACCEPTANCE_ENVIRONMENT" upn="$ACCEPTANCE_USER_UPN"
+  local secrets reason="" key attempt b32_re='^[A-Z2-7]{16,}=*$'
+
+  secrets="$(gh secret list --env "$env" --repo "$GITHUB_REPO")" \
+    || die "could not list the secrets of the GitHub '${env}' environment."
+  if [ "${RESET_ACCEPTANCE_USER_TOTP:-}" = "1" ]; then
+    reason="RESET_ACCEPTANCE_USER_TOTP=1"
+  elif [ "${ACCEPTANCE_USER_CREATED:-}" = "yes" ]; then
+    # A brand-new user has no authenticator registered, so any key already in
+    # the secret belongs to a deleted predecessor and is useless.
+    reason="the user was just created"
+  elif ! printf '%s\n' "$secrets" | cut -f1 | grep -qx 'ACCEPTANCE_USER_TOTP_SECRET'; then
+    reason="the '${env}' environment has no ACCEPTANCE_USER_TOTP_SECRET"
+  fi
+  if [ -z "$reason" ]; then
+    ACCEPTANCE_TOTP_STATUS="already set (not changed)"
+    ok "ACCEPTANCE_USER_TOTP_SECRET already set on '${env}' (RESET_ACCEPTANCE_USER_TOTP=1 to redo it)"
+    return 0
+  fi
+
+  if ! acceptance_totp_interactive; then
+    ACCEPTANCE_TOTP_STATUS="NOT SET: run bootstrap from a terminal"
+    warn "TOTP enrolment for ${upn} needs a person at a terminal (${reason}), and this run has no TTY. ACCEPTANCE_USER_TOTP_SECRET was NOT written. Re-run bootstrap.sh from a terminal to set it."
+    return 0
+  fi
+  if [ -z "${ACCEPTANCE_USER_FRESH_PASSWORD:-}" ]; then
+    ACCEPTANCE_TOTP_STATUS="NOT SET: re-run with RESET_ACCEPTANCE_USER_PASSWORD=1"
+    warn "TOTP enrolment for ${upn} is needed (${reason}), and it takes one browser sign-in with the user's password. This run did not generate that password, so it cannot show it. Re-run with RESET_ACCEPTANCE_USER_PASSWORD=1 to set a new one (it is shown once, during enrolment). ACCEPTANCE_USER_TOTP_SECRET was NOT written."
+    return 0
+  fi
+
+  cat <<STEPS
+
+────────────────────────────────────────────────────────────────────
+ONE-TIME TOTP ENROLMENT for ${upn}  (${reason})
+
+  1. Open a PRIVATE browser window at
+       https://mysignins.microsoft.com/security-info
+  2. Sign in as ${upn} with the password below.
+  3. When asked to set up Microsoft Authenticator, choose
+       "I want to use a different authenticator app", then Next,
+       then "Can't scan image?".
+  4. Copy the SECRET KEY it shows and paste it at the prompt here.
+  5. The wizard then asks for a 6-digit code. Add the same key to any
+     authenticator app (or run: oathtool --totp -b '<key>') and enter
+     the code to finish the registration.
+
+STEPS
+  # printf, a builtin: the password goes to the terminal and nowhere else.
+  printf '  ⚠️  PASSWORD (shown ONCE, never again; it is also in the GitHub secret\n      ACCEPTANCE_USER_PASSWORD, which cannot be read back):\n\n      %s\n\n' "$ACCEPTANCE_USER_FRESH_PASSWORD"
+  printf '────────────────────────────────────────────────────────────────────\n'
+
+  for attempt in 1 2 3; do
+    key=""
+    if ! IFS= read -rs -p "Paste the secret key (input hidden): " key; then
+      printf '\n' >&2
+      ACCEPTANCE_TOTP_STATUS="NOT SET: no key entered"
+      warn "No key was entered. ACCEPTANCE_USER_TOTP_SECRET was NOT written. Re-run with RESET_ACCEPTANCE_USER_PASSWORD=1 RESET_ACCEPTANCE_USER_TOTP=1 to try again."
+      return 0
+    fi
+    printf '\n' >&2
+    # Strip whitespace and upper-case (the portal shows the key in spaced,
+    # lower-case groups). Through a pipe, never as an argument.
+    key="$(printf '%s' "$key" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+    if [[ "$key" =~ $b32_re ]]; then
+      put_acceptance_secret ACCEPTANCE_USER_TOTP_SECRET "$key"
+      key=""
+      ACCEPTANCE_TOTP_STATUS="written"
+      ok "ACCEPTANCE_USER_TOTP_SECRET written to the '${env}' environment"
+      return 0
+    fi
+    key=""
+    warn "That is not a base32 TOTP key (letters A-Z and digits 2-7, at least 16 of them). Attempt ${attempt} of 3."
+  done
+  ACCEPTANCE_TOTP_STATUS="NOT SET: no valid key entered"
+  warn "No valid key after 3 attempts. ACCEPTANCE_USER_TOTP_SECRET was NOT written. Re-run with RESET_ACCEPTANCE_USER_PASSWORD=1 RESET_ACCEPTANCE_USER_TOTP=1 to try again."
+}
+
+bootstrap_dev_web_registration() {
+  local api_app_id scope_id web_app_id web_sp_id redirects_json body creds
+  ACCEPTANCE_TOTP_STATUS=""
+
+  log "── dev WEB SPA registration ${DEV_WEB_APP_NAME} + acceptance test user (HAR-82)"
+
+  # Before anything is created: this step writes the user's password straight
+  # into a GitHub secret, and without gh it would make a user whose password
+  # nobody holds.
+  gh auth status >/dev/null 2>&1 \
+    || die "the GitHub CLI is unavailable or not authenticated. The dev web step stores the acceptance user's password in a GitHub secret, so it cannot run without it. Run 'gh auth login' and re-run bootstrap (every earlier step is idempotent)."
+
+  api_app_id="$(az_discover_unique "dev API registration '${DEV_API_APP_NAME}'" \
+    az ad app list --display-name "$DEV_API_APP_NAME" --query '[].appId' -o tsv)" || exit 1
+  [ -n "$api_app_id" ] \
+    || die "the dev API registration '${DEV_API_APP_NAME}' does not exist. bootstrap_dev_api_registration creates it and runs before this step in main()."
+  assert_uuid "$api_app_id" "the dev API registration's appId"
+  scope_id="$(dev_api_scope_id "$api_app_id")"
+
+  web_app_id="$(az_discover_unique "dev web SPA registration '${DEV_WEB_APP_NAME}'" \
+    az ad app list --display-name "$DEV_WEB_APP_NAME" --query '[].appId' -o tsv)" || exit 1
+  if [ -z "$web_app_id" ]; then
+    log "Creating dev web SPA registration: ${DEV_WEB_APP_NAME}"
+    web_app_id="$(az ad app create --display-name "$DEV_WEB_APP_NAME" \
+      --sign-in-audience AzureADMyOrg --query appId -o tsv)" \
+      || die "failed to create the dev web SPA registration '${DEV_WEB_APP_NAME}' — check tenant app-registration permissions."
+    ok "Dev web SPA registration created: ${web_app_id}"
+  else
+    ok "Dev web SPA registration already exists: ${web_app_id}"
+  fi
+  assert_uuid "$web_app_id" "the dev web SPA registration's appId"
+
+  # The whole sign-in shape in one idempotent PATCH, converged on every run:
+  # redirect URIs on the SPA platform ONLY (web and publicClient emptied, so a
+  # URI added by hand on another platform does not survive), implicit grant
+  # off, and exactly the four delegated permissions.
+  redirects_json="$(jq -cn --arg u "$DEV_WEB_REDIRECT_URIS" '$u | split(" ")')"
+  body="$(jq -cn \
+    --argjson redirects "$redirects_json" \
+    --arg api "$api_app_id" --arg scope "$scope_id" --arg graph "$MS_GRAPH_APP_ID" \
+    --arg openid "$GRAPH_SCOPE_ID_OPENID" --arg profile "$GRAPH_SCOPE_ID_PROFILE" \
+    --arg offline "$GRAPH_SCOPE_ID_OFFLINE_ACCESS" '
+    { spa: { redirectUris: $redirects },
+      web: { redirectUris: [],
+             implicitGrantSettings: { enableAccessTokenIssuance: false, enableIdTokenIssuance: false } },
+      publicClient: { redirectUris: [] },
+      requiredResourceAccess: [
+        { resourceAppId: $api, resourceAccess: [ { id: $scope, type: "Scope" } ] },
+        { resourceAppId: $graph, resourceAccess: [
+            { id: $openid, type: "Scope" }, { id: $profile, type: "Scope" },
+            { id: $offline, type: "Scope" } ] } ] }')"
+  az rest --method PATCH \
+    --uri "https://graph.microsoft.com/v1.0/applications(appId='${web_app_id}')" \
+    --headers "Content-Type=application/json" \
+    --body "$body" -o none \
+    || die "failed to configure the dev web SPA registration ${web_app_id} (SPA redirect URIs, implicit grant off, permissions)."
+  ok "SPA platform: ${DEV_WEB_REDIRECT_URIS// /, } (auth-code + PKCE, implicit grant off)"
+
+  # NO SECRET, NO CERTIFICATE, proven by read-back: a SPA is a public client,
+  # and a credential on it is something someone added by hand.
+  creds="$(az ad app credential list --id "$web_app_id" --query '[].keyId' -o tsv)" \
+    || die "could not read back the client secrets of the dev web SPA registration ${web_app_id}."
+  creds="${creds}
+$(az ad app credential list --id "$web_app_id" --cert --query '[].keyId' -o tsv)" \
+    || die "could not read back the certificates of the dev web SPA registration ${web_app_id}."
+  creds="$(printf '%s\n' "$creds" | grep -v '^[[:space:]]*$' | grep -v '^null$' || true)"
+  [ -z "$creds" ] \
+    || die "the dev web SPA registration ${web_app_id} carries a client secret or certificate. A SPA must have neither; remove them (keyIds below), then re-run:
+$(printf '%s\n' "$creds" | sed 's/^/    /')"
+  ok "No client secret and no certificate on ${DEV_WEB_APP_NAME} (verified)"
+
+  web_sp_id="$(az_discover_unique "service principal for the dev web SPA (${web_app_id})" \
+    az ad sp list --filter "appId eq '${web_app_id}'" --query '[].id' -o tsv)" || exit 1
+  if [ -z "$web_sp_id" ]; then
+    web_sp_id="$(az ad sp create --id "$web_app_id" --query id -o tsv)" \
+      || die "failed to create the service principal for the dev web SPA (${web_app_id})."
+    ok "Service principal created for the dev web SPA: ${web_sp_id}"
+  fi
+  assert_uuid "$web_sp_id" "the dev web SPA's service principal id"
+
+  log "Pre-authorizing the dev web SPA ${web_app_id} for ${DEV_API_SCOPE_NAME}"
+  ensure_api_preauthorized "$api_app_id" "$scope_id" "$web_app_id"
+  ensure_graph_admin_consent "$web_sp_id"
+
+  ensure_acceptance_user
+  enrol_acceptance_user_totp
+  ACCEPTANCE_USER_FRESH_PASSWORD=""
+
+  ensure_acceptance_variable DEV_WEB_CLIENT_ID "$web_app_id"
+  ensure_acceptance_variable ACCEPTANCE_USER_UPN "$ACCEPTANCE_USER_UPN"
+
+  cat <<SUMMARY
+
+────────────────────────────────────────────────────────────────────
+dev WEB SPA registration + acceptance test user (HAR-82).
+
+  Set on the GitHub '${WEB_ACCEPTANCE_ENVIRONMENT}' environment as VARIABLES:
+
+    DEV_WEB_CLIENT_ID   = ${web_app_id}
+    ACCEPTANCE_USER_UPN = ${ACCEPTANCE_USER_UPN}
+
+  SECRETS on the same environment (values never printed here):
+    ACCEPTANCE_USER_PASSWORD     set when the user is created, or with
+                                 RESET_ACCEPTANCE_USER_PASSWORD=1
+    ACCEPTANCE_USER_TOTP_SECRET  ${ACCEPTANCE_TOTP_STATUS}
+
+  For apps/web/public/config.json (a follow-up issue makes this change):
+
+    "clientId": "${web_app_id}"
+
+  The SPA is pre-authorized for ${DEV_API_SCOPE_NAME} on ${DEV_API_APP_NAME}
+  and admin-consented for Graph ${GRAPH_CONSENT_SCOPES}. No client secret.
 ────────────────────────────────────────────────────────────────────
 SUMMARY
 }
@@ -2806,7 +3303,7 @@ assert_federated_environment_map() {
 }
 
 main() {
-  log "🚀 MeatGeek V2 bootstrap (remote state + plan/deploy identities + dev API auth)"
+  log "🚀 MeatGeek V2 bootstrap (remote state + plan/deploy identities + dev API auth + dev web SPA)"
   require_tools
   # BEFORE anything is provisioned: refuse to build a map that reintroduces F8.
   assert_federated_environment_map
@@ -2822,6 +3319,7 @@ main() {
   bootstrap_acceptance_peer_identity # dev ACCEPTANCE PEER (zero roles, HAR-61)
   bootstrap_infra_apply_identity # dev INFRA-APPLY identity (MG-23, RG-scoped)
   bootstrap_dev_api_registration # dev Entra API auth registration (access_as_user)
+  bootstrap_dev_web_registration # dev web SPA + TOTP acceptance user (HAR-82)
   # GitHub-side, not Azure-side. BOTH environments must EXIST WITH THE RIGHT
   # PROTECTION before activation, or GitHub auto-creates them unprotected on
   # first workflow reference. Neither may be left to auto-creation: the apply

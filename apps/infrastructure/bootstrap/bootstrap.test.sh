@@ -2864,6 +2864,347 @@ else bad "HAR-61: the peer function must refuse a non-app-deploy environment bef
 unset -f az har61_reset har61_run
 rm -f "$HAR61_LOG"
 
+# ===========================================================================
+# HAR-82: the dev WEB SPA registration + TOTP-enrolled acceptance test user
+# ===========================================================================
+# Every az and gh call is stubbed. State lives in FILES under $H82 (not shell
+# variables) so calls made inside command substitutions still change it, and
+# a second run sees what the first one created. The stubs are defined at TOP
+# LEVEL for the Bash 3.2 parser-bug reason documented above.
+#
+#   $H82/argv.log       every az/gh argv, one per line (the "process list")
+#   $H82/rest.log       every az rest: METHOD URI BODY (bodies passed as @file
+#                       are expanded, so this file DOES hold the password)
+#   $H82/secret-values  NAME<TAB>value for each gh secret set (read from stdin)
+#   $H82/out            the step's stdout+stderr
+H82="$(mktemp -d)"
+H82_API="aaaaaaaa-0000-4000-8000-000000000001"
+H82_API_SP="aaaaaaaa-0000-4000-8000-000000000006"
+H82_NEW_WEB="bbbbbbbb-0000-4000-8000-000000000002"
+H82_NEW_WEB_SP="bbbbbbbb-0000-4000-8000-000000000003"
+H82_GRAPH_SP="cccccccc-0000-4000-8000-000000000004"
+H82_NEW_USER="dddddddd-0000-4000-8000-000000000005"
+H82_UPN="meatgeek-dev-acceptance@contoso.onmicrosoft.com"
+H82_SMOKE_2="eeeeeeee-0000-4000-8000-000000000007"
+H82_SCOPE="$(dev_api_scope_id "$H82_API")"
+
+h82_reset() {
+  rm -rf "$H82"; mkdir -p "$H82"
+  printf '%s' "$H82_API" > "$H82/api_app"
+  printf '[]' > "$H82/preauth.json"
+  for f in web_app web_sp user roles dirroles grant secrets secret-values vars argv.log rest.log creds consent_failures; do
+    : > "$H82/$f"
+  done
+  H82_TTY=""; H82_STDIN="/dev/null"; H82_GH_UNAUTH=""
+  unset RESET_ACCEPTANCE_USER_PASSWORD RESET_ACCEPTANCE_USER_TOTP
+}
+
+h82_rest() {
+  local method="" uri="" body="" prev="" a
+  for a in "$@"; do
+    case "$prev" in --method) method="$a" ;; --uri) uri="$a" ;; --body) body="$a" ;; esac
+    prev="$a"
+  done
+  case "$body" in @*) body="$(cat "${body#@}")" ;; esac
+  printf '%s %s %s\n' "$method" "$uri" "$body" >> "$H82/rest.log"
+  case "$method $uri" in
+    "PATCH https://graph.microsoft.com/v1.0/applications(appId='${H82_API}')")
+      if printf '%s' "$body" | jq -e '.api.preAuthorizedApplications' >/dev/null 2>&1; then
+        printf '%s' "$body" | jq -c '.api.preAuthorizedApplications' > "$H82/preauth.json"
+      fi ;;
+    "GET https://graph.microsoft.com/v1.0/domains") echo "contoso.onmicrosoft.com" ;;
+    "GET https://graph.microsoft.com/v1.0/oauth2PermissionGrants"*) cat "$H82/grant" ;;
+    "POST https://graph.microsoft.com/v1.0/oauth2PermissionGrants")
+      if [ -s "$H82/consent_failures" ] && [ "$(cat "$H82/consent_failures")" -gt 0 ]; then
+        echo $(( $(cat "$H82/consent_failures") - 1 )) > "$H82/consent_failures"
+        return 1
+      fi
+      printf 'grant-1\topenid profile offline_access' > "$H82/grant" ;;
+    "POST https://graph.microsoft.com/v1.0/users")
+      printf '%s' "$H82_NEW_USER" > "$H82/user"; echo "$H82_NEW_USER" ;;
+    "GET https://graph.microsoft.com/v1.0/users/"*) cat "$H82/dirroles" ;;
+    *) : ;;
+  esac
+}
+
+az() {
+  printf 'AZ %s\n' "$*" >> "$H82/argv.log"
+  case "$*" in
+    rest*) shift; h82_rest "$@" ;;
+    "account show --query tenantId -o tsv") echo "22222222-2222-2222-2222-222222222222" ;;
+    "ad app list --display-name ${DEV_API_APP_NAME} "*) cat "$H82/api_app" ;;
+    "ad app list --display-name ${DEV_WEB_APP_NAME} "*) cat "$H82/web_app" ;;
+    "ad app create --display-name ${DEV_WEB_APP_NAME} "*)
+      printf '%s' "$H82_NEW_WEB" > "$H82/web_app"; echo "$H82_NEW_WEB" ;;
+    "ad app show --id ${H82_API} --query api.preAuthorizedApplications -o json") cat "$H82/preauth.json" ;;
+    "ad app credential list"*) cat "$H82/creds" ;;
+    "ad sp list --filter appId eq '${MS_GRAPH_APP_ID}' "*) echo "$H82_GRAPH_SP" ;;
+    "ad sp list --filter appId eq '${H82_API}' "*) echo "$H82_API_SP" ;;
+    "ad sp list --filter appId eq '${H82_NEW_WEB}' "*) cat "$H82/web_sp" ;;
+    "ad sp create --id ${H82_NEW_WEB} "*)
+      printf '%s' "$H82_NEW_WEB_SP" > "$H82/web_sp"; echo "$H82_NEW_WEB_SP" ;;
+    "ad user list"*) cat "$H82/user" ;;
+    "role assignment list"*) cat "$H82/roles" ;;
+    *) : ;;
+  esac
+}
+
+gh() {
+  local a prev="" val="" v
+  printf 'GH %s\n' "$*" >> "$H82/argv.log"
+  case "$1 $2" in
+    "auth status") [ -z "$H82_GH_UNAUTH" ] ;;
+    "secret list")
+      while IFS= read -r v; do
+        [ -n "$v" ] && printf '%s\t2026-11-20T00:00:00Z\n' "$v"
+      done < "$H82/secrets" ;;
+    "secret set")
+      v="$(cat)"
+      printf '%s\n' "$3" >> "$H82/secrets"
+      printf '%s\t%s\n' "$3" "$v" >> "$H82/secret-values" ;;
+    "variable list") cat "$H82/vars" ;;
+    "variable set")
+      for a in "$@"; do [ "$prev" = "--body" ] && val="$a"; prev="$a"; done
+      { grep -v "^$3	" "$H82/vars" || true; printf '%s\t%s\t2026-11-20T00:00:00Z\n' "$3" "$val"; } > "$H82/vars.tmp"
+      mv "$H82/vars.tmp" "$H82/vars" ;;
+  esac
+}
+
+# A person at a terminal, or not. The real check is `[ -t 0 ]`.
+acceptance_totp_interactive() { [ -n "$H82_TTY" ]; }
+
+h82_run() {
+  H82_RC=0
+  ( OIDC_SUBJECT_PREFIX="repo:${GITHUB_REPO}"; bootstrap_dev_web_registration ) \
+    < "$H82_STDIN" > "$H82/out" 2>&1 || H82_RC=$?
+}
+h82_secret() { awk -F'\t' -v n="$1" '$1 == n { v = $2 } END { printf "%s", v }' "$H82/secret-values"; }
+h82_count() { grep -oF -- "$1" "$2" 2>/dev/null | wc -l | tr -d ' '; }
+h82_web_patch() { grep -F "PATCH https://graph.microsoft.com/v1.0/applications(appId='${H82_NEW_WEB}')" "$H82/rest.log" | tail -1 | cut -d' ' -f3-; }
+
+# --- static: wiring and the hidden read --------------------------------------
+h82_api_line="$(grep -n '^[[:space:]]*bootstrap_dev_api_registration\b' "$BOOT" | tail -1 | cut -d: -f1)"
+h82_web_line="$(grep -n '^[[:space:]]*bootstrap_dev_web_registration\b' "$BOOT" | tail -1 | cut -d: -f1)"
+if [ -n "$h82_api_line" ] && [ -n "$h82_web_line" ] && [ "$h82_web_line" -eq $((h82_api_line+1)) ]; then
+  ok "HAR-82: main() calls bootstrap_dev_web_registration right after bootstrap_dev_api_registration"
+else bad "HAR-82: main() must call bootstrap_dev_web_registration right after bootstrap_dev_api_registration (api@${h82_api_line:-none}, web@${h82_web_line:-none})"; fi
+h82_enrol_fn="$(awk '/^enrol_acceptance_user_totp\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT")"
+if printf '%s\n' "$h82_enrol_fn" | grep -q 'read -rs'; then
+  ok "HAR-82: the TOTP key is read with 'read -rs' (no echo)"
+else bad "HAR-82: enrol_acceptance_user_totp must read the key with 'read -rs'"; fi
+[ "$DEV_WEB_APP_NAME" = "meatgeek-v2-dev-web" ] \
+  && ok "HAR-82: DEV_WEB_APP_NAME defaults to meatgeek-v2-dev-web" \
+  || bad "HAR-82: DEV_WEB_APP_NAME must default to meatgeek-v2-dev-web (got '${DEV_WEB_APP_NAME}')"
+
+# --- FIRST RUN, no terminal --------------------------------------------------
+h82_reset
+h82_run
+h82_pw="$(h82_secret ACCEPTANCE_USER_PASSWORD)"
+h82_body="$(h82_web_patch)"
+[ "$H82_RC" -eq 0 ] \
+  && ok "HAR-82: a first run with no TTY exits 0" \
+  || bad "HAR-82: a first run with no TTY must exit 0 (rc=${H82_RC}, out: $(cat "$H82/out"))"
+grep -q "^AZ ad app create --display-name ${DEV_WEB_APP_NAME} --sign-in-audience AzureADMyOrg " "$H82/argv.log" \
+  && ok "HAR-82: first run creates ${DEV_WEB_APP_NAME}, single tenant (AzureADMyOrg)" \
+  || bad "HAR-82: first run must create the SPA with --sign-in-audience AzureADMyOrg (log: $(cat "$H82/argv.log"))"
+if [ "$(printf '%s' "$h82_body" | jq -c '.spa.redirectUris' 2>/dev/null)" = '["https://meatgeekv2-web.vercel.app","http://localhost:3000"]' ]; then
+  ok "HAR-82: spa.redirectUris is exactly the Vercel URL and http://localhost:3000"
+else bad "HAR-82: spa.redirectUris must be exactly the two URIs (body: ${h82_body})"; fi
+if [ "$(printf '%s' "$h82_body" | jq -c '[.web.redirectUris, .publicClient.redirectUris, .web.implicitGrantSettings.enableAccessTokenIssuance, .web.implicitGrantSettings.enableIdTokenIssuance]' 2>/dev/null)" = '[[],[],false,false]' ]; then
+  ok "HAR-82: no web/publicClient redirect URIs and implicit grant off (enableAccessTokenIssuance=false)"
+else bad "HAR-82: web/publicClient redirects must be empty and implicit grant off (body: ${h82_body})"; fi
+if ! grep -qiE 'passwordCredentials|keyCredentials|addPassword|addKey' "$H82/rest.log" \
+   && ! grep -qE '^AZ ad app (credential reset|update .*--password)' "$H82/argv.log"; then
+  ok "HAR-82: no passwordCredentials / keyCredentials / secret is ever written to the SPA"
+else bad "HAR-82: the SPA must get no client secret or certificate (rest: $(cat "$H82/rest.log"))"; fi
+if [ "$(printf '%s' "$h82_body" | jq -c --arg a "$H82_API" --arg g "$MS_GRAPH_APP_ID" '[(.requiredResourceAccess[] | select(.resourceAppId == $a) | [.resourceAccess[].id]), (.requiredResourceAccess[] | select(.resourceAppId == $g) | [.resourceAccess[].id] | sort)]' 2>/dev/null)" \
+   = "$(jq -cn --arg s "$H82_SCOPE" --arg o "$GRAPH_SCOPE_ID_OPENID" --arg p "$GRAPH_SCOPE_ID_PROFILE" --arg f "$GRAPH_SCOPE_ID_OFFLINE_ACCESS" '[[$s], ([$o, $p, $f] | sort)]')" ]; then
+  ok "HAR-82: requiredResourceAccess = the API's access_as_user + Graph openid/profile/offline_access"
+else bad "HAR-82: requiredResourceAccess is wrong (body: ${h82_body})"; fi
+if jq -e --arg w "$H82_NEW_WEB" --arg s "$H82_SCOPE" 'any(.[]; .appId == $w and (.delegatedPermissionIds | index($s)))' "$H82/preauth.json" >/dev/null 2>&1; then
+  ok "HAR-82: the SPA is pre-authorized on the API for access_as_user"
+else bad "HAR-82: the SPA must be pre-authorized on the API (preauth: $(cat "$H82/preauth.json"))"; fi
+if grep -F "POST https://graph.microsoft.com/v1.0/oauth2PermissionGrants " "$H82/rest.log" | cut -d' ' -f3- \
+   | jq -e --arg c "$H82_NEW_WEB_SP" --arg r "$H82_GRAPH_SP" '.clientId == $c and .resourceId == $r and .consentType == "AllPrincipals" and .scope == "openid profile offline_access"' >/dev/null 2>&1; then
+  ok "HAR-82: tenant-wide (AllPrincipals) admin consent for Graph openid profile offline_access"
+else bad "HAR-82: an AllPrincipals Graph grant must be created (rest: $(cat "$H82/rest.log"))"; fi
+h82_user_body="$(grep -F "POST https://graph.microsoft.com/v1.0/users " "$H82/rest.log" | cut -d' ' -f3-)"
+if printf '%s' "$h82_user_body" | jq -e --arg u "$H82_UPN" --arg p "$h82_pw" '.userPrincipalName == $u and .displayName == "MeatGeek dev acceptance" and .userType == "Member" and .accountEnabled == true and .passwordProfile.forceChangePasswordNextSignIn == false and .passwordProfile.password == $p' >/dev/null 2>&1; then
+  ok "HAR-82: the user ${H82_UPN} is created as a Member, no forced change, with the password stored in the secret"
+else bad "HAR-82: user create body is wrong or its password differs from ACCEPTANCE_USER_PASSWORD (body: ${h82_user_body})"; fi
+if [ "${#h82_pw}" -ge 24 ]; then
+  ok "HAR-82: the generated password is at least 24 characters (${#h82_pw})"
+else bad "HAR-82: the generated password must be at least 24 characters (got ${#h82_pw})"; fi
+grep -q '^GH secret set ACCEPTANCE_USER_PASSWORD --env development --repo ' "$H82/argv.log" \
+  && ok "HAR-82: ACCEPTANCE_USER_PASSWORD is written to the development environment" \
+  || bad "HAR-82: ACCEPTANCE_USER_PASSWORD must be set with --env development (log: $(cat "$H82/argv.log"))"
+if [ -n "$h82_pw" ] && [ "$(h82_count "$h82_pw" "$H82/argv.log")" -eq 0 ] && [ "$(h82_count "$h82_pw" "$H82/out")" -eq 0 ]; then
+  ok "HAR-82: the password is in no az/gh argv and not in stdout/stderr (no TTY, so no enrolment print)"
+else bad "HAR-82: the password leaked (argv: $(h82_count "$h82_pw" "$H82/argv.log"), output: $(h82_count "$h82_pw" "$H82/out"))"; fi
+if grep -q 'ACCEPTANCE_USER_TOTP_SECRET' "$H82/out" && grep -q 'no TTY' "$H82/out" \
+   && [ -z "$(h82_secret ACCEPTANCE_USER_TOTP_SECRET)" ]; then
+  ok "HAR-82: with no TTY the TOTP step warns, names ACCEPTANCE_USER_TOTP_SECRET, writes nothing"
+else bad "HAR-82: with no TTY the TOTP step must warn naming the variable (out: $(cat "$H82/out"))"; fi
+if grep -qF "DEV_WEB_CLIENT_ID	${H82_NEW_WEB}	" "$H82/vars" && grep -qF "ACCEPTANCE_USER_UPN	${H82_UPN}	" "$H82/vars" \
+   && grep -q '^GH variable set DEV_WEB_CLIENT_ID --env development ' "$H82/argv.log"; then
+  ok "HAR-82: DEV_WEB_CLIENT_ID and ACCEPTANCE_USER_UPN are set as development variables"
+else bad "HAR-82: the two development variables must be set (vars: $(cat "$H82/vars"))"; fi
+if grep -qF "\"clientId\": \"${H82_NEW_WEB}\"" "$H82/out" && grep -qF "ACCEPTANCE_USER_UPN = ${H82_UPN}" "$H82/out"; then
+  ok "HAR-82: the summary prints the config.json clientId line and the UPN"
+else bad "HAR-82: the summary must print '\"clientId\": \"<id>\"' and the UPN (out: $(cat "$H82/out"))"; fi
+
+# --- SECOND RUN: idempotent ---------------------------------------------------
+# State carries over from the first run, plus the TOTP key an operator enrolled.
+printf 'ACCEPTANCE_USER_TOTP_SECRET\n' >> "$H82/secrets"
+: > "$H82/argv.log"; : > "$H82/rest.log"; : > "$H82/secret-values"
+h82_run
+if [ "$H82_RC" -eq 0 ] \
+   && ! grep -qE '^AZ (ad app create|ad sp create)' "$H82/argv.log" \
+   && ! grep -qE '^POST ' "$H82/rest.log" \
+   && ! grep -q '^GH secret set' "$H82/argv.log" \
+   && ! grep -q '^GH variable set' "$H82/argv.log" \
+   && ! grep -qF "PATCH https://graph.microsoft.com/v1.0/applications(appId='${H82_API}')" "$H82/rest.log"; then
+  ok "HAR-82: a second run creates nothing, writes no secret or variable, and leaves the API's preauth alone"
+else bad "HAR-82: the second run must be a no-op apart from converging PATCHes (rc=${H82_RC}, argv: $(cat "$H82/argv.log"), rest: $(cut -c1-120 "$H82/rest.log"))"; fi
+
+# --- RESET_ACCEPTANCE_USER_PASSWORD=1 rewrites the password and nothing else --
+: > "$H82/argv.log"; : > "$H82/rest.log"; : > "$H82/secret-values"
+RESET_ACCEPTANCE_USER_PASSWORD=1 h82_run
+h82_pw2="$(h82_secret ACCEPTANCE_USER_PASSWORD)"
+h82_reset_body="$(grep -F "PATCH https://graph.microsoft.com/v1.0/users/${H82_NEW_USER} " "$H82/rest.log" | cut -d' ' -f3-)"
+if [ "$H82_RC" -eq 0 ] \
+   && [ "$(grep -c '^GH secret set' "$H82/argv.log")" -eq 1 ] \
+   && grep -q '^GH secret set ACCEPTANCE_USER_PASSWORD ' "$H82/argv.log" \
+   && [ -n "$h82_pw2" ] && [ "$h82_pw2" != "$h82_pw" ] \
+   && printf '%s' "$h82_reset_body" | jq -e --arg p "$h82_pw2" '.passwordProfile.password == $p and .passwordProfile.forceChangePasswordNextSignIn == false' >/dev/null 2>&1 \
+   && ! grep -qE '^AZ (ad app create|ad sp create)' "$H82/argv.log" \
+   && ! grep -qE '^POST ' "$H82/rest.log" \
+   && ! grep -q '^GH variable set' "$H82/argv.log"; then
+  ok "HAR-82: RESET_ACCEPTANCE_USER_PASSWORD=1 sets a new password on the user and rewrites ACCEPTANCE_USER_PASSWORD only"
+else bad "HAR-82: the reset must rewrite only ACCEPTANCE_USER_PASSWORD (rc=${H82_RC}, argv: $(cat "$H82/argv.log"))"; fi
+if [ "$(h82_count "$h82_pw2" "$H82/argv.log")" -eq 0 ] && [ "$(h82_count "$h82_pw2" "$H82/out")" -eq 0 ]; then
+  ok "HAR-82: the reset password is in no argv and not printed (TOTP already enrolled, so no enrolment print)"
+else bad "HAR-82: the reset password leaked (argv: $(h82_count "$h82_pw2" "$H82/argv.log"), output: $(h82_count "$h82_pw2" "$H82/out"))"; fi
+
+# --- FIRST RUN at a terminal: enrolment, password shown exactly once ----------
+h82_reset
+H82_TTY=1
+printf 'jbsw y3dp ehpk 3pxp\n' > "$H82/stdin"; H82_STDIN="$H82/stdin"
+h82_run
+h82_pw="$(h82_secret ACCEPTANCE_USER_PASSWORD)"
+if [ "$H82_RC" -eq 0 ] && [ "$(h82_secret ACCEPTANCE_USER_TOTP_SECRET)" = "JBSWY3DPEHPK3PXP" ]; then
+  ok "HAR-82: the TOTP key is normalised (spaces stripped, upper-cased) and written to ACCEPTANCE_USER_TOTP_SECRET"
+else bad "HAR-82: the TOTP key must be stored normalised (rc=${H82_RC}, got '$(h82_secret ACCEPTANCE_USER_TOTP_SECRET)', out: $(cat "$H82/out"))"; fi
+if [ -n "$h82_pw" ] && [ "$(h82_count "$h82_pw" "$H82/out")" -eq 1 ] && [ "$(h82_count "$h82_pw" "$H82/argv.log")" -eq 0 ] \
+   && grep -q 'shown ONCE' "$H82/out"; then
+  ok "HAR-82: the password appears exactly once, in the enrolment print with its shown-once warning, and in no argv"
+else bad "HAR-82: the password must be printed exactly once during enrolment (output: $(h82_count "$h82_pw" "$H82/out"), argv: $(h82_count "$h82_pw" "$H82/argv.log"))"; fi
+if [ "$(h82_count 'JBSWY3DPEHPK3PXP' "$H82/out")" -eq 0 ] && [ "$(h82_count 'jbsw y3dp' "$H82/out")" -eq 0 ] \
+   && [ "$(h82_count 'JBSWY3DPEHPK3PXP' "$H82/argv.log")" -eq 0 ]; then
+  ok "HAR-82: the TOTP key is never echoed or put in argv"
+else bad "HAR-82: the TOTP key leaked into output or argv"; fi
+if grep -qF 'https://mysignins.microsoft.com/security-info' "$H82/out" \
+   && grep -qF 'I want to use a different authenticator app' "$H82/out" \
+   && grep -qF "Can't scan image?" "$H82/out" && grep -qF "$H82_UPN" "$H82/out"; then
+  ok "HAR-82: the enrolment steps name the security-info URL, the UPN and both portal choices"
+else bad "HAR-82: the enrolment steps are incomplete (out: $(cat "$H82/out"))"; fi
+
+# --- a key that is not base32 is rejected -------------------------------------
+h82_reset
+H82_TTY=1
+printf 'not-a-key!!\n0189 0189 0189 0189\nABCDEFG\n' > "$H82/stdin"; H82_STDIN="$H82/stdin"
+h82_run
+if [ "$H82_RC" -eq 0 ] && [ -z "$(h82_secret ACCEPTANCE_USER_TOTP_SECRET)" ] \
+   && [ "$(grep -c 'not a base32 TOTP key' "$H82/out")" -eq 3 ] \
+   && ! grep -q '^GH secret set ACCEPTANCE_USER_TOTP_SECRET' "$H82/argv.log" \
+   && [ "$(h82_count 'not-a-key' "$H82/out")" -eq 0 ]; then
+  ok "HAR-82: a key that is not base32 (or under 16 chars) is rejected three times and nothing is written"
+else bad "HAR-82: invalid TOTP keys must be rejected (rc=${H82_RC}, totp='$(h82_secret ACCEPTANCE_USER_TOTP_SECRET)', out: $(cat "$H82/out"))"; fi
+
+# --- existing user, no TOTP yet, password not generated this run --------------
+h82_reset
+H82_TTY=1
+printf '%s' "$H82_NEW_WEB" > "$H82/web_app"; printf '%s' "$H82_NEW_WEB_SP" > "$H82/web_sp"
+printf '%s' "$H82_NEW_USER" > "$H82/user"
+printf 'JBSWY3DPEHPK3PXP\n' > "$H82/stdin"; H82_STDIN="$H82/stdin"
+h82_run
+if [ "$H82_RC" -eq 0 ] && grep -q 'RESET_ACCEPTANCE_USER_PASSWORD=1' "$H82/out" \
+   && ! grep -q 'shown ONCE' "$H82/out" && ! grep -q '^GH secret set' "$H82/argv.log"; then
+  ok "HAR-82: with no fresh password the TOTP step asks for RESET_ACCEPTANCE_USER_PASSWORD=1 and prints no password"
+else bad "HAR-82: an existing user without a fresh password must get the reset hint, not a print (out: $(cat "$H82/out"))"; fi
+
+# --- preAuthorizedApplications survives either step order ---------------------
+h82_api_step() {
+  H82_RC=0
+  ( SMOKE_TEST_CLIENT_IDS="${AZURE_CLI_PUBLIC_CLIENT_ID} ${H82_SMOKE_2}"; bootstrap_dev_api_registration ) \
+    < /dev/null > "$H82/out" 2>&1 || H82_RC=$?
+}
+h82_preauth_ok() {
+  jq -e --arg w "$H82_NEW_WEB" --arg c "$AZURE_CLI_PUBLIC_CLIENT_ID" --arg s2 "$H82_SMOKE_2" --arg s "$H82_SCOPE" '
+    ([.[] | select(.delegatedPermissionIds | index($s)) | .appId] | sort) == ([$w, $c, $s2] | sort)' \
+    "$H82/preauth.json" >/dev/null 2>&1
+}
+h82_reset; printf 'ACCEPTANCE_USER_TOTP_SECRET\n' > "$H82/secrets"
+h82_api_step; h82_rc1="$H82_RC"; h82_run
+if [ "$h82_rc1" -eq 0 ] && [ "$H82_RC" -eq 0 ] && h82_preauth_ok; then
+  ok "HAR-82: API step then web step leaves the SPA AND every SMOKE_TEST_CLIENT_IDS entry pre-authorized"
+else bad "HAR-82: API→web lost a pre-authorization (rc=${h82_rc1}/${H82_RC}, preauth: $(cat "$H82/preauth.json"))"; fi
+h82_reset; printf 'ACCEPTANCE_USER_TOTP_SECRET\n' > "$H82/secrets"
+h82_run; h82_rc1="$H82_RC"; h82_api_step
+if [ "$h82_rc1" -eq 0 ] && [ "$H82_RC" -eq 0 ] && h82_preauth_ok; then
+  ok "HAR-82: web step then API step leaves the SPA AND every SMOKE_TEST_CLIENT_IDS entry pre-authorized"
+else bad "HAR-82: web→API lost a pre-authorization (rc=${h82_rc1}/${H82_RC}, preauth: $(cat "$H82/preauth.json"))"; fi
+# An entry neither step manages is kept, not dropped.
+h82_reset; printf 'ACCEPTANCE_USER_TOTP_SECRET\n' > "$H82/secrets"
+printf '[{"appId":"ffffffff-0000-4000-8000-000000000008","delegatedPermissionIds":["%s"]}]' "$H82_SCOPE" > "$H82/preauth.json"
+h82_api_step; h82_run
+if jq -e --arg w "$H82_NEW_WEB" --arg c "$AZURE_CLI_PUBLIC_CLIENT_ID" --arg s2 "$H82_SMOKE_2" '
+     ([.[].appId] | sort) == ([$w, $c, $s2, "ffffffff-0000-4000-8000-000000000008"] | sort)' "$H82/preauth.json" >/dev/null 2>&1; then
+  ok "HAR-82: an existing pre-authorized client neither step manages is kept"
+else bad "HAR-82: an unmanaged pre-authorized client must not be dropped (preauth: $(cat "$H82/preauth.json"))"; fi
+
+# --- fail closed --------------------------------------------------------------
+# A just-created SP the consent POST cannot see yet: retried, then granted.
+h82_reset
+printf '2' > "$H82/consent_failures"
+WEB_CONSENT_RETRY_DELAY=0 h82_run
+if [ "$H82_RC" -eq 0 ] && [ "$(grep -c '^POST https://graph.microsoft.com/v1.0/oauth2PermissionGrants ' "$H82/rest.log")" -eq 3 ] \
+   && [ -s "$H82/grant" ]; then
+  ok "HAR-82: the consent POST is retried while the new service principal replicates, then succeeds"
+else bad "HAR-82: the consent POST must retry (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
+h82_reset
+H82_GH_UNAUTH=1
+h82_run
+if [ "$H82_RC" -ne 0 ] && grep -q 'not authenticated' "$H82/out" && ! grep -q '^AZ ' "$H82/argv.log"; then
+  ok "HAR-82: without an authenticated gh the step dies before any az call (no user without a stored password)"
+else bad "HAR-82: an unauthenticated gh must stop the step before az runs (rc=${H82_RC}, argv: $(cat "$H82/argv.log"))"; fi
+h82_reset
+printf 'Reader\t/subscriptions/x\n' > "$H82/roles"
+printf '%s' "$H82_NEW_WEB" > "$H82/web_app"; printf '%s' "$H82_NEW_WEB_SP" > "$H82/web_sp"
+printf '%s' "$H82_NEW_USER" > "$H82/user"
+h82_run
+if [ "$H82_RC" -ne 0 ] && grep -q 'must hold NONE' "$H82/out" && ! grep -q '^GH variable set' "$H82/argv.log"; then
+  ok "HAR-82: an acceptance user holding an Azure role stops the run"
+else bad "HAR-82: a role on the acceptance user must die (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
+h82_reset
+printf 'Global Reader\n' > "$H82/dirroles"
+printf '%s' "$H82_NEW_WEB" > "$H82/web_app"; printf '%s' "$H82_NEW_WEB_SP" > "$H82/web_sp"
+printf '%s' "$H82_NEW_USER" > "$H82/user"
+h82_run
+if [ "$H82_RC" -ne 0 ] && grep -q 'directory roles' "$H82/out"; then
+  ok "HAR-82: an acceptance user holding a directory role stops the run"
+else bad "HAR-82: a directory role on the acceptance user must die (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
+h82_reset
+printf '%s' "$H82_NEW_WEB" > "$H82/web_app"
+printf '99999999-0000-4000-8000-000000000009\n' > "$H82/creds"
+h82_run
+if [ "$H82_RC" -ne 0 ] && grep -q 'client secret or certificate' "$H82/out" && ! grep -q '^GH secret set' "$H82/argv.log"; then
+  ok "HAR-82: a client secret or certificate found on the SPA stops the run"
+else bad "HAR-82: a credential on the SPA must die (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
+
+unset -f az gh h82_rest h82_reset h82_run h82_secret h82_count h82_web_patch h82_api_step h82_preauth_ok
+rm -rf "$H82"
+
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

@@ -528,6 +528,13 @@ What it creates (and nothing else):
    environments, three privilege levels. The fourth, the dev acceptance peer
    (HAR-61), holds no privilege at all and is described in its own section below.
 
+3. **The dev web SPA registration and the acceptance test user (HAR-82)** — the
+   Entra app the browser app signs in with (SPA platform, no secret) and a
+   TOTP-enrolled member user for the live browser proof, whose password and
+   TOTP key go to GitHub `development` secrets. The first run needs a person at
+   a terminal for one browser sign-in. See
+   [Dev web SPA registration and acceptance test user](#dev-web-spa-registration-and-acceptance-test-user-har-82).
+
 A **V1-safety guard** (`assert_v2_name`) refuses to operate on any name that is
 not unambiguously `meatgeek-v2` / `meatgeekv2`, and explicitly rejects the known
 V1 identifiers (`meatgeek-shared`, `meatgeekterraformstate`). This is the last
@@ -746,12 +753,98 @@ For the operator token flow below,
 `az account get-access-token --scope "<App ID URI>/access_as_user"`, the caller
 is the **Azure CLI public client** `04b07795-8ddb-461a-bbee-02f9e1bf7b46`. So
 `functions_auth_allowed_client_app_ids` **defaults to that client** (override with
-a dedicated dev client's app id), and the bootstrap **pre-authorizes** exactly
-those client id(s) for `access_as_user` (`SMOKE_TEST_CLIENT_IDS` →
+a dedicated dev client's app id), and the bootstrap **pre-authorizes** those
+client id(s) for `access_as_user` (`SMOKE_TEST_CLIENT_IDS` →
 `preAuthorizedApplications`) so acquisition needs no consent prompt. A token
 minted by **any other client** — even with the correct audience — is **rejected**
 by `allowed_applications`. Keep the tfvars list and `SMOKE_TEST_CLIENT_IDS` in
 sync: the allowed caller and the pre-authorized caller must be the same set.
+
+**Pre-authorization is merged, never replaced (HAR-82).** Two steps write
+`api.preAuthorizedApplications`: this one (`SMOKE_TEST_CLIENT_IDS`) and the dev
+web SPA step below (the SPA's own appId). Each reads the list already on the
+app, adds what it needs, and PATCHes only if something changed, so a re-run of
+either step, in either order, keeps the other's entry. Bootstrap never
+**removes** a pre-authorized client. To drop one, edit the API registration's
+*Expose an API → Authorized client applications* in the portal.
+
+### Dev web SPA registration and acceptance test user (HAR-82)
+
+The web app (`https://meatgeekv2-web.vercel.app`) signs people in with Entra,
+and the live acceptance proof signs in from Playwright as a test user.
+`bootstrap_dev_web_registration` creates both, right after the API registration.
+
+**What it creates (create-if-absent, converged on every run):**
+
+| Object | Shape |
+| ------ | ----- |
+| App registration `meatgeek-v2-dev-web` (override: `DEV_WEB_APP_NAME`) | Single tenant (`AzureADMyOrg`). **SPA** platform only, redirect URIs exactly `https://meatgeekv2-web.vercel.app` and `http://localhost:3000` (auth code + PKCE). No `web`/`publicClient` redirect URIs, implicit grant off. **No client secret, no certificate**: a read-back on every run aborts if one has been added. |
+| Its permissions | The dev API's `access_as_user` (pre-authorized on `meatgeek-v2-dev-api`, so no consent) and Microsoft Graph `openid`, `profile`, `offline_access`, admin-consented tenant-wide by an `AllPrincipals` grant. Neither the owner nor the test user sees a consent prompt. |
+| Its service principal | Needed for the consent grant. |
+| User `meatgeek-dev-acceptance@<default domain>` | Member, display name `MeatGeek dev acceptance`, no forced password change. The domain is the tenant's default verified domain, read from Graph. Bootstrap aborts if the user holds **any** Azure role assignment or Entra directory role: its credentials live in GitHub secrets. |
+
+**What it writes to the GitHub `development` environment:**
+
+| Name | Kind | When |
+| ---- | ---- | ---- |
+| `ACCEPTANCE_USER_PASSWORD` | secret | When the user is created, or with `RESET_ACCEPTANCE_USER_PASSWORD=1`. A random 32-character password, piped to `gh secret set` on stdin. It is never in a command line and never logged. |
+| `ACCEPTANCE_USER_TOTP_SECRET` | secret | During the one-time enrolment below. |
+| `DEV_WEB_CLIENT_ID` | variable | Every run, if it differs. The SPA's appId. |
+| `ACCEPTANCE_USER_UPN` | variable | Every run, if it differs. |
+
+`gh` must be authenticated for this step; it aborts before creating anything
+otherwise, so there is never a user whose password nobody holds.
+
+**One-time TOTP enrolment (interactive).** The tenant has security defaults on,
+so the user must register MFA, and Playwright needs the TOTP key to produce
+codes. Bootstrap runs the enrolment when the `development` environment has no
+`ACCEPTANCE_USER_TOTP_SECRET`, when the user was just created, or with
+`RESET_ACCEPTANCE_USER_TOTP=1`. Run bootstrap **from a terminal** for this:
+
+1. Bootstrap prints the steps and the user's password. **The password is shown
+   once**, and only in this step. GitHub secrets cannot be read back.
+2. Open a **private** browser window at
+   `https://mysignins.microsoft.com/security-info` and sign in as the UPN.
+3. When asked to set up Microsoft Authenticator, choose **I want to use a
+   different authenticator app**, then **Next**, then **Can't scan image?**.
+4. Copy the **secret key** and paste it at bootstrap's prompt. The input is
+   hidden (`read -rs`). Bootstrap strips spaces, upper-cases it, checks it is
+   base32 (A–Z, 2–7) of at least 16 characters, and writes it to
+   `ACCEPTANCE_USER_TOTP_SECRET` on stdin. You get three attempts.
+5. Finish the browser wizard: add the same key to any authenticator app (or run
+   `oathtool --totp -b '<key>'`) and enter the 6-digit code it shows.
+
+With no TTY (CI, a piped run), bootstrap skips the enrolment with a warning
+naming `ACCEPTANCE_USER_TOTP_SECRET` and still exits 0. If enrolment is needed
+but this run did not generate the password (the user already existed), it shows
+nothing and asks you to re-run with `RESET_ACCEPTANCE_USER_PASSWORD=1`.
+
+**Reset flags.**
+
+```bash
+# New password: sets it on the user and rewrites ACCEPTANCE_USER_PASSWORD, nothing else.
+RESET_ACCEPTANCE_USER_PASSWORD=1 ./bootstrap.sh
+
+# Re-enrol TOTP (e.g. the authenticator was removed). The enrolment sign-in needs
+# the password, so reset both together:
+RESET_ACCEPTANCE_USER_PASSWORD=1 RESET_ACCEPTANCE_USER_TOTP=1 ./bootstrap.sh
+```
+
+Before re-enrolling, delete the old authenticator method from the user
+(*Entra admin center → Users → MeatGeek dev acceptance → Authentication methods*),
+otherwise the sign-in asks for a code from it.
+
+**After the run.** The summary block headed `dev WEB SPA registration` prints
+`DEV_WEB_CLIENT_ID`, `ACCEPTANCE_USER_UPN`, and the line for
+`apps/web/public/config.json`:
+
+```
+"clientId": "<DEV_WEB_CLIENT_ID>"
+```
+
+Bootstrap does not edit that file. A follow-up issue sets it, together with the
+Easy Auth `functions_auth_allowed_client_app_ids` entry in
+`environments/dev.tfvars` and CORS for the web origin.
 
 ---
 
