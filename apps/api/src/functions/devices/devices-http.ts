@@ -13,7 +13,7 @@ import {
 import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
 
 /**
- * HAR-20 (MG-80) — what the four devices handlers share: their injection seam
+ * HAR-20 (MG-80) — what the devices handlers share: their injection seam
  * and their response shapes.
  *
  * Identity comes only from the Easy Auth principal. No handler reads a `userId`
@@ -27,7 +27,7 @@ import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/requ
 /** The repository surface the handlers use. */
 export type DevicesRepositoryPort = Pick<
   DevicesRepository,
-  'listDevicesByOwner' | 'getDeviceOwnership' | 'registerDevice' | 'updateDevice'
+  'listDevicesByOwner' | 'getDeviceOwnership' | 'registerDevice' | 'updateDevice' | 'deleteDevice'
 >;
 
 /** Injection seam. Production wires Easy Auth and the adapter-backed

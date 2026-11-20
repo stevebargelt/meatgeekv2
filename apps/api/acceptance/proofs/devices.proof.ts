@@ -3,7 +3,8 @@ import { randomUUID } from 'crypto';
 import type { Device, RegisterDeviceRequest } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
-import { expectNoSystemProperties } from '../lib/checks';
+import { expectErrorCode, expectNoSystemProperties } from '../lib/checks';
+import { deleteDevice, deleteRegisteredDevice } from '../lib/devices';
 import { defineProofs } from '../lib/proof';
 
 /**
@@ -13,9 +14,14 @@ import { defineProofs } from '../lib/proof';
  * 404. Every response is checked for Cosmos system properties, and every route
  * must report its request charge (the runner's default).
  *
+ * HAR-85: then `DELETE /devices/{id}`. The acceptance peer deleting the owner's
+ * device is 403 DEVICE_NOT_OWNED and the device is still there; the owner's
+ * delete is 204, after which a GET is 404 and a second delete is 404
+ * DEVICE_NOT_FOUND. If an earlier step failed, the always-run last step deletes
+ * the device instead, so no run leaves it behind.
+ *
  * The device id is `acceptance-<runId>` and its name is run-unique, so repeated
- * runs never collide on id or name. Acceptance devices are not deleted: there is
- * no delete route.
+ * runs never collide on id or name.
  */
 
 const CONNECTION_STATUSES = ['online', 'offline', 'unknown'];
@@ -39,6 +45,10 @@ function expectDevice(api: AcceptanceApi, response: AcceptanceResponse, value: u
 export default defineProofs('devices', () => {
   let registered: RegisterDeviceRequest | undefined;
   let owner: string | undefined;
+  /** POST /devices answered 201. */
+  let created = false;
+  /** The DELETE step answered 204. */
+  let deleted = false;
 
   const registeredDevice = (): RegisterDeviceRequest => {
     if (!registered) {
@@ -69,6 +79,7 @@ export default defineProofs('devices', () => {
         };
         const response = await api.request({ method: 'POST', path: '/devices', body: registered });
         api.expectStatus(response, 201);
+        created = true;
         expectNoSystemProperties(api, response);
         const device = expectDevice(api, response, response.body);
         api.check(
@@ -160,5 +171,49 @@ export default defineProofs('devices', () => {
         api.expectStatus(response, 404);
       },
     },
+    {
+      name: 'DELETE /devices/{id} as the peer is 403 DEVICE_NOT_OWNED and the device stays',
+      async run(api: AcceptanceApi) {
+        const { deviceId } = registeredDevice();
+        const refused = await deleteDevice(api, deviceId, 'peer');
+        api.expectStatus(refused, 403);
+        expectErrorCode(api, refused, 'DEVICE_NOT_OWNED');
+        const response = await getById(api, deviceId);
+        api.expectStatus(response, 200);
+        const device = expectDevice(api, response, response.body);
+        api.check(response, device.userId === owner, 'device.userId is not the registering caller');
+      },
+    },
+    {
+      name: 'DELETE /devices/{id} deletes the caller’s device',
+      async run(api: AcceptanceApi) {
+        const { deviceId } = registeredDevice();
+        const response = await deleteDevice(api, deviceId);
+        api.expectStatus(response, 204);
+        deleted = true;
+      },
+    },
+    {
+      name: 'GET /devices/{id} is 404 after the delete',
+      async run(api: AcceptanceApi) {
+        const { deviceId } = registeredDevice();
+        const response = await getById(api, deviceId);
+        api.expectStatus(response, 404);
+      },
+    },
+    {
+      name: 'DELETE /devices/{id} again is 404 DEVICE_NOT_FOUND',
+      async run(api: AcceptanceApi) {
+        const { deviceId } = registeredDevice();
+        const response = await deleteDevice(api, deviceId);
+        api.expectStatus(response, 404);
+        expectErrorCode(api, response, 'DEVICE_NOT_FOUND');
+      },
+    },
+    deleteRegisteredDevice('always: DELETE /devices/{id} removes acceptance-<runId>', () => ({
+      deviceId: registered?.deviceId,
+      created,
+      deleted,
+    })),
   ];
 });

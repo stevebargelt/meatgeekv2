@@ -182,7 +182,7 @@ model {
           description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart, POST /cooks/{cookId}/stop'
         }
         devices = component 'devices' {
-          description 'GET and POST /devices, GET and PATCH /devices/{id}'
+          description 'GET and POST /devices, GET, PATCH and DELETE /devices/{id}'
         }
         temperatures = component 'temperatures' {
           description 'GET /temperatures/current/{deviceId}, GET /temperatures/history'
@@ -231,9 +231,12 @@ model {
         devices -> ownership 'GET, PATCH /devices/{id}: 404' {
           description 'Foreign and unknown both answer 404 (error code NOT_FOUND).'
         }
+        devices -> ownership 'DELETE /devices/{id}: 403 or 404' {
+          description 'HAR-85: a foreign device is 403 DEVICE_NOT_OWNED and is not deleted; an unknown one is 404 DEVICE_NOT_FOUND. The device document alone is deleted: its cooks stay, its readings expire on the TTL.'
+        }
         temperatures -> ownership 'current, history: 404 DEVICE_NOT_FOUND'
         cooks -> repos 'write cook'
-        devices -> repos 'list by userId, register, update'
+        devices -> repos 'list by userId, register, update, delete'
         temperatures -> repos 'query readings'
         recipes -> repos
         users -> repos
@@ -350,7 +353,7 @@ model {
       description 'The only writer of temperatures. Partition value from {deviceid}.'
     }
 
-    // Client connections (MG-30): negotiate and register-device manage groups.
+    // Client connections (MG-30): negotiate mints a token for the caller's userId; no groups (HAR-81).
     cloud.api.negotiate -> cloud.realtime 'mint client token for the caller' {
       technology 'REST api-version 2024-12-01, managed identity'
     }
@@ -393,7 +396,7 @@ model {
 
     // API to data (partition keys in each container's technology).
     cloud.api.ownership -> cloud.data.devices 'point read'
-    cloud.api.repos -> cloud.data.devices 'list by userId, register, update'
+    cloud.api.repos -> cloud.data.devices 'list by userId, register, update, delete'
     cloud.api.repos -> cloud.data.cooks 'read, write; caller partition'
     cloud.api.repos -> cloud.data.users 'point read, write; id = caller'
     cloud.api.repos -> cloud.data.recipes 'read, write; caller partition'

@@ -10,6 +10,7 @@ import type {
 } from '@meatgeekv2/api-interfaces';
 
 import { expectErrorCode } from '../lib/checks';
+import { deleteRegisteredDevice } from '../lib/devices';
 import type { AcceptanceApi, AcceptanceResponse, Caller } from '../lib/proof';
 import { defineProofs } from '../lib/proof';
 
@@ -39,8 +40,9 @@ import { defineProofs } from '../lib/proof';
  * them (the chart's data is proved by HAR-87's standing cook).
  *
  * The cook uses a client-generated UUID id as MG-84 requires (the id is the
- * start's idempotency key). Acceptance devices and cooks are not deleted: there
- * is no delete route yet.
+ * start's idempotency key). HAR-85: the last step, run even after a failure,
+ * deletes `acceptance-cook-<runId>`. The cook stays in the owner's history:
+ * deleting a device leaves its cooks, and there is no cook delete route.
  */
 
 const COOK_STATUSES = ['planning', 'active', 'paused', 'completed', 'cancelled'];
@@ -153,6 +155,8 @@ async function findCook(
 
 export default defineProofs('cooks lifecycle', () => {
   let device: RegisterDeviceRequest | undefined;
+  /** POST /devices answered 201. */
+  let deviceCreated = false;
   let started: StartCookRequest | undefined;
   /** HAR-75: the Cook the POST answered with. */
   let startedCook: Cook | undefined;
@@ -194,6 +198,7 @@ export default defineProofs('cooks lifecycle', () => {
           body: device,
         });
         api.expectStatus(response, 201);
+        deviceCreated = true;
         api.check(
           response,
           response.body?.id === device.deviceId,
@@ -424,5 +429,9 @@ export default defineProofs('cooks lifecycle', () => {
         );
       },
     },
+    deleteRegisteredDevice('always: DELETE /devices/{id} removes acceptance-cook-<runId>', () => ({
+      deviceId: device?.deviceId,
+      created: deviceCreated,
+    })),
   ];
 });

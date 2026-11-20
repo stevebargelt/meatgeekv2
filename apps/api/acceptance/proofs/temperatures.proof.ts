@@ -2,6 +2,7 @@ import type { RegisterDeviceRequest, TemperatureHistoryResponse } from '@meatgee
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { expectErrorCode } from '../lib/checks';
+import { deleteRegisteredDevice } from '../lib/devices';
 import { defineProofs } from '../lib/proof';
 
 /**
@@ -22,12 +23,16 @@ import { defineProofs } from '../lib/proof';
  *   6. the unowned device's history is 404 DEVICE_NOT_FOUND.
  *
  * Every step but the 400 reaches Cosmos, so those responses must carry their
- * request charge (the runner's default). The 400 is answered before any read. Acceptance devices are not deleted: there is no delete
- * route.
+ * request charge (the runner's default). The 400 is answered before any read.
+ *
+ * HAR-85: the last step, run even after a failure, deletes
+ * `acceptance-temp-<runId>`.
  */
 
 export default defineProofs('temperatures', () => {
   let registered: RegisterDeviceRequest | undefined;
+  /** POST /devices answered 201. */
+  let created = false;
 
   const current = (api: AcceptanceApi, deviceId: string) =>
     api.request({
@@ -55,6 +60,7 @@ export default defineProofs('temperatures', () => {
         };
         const response = await api.request({ method: 'POST', path: '/devices', body: registered });
         api.expectStatus(response, 201);
+        created = true;
       },
     },
     {
@@ -124,5 +130,9 @@ export default defineProofs('temperatures', () => {
         expectErrorCode(api, response, 'DEVICE_NOT_FOUND');
       },
     },
+    deleteRegisteredDevice('always: DELETE /devices/{id} removes acceptance-temp-<runId>', () => ({
+      deviceId: registered?.deviceId,
+      created,
+    })),
   ];
 });

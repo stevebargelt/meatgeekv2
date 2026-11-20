@@ -1,10 +1,11 @@
 # Device path items (HAR-20 / MG-80).
 #
-# Implementation status — all four operations are implemented:
+# Implementation status — all five operations are implemented:
 #   - devices-collection GET  : apps/api/src/functions/devices/get-devices.ts
 #   - devices-collection POST : apps/api/src/functions/devices/register-device.ts
 #   - device-item GET         : apps/api/src/functions/devices/get-device.ts
 #   - device-item PATCH       : apps/api/src/functions/devices/update-device.ts
+#   - device-item DELETE      : apps/api/src/functions/devices/delete-device.ts (HAR-85)
 #
 # Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
 # There is no userId query parameter or x-user-id header: a device's owner is
@@ -159,6 +160,64 @@ device-item:
           DEVICE_CONFLICT: the caller already has another device with the new
           name. CONCURRENT_UPDATE: the device changed between the read and the
           write.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: '../components/responses.yaml#/ServerError'
+
+  delete:
+    operationId: deleteDevice
+    summary: Delete one of the caller's devices
+    description: |
+      Deletes the device document: one point read for ownership, then one
+      point delete. No body on success.
+
+      Only the device goes. Its cooks stay in the caller's history (GET
+      /cooks still lists them), and its readings expire on the temperatures
+      container's TTL (7 days in dev, 90 in prod). A cook still active on
+      the device stays active, and POST /cooks/{cookId}/stop answers 403
+      DEVICE_NOT_OWNED for it until the caller registers the same id again.
+      Stop a device's cook before deleting the device.
+
+      Unlike GET and PATCH, which answer 404 for both, DELETE tells a device
+      someone else owns (403 DEVICE_NOT_OWNED) from one nobody registered
+      (404 DEVICE_NOT_FOUND), as the cook routes' 403 does.
+    tags: [devices]
+    parameters:
+      - $ref: '../components/parameters.yaml#/DeviceIdPath'
+    responses:
+      '204':
+        description: Deleted.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+      '401':
+        $ref: '../components/responses.yaml#/Unauthenticated'
+      '403':
+        description: |
+          DEVICE_NOT_OWNED: the device is registered to someone else. Nothing
+          was deleted.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '404':
+        description: |
+          DEVICE_NOT_FOUND: no device has this id (or it was deleted already).
         headers:
           X-Request-ID:
             $ref: '../components/headers.yaml#/X-Request-ID'

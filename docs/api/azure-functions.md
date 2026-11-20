@@ -27,6 +27,7 @@ yet wired.
 | `registerDevice`         | HTTP `POST`   | `devices`                         | Register a device to the caller                               |
 | `getDevice`              | HTTP `GET`    | `devices/{id}`                    | One of the caller's devices (404 otherwise)                   |
 | `updateDevice`           | HTTP `PATCH`  | `devices/{id}`                    | Change name / location / configuration                        |
+| `deleteDevice`           | HTTP `DELETE` | `devices/{id}`                    | HAR-85 — delete one of the caller's devices                   |
 | `getUserProfile`         | HTTP `GET`    | `users/me`                        | The caller's profile (404 until the first PUT)                |
 | `putUserProfile`         | HTTP `PUT`    | `users/me`                        | Create or replace the caller's profile                        |
 | `listRecipes`            | HTTP `GET`    | `recipes`                         | List the caller's recipes, newest first                       |
@@ -139,6 +140,24 @@ instead.
   buckets that keeps the chart at 720 points or fewer. Each channel of a point is
   `{min, max, avg}` with `avg = Σsum / Σn`; empty buckets and channels are left
   out. `x-meatgeek-request-charge` is the point read plus every query page.
+
+`deleteDevice` (HAR-85) reads the device (a point read, partition key = device
+id), then point-deletes it:
+
+- `204`, no body: deleted.
+- `403 DEVICE_NOT_OWNED`: someone else owns it; nothing is deleted.
+- `404 DEVICE_NOT_FOUND`: no device has that id, a second delete included.
+
+Unlike `getDevice` and `updateDevice`, which answer `404` for both, a delete
+tells a foreign device from an unknown one, as the cook routes' `403` does.
+Every answer after the principal check carries `x-meatgeek-request-charge`.
+Only the device document goes. Its cooks stay in the owner's history (`getCooks`
+and `getCook` still return them), and its readings expire on the `temperatures`
+container's TTL (`temperature_data_ttl_days`: 7 in dev, 90 in prod). A cook
+still active on the device stays active, and `stopCook` refuses it with `403
+DEVICE_NOT_OWNED` (it checks the cook's device) until the owner registers the
+same id again, which creates a fresh device and makes the stop work. Stop a
+device's cook before deleting the device.
 
 `storageHeartbeat` exists because, when it was added, it was the **only**
 registration that needed `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and

@@ -7,8 +7,9 @@ import type { Container } from '@azure/cosmos';
  * It models the Cosmos behaviour the devices repository relies on: documents
  * keyed by `id` in partition `/id`, system properties (`_rid`, `_self`, `_etag`,
  * `_attachments`, `_ts`) stamped on every stored document, 404 on a missing
- * point read, 409 on `create` of an existing id, and 412 on a replace whose
- * If-Match ETag is stale. Every operation reports a request charge.
+ * point read, 409 on `create` of an existing id, 412 on a replace whose
+ * If-Match ETag is stale, and 404 on a delete of a missing id. Every operation
+ * reports a request charge.
  *
  * `failNext` makes the next matching operation throw an error shaped like an
  * SDK ErrorResponse, its text carrying the account endpoint so tests can prove
@@ -17,7 +18,7 @@ import type { Container } from '@azure/cosmos';
 
 export const FAKE_ACCOUNT_ENDPOINT = 'https://mgv2-secret-account.documents.azure.com/';
 
-export type FakeOperation = 'read' | 'create' | 'replace' | 'query';
+export type FakeOperation = 'read' | 'create' | 'replace' | 'query' | 'delete';
 
 export interface FakeCall {
   readonly operation: FakeOperation;
@@ -32,6 +33,7 @@ export interface FakeCall {
 export const READ_CHARGE = 1;
 export const WRITE_CHARGE = 6.5;
 export const QUERY_CHARGE = 2.75;
+export const DELETE_CHARGE = 5.33;
 
 type StoredDocument = Record<string, unknown> & { id: string };
 
@@ -49,6 +51,8 @@ export class FakeDevicesContainer {
   private failures: Array<{ operation: FakeOperation; statusCode: number }> = [];
   /** Runs after a read and before the next replace (to simulate a concurrent writer). */
   beforeReplace?: (id: string) => void;
+  /** Runs after a read and before the next delete (to simulate a concurrent delete). */
+  beforeDelete?: (id: string) => void;
 
   /** Seeds a document as if it had been written earlier. */
   seed(document: { id: string } & object): void {
@@ -69,6 +73,11 @@ export class FakeDevicesContainer {
     if (current) {
       this.documents.set(id, this.stamp(current));
     }
+  }
+
+  /** Deletes a stored document behind the repository's back. */
+  remove(id: string): void {
+    this.documents.delete(id);
   }
 
   failNext(operation: FakeOperation, statusCode = 503): void {
@@ -136,6 +145,15 @@ export class FakeDevicesContainer {
         const stored = this.stamp(body);
         this.documents.set(id, stored);
         return { statusCode: 200, resource: { ...stored }, requestCharge: WRITE_CHARGE };
+      },
+      delete: async () => {
+        this.beforeDelete?.(id);
+        this.calls.push({ operation: 'delete', id, partitionKey });
+        this.takeFailure('delete', DELETE_CHARGE);
+        if (partitionKey !== id || !this.documents.delete(id)) {
+          throw cosmosError(404, DELETE_CHARGE);
+        }
+        return { statusCode: 204, resource: undefined, requestCharge: DELETE_CHARGE };
       },
     };
   }
