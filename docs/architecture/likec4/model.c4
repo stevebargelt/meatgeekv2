@@ -158,7 +158,8 @@ model {
           `COSMOSDB_*_CONTAINER_NAME` per container), the IoT Hub host
           (`IOTHUB_SERVICE_HOSTNAME`) and its Event Hub consumer group
           (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). broadcastTemperature reads the consumer group;
-          nothing reads `IOTHUB_SERVICE_HOSTNAME` yet, and the
+          startCook and stopCook read `IOTHUB_SERVICE_HOSTNAME` to write the device twin's
+          desired active cook (HAR-66), and the
           identity's IoT Hub Twin Contributor grant is on in dev only. The one exception is the Application
           Insights connection string (`APPLICATIONINSIGHTS_CONNECTION_STRING`), with ingestion
           itself authenticated by Entra (`Authorization=AAD`) and sampled at

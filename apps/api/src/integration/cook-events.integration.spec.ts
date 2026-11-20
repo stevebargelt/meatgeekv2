@@ -160,11 +160,17 @@ async function ownedDevice(userId: string, deviceId: string) {
   };
 }
 
+/** HAR-66: the twin sync always succeeds here (it is covered in its own spec). */
+async function syncedTwin() {
+  return { outcome: 'patched' as const, requestCharge: 0 };
+}
+
 /** Fake start-cook deps: authenticated, with a repository that echoes the write. */
 function startDeps() {
   return {
     resolvePrincipal: () => AUTHED_PRINCIPAL,
     getDeviceOwnership: ownedDevice,
+    syncDeviceTwin: syncedTwin,
     getRepository: () => ({
       // Persist = echo back the document the handler built (what Cosmos returns).
       startCook: async (cook: Cook) => ({ outcome: 'created' as const, cook, requestCharge: 1 }),
@@ -182,6 +188,7 @@ function stopDeps(persisted: Cook | undefined) {
   return {
     resolvePrincipal: () => AUTHED_PRINCIPAL,
     getDeviceOwnership: ownedDevice,
+    syncDeviceTwin: syncedTwin,
     getRepository: () => ({
       getCook: async () => ({ cook: persisted, requestCharge: 1 }),
       stopCook: async (_userId: string, id: string, endTime: string) => ({

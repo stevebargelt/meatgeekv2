@@ -16,7 +16,9 @@ import {
 import { CooksRepository, getCooksRepository } from '../../shared/cosmos/cooks-repository';
 import { getDeviceOwnership, type DeviceOwnership } from '../../shared/cosmos/devices-repository';
 import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
+import { syncDeviceTwin, type SyncDeviceTwin } from '../../shared/iothub/device-twin-sync';
 import { deviceNotOwnedBody } from './device-ownership';
+import { deviceTwinUpdateFailedBody, runDeviceTwinStep } from './device-twin-step';
 
 /**
  * MG-59 — stop a cook by durably completing the REAL persisted document.
@@ -37,6 +39,11 @@ import { deviceNotOwnedBody } from './device-ownership';
  * the device's ownership. A device registered to someone else, or not registered
  * at all, gets 403 DEVICE_NOT_OWNED with no write and no SignalR output. Only
  * then does the stop run. The RU header sums every read and write.
+ *
+ * HAR-66 (goal HAR-55): after the stop write, whether or not this call made the
+ * transition, the device twin is synced to Cosmos, so a retried stop heals a
+ * failed sync. A sync failure leaves the cook completed and answers 503
+ * DEVICE_TWIN_UPDATE_FAILED; `cook_stopped` is emitted exactly as before.
  *
  * Sanitization (MG-51 discipline): a dependency error can carry the account host,
  * the database/container name, or token fragments. None of it reaches a response
@@ -62,12 +69,15 @@ export interface StopCookDeps {
   getRepository: () => StopCookRepository;
   /** HAR-26: who owns `deviceId` relative to `userId` (one point read). */
   getDeviceOwnership: (userId: string, deviceId: string) => Promise<DeviceOwnership>;
+  /** HAR-66: bring the device twin in line with Cosmos after the write. */
+  syncDeviceTwin: SyncDeviceTwin;
 }
 
 const defaultDeps: StopCookDeps = {
   resolvePrincipal: principalFromRequest,
   getRepository: getCooksRepository,
   getDeviceOwnership,
+  syncDeviceTwin,
 };
 
 function jsonResponse(
@@ -208,6 +218,26 @@ export async function stopCookHandler(
       arguments: [buildCookEnvelope(COOK_STOPPED, stopped, correlationId)],
     };
     context.extraOutputs.set(signalROutput, [message]);
+  }
+
+  // HAR-66: the twin follows Cosmos. Runs on every successful stop, transitioned
+  // or not, so retrying a stop whose sync failed heals the twin.
+  const twin = await runDeviceTwinStep(
+    deps.syncDeviceTwin,
+    context,
+    'stopCook',
+    userId,
+    stopped.deviceId,
+    correlationId
+  );
+  spent += twin.requestCharge;
+  if (!twin.ok) {
+    return jsonResponse(
+      503,
+      deviceTwinUpdateFailedBody(stopped.id, twin.reason, context.invocationId),
+      correlationId,
+      spent
+    );
   }
 
   return jsonResponse(200, stopped, correlationId, spent);

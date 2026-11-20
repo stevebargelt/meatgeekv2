@@ -296,6 +296,24 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     expect(afterStop.outcome).toBe('created');
   });
 
+  it('HAR-66: the device active cook follows start and stop', async () => {
+    const userId = `user-${randomUUID()}`;
+    const cook = newCook(userId, { deviceId: 'grill-twin' });
+
+    const before = await repository.getActiveCookIdForDevice(userId, 'grill-twin');
+    expect(before.cookId).toBeUndefined();
+
+    await repository.startCook(cook);
+    const during = await repository.getActiveCookIdForDevice(userId, 'grill-twin');
+    expect(during.cookId).toBe(cook.id);
+    expectPositiveCharge(during.requestCharge);
+
+    await repository.stopCook(userId, cook.id, new Date().toISOString());
+    expect(
+      (await repository.getActiveCookIdForDevice(userId, 'grill-twin')).cookId
+    ).toBeUndefined();
+  });
+
   it('stops a cook and reads it back stopped, idempotently', async () => {
     const userId = `user-${randomUUID()}`;
     const cook = newCook(userId);

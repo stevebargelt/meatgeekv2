@@ -15,7 +15,9 @@ import {
 import type { CooksRepository } from '../../shared/cosmos/cooks-repository';
 import { getDeviceOwnership, type DeviceOwnership } from '../../shared/cosmos/devices-repository';
 import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
+import { syncDeviceTwin, type SyncDeviceTwin } from '../../shared/iothub/device-twin-sync';
 import { deviceNotOwnedBody } from './device-ownership';
+import { deviceTwinUpdateFailedBody, runDeviceTwinStep } from './device-twin-step';
 
 /**
  * MG-59 step 4 — start a cook by PERSISTING it through the shared Cosmos
@@ -47,6 +49,14 @@ import { deviceNotOwnedBody } from './device-ownership';
  * cook on a device, "one active cook per (user, device)" is in effect one active
  * cook per device.
  *
+ * HAR-66 (goal HAR-55) syncs the device twin after the write: on 201 and on a
+ * matching 200 replay (so a retry heals a failed sync), never on 409 or 422.
+ * The twin's desired `activeCookId` / `correlationId` follow the device's active
+ * cook in Cosmos (see shared/iothub/device-twin-sync). If the sync fails the
+ * cook stays committed and the answer is 503 DEVICE_TWIN_UPDATE_FAILED; a
+ * retry of the same request replays and syncs again. `cook_started` is still
+ * emitted on creation even when the answer is 503, because the cook exists.
+ *
  * The `Cook` and `StartCookRequest` shapes are the canonical ones from
  * @meatgeekv2/api-interfaces — there is no local re-declaration here.
  */
@@ -74,6 +84,8 @@ export interface StartCookDeps {
   getRepository(): Pick<CooksRepository, 'startCook'>;
   /** HAR-26: who owns `deviceId` relative to `userId` (one point read). */
   getDeviceOwnership(userId: string, deviceId: string): Promise<DeviceOwnership>;
+  /** HAR-66: bring the device twin in line with Cosmos after the write. */
+  syncDeviceTwin: SyncDeviceTwin;
 }
 
 /**
@@ -99,6 +111,7 @@ const defaultDeps: StartCookDeps = {
   resolvePrincipal: principalFromRequest,
   getRepository: resolveCooksRepository,
   getDeviceOwnership,
+  syncDeviceTwin,
 };
 
 /**
@@ -256,7 +269,7 @@ export async function startCookHandler(
     // throws to the catch and NO envelope is ever set. The cook and its device
     // lock are written in one transactional batch (see CooksRepository.startCook).
     const result = await deps.getRepository().startCook(newCook);
-    const requestCharge = spent + result.requestCharge;
+    let requestCharge = spent + result.requestCharge;
 
     // RU charge is a bare number — safe to log for the shared-throughput budget.
     context.log(`startCook ${result.outcome} (requestCharge=${requestCharge} RU)`);
@@ -295,25 +308,52 @@ export async function startCookHandler(
           requestCharge
         );
       }
-      return jsonResponse(200, result.cook, context.invocationId, requestCharge);
     }
 
+    // Correlation id propagates from the inbound request when present, else the
+    // Functions invocation id. Both the twin and the SignalR envelope carry it.
+    const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
     const storedCook = result.cook;
 
-    // Emit AFTER the successful write. Correlation id propagates from the inbound
-    // request when present, else the Functions invocation id. The message-level
+    // Emit AFTER the successful write, and only on creation. The message-level
     // `userId` scopes SignalR DELIVERY to the cook's owner: the authenticated
     // principal, whose ownership of the device was checked above (HAR-57,
     // MG-30). Never the deviceId; the Pi gets its cook from the device twin.
-    const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
-    const message: SignalROutputMessage = {
-      target: COOK_STARTED,
-      userId,
-      arguments: [buildCookEnvelope(COOK_STARTED, storedCook, correlationId)],
-    };
-    context.extraOutputs.set(signalROutput, [message]);
+    if (result.outcome === 'created') {
+      const message: SignalROutputMessage = {
+        target: COOK_STARTED,
+        userId,
+        arguments: [buildCookEnvelope(COOK_STARTED, storedCook, correlationId)],
+      };
+      context.extraOutputs.set(signalROutput, [message]);
+    }
 
-    return jsonResponse(201, storedCook, context.invocationId, requestCharge);
+    // HAR-66: the twin follows Cosmos. Runs on creation and on a matching
+    // replay, so retrying a start whose sync failed heals the twin.
+    const twin = await runDeviceTwinStep(
+      deps.syncDeviceTwin,
+      context,
+      'startCook',
+      userId,
+      storedCook.deviceId,
+      correlationId
+    );
+    requestCharge += twin.requestCharge;
+    if (!twin.ok) {
+      return jsonResponse(
+        503,
+        deviceTwinUpdateFailedBody(storedCook.id, twin.reason, context.invocationId),
+        context.invocationId,
+        requestCharge
+      );
+    }
+
+    return jsonResponse(
+      result.outcome === 'created' ? 201 : 200,
+      storedCook,
+      context.invocationId,
+      requestCharge
+    );
   } catch (error) {
     // Sanitized: a fixed message plus a numeric dependency status only. The raw
     // error (which can carry the Cosmos account endpoint) is never logged or

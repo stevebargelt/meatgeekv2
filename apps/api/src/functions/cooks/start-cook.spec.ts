@@ -32,6 +32,7 @@ const VALID_ENV = {
 // imported instance.
 let startCookHandler: typeof import('./start-cook').startCookHandler;
 let signalROutput: unknown;
+let DeviceTwinSyncErrorClass: typeof import('../../shared/iothub/device-twin-sync').DeviceTwinSyncError;
 
 beforeAll(() => {
   jest.resetModules();
@@ -41,6 +42,9 @@ beforeAll(() => {
   startCookHandler = (require('./start-cook') as typeof import('./start-cook')).startCookHandler;
   signalROutput = (require('../signalr/envelope') as typeof import('../signalr/envelope'))
     .signalROutput;
+  DeviceTwinSyncErrorClass = (
+    require('../../shared/iothub/device-twin-sync') as typeof import('../../shared/iothub/device-twin-sync')
+  ).DeviceTwinSyncError;
 });
 
 function mockRequest(body: Partial<StartCookRequest>, requestIdHeader?: string): HttpRequest {
@@ -142,6 +146,38 @@ function fakeOwnership(statuses: Record<string, 'foreign' | 'unknown'> = {}) {
   };
 }
 
+/** HAR-66: a recorded call to the injected device twin sync. */
+interface TwinSyncCall {
+  readonly userId: string;
+  readonly deviceId: string;
+  readonly correlationId: string;
+}
+
+/**
+ * HAR-66: a fake device twin sync. It records each call; with `failWith` it
+ * throws a DeviceTwinSyncError with that reason (from the handler's own module
+ * graph, so the handler's instanceof check matches).
+ */
+function fakeTwinSync(failWith?: string) {
+  const calls: TwinSyncCall[] = [];
+  return {
+    calls,
+    sync: async (userId: string, deviceId: string, correlationId: string) => {
+      calls.push({ userId, deviceId, correlationId });
+      if (failWith !== undefined) {
+        throw new DeviceTwinSyncErrorClass(failWith, TWIN_FAILURE_CHARGE);
+      }
+      return { outcome: 'patched' as const, requestCharge: 0 };
+    },
+  };
+}
+
+/** RU a failing fake sync reports, so tests can see it summed into the header. */
+const TWIN_FAILURE_CHARGE = 2;
+
+/** The default for tests that are not about the twin. */
+const noTwinSync = fakeTwinSync().sync;
+
 /** Deps that authenticate as PRINCIPAL_USER_ID and capture repository writes. */
 function authedDeps(
   repo = fakeRepository(),
@@ -160,6 +196,7 @@ function authedDeps(
       },
     }),
     getRepository: () => repo,
+    syncDeviceTwin: noTwinSync,
     getDeviceOwnership: ownership.getDeviceOwnership,
   };
   return { deps, writes: repo.writes };
@@ -233,6 +270,7 @@ describe('startCookHandler', () => {
         reason: 'principal_header_missing',
       }),
       getRepository: () => repo,
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: fakeOwnership().getDeviceOwnership,
     };
 
@@ -264,6 +302,7 @@ describe('startCookHandler', () => {
           });
         },
       }),
+      syncDeviceTwin: noTwinSync,
       getDeviceOwnership: fakeOwnership().getDeviceOwnership,
     };
 
@@ -612,6 +651,7 @@ describe('startCookHandler', () => {
       const { ctx, messages } = mockContext();
       const res = await startCookHandler(mockRequest(validBody), ctx, {
         ...authedDeps(repo).deps,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership: async () => {
           throw Object.assign(new Error('request to https://acct.documents.azure.com failed'), {
             code: 503,
@@ -717,6 +757,7 @@ describe('startCookHandler', () => {
     it('omits the header on a 500 when the ownership read fails without a charge', async () => {
       const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
         ...authedDeps().deps,
+        syncDeviceTwin: noTwinSync,
         getDeviceOwnership: async () => {
           throw new Error('config missing');
         },
@@ -749,6 +790,205 @@ describe('startCookHandler', () => {
       expect([unauth.status, invalid.status]).toEqual([401, 400]);
       expect(chargeHeader(unauth)).toBeUndefined();
       expect(chargeHeader(invalid)).toBeUndefined();
+    });
+  });
+
+  describe('HAR-66 — the device twin is synced after the write', () => {
+    function withTwin(twin: ReturnType<typeof fakeTwinSync>, repo = fakeRepository()) {
+      const { deps } = authedDeps(repo);
+      return { deps: { ...deps, syncDeviceTwin: twin.sync }, repo };
+    }
+
+    it('syncs on 201 with the owner, the device and the request correlation id', async () => {
+      const twin = fakeTwinSync();
+      const { deps } = withTwin(twin);
+
+      const res = await startCookHandler(
+        mockRequest(validBody, 'req-start-1'),
+        mockContext().ctx,
+        deps
+      );
+
+      expect(res.status).toBe(201);
+      expect(twin.calls).toEqual([
+        { userId: PRINCIPAL_USER_ID, deviceId: 'meatgeek3', correlationId: 'req-start-1' },
+      ]);
+    });
+
+    it('falls back to the invocation id as the correlation id', async () => {
+      const twin = fakeTwinSync();
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, withTwin(twin).deps);
+      expect(twin.calls[0].correlationId).toBe(INVOCATION_ID);
+    });
+
+    it('syncs on a matching replay (200), and emits nothing', async () => {
+      const twin = fakeTwinSync();
+      const { deps } = withTwin(twin);
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, deps);
+
+      const { ctx, messages } = mockContext();
+      const replay = await startCookHandler(mockRequest(validBody, 'req-retry'), ctx, deps);
+
+      expect(replay.status).toBe(200);
+      expect(messages()).toBeUndefined();
+      expect(twin.calls).toHaveLength(2);
+      expect(twin.calls[1]).toEqual({
+        userId: PRINCIPAL_USER_ID,
+        deviceId: 'meatgeek3',
+        correlationId: 'req-retry',
+      });
+    });
+
+    it('makes no twin call on 409 COOK_ALREADY_ACTIVE', async () => {
+      const repo = fakeRepository();
+      const first = fakeTwinSync();
+      await startCookHandler(mockRequest(validBody), mockContext().ctx, withTwin(first, repo).deps);
+
+      const twin = fakeTwinSync();
+      const res = await startCookHandler(
+        mockRequest({ ...validBody, id: OTHER_COOK_ID }),
+        mockContext().ctx,
+        withTwin(twin, repo).deps
+      );
+
+      expect(res.status).toBe(409);
+      expect(twin.calls).toEqual([]);
+    });
+
+    it('makes no twin call on 422 COOK_ID_REUSED', async () => {
+      const repo = fakeRepository();
+      await startCookHandler(
+        mockRequest(validBody),
+        mockContext().ctx,
+        withTwin(fakeTwinSync(), repo).deps
+      );
+
+      const twin = fakeTwinSync();
+      const res = await startCookHandler(
+        mockRequest({ ...validBody, name: 'A different cook' }),
+        mockContext().ctx,
+        withTwin(twin, repo).deps
+      );
+
+      expect(res.status).toBe(422);
+      expect(twin.calls).toEqual([]);
+    });
+
+    it('makes no twin call on 401', async () => {
+      const twin = fakeTwinSync();
+      const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
+        ...withTwin(twin).deps,
+        resolvePrincipal: (): PrincipalResult => ({
+          authenticated: false,
+          reason: 'principal_header_missing',
+        }),
+      });
+      expect(res.status).toBe(401);
+      expect(twin.calls).toEqual([]);
+    });
+
+    it.each(['foreign', 'unknown'] as const)(
+      'makes no twin call on 403 (%s device)',
+      async status => {
+        const twin = fakeTwinSync();
+        const { deps } = authedDeps(fakeRepository(), fakeOwnership({ meatgeek3: status }));
+        const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
+          ...deps,
+          syncDeviceTwin: twin.sync,
+        });
+        expect(res.status).toBe(403);
+        expect(twin.calls).toEqual([]);
+      }
+    );
+
+    it('makes no twin call when the Cosmos write fails', async () => {
+      const twin = fakeTwinSync();
+      const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
+        ...withTwin(twin).deps,
+        getRepository: () => ({
+          startCook: async () => {
+            throw Object.assign(new Error('cosmos down'), { statusCode: 503 });
+          },
+        }),
+      });
+      expect(res.status).toBe(500);
+      expect(twin.calls).toEqual([]);
+    });
+
+    it('a sync failure on 201 answers 503 with the cook persisted and cook_started still set', async () => {
+      const repo = fakeRepository();
+      const twin = fakeTwinSync('iothub_patch_twin_status_403');
+      const { ctx, messages } = mockContext();
+
+      const res = await startCookHandler(mockRequest(validBody), ctx, withTwin(twin, repo).deps);
+
+      expect(res.status).toBe(503);
+      expect(res.jsonBody).toEqual({
+        error: 'DEVICE_TWIN_UPDATE_FAILED',
+        message: expect.any(String),
+        cookId: COOK_ID,
+        reason: 'iothub_patch_twin_status_403',
+        requestId: INVOCATION_ID,
+      });
+      expect(repo.stored.get(COOK_ID)?.status).toBe('active');
+      expect(messages()).toHaveLength(1);
+      expect(messages()![0].target).toBe('cook_started');
+      // RU: ownership read + the write + what the sync spent before failing.
+      const headers = res.headers as Record<string, string>;
+      expect(headers['x-meatgeek-request-charge']).toBe(String(1 + 7.42 + TWIN_FAILURE_CHARGE));
+      expect(headers['X-Request-ID']).toBe(INVOCATION_ID);
+    });
+
+    it('a retry of the same request after a failed sync replays and heals the twin', async () => {
+      const repo = fakeRepository();
+      const failed = await startCookHandler(
+        mockRequest(validBody),
+        mockContext().ctx,
+        withTwin(fakeTwinSync('iothub_get_twin_failed'), repo).deps
+      );
+      expect(failed.status).toBe(503);
+
+      const twin = fakeTwinSync();
+      const { ctx, messages } = mockContext();
+      const retry = await startCookHandler(mockRequest(validBody), ctx, withTwin(twin, repo).deps);
+
+      expect(retry.status).toBe(200);
+      expect(twin.calls).toHaveLength(1);
+      // The replay does not announce the cook a second time.
+      expect(messages()).toBeUndefined();
+      expect(repo.writes).toHaveLength(1);
+    });
+
+    it('a sync failure on a replay answers 503 and emits nothing', async () => {
+      const repo = fakeRepository();
+      await startCookHandler(
+        mockRequest(validBody),
+        mockContext().ctx,
+        withTwin(fakeTwinSync(), repo).deps
+      );
+
+      const { ctx, messages } = mockContext();
+      const res = await startCookHandler(
+        mockRequest(validBody),
+        ctx,
+        withTwin(fakeTwinSync('device_twin_sync_contended'), repo).deps
+      );
+
+      expect(res.status).toBe(503);
+      expect((res.jsonBody as { reason: string }).reason).toBe('device_twin_sync_contended');
+      expect(messages()).toBeUndefined();
+    });
+
+    it('an unexpected sync error still answers a sanitized 503', async () => {
+      const res = await startCookHandler(mockRequest(validBody), mockContext().ctx, {
+        ...authedDeps().deps,
+        syncDeviceTwin: async () => {
+          throw new Error('https://meatgeek-dev-iothub.azure-devices.net/twins/meatgeek3 failed');
+        },
+      });
+      expect(res.status).toBe(503);
+      expect((res.jsonBody as { reason: string }).reason).toBe('device_twin_sync_failed');
+      expect(JSON.stringify(res)).not.toContain('azure-devices');
     });
   });
 });
