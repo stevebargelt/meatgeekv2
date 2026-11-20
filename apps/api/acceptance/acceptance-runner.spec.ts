@@ -23,11 +23,14 @@ import { join } from 'path';
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
 import type { AcceptanceApi, SimDeviceOptions } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
+import { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
 import volumeGroup, { VOLUME } from './proofs/telemetry-volume.proof';
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
+/** HAR-67: the acceptance peer's token, a second caller who owns nothing. */
+const PEER_TOKEN = 'eyJ0eXAi.SECRET-peer-token.value-41b7';
 
 const SIM_DEVICE = 'meatgeek-dev-simulated-smoker';
 const SIM_KEY = 'c2VjcmV0LXNpbS1kZXZpY2Uta2V5LWZvci10ZXN0cw==';
@@ -65,6 +68,10 @@ type StubRoute =
 
 /** HAR-57: the client access token the stub's POST /negotiate hands out. */
 const SIGNALR_CLIENT_TOKEN = 'stub-signalr-client-token-7d1e';
+/** HAR-67: the client access token negotiate hands the peer. */
+const PEER_SIGNALR_CLIENT_TOKEN = 'stub-signalr-peer-token-3a90';
+/** HAR-67: the active cook an earlier run left on the simulated device. */
+const STALE_COOK_ID = '0b7c1d52-9e1f-4c3a-8d2e-5f6a7b8c9d0e';
 /** The SignalR JSON protocol's record separator. */
 const RS = '\u001e';
 
@@ -110,6 +117,11 @@ interface StubOptions {
    *  `extra-field` the sent reading with an `iothub_name`, `no-enqueued` the
    *  sent reading without `enqueuedTimeUtc`. */
   readonly livePush?: 'deliver' | 'never' | 'extra-field' | 'no-enqueued';
+  /** HAR-67: also push this target to the peer's connections, as a broken
+   *  group or user scoping would. By default the peer gets nothing. */
+  readonly peerLeak?: 'temperature' | 'cook_started';
+  /** HAR-67: the simulated device already has an active cook (an earlier run's). */
+  readonly simActiveCook?: boolean;
 }
 
 interface StubCook {
@@ -143,6 +155,10 @@ interface Stub {
   readonly topups: string[][];
   /** HAR-63: how many SignalR connections each `--count 1` send was pushed to. */
   readonly livePushes: number[];
+  /** HAR-67: each cook event pushed, with how many connections it went to. */
+  readonly cookPushes: Array<{ target: string; cookId: string; connections: number }>;
+  /** HAR-67: the simulated device's cooks. */
+  readonly simCooks: () => Array<{ id: string; status: string }>;
   /** HAR-45: the `total` each `limit=1` read of the simulated device returned. */
   readonly volumeTotals: number[];
   close(): Promise<void>;
@@ -193,6 +209,17 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   // The acceptance identity's profile persists between runs, as it does in dev.
   let profile: Record<string, unknown> | undefined;
   const requests: Stub['requests'] = [];
+  if (options.simActiveCook) {
+    cooks.push({
+      id: STALE_COOK_ID,
+      userId: 'stub-tenant:stub-user',
+      deviceId: SIM_DEVICE,
+      name: 'Acceptance isolation (an earlier run)',
+      status: 'active',
+      startTime: '2026-11-18T10:00:00.000Z',
+      meatType: 'acceptance',
+    });
+  }
   let simPolls = 0;
   const simVisibleFromPoll = options.simVisibleFromPoll ?? 3;
   const simRouted = () => !options.simNeverRouted && simPolls >= simVisibleFromPoll;
@@ -207,11 +234,45 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   // whether the first (initialising) poll has been answered.
   const signalRConnections = new Map<
     string,
-    { outbox: string[]; held?: ServerResponse; started: boolean; closed: boolean }
+    {
+      user: 'owner' | 'peer';
+      outbox: string[];
+      held?: ServerResponse;
+      started: boolean;
+      closed: boolean;
+    }
   >();
   const livePushes: number[] = [];
+  const cookPushes: Stub['cookPushes'] = [];
+  /** HAR-67: the open connections a message on `target` reaches: the owner's,
+   *  plus the peer's when `peerLeak` names that target. */
+  const recipients = (target: string) =>
+    [...signalRConnections.values()].filter(
+      c => c.started && !c.closed && (c.user === 'owner' || options.peerLeak === target)
+    );
+  /** HAR-67: what startCook / stopCook would send to the owner's userId. */
+  const pushCookEvent = (target: 'cook_started' | 'cook_stopped', cook: StubCook) => {
+    const { id, ...rest } = cook;
+    const envelope = {
+      type: target,
+      timestamp: new Date().toISOString(),
+      messageId: randomUUID(),
+      deviceId: cook.deviceId,
+      userId: cook.userId,
+      ...(target === 'cook_started' ? { cookId: id } : {}),
+      correlation: { id: 'stub-invocation' },
+      payload: { id, ...rest },
+    };
+    const open = recipients(target);
+    cookPushes.push({ target, cookId: id, connections: open.length });
+    const message = `${JSON.stringify({ type: 1, target, arguments: [envelope] })}${RS}`;
+    for (const connection of open) {
+      connection.outbox.push(message);
+      flushPoll(connection);
+    }
+  };
   /** HAR-63: what broadcastTemperature would push to the simulated device's
-   *  group, sent to every open connection (all of them the caller's). */
+   *  group, sent to every open connection of its owner. */
   const pushLiveReading = () => {
     const push = options.livePush ?? 'deliver';
     const invocation = (payload: unknown) =>
@@ -225,7 +286,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       invocation({ ...simReading(simServed), deviceId: 'someone-elses-device', enqueuedTimeUtc }),
       ...(push === 'never' ? [] : [invocation(sent)]),
     ];
-    const open = [...signalRConnections.values()].filter(c => c.started && !c.closed);
+    const open = recipients('temperature');
     livePushes.push(open.length);
     for (const connection of open) {
       connection.outbox.push(...messages);
@@ -257,9 +318,15 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           path: url.pathname + url.search,
           authorization,
         });
+        const user =
+          authorization === `Bearer ${SIGNALR_CLIENT_TOKEN}`
+            ? 'owner'
+            : authorization === `Bearer ${PEER_SIGNALR_CLIENT_TOKEN}`
+              ? 'peer'
+              : undefined;
         if (
           options.signalRRejectsToken ||
-          authorization !== `Bearer ${SIGNALR_CLIENT_TOKEN}` ||
+          !user ||
           url.searchParams.get('hub') !== 'temperatureHub'
         ) {
           response.writeHead(401);
@@ -268,7 +335,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         }
         if (request.method === 'POST' && url.pathname === '/client/negotiate') {
           const token = `conn-${signalRConnections.size + 1}`;
-          signalRConnections.set(token, { outbox: [], started: false, closed: false });
+          signalRConnections.set(token, { user, outbox: [], started: false, closed: false });
           response.writeHead(200, { 'Content-Type': 'application/json' });
           response.end(
             JSON.stringify({
@@ -283,7 +350,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           return;
         }
         const connection = signalRConnections.get(url.searchParams.get('id') ?? '');
-        if (url.pathname !== '/client/' || !connection) {
+        if (url.pathname !== '/client/' || !connection || connection.user !== user) {
           response.writeHead(404);
           response.end();
           return;
@@ -363,7 +430,13 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         response.end(JSON.stringify(body));
       };
 
-      if (authorization !== `Bearer ${TOKEN}`) {
+      const caller =
+        authorization === `Bearer ${TOKEN}`
+          ? 'owner'
+          : authorization === `Bearer ${PEER_TOKEN}`
+            ? 'peer'
+            : undefined;
+      if (!caller) {
         send(401, {
           error:
             options.echoAuthorization && authorization ? `BAD ${authorization}` : 'UNAUTHENTICATED',
@@ -404,6 +477,18 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         send(404, { error: 'NOT_FOUND' });
         return;
       }
+      // HAR-67: the peer owns nothing. The stub serves it only the routes the
+      // isolation proof sends as the peer.
+      const owns = (deviceId: string) => caller === 'owner' && devices.has(deviceId);
+      const peerRoutes: StubRoute[] = [
+        'POST /negotiate',
+        'GET /temperatures/current/{deviceId}',
+        'POST /cooks',
+      ];
+      if (caller === 'peer' && !peerRoutes.includes(route)) {
+        send(404, { error: 'NOT_FOUND' });
+        return;
+      }
 
       if (options.failRoute?.route === route) {
         send(
@@ -434,7 +519,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           200,
           {
             url: `http://127.0.0.1:${port}/client/?hub=temperatureHub`,
-            accessToken: SIGNALR_CLIENT_TOKEN,
+            accessToken: caller === 'peer' ? PEER_SIGNALR_CLIENT_TOKEN : SIGNALR_CLIENT_TOKEN,
           },
           route
         );
@@ -515,7 +600,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
 
       if (route === 'GET /temperatures/current/{deviceId}') {
         const deviceId = decodeURIComponent(temperatureMatch![1]);
-        const owned = devices.has(deviceId);
+        const owned = owns(deviceId);
         if (owned && deviceId === SIM_DEVICE) {
           // HAR-44: the simulated device's reading arrives after a few polls.
           simPolls += 1;
@@ -655,13 +740,13 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           return;
         }
         // HAR-26: a cook only starts on a device the caller registered.
-        if (!options.allowAnyDevice && !devices.has(body.deviceId)) {
+        if (!options.allowAnyDevice && !owns(body.deviceId)) {
           send(403, { error: 'DEVICE_NOT_OWNED' }, route);
           return;
         }
         const cook: StubCook = {
           id: body.id,
-          userId: 'stub-tenant:stub-user',
+          userId: caller === 'peer' ? 'stub-tenant:stub-peer' : 'stub-tenant:stub-user',
           deviceId: body.deviceId,
           name: body.name,
           status: 'active',
@@ -670,6 +755,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           notes: body.notes,
         };
         cooks.push(cook);
+        pushCookEvent('cook_started', cook);
         send(201, cook, route);
       } else {
         const cook = cooks.find(candidate => candidate.id === decodeURIComponent(stopMatch![1]));
@@ -679,6 +765,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         }
         cook.status = 'completed';
         cook.endTime = new Date().toISOString();
+        pushCookEvent('cook_stopped', cook);
         send(200, cook, route);
       }
     })().catch(() => {
@@ -695,6 +782,9 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     signalRRequests,
     topups,
     livePushes,
+    cookPushes,
+    simCooks: () =>
+      cooks.filter(c => c.deviceId === SIM_DEVICE).map(({ id, status }) => ({ id, status })),
     volumeTotals,
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
   };
@@ -804,12 +894,14 @@ async function runAgainstStub(options: StubOptions = {}, mode: FakeMode = 'ok'):
   return run({
     ACCEPTANCE_BASE_URL: stub.baseUrl,
     ACCEPTANCE_BEARER_TOKEN: TOKEN,
+    ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
     ...simEnv(mode),
   });
 }
 
 const realPoll = { ...ROUNDTRIP_POLL };
 const realLiveWait = { ...LIVE_WAIT };
+const realIsolationWait = { ...ISOLATION_WAIT };
 const realVolume = { ...VOLUME };
 
 beforeAll(() => {
@@ -819,6 +911,9 @@ beforeAll(() => {
   ROUNDTRIP_POLL.capMs = 300;
   // HAR-63: the live push is waited for up to 90 s live; here, 300 ms.
   LIVE_WAIT.capMs = 300;
+  // HAR-67: 90 s for the owner's message and a 15 s grace for the peer live.
+  ISOLATION_WAIT.capMs = 300;
+  ISOLATION_WAIT.graceMs = 100;
   // HAR-45: a long cook is 8,640 readings, re-read every 10 s for up to 15 min
   // live. Here a few hundred (still over the 100-reading default page), and
   // polls in milliseconds. The send interval is left as it is live.
@@ -831,6 +926,7 @@ beforeAll(() => {
 afterAll(() => {
   Object.assign(ROUNDTRIP_POLL, realPoll);
   Object.assign(LIVE_WAIT, realLiveWait);
+  Object.assign(ISOLATION_WAIT, realIsolationWait);
   Object.assign(VOLUME, realVolume);
   rmSync(fakeDir, { recursive: true, force: true });
 });
@@ -905,8 +1001,11 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(summaryRow(result.output, 'GET /cooks (no auth)')).toMatch(/-\s*$/);
 
     // HAR-26: one start on the registered device, one refused on the unowned one.
+    // HAR-67: the isolation group starts one more as the owner and is refused
+    // one as the peer.
     const posts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
-    expect(posts).toHaveLength(2);
+    expect(posts.filter(r => r.authorization === `Bearer ${TOKEN}`)).toHaveLength(3);
+    expect(posts.filter(r => r.authorization === `Bearer ${PEER_TOKEN}`)).toHaveLength(1);
     expect(
       stub!.requests.filter(
         r => r.method === 'GET' && /^\/api\/cooks\?deviceId=acceptance-unowned-[^&]+$/.test(r.path)
@@ -928,28 +1027,31 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
+    // HAR-67: the isolation group uses every cooks route too.
+    expect(result.failures).toHaveLength(2);
     expect(result.failures[0]).toContain(`${route} → 503`);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
-    expect(result.output).toContain(`FAIL cooks lifecycle`);
+    expect(result.failures[1]).toContain('signalr isolation ›');
+    expect(result.failures[1]).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
   });
 
   /** HAR-26 and HAR-28: the cooks lifecycle and the temperatures proof also
    *  register their own device, so a broken POST /devices fails them too.
-   *  HAR-63: the live-temperature group registers the simulated device first
-   *  (201), so the round trip, which runs after it, takes the 409 path and
-   *  reads GET /devices/{id}. */
+   *  HAR-67: the isolation group registers the simulated device first (201),
+   *  so the live-temperature group (HAR-63) and the round trip, which run
+   *  after it, take the 409 path and read GET /devices/{id}. */
   const groupsUsing = (route: DeviceRoute): string[] =>
     route === 'POST /devices'
       ? [
           'cooks lifecycle ›',
           'devices ›',
           'temperatures ›',
+          'signalr isolation ›',
           'signalr live temperature ›',
           'telemetry round-trip ›',
         ]
       : route === 'GET /devices/{id}'
-        ? ['devices ›', 'telemetry round-trip ›']
+        ? ['devices ›', 'signalr live temperature ›', 'telemetry round-trip ›']
         : ['devices ›'];
 
   it.each(DEVICE_ROUTES)(
@@ -1011,9 +1113,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // stop() ends the connection with a DELETE, after the handshake POST. (A
     // close message the client POSTs can race the DELETE, so it need not be last.)
     expect(calls.lastIndexOf('DELETE /client/')).toBeGreaterThan(calls.indexOf('POST /client/'));
-    // Every SignalR call presented the negotiated token, never the API bearer.
+    // Every SignalR call presented a negotiated token (HAR-67: the owner's or
+    // the peer's), never an API bearer.
     expect(
-      stub!.signalRRequests.every(r => r.authorization === `Bearer ${SIGNALR_CLIENT_TOKEN}`)
+      stub!.signalRRequests.every(
+        r =>
+          r.authorization === `Bearer ${SIGNALR_CLIENT_TOKEN}` ||
+          r.authorization === `Bearer ${PEER_SIGNALR_CLIENT_TOKEN}`
+      )
     ).toBe(true);
     // Neither the token nor the client url reaches the output.
     expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
@@ -1026,9 +1133,13 @@ describe('live acceptance runner (against an in-process stub)', () => {
       const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
       expect(result.exitCode).not.toBe(0);
-      // HAR-63: the live-temperature group negotiates too.
-      expect(result.failures).toHaveLength(2);
-      for (const group of ['signalr live temperature ›', 'signalr negotiate ›']) {
+      // HAR-63, HAR-67: the live-temperature and isolation groups negotiate too.
+      expect(result.failures).toHaveLength(3);
+      for (const group of [
+        'signalr isolation ›',
+        'signalr live temperature ›',
+        'signalr negotiate ›',
+      ]) {
         expect(result.failures.find(line => line.includes(group))).toContain(`${route} → 503`);
       }
       expect(result.output).toContain('SKIP signalr negotiate › a SignalR client connects');
@@ -1045,12 +1156,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
     });
 
     expect(result.exitCode).not.toBe(0);
-    // HAR-63: the live-temperature group negotiates too, and reports it the same way.
-    expect(result.failures).toHaveLength(2);
-    expect(result.failures[0]).toContain(
+    // HAR-63, HAR-67: the live-temperature and isolation groups negotiate too,
+    // and report it the same way.
+    expect(result.failures).toHaveLength(3);
+    expect(result.failures[0]).toContain('FAIL signalr isolation › the owner negotiates');
+    expect(result.failures[1]).toContain(
       'FAIL signalr live temperature › POST /negotiate returns 200'
     );
-    expect(result.failures[1]).toContain(
+    expect(result.failures[2]).toContain(
       'FAIL signalr negotiate › POST /negotiate returns a url and an accessToken'
     );
     for (const failure of result.failures) {
@@ -1077,12 +1190,13 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ signalRRejectsToken: true });
 
     expect(result.exitCode).not.toBe(0);
-    // HAR-63: the live-temperature group connects too.
-    expect(result.failures).toHaveLength(2);
-    expect(result.failures[0]).toContain(
+    // HAR-63, HAR-67: the live-temperature and isolation groups connect too.
+    expect(result.failures).toHaveLength(3);
+    expect(result.failures[0]).toContain('FAIL signalr isolation › the owner negotiates');
+    expect(result.failures[1]).toContain(
       'FAIL signalr live temperature › POST /negotiate returns 200'
     );
-    expect(result.failures[1]).toContain('FAIL signalr negotiate › a SignalR client connects');
+    expect(result.failures[2]).toContain('FAIL signalr negotiate › a SignalR client connects');
     for (const failure of result.failures) {
       expect(failure).toContain('start() failed');
     }
@@ -1125,11 +1239,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
   });
 
   /** HAR-44: the telemetry round-trip reads both temperatures routes too;
-   *  HAR-45: the telemetry volume group reads history only. */
+   *  HAR-45: the telemetry volume group reads history only; HAR-67: the
+   *  isolation group reads current, as the peer. */
   const temperatureGroups = (route: TemperatureRoute): string[] => [
     'FAIL temperatures ›',
     'FAIL telemetry round-trip ›',
-    ...(route === 'GET /temperatures/history' ? ['FAIL telemetry volume ›'] : []),
+    ...(route === 'GET /temperatures/history'
+      ? ['FAIL telemetry volume ›']
+      : ['FAIL signalr isolation ›']),
   ];
 
   it.each(TEMPERATURE_ROUTES)(
@@ -1141,7 +1258,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       expect(result.failures).toHaveLength(temperatureGroups(route).length);
       temperatureGroups(route).forEach(group => {
         const failure = result.failures.find(line => line.startsWith(group));
-        expect(failure).toContain(`${route} → 503`);
+        expect(failure).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
       });
     }
   );
@@ -1157,10 +1274,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
       const result = await runAgainstStub({ temperatureErrorCode: answered });
 
       expect(result.exitCode).not.toBe(0);
-      expect(result.failures).toHaveLength(1);
-      expect(result.failures[0]).toContain('FAIL temperatures ›');
-      expect(result.failures[0]).toContain('GET /temperatures/current/{deviceId} → 404');
-      expect(result.failures[0]).toContain(`body.error is "${answered}", not ${expected}`);
+      const failures = result.failures.filter(line => line.startsWith('FAIL temperatures ›'));
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain('GET /temperatures/current/{deviceId} → 404');
+      expect(failures[0]).toContain(`body.error is "${answered}", not ${expected}`);
+      // HAR-67: the peer's read of the simulated device must be DEVICE_NOT_FOUND too.
+      const isolation = result.failures.filter(line => line.startsWith('FAIL signalr isolation ›'));
+      expect(isolation).toHaveLength(answered === 'DEVICE_NOT_FOUND' ? 0 : 1);
+      expect(result.failures).toHaveLength(failures.length + isolation.length);
     }
   );
 
@@ -1197,7 +1318,12 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
   it('accepts the profile PUT as a create on the first run and a replace on the next', async () => {
     stub = await startStub();
-    const env = { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() };
+    const env = {
+      ACCEPTANCE_BASE_URL: stub.baseUrl,
+      ACCEPTANCE_BEARER_TOKEN: TOKEN,
+      ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+      ...simEnv(),
+    };
     const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
     const lines: string[] = [];
     const second = await runAcceptance({
@@ -1226,9 +1352,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ allowAnyDevice: true });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
+    // HAR-67: the peer's start on the simulated device is not refused either.
+    expect(result.failures).toHaveLength(2);
     expect(result.failures[0]).toContain('unregistered device is 403 DEVICE_NOT_OWNED');
     expect(result.failures[0]).toContain('POST /cooks → 201: expected 403');
+    expect(result.failures[1]).toContain(
+      'FAIL signalr isolation › the peer: POST /cooks on the simulated device is 403'
+    );
+    expect(result.failures[1]).toContain('POST /cooks (peer) → 201: expected 403');
   });
 
   it('(b) exits non-zero when the unauthenticated GET /cooks is not refused', async () => {
@@ -1236,7 +1367,12 @@ describe('live acceptance runner (against an in-process stub)', () => {
     stub = await startStub();
     const lines: string[] = [];
     const result = await runAcceptance({
-      env: { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() },
+      env: {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+      },
       write: line => lines.push(line),
       groups: [
         {
@@ -1266,9 +1402,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ omitChargeOn: route });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
-    expect(result.failures[0]).toContain(route);
-    expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    // HAR-67: the isolation group uses every cooks route too.
+    expect(result.failures).toHaveLength(2);
+    expect(result.failures[0]).toContain('cooks lifecycle ›');
+    expect(result.failures[1]).toContain('signalr isolation ›');
+    for (const failure of result.failures) {
+      expect(failure).toContain(route);
+      expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    }
   });
 
   it.each([
@@ -1294,6 +1435,27 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.output).toContain('ACCEPTANCE_BEARER_TOKEN is not set');
   });
 
+  it.each([undefined, '  '])(
+    '(d) HAR-67: refuses to run when ACCEPTANCE_PEER_BEARER_TOKEN is %p',
+    async value => {
+      stub = await startStub();
+      const result = await run({
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: value,
+        ...simEnv(),
+      });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.failures).toEqual([
+        'acceptance: ACCEPTANCE_PEER_BEARER_TOKEN is not set; the live acceptance run needs it',
+      ]);
+      // Nothing ran: no request, no SignalR connection.
+      expect(stub.requests).toHaveLength(0);
+      expect(stub.signalRRequests).toHaveLength(0);
+    }
+  );
+
   it('(e) never prints the token, even when the server echoes it back', async () => {
     const outputs: string[] = [];
 
@@ -1317,6 +1479,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
     for (const output of outputs) {
       expect(output).not.toContain(TOKEN);
       expect(output).not.toContain('SECRET-acceptance-token');
+      // HAR-67: nor the peer's.
+      expect(output).not.toContain(PEER_TOKEN);
+      expect(output).not.toContain('SECRET-peer-token');
       expect(output).not.toMatch(/authorization/i);
     }
     // ...and the token was in fact sent on authenticated requests.
@@ -1325,7 +1490,12 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
   it('starts each run with a fresh synthetic device, so reruns never collide', async () => {
     stub = await startStub();
-    const env = { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() };
+    const env = {
+      ACCEPTANCE_BASE_URL: stub.baseUrl,
+      ACCEPTANCE_BEARER_TOKEN: TOKEN,
+      ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+      ...simEnv(),
+    };
     const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
     const lines: string[] = [];
     const second = await runAcceptance({
@@ -1371,8 +1541,11 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     );
 
     // A 404 NO_READINGS, then older readings, were polled past.
+    // (HAR-67: the isolation group's one read is the peer's, not counted.)
     const current = stub!.requests.filter(
-      r => r.path === `/api/temperatures/current/${SIM_DEVICE}`
+      r =>
+        r.path === `/api/temperatures/current/${SIM_DEVICE}` &&
+        r.authorization === `Bearer ${TOKEN}`
     );
     expect(current).toHaveLength(4);
     // History was paged (two per page) until the sent reading turned up, from a
@@ -1465,6 +1638,7 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
         const result = await run({
           ACCEPTANCE_BASE_URL: stub.baseUrl,
           ACCEPTANCE_BEARER_TOKEN: TOKEN,
+          ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
           ...simEnv(),
           [name]: value,
         });
@@ -1521,9 +1695,10 @@ describe('signalr live temperature (HAR-63, against the stub and a fake simdevic
     const metrics = result.lines.filter(line => line.startsWith('METRIC signalr-delivery-ms '));
     expect(metrics).toHaveLength(1);
     expect(metrics[0]).toMatch(/^METRIC signalr-delivery-ms \d+$/);
-    // The reading went to the one open connection, the proof's own; the round
-    // trip's later send found none open.
-    expect(stub!.livePushes).toEqual([1, 0]);
+    // HAR-67: the isolation group's send reached its owner connection only
+    // (not the peer's). Then the reading went to the one open connection, the
+    // proof's own; the round trip's later send found none open.
+    expect(stub!.livePushes).toEqual([1, 1, 0]);
     // Registration came before negotiate, so the group membership includes it.
     const label = (step: number) => result.lines.indexOf(`RUN  ${GROUP} ${STEPS[step]}`);
     const negotiate = result.lines.findIndex(
@@ -1561,8 +1736,11 @@ describe('signalr live temperature (HAR-63, against the stub and a fake simdevic
     expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[4]}`);
     expect(result.output).not.toMatch(/^METRIC signalr-delivery-ms /m);
     expectEveryConnectionStopped();
-    // Only this group failed.
-    expect(result.failures).toEqual(failures);
+    // Only this group and the isolation group (whose owner waits for the same
+    // push) failed.
+    expect(result.failures.filter(line => !line.startsWith('FAIL signalr isolation ›'))).toEqual(
+      failures
+    );
   });
 
   it.each([
@@ -1594,6 +1772,152 @@ describe('signalr live temperature (HAR-63, against the stub and a fake simdevic
   });
 });
 
+describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', () => {
+  const GROUP = 'signalr isolation ›';
+  const STEPS = [
+    'POST /devices registers the simulated device to the owner',
+    'the owner negotiates and connects, listening for temperature, cook_started and cook_stopped',
+    'the peer: POST /negotiate?deviceId=<simulated device> returns 200 and its client connects',
+    'the peer: GET /temperatures/current/<simulated device> is 404 DEVICE_NOT_FOUND',
+    'the peer: POST /cooks on the simulated device is 403 DEVICE_NOT_OWNED',
+    'simdevice --count 1 sends one reading through IoT Hub',
+    'the owner receives the reading on temperature; the peer receives nothing in the grace window',
+    'the owner stops any cook already active on the simulated device',
+    'POST /cooks as the owner starts a cook on the simulated device and cook_started reaches the owner',
+    'POST /cooks/{cookId}/stop stops it, cook_stopped reaches the owner, and the peer has received nothing',
+    'both SignalR connections stop',
+  ];
+  const isolationFailures = (result: Run) =>
+    result.failures.filter(line => line.startsWith(`FAIL ${GROUP}`));
+  const metric = (result: Run, name: string) =>
+    result.lines.filter(line => line.startsWith(`METRIC ${name} `));
+  /** The isolation group's two connections, in the order the stub opened them:
+   *  the first two `POST /client/negotiate` calls of the run. */
+  const isolationConnections = () =>
+    stub!.signalRRequests.filter(
+      r => r.method === 'POST' && r.path.startsWith('/client/negotiate')
+    );
+  /** Every SignalR connection the run opened was closed again (a DELETE each). */
+  const expectEveryConnectionStopped = () => {
+    const calls = stub!.signalRRequests.map(r => `${r.method} ${r.path.split('?')[0]}`);
+    const opened = calls.filter(call => call === 'POST /client/negotiate').length;
+    expect(opened).toBeGreaterThan(0);
+    expect(calls.filter(call => call === 'DELETE /client/')).toHaveLength(opened);
+  };
+
+  it('(a) passes: the owner gets the reading and both cook events, the peer nothing; prints both metrics', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    expect(metric(result, 'isolation-peer-messages')).toEqual(['METRIC isolation-peer-messages 0']);
+    const cookMetric = metric(result, 'signalr-cook-event-ms');
+    expect(cookMetric).toHaveLength(1);
+    expect(cookMetric[0]).toMatch(/^METRIC signalr-cook-event-ms \d+$/);
+
+    // The peer negotiated with the simulated device in the query, with its own
+    // token, and got its own SignalR token.
+    const peerNegotiate = stub!.requests.filter(
+      r => r.method === 'POST' && r.path.startsWith('/api/negotiate')
+    );
+    expect(peerNegotiate.map(r => [r.path, r.authorization])).toContainEqual([
+      `/api/negotiate?deviceId=${SIM_DEVICE}`,
+      `Bearer ${PEER_TOKEN}`,
+    ]);
+    const [ownerConn, peerConn] = isolationConnections();
+    expect(ownerConn.authorization).toBe(`Bearer ${SIGNALR_CLIENT_TOKEN}`);
+    expect(peerConn.authorization).toBe(`Bearer ${PEER_SIGNALR_CLIENT_TOKEN}`);
+    // The peer's two refused calls are labelled as the peer's.
+    expect(
+      result.lines.some(line =>
+        /^\s+GET\s+\/temperatures\/current\/\{deviceId\} \(peer\)\s+404\s/.test(line)
+      )
+    ).toBe(true);
+    expect(result.lines.some(line => /^\s+POST\s+\/cooks \(peer\)\s+403\s/.test(line))).toBe(true);
+    expect(summaryRow(result.output, 'POST /cooks (peer)')).toMatch(/11\.43\s*$/);
+    // The cook events went to the owner's one connection each.
+    const isolationCooks = stub!.cookPushes.filter(p => p.connections > 0);
+    expect(isolationCooks.map(p => p.target)).toEqual(['cook_started', 'cook_stopped']);
+    expect(isolationCooks.every(p => p.connections === 1)).toBe(true);
+    expect(stub!.simCooks().every(c => c.status === 'completed')).toBe(true);
+    expectEveryConnectionStopped();
+    for (const secret of [SIGNALR_CLIENT_TOKEN, PEER_SIGNALR_CLIENT_TOKEN, TOKEN, PEER_TOKEN]) {
+      expect(result.output).not.toContain(secret);
+    }
+    expect(result.output).not.toContain('/client/');
+  });
+
+  it('(a) stops a cook an earlier run left active on the simulated device before starting its own', async () => {
+    const result = await runAgainstStub({ simActiveCook: true });
+
+    expect(result.failures).toEqual([]);
+    expect(
+      stub!.requests.some(r => r.method === 'POST' && r.path === `/api/cooks/${STALE_COOK_ID}/stop`)
+    ).toBe(true);
+    expect(stub!.simCooks()).toHaveLength(2);
+    expect(stub!.simCooks().every(c => c.status === 'completed')).toBe(true);
+  });
+
+  it('(b) fails naming the target when a temperature reaches the peer, and stops both connections', async () => {
+    const result = await runAgainstStub({ peerLeak: 'temperature' });
+
+    expect(result.exitCode).not.toBe(0);
+    const failures = isolationFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`FAIL ${GROUP} ${STEPS[6]}`);
+    expect(failures[0]).toContain(
+      `LEAK: the peer, who does not own ${SIM_DEVICE}, received 3 message(s) by the reading`
+    );
+    // The replayed reading, the other device's and the sent one: all on temperature.
+    expect(failures[0]).toContain(': temperature ×3');
+    expect(metric(result, 'isolation-peer-messages')).toEqual(['METRIC isolation-peer-messages 3']);
+    expect(metric(result, 'signalr-cook-event-ms')).toEqual([]);
+    STEPS.slice(7).forEach(step => expect(result.output).toContain(`SKIP ${GROUP} ${step}`));
+    expectEveryConnectionStopped();
+    // Only this group failed: the other groups' connections are the owner's.
+    expect(result.failures).toEqual(failures);
+  });
+
+  it('(b) fails naming the target when cook_started reaches the peer', async () => {
+    const result = await runAgainstStub({ peerLeak: 'cook_started' });
+
+    const failures = isolationFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`FAIL ${GROUP} ${STEPS[9]}`);
+    expect(failures[0]).toContain('received 1 message(s) by cook_stopped');
+    expect(failures[0]).toContain(': cook_started ×1');
+    expect(metric(result, 'isolation-peer-messages')).toEqual(['METRIC isolation-peer-messages 1']);
+    expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[10]}`);
+    expectEveryConnectionStopped();
+  });
+
+  it('(b) fails naming the cap when the reading never reaches the owner, and stops both connections', async () => {
+    const result = await runAgainstStub({ livePush: 'never' });
+
+    const failures = isolationFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`FAIL ${GROUP} ${STEPS[6]}`);
+    expect(failures[0]).toContain(
+      `nothing within the ${ISOLATION_WAIT.capMs / 1000} s cap; the owner connection is Connected`
+    );
+    expect(failures[0]).toContain('The owner received 2 message(s) (temperature ×2)');
+    expect(metric(result, 'isolation-peer-messages')).toEqual([]);
+    expectEveryConnectionStopped();
+  });
+
+  it('(b) fails when the peer is not refused POST /cooks, before any reading is sent', async () => {
+    const result = await runAgainstStub({ allowAnyDevice: true });
+
+    const failures = isolationFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`FAIL ${GROUP} ${STEPS[4]}`);
+    expect(failures[0]).toContain('POST /cooks (peer) → 201: expected 403');
+    expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[5]}`);
+    expectEveryConnectionStopped();
+  });
+});
+
 describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () => {
   const GROUP = 'telemetry volume ›';
   const STEPS = [
@@ -1619,11 +1943,11 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     expect(result.failures).toEqual([]);
     expect(result.exitCode).toBe(0);
     STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
-    // No simdevice top-up: the only runs are the live push's (HAR-63) and the
-    // round trip's, one reading each.
+    // No simdevice top-up: the only runs are the isolation proof's (HAR-67),
+    // the live push's (HAR-63) and the round trip's, one reading each.
     expect(stub!.topups).toEqual([]);
     const execs = result.lines.filter(line => /^\s+EXEC\s/.test(line));
-    expect(execs).toHaveLength(2);
+    expect(execs).toHaveLength(3);
     execs.forEach(line => expect(line).toMatch(/^\s+EXEC\s+simdevice --count 1\s/));
     expect(metric(result, 'history-total-before')).toEqual([
       `METRIC history-total-before ${VOLUME.target}`,
@@ -1750,7 +2074,12 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     };
     const lines: string[] = [];
     const result = await runAcceptance({
-      env: { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv() },
+      env: {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+      },
       write: line => lines.push(line),
       groups: [roundtripGroup, recorded],
     });
@@ -1774,7 +2103,12 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     const lines: string[] = [];
     let exitCode: number | null | undefined;
     const result = await runAcceptance({
-      env: { ACCEPTANCE_BASE_URL: stub.baseUrl, ACCEPTANCE_BEARER_TOKEN: TOKEN, ...simEnv('hang') },
+      env: {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv('hang'),
+      },
       write: line => lines.push(line),
       groups: [
         {

@@ -39,6 +39,17 @@ proof the ticket adds. You can also run it by hand, as below.
 |                                     | `GET /recipes/{id}` for the new recipe                                                                                                                                                 | `200`; the patched description reads back                                                                                                                                                                      |
 |                                     | `DELETE /recipes/{id}` for the new recipe                                                                                                                                              | `204`                                                                                                                                                                                                          |
 |                                     | `GET /recipes/{id}` for the deleted recipe                                                                                                                                             | `404` with `error: RECIPE_NOT_FOUND`                                                                                                                                                                           |
+| `signalr-isolation.proof.ts`        | `POST /devices` registering the simulated device to the owner, as `signalr-live-temperature.proof.ts` does                                                                             | `201`, or `409 DEVICE_CONFLICT` then `GET /devices/{id}` `200`                                                                                                                                                 |
+|                                     | `POST /negotiate` as the owner, then a client with handlers on `temperature`, `cook_started` and `cook_stopped`                                                                        | `200`; `start()` resolves within 30 s and the connection is `Connected`                                                                                                                                        |
+|                                     | `POST /negotiate?deviceId=<simulated device>` as the peer (the query must be ignored), then a client with the same handlers; every invocation it receives, on any target, is recorded  | `200`; the peer's client connects                                                                                                                                                                              |
+|                                     | `GET /temperatures/current/<simulated device>` as the peer                                                                                                                             | `404` with `error: DEVICE_NOT_FOUND`                                                                                                                                                                           |
+|                                     | `POST /cooks` with a new UUID `id` on the simulated device, as the peer                                                                                                                | `403` with `error: DEVICE_NOT_OWNED`                                                                                                                                                                           |
+|                                     | `simdevice --count 1`                                                                                                                                                                  | exit `0` and exactly one JSON line on stdout, with a `timestamp` and `sentAt`                                                                                                                                  |
+|                                     | wait up to 90 s for the sent reading on the owner's `temperature` (matched as in 7a), then a further 15 s                                                                              | the owner receives it; the peer has received **no message at all**, else it fails naming each target and count                                                                                                 |
+|                                     | `GET /cooks?deviceId=<simulated device>&status=active` as the owner, and `POST /cooks/{cookId}/stop` for each cook listed                                                              | `200`, then `2xx` per stop (an earlier run's cook is cleared, twin sync included)                                                                                                                              |
+|                                     | `POST /cooks` with a new UUID `id` on the simulated device, as the owner; wait up to 90 s for `cook_started` with that cook as `payload`                                               | `201`; `cook_started` reaches the owner; prints `METRIC signalr-cook-event-ms`                                                                                                                                 |
+|                                     | `POST /cooks/{cookId}/stop` as the owner; wait up to 90 s for `cook_stopped`, then a further 15 s                                                                                      | `2xx`; `cook_stopped` reaches the owner; the peer has still received nothing; prints `METRIC isolation-peer-messages` (must be `0`)                                                                            |
+|                                     | `stop()` on both connections                                                                                                                                                           | both are `Disconnected`. A failure at any earlier step stops both connections before it is reported                                                                                                            |
 | `signalr-live-temperature.proof.ts` | `POST /devices` registering the simulated device, as `telemetry-roundtrip.proof.ts` does                                                                                               | `201`, or `409 DEVICE_CONFLICT` then `GET /devices/{id}` `200`                                                                                                                                                 |
 |                                     | `POST /negotiate` (after the registration), then a `@microsoft/signalr` client with a handler on target `temperature` opens the `url` with `accessTokenFactory`                        | `200`; `start()` resolves within 30 s and the connection is `Connected`                                                                                                                                        |
 |                                     | `simdevice --count 1` (one reading through IoT Hub, as the simulated device); the wall-clock time just before it starts is kept                                                        | exit `0` and exactly one JSON line on stdout, with a `timestamp` and `sentAt`                                                                                                                                  |
@@ -157,6 +168,22 @@ having registered the device to the caller.
   few round-trip readings since. `METRIC history-max-page-readings` says which
   it was.
 
+`signalr-isolation.proof.ts` (HAR-67, goal HAR-55 items 5 and 7b) proves a
+caller who does not own the simulated device receives nothing from it over
+SignalR. The owner is the run's caller; the peer is the zero-role acceptance
+peer (`ACCEPTANCE_PEER_BEARER_TOKEN`), which a proof sends as with
+`api.request({ ..., as: 'peer' })`. The peer's `POST /negotiate` carries
+`?deviceId=<simulated device>`, which negotiate must ignore: it adds a caller
+only to the groups of devices it owns. The peer's connection records every
+invocation at the protocol, before dispatch, so a message on a target nobody
+handles still counts as a leak. Silence is judged after a 15 s grace once the
+owner has received the same event, so a late leak is not missed. A leak fails
+the proof with the target(s) and counts the peer received; it is reported, not
+fixed, here. The cook runs on the simulated device itself, so the proof first
+stops any cook an earlier run left active on it (`POST /cooks` would be `409
+COOK_ALREADY_ACTIVE`); stops and starts sync the device twin (HAR-66). Two
+connections are open while it runs (dev SignalR `Free_F1` allows 20).
+
 `signalr-live-temperature.proof.ts` (HAR-63, goal HAR-55 item 7a) proves a
 live reading reaches its owner by push: simdevice → IoT Hub →
 `temperature-data` Event Hub → `broadcastTemperature` → SignalR group
@@ -237,6 +264,8 @@ PASS telemetry round-trip › GET /temperatures/current/{deviceId} returns the s
 | `history-ru-max-page`       | `telemetry-volume.proof.ts`         | RU of `limit=5000` with `startTime` 12 h ago                                                                                                                                                                                          |
 | `history-max-page-readings` | `telemetry-volume.proof.ts`         | how many readings that max page returned                                                                                                                                                                                              |
 | `signalr-delivery-ms`       | `signalr-live-temperature.proof.ts` | ms from just before `simdevice --count 1` starts to the client receiving the reading on target `temperature`. Includes simdevice's start-up and IoT Hub connect, so it overstates hub-to-client delivery by about the `EXEC` duration |
+| `isolation-peer-messages`   | `signalr-isolation.proof.ts`        | messages the peer received on any target, by the end of the 15 s grace after `cook_stopped` (or by the failing check). The proof fails unless it is `0`                                                                               |
+| `signalr-cook-event-ms`     | `signalr-isolation.proof.ts`        | ms from just before the owner's `POST /cooks` to the owner's client receiving `cook_started` for that cook                                                                                                                            |
 
 There are no thresholds on them; the numbers are the deliverable. The CI job copies every line starting with
 `METRIC ` into the run summary. Proofs print one with `api.metric(name, value)`.
@@ -247,21 +276,22 @@ simdevice was the last thing it ran). Secrets are never printed: the suite logs
 no request or response headers or bodies (only a bare upper-case `error` code
 from an error body), never prints simdevice's stdout or stderr raw (stdout is
 parsed as JSON lines; of stderr only the first line is reported, on failure),
-and masks in every line, as a second guard, the bearer token, the
+and masks in every line, as a second guard, both bearer tokens, the
 `SIMDEVICE_CONNECTION_STRING` value, and its `SharedAccessKey` value.
 
 ## Running it locally against dev
 
-The suite takes five inputs, all from the environment. If any is missing it
+The suite takes six inputs, all from the environment. If any is missing it
 fails at once and names the variable; it never skips silently.
 
-| Variable                      | Value                                                                                                  |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `ACCEPTANCE_BASE_URL`         | The API root, including `/api`, e.g. `https://<function-app-host>/api`                                 |
-| `ACCEPTANCE_BEARER_TOKEN`     | An Entra access token for the API audience                                                             |
-| `SIMDEVICE_CONNECTION_STRING` | The simulated device's IoT Hub connection string. Only the runner reads it; simdevice inherits it      |
-| `ACCEPTANCE_SIM_DEVICE_ID`    | The simulated device's id, `meatgeek-dev-simulated-smoker` in dev                                      |
-| `ACCEPTANCE_SIMDEVICE_BIN`    | Path to the built `simdevice` binary, e.g. `$PWD/apps/data-pusher/dist/simdevice` (absolute is safest) |
+| Variable                       | Value                                                                                                  |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `ACCEPTANCE_BASE_URL`          | The API root, including `/api`, e.g. `https://<function-app-host>/api`                                 |
+| `ACCEPTANCE_BEARER_TOKEN`      | An Entra access token for the API audience                                                             |
+| `ACCEPTANCE_PEER_BEARER_TOKEN` | A token for the same audience as a second caller who owns no devices (HAR-67)                          |
+| `SIMDEVICE_CONNECTION_STRING`  | The simulated device's IoT Hub connection string. Only the runner reads it; simdevice inherits it      |
+| `ACCEPTANCE_SIM_DEVICE_ID`     | The simulated device's id, `meatgeek-dev-simulated-smoker` in dev                                      |
+| `ACCEPTANCE_SIMDEVICE_BIN`     | Path to the built `simdevice` binary, e.g. `$PWD/apps/data-pusher/dist/simdevice` (absolute is safest) |
 
 ```bash
 az login   # once, as a user the dev tenant knows
@@ -271,6 +301,14 @@ HOST=$(az functionapp list -g meatgeek-v2-dev-rg --query '[0].defaultHostName' -
 
 export ACCEPTANCE_BASE_URL="https://${HOST}/api"
 export ACCEPTANCE_BEARER_TOKEN=$(az account get-access-token \
+  --scope api://348570b2-44e5-41a6-ad15-2a7032366130/access_as_user \
+  --query accessToken -o tsv)
+
+# The isolation proof's second caller: a different user, signed in from its own
+# az config directory so your own login is untouched. It must own no devices.
+AZURE_CONFIG_DIR="$HOME/.azure-acceptance-peer" az login   # once, as the second user
+export ACCEPTANCE_PEER_BEARER_TOKEN=$(AZURE_CONFIG_DIR="$HOME/.azure-acceptance-peer" \
+  az account get-access-token \
   --scope api://348570b2-44e5-41a6-ad15-2a7032366130/access_as_user \
   --query accessToken -o tsv)
 
@@ -316,8 +354,7 @@ service principal's partition. The same step also signs in, from a separate
 the `development` environment, set by bootstrap, HAR-61) and hands the suite a
 second masked app-only token as `ACCEPTANCE_PEER_BEARER_TOKEN`, after checking
 that its `appid`/`azp` claim is the peer's and not app-publish's (HAR-65). The
-suite does not require that variable yet, so it is not in the table above; the
-HAR-55 cross-user proof will add it. The same job builds simdevice, ensures the
+isolation proof (HAR-67) sends as it. The same job builds simdevice, ensures the
 simulated device exists and hands the suite its masked connection string (see
 [CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)). The proof results and the RU-per-route table
 also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
