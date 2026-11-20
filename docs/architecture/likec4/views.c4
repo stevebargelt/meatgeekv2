@@ -126,7 +126,7 @@ views {
     title 'Flow: one temperature reading'
     description '''
       Today. Both paths are live. Storage: IoT Hub's `cosmos-storage-route` writes Cosmos.
-      Push: Event Hub, then `broadcastTemperature`, then the SignalR group `device-{id}`.
+      Push: Event Hub, then `broadcastTemperature`, then SignalR, addressed to the device owner.
       No app negotiates or connects to SignalR yet, so the flow stops at SignalR; the only live
       client is the acceptance proofs (`signalr negotiate`, `signalr live temperature`,
       `signalr isolation`). Measured send-to-client delay: `METRIC signalr-delivery-ms` 18424
@@ -170,10 +170,10 @@ views {
     meatgeek.cloud.ingest.eventhub -> meatgeek.cloud.api.broadcast 'Event Hub trigger, consumer group api-broadcast' {
       notes '**Live.** `broadcastTemperature` (HAR-60), `cardinality: many`, identity-based. The device is the hub-stamped `iothub-connection-device-id`; the reading is mapped by `toTemperatureReading`, as `GET /temperatures/current` does, plus `enqueuedTimeUtc`.'
     }
-    meatgeek.cloud.api.broadcast -> meatgeek.cloud.realtime 'each reading to device-{id}' {
+    meatgeek.cloud.api.broadcast -> meatgeek.cloud.realtime 'each reading to its owner' {
       notes '''
-        **Live.** SignalR output binding, target `temperature`, hub `temperatureHub`. `negotiate`
-        puts a user in `device-{id}` for each device it owns. No app connects yet; the
+        **Live.** SignalR output binding, target `temperature`, hub `temperatureHub`, `userId` =
+        the device owner, read once per device per batch (HAR-81). No app connects yet; the
         acceptance proofs are the only live client (`signalr live temperature` measured
         `signalr-delivery-ms` 18424, run 44673261258).
       '''

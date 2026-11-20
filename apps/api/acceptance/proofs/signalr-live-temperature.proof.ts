@@ -23,14 +23,16 @@ import { isDate, registerSimulatedDevice, sameInstant, sendOneReading } from '..
  * HAR-63 (goal HAR-55, item 7a) — a reading the simulated device sends reaches
  * its owner's SignalR client by push, and the run records how long that took.
  * The path: simdevice → IoT Hub → `temperature-data` Event Hub →
- * `broadcastTemperature` (HAR-60) → SignalR group `device-{deviceId}`, which
- * `POST /negotiate` (HAR-57, HAR-59) put the caller in.
+ * `broadcastTemperature` (HAR-60) → SignalR, addressed to the userId stored as
+ * the device's owner (HAR-81), which is the caller's userId the token from
+ * `POST /negotiate` (HAR-57, HAR-59) is minted for.
  *
  *   1. the simulated device is registered to the caller (as the telemetry
- *      round trip does): ownership is what puts the caller in its group;
- *   2. `POST /negotiate` answers 200, after the registration, so the groups it
- *      adds include the device; a `@microsoft/signalr` client with a handler on
- *      target `temperature` connects with the url and token (`start()`);
+ *      round trip does): ownership is what makes `broadcastTemperature`
+ *      address the reading to the caller;
+ *   2. `POST /negotiate` answers 200 with no request charge (it reads no
+ *      devices); a `@microsoft/signalr` client with a handler on target
+ *      `temperature` connects with the url and token (`start()`);
  *   3. `simdevice --count 1` sends one reading; the wall-clock time just before
  *      the send is kept;
  *   4. the client receives, within 90 s, a `temperature` message for the device
@@ -126,7 +128,12 @@ export default defineProofs('signalr live temperature', () => {
         if (!registered) {
           throw new Error('the simulated device was not registered by an earlier proof');
         }
-        const response = await api.request<NegotiateBody>({ method: 'POST', path: '/negotiate' });
+        // HAR-81: negotiate reads no devices, so it reports no request charge.
+        const response = await api.request<NegotiateBody>({
+          method: 'POST',
+          path: '/negotiate',
+          expectRequestCharge: false,
+        });
         api.check(
           response,
           response.status === 200,

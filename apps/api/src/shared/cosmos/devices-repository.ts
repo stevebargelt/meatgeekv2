@@ -256,6 +256,23 @@ export class DevicesRepository {
   }
 
   /**
+   * HAR-81: the owner of `deviceId`, from one point read, with no caller to
+   * compare against. `undefined` when no device has that id (or the stored
+   * document has no owner). The live-reading push uses it to address each
+   * reading to its owner's SignalR user.
+   */
+  async getDeviceOwner(
+    deviceId: string
+  ): Promise<{ readonly userId: string | undefined; readonly requestCharge: number }> {
+    const { document, requestCharge } = await this.readDocument(deviceId);
+    const userId =
+      typeof document?.userId === 'string' && document.userId.length > 0
+        ? document.userId
+        : undefined;
+    return { userId, requestCharge };
+  }
+
+  /**
    * Every device `userId` owns: `SELECT * FROM c WHERE c.userId = @userId`,
    * cross-partition by design (see the file header), sorted by name.
    */

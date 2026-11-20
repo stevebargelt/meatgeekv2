@@ -162,6 +162,39 @@ describe('DevicesRepository.getDeviceOwnership', () => {
   });
 });
 
+describe('DevicesRepository.getDeviceOwner (HAR-81)', () => {
+  it('is the stored userId, from one point read keyed on the device id', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device({ userId: STRANGER }));
+
+    expect(await repository.getDeviceOwner('grill-1')).toEqual({
+      userId: STRANGER,
+      requestCharge: READ_CHARGE,
+    });
+    expect(fake.calls).toEqual([{ operation: 'read', id: 'grill-1', partitionKey: 'grill-1' }]);
+  });
+
+  it('is undefined when there is no such device', async () => {
+    const { repository } = setup();
+    expect(await repository.getDeviceOwner('nope')).toEqual({
+      userId: undefined,
+      requestCharge: READ_CHARGE,
+    });
+  });
+
+  it('is undefined without a read when the id could never be a device id', async () => {
+    const { fake, repository } = setup();
+    expect(await repository.getDeviceOwner('a/b')).toEqual({ userId: undefined, requestCharge: 0 });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('propagates a Cosmos failure other than 404', async () => {
+    const { fake, repository } = setup();
+    fake.failNext('read', 503);
+    await expect(repository.getDeviceOwner('grill-1')).rejects.toMatchObject({ statusCode: 503 });
+  });
+});
+
 describe('DevicesRepository.listDevicesByOwner', () => {
   it('runs the one owner query, cross-partition (no partitionKey), sorted by name', async () => {
     const { fake, repository } = setup();

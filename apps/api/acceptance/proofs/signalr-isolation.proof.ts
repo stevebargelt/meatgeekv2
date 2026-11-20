@@ -34,10 +34,10 @@ import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/tel
  * zero-role acceptance peer (HAR-61), sent as with `request({ as: 'peer' })`.
  *
  * What keeps the peer out, all on `main` already: `POST /negotiate` mints the
- * token for the caller's own userId and adds that user only to the
- * `device-{id}` groups of devices it owns, ignoring any query (HAR-57, HAR-59);
- * `broadcastTemperature` sends a reading only to `device-{deviceId}` (HAR-60);
- * `cook_started` / `cook_stopped` go to the cook owner's userId (HAR-57).
+ * token for the caller's own userId, ignoring any query (HAR-57, HAR-59);
+ * `broadcastTemperature` sends a reading only to the device owner's userId
+ * (HAR-60, HAR-81); `cook_started` / `cook_stopped` go to the cook owner's
+ * userId (HAR-57).
  *
  *   1. the simulated device is registered to the owner (as proof 7a does);
  *   2. the owner negotiates and connects, with handlers on `temperature`,
@@ -159,6 +159,8 @@ export default defineProofs('signalr isolation', () => {
       method: 'POST',
       path: `/negotiate${query}`,
       as: who,
+      // HAR-81: negotiate reads no devices, so it reports no request charge.
+      expectRequestCharge: false,
     });
     api.check(
       response,

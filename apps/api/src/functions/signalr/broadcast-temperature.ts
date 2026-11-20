@@ -1,8 +1,13 @@
 import type { InvocationContext } from '@azure/functions';
 
+import { getDevicesRepository } from '../../shared/cosmos/devices-repository';
 import { toTemperatureReading } from '../../shared/cosmos/temperatures-repository';
-import { deviceGroup } from '../../shared/signalr/signalr-management';
-import { signalROutput, SignalRGroupMessage, TEMPERATURE } from './envelope';
+import {
+  LiveTemperaturePayload,
+  signalROutput,
+  SignalRTemperatureMessage,
+  TEMPERATURE,
+} from './envelope';
 
 /**
  * HAR-60 — the live-reading producer.
@@ -11,9 +16,23 @@ import { signalROutput, SignalRGroupMessage, TEMPERATURE } from './envelope';
  * (`eventhub-realtime-route` in apps/infrastructure/modules/iot-hub/main.tf).
  * This Event Hub trigger reads it on the API's own consumer group
  * (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`, "api-broadcast") and pushes each
- * reading to its device's SignalR group, `device-{deviceId}`. negotiate (HAR-57)
- * puts each user in the groups of the devices they own, so a reading reaches
- * only its device's owner.
+ * reading to its device's owner: the message's `userId` is the `userId` stored
+ * on the device, so only that owner's connections receive it, the same way cook
+ * events reach their owner.
+ *
+ * OWNER LOOKUP (HAR-81). Each distinct device in a batch costs one point read of
+ * the devices container (partition key = device id), so a change of owner takes
+ * effect at the next reading. Before HAR-81 the reading went to a
+ * `device-{deviceId}` group, and negotiate added the caller to one group per
+ * device it owned: one SignalR REST call per device on every negotiate. With 98
+ * devices, two negotiates in a row sent about 200 calls in under 2 s, and the
+ * Free_F1 service throttled the whole instance with 429s. Addressing the user
+ * needs no group membership, so negotiate makes no REST call but the token.
+ *
+ * A device with no stored owner (not registered) is not pushed and is counted
+ * as `unowned`. A failed owner read drops that device's readings from this
+ * batch's push and is counted as `lookupFailed`; the readings are still stored
+ * by the IoT Hub route, and the next batch reads the owner again.
  *
  * TRUST RULE (MG-73). The device is the hub-stamped
  * `iothub-connection-device-id` system property, never `Body.deviceId`. Each
@@ -84,12 +103,18 @@ function storedEnqueuedTime(value: unknown): unknown {
   return value instanceof Date ? toIsoString(value) : value;
 }
 
-/** One batch element as a SignalR group message, or `null` to skip it. */
-function toGroupMessage(
+/** A valid batch element: its device and the payload to push. */
+interface LiveReading {
+  readonly deviceId: string;
+  readonly payload: LiveTemperaturePayload;
+}
+
+/** One batch element as a live reading, or `null` to skip it. */
+function toLiveReading(
   body: unknown,
   systemProperties: unknown,
   enqueuedTimeUtc: unknown
-): SignalRGroupMessage | null {
+): LiveReading | null {
   if (!isJsonObject(systemProperties)) {
     return null;
   }
@@ -115,15 +140,40 @@ function toGroupMessage(
   if (enqueued === undefined) {
     return null;
   }
-  return {
-    target: TEMPERATURE,
-    groupName: deviceGroup(deviceId),
-    arguments: [{ ...reading, enqueuedTimeUtc: enqueued }],
-  };
+  return { deviceId, payload: { ...reading, enqueuedTimeUtc: enqueued } };
 }
 
 function arrayOrEmpty(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+/** Injection seam: production reads owners from the devices container; tests
+ *  pass a fake. Called once per distinct device in a batch. */
+export interface BroadcastTemperatureDeps {
+  ownerOf(deviceId: string): Promise<string | undefined>;
+}
+
+export const defaultBroadcastTemperatureDeps: BroadcastTemperatureDeps = {
+  ownerOf: async deviceId => (await getDevicesRepository().getDeviceOwner(deviceId)).userId,
+};
+
+/** Each distinct device's owner: a string, `undefined` (no owner), or `null`
+ *  when the read failed. Reads run in parallel and never throw. */
+async function resolveOwners(
+  deviceIds: Iterable<string>,
+  deps: BroadcastTemperatureDeps
+): Promise<Map<string, string | undefined | null>> {
+  const ids = [...new Set(deviceIds)];
+  const owners = await Promise.all(
+    ids.map(async id => {
+      try {
+        return await deps.ownerOf(id);
+      } catch {
+        return null;
+      }
+    })
+  );
+  return new Map(ids.map((id, index) => [id, owners[index]]));
 }
 
 /**
@@ -133,29 +183,51 @@ function arrayOrEmpty(value: unknown): unknown[] {
  */
 export async function broadcastTemperatureHandler(
   events: unknown,
-  context: InvocationContext
+  context: InvocationContext,
+  deps: BroadcastTemperatureDeps = defaultBroadcastTemperatureDeps
 ): Promise<void> {
   const batch = arrayOrEmpty(events);
   const metadata = context.triggerMetadata ?? {};
   const systemPropertiesArray = arrayOrEmpty(metadata['systemPropertiesArray']);
   const enqueuedTimeUtcArray = arrayOrEmpty(metadata['enqueuedTimeUtcArray']);
 
-  const messages: SignalRGroupMessage[] = [];
+  const readings: LiveReading[] = [];
   let skipped = 0;
   batch.forEach((body, index) => {
-    let message: SignalRGroupMessage | null = null;
+    let reading: LiveReading | null = null;
     try {
-      message = toGroupMessage(body, systemPropertiesArray[index], enqueuedTimeUtcArray[index]);
+      reading = toLiveReading(body, systemPropertiesArray[index], enqueuedTimeUtcArray[index]);
     } catch {
-      message = null;
+      reading = null;
     }
-    if (message) {
-      messages.push(message);
+    if (reading) {
+      readings.push(reading);
     } else {
       skipped += 1;
     }
   });
 
+  const owners = await resolveOwners(
+    readings.map(r => r.deviceId),
+    deps
+  );
+  const messages: SignalRTemperatureMessage[] = [];
+  let unowned = 0;
+  let lookupFailed = 0;
+  for (const { deviceId, payload } of readings) {
+    const owner = owners.get(deviceId);
+    if (owner === null) {
+      lookupFailed += 1;
+    } else if (owner === undefined) {
+      unowned += 1;
+    } else {
+      messages.push({ target: TEMPERATURE, userId: owner, arguments: [payload] });
+    }
+  }
+
   context.extraOutputs.set(signalROutput, messages);
-  context.log(`broadcastTemperature sent=${messages.length} skipped=${skipped}`);
+  context.log(
+    `broadcastTemperature sent=${messages.length} skipped=${skipped}` +
+      ` unowned=${unowned} lookupFailed=${lookupFailed}`
+  );
 }

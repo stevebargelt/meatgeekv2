@@ -7,7 +7,7 @@
 # These are NOT HTTP endpoints.
 #
 # The schemas describe exactly what the producers build:
-#   - temperature  : toGroupMessage in apps/api/src/functions/signalr/broadcast-temperature.ts
+#   - temperature  : broadcastTemperatureHandler in apps/api/src/functions/signalr/broadcast-temperature.ts
 #   - cook_started : buildCookEnvelope in apps/api/src/functions/signalr/envelope.ts
 #   - cook_stopped : buildCookEnvelope in apps/api/src/functions/signalr/envelope.ts
 # apps/api/src/contract/contract.spec.ts builds one of each with that code and
@@ -36,7 +36,7 @@ SignalRConnectionInfo:
       type: string
       description: |
         Client access token, valid for 60 minutes. Negotiate again for a new
-        one; negotiating also refreshes the caller's device groups.
+        one.
 
 CorrelationContext:
   type: object
@@ -54,9 +54,9 @@ CorrelationContext:
 TemperatureMessage:
   type: object
   description: |
-    SignalR target `temperature`. A live reading, sent to group
-    `device-{deviceId}`; negotiate puts each user in the groups of the devices
-    they own, so it reaches the device's owner. The fields are exactly a
+    SignalR target `temperature`. A live reading, sent to the SignalR user id
+    stored as the device's owner, so it reaches that owner's connections only
+    (HAR-81). A reading from a device with no owner is not sent. The fields are exactly a
     TemperatureReading (what GET /temperatures/current would return for the
     same IoT Hub message) plus `enqueuedTimeUtc`. Events that cannot be mapped
     to a reading are dropped, not sent.

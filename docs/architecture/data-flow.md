@@ -123,20 +123,19 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 
 ### 4. Real-time Path Details
 
-**On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's SignalR group through the SignalR output binding on `temperatureHub`. The client apps that receive it are not built yet, and there is no `cook-{cookId}` group.
+**On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's owner through the SignalR output binding on `temperatureHub`, addressed by `userId` (HAR-81). The client apps that receive it are not built yet. No message goes to a SignalR group.
 
 The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows this path, up to SignalR.
 
 **Measured live delay** (send to client, one dev sample, `signalr live temperature` proof): `METRIC signalr-delivery-ms 18424` (run 44673261258).
 
 **What is sent** (`apps/api/src/functions/signalr/broadcast-temperature.ts`):
-- One message per event: target `temperature`, group `device-{deviceId}`, one argument — the `TemperatureReading` plus `enqueuedTimeUtc` (the Event Hub enqueued time, ISO 8601).
+- One message per event: target `temperature`, `userId` = the `userId` stored on the device, one argument — the `TemperatureReading` plus `enqueuedTimeUtc` (the Event Hub enqueued time, ISO 8601).
+- The owner is read once per distinct device per batch (a point read on `devices`, partition key = device id), so a change of owner takes effect at the next reading. A device with no stored owner is not pushed (`unowned`); a failed owner read drops that device's readings from the batch's push (`lookupFailed`). The readings are stored either way.
 - The device is the hub-stamped `iothub-connection-device-id` system property, never `Body.deviceId`.
 - The reading is `toTemperatureReading` of the event shaped as the stored IoT Hub document, so it equals what `GET /temperatures/current` returns for the same message.
-- An event with no device id, a non-JSON body or no timestamp is skipped and counted, never thrown; each batch logs `broadcastTemperature sent=<n> skipped=<m>`.
-
-**SignalR Groups**:
-- `device-{deviceId}`: the device's owners. negotiate resets a user's groups to the devices they own; `registerDevice` adds the new owner.
+- An event with no device id, a non-JSON body or no timestamp is skipped and counted, never thrown; each batch logs `broadcastTemperature sent=<n> skipped=<m> unowned=<u> lookupFailed=<f>`.
+- `POST /negotiate` only mints a client token for the caller's `userId`; it reads no devices and manages no groups. Before HAR-81, readings went to `device-{deviceId}` groups that negotiate refilled on every call, one SignalR REST call per owned device, which tripped the Free_F1 service's throttling.
 
 ## Cook Session Management Flow
 
