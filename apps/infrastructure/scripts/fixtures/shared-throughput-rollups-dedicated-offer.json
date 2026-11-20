@@ -1,0 +1,376 @@
+{
+  "containers": [
+    {
+      "definition": {
+        "id": "cooks",
+        "resource": {
+          "_etag": "\"cooks-dst\"",
+          "_rid": "cooksDST==",
+          "_self": "dbs/shared/colls/cooks/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "defaultTtl": -1,
+          "id": "cooks",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/id"
+            ],
+            "version": 2
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "cooks",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
+    },
+    {
+      "definition": {
+        "id": "users",
+        "resource": {
+          "_etag": "\"users-dst\"",
+          "_rid": "usersDST==",
+          "_self": "dbs/shared/colls/users/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "defaultTtl": -1,
+          "id": "users",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/id"
+            ],
+            "version": 2
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": [
+              {
+                "paths": [
+                  "/email"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "name": "users",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
+    },
+    {
+      "definition": {
+        "id": "recipes",
+        "resource": {
+          "_etag": "\"recipes-dst\"",
+          "_rid": "recipesDST==",
+          "_self": "dbs/shared/colls/recipes/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "defaultTtl": -1,
+          "id": "recipes",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/id"
+            ],
+            "version": 2
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "recipes",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
+    },
+    {
+      "definition": {
+        "id": "temperatures",
+        "resource": {
+          "_etag": "\"temperatures-dst\"",
+          "_rid": "temperaturesDST==",
+          "_self": "dbs/shared/colls/temperatures/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "defaultTtl": 7776000,
+          "id": "temperatures",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [
+              [
+                {
+                  "order": "ascending",
+                  "path": "/deviceId"
+                },
+                {
+                  "order": "descending",
+                  "path": "/timestamp"
+                }
+              ]
+            ],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/deviceId"
+            ],
+            "version": 2
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "temperatures",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
+    },
+    {
+      "definition": {
+        "id": "devices",
+        "resource": {
+          "_etag": "\"devices-dst\"",
+          "_rid": "devicesDST==",
+          "_self": "dbs/shared/colls/devices/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "defaultTtl": -1,
+          "id": "devices",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/id"
+            ],
+            "version": 2
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "devices",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
+    },
+    {
+      "definition": {
+        "id": "temperature-rollups",
+        "resource": {
+          "_etag": "\"temperature-rollups-dst\"",
+          "_rid": "temperatureRollupsDST==",
+          "_self": "dbs/shared/colls/temperature-rollups/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "id": "temperature-rollups",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/*"
+              },
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/deviceId/?"
+              },
+              {
+                "path": "/hourStart/?"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/deviceId"
+            ],
+            "version": 1
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "temperature-rollups",
+      "throughputProbe": {
+        "offerFound": true,
+        "queryOk": true
+      }
+    },
+    {
+      "definition": {
+        "id": "leases",
+        "resource": {
+          "_etag": "\"leases-dst\"",
+          "_rid": "leasesDST==",
+          "_self": "dbs/shared/colls/leases/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "id": "leases",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/id"
+            ],
+            "version": 1
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "leases",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
+    }
+  ],
+  "database": {
+    "name": "meatgeek-v2-dev-shared-db",
+    "offerProbe": {
+      "document": {
+        "id": "meatgeek-v2-dev-shared-db",
+        "resource": {
+          "_rid": "sharedDBOffer==",
+          "minimumThroughput": "400",
+          "throughput": 400
+        }
+      },
+      "offerFound": true,
+      "queryOk": true
+    }
+  }
+}

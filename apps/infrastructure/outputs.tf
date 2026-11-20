@@ -59,6 +59,18 @@ output "destination_database_name" {
   value       = module.cosmos_db.destination_database_name
 }
 
+# HAR-74 cook chart read-model containers (non-secret names). Published so the
+# apply run's plan output shows both, and so a later API issue can read them back.
+output "temperature_rollups_container_name" {
+  description = "Name of the Cosmos container holding per-device, per-hour temperature rollups for the cook chart (non-secret)"
+  value       = module.cosmos_db.destination_container_names.temperature_rollups
+}
+
+output "leases_container_name" {
+  description = "Name of the Cosmos lease container for the Functions change-feed trigger (non-secret)"
+  value       = module.cosmos_db.destination_container_names.leases
+}
+
 # Azure Functions Outputs
 output "function_app_name" {
   description = "Name of the Azure Function App"

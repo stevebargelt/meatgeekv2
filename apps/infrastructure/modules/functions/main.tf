@@ -195,6 +195,12 @@ locals {
     "COSMOSDB_USERS_CONTAINER_NAME"        = var.users_container_name
     "COSMOSDB_RECIPES_CONTAINER_NAME"      = var.recipes_container_name
 
+    # The cook chart read model (HAR-74): the per-device, per-hour rollup
+    # container, and the lease container the Cosmos DB change-feed trigger uses
+    # under the managed identity. Same sourcing as the five above.
+    "COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME" = var.temperature_rollups_container_name
+    "COSMOSDB_LEASES_CONTAINER_NAME"              = var.leases_container_name
+
     # IoT telemetry (Event Hubs-compatible) — identity-based. The fully-qualified
     # namespace is non-secret; the identity is granted Azure Event Hubs Data
     # Receiver in the root module.

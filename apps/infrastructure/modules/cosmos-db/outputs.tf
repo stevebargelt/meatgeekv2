@@ -58,7 +58,7 @@ output "destination_database_name" {
 }
 
 output "destination_database_throughput" {
-  description = "Database-level shared throughput (RU/s) on the destination database — the single 400 RU/s offer the five destination containers share"
+  description = "Database-level shared throughput (RU/s) on the destination database — the single 400 RU/s offer every destination container shares"
   value       = azurerm_cosmosdb_sql_database.meatgeek_shared.throughput
 }
 
@@ -70,28 +70,36 @@ output "destination_container_names" {
     cooks        = azurerm_cosmosdb_sql_container.cooks_shared.name
     users        = azurerm_cosmosdb_sql_container.users_shared.name
     recipes      = azurerm_cosmosdb_sql_container.recipes_shared.name
+    # HAR-74 cook chart read model. Published to the Function App as
+    # COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME / COSMOSDB_LEASES_CONTAINER_NAME.
+    temperature_rollups = azurerm_cosmosdb_sql_container.temperature_rollups_shared.name
+    leases              = azurerm_cosmosdb_sql_container.leases_shared.name
   }
 }
 
 output "destination_container_ids" {
   description = "Resource IDs of the containers under the MG-53 shared-throughput destination database (UNWIRED). As with container_ids above, reference the id (not a bare resource address) in any future replace_triggered_by."
   value = {
-    devices      = azurerm_cosmosdb_sql_container.devices_shared.id
-    temperatures = azurerm_cosmosdb_sql_container.temperatures_shared.id
-    cooks        = azurerm_cosmosdb_sql_container.cooks_shared.id
-    users        = azurerm_cosmosdb_sql_container.users_shared.id
-    recipes      = azurerm_cosmosdb_sql_container.recipes_shared.id
+    devices             = azurerm_cosmosdb_sql_container.devices_shared.id
+    temperatures        = azurerm_cosmosdb_sql_container.temperatures_shared.id
+    cooks               = azurerm_cosmosdb_sql_container.cooks_shared.id
+    users               = azurerm_cosmosdb_sql_container.users_shared.id
+    recipes             = azurerm_cosmosdb_sql_container.recipes_shared.id
+    temperature_rollups = azurerm_cosmosdb_sql_container.temperature_rollups_shared.id
+    leases              = azurerm_cosmosdb_sql_container.leases_shared.id
   }
 }
 
 output "destination_partition_keys" {
   description = "Partition key paths for each destination container. temperatures MUST be /deviceId to match the IoT Hub Cosmos endpoint's authenticated partition identity (MG-73)."
   value = {
-    devices      = "/id"
-    temperatures = "/deviceId"
-    cooks        = "/userId"
-    users        = "/id"
-    recipes      = "/userId"
+    devices             = "/id"
+    temperatures        = "/deviceId"
+    cooks               = "/userId"
+    users               = "/id"
+    recipes             = "/userId"
+    temperature_rollups = "/deviceId"
+    leases              = "/id"
   }
 }
 

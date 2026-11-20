@@ -5,7 +5,7 @@
 #
 # WHAT THIS FILE DOES NOT DO — read before trusting it as the regression guard.
 # It does NOT prove that replacing azurerm_cosmosdb_account.main plans the SQL
-# database and its five containers for replacement. That property is a state
+# database and its seven containers for replacement. That property is a state
 # DIFF: a resource can only be "replaced" relative to a prior state. A
 # `terraform test` run block with `command = plan` always starts from EMPTY
 # state, and static check 15 forbids `command = apply` because the PR gate is
@@ -41,10 +41,10 @@
 #
 # What this file DOES pin is the premise the fix rests on. Each child reaches its
 # parent through the parent's CONFIGURED `name` (`account_name` on the database
-# and on all five containers; `database_name` on the five containers), and every
+# and on all seven containers; `database_name` on the seven containers), and every
 # one of those names is a pure function of input variables — a static literal,
 # identical before and after a replacement. That is exactly why those references
-# propagate ORDERING but not REPLACEMENT, and therefore why each of the six
+# propagate ORDERING but not REPLACEMENT, and therefore why each of the eight
 # children needs its own `replace_triggered_by` lifecycle block in main.tf.
 # (Arguments are named rather than line numbers, which rot — an earlier revision
 # of this preamble cited six line numbers and every one of them was already
@@ -91,7 +91,7 @@
 #
 # The database is the same shape one level down, latent rather than live: it has
 # no in-place-updatable argument today, but the moment anyone adds `throughput`
-# or `autoscale_settings` to it a bare trigger would recreate all five containers
+# or `autoscale_settings` to it a bare trigger would recreate all seven containers
 # on a throughput tweak. Its trigger must be `.id` for that reason too, not only
 # for symmetry.
 #
@@ -199,7 +199,7 @@ run "parent_names_are_configured_values_that_survive_replacement" {
 # place, driven by values a maintainer would plausibly change. It does, and this
 # run block pins that: the three assertions below are the concrete edits that a
 # bare trigger would have turned into destroy-and-recreate of the SQL database and
-# all five containers.
+# all seven containers.
 #
 # The run-level variables deliberately differ from the module defaults, so each
 # assertion demonstrates the value FLOWING from a variable into the account rather
@@ -215,12 +215,12 @@ run "account_carries_in_place_updatable_arguments" {
 
   assert {
     condition     = azurerm_cosmosdb_account.main.tags == var.tags
-    error_message = "The account's tags must be var.tags unchanged. Tags are updated IN PLACE by Azure, so this is the cheapest, most routine edit anyone can make to this account — and under a bare whole-resource replace_triggered_by it would have destroyed and recreated the SQL database and all five containers, losing every stored document. This assertion is why the lifecycle blocks in main.tf name azurerm_cosmosdb_account.main.id and not azurerm_cosmosdb_account.main"
+    error_message = "The account's tags must be var.tags unchanged. Tags are updated IN PLACE by Azure, so this is the cheapest, most routine edit anyone can make to this account — and under a bare whole-resource replace_triggered_by it would have destroyed and recreated the SQL database and all seven containers, losing every stored document. This assertion is why the lifecycle blocks in main.tf name azurerm_cosmosdb_account.main.id and not azurerm_cosmosdb_account.main"
   }
 
   assert {
     condition     = one(azurerm_cosmosdb_account.main.consistency_policy).consistency_level == var.consistency_level
-    error_message = "consistency_policy.consistency_level must track var.consistency_level. It is an in-place update on Azure, not a force-new: tuning consistency is a normal operational change, and a bare whole-resource trigger would have made it a data-loss event for the database and all five containers. The account's `.id` is untouched by this edit, which is precisely why the attribute-form trigger does not fire on it"
+    error_message = "consistency_policy.consistency_level must track var.consistency_level. It is an in-place update on Azure, not a force-new: tuning consistency is a normal operational change, and a bare whole-resource trigger would have made it a data-loss event for the database and all seven containers. The account's `.id` is untouched by this edit, which is precisely why the attribute-form trigger does not fire on it"
   }
 
   assert {
@@ -241,7 +241,7 @@ run "database_reaches_its_account_through_the_accounts_configured_name" {
   }
 }
 
-# THE THIRD SHAPE, asserted because no static scan sees it. Every one of the six
+# THE THIRD SHAPE, asserted because no static scan sees it. Every one of the eight
 # children also reaches azurerm_cosmosdb_account.main through the account's
 # CONFIGURED `resource_group_name` attribute. It is a reference to the ACCOUNT —
 # not to a resource group — and it is exactly as ordering-only as `account_name`,
@@ -257,7 +257,7 @@ run "children_reach_the_account_through_its_configured_resource_group_name" {
 
   assert {
     condition     = azurerm_cosmosdb_account.main.resource_group_name == var.resource_group_name
-    error_message = "The account's resource_group_name must be var.resource_group_name unchanged — a configured value. This is what makes the six children's `resource_group_name = azurerm_cosmosdb_account.main.resource_group_name` references ordering-only rather than replacement-carrying. Static check 18 cannot see this shape (the field is excluded by name AND the value's trailing attribute is not `.name`), so if it ever becomes computed this assertion is the only place that will notice"
+    error_message = "The account's resource_group_name must be var.resource_group_name unchanged — a configured value. This is what makes the eight children's `resource_group_name = azurerm_cosmosdb_account.main.resource_group_name` references ordering-only rather than replacement-carrying. Static check 18 cannot see this shape (the field is excluded by name AND the value's trailing attribute is not `.name`), so if it ever becomes computed this assertion is the only place that will notice"
   }
 
   assert {
@@ -272,12 +272,14 @@ run "children_reach_the_account_through_its_configured_resource_group_name" {
       azurerm_cosmosdb_sql_container.cooks_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
       azurerm_cosmosdb_sql_container.users_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
       azurerm_cosmosdb_sql_container.recipes_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.temperature_rollups_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
+      azurerm_cosmosdb_sql_container.leases_shared.resource_group_name == azurerm_cosmosdb_account.main.resource_group_name,
     ])
-    error_message = "All five destination containers reach azurerm_cosmosdb_account.main through the account's configured resource_group_name. If a container ever sourced its resource group from anywhere else — var.resource_group_name directly, or a different parent — it would stop being paired with the account through this attribute, and the enumeration in this file's preamble would be stale. That silent staleness is how MG-48 broke dev three times"
+    error_message = "All seven destination containers reach azurerm_cosmosdb_account.main through the account's configured resource_group_name. If a container ever sourced its resource group from anywhere else — var.resource_group_name directly, or a different parent — it would stop being paired with the account through this attribute, and the enumeration in this file's preamble would be stale. That silent staleness is how MG-48 broke dev three times"
   }
 }
 
-# All five destination containers reach the account AND the shared database by
+# All seven destination containers reach the account AND the shared database by
 # configured name. Each therefore needs replace_triggered_by naming BOTH parents'
 # ids: the account because Azure destroys the container with it, and the database
 # because a replaced database is a new, empty database that the old container is
@@ -334,5 +336,25 @@ run "containers_reach_their_parents_through_configured_names" {
   assert {
     condition     = azurerm_cosmosdb_sql_container.recipes_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
     error_message = "Container 'recipes_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.recipes_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by"
+  }
+
+  # --- temperature-rollups (HAR-74) ---
+  assert {
+    condition     = azurerm_cosmosdb_sql_container.temperature_rollups_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "Container 'temperature_rollups_shared' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.temperature_rollups_shared must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
+  }
+  assert {
+    condition     = azurerm_cosmosdb_sql_container.temperature_rollups_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
+    error_message = "Container 'temperature_rollups_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.temperature_rollups_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by"
+  }
+
+  # --- leases (HAR-74) ---
+  assert {
+    condition     = azurerm_cosmosdb_sql_container.leases_shared.account_name == azurerm_cosmosdb_account.main.name
+    error_message = "Container 'leases_shared' must reach the account through azurerm_cosmosdb_account.main.name — configured, unchanged by replacement, ordering only. azurerm_cosmosdb_sql_container.leases_shared must name azurerm_cosmosdb_account.main.id in replace_triggered_by"
+  }
+  assert {
+    condition     = azurerm_cosmosdb_sql_container.leases_shared.database_name == azurerm_cosmosdb_sql_database.meatgeek_shared.name
+    error_message = "Container 'leases_shared' must reach the database through azurerm_cosmosdb_sql_database.meatgeek_shared.name — a configured literal that survives the database's replacement, so azurerm_cosmosdb_sql_container.leases_shared must name azurerm_cosmosdb_sql_database.meatgeek_shared.id in replace_triggered_by"
   }
 }

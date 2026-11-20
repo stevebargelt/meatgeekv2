@@ -2,7 +2,7 @@
 #
 # assert-live-shared-throughput.sh — FAIL-CLOSED post-create assertion that the
 # MG-53 DESTINATION shared-throughput Cosmos database was materialised exactly as
-# intended: a SINGLE 400 RU/s offer at the DATABASE level, five containers that
+# intended: a SINGLE 400 RU/s offer at the DATABASE level, seven containers that
 # hold NO dedicated offer of their own, and the temperatures container partitioned
 # on /deviceId. It asserts the acceptance of MG-53 against LIVE Azure read-backs, in
 # the same fail-closed style as scripts/assert-live-host-storage.sh (MG-58).
@@ -42,8 +42,9 @@
 #       a shared-throughput offer (from `az cosmosdb sql database throughput
 #       show`) whose MANUAL throughput equals the expected value (default 400). An
 #       autoscale offer is NOT the intended manual shared offer and is a violation.
-#   (b) NO DESTINATION CONTAINER HOLDS A DEDICATED OFFER. For each of the five
-#       containers, the per-container throughput probe (`az cosmosdb sql container
+#   (b) NO DESTINATION CONTAINER HOLDS A DEDICATED OFFER. For each of the seven
+#       containers (the five MG-53 entity containers plus HAR-74's
+#       temperature-rollups and leases), the per-container throughput probe (`az cosmosdb sql container
 #       throughput show`) must show NO offer. A probe that RETURNS an offer is a
 #       VIOLATION. A probe that could not RUN (auth/network/throttle) is a FATAL,
 #       never a pass — "no offer" and "could not tell" are different states and
@@ -97,7 +98,8 @@
 #         },
 #         "definition": { ... }   // destination `az cosmosdb sql container show`
 #       },
-#       ... exactly the five containers: cooks, users, recipes, temperatures, devices
+#       ... exactly the seven containers: cooks, users, recipes, temperatures,
+#           devices, temperature-rollups, leases
 #     ]
 #   }
 #
@@ -157,10 +159,11 @@ PROG="assert-live-shared-throughput"
 EX_VIOLATION=3
 EX_OP=1
 
-# The five destination containers, spelled out ONCE and iterated by VALUE (never
+# The seven destination containers, spelled out ONCE and iterated by VALUE (never
 # by index, which would need bash-4 ${!arr[@]}). This IS the required set: a bundle
-# that does not carry exactly these five names is malformed and fails closed.
-EXPECTED_CONTAINERS="cooks users recipes temperatures devices"
+# that does not carry exactly these seven names is malformed and fails closed.
+# temperature-rollups and leases are the cook chart read model (HAR-74).
+EXPECTED_CONTAINERS="cooks users recipes temperatures devices temperature-rollups leases"
 # The one container whose create-only partition key this gate owns, and the path
 # it must carry (agreeing with the IoT Hub endpoint's partition_key_name).
 TEMPERATURES="temperatures"
@@ -263,7 +266,7 @@ containers_type="$(jqp '(.containers | type) // "null"')"
 [ "${containers_type}" = "__PROBE_ERROR__" ] && die "the .containers probe failed on ${SRC}"
 [ "${containers_type}" = "array" ] || die "the bundle (${SRC}) has no '.containers' array (got '${containers_type}'). Fail-closed"
 
-# The container SET must be EXACTLY the five expected names — no more, no fewer, no
+# The container SET must be EXACTLY the seven expected names — no more, no fewer, no
 # duplicates. A bundle that silently omits a container would let (b)/(c) "pass" by
 # never running for it; a bundle with a duplicate name makes per-name lookup
 # ambiguous. Both are the vacuous-PASS class. Compare canonical sorted name lists.
@@ -272,7 +275,7 @@ case "${got_names}" in *__PROBE_ERROR__*) die "the container-name probe failed o
 want_names="$(printf '%s\n' "${EXPECTED_CONTAINERS}" | tr ' ' '\n' | jq -R . | jq -c -s 'sort' 2>/dev/null || printf '%s\n' '__PROBE_ERROR__')"
 case "${want_names}" in *__PROBE_ERROR__*) die "internal error building the expected container-name set — refusing to compare against nothing" ;; esac
 [ "${got_names}" = "${want_names}" ] || \
-  die "the bundle (${SRC}) does not carry EXACTLY the five expected destination containers. expected=${want_names} got=${got_names} — a bundle missing/duplicating a container cannot be asserted (an omitted container would silently skip its offer/partition checks). Fail-closed"
+  die "the bundle (${SRC}) does not carry EXACTLY the seven expected destination containers. expected=${want_names} got=${got_names} — a bundle missing/duplicating a container cannot be asserted (an omitted container would silently skip its offer/partition checks). Fail-closed"
 
 # Every container entry must be an object carrying a string name, a throughputProbe
 # object, and a definition object. The per-container assertions ARE those fields;
@@ -374,7 +377,7 @@ for name in ${EXPECTED_CONTAINERS}; do
   # database probe above: `false // x` yields x, which would misread the healthy
   # offerFound=false case). select() yields nothing on a name miss, so wrap in an
   # array and require exactly one match — a defence even though the name set is
-  # already validated to be exactly the five expected.
+  # already validated to be exactly the seven expected.
   c_query_ok="$(printf '%s\n' "${JSON}" | jq -r --arg n "${name}" '
     [ .containers[] | select(.name == $n) ] as $m
     | if ($m | length) != 1 then "__BAD__"
