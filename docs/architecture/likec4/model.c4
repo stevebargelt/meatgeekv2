@@ -269,8 +269,8 @@ model {
 
       realtime = service 'SignalR Service' {
         #live
-        technology 'Default mode, hub temperatureHub'
-        description 'Terraform sets service_mode = "Default", in which a client connects only while a hub server is connected; none is. cook_started and cook_stopped are sent to the owning userId; negotiate puts a user in device-{id} for each device it owns (MG-30). Never proven live with a client receiving (procedure in docs/api/signalr-cook-events-smoke.md). Decided: push to clients only (live temperatures and cook events).'
+        technology 'Serverless mode, hub temperatureHub'
+        description 'Terraform sets service_mode = "Serverless": no hub server, no upstream. cook_started and cook_stopped are sent to the owning userId; negotiate puts a user in device-{id} for each device it owns (MG-30). The negotiate acceptance proof connects a client; receiving a cook event is not yet proven live (procedure in docs/api/signalr-cook-events-smoke.md). Decided: push to clients only (live temperatures and cook events).'
       }
 
       observability = area 'Observability' {

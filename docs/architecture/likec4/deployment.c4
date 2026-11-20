@@ -31,7 +31,7 @@ deployment {
       }
       cosmos = instanceOf meatgeek.cloud.data
       signalr = instanceOf meatgeek.cloud.realtime {
-        technology 'service_mode = "Default", hub temperatureHub'
+        technology 'service_mode = "Serverless", hub temperatureHub'
       }
       appinsights = instanceOf meatgeek.cloud.observability.appinsights
       logs = instanceOf meatgeek.cloud.observability.logs

@@ -54,10 +54,9 @@ The code is `apps/api/src/functions/signalr/negotiate.ts`,
   setting `AzureSignalRConnectionString__serviceUri` holds the service URI, and
   the Function App identity holds **SignalR Service Owner**. Local (key) auth is
   disabled on the service.
-- A client can only connect when the service accepts client connections without
-  a hub server: **Serverless** service mode. In **Default** mode with no hub
-  server connected, `start()` fails with "Azure SignalR Service is not connected
-  yet", and messages sent through the output binding are not delivered.
+- The service runs in **Serverless** mode (HAR-57): there is no hub server, so
+  in Default mode no client could connect and nothing sent to a user was
+  delivered. No upstream is configured.
 - An Entra bearer token for the API, scope `api://<api-app-id>/access_as_user`
   (see [authentication.md](./authentication.md)).
 - A device registered to that caller (`POST /devices`).

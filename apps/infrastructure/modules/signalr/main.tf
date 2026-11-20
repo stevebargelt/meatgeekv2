@@ -34,8 +34,13 @@ resource "azurerm_signalr_service" "main" {
   # this flag is ever flipped back to true.
   local_auth_enabled = false
 
-  # Service mode configuration
-  service_mode              = "Default"
+  # Serverless (HAR-57, MG-30): there is no hub server. The API mints client
+  # tokens and manages groups through the data-plane REST API, and sends cook
+  # events through the Functions output binding. In "Default" mode the service
+  # accepts a client connection only while a hub server is connected, so no
+  # client could ever connect and nothing sent to a user was delivered. No
+  # upstream is configured: client-to-server messages are not used.
+  service_mode              = "Serverless"
   connectivity_logs_enabled = true
   messaging_logs_enabled    = true
   http_request_logs_enabled = true
