@@ -82,3 +82,57 @@ export function expectHubMessage(
     throw new ProofFailure(mismatch);
   }
 }
+
+/**
+ * How long to wait before each retry of a SignalR client `start()` the service
+ * throttled. Live: 1, 2, 4 and 8 s, so five attempts and at most 15 s of
+ * waiting. The spec shortens it.
+ */
+export const START_RETRY = { delaysMs: [1_000, 2_000, 4_000, 8_000] as readonly number[] };
+
+/** The client's error for a negotiate the SignalR service answered with 429. */
+const THROTTLED = /Status code '429'/;
+
+/** The part of a HubConnection `startConnection` needs. */
+export interface StartableConnection {
+  start(): Promise<void>;
+}
+
+/**
+ * Start a SignalR client connection, retrying while the Azure SignalR service
+ * answers the client's own negotiate with 429 (Too many requests).
+ *
+ * Our `POST /negotiate` already retries the service's REST API (HAR-80); this
+ * covers the next step, the client dialling the service with the url and
+ * token. The dev service is Free_F1, which throttles that step briefly when
+ * connections are opened close together (HAR-77's first live run: two proofs
+ * got 429, the next one, two seconds later, connected). Any other error fails
+ * at once. Each attempt has its own `CONNECT_TIMEOUT_MS`.
+ *
+ * Fails with `<what> failed: <masked error>`, adding how many attempts were
+ * throttled when the last error is a 429.
+ */
+export async function startConnection(
+  connection: StartableConnection,
+  what: string,
+  secrets: () => readonly string[]
+): Promise<void> {
+  const delays = START_RETRY.delaysMs;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await within(connection.start(), CONNECT_TIMEOUT_MS, what);
+      return;
+    } catch (error) {
+      if (error instanceof ProofFailure) {
+        throw error;
+      }
+      const throttled = error instanceof Error && THROTTLED.test(error.message);
+      if (throttled && attempt < delays.length) {
+        await new Promise<void>(resolve => setTimeout(resolve, delays[attempt]));
+        continue;
+      }
+      const tries = throttled ? ` (throttled on all ${attempt + 1} attempts)` : '';
+      throw new ProofFailure(`${what} failed: ${describeError(error, secrets())}${tries}`);
+    }
+  }
+}

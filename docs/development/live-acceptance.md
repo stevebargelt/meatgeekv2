@@ -232,6 +232,17 @@ dev (MG-37), so this proof's output is the only evidence of delivery: a timeout
 says how many `temperature` messages did arrive, how many for the device, and
 the last `timestamp` among them.
 
+The three SignalR proofs start their clients through `startConnection` in
+`lib/signalr.ts`. When the SignalR service answers the client's own negotiate
+with `429` (Too many requests), it retries after 1, 2, 4 and 8 s, so five
+attempts in all; any other error fails at once. `POST /negotiate` already
+retries the service's REST API (HAR-80); this covers the next step, the client
+dialling the service. Free_F1 throttles that step briefly when connections open
+close together: HAR-77's first live run had two proofs fail with `429`, and the
+next one, two seconds later, connected. If every attempt is throttled, the
+failure ends `(throttled on all 5 attempts)`, which points at the service's
+limits rather than our code.
+
 `recipes.proof.ts` cleans up after itself: it creates one recipe named
 `Acceptance recipe <runId>`, and its sixth step deletes it. If an earlier step
 fails, the runner skips the rest of the group, so that run's one recipe stays in

@@ -27,7 +27,7 @@ import { Contract } from './lib/contract';
 import type { AcceptanceApi, ProofGroup, SimDeviceOptions } from './lib/proof';
 import { ProofFailure } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
-import { expectHubMessage } from './lib/signalr';
+import { expectHubMessage, START_RETRY, startConnection } from './lib/signalr';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
@@ -164,6 +164,9 @@ interface StubOptions {
   /** HAR-77: answer a request without a token with this JSON body (the
    *  handler's 401) instead of Easy Auth's empty one. */
   readonly unauthenticatedBody?: unknown;
+  /** HAR-77: answer this many of the SignalR client's `POST /client/negotiate`
+   *  calls with 429, as the Free_F1 service did live (`Infinity`: all). */
+  readonly signalRThrottle?: number;
 }
 
 interface StubCook {
@@ -394,6 +397,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     }
   };
 
+  let throttled = 0;
   const server: Server = createServer((request, response: ServerResponse) => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://stub');
@@ -421,6 +425,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           return;
         }
         if (request.method === 'POST' && url.pathname === '/client/negotiate') {
+          if (throttled < (options.signalRThrottle ?? 0)) {
+            throttled++;
+            response.writeHead(429);
+            response.end('Too many requests.');
+            return;
+          }
           const token = `conn-${signalRConnections.size + 1}`;
           signalRConnections.set(token, { user, outbox: [], started: false, closed: false });
           response.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1125,6 +1135,7 @@ const realLiveWait = { ...LIVE_WAIT };
 const realIsolationWait = { ...ISOLATION_WAIT };
 const realTwinPoll = { ...TWIN_POLL };
 const realVolume = { ...VOLUME };
+const realStartRetry = { ...START_RETRY };
 
 beforeAll(() => {
   fakeDir = mkdtempSync(join(tmpdir(), 'acceptance-simdevice-'));
@@ -1148,6 +1159,8 @@ beforeAll(() => {
   VOLUME.pageLimit = 100;
   VOLUME.pollIntervalMs = 5;
   VOLUME.pollCapMs = 300;
+  // HAR-77: a throttled SignalR start() is retried after 1, 2, 4, 8 s live.
+  START_RETRY.delaysMs = [1, 1, 1, 1];
 });
 
 afterAll(() => {
@@ -1156,6 +1169,7 @@ afterAll(() => {
   Object.assign(ISOLATION_WAIT, realIsolationWait);
   Object.assign(TWIN_POLL, realTwinPoll);
   Object.assign(VOLUME, realVolume);
+  Object.assign(START_RETRY, realStartRetry);
   rmSync(fakeDir, { recursive: true, force: true });
 });
 
@@ -2944,5 +2958,69 @@ describe('OpenAPI contract (HAR-77, against the stub)', () => {
         'contract: hub message cook_paused: the target is not in x-signalr.messages'
       );
     });
+  });
+});
+
+describe('SignalR start() retries a throttled service (HAR-77, against the stub)', () => {
+  const SIGNALR_GROUPS = [
+    'signalr isolation ›',
+    'signalr live temperature ›',
+    'signalr negotiate ›',
+  ];
+  const negotiates = () =>
+    stub!.signalRRequests.filter(r => r.method === 'POST' && r.path.startsWith('/client/negotiate'))
+      .length;
+
+  it('passes every proof when the service answers the first client negotiates with 429', async () => {
+    const result = await runAgainstStub({ signalRThrottle: 3 });
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    // Three throttled negotiates were retried; then each connection opened and was stopped.
+    const calls = stub!.signalRRequests.map(r => `${r.method} ${r.path.split('?')[0]}`);
+    expect(calls.filter(call => call === 'DELETE /client/')).toHaveLength(negotiates() - 3);
+    expect(result.output).not.toContain('/client/');
+  });
+
+  it('fails each SignalR proof naming the 429 and the attempts when the service never stops throttling', async () => {
+    const result = await runAgainstStub({ signalRThrottle: Infinity });
+
+    expect(result.exitCode).not.toBe(0);
+    for (const group of SIGNALR_GROUPS) {
+      const failures = result.failures.filter(line => line.startsWith(`FAIL ${group}`));
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain('start() failed: Error: Failed to complete negotiation');
+      expect(failures[0]).toContain("Status code '429' (throttled on all 5 attempts)");
+    }
+    expect(negotiates()).toBe(3 * 5);
+    expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
+    expect(result.output).not.toContain('/client/');
+  });
+
+  it('does not retry an error that is not a 429', async () => {
+    let calls = 0;
+    const connection = {
+      start: () => {
+        calls++;
+        return Promise.reject(new Error("Unauthorized: Status code '401'"));
+      },
+    };
+
+    await expect(startConnection(connection, 'start()', () => [])).rejects.toThrow(
+      "start() failed: Error: Unauthorized: Status code '401'"
+    );
+    expect(calls).toBe(1);
+  });
+
+  it('masks the secrets in the failure', async () => {
+    const connection = {
+      start: () =>
+        Promise.reject(new Error("tok-123 at https://x.service.signalr.net: Status code '429'")),
+    };
+
+    const failure = startConnection(connection, 'owner start()', () => ['tok-123']);
+    await expect(failure).rejects.toThrow(
+      "owner start() failed: Error: *** at <url> Status code '429' (throttled on all 5 attempts)"
+    );
   });
 });
