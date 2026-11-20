@@ -6,7 +6,7 @@ title: "[Phase 3+] pact-consumer-driven-contracts"
 ---
 
 #### Context
-#2 chose Schemathesis (property-based fuzz against the OpenAPI spec) for current contract testing because Pact requires consumer participation and no consumers exist yet. Add Pact when real consumer code exists (React Native in Phase 3, React web sometime after).
+#2 chose Schemathesis (property-based fuzz against the OpenAPI spec) for current contract testing because Pact requires consumer participation and no consumers exist yet. Add Pact when real consumer code exists (native iOS (Swift), not built, in Phase 3; the React web app now consumes the API).
 
 #### Acceptance Criteria
 - [ ] Pact consumer-side setup in `apps/mobile` (and `apps/web` if it's consuming the API by then)

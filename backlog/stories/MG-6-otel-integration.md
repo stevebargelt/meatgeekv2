@@ -37,7 +37,7 @@ Cross-cutting observability work landing the OTel discipline + Sentry architectu
 
 #### Acceptance Criteria — Documentation
 - [ ] Amend `docs/monitoring/observability.md`:
-  - [ ] OTel-with-two-exemptions discipline (server/device = OTel; React web = App Insights JS SDK; React Native = Sentry)
+  - [ ] OTel-with-two-exemptions discipline (server/device = OTel; React web = App Insights JS SDK; native iOS (Swift), not built = Sentry)
   - [ ] Trace-ID copy-paste join workflow for mobile↔backend debugging
   - [ ] Sentry-vs-App-Insights ownership boundary (backend errors → App Insights; mobile crashes → Sentry; never bridge them)
   - [ ] Custom dimension contract (already in doc; verify still accurate)

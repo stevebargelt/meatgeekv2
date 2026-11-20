@@ -43,6 +43,7 @@ const GROUPS = [
     title: 'Flows, today',
     ids: [
       'telemetry',
+      'watchCook',
       'cookStart',
       'readHistory',
       'mergeToDeploy',

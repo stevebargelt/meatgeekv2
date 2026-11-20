@@ -17,7 +17,16 @@ model {
   }
 
   entra = external 'Microsoft Entra ID' {
-    description 'Issues the access tokens that the API accepts.'
+    description 'Issues the access tokens that the API accepts: user tokens (access_as_user) to the web app by auth code + PKCE, and app-only tokens to the acceptance suite.'
+  }
+
+  vercel = external 'Vercel' {
+    description '''
+      Hosts the web app. Hobby plan ($0, personal non-commercial use), Git integration,
+      production branch `main`: Vercel builds `apps/web` on every push to `main` by itself, with
+      no Vercel token in GitHub. It reports to GitHub only through the `Vercel` commit status (no
+      GitHub Deployments).
+    '''
   }
 
   meatgeek = system 'MeatGeek V2' {
@@ -159,6 +168,8 @@ model {
           `COSMOSDB_*_CONTAINER_NAME` per container), the IoT Hub host
           (`IOTHUB_SERVICE_HOSTNAME`) and its Event Hub consumer group
           (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). broadcastTemperature reads the consumer group;
+          rollupTemperatures reads the `temperatures` change feed with its leases in `leases`
+          (`COSMOSDB_LEASES_CONTAINER_NAME`);
           startCook and stopCook read `IOTHUB_SERVICE_HOSTNAME` to write the device twin's
           desired active cook (HAR-66), and the
           identity's IoT Hub Twin Contributor grant is on in dev only. The one exception is the Application
@@ -218,6 +229,16 @@ model {
           technology 'Event Hub trigger, cardinality many; SignalR output binding'
           description 'broadcastTemperature (HAR-60): sends each reading on temperature-data to the userId of the device owner (HAR-81: one point read of the device per batch), the device taken from the hub-stamped iothub-connection-device-id, the reading mapped by toTemperatureReading (the same mapper as GET /temperatures/current) plus enqueuedTimeUtc. Bad events are skipped and counted, never thrown.'
         }
+        rollup = component 'rollupTemperatures' {
+          technology 'Cosmos DB change-feed trigger, identity-based, startFromBeginning'
+          description '''
+            The cook chart's read model (HAR-86). Folds each change-feed batch from `temperatures`
+            in memory per device-hour document, then does one etag read-merge-replace per document
+            (`If-Match`; a 412 or a 409 re-reads and merges again). At-least-once: a batch written
+            but not checkpointed is folded again, which can double-count `n` and `sum` for one
+            slot; `min` and `max` are unaffected. Accepted, see temperature-rollups-repository.ts.
+          '''
+        }
 
         easyauth -> principal 'X-MS-CLIENT-PRINCIPAL'
         principal -> cooks 'userId'
@@ -236,6 +257,7 @@ model {
         }
         temperatures -> ownership 'current, history: 404 DEVICE_NOT_FOUND'
         cooks -> repos 'write cook'
+        cooks -> repos 'chart: cook point read + one single-partition rollup query'
         devices -> repos 'list by userId, register, update, delete'
         temperatures -> repos 'query readings'
         recipes -> repos
@@ -246,7 +268,7 @@ model {
       data = store 'Cosmos DB' {
         #live
         technology 'Cosmos DB for NoSQL, one shared-throughput database'
-        description 'One shared-throughput database (400 RU/s), its name Terraform-owned (COSMOSDB_DATABASE_NAME = module.cosmos_db.destination_database_name, the MG-53 shared-throughput destination that the MG-62 cutover moved both dev consumers onto). The setting has no default, so the app can never be deployed pointed at a database that does not exist (MG-51). Access by managed identity only.'
+        description 'Seven containers in one shared-throughput database (400 RU/s), its name Terraform-owned (COSMOSDB_DATABASE_NAME = module.cosmos_db.destination_database_name, the MG-53 shared-throughput destination that the MG-62 cutover moved both dev consumers onto). The setting has no default, so the app can never be deployed pointed at a database that does not exist (MG-51). Access by managed identity only.'
 
         devices = collection 'devices' {
           technology 'partition /id'
@@ -271,6 +293,18 @@ model {
         recipes = collection 'recipes' {
           technology 'partition /userId'
         }
+        temperatureRollups = collection 'temperature-rollups' {
+          technology 'partition /deviceId'
+          description '''
+            One document per device-hour, id `<deviceId>:<yyyy-mm-ddThh>` (UTC): up to 60 minute
+            slots, each `{n, min, max, sum}` per channel. No TTL, so a chart outlives the raw
+            readings. Written only by `rollupTemperatures`; read only by `GET /cooks/{cookId}/chart`.
+          '''
+        }
+        leases = collection 'leases' {
+          technology 'partition /id'
+          description 'The change-feed trigger lease container, Terraform-owned (data-plane RBAC cannot create containers, so the trigger never creates it).'
+        }
       }
 
       realtime = service 'SignalR Service' {
@@ -284,8 +318,10 @@ model {
           client connects with the token the API mints), `signalr live temperature` (a simulated
           reading reaches its owner by push, `METRIC signalr-delivery-ms` 18424 in run
           44673261258) and `signalr isolation` (a non-owner receives nothing, while the owner
-          receives the reading and its `cook_started` and `cook_stopped`). The device holds no
-          SignalR connection.
+          receives the reading and its `cook_started` and `cook_stopped`). The web app's live panel
+          is a live client in production: the web-acceptance proof sees a pushed reading in the
+          browser (`METRIC web-push-ms` 510, run 44837747351). The device holds no SignalR
+          connection.
         '''
       }
 
@@ -332,15 +368,55 @@ model {
       }
     }
 
-    mobile = mobileapp 'Mobile app' {
-      #scaffold
-      technology 'React Native'
-      description 'A welcome screen only. It makes no API calls yet.'
+    mobile = mobileapp 'iOS app' {
+      #decided
+      technology 'Swift (native iOS)'
+      description '''
+        Decided by the owner on 2026-11-19 as the next goal, and not built: nothing for it is on
+        `main`. It shares only the OpenAPI contract with the web app and will generate its client
+        with swift-openapi-generator. The earlier mobile app was removed in HAR-73.
+      '''
     }
     web = webapp 'Web app' {
-      #scaffold
-      technology 'React, Vite'
-      description 'A welcome screen only. It makes no API calls yet.'
+      #live
+      technology 'React 18, Vite, TypeScript; MSAL (auth code + PKCE); openapi-fetch with types generated from libs/api-specs/spec; @microsoft/signalr 8.0.17; recharts'
+      description '''
+        Sign in with Entra; list, register and rename devices; start and stop a cook; list cooks,
+        paged by continuation token; a cook's detail page with a live panel by push and a chart of
+        the whole cook. Hosted on Vercel production (`https://meatgeekv2-web.vercel.app`), built by
+        Vercel's Git integration from `main`; there is no Vercel token in GitHub. Its runtime
+        config is `/config.json`, fetched before the app renders.
+      '''
+      link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/web 'Source'
+
+      shell = component 'shell' {
+        technology '@azure/msal-browser, openapi-fetch'
+        description 'Fetches and validates `/config.json`, signs in with MSAL (auth code + PKCE, no client secret) and builds the one API client, which adds `Authorization: Bearer <token>` from `acquireTokenSilent` and an `X-Request-ID` to every call.'
+      }
+      devices = component 'devices' {
+        description 'Devices page: GET /devices with one GET /cooks?status=active for the page, register (POST /devices) and rename (PATCH /devices/{id}).'
+      }
+      cooks = component 'cooks' {
+        description 'Cooks list (GET /cooks, "Load more" by continuation token), the start form (POST /cooks with a client-generated id, one per intent, so a retry is idempotent), the cook detail page (GET /cooks/{cookId}) and stop (POST /cooks/{cookId}/stop).'
+      }
+      livePanel = component 'live panel' {
+        technology '@microsoft/signalr 8.0.17'
+        description '''
+          POST /negotiate, then one hub connection with `withAutomaticReconnect`; when that gives
+          up and the connection closes it negotiates again with backoff (2, 5, 10, then 30 s).
+          After every connect and reconnect it backfills from
+          `GET /temperatures/current/{deviceId}`. States: `waiting` (no reading yet), `live`, and
+          `stale` (no reading for 3 x the device `pollingInterval`, or reconnecting).
+        '''
+      }
+      chart = component 'chart' {
+        technology 'recharts'
+        description 'GET /cooks/{cookId}/chart: one avg line per channel with a min/max band, from the server-side rollups. Readings pushed to the live panel are appended to it.'
+      }
+
+      livePanel -> chart 'pushed readings'
+      cooks -> livePanel 'the cook device'
+      cooks -> chart 'the cook'
     }
 
     // Telemetry: the storage path is live end to end.
@@ -360,20 +436,14 @@ model {
     cloud.api.broadcast -> cloud.api.repos 'owner of each device in the batch'
 
     // Realtime path: push to clients. Event Hub -> Function -> SignalR (HAR-60), live.
-    // The edges to the apps stay #decided on purpose: the mobile and web apps do not call
-    // negotiate or open a SignalR connection (their UI is outside HAR-55), so the model must
-    // not draw them as live. The acceptance proofs are the only live SignalR client today.
     cloud.ingest.eventhub -[event]-> cloud.api.broadcast 'Event Hub trigger' {
       technology 'consumer group api-broadcast, identity-based'
     }
     cloud.api.broadcast -> cloud.realtime 'each reading, to its device owner' {
       technology 'SignalR output binding, target temperature'
     }
-    cloud.realtime -[decided]-> mobile 'live temperatures, cook events' {
-      #decided
-    }
-    cloud.realtime -[decided]-> web 'live temperatures, cook events' {
-      #decided
+    cloud.realtime -> web.livePanel 'temperature, cook_stopped' {
+      technology 'WebSockets, @microsoft/signalr'
     }
 
     // The active cook is device state, carried by the IoT Hub device twin (HAR-58, HAR-66).
@@ -394,6 +464,16 @@ model {
       description 'Emitted only after the Cosmos write succeeds. The envelope carries CorrelationContext { id }: the correlation.id the Pi stamps on every reading for the rest of the cook.'
     }
 
+    // Chart read model (HAR-86): the change feed folds readings into hourly rollups.
+    cloud.data.temperatures -[event]-> cloud.api.rollup 'change feed (leases)' {
+      technology 'Cosmos DB trigger, managed identity'
+    }
+    cloud.api.rollup -> cloud.data.temperatureRollups 'read-merge-replace, If-Match'
+    cloud.api.rollup -> cloud.data.leases 'change-feed checkpoints'
+    cloud.api.repos -> cloud.data.temperatureRollups 'chart query; partition = deviceId' {
+      description 'One single-partition query over the hours the cook covers (about 13 documents for a 12 h cook), at most 720 points returned.'
+    }
+
     // API to data (partition keys in each container's technology).
     cloud.api.ownership -> cloud.data.devices 'point read'
     cloud.api.repos -> cloud.data.devices 'list by userId, register, update, delete'
@@ -401,7 +481,7 @@ model {
     cloud.api.repos -> cloud.data.users 'point read, write; id = caller'
     cloud.api.repos -> cloud.data.recipes 'read, write; caller partition'
     cloud.api.repos -> cloud.data.temperatures 'read only; partition = deviceId' {
-      description 'Current: newest reading by iothub-enqueuedtime. History: a COUNT(1) over the device partition for total, then an OFFSET/LIMIT page.'
+      description 'Current: newest reading by iothub-enqueuedtime. History: one page per request by continuation token (maxItemCount = limit, at most 1000), with no COUNT and no OFFSET (HAR-75).'
     }
 
     // Observability.
@@ -420,14 +500,29 @@ model {
     cloud.data -> cloud.observability.metricAlerts 'cosmos-429-rate'
     cloud.realtime -> cloud.observability.metricAlerts 'signalr-connection-failure-rate'
 
-    // Clients: not wired yet.
-    mobile -[planned]-> cloud.api 'REST' {
-      #notBuilt
+    // Web app: live in production on Vercel (HAR-71).
+    web -> cloud.api 'REST, user access token (access_as_user)' {
+      technology 'HTTPS, openapi-fetch'
+      description 'Every call carries the user access token; Easy Auth validates it before any function runs.'
     }
-    web -[planned]-> cloud.api 'REST' {
-      #notBuilt
+    web.devices -> cloud.api.devices 'GET, POST /devices; PATCH /devices/{id}'
+    web.cooks -> cloud.api.cooks 'GET, POST /cooks; GET /cooks/{cookId}; POST /cooks/{cookId}/stop'
+    web.shell -> entra 'auth code + PKCE (MSAL), no secret'
+    web.livePanel -> cloud.api.negotiate 'POST /negotiate'
+    web.livePanel -> cloud.realtime 'connects as the signed-in user' {
+      technology 'WebSockets, @microsoft/signalr, withAutomaticReconnect'
+    }
+    web.livePanel -> cloud.api.temperatures 'GET /temperatures/current/{deviceId} (backfill)'
+    web.chart -> cloud.api.cooks 'GET /cooks/{cookId}/chart'
+
+    // iOS app: decided, not built.
+    mobile -[decided]-> cloud.api 'REST' {
+      #decided
     }
     mobile -[decided]-> cloud.api.negotiate 'negotiate' {
+      #decided
+    }
+    cloud.realtime -[decided]-> mobile 'live temperatures, cook events' {
       #decided
     }
   }
@@ -436,23 +531,32 @@ model {
     description 'GitHub Actions on meatgeekv2. Credentials never meet unmerged code.'
 
     ci = workflow 'CI/CD Pipeline' {
-      description 'On every pull request and push to main: lint and test, Cosmos emulator tests, builds, Terraform validation, security scan. Never receives a device credential.'
+      description '''
+        On every pull request and push to main: lint and test, Cosmos emulator tests, builds,
+        Terraform validation, security scan, and `web-e2e`: Playwright drives the web app's main
+        path against the built app, with Entra, the API and SignalR faked at the network edge, so
+        it needs no secret and no environment (`contents: read` only). Never receives a device
+        credential.
+      '''
     }
     apply = workflow 'Apply Dev Infrastructure' {
       description 'Started by a green CI run on main. A run for a superseded commit succeeds without applying.'
     }
     deploy = workflow 'Deploy Dev App' {
-      description 'Started by a successful apply. Publishes the API bundle for the commit that was applied.'
+      description 'Started by a successful apply. Publishes the API bundle for the commit that was applied, then runs the acceptance and web-acceptance jobs in parallel.'
     }
     acceptance = workflow 'Acceptance' {
       technology 'nx run api:acceptance, environment development'
       description '''
         A job in Deploy Dev App: live probes against the deployed API with an app-only token,
-        logged in under OIDC as the dev app-publish identity. It ensures the simulated device
-        identity, fetches its connection string per run, masks it (the string and its key)
-        and hands it to `simdevice` only through `SIMDEVICE_CONNECTION_STRING`. It copies
-        every `METRIC` line into the run summary. The proofs live in
-        `apps/api/acceptance/proofs/`; the two telemetry proofs run in order, round trip first.
+        logged in under OIDC as the dev app-publish identity. There are three standing simulated
+        devices: `<sim>` and `<sim>-chart`, which this job ensures, and `<sim>-web`, which the
+        web-acceptance job ensures (`<sim>` is `meatgeek-dev-simulated-smoker`). It fetches each
+        connection string per run, masks it (the string and its key) and hands it to `simdevice`
+        only through an env var (`SIMDEVICE_CONNECTION_STRING`, `SIMDEVICE_CHART_CONNECTION_STRING`).
+        It copies every `METRIC` line into the run summary. The proofs live in
+        `apps/api/acceptance/proofs/` and run in file-name order: the two telemetry proofs round
+        trip first, and the chart proof after both.
       '''
 
       roundtrip = component 'telemetry-roundtrip.proof.ts' {
@@ -461,20 +565,43 @@ model {
       volume = component 'telemetry-volume.proof.ts' {
         description 'Walks the simulated device history by continuation token, tops it up to one long cook of readings (12 h at one every 5 s = 8,640), walks again, and checks the last page costs at most 1.5 x the first.'
       }
+      chart = component 'volume-cook-chart.proof.ts' {
+        description '''
+          Keeps one standing active cook on `<sim>-chart` and never stops it. If its chart does
+          not cover 12 h, a one-time top-up of 8,640 readings by `simdevice --start <startTime>
+          --step 5s`; rollups have no TTL, so later runs send nothing. Then one more
+          `GET /cooks/{cookId}/chart` is the measurement: `METRIC chart-ru-12h` must be at most 40
+          (measured 6.19).
+        '''
+      }
+    }
+
+    webAcceptance = workflow 'Web acceptance' {
+      technology 'nx e2e-live web-e2e, environment development'
+      description '''
+        A job in Deploy Dev App, in parallel with `acceptance`: the live browser proof against the
+        production web app. It waits for `/version.json` to show the deployed commit (or a
+        descendant), signs in on Microsoft's real pages as `ACCEPTANCE_USER_UPN` (password +
+        TOTP), registers `<sim>-web`, starts a cook, sees a reading pushed by `simdevice` in the
+        live panel, and stops the cook. Prints `METRIC web-deploy-wait-s` and `web-push-ms` (510
+        in run 44837747351), then runs a leak check on its log and screenshots.
+      '''
     }
 
     simdevice = app 'simdevice' {
       #live
       technology 'Go, apps/data-pusher/cmd/simdevice'
       description '''
-        A software IoT Hub device for dev. It sends synthetic readings as the standing device
-        `meatgeek-dev-simulated-smoker` through the data-pusher's own `internal/publish` and
+        A software IoT Hub device for dev. It sends synthetic readings as any of the three standing
+        devices (`<sim>` = `meatgeek-dev-simulated-smoker`, `<sim>-chart`, `<sim>-web`) through
+        the data-pusher's own `internal/publish` and
         `internal/iothub` code: MQTT on 8883, device SAS, QoS 1, with `messageId`,
         `$.ct=application/json`, `$.ce=utf-8` and a per-reading `traceparent` (span
         `simdevice.publish`), as the Pi's readings carry. Unlike the Pi, it sends no
-        `correlation.id` and no cook id: it has no cook. Built and spawned per run by the
-        acceptance job. Its credential
-        reaches it only via the `SIMDEVICE_CONNECTION_STRING` env var, fetched per run under
+        `correlation.id` and no cook id: it has no cook. Readings carry the wall-clock time unless
+        `--start/--step` stamps synthetic timestamps (reading i at start + i x step). Built and
+        spawned per run by the acceptance and web-acceptance jobs. Its credential
+        reaches it only via an env var, fetched per run under
         OIDC as the dev app-publish identity and masked. It is never stored (no repo secret, no
         Key Vault, no hub shared-access policy) and never passed to PR CI.
       '''
@@ -484,8 +611,11 @@ model {
     ci -[event]-> apply 'workflow_run, main only'
     apply -[event]-> deploy 'workflow_run'
     deploy -> acceptance 'needs: deploy'
+    deploy -> webAcceptance 'needs: deploy'
     acceptance.roundtrip -> simdevice 'spawns: --count 1'
     acceptance.volume -> simdevice 'spawns: top-up to 8,640 readings'
+    acceptance.chart -> simdevice 'spawns as <sim>-chart, --start/--step'
+    webAcceptance -> simdevice 'spawns as <sim>-web'
   }
 
   // Device software updates. Today: by hand. Not built: over the air.
@@ -511,7 +641,7 @@ model {
   }
 
   // Simulated device (dev acceptance).
-  delivery.simdevice -[event]-> meatgeek.cloud.ingest.iothub 'telemetry as meatgeek-dev-simulated-smoker: messageId, $.ct=application/json, $.ce=utf-8, traceparent' {
+  delivery.simdevice -[event]-> meatgeek.cloud.ingest.iothub 'telemetry as <sim>, <sim>-chart or <sim>-web: messageId, $.ct=application/json, $.ce=utf-8, traceparent' {
     technology 'MQTT 8883, device SAS, QoS 1'
     description 'Built by the internal/publish builders of the data-pusher over the same internal/iothub transport, so messageId, $.ct, $.ce and traceparent match the readings of the Pi. No correlation.id and no cook id: simdevice passes an empty correlation and a nil cook id.'
   }
@@ -527,16 +657,19 @@ model {
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices: 201, or 409 then GET /devices/{id}'
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.temperatures 'GET /temperatures/current/{id}, then history'
   delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history: two walks by continuation token'
+  delivery.acceptance.chart -> meatgeek.cloud.api.cooks 'GET /cooks/{cookId}/chart'
   delivery.acceptance -> meatgeek.cloud.api.negotiate 'POST /negotiate (signalr proofs)'
   delivery.acceptance -> meatgeek.cloud.realtime 'connects as a SignalR client' {
     technology '@microsoft/signalr'
-    description 'The signalr negotiate, signalr live temperature and signalr isolation proofs: the only live SignalR client today. They receive temperature, cook_started and cook_stopped.'
+    description 'The signalr negotiate, signalr live temperature and signalr isolation proofs. They receive temperature, cook_started and cook_stopped.'
   }
 
   // Landscape.
   pitmaster -> smoker 'cooks on'
-  pitmaster -> meatgeek.mobile 'monitors a cook'
-  pitmaster -> meatgeek.web 'reviews cooks'
+  pitmaster -> meatgeek.web 'watches a cook live, reviews cooks'
+  pitmaster -[decided]-> meatgeek.mobile 'monitors a cook' {
+    #decided
+  }
   smoker -> meatgeek.edge.controller 'RTD sensor readings'
   meatgeek.cloud.api.easyauth -> entra 'validates access tokens'
   team -> delivery.ci 'pull requests'
@@ -544,6 +677,12 @@ model {
   delivery.deploy -> meatgeek.cloud.api 'publishes the bundle'
   delivery.acceptance -> meatgeek.cloud.api 'live acceptance probes'
   delivery.acceptance -> entra 'app-only token (OIDC)'
+  vercel -> meatgeek.web 'builds apps/web on every push to main, serves production'
+  delivery.webAcceptance -> meatgeek.web 'Playwright, production'
+  delivery.webAcceptance -> entra 'signs in as the test user'
+  delivery.webAcceptance -> meatgeek.cloud.ingest.iothub 'ensure <sim>-web, read its connection string' {
+    technology 'az iot hub device-identity --auth-type login, OIDC'
+  }
   meatgeek.cloud.observability.actionGroup -> operator 'alert email'
   meatgeek.cloud.observability.budgets -> operator 'budget email (contact_emails)'
 }

@@ -8,23 +8,19 @@ The entire MeatGeek V2 system is organized as an **NX monorepo** hosted at `http
 
 ```
 meatgeekv2/
-├── apps/                           # Deployable applications
+├── apps/                           # Deployable applications and their tests
 │   ├── api/                       # Azure Functions API (TypeScript)
-│   ├── web/                       # React web application
+│   ├── data-pusher/              # IoT Hub integration service (Go), plus cmd/simdevice
 │   ├── device-controller/         # Enhanced Raspberry Pi controller (Go)
-│   ├── data-pusher/              # IoT Hub integration service (Go)
-│   ├── device-simulator/         # Development and testing tool
-│   └── infrastructure/           # Terraform Infrastructure as Code
+│   ├── infrastructure/           # Terraform Infrastructure as Code
+│   ├── web/                       # React web application (Vercel)
+│   └── web-e2e/                   # Playwright browser tests of the web app
 ├── libs/                          # Shared libraries and utilities
 │   ├── api-interfaces/           # TypeScript types and interfaces
-│   ├── ui-components/            # Shared React components
+│   ├── api-specs/                # OpenAPI 3.0 specification and generated types
 │   ├── data-models/              # Domain models and business logic
-│   ├── realtime/                 # SignalR real-time communication
-│   ├── charts/                   # Data visualization components
-│   ├── tracing/                  # OpenTelemetry observability
-│   ├── api-specs/                # OpenAPI 3.0 specifications
 │   └── utils/                    # Common utilities
-├── tools/                         # Build scripts and generators
+├── docs/architecture/likec4/      # The LikeC4 architecture model
 ├── .github/workflows/             # CI/CD pipeline definitions
 └── configuration files            # NX, TypeScript, ESLint, Jest configs
 ```
@@ -62,22 +58,43 @@ apps/api/
 The mobile client will be a native iOS (Swift) app. It is planned and not built, and it is not an Nx project in this workspace. Because it is Swift, it shares no TypeScript code with the web app: the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`.
 
 #### 3. Web Application (`apps/web/`)
-**Purpose**: Secondary interface with advanced analytics  
-**Technology**: React with TypeScript  
+**Purpose**: The live client: sign in, devices, cooks, a live panel by push and a chart of the whole cook  
+**Technology**: React 18, Vite, TypeScript; MSAL, openapi-fetch, `@microsoft/signalr`, recharts  
+
+Served by Vercel production at `https://meatgeekv2-web.vercel.app`, built by Vercel's Git integration from every push to `main`.
 
 ```
 apps/web/
 ├── src/
-│   ├── pages/                  # Web pages/routes
-│   ├── components/             # Web-specific components
-│   ├── hooks/                  # Custom React hooks
-│   ├── services/               # API integration
-│   └── styles/                 # Styling and themes
-├── public/                     # Static assets
+│   ├── app/                    # Routes and status pages
+│   ├── auth/                   # MSAL instance and the silent token
+│   ├── config/                 # /config.json, fetched and validated before render
+│   ├── api/                    # openapi-fetch client (types from libs/api-specs)
+│   ├── devices/                # Devices page: list, register, rename
+│   ├── cooks/                  # Cooks list, start form, cook detail, chart
+│   └── live/                   # SignalR connection and the live panel
+├── build/                      # version.json generation
+├── public/                     # Static assets and config.json
 └── project.json                # NX web app configuration
 ```
 
-#### 4. Device Controller (`apps/device-controller/`)
+#### 4. Web Browser Tests (`apps/web-e2e/`)
+**Purpose**: Playwright tests of the web app  
+**Technology**: Playwright, TypeScript  
+
+```
+apps/web-e2e/
+├── src/                        # `nx e2e web-e2e`: the main path against the built app
+│   └── fakes/                  # Entra, the API and the SignalR hub, faked at the network edge
+├── live/                       # `nx e2e-live web-e2e`: the live browser proof against production
+├── playwright.config.ts
+├── playwright.live.config.ts
+└── project.json
+```
+
+`nx e2e web-e2e` runs in CI's `web-e2e` job on every pull request and push: it needs no secret and no network beyond the installs. `nx e2e-live web-e2e` runs only in Deploy Dev App's `web-acceptance` job: it signs in on Microsoft's real pages as the TOTP acceptance user, starts a cook on `<simulated_device_id>-web` and waits for a reading pushed by `simdevice` (see `docs/development/live-acceptance.md`).
+
+#### 5. Device Controller (`apps/device-controller/`)
 **Purpose**: Enhanced version of existing Raspberry Pi controller  
 **Technology**: Go with hardware integration  
 
@@ -97,7 +114,7 @@ apps/device-controller/
 └── project.json                # NX orchestration configuration
 ```
 
-#### 5. Data Pusher (`apps/data-pusher/`)
+#### 6. Data Pusher (`apps/data-pusher/`)
 **Purpose**: Reliable IoT Hub communication service  
 **Technology**: Go service  
 
@@ -115,7 +132,7 @@ apps/data-pusher/
 └── project.json                # NX orchestration configuration
 ```
 
-#### 6. Infrastructure (`apps/infrastructure/`)
+#### 7. Infrastructure (`apps/infrastructure/`)
 **Purpose**: Terraform Infrastructure as Code  
 **Technology**: Terraform with NX integration  
 
@@ -352,22 +369,7 @@ export interface Cook {
 }
 ```
 
-#### 2. UI Components (`libs/ui-components/`)
-**Purpose**: Reusable React components for the web app  
-
-```
-libs/ui-components/
-├── src/lib/
-│   ├── TemperatureDisplay/     # Live temperature readouts
-│   ├── CookCard/               # Cook session cards
-│   ├── DeviceStatus/           # Device health indicators
-│   ├── ChartComponents/        # Base chart components
-│   ├── LoadingSpinner/         # Shared loading states
-│   └── ErrorBoundary/          # Error handling components
-└── index.ts                    # Library exports
-```
-
-#### 3. Data Models (`libs/data-models/`)
+#### 2. Data Models (`libs/data-models/`)
 **Purpose**: Business logic and domain models  
 
 ```typescript
@@ -393,7 +395,7 @@ export class TemperatureCalculator {
 }
 ```
 
-#### 4. OpenAPI Specifications (`libs/api-specs/`)
+#### 3. OpenAPI Specifications (`libs/api-specs/`)
 **Purpose**: The API contract the clients share: every HTTP route `apps/api` serves and every SignalR message it sends. `npx nx test api` fails when the spec and `apps/api/src/main.ts` disagree (see `libs/api-specs/README.md`).
 
 ```
@@ -491,11 +493,9 @@ libs/api-interfaces ───┤
                        ↑
 libs/data-models ──────┤
                        ↑
-libs/tracing ──────────┘
+libs/utils ────────────┘
 
-libs/ui-components ──→ apps/web
-
-libs/charts ───────────→ apps/web
+libs/api-specs (generated types) ──→ apps/web
 ```
 
 This structure ensures that:
