@@ -1,6 +1,13 @@
 import type { AccountInfo } from '@azure/msal-browser';
 import type { Cook, Device } from '../api/client';
 import type { AppConfig } from '../config/config';
+import type {
+  HubFactory,
+  HubMessages,
+  LiveHub,
+  SignalRConnectionInfo,
+  TemperatureMessage,
+} from '../live/hub';
 
 export const TEST_CONFIG: AppConfig = {
   apiBaseUrl: 'https://api.example.test/api',
@@ -105,4 +112,85 @@ export function makeCook(overrides: Partial<Cook> = {}): Cook {
 export function apiPath(req: RecordedRequest): string {
   const url = new URL(req.url);
   return url.pathname.replace(new URL(TEST_CONFIG.apiBaseUrl).pathname, '') + url.search;
+}
+
+/**
+ * A fake SignalR connection. `emit`, `reconnecting`, `reconnected` and `close`
+ * play what the service would do; `start` resolves unless `failStart` is set.
+ */
+export class FakeHub implements LiveHub {
+  private handlers: { [K in keyof HubMessages]?: ((message: HubMessages[K]) => void)[] } = {};
+  private reconnectingHandlers: (() => void)[] = [];
+  private reconnectedHandlers: (() => void)[] = [];
+  private closeHandlers: (() => void)[] = [];
+  failStart = false;
+  readonly start = jest.fn(async () => {
+    if (this.failStart) throw new Error('start failed');
+  });
+  readonly stop = jest.fn(async () => undefined);
+
+  constructor(readonly info: SignalRConnectionInfo) {}
+
+  on<K extends keyof HubMessages>(target: K, handler: (message: HubMessages[K]) => void): void {
+    const list = (this.handlers[target] ?? []) as ((message: HubMessages[K]) => void)[];
+    list.push(handler);
+    (this.handlers as Record<string, unknown>)[target] = list;
+  }
+  onReconnecting(handler: () => void) {
+    this.reconnectingHandlers.push(handler);
+  }
+  onReconnected(handler: () => void) {
+    this.reconnectedHandlers.push(handler);
+  }
+  onClose(handler: () => void) {
+    this.closeHandlers.push(handler);
+  }
+
+  emit<K extends keyof HubMessages>(target: K, message: HubMessages[K]) {
+    for (const handler of (this.handlers[target] ?? []) as ((m: HubMessages[K]) => void)[]) {
+      handler(message);
+    }
+  }
+  reconnecting() {
+    this.reconnectingHandlers.forEach(handler => handler());
+  }
+  reconnected() {
+    this.reconnectedHandlers.forEach(handler => handler());
+  }
+  close() {
+    this.closeHandlers.forEach(handler => handler());
+  }
+}
+
+/** A hub factory that records every connection it builds. */
+export function createFakeHubs() {
+  const hubs: FakeHub[] = [];
+  const createHub: HubFactory = jest.fn((info: SignalRConnectionInfo) => {
+    const hub = new FakeHub(info);
+    hubs.push(hub);
+    return hub;
+  });
+  return {
+    hubs,
+    createHub,
+    latest(): FakeHub {
+      const hub = hubs[hubs.length - 1];
+      if (!hub) throw new Error('No hub connection was built.');
+      return hub;
+    },
+  };
+}
+
+export type FakeHubs = ReturnType<typeof createFakeHubs>;
+
+/** A `temperature` message, as the hub sends it; override any field. */
+export function makeTemperature(overrides: Partial<TemperatureMessage> = {}): TemperatureMessage {
+  return {
+    deviceId: BRISKET_BOX.id,
+    timestamp: '2026-11-20T15:00:00.000Z',
+    enqueuedTimeUtc: '2026-11-20T15:00:00.500Z',
+    grillTemp: 225,
+    probe1Temp: 150,
+    ...overrides,
+  };
 }

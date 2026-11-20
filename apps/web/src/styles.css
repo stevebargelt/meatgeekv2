@@ -230,3 +230,46 @@ ul.plain {
   margin: 0;
   padding: 0;
 }
+
+.live-panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.badge {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.badge-live {
+  color: #1a7f37;
+  border-color: #1a7f37;
+}
+
+.badge-stale {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.live-readings {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.live-readings dt {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.live-readings dd {
+  margin: 0;
+  font-size: 1.5rem;
+  font-variant-numeric: tabular-nums;
+}
