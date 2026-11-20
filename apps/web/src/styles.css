@@ -123,7 +123,8 @@ button.link {
   text-decoration: underline;
 }
 
-.device-table {
+.device-table,
+.data-table {
   width: 100%;
   border-collapse: collapse;
   background: #fff;
@@ -131,7 +132,9 @@ button.link {
 }
 
 .device-table th,
-.device-table td {
+.device-table td,
+.data-table th,
+.data-table td {
   text-align: left;
   padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--border);
@@ -159,4 +162,71 @@ button.link {
 .request-id {
   color: var(--muted);
   font-size: 0.875rem;
+}
+
+select {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.75rem 0;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: 0 1rem;
+}
+
+.form-row > td {
+  background: var(--bg);
+}
+
+.form-row .card {
+  margin-top: 0;
+}
+
+.filters {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.notice {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--danger);
+  background: #fff;
+}
+
+.notice p {
+  margin: 0 0 0.5rem;
+}
+
+.cook-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1.5rem;
+  margin: 1rem 0;
+}
+
+.cook-fields dt {
+  color: var(--muted);
+}
+
+.cook-fields dd {
+  margin: 0;
+}
+
+ul.plain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
