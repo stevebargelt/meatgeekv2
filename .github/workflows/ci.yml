@@ -193,6 +193,66 @@ jobs:
           COSMOS_EMULATOR_ENDPOINT: https://localhost:8081
         run: npx nx run api:test-emulator
 
+  # HAR-98 — the web app's browser test of the main path (HAR-97). `nx e2e
+  # web-e2e` builds web, serves dist/apps/web with `vite preview` on port 4300,
+  # and fakes Entra, the API and the SignalR hub at the network edge, so the job
+  # needs no network beyond the installs, no secret and no environment. That is
+  # what lets it run on fork pull requests too: keep it that way.
+  #
+  # Independent of `setup` (like api-cosmos-emulator) and deliberately without
+  # a path filter: a skipped job would look green.
+  web-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve the installed @playwright/test version
+        # The browser build Playwright downloads is tied to this exact version,
+        # so it is the cache key. Read from the lockfile, not package.json, so a
+        # range in package.json can never key two different installs alike.
+        id: playwright
+        run: |
+          version=$(node -p "require('./package-lock.json').packages['node_modules/@playwright/test'].version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium
+
+      - name: Install Chromium and its system dependencies
+        # Runs on a cache hit too: the cache holds the browser binary only, and
+        # the apt packages Chromium links against are not cached.
+        run: npx playwright install --with-deps chromium
+
+      - name: Web main-path browser test
+        run: npx nx e2e web-e2e
+
+      - name: Upload Playwright traces and screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-e2e-playwright
+          path: dist/.playwright/web-e2e
+          retention-days: 7
+
   build-typescript:
     runs-on: ubuntu-latest
     needs: setup
