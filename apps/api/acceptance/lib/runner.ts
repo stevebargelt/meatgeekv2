@@ -302,12 +302,16 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       lastRequest = { method: request.method, route, as };
       lastExec = undefined;
 
-      const headers: Record<string, string> = { Accept: 'application/json' };
+      // A proof's own headers go first, so the runner's always win (Headers
+      // matches names case-insensitively).
+      const headers = new Headers(request.headers);
+      headers.set('Accept', 'application/json');
+      headers.delete('Authorization');
       if (authenticated) {
-        headers['Authorization'] = `Bearer ${as === 'peer' ? peerToken : token}`;
+        headers.set('Authorization', `Bearer ${as === 'peer' ? peerToken : token}`);
       }
       if (request.body !== undefined) {
-        headers['Content-Type'] = 'application/json';
+        headers.set('Content-Type', 'application/json');
       }
 
       const started = performance.now();
@@ -411,7 +415,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     let groupFailed = false;
     for (const proof of proofs) {
       const label = `${group.name} › ${proof.name}`;
-      if (groupFailed) {
+      if (groupFailed && !proof.always) {
         skipped += 1;
         write(`SKIP ${label} (an earlier proof in this group failed)`);
         continue;

@@ -25,6 +25,9 @@ export interface RequestOptions {
   readonly route?: string;
   /** JSON request body. */
   readonly body?: unknown;
+  /** Extra request headers, e.g. `X-Request-ID` (HAR-68). They never replace
+   *  the runner's own `Authorization`, `Accept` or `Content-Type`. */
+  readonly headers?: Readonly<Record<string, string>>;
   /** Send a bearer token. Default `true`. */
   readonly authenticated?: boolean;
   /** Whose bearer token to send. Default `'owner'`. A peer request is marked
@@ -100,6 +103,9 @@ export interface AcceptanceApi {
 export interface Proof {
   /** Printed on pass and fail, e.g. `POST /cooks starts a cook`. */
   readonly name: string;
+  /** Run even after an earlier proof in the group failed (HAR-68): for a
+   *  cleanup step that must leave the system as the group found it. */
+  readonly always?: boolean;
   run(api: AcceptanceApi): Promise<void>;
 }
 
@@ -107,7 +113,7 @@ export interface Proof {
  * An ordered list of proofs from one file. They run in order and may share
  * state through the `create` closure (e.g. the id of a cook made by an earlier
  * proof). After a failure the rest of the group is skipped, since later proofs
- * usually depend on earlier ones. `create` is called afresh on every run.
+ * usually depend on earlier ones; a proof marked `always` still runs. `create` is called afresh on every run.
  */
 export interface ProofGroup {
   readonly name: string;

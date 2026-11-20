@@ -21,9 +21,10 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
-import type { AcceptanceApi, SimDeviceOptions } from './lib/proof';
+import type { AcceptanceApi, ProofGroup, SimDeviceOptions } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
-import { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
+import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
+import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
 import volumeGroup, { VOLUME } from './proofs/telemetry-volume.proof';
@@ -70,6 +71,10 @@ type StubRoute =
 const SIGNALR_CLIENT_TOKEN = 'stub-signalr-client-token-7d1e';
 /** HAR-67: the client access token negotiate hands the peer. */
 const PEER_SIGNALR_CLIENT_TOKEN = 'stub-signalr-peer-token-3a90';
+/** HAR-68: the body `timestamp` of the reading a fake `simdevice --twin --count 1` sends. */
+const TWIN_TIMESTAMP = '2026-11-19T16:45:12.340Z';
+/** HAR-68: the fixed reason the stub's 503 DEVICE_TWIN_UPDATE_FAILED carries. */
+const TWIN_FAILURE_REASON = 'iothub_patch_twin_status_500';
 /** HAR-67: the active cook an earlier run left on the simulated device. */
 const STALE_COOK_ID = '0b7c1d52-9e1f-4c3a-8d2e-5f6a7b8c9d0e';
 /** The SignalR JSON protocol's record separator. */
@@ -122,6 +127,14 @@ interface StubOptions {
   readonly peerLeak?: 'temperature' | 'cook_started';
   /** HAR-67: the simulated device already has an active cook (an earlier run's). */
   readonly simActiveCook?: boolean;
+  /** HAR-68: the twin proof's POST /cooks (X-Request-ID acceptance-twin-…)
+   *  saves the cook but answers 503 DEVICE_TWIN_UPDATE_FAILED, as the API does
+   *  when the twin PATCH fails. */
+  readonly twinUpdateFails?: boolean;
+  /** HAR-68: what the fake `simdevice --twin` prints wrong: `desired-cook`, a
+   *  desired activeCookId that is not the active cook; `reported-version`, a
+   *  reported appliedDesiredVersion one behind desired.$version. */
+  readonly twinFault?: 'desired-cook' | 'reported-version';
 }
 
 interface StubCook {
@@ -150,7 +163,15 @@ interface Stub {
   readonly baseUrl: string;
   /** HAR-57: requests the SignalR client made to the stub's `/client/` endpoint. */
   readonly signalRRequests: Array<{ method: string; path: string; authorization?: string }>;
-  readonly requests: Array<{ method: string; path: string; authorization?: string }>;
+  readonly requests: Array<{
+    method: string;
+    path: string;
+    authorization?: string;
+    /** HAR-68: the request's X-Request-ID header, when it sent one. */
+    requestId?: string;
+  }>;
+  /** HAR-68: the arguments of each `simdevice --twin` run the fake reported. */
+  readonly twinRuns: string[][];
   /** HAR-45: the arguments of each top-up the fake simdevice reported. */
   readonly topups: string[][];
   /** HAR-63: how many SignalR connections each `--count 1` send was pushed to. */
@@ -220,6 +241,38 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       meatType: 'acceptance',
     });
   }
+  /** HAR-68: the simulated device's twin. Start and stop sync desired to its
+   *  active cook as the API does (HAR-66); a fake `simdevice --twin` applies
+   *  desired to reported. */
+  const twin = {
+    desired: { activeCookId: null as string | null, correlationId: null as string | null },
+    version: 1,
+    reported: {
+      activeCookId: null as string | null,
+      correlationId: null as string | null,
+      appliedDesiredVersion: null as number | null,
+    },
+  };
+  const syncTwin = (correlationId: string) => {
+    const active = cooks.find(c => c.deviceId === SIM_DEVICE && c.status === 'active');
+    const target =
+      active === undefined
+        ? { activeCookId: null, correlationId: null }
+        : active.id === twin.desired.activeCookId
+          ? twin.desired
+          : { activeCookId: active.id, correlationId };
+    if (
+      target.activeCookId !== twin.desired.activeCookId ||
+      target.correlationId !== twin.desired.correlationId
+    ) {
+      twin.desired = { ...target };
+      twin.version += 1;
+    }
+  };
+  const twinRuns: string[][] = [];
+  /** HAR-68: the reading the last `simdevice --twin --count 1` sent, served as
+   *  the simulated device's current reading until another send replaces it. */
+  let twinReading: { timestamp: string; cookId: string | null } | undefined;
   let simPolls = 0;
   const simVisibleFromPoll = options.simVisibleFromPoll ?? 3;
   const simRouted = () => !options.simNeverRouted && simPolls >= simVisibleFromPoll;
@@ -402,6 +455,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         const { args } = (await readJson(request)) as { args: string[] };
         if (args.join(' ') === '--count 1') {
           // HAR-63: the one reading; broadcastTemperature pushes it live.
+          twinReading = undefined;
           setTimeout(pushLiveReading, 20);
         } else {
           topups.push(args);
@@ -411,11 +465,40 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         response.end();
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/__simdevice/twin') {
+        // HAR-68: the fake simdevice reconnecting with --twin. Not an API route.
+        const { args } = (await readJson(request)) as { args: string[] };
+        twinRuns.push(args);
+        twin.reported = {
+          ...twin.desired,
+          appliedDesiredVersion: twin.version,
+        };
+        const desired = {
+          activeCookId:
+            options.twinFault === 'desired-cook' ? randomUUID() : twin.desired.activeCookId,
+          correlationId: twin.desired.correlationId,
+          $version: twin.version,
+        };
+        const reported = {
+          ...twin.reported,
+          appliedDesiredVersion:
+            options.twinFault === 'reported-version' ? twin.version - 1 : twin.version,
+        };
+        if (args.join(' ').includes('--count 1')) {
+          twinReading = { timestamp: TWIN_TIMESTAMP, cookId: reported.activeCookId };
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ desired, reported }));
+        return;
+      }
       const authorization = request.headers['authorization'];
+      const requestIdHeader = request.headers['x-request-id'];
+      const requestId = typeof requestIdHeader === 'string' ? requestIdHeader : undefined;
       requests.push({
         method: request.method ?? '',
         path: url.pathname + url.search,
         authorization,
+        ...(requestId === undefined ? {} : { requestId }),
       });
 
       const send = (status: number, body: unknown, route?: StubRoute) => {
@@ -601,6 +684,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       if (route === 'GET /temperatures/current/{deviceId}') {
         const deviceId = decodeURIComponent(temperatureMatch![1]);
         const owned = owns(deviceId);
+        if (owned && deviceId === SIM_DEVICE && twinReading) {
+          // HAR-68: the reading the twin run sent, tagged with its cook.
+          const { timestamp, cookId } = twinReading;
+          send(200, { ...simReading(timestamp), ...(cookId ? { cookId } : {}) }, route);
+          return;
+        }
         if (owned && deviceId === SIM_DEVICE) {
           // HAR-44: the simulated device's reading arrives after a few polls.
           simPolls += 1;
@@ -756,6 +845,25 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         };
         cooks.push(cook);
         pushCookEvent('cook_started', cook);
+        if (cook.deviceId === SIM_DEVICE) {
+          // HAR-66/68: the twin follows the stored cook; a failed PATCH is a 503
+          // and the cook stays saved.
+          if (options.twinUpdateFails && requestId?.startsWith('acceptance-twin-')) {
+            send(
+              503,
+              {
+                error: 'DEVICE_TWIN_UPDATE_FAILED',
+                message: 'The cook was saved, but the device twin was not updated.',
+                cookId: cook.id,
+                reason: TWIN_FAILURE_REASON,
+                requestId: 'stub-invocation',
+              },
+              route
+            );
+            return;
+          }
+          syncTwin(requestId ?? 'stub-invocation');
+        }
         send(201, cook, route);
       } else {
         const cook = cooks.find(candidate => candidate.id === decodeURIComponent(stopMatch![1]));
@@ -766,6 +874,9 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         cook.status = 'completed';
         cook.endTime = new Date().toISOString();
         pushCookEvent('cook_stopped', cook);
+        if (cook.deviceId === SIM_DEVICE) {
+          syncTwin(requestId ?? 'stub-invocation');
+        }
         send(200, cook, route);
       }
     })().catch(() => {
@@ -779,6 +890,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   return {
     baseUrl: `http://127.0.0.1:${port}/api`,
     requests,
+    twinRuns,
     signalRRequests,
     topups,
     livePushes,
@@ -795,9 +907,17 @@ interface Run extends RunResult {
   readonly lines: readonly string[];
 }
 
-async function run(env: Record<string, string | undefined>): Promise<Run> {
+async function run(
+  env: Record<string, string | undefined>,
+  groups?: readonly ProofGroup[]
+): Promise<Run> {
   const lines: string[] = [];
-  const result = await runAcceptance({ env, write: line => lines.push(line), timeoutMs: 5_000 });
+  const result = await runAcceptance({
+    env,
+    write: line => lines.push(line),
+    timeoutMs: 5_000,
+    groups,
+  });
   return { ...result, lines, output: lines.join('\n') };
 }
 
@@ -826,7 +946,24 @@ const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stri
 const args = process.argv.slice(2).join(' ');
 const handedOver = conn === ${JSON.stringify(SIM_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.argv.some(a => a.includes(key));
 const topup = /^--count ([1-9][0-9]*) --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
-if (mode === 'ok' || mode === 'topup-exit1') {
+const twin = /^--twin --count ([01]) --timeout 60s$/.exec(args);
+if ((mode === 'ok' || mode === 'topup-exit1') && twin && handedOver) {
+  // HAR-68: reconnect, read the stub's twin (it applies desired to reported),
+  // print the twin line, then the reading carrying the cook.
+  fetch(${JSON.stringify(stub ? `${stub.baseUrl}/__simdevice/twin` : '')}, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ args: process.argv.slice(2) }),
+  })
+    .then(r => r.json())
+    .then(({ desired, reported }) => {
+      line({ event: 'twin', desired, reported });
+      if (twin[1] === '1') line(reading(${JSON.stringify(TWIN_TIMESTAMP)}));
+    }, () => {
+      process.stderr.write('fake simdevice: no twin response\\n');
+      process.exit(1);
+    });
+} else if (mode === 'ok' || mode === 'topup-exit1') {
   if (!handedOver || (args !== '--count 1' && !topup)) {
     process.stderr.write('fake simdevice: bad hand-over: ' + args + '\\n');
     process.exit(2);
@@ -889,19 +1026,28 @@ function simEnv(mode: FakeMode = 'ok'): Record<string, string> {
 
 let stub: Stub | undefined;
 
-async function runAgainstStub(options: StubOptions = {}, mode: FakeMode = 'ok'): Promise<Run> {
+/** Run every proof group (or only `groups`) against a fresh stub. */
+async function runAgainstStub(
+  options: StubOptions = {},
+  mode: FakeMode = 'ok',
+  groups?: readonly ProofGroup[]
+): Promise<Run> {
   stub = await startStub(options);
-  return run({
-    ACCEPTANCE_BASE_URL: stub.baseUrl,
-    ACCEPTANCE_BEARER_TOKEN: TOKEN,
-    ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
-    ...simEnv(mode),
-  });
+  return run(
+    {
+      ACCEPTANCE_BASE_URL: stub.baseUrl,
+      ACCEPTANCE_BEARER_TOKEN: TOKEN,
+      ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+      ...simEnv(mode),
+    },
+    groups
+  );
 }
 
 const realPoll = { ...ROUNDTRIP_POLL };
 const realLiveWait = { ...LIVE_WAIT };
 const realIsolationWait = { ...ISOLATION_WAIT };
+const realTwinPoll = { ...TWIN_POLL };
 const realVolume = { ...VOLUME };
 
 beforeAll(() => {
@@ -914,6 +1060,9 @@ beforeAll(() => {
   // HAR-67: 90 s for the owner's message and a 15 s grace for the peer live.
   ISOLATION_WAIT.capMs = 300;
   ISOLATION_WAIT.graceMs = 100;
+  // HAR-68: the twin reading is polled every 2 s for up to 90 s live.
+  TWIN_POLL.intervalMs = 5;
+  TWIN_POLL.capMs = 300;
   // HAR-45: a long cook is 8,640 readings, re-read every 10 s for up to 15 min
   // live. Here a few hundred (still over the 100-reading default page), and
   // polls in milliseconds. The send interval is left as it is live.
@@ -927,6 +1076,7 @@ afterAll(() => {
   Object.assign(ROUNDTRIP_POLL, realPoll);
   Object.assign(LIVE_WAIT, realLiveWait);
   Object.assign(ISOLATION_WAIT, realIsolationWait);
+  Object.assign(TWIN_POLL, realTwinPoll);
   Object.assign(VOLUME, realVolume);
   rmSync(fakeDir, { recursive: true, force: true });
 });
@@ -1002,9 +1152,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
     // HAR-26: one start on the registered device, one refused on the unowned one.
     // HAR-67: the isolation group starts one more as the owner and is refused
-    // one as the peer.
+    // one as the peer. HAR-68: the twin group starts one more as the owner.
     const posts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
-    expect(posts.filter(r => r.authorization === `Bearer ${TOKEN}`)).toHaveLength(3);
+    expect(posts.filter(r => r.authorization === `Bearer ${TOKEN}`)).toHaveLength(4);
     expect(posts.filter(r => r.authorization === `Bearer ${PEER_TOKEN}`)).toHaveLength(1);
     expect(
       stub!.requests.filter(
@@ -1023,27 +1173,38 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(anonymous[0]).toMatchObject({ method: 'GET', path: '/api/cooks' });
   });
 
+  /** HAR-68: the device twin group's failures when `route` is broken: the step
+   *  that sends it, plus its always-run cleanup when that lists (GET /cooks) or
+   *  must stop (a stop refused, so the cook is still active) the cooks. */
+  const twinFailures = (route: CookRoute, refused: boolean): number =>
+    route === 'GET /cooks' || (refused && route === 'POST /cooks/{cookId}/stop') ? 2 : 1;
+
   it.each(ROUTES)('(b) exits non-zero and names %s when it returns a wrong status', async route => {
     const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
     expect(result.exitCode).not.toBe(0);
-    // HAR-67: the isolation group uses every cooks route too.
-    expect(result.failures).toHaveLength(2);
-    expect(result.failures[0]).toContain(`${route} → 503`);
+    // HAR-67 and HAR-68: the isolation and twin groups use every cooks route too.
+    const twin = result.failures.filter(line => line.startsWith('FAIL device twin ›'));
+    expect(twin).toHaveLength(twinFailures(route, true));
+    expect(result.failures).toHaveLength(2 + twin.length);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
-    expect(result.failures[1]).toContain('signalr isolation ›');
-    expect(result.failures[1]).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
+    expect(result.failures[result.failures.length - 1]).toContain('signalr isolation ›');
+    for (const failure of result.failures) {
+      expect(failure).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
+    }
   });
 
   /** HAR-26 and HAR-28: the cooks lifecycle and the temperatures proof also
    *  register their own device, so a broken POST /devices fails them too.
-   *  HAR-67: the isolation group registers the simulated device first (201),
-   *  so the live-temperature group (HAR-63) and the round trip, which run
-   *  after it, take the 409 path and read GET /devices/{id}. */
+   *  HAR-68: the device twin group registers the simulated device first
+   *  (201), so the isolation (HAR-67), live-temperature (HAR-63) and round
+   *  trip groups, which run after it, take the 409 path and read
+   *  GET /devices/{id}. */
   const groupsUsing = (route: DeviceRoute): string[] =>
     route === 'POST /devices'
       ? [
           'cooks lifecycle ›',
+          'device twin ›',
           'devices ›',
           'temperatures ›',
           'signalr isolation ›',
@@ -1051,7 +1212,12 @@ describe('live acceptance runner (against an in-process stub)', () => {
           'telemetry round-trip ›',
         ]
       : route === 'GET /devices/{id}'
-        ? ['devices ›', 'signalr live temperature ›', 'telemetry round-trip ›']
+        ? [
+            'devices ›',
+            'signalr isolation ›',
+            'signalr live temperature ›',
+            'telemetry round-trip ›',
+          ]
         : ['devices ›'];
 
   it.each(DEVICE_ROUTES)(
@@ -1240,13 +1406,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
   /** HAR-44: the telemetry round-trip reads both temperatures routes too;
    *  HAR-45: the telemetry volume group reads history only; HAR-67: the
-   *  isolation group reads current, as the peer. */
+   *  isolation group reads current, as the peer; HAR-68: so does the twin
+   *  group, as the owner. */
   const temperatureGroups = (route: TemperatureRoute): string[] => [
     'FAIL temperatures ›',
     'FAIL telemetry round-trip ›',
     ...(route === 'GET /temperatures/history'
       ? ['FAIL telemetry volume ›']
-      : ['FAIL signalr isolation ›']),
+      : ['FAIL signalr isolation ›', 'FAIL device twin ›']),
   ];
 
   it.each(TEMPERATURE_ROUTES)(
@@ -1362,6 +1529,37 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.failures[1]).toContain('POST /cooks (peer) → 201: expected 403');
   });
 
+  it("HAR-68: sends a proof's extra headers, but never lets them replace the caller's token", async () => {
+    const result = await runAgainstStub({}, 'ok', [
+      {
+        name: 'headers',
+        create: () => [
+          {
+            name: 'GET /cooks with X-Request-ID and a forged Authorization',
+            run: async api => {
+              const response = await api.request({
+                method: 'GET',
+                path: '/cooks',
+                headers: { 'X-Request-ID': 'acceptance-headers', authorization: 'Bearer forged' },
+              });
+              api.expectStatus(response, 200);
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(result.failures).toEqual([]);
+    expect(stub!.requests).toEqual([
+      {
+        method: 'GET',
+        path: '/api/cooks',
+        authorization: `Bearer ${TOKEN}`,
+        requestId: 'acceptance-headers',
+      },
+    ]);
+  });
+
   it('(b) exits non-zero when the unauthenticated GET /cooks is not refused', async () => {
     // A stub that lets anyone in (e.g. Easy Auth switched off) must fail proof 1.
     stub = await startStub();
@@ -1402,10 +1600,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ omitChargeOn: route });
 
     expect(result.exitCode).not.toBe(0);
-    // HAR-67: the isolation group uses every cooks route too.
-    expect(result.failures).toHaveLength(2);
+    // HAR-67 and HAR-68: the isolation and twin groups use every cooks route
+    // too. A stop that went through but omitted its RU leaves nothing for the
+    // twin group's cleanup to stop.
+    const twin = result.failures.filter(line => line.startsWith('FAIL device twin ›'));
+    expect(twin).toHaveLength(twinFailures(route, false));
+    expect(result.failures).toHaveLength(2 + twin.length);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
-    expect(result.failures[1]).toContain('signalr isolation ›');
+    expect(result.failures[result.failures.length - 1]).toContain('signalr isolation ›');
     for (const failure of result.failures) {
       expect(failure).toContain(route);
       expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
@@ -1541,13 +1743,14 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     );
 
     // A 404 NO_READINGS, then older readings, were polled past.
-    // (HAR-67: the isolation group's one read is the peer's, not counted.)
+    // (HAR-67: the isolation group's one read is the peer's, not counted.
+    // HAR-68: the twin group's one read, before the round trip, is.)
     const current = stub!.requests.filter(
       r =>
         r.path === `/api/temperatures/current/${SIM_DEVICE}` &&
         r.authorization === `Bearer ${TOKEN}`
     );
-    expect(current).toHaveLength(4);
+    expect(current).toHaveLength(1 + 4);
     // History was paged (two per page) until the sent reading turned up, from a
     // window opening five minutes before the send. (The volume group's reads
     // carry a `limit` or no window.)
@@ -1772,6 +1975,117 @@ describe('signalr live temperature (HAR-63, against the stub and a fake simdevic
   });
 });
 
+describe('device twin (HAR-68, against the stub and a fake simdevice)', () => {
+  const GROUP = 'device twin ›';
+  const STEPS = [
+    'POST /devices registers the simulated device to the owner',
+    'any cook already active on the simulated device is stopped',
+    'POST /cooks with X-Request-ID acceptance-twin-<runId> starts a cook on the simulated device: 201',
+    'simdevice --twin --count 1 reconnects: the twin carries the cook and the device reports it applied',
+    'GET /temperatures/current/{deviceId} returns the reading just sent, tagged with the cook',
+    'POST /cooks/{cookId}/stop stops the cook: 200',
+    'simdevice --twin --count 0 reconnects: the twin has no cook and the device reports it applied',
+    'no cook is left active on the simulated device',
+  ];
+  const CLEANUP = STEPS[STEPS.length - 1];
+  const runTwin = (options: StubOptions = {}, mode: FakeMode = 'ok') =>
+    runAgainstStub(options, mode, [twinGroup]);
+  const runIdOf = (result: Run) =>
+    /^acceptance run (\S+) against /.exec(result.lines[0] ?? '')?.[1] ?? '(none)';
+  /** The failed step, the cleanup PASSed after it, and every step between SKIPped. */
+  const expectFailedAt = (result: Run, step: number, message: string) => {
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(`FAIL ${GROUP} ${STEPS[step]}`);
+    expect(result.failures[0]).toContain(message);
+    STEPS.slice(step + 1, -1).forEach(skipped =>
+      expect(result.lines).toContain(
+        `SKIP ${GROUP} ${skipped} (an earlier proof in this group failed)`
+      )
+    );
+    expect(result.lines).toContain(`PASS ${GROUP} ${CLEANUP}`);
+    // The cleanup left no cook active on the simulated device.
+    expect(stub!.simCooks().length).toBeGreaterThan(0);
+    expect(stub!.simCooks().every(c => c.status === 'completed')).toBe(true);
+  };
+
+  it('(a) passes: the started cook reaches the twin and the reading, the stop clears it; prints METRIC twin-apply-ms', async () => {
+    const result = await runTwin();
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    const metrics = result.lines.filter(line => line.startsWith('METRIC twin-apply-ms '));
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatch(/^METRIC twin-apply-ms \d+$/);
+    // The start carried the run's X-Request-ID, which became the correlation id.
+    const starts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
+    expect(starts).toEqual([
+      expect.objectContaining({ requestId: `acceptance-twin-${runIdOf(result)}` }),
+    ]);
+    // Two reconnects, with simdevice's real flag syntax.
+    expect(stub!.twinRuns).toEqual([
+      ['--twin', '--count', '1', '--timeout', '60s'],
+      ['--twin', '--count', '0', '--timeout', '60s'],
+    ]);
+    expect(stub!.simCooks()).toHaveLength(1);
+    expect(stub!.simCooks()[0].status).toBe('completed');
+    expect(result.output).not.toContain(TOKEN);
+    expect(result.output).not.toContain(SIM_KEY);
+  });
+
+  it('(a) stops a cook an earlier run left active on the simulated device before starting its own', async () => {
+    const result = await runTwin({ simActiveCook: true });
+
+    expect(result.failures).toEqual([]);
+    const stops = stub!.requests.filter(r => r.method === 'POST' && r.path.endsWith('/stop'));
+    expect(stops[0]?.path).toBe(`/api/cooks/${STALE_COOK_ID}/stop`);
+    expect(stops).toHaveLength(2);
+    expect(stub!.simCooks().every(c => c.status === 'completed')).toBe(true);
+  });
+
+  it('(b) fails when the twin desired activeCookId is not the new cook, and still stops the cook', async () => {
+    const result = await runTwin({ twinFault: 'desired-cook' });
+
+    expectFailedAt(result, 3, 'simdevice → exit 0: desired.activeCookId is "');
+    expect(result.failures[0]).toMatch(/not the new cook [0-9a-f-]{36}$/);
+    expect(result.lines.some(line => line.startsWith('METRIC twin-apply-ms'))).toBe(false);
+  });
+
+  it('(b) fails when reported.appliedDesiredVersion is not desired.$version, and still stops the cook', async () => {
+    const result = await runTwin({ twinFault: 'reported-version' });
+
+    expectFailedAt(
+      result,
+      3,
+      'reported.appliedDesiredVersion is 1, not desired.$version 2: the device did not ' +
+        'report applying the current desired state'
+    );
+  });
+
+  it('(b) fails on a 503 DEVICE_TWIN_UPDATE_FAILED start, printing its reason, and still stops the saved cook', async () => {
+    const result = await runTwin({ twinUpdateFails: true });
+
+    expectFailedAt(
+      result,
+      2,
+      `POST /cooks → 503: DEVICE_TWIN_UPDATE_FAILED, reason ${TWIN_FAILURE_REASON}: the cook ` +
+        'was saved but the device twin was not updated'
+    );
+    expect(stub!.twinRuns).toEqual([]);
+  });
+
+  it('(c) fails with the exit code when simdevice exits 1, and still stops the cook', async () => {
+    const result = await runTwin({}, 'exit1');
+
+    expectFailedAt(
+      result,
+      3,
+      'simdevice → exit 1: simdevice exited 1, expected 0: send failed: connection refused'
+    );
+  });
+});
+
 describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', () => {
   const GROUP = 'signalr isolation ›';
   const STEPS = [
@@ -1849,7 +2163,8 @@ describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', ()
   });
 
   it('(a) stops a cook an earlier run left active on the simulated device before starting its own', async () => {
-    const result = await runAgainstStub({ simActiveCook: true });
+    // Only this group: the device twin group runs earlier and would stop it first.
+    const result = await runAgainstStub({ simActiveCook: true }, 'ok', [isolationGroup]);
 
     expect(result.failures).toEqual([]);
     expect(
@@ -1943,12 +2258,15 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     expect(result.failures).toEqual([]);
     expect(result.exitCode).toBe(0);
     STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
-    // No simdevice top-up: the only runs are the isolation proof's (HAR-67),
-    // the live push's (HAR-63) and the round trip's, one reading each.
+    // No simdevice top-up: the only sends are the isolation proof's (HAR-67),
+    // the live push's (HAR-63) and the round trip's, one reading each, besides
+    // the twin group's two reconnects (HAR-68).
     expect(stub!.topups).toEqual([]);
     const execs = result.lines.filter(line => /^\s+EXEC\s/.test(line));
-    expect(execs).toHaveLength(3);
-    execs.forEach(line => expect(line).toMatch(/^\s+EXEC\s+simdevice --count 1\s/));
+    const sends = execs.filter(line => !/^\s+EXEC\s+simdevice --twin\s/.test(line));
+    expect(execs).toHaveLength(sends.length + 2);
+    expect(sends).toHaveLength(3);
+    sends.forEach(line => expect(line).toMatch(/^\s+EXEC\s+simdevice --count 1\s/));
     expect(metric(result, 'history-total-before')).toEqual([
       `METRIC history-total-before ${VOLUME.target}`,
     ]);
