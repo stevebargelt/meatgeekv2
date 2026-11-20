@@ -24,6 +24,7 @@ import { getDevicesHandler } from './functions/devices/get-devices';
 import { getDeviceHandler } from './functions/devices/get-device';
 import { registerDeviceHandler } from './functions/devices/register-device';
 import { updateDeviceHandler } from './functions/devices/update-device';
+import { deleteDeviceHandler } from './functions/devices/delete-device';
 import { getUserProfileHandler } from './functions/users/get-user-profile';
 import { putUserProfileHandler } from './functions/users/put-user-profile';
 import { listRecipesHandler } from './functions/recipes/list-recipes';
@@ -151,6 +152,14 @@ app.http('updateDevice', {
   authLevel: 'anonymous',
   route: 'devices/{id}',
   handler: updateDeviceHandler,
+});
+
+// HAR-85: delete one of the caller's devices. Its cooks and readings stay.
+app.http('deleteDevice', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'devices/{id}',
+  handler: deleteDeviceHandler,
 });
 
 // HAR-27 (MG-81): the caller's own profile. Identity is the Easy Auth

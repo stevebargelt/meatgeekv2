@@ -439,8 +439,9 @@ graph TB
   MeatgeekCloudApi.Cooks -. "`start, stop: 403
 DEVICE_NOT_OWNED`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Cooks -. "`write cook`" .-> MeatgeekCloudApi.Repos
-  MeatgeekCloudApi.Devices -. "`GET, PATCH /devices/{id}: 404`" .-> MeatgeekCloudApi.Ownership
-  MeatgeekCloudApi.Devices -. "`list by userId, register, update`" .-> MeatgeekCloudApi.Repos
+  MeatgeekCloudApi.Devices -. "`[...]`" .-> MeatgeekCloudApi.Ownership
+  MeatgeekCloudApi.Devices -. "`list by userId, register,
+update, delete`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Temperatures -. "`current, history: 404
 DEVICE_NOT_FOUND`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Temperatures -. "`query readings`" .-> MeatgeekCloudApi.Repos
