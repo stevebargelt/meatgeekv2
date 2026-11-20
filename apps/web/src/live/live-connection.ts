@@ -38,8 +38,8 @@ export const RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 30_000] as const;
  *
  * The hub's own automatic reconnect handles short drops. When it gives up and
  * the connection closes, or when negotiate or start fails (a 429, a 503, a
- * network error), this negotiates again, for a fresh token and fresh device
- * groups, and starts a new connection after 2, 5, 10, then every 30 s. A 401
+ * network error), this negotiates again for a fresh token and starts a new
+ * connection after 2, 5, 10, then every 30 s. A 401
  * from negotiate stops it: only signing in again can fix that.
  */
 export function openLiveConnection(options: LiveConnectionOptions): () => void {

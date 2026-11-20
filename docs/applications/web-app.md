@@ -138,7 +138,7 @@ connection per page: opened on mount, stopped on unmount.
 3. When the connection **closes** (automatic reconnect gave up), or negotiate or
    start fails (429, 503, 500, network), it negotiates again and starts a new
    connection after 2, 5, 10, then every 30 s, for as long as the page is open.
-   Negotiating again gets a fresh 60-minute token and fresh device groups.
+   Negotiating again gets a fresh 60-minute token.
 4. A 401 from negotiate stops retrying and shows "Sign in again".
 
 Messages are typed from the spec's `x-signalr` schemas. `temperature` messages

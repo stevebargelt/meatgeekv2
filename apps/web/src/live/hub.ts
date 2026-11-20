@@ -37,7 +37,7 @@ export type HubFactory = (info: SignalRConnectionInfo) => LiveHub;
  * A real `HubConnection` to the URL negotiate returned. Its access token
  * factory returns the negotiate token; when that token expires (60 minutes)
  * automatic reconnect fails, the connection closes, and the caller negotiates
- * again for a new token and fresh device groups.
+ * again for a new token.
  */
 export const createSignalRHub: HubFactory = ({ url, accessToken }) => {
   const connection = new HubConnectionBuilder()
