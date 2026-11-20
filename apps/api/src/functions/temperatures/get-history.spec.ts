@@ -558,4 +558,26 @@ describe('GET /temperatures/history', () => {
 
     expect(response.status).toBe(500);
   });
+
+  it('500, not 400, when a page with a token fails at the network (ECONNRESET), leaking no endpoint', async () => {
+    const { deps, temperatures } = ownedWithReadings(3);
+    temperatures.failNext('ECONNRESET');
+    const { ctx, errors, logs } = context();
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE, continuationToken: 'fake-history-token:1' }),
+      ctx,
+      deps
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.jsonBody).toEqual({
+      error: 'INTERNAL_SERVER_ERROR',
+      message: 'Failed to retrieve temperature history',
+      requestId: 'inv-9',
+    });
+    expect(errors).not.toEqual([]);
+    const everything = [JSON.stringify(response), ...errors, ...logs].join('\n');
+    expect(everything).not.toContain(FAKE_ACCOUNT_ENDPOINT);
+  });
 });

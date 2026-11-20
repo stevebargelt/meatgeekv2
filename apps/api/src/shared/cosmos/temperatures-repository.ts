@@ -235,6 +235,23 @@ function statusCodeOf(error: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * HAR-75 — whether a failure on a tokened history page means Cosmos refused
+ * the token. A 400 from the engine, or a client-side parse failure, which has
+ * no status and no string `code` (a `SyntaxError`, a plain `Error`). A
+ * connection-level SDK failure carries a string `code` (`ECONNREFUSED`,
+ * `ECONNRESET`, `ETIMEDOUT`, `TimeoutError`) and is the dependency's fault,
+ * not the caller's: it propagates and the handler answers 500.
+ */
+function isRefusedToken(error: unknown): boolean {
+  const status = statusCodeOf(error);
+  if (status !== undefined) {
+    return status === 400;
+  }
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code !== 'string';
+}
+
 export class TemperaturesRepository {
   /**
    * @param container the temperatures container from the shared adapter
@@ -278,9 +295,10 @@ export class TemperaturesRepository {
    * (`partitionKey: deviceId`), one `fetchNext`: `maxItemCount` is the page
    * size and the SDK continuation token is the position. No COUNT is issued.
    *
-   * A token Cosmos refuses (a 400, or a client-side failure to parse it with
-   * no status) throws {@link InvalidContinuationTokenError}. Without a token
-   * every failure propagates as it is.
+   * A token Cosmos refuses ({@link isRefusedToken}: a 400, or a client-side
+   * parse failure with no status and no string `code`) throws
+   * {@link InvalidContinuationTokenError}. A network failure (string `code`),
+   * any other status, and every failure without a token propagate as they are.
    *
    * Callers must have checked that the caller owns the device first.
    */
@@ -298,8 +316,7 @@ export class TemperaturesRepository {
         })
         .fetchNext();
     } catch (error) {
-      const status = statusCodeOf(error);
-      if (options.continuationToken !== undefined && (status === 400 || status === undefined)) {
+      if (options.continuationToken !== undefined && isRefusedToken(error)) {
         throw new InvalidContinuationTokenError(requestChargeOfError(error));
       }
       throw error;

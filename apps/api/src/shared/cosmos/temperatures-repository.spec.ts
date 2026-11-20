@@ -368,7 +368,7 @@ describe('TemperaturesRepository history queries (HAR-35)', () => {
     await expect(refused).rejects.not.toHaveProperty('message', expect.stringContaining('https'));
   });
 
-  it('turns a status-less SDK failure on a token into InvalidContinuationTokenError', async () => {
+  it('turns a client-side token parse failure (no status, no string code) into InvalidContinuationTokenError', async () => {
     const container = {
       items: {
         query: () => ({
@@ -383,6 +383,22 @@ describe('TemperaturesRepository history queries (HAR-35)', () => {
     await expect(
       repository.getReadingsPage({ deviceId: DEVICE }, { limit: 2, continuationToken: 'g' })
     ).rejects.toBeInstanceOf(InvalidContinuationTokenError);
+  });
+
+  it('lets a network failure on a tokened page (string code, no status) propagate, not InvalidContinuationTokenError', async () => {
+    for (const code of ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'TimeoutError']) {
+      const fake = new FakeTemperaturesContainer();
+      const repository = new TemperaturesRepository(fake.asContainer());
+      fake.failNext(code);
+      const failed = await repository
+        .getReadingsPage(
+          { deviceId: DEVICE },
+          { limit: 1, continuationToken: 'fake-history-token:0' }
+        )
+        .catch((error: unknown) => error);
+      expect(failed).not.toBeInstanceOf(InvalidContinuationTokenError);
+      expect(failed).toMatchObject({ code });
+    }
   });
 
   it('lets a 400 without a token, and a non-400 with one, propagate as they are', async () => {

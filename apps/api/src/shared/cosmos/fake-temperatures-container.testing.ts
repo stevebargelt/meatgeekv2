@@ -94,7 +94,7 @@ function matchesHistoryClauses(
 export class FakeTemperaturesContainer {
   readonly queries: FakeTemperaturesQuery[] = [];
   private readonly documents: StoredDocument[] = [];
-  private failNextStatus: number | undefined;
+  private failNextStatus: number | string | undefined;
   private failAfterQueries = 0;
 
   /** Seeds a document as IoT Hub would have routed it, system properties added. */
@@ -112,8 +112,10 @@ export class FakeTemperaturesContainer {
 
   /** Makes a query throw an SDK-shaped error whose text names the account (and
    *  reports {@link TEMPERATURES_QUERY_CHARGE}): the next one, or the one after
-   *  `skip` more queries succeed. */
-  failNext(statusCode = 503, skip = 0): void {
+   *  `skip` more queries succeed. A number is an HTTP status; a string is a
+   *  connection-level failure as the SDK throws it (`RestError` with that
+   *  string `code`, e.g. `'ECONNRESET'`, and no status). */
+  failNext(statusCode: number | string = 503, skip = 0): void {
     this.failNextStatus = statusCode;
     this.failAfterQueries = skip;
   }
@@ -198,7 +200,13 @@ export class FakeTemperaturesContainer {
 
 /** An SDK-shaped error whose text names the account and that reports
  *  {@link TEMPERATURES_QUERY_CHARGE}. */
-function sdkError(statusCode: number): Error {
+function sdkError(statusCode: number | string): Error {
+  if (typeof statusCode === 'string') {
+    return Object.assign(new Error(`connect ${statusCode} ${FAKE_ACCOUNT_ENDPOINT}`), {
+      name: 'RestError',
+      code: statusCode,
+    });
+  }
   return Object.assign(
     new Error(`Request to ${FAKE_ACCOUNT_ENDPOINT} failed with status ${statusCode}`),
     { code: statusCode, statusCode, requestCharge: TEMPERATURES_QUERY_CHARGE }
