@@ -29,7 +29,8 @@ export default defineConfig({
   // Up to 15 min waiting for the Vercel build, then a few minutes of proof.
   timeout: 25 * 60_000,
   expect: { timeout: 30_000 },
-  reporter: [['list']],
+  // step-reporter: a PASS or FAIL line per proof step (HAR-101).
+  reporter: [['list'], ['./live/step-reporter.ts']],
   use: {
     headless: true,
     trace: 'off',
