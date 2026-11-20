@@ -39,9 +39,10 @@ model {
         technology 'Go'
         description '''
           Polls the controller, queues readings on disk and publishes them to IoT Hub.
-          Configured by env vars `IOTHUB_CONNECTION_STRING`, `SIGNALR_HUB_URL`,
-          `API_BASE_URL` and `OTEL_EXPORTER_OTLP_ENDPOINT` (plus `DEVICE_URL`,
-          `POLL_INTERVAL`, `QUEUE_DIR`, `COOKSESSION_STATE_PATH`).
+          Learns its active cook from the IoT Hub device twin over the same MQTT connection
+          (HAR-58); it has no SignalR client and makes no REST API call.
+          Configured by env vars `IOTHUB_CONNECTION_STRING` and `OTEL_EXPORTER_OTLP_ENDPOINT`
+          (plus `DEVICE_URL`, `POLL_INTERVAL`, `QUEUE_DIR`, `COOKSESSION_STATE_PATH`).
         '''
         link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/data-pusher 'Source'
 
@@ -62,21 +63,25 @@ model {
             through this same code.
           '''
         }
-        signalr = component 'signalr client' {
-          #retiring
-          description 'Listens on temperatureHub for cook_started and cook_stopped and hands the cook id and correlation.id to cooksession. It POSTs negotiate straight to SIGNALR_HUB_URL and does not speak the API negotiate handshake (MG-29), and the live SignalR path awaits the MG-24 bootstrap (AC5), so this has never worked live. Since MG-30 the API sends cook events to the owning user, not the device, so it receives none. To be removed.'
-        }
         twin = component 'twin client' {
-          #decided
-          description 'Reads the device twin desired properties on connect and on change, and reports what it applied. An offline Pi catches up on reconnect.'
+          #live
+          technology 'MQTT twin topics, internal/iothub/twin.go'
+          description '''
+            Shares the telemetry MQTT connection (IoT Hub allows one per device); it never dials
+            its own. On every connect it subscribes to the twin topics and GETs the whole twin,
+            so an offline Pi catches up on reconnect. It applies desired patches in `$version`
+            order (an older version is ignored; a skipped version triggers a fresh GET),
+            persists each to `cooksession`, then reports `activeCookId`, `correlationId` and
+            `appliedDesiredVersion`.
+          '''
         }
         session = component 'cooksession' {
-          technology 'cooksession.Store + correlationHolder'
+          technology 'cooksession.Store'
           description '''
-            Holds the active cook id (`cooksession.Store`, state at `/var/lib/meatgeek-pusher/cooksession.json`)
-            and the cook-scoped `correlation.id` (`correlationHolder` in `cmd/main.go`).
-            `cooksession.Reconcile` against the REST API at startup is the practical cook-id
-            source until the live SignalR path is proven (MG-24 AC5).
+            Persists the active cook id, the cook-scoped correlation id and the applied twin
+            desired version at `/var/lib/meatgeek-pusher/cooksession.json`, a restart cache so
+            a boot with no network still stamps the last cook it was told about. Its only
+            writer is the twin client.
           '''
         }
         tracing = component 'telemetry' {
@@ -87,12 +92,8 @@ model {
         collector -> queue 'enqueues readings'
         queue -> iot 'drains in order'
         tracing -> iot 'traceparent per message'
-        signalr -[retiring]-> session 'sets active cook and correlation id' {
-          #retiring
-        }
-        twin -[decided]-> session 'sets active cook and correlation id' {
-          #decided
-        }
+        twin -> iot 'shares the MQTT connection'
+        twin -> session 'persists active cook, correlation id, applied version'
         session -> collector 'cook id and correlation id'
       }
 
@@ -272,7 +273,17 @@ model {
       realtime = service 'SignalR Service' {
         #live
         technology 'Serverless mode, hub temperatureHub'
-        description 'Terraform sets service_mode = "Serverless": no hub server, no upstream. cook_started and cook_stopped are sent to the owning userId; negotiate puts a user in device-{id} for each device it owns (MG-30). The negotiate acceptance proof connects a client; receiving a cook event is not yet proven live (procedure in docs/api/signalr-cook-events-smoke.md). Decided: push to clients only (live temperatures and cook events).'
+        description '''
+          Terraform sets `service_mode = "Serverless"`: no hub server, no upstream. Push to clients
+          only: `broadcastTemperature` sends each reading to `device-{id}`, and `cook_started` and
+          `cook_stopped` go to the owning userId; negotiate puts a user in `device-{id}` for each
+          device it owns (MG-30). Proven live by the acceptance proofs: `signalr negotiate` (a
+          client connects with the token the API mints), `signalr live temperature` (a simulated
+          reading reaches its owner by push, `METRIC signalr-delivery-ms` 18424 in run
+          44673261258) and `signalr isolation` (a non-owner receives nothing, while the owner
+          receives the reading and its `cook_started` and `cook_stopped`). The device holds no
+          SignalR connection.
+        '''
       }
 
       observability = area 'Observability' {
@@ -332,7 +343,7 @@ model {
     // Telemetry: the storage path is live end to end.
     edge.pusher.iot -[event]-> cloud.ingest.iothub 'telemetry: messageId, $.ct=application/json, $.ce=utf-8, correlation.id, traceparent' {
       technology 'MQTT 8883, device SAS, QoS 1'
-      description 'Each reading as JSON with message properties messageId, $.ct=application/json, $.ce=utf-8, correlation.id (cook-scoped, from correlationHolder) and traceparent (per message, from the publisher.publish span). No Function reads traceparent back.'
+      description 'Each reading as JSON with message properties messageId, $.ct=application/json, $.ce=utf-8, correlation.id (cook-scoped, from cooksession) and traceparent (per message, from the publisher.publish span). No Function reads traceparent back.'
     }
     cloud.ingest.iothub -[event]-> cloud.data.temperatures 'cosmos-storage-route' {
       technology 'identity-based, no Function in the path'
@@ -348,8 +359,10 @@ model {
       technology 'REST api-version 2024-12-01, managed identity'
     }
 
-    // Realtime path: push to clients. Event Hub -> Function -> SignalR -> apps.
-    // The Function (HAR-60) is built; the apps that receive it are not.
+    // Realtime path: push to clients. Event Hub -> Function -> SignalR (HAR-60), live.
+    // The edges to the apps stay #decided on purpose: the mobile and web apps do not call
+    // negotiate or open a SignalR connection (their UI is outside HAR-55), so the model must
+    // not draw them as live. The acceptance proofs are the only live SignalR client today.
     cloud.ingest.eventhub -[event]-> cloud.api.broadcast 'Event Hub trigger' {
       technology 'consumer group api-broadcast, identity-based'
     }
@@ -363,33 +376,22 @@ model {
       #decided
     }
 
-    // Decided: the active cook is device state, carried by the IoT Hub device twin.
-    cloud.api.cooks -[decided]-> cloud.ingest.iothub 'set twin desired properties' {
-      #decided
-      description 'Active cook id and correlation id, set only after the Cosmos write succeeds.'
+    // The active cook is device state, carried by the IoT Hub device twin (HAR-58, HAR-66).
+    cloud.api.cooks -> cloud.ingest.iothub 'set twin desired properties' {
+      technology 'IoT Hub service REST, managed identity (IoT Hub Twin Contributor)'
+      description 'Desired activeCookId and correlationId, synced after the Cosmos write to the device lock under the twin etag (If-Match), so the twin follows Cosmos. A failed sync answers 503 DEVICE_TWIN_UPDATE_FAILED; the cook stays written and a retry of the same request heals the twin.'
     }
-    cloud.ingest.iothub -[decided]-> edge.pusher.twin 'desired properties' {
-      #decided
-      description 'Delivered now if the Pi is connected, or when it next connects.'
+    cloud.ingest.iothub -> edge.pusher.twin 'desired properties' {
+      description 'Read in full on every connect and patched on every change, so a Pi that was offline when the cook started gets it on reconnect.'
     }
-    edge.pusher.twin -[decided]-> cloud.ingest.iothub 'reported properties' {
-      #decided
-      description 'What the Pi applied, so the cloud can see it took effect.'
+    edge.pusher.twin -> cloud.ingest.iothub 'reported properties' {
+      description 'activeCookId, correlationId and appliedDesiredVersion: what the Pi applied, so the cloud can see it took effect.'
     }
 
     // Cook lifecycle.
     cloud.api.cooks -[event]-> cloud.realtime 'cook_started, cook_stopped to the owning userId' {
       technology 'SignalR output binding, hub temperatureHub'
       description 'Emitted only after the Cosmos write succeeds. The envelope carries CorrelationContext { id }: the correlation.id the Pi stamps on every reading for the rest of the cook.'
-    }
-    cloud.realtime -[retiring]-> edge.pusher.signalr 'cook lifecycle events' {
-      #retiring
-      technology 'WebSocket, SIGNALR_HUB_URL'
-      description 'Cook events now go to the owning userId (MG-30), not the device, so the Pi receives none. Never proven live (MG-24 AC5).'
-    }
-    edge.pusher.session -> cloud.api.cooks 'GET /cooks?deviceId&status=active (Reconcile)' {
-      technology 'HTTPS, API_BASE_URL'
-      description 'cooksession.Reconcile on startup, to recover the active cook after a restart or a missed event. The practical cook-id source today. With the twin this becomes a fallback or goes away.'
     }
 
     // API to data (partition keys in each container's technology).
@@ -525,6 +527,11 @@ model {
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices: 201, or 409 then GET /devices/{id}'
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.temperatures 'GET /temperatures/current/{id}, then history'
   delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history: total, then three pages'
+  delivery.acceptance -> meatgeek.cloud.api.negotiate 'POST /negotiate (signalr proofs)'
+  delivery.acceptance -> meatgeek.cloud.realtime 'connects as a SignalR client' {
+    technology '@microsoft/signalr'
+    description 'The signalr negotiate, signalr live temperature and signalr isolation proofs: the only live SignalR client today. They receive temperature, cook_started and cook_stopped.'
+  }
 
   // Landscape.
   pitmaster -> smoker 'cooks on'

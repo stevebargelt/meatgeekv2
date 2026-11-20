@@ -8,7 +8,7 @@ MeatGeek V2 uses a **parallel processing architecture** where temperature teleme
 
 The [`ingest`](https://stevebargelt.github.io/meatgeekv2/#/view/ingest/) and [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) views show this flow: IoT Hub routes each message both directly to Cosmos DB (storage) and to an Event Hub (real-time).
 
-The real-time leg (Event Hub → Function → SignalR) is **planned, not on `main`**: IoT Hub routes to the Event Hub today, but no function in `apps/api` consumes it.
+The real-time leg (Event Hub → Function → SignalR) is **on `main` since HAR-60**: `broadcastTemperature` in `apps/api` consumes the Event Hub and pushes each reading to its device's SignalR group. No app connects to SignalR yet; the acceptance proofs are the only live client.
 
 ## Detailed Data Flow
 
@@ -125,7 +125,9 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 
 **On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's SignalR group through the SignalR output binding on `temperatureHub`. The client apps that receive it are not built yet, and there is no `cook-{cookId}` group.
 
-The [`liveTemperatureTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/liveTemperatureTarget/) and [`realtimeTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/) views show the decided design.
+The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows this path, up to SignalR.
+
+**Measured live delay** (send to client, one dev sample, `signalr live temperature` proof): `METRIC signalr-delivery-ms 18424` (run 44673261258).
 
 **What is sent** (`apps/api/src/functions/signalr/broadcast-temperature.ts`):
 - One message per event: target `temperature`, group `device-{deviceId}`, one argument — the `TemperatureReading` plus `enqueuedTimeUtc` (the Event Hub enqueued time, ISO 8601).
@@ -158,18 +160,19 @@ The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) v
    }
    ```
 5. After the write, the API emits `cook_started` on the `temperatureHub` SignalR hub to the owning user's `userId` (`"<tid>:<oid>"`), never to the device (MG-30). It reaches the owner's client connections; the Pi does not receive it
-6. The Data Pusher learns the active cook from the REST API on startup (`cooksession.Reconcile`), and from the device twin in the decided design, and caches cookId
-7. All subsequent temperature messages include cookId
+6. After the write, the API sets the device twin's desired `activeCookId` and `correlationId`, synced to the Cosmos device lock under the twin etag (HAR-66). If that fails, the answer is **503 `DEVICE_TWIN_UPDATE_FAILED`**: the cook stays written, and retrying the same request heals the twin
+7. The Data Pusher learns the active cook from the device twin's desired properties: a full read on every connect and a patch on every change, so a Pi that was offline when the cook started gets it when it reconnects (HAR-58). It persists the cook in `cooksession` and reports `activeCookId`, `correlationId` and `appliedDesiredVersion` back as reported properties
+8. All subsequent temperature messages include cookId and the cook-scoped `correlation.id`
 
 ### During Active Cook
 
-Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId; IoT Hub stores it in Cosmos DB (the SignalR real-time leg is planned, not on `main`). See the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view.
+Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId; IoT Hub stores it in Cosmos DB, and `broadcastTemperature` pushes it to the device's SignalR group. See the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view.
 
 ### Ending a Cook
 
 Stopping goes through the same ownership read: `POST /cooks/{cookId}/stop` on a device the caller does not own is a 403 `DEVICE_NOT_OWNED`.
 
-For an owned device the API marks the cook completed and emits `cook_stopped` on `temperatureHub` to the owning user's `userId`, like `cook_started`. The Pi does not receive it; it learns the cook has ended the same way it learns a cook has started. The path has the same shape as starting a cook; see the [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view.
+For an owned device the API marks the cook completed, clears the device twin's desired `activeCookId` and `correlationId` (a failed sync is the same 503 `DEVICE_TWIN_UPDATE_FAILED`, healed by a retry), and emits `cook_stopped` on `temperatureHub` to the owning user's `userId`, like `cook_started`. The Pi does not receive the SignalR event; it learns the cook has ended from the twin, on change or on its next connect, and reports the cleared state back. The path has the same shape as starting a cook; see the [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view.
 
 ## Cook-Temperature Association Strategy
 
@@ -177,33 +180,10 @@ For an owned device the API marks the cook completed and emits `cook_stopped` on
 - **Device tracks active cook** in Data Pusher service
 - **Includes cookId** in all temperature messages
 - **Benefits**: Simple, reliable, single source of truth
-- **Recovery**: Device queries API on startup for active cook
+- **Source**: the IoT Hub device twin's desired properties, read on every connect and patched on change (HAR-58); the device reports what it applied
+- **Recovery**: `cooksession.json` caches the last applied cook across a restart; the twin read on the next connect overwrites it
 
-**Implementation**:
-```go
-// Data Pusher maintains cook state
-type DataPusher struct {
-    activeCookId *string
-    deviceUrl    string
-    iotClient    IoTHubClient
-    signalRConn  SignalRConnection
-}
-
-func (dp *DataPusher) onCookStarted(cookId string) {
-    dp.activeCookId = &cookId
-    // Persist to local file for recovery
-    dp.saveState()
-}
-
-func (dp *DataPusher) enrichTemperatureData(temps TemperatureReading) TemperatureReading {
-    if dp.activeCookId != nil {
-        temps.CookId = dp.activeCookId
-    }
-    temps.MessageType = "temperature"
-    temps.Timestamp = time.Now()
-    return temps
-}
-```
+**Implementation**: `apps/data-pusher/internal/iothub/twin.go` applies the twin to `internal/cooksession` (`cooksession.Store`), and `cmd/main.go` stamps each reading with the cook id and correlation id from one `cooksession` snapshot. The decision and its alternatives are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
 
 ### Alternative Approaches (Not Chosen)
 
@@ -231,7 +211,7 @@ func (dp *DataPusher) enrichTemperatureData(temps TemperatureReading) Temperatur
 
 ### Device Resilience
 - **Local buffering** in Data Pusher for network outages
-- **State recovery** on restart (query active cook from API)
+- **State recovery** on restart (`cooksession.json`, then the device twin on connect)
 - **Fallback behavior** if cook association fails
 
 ## Performance Characteristics
@@ -243,7 +223,7 @@ func (dp *DataPusher) enrichTemperatureData(temps TemperatureReading) Temperatur
 
 ### Latency
 - **Storage**: ~1.2 s from send to readable through the API, measured in dev by `apps/api/acceptance/proofs/telemetry-roundtrip.proof.ts` (`METRIC roundtrip-ms`): 1211 ms (run 44603121177) and 1235 ms (run 44612029684). It times one `simdevice` reading from send, through IoT Hub's `cosmos-storage-route`, until `GET /temperatures/current/{deviceId}` returns it. Single dev samples, not targets; each `Deploy Dev App` run's summary carries the current value.
-- **Real-time and client updates**: not measured. `broadcastTemperature` consumes the Event Hub and stamps each push with `enqueuedTimeUtc` so a client can measure delay, but no client receives the pushes or calls the API yet.
+- **Real-time push**: ~18.4 s from send to a SignalR client, measured in dev by `apps/api/acceptance/proofs/signalr-live-temperature.proof.ts` (`METRIC signalr-delivery-ms`): 18424 ms (run 44673261258). It times one `simdevice` reading from send, through the Event Hub and `broadcastTemperature`, until the owner's SignalR client receives it. A single dev sample, not a target. No app receives the pushes yet.
 
 ### History read cost
 Measured in dev by `apps/api/acceptance/proofs/telemetry-volume.proof.ts` (run 44612029684) on the simulated device holding 8700 readings (`history-total`; the proof tops it up to at least one 12 h cook at one reading every 5 s, 8,640):

@@ -19,7 +19,7 @@ opacity or the dashed and dotted borders the site gives to elements that are not
 so check the site when an element's state matters. A flow (a dynamic view) is drawn as a
 flowchart without step numbers; its numbered steps and their notes follow the diagram.
 
-19 views, grouped as: Landscape and containers (3), Drill-downs (6), Deployment (1), Flows, today (6), Decided, not built (3).
+16 views, grouped as: Landscape and containers (3), Drill-downs (6), Deployment (1), Flows, today (6).
 
 **Legend: the honesty convention**, copied from the
 [model README](likec4/README.md#the-honesty-convention).
@@ -48,7 +48,7 @@ Relationship kinds (`a -[kind]-> b`; a plain `->` means "live today"):
 
 **The rule:** a view that shows current state never draws a decided or not-built
 path as if it were live. Decided designs go in their own views, whose id ends in
-`Target` (for example `realtimeTarget`, `cookStartTarget`). A current-state view
+`Target` (for example `probeAlertTarget` in "Add a flow" below). A current-state view
 may still include a `#decided` or `#notBuilt` element, because the view styles
 render those dashed or faded, but its flows describe only what runs today.
 
@@ -102,14 +102,14 @@ graph TB
   class Delivery,Meatgeek.Edge,Meatgeek.Cloud primary
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class Meatgeek.Mobile,Meatgeek.Web amber
-  linkStyle 0,1,2,3,4,5,6,7,8,9,10,12,13,16 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,10,12,13,16 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 9,15 stroke:#8D8D8D
   linkStyle 11,14 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 15 stroke:#8D8D8D
 ```
 
 ## MeatGeek V2: containers
 
-Everything that runs, plus the realtime decisions of 2026-11-19: sky dashed is decided and not built, red dotted is in the code and being removed, grey dotted is not built with no decision.
+Everything that runs. Sky dashed is decided and not built: the mobile and web apps as SignalR clients. Grey dotted is not built, with no decision.
 
 View `system` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/system/
 
@@ -164,13 +164,9 @@ graph TB
   Meatgeek.Edge.Updater -. "`installs, restarts`" .-> Meatgeek.Edge.Pusher
   Meatgeek.Mobile -. "`REST`" .-> Meatgeek.Cloud.Api
   Meatgeek.Web -. "`REST`" .-> Meatgeek.Cloud.Api
-  Meatgeek.Edge.Pusher -. "`GET /cooks?
-deviceId&status=active
-(Reconcile)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Cloud.Api -. "`validates access tokens`" .-> Entra
   Meatgeek.Cloud.Realtime -. "`live temperatures, cook events`" .-> Meatgeek.Mobile
   Meatgeek.Cloud.Realtime -. "`live temperatures, cook events`" .-> Meatgeek.Web
-  Meatgeek.Cloud.Realtime -. "`cook lifecycle events`" .-> Meatgeek.Edge.Pusher
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Data
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Realtime
   Meatgeek.Edge.Pusher -. "`[...]`" .-> Meatgeek.Cloud.Ingest.Iothub
@@ -215,11 +211,10 @@ traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   class Meatgeek.Mobile,Meatgeek.Web,Meatgeek.Cloud.Observability.Collector amber
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class Meatgeek.Cloud.Data green
-  linkStyle 0,1,2,3,4,5,10,11,15,17,28,29,30,31,32,33,34,35,36,37,38,39,41,42,43,44 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 6,7,8,9,18,19,22,26,27,40 stroke:#8D8D8D
-  linkStyle 12,13,20,21 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 14 stroke:#AC4D39
-  linkStyle 16,23,24,25,45 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,10,13,18,19,26,27,28,29,30,31,32,33,34,35,36,37,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 6,7,8,9,16,17,20,24,25,38 stroke:#8D8D8D
+  linkStyle 11,12 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 14,15,21,22,23,43 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## MeatGeek cloud (Azure)
@@ -231,22 +226,23 @@ View `cloud` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/cloud
 title: "MeatGeek cloud (Azure)"
 ---
 graph TB
-  MeatgeekEdge@{ shape: rectangle, label: "MeatGeek device" }
-  MeatgeekMobile@{ shape: rounded, label: "Mobile app" }
-  MeatgeekWeb@{ shape: rounded, label: "Web app" }
   subgraph MeatgeekCloud["`MeatGeek cloud`"]
-    subgraph MeatgeekCloud.Ingest["`Ingest`"]
-      MeatgeekCloud.Ingest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
-      MeatgeekCloud.Ingest.Iothub@{ shape: rectangle, label: "IoT Hub" }
+    subgraph MeatgeekCloud.Api["`Functions API`"]
+      MeatgeekCloud.Api.Cooks@{ shape: rectangle, label: "cooks" }
+      MeatgeekCloud.Api.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
+      MeatgeekCloud.Api.Negotiate@{ shape: rectangle, label: "negotiate" }
     end
-    MeatgeekCloud.Api@{ shape: rectangle, label: "Functions API" }
     MeatgeekCloud.Deviceupdate@{ shape: rectangle, label: "Device Update for IoT Hub" }
-    MeatgeekCloud.Realtime@{ shape: rectangle, label: "SignalR Service" }
+    subgraph MeatgeekCloud.Ingest["`Ingest`"]
+      MeatgeekCloud.Ingest.Iothub@{ shape: rectangle, label: "IoT Hub" }
+      MeatgeekCloud.Ingest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
+    end
     MeatgeekCloud.Data@{ shape: disk, label: "Cosmos DB" }
+    MeatgeekCloud.Realtime@{ shape: rectangle, label: "SignalR Service" }
     subgraph MeatgeekCloud.Observability["`Observability`"]
-      MeatgeekCloud.Observability.Collector@{ shape: rectangle, label: "OTLP collector" }
       MeatgeekCloud.Observability.Budgets@{ shape: rectangle, label: "Budgets" }
       MeatgeekCloud.Observability.Workbook@{ shape: rectangle, label: "Workbook" }
+      MeatgeekCloud.Observability.Collector@{ shape: rectangle, label: "OTLP collector" }
       MeatgeekCloud.Observability.ActivityAlerts@{ shape: rectangle, label: "Activity-log alerts" }
       MeatgeekCloud.Observability.Appinsights@{ shape: rectangle, label: "Application Insights" }
       MeatgeekCloud.Observability.Logs@{ shape: rectangle, label: "Log Analytics" }
@@ -254,36 +250,25 @@ graph TB
       MeatgeekCloud.Observability.ActionGroup@{ shape: rectangle, label: "Action group" }
     end
   end
+  Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   subgraph Delivery["`Delivery pipeline`"]
     Delivery.Simdevice@{ shape: rectangle, label: "simdevice" }
   end
-  Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
+  subgraph MeatgeekEdge["`MeatGeek device`"]
+    MeatgeekEdge.PusherTwin@{ shape: rectangle, label: "twin client" }
+  end
+  MeatgeekMobile@{ shape: rounded, label: "Mobile app" }
+  MeatgeekWeb@{ shape: rounded, label: "Web app" }
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
-  MeatgeekEdge -. "`GET /cooks?
-deviceId&status=active
-(Reconcile)`" .-> MeatgeekCloud.Api
-  MeatgeekMobile -. "`REST`" .-> MeatgeekCloud.Api
-  MeatgeekWeb -. "`REST`" .-> MeatgeekCloud.Api
-  MeatgeekCloud.Api -. "`[...]`" .-> MeatgeekCloud.Data
-  MeatgeekCloud.Api -. "`[...]`" .-> MeatgeekCloud.Realtime
-  MeatgeekCloud.Api -. "`validates access tokens`" .-> Entra
-  MeatgeekCloud.Realtime -. "`cook lifecycle events`" .-> MeatgeekEdge
   MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekMobile
   MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekWeb
   MeatgeekCloud.Deviceupdate -. "`deployment to a device group`" .-> MeatgeekCloud.Ingest.Iothub
-  MeatgeekCloud.Api -. "`set twin desired properties`" .-> MeatgeekCloud.Ingest.Iothub
-  MeatgeekEdge -. "`[...]`" .-> MeatgeekCloud.Ingest.Iothub
-  MeatgeekCloud.Ingest.Iothub -. "`[...]`" .-> MeatgeekEdge
   MeatgeekCloud.Ingest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloud.Data
-  MeatgeekCloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloud.Api
   MeatgeekCloud.Ingest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloud.Ingest.Eventhub
-  MeatgeekCloud.Api -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloud.Observability.Appinsights
-  MeatgeekCloud.Api -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
-  MeatgeekEdge -. "`OTLP/HTTP`" .-> MeatgeekCloud.Observability.Collector
-  MeatgeekCloud.Data -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
-  MeatgeekCloud.Data -. "`cosmos-429-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
   MeatgeekCloud.Realtime -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Realtime -. "`signalr-connection-failure-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
+  MeatgeekCloud.Data -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
+  MeatgeekCloud.Data -. "`cosmos-429-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
   MeatgeekCloud.Ingest.Iothub -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Observability.ActionGroup -. "`alert email`" .-> Operator
   MeatgeekCloud.Observability.Budgets -. "`budget email (contact_emails)`" .-> Operator
@@ -294,26 +279,36 @@ deviceId&status=active
   MeatgeekCloud.Observability.Logs -. "`ingestion-cap-reached`" .-> MeatgeekCloud.Observability.MetricAlerts
   MeatgeekCloud.Observability.MetricAlerts -. "`four metric alerts`" .-> MeatgeekCloud.Observability.ActionGroup
   MeatgeekCloud.Observability.ActivityAlerts -. "`three activity-log alerts`" .-> MeatgeekCloud.Observability.ActionGroup
-  Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge
+  MeatgeekCloud.Api.Cooks -. "`cook_started, cook_stopped
+to the owning userId`" .-> MeatgeekCloud.Realtime
+  MeatgeekCloud.Api.Cooks -. "`set twin desired properties`" .-> MeatgeekCloud.Ingest.Iothub
+  MeatgeekMobile -. "`negotiate`" .-> MeatgeekCloud.Api.Negotiate
+  MeatgeekCloud.Api.Negotiate -. "`reset groups to owned
+devices, mint client token`" .-> MeatgeekCloud.Realtime
+  MeatgeekCloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloud.Api.Broadcast
+  MeatgeekCloud.Api.Broadcast -. "`each reading, to its device group`" .-> MeatgeekCloud.Realtime
+  MeatgeekCloud.Ingest.Iothub -. "`desired properties`" .-> MeatgeekEdge.PusherTwin
+  MeatgeekEdge.PusherTwin -. "`reported properties`" .-> MeatgeekCloud.Ingest.Iothub
   Delivery.Simdevice -. "`telemetry as meatgeek-dev-
 simulated-smoker: messageId,
 $.ct=application/json, $.ce=utf-8,
 traceparent`" .-> MeatgeekCloud.Ingest.Iothub
-  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekEdge,Delivery.Simdevice,MeatgeekCloud.Api primary
-  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
-  class MeatgeekMobile,MeatgeekWeb,MeatgeekCloud.Observability.Collector amber
-  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts,MeatgeekCloud.Observability.ActionGroup indigo
+  MeatgeekWeb -. "`REST`" .-> MeatgeekCloud.Api
+  MeatgeekCloud.Api -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
-  class MeatgeekCloud.Deviceupdate,Entra muted
+  class Entra,MeatgeekCloud.Deviceupdate muted
+  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
+  class MeatgeekCloud.Api.Cooks,Delivery.Simdevice,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.PusherTwin,MeatgeekCloud.Api.Negotiate primary
+  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
+  class MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts,MeatgeekCloud.Observability.ActionGroup indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data green
-  linkStyle 0,3,5,11,12,16,17,19,20,21,22,23,24,25,26,27,28,30,31,32,33 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,2,9,18,29 stroke:#8D8D8D
-  linkStyle 4,13,14,15,34 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 6 stroke:#AC4D39
-  linkStyle 7,8,10 stroke:#0ea5e9,stroke-dasharray:8 4
+  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
+  class MeatgeekMobile,MeatgeekWeb,MeatgeekCloud.Observability.Collector amber
+  linkStyle 0,1,21 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 2,15,28 stroke:#8D8D8D
+  linkStyle 3,4,19,23,27 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 5,6,7,8,9,10,11,12,13,14,16,17,18,20,22,24,25,26,29 stroke:#8D8D8D,stroke-dasharray:8 4
 ```
 
 ---
@@ -331,17 +326,10 @@ title: "MeatGeek device (Raspberry Pi)"
 graph TB
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   Smoker@{ shape: rectangle, label: "Pellet smoker" }
-  subgraph MeatgeekCloud["`MeatGeek cloud`"]
-    MeatgeekCloud.Realtime@{ shape: rectangle, label: "SignalR Service" }
-    MeatgeekCloud.Api@{ shape: rectangle, label: "Functions API" }
-    MeatgeekCloud.ObservabilityCollector@{ shape: rectangle, label: "OTLP collector" }
-    MeatgeekCloud.IngestIothub@{ shape: rectangle, label: "IoT Hub" }
-  end
   subgraph MeatgeekEdge["`MeatGeek device`"]
     subgraph MeatgeekEdge.Pusher["`data-pusher`"]
       MeatgeekEdge.Pusher.Tracing@{ shape: rectangle, label: "telemetry" }
       MeatgeekEdge.Pusher.Twin@{ shape: rectangle, label: "twin client" }
-      MeatgeekEdge.Pusher.Signalr@{ shape: rectangle, label: "signalr client" }
       MeatgeekEdge.Pusher.Session@{ shape: rectangle, label: "cooksession" }
       MeatgeekEdge.Pusher.Collector@{ shape: rectangle, label: "collector" }
       MeatgeekEdge.Pusher.Queue@{ shape: rectangle, label: "disk queue" }
@@ -350,6 +338,10 @@ graph TB
     MeatgeekEdge.Updater@{ shape: rectangle, label: "update agent" }
     MeatgeekEdge.Controller@{ shape: rectangle, label: "device-controller" }
   end
+  subgraph MeatgeekCloud["`MeatGeek cloud`"]
+    MeatgeekCloud.IngestIothub@{ shape: rectangle, label: "IoT Hub" }
+    MeatgeekCloud.ObservabilityCollector@{ shape: rectangle, label: "OTLP collector" }
+  end
   Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Controller
   Smoker -. "`RTD sensor readings`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Updater -. "`installs, restarts`" .-> MeatgeekEdge.Controller
@@ -357,9 +349,10 @@ graph TB
   MeatgeekEdge.Pusher.Collector -. "`enqueues readings`" .-> MeatgeekEdge.Pusher.Queue
   MeatgeekEdge.Pusher.Session -. "`cook id and correlation id`" .-> MeatgeekEdge.Pusher.Collector
   MeatgeekEdge.Pusher.Queue -. "`drains in order`" .-> MeatgeekEdge.Pusher.Iot
+  MeatgeekEdge.Pusher.Twin -. "`shares the MQTT connection`" .-> MeatgeekEdge.Pusher.Iot
   MeatgeekEdge.Pusher.Tracing -. "`traceparent per message`" .-> MeatgeekEdge.Pusher.Iot
-  MeatgeekEdge.Pusher.Signalr -. "`sets active cook and correlation id`" .-> MeatgeekEdge.Pusher.Session
-  MeatgeekEdge.Pusher.Twin -. "`sets active cook and correlation id`" .-> MeatgeekEdge.Pusher.Session
+  MeatgeekEdge.Pusher.Twin -. "`persists active cook,
+correlation id, applied version`" .-> MeatgeekEdge.Pusher.Session
   MeatgeekEdge.Updater -. "`installed version, result`" .-> MeatgeekCloud.IngestIothub
   MeatgeekEdge.Pusher.Iot -. "`telemetry: messageId,
 $.ct=application/json, $.ce=utf-
@@ -367,33 +360,21 @@ $.ct=application/json, $.ce=utf-
   MeatgeekEdge.Pusher.Twin -. "`reported properties`" .-> MeatgeekCloud.IngestIothub
   MeatgeekCloud.IngestIothub -. "`update available`" .-> MeatgeekEdge.Updater
   MeatgeekCloud.IngestIothub -. "`desired properties`" .-> MeatgeekEdge.Pusher.Twin
-  MeatgeekCloud.Realtime -. "`cook lifecycle events`" .-> MeatgeekEdge.Pusher.Signalr
-  MeatgeekEdge.Pusher.Session -. "`GET /cooks?
-deviceId&status=active
-(Reconcile)`" .-> MeatgeekCloud.Api
-  MeatgeekCloud.Api -. "`set twin desired properties`" .-> MeatgeekCloud.IngestIothub
-  MeatgeekCloud.Api -. "`[...]`" .-> MeatgeekCloud.Realtime
   MeatgeekEdge.Controller -. "`OTLP/HTTP`" .-> MeatgeekCloud.ObservabilityCollector
   MeatgeekEdge.Pusher.Tracing -. "`OTLP/HTTP`" .-> MeatgeekCloud.ObservabilityCollector
   Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Pusher
   MeatgeekEdge.Updater -. "`installs, restarts`" .-> MeatgeekEdge.Pusher
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Smoker,MeatgeekEdge.Updater muted
-  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloud.Realtime,MeatgeekCloud.IngestIothub indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekEdge.Pusher.Tracing,MeatgeekEdge.Pusher.Session,MeatgeekEdge.Pusher.Collector,MeatgeekEdge.Controller,MeatgeekEdge.Pusher.Queue,MeatgeekEdge.Pusher.Iot,MeatgeekCloud.Api primary
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekEdge.Pusher.Twin sky
-  classDef red fill:#AC4D39,stroke:#853A2D,color:#FBD3CB
-  class MeatgeekEdge.Pusher.Signalr red
+  class MeatgeekEdge.Pusher.Tracing,MeatgeekEdge.Pusher.Twin,MeatgeekEdge.Pusher.Session,MeatgeekEdge.Pusher.Collector,MeatgeekEdge.Controller,MeatgeekEdge.Pusher.Queue,MeatgeekEdge.Pusher.Iot primary
+  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
+  class MeatgeekCloud.IngestIothub indigo
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.ObservabilityCollector amber
-  linkStyle 0,1,3,4,5,6,7,16,21 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,10,13,19,20,22 stroke:#8D8D8D
-  linkStyle 8,15 stroke:#AC4D39
-  linkStyle 9,12,14,17 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 11,18 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,3,4,5,6,7,8,9,12,14,17 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,10,13,15,16,18 stroke:#8D8D8D
+  linkStyle 11 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Functions API
@@ -413,10 +394,8 @@ title: "Functions API"
 graph TB
   Delivery@{ shape: rectangle, label: "Delivery pipeline" }
   MeatgeekMobile@{ shape: rounded, label: "Mobile app" }
-  MeatgeekCloudIngest@{ shape: rectangle, label: "Ingest" }
   subgraph MeatgeekCloudApi["`Functions API`"]
     MeatgeekCloudApi.Negotiate@{ shape: rectangle, label: "negotiate" }
-    MeatgeekCloudApi.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
     MeatgeekCloudApi.Easyauth@{ shape: rectangle, label: "Easy Auth" }
     MeatgeekCloudApi.Health@{ shape: rectangle, label: "health" }
     MeatgeekCloudApi.Otel@{ shape: rectangle, label: "telemetry" }
@@ -428,27 +407,30 @@ graph TB
     MeatgeekCloudApi.Users@{ shape: rectangle, label: "users" }
     MeatgeekCloudApi.Ownership@{ shape: rectangle, label: "ownership check" }
     MeatgeekCloudApi.Repos@{ shape: rectangle, label: "cosmos repositories" }
+    MeatgeekCloudApi.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
   end
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   subgraph MeatgeekCloudObservability["`Observability`"]
     MeatgeekCloudObservability.Appinsights@{ shape: rectangle, label: "Application Insights" }
   end
-  MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
-  subgraph MeatgeekEdge["`MeatGeek device`"]
-    MeatgeekEdge.Pusher@{ shape: rectangle, label: "data-pusher" }
+  subgraph MeatgeekCloudIngest["`Ingest`"]
+    MeatgeekCloudIngest.Iothub@{ shape: rectangle, label: "IoT Hub" }
+    MeatgeekCloudIngest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
   end
   subgraph MeatgeekCloudData["`Cosmos DB`"]
-    MeatgeekCloudData.Temperatures@{ shape: cylinder, label: "temperatures" }
     MeatgeekCloudData.Devices@{ shape: cylinder, label: "devices" }
+    MeatgeekCloudData.Temperatures@{ shape: cylinder, label: "temperatures" }
     MeatgeekCloudData.Cooks@{ shape: cylinder, label: "cooks" }
     MeatgeekCloudData.Users@{ shape: cylinder, label: "users" }
     MeatgeekCloudData.Recipes@{ shape: cylinder, label: "recipes" }
   end
+  MeatgeekEdgePusherTwin@{ shape: rectangle, label: "twin client" }
+  MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
   Delivery -. "`POST /devices: 201, or
 409 then GET /devices/{id}`" .-> MeatgeekCloudApi.Devices
   Delivery -. "`[...]`" .-> MeatgeekCloudApi.Temperatures
+  Delivery -. "`POST /negotiate (signalr proofs)`" .-> MeatgeekCloudApi.Negotiate
   MeatgeekMobile -. "`negotiate`" .-> MeatgeekCloudApi.Negotiate
-  MeatgeekCloudIngest -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Broadcast
   MeatgeekCloudApi.Easyauth -. "`X-MS-CLIENT-PRINCIPAL`" .-> MeatgeekCloudApi.Principal
   MeatgeekCloudApi.Principal -. "`userId`" .-> MeatgeekCloudApi.Cooks
   MeatgeekCloudApi.Principal -. "`userId`" .-> MeatgeekCloudApi.Devices
@@ -468,7 +450,6 @@ DEVICE_NOT_FOUND`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Negotiate -. "`list devices by owner`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Health -. "`probe`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Easyauth -. "`validates access tokens`" .-> Entra
-  MeatgeekCloudApi.Cooks -. "`set twin desired properties`" .-> MeatgeekCloudIngest
   MeatgeekCloudApi.Cooks -. "`cook_started, cook_stopped
 to the owning userId`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Devices -. "`add owner to device-
@@ -476,36 +457,36 @@ to the owning userId`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Negotiate -. "`reset groups to owned
 devices, mint client token`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Broadcast -. "`each reading, to its device group`" .-> MeatgeekCloudRealtime
-  MeatgeekCloudIngest -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudApi.Ownership -. "`point read`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Repos -. "`list by userId, register, update`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Repos -. "`read only; partition = deviceId`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Cooks
   MeatgeekCloudApi.Repos -. "`point read, write; id = caller`" .-> MeatgeekCloudData.Users
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Recipes
+  Delivery -. "`connects as a SignalR client`" .-> MeatgeekCloudRealtime
   MeatgeekCloudRealtime -. "`live temperatures, cook events`" .-> MeatgeekMobile
   Delivery -. "`app-only token (OIDC)`" .-> Entra
-  MeatgeekCloudIngest -. "`desired properties`" .-> MeatgeekEdge.Pusher
-  MeatgeekCloudRealtime -. "`cook lifecycle events`" .-> MeatgeekEdge.Pusher
-  MeatgeekEdge.Pusher -. "`GET /cooks?
-deviceId&status=active
-(Reconcile)`" .-> MeatgeekCloudApi.Cooks
-  MeatgeekEdge.Pusher -. "`[...]`" .-> MeatgeekCloudIngest
   MeatgeekCloudApi.Otel -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloudObservability.Appinsights
+  Delivery -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
+  MeatgeekCloudApi.Cooks -. "`set twin desired properties`" .-> MeatgeekCloudIngest.Iothub
+  MeatgeekCloudIngest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures
+  MeatgeekCloudIngest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngest.Eventhub
+  MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Broadcast
+  MeatgeekCloudIngest.Iothub -. "`desired properties`" .-> MeatgeekEdgePusherTwin
+  MeatgeekEdgePusherTwin -. "`reported properties`" .-> MeatgeekCloudIngest.Iothub
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery,MeatgeekCloudIngest,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Broadcast,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekCloudApi.Repos,MeatgeekEdge.Pusher primary
+  class Delivery,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekCloudApi.Repos,MeatgeekEdgePusherTwin,MeatgeekCloudApi.Broadcast primary
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekMobile amber
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloudObservability.Appinsights,MeatgeekCloudRealtime indigo
+  class MeatgeekCloudObservability.Appinsights,MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
-  class MeatgeekCloudData.Temperatures,MeatgeekCloudData.Devices,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,23,24,25,27,28,29,30,31,32,34,37,38,39 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,21,33,35 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 3,22,26 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 36 stroke:#AC4D39
+  class MeatgeekCloudData.Devices,MeatgeekCloudData.Temperatures,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
+  linkStyle 0,1,2,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,22,23,24,25,26,27,28,29,30,31,33,34,36,40,41 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 3,32 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 21,35,37,38,39 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Cosmos DB
@@ -559,9 +540,8 @@ traceparent`" .-> MeatgeekCloudIngest.Iothub
   class MeatgeekCloudIngest.Iothub indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.Temperatures,MeatgeekCloudData.Devices,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,2,3,4,5,8 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 6,9 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 7 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,7 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 6,8,9 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Ingest
@@ -582,6 +562,9 @@ graph TB
     MeatgeekCloudIngest.Iothub@{ shape: rectangle, label: "IoT Hub" }
     MeatgeekCloudIngest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
   end
+  subgraph MeatgeekEdge["`MeatGeek device`"]
+    MeatgeekEdge.Pusher@{ shape: rectangle, label: "data-pusher" }
+  end
   subgraph MeatgeekCloudData["`Cosmos DB`"]
     MeatgeekCloudData.Temperatures@{ shape: cylinder, label: "temperatures" }
   end
@@ -589,9 +572,6 @@ graph TB
     MeatgeekCloudApi.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
   end
   MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
-  subgraph MeatgeekEdge["`MeatGeek device`"]
-    MeatgeekEdge.Pusher@{ shape: rectangle, label: "data-pusher" }
-  end
   MeatgeekCloudObservability@{ shape: rectangle, label: "Observability" }
   MeatgeekCloudDeviceupdate -. "`deployment to a device group`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngest.Eventhub
@@ -603,13 +583,13 @@ graph TB
   MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Broadcast
   MeatgeekCloudApi.Broadcast -. "`each reading, to its device group`" .-> MeatgeekCloudRealtime
   MeatgeekCloudRealtime -. "`[...]`" .-> MeatgeekCloudObservability
-  MeatgeekCloudRealtime -. "`cook lifecycle events`" .-> MeatgeekEdge.Pusher
   Delivery.Simdevice -. "`telemetry as meatgeek-dev-
 simulated-smoker: messageId,
 $.ct=application/json, $.ce=utf-8,
 traceparent`" .-> MeatgeekCloudIngest.Iothub
   Delivery.Acceptance -. "`ensure the device identity,
 read its connection string`" .-> MeatgeekCloudIngest.Iothub
+  Delivery.Acceptance -. "`connects as a SignalR client`" .-> MeatgeekCloudRealtime
   Delivery.Acceptance -. "`[...]`" .-> Delivery.Simdevice
   Delivery.Acceptance -. "`live acceptance probes`" .-> MeatgeekCloudApi
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
@@ -617,16 +597,14 @@ read its connection string`" .-> MeatgeekCloudIngest.Iothub
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
   class Delivery.Acceptance slate
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery.Simdevice,MeatgeekCloudApi.Broadcast,MeatgeekEdge.Pusher,MeatgeekCloudObservability primary
+  class Delivery.Simdevice,MeatgeekEdge.Pusher,MeatgeekCloudApi.Broadcast,MeatgeekCloudObservability primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.Temperatures green
   linkStyle 0,5 stroke:#8D8D8D
-  linkStyle 1,6,7,11 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 2,4,8,9,12,13,14 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 3 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 10 stroke:#AC4D39
+  linkStyle 1,4,6,7,10 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 2,3,8,9,11,12,13,14 stroke:#8D8D8D,stroke-dasharray:8 4
 ```
 
 ## Observability
@@ -682,12 +660,8 @@ graph TB
   MeatgeekCloudObservability.Budgets -. "`budget email (contact_emails)`" .-> Operator
   MeatgeekCloudApi -. "`[...]`" .-> MeatgeekCloudData
   MeatgeekCloudApi -. "`[...]`" .-> MeatgeekCloudRealtime
-  MeatgeekCloudRealtime -. "`cook lifecycle events`" .-> MeatgeekEdge.Pusher
   Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Pusher
   MeatgeekEdge.Pusher -. "`OTLP/HTTP`" .-> MeatgeekCloudObservability.Collector
-  MeatgeekEdge.Pusher -. "`GET /cooks?
-deviceId&status=active
-(Reconcile)`" .-> MeatgeekCloudApi
   Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Pusher -. "`GET get_status, every 5 s`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Controller -. "`OTLP/HTTP`" .-> MeatgeekCloudObservability.Collector
@@ -704,11 +678,9 @@ deviceId&status=active
   class MeatgeekCloudRealtime,MeatgeekCloudObservability.Workbook,MeatgeekCloudObservability.ActivityAlerts,MeatgeekCloudObservability.Budgets,MeatgeekCloudObservability.Appinsights,MeatgeekCloudObservability.Logs,MeatgeekCloudObservability.MetricAlerts,MeatgeekCloudObservability.ActionGroup,MeatgeekCloudIngest.Iothub indigo
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloudObservability.Collector amber
-  linkStyle 0,1,2,3,4,5,6,7,8,10,11,12,13,14,15,18,20,21,22,25,26 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 9,19,23 stroke:#8D8D8D
-  linkStyle 16,27 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 17 stroke:#AC4D39
-  linkStyle 24,28 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,10,11,12,13,14,15,17,19,20,22,24,26 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 9,18,21 stroke:#8D8D8D
+  linkStyle 16,23,25 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Delivery pipeline
@@ -815,11 +787,7 @@ graph TB
   DevRg.Workbook -. "`queries`" .-> DevRg.Appinsights
   DevCi.Acceptance -. "`[...]`" .-> DevCi.Simdevice
   DevPi.Pusher -. "`[...]`" .-> DevRg.Iothub
-  DevPi.Pusher -. "`GET /cooks?
-deviceId&status=active
-(Reconcile)`" .-> DevRg.Api
   DevRg.Iothub -. "`desired properties`" .-> DevPi.Pusher
-  DevRg.Signalr -. "`cook lifecycle events`" .-> DevPi.Pusher
   DevCi.Acceptance -. "`ensure the device identity,
 read its connection string`" .-> DevRg.Iothub
   DevCi.Simdevice -. "`telemetry as meatgeek-dev-
@@ -828,6 +796,7 @@ $.ct=application/json, $.ce=utf-8,
 traceparent`" .-> DevRg.Iothub
   DevRg.Api -. "`validates access tokens`" .-> DevIdentity.Entra
   DevCi.Acceptance -. "`[...]`" .-> DevRg.Api
+  DevCi.Acceptance -. "`connects as a SignalR client`" .-> DevRg.Signalr
   DevCi.Acceptance -. "`app-only token (OIDC)`" .-> DevIdentity.Entra
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class DevPi.Pusher,DevPi.Controller,DevCi.Simdevice,DevRg.Api primary
@@ -839,10 +808,8 @@ traceparent`" .-> DevRg.Iothub
   class DevRg.Cosmos green
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class DevIdentity.Entra muted
-  linkStyle 0,3,6,8,9,10,11,12,13,14,15,16,19,21,22,23 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,2,5,7,20 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 4,17 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 18 stroke:#AC4D39
+  linkStyle 0,3,4,6,8,9,10,11,12,13,14,16,17,19,20,21,22 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 1,2,5,7,15,18 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -851,11 +818,16 @@ traceparent`" .-> DevRg.Iothub
 
 ## Flow: one temperature reading
 
-Today. The storage path is live; the realtime path stops at Event Hub.
-Two correlation axes ride on each reading. `correlation.id` is cook-scoped: it comes from
-the `CorrelationContext.id` of the `cook_started` envelope (see `cookStart`), is held in
-`correlationHolder` and is stamped on every message for the whole cook. `traceparent` is
-per message, from the `publisher.publish` span; no Function reads it back.
+Today. Both paths are live. Storage: IoT Hub's `cosmos-storage-route` writes Cosmos.
+Push: Event Hub, then `broadcastTemperature`, then the SignalR group `device-{id}`.
+No app negotiates or connects to SignalR yet, so the flow stops at SignalR; the only live
+client is the acceptance proofs (`signalr negotiate`, `signalr live temperature`,
+`signalr isolation`). Measured send-to-client delay: `METRIC signalr-delivery-ms` 18424
+(run 44673261258), a single dev sample.
+Two correlation axes ride on each reading. `correlation.id` is cook-scoped: the device
+twin's desired `correlationId` (see `cookStart`), persisted in `cooksession` and stamped
+on every message for the whole cook. `traceparent` is per message, from the
+`publisher.publish` span; no Function reads it back.
 
 View `telemetry` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/
 
@@ -874,6 +846,8 @@ graph LR
   MeatgeekCloudIngestIothub@{ shape: rectangle, label: "IoT Hub" }
   MeatgeekCloudDataTemperatures@{ shape: cylinder, label: "temperatures" }
   MeatgeekCloudIngestEventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
+  MeatgeekCloudApiBroadcast@{ shape: rectangle, label: "realtime broadcast" }
+  MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
   MeatgeekCloudApiTemperatures@{ shape: rectangle, label: "temperatures" }
   MeatgeekCloudApiRepos@{ shape: rectangle, label: "cosmos repositories" }
   Smoker -. "`grill and probe temperatures`" .-> MeatgeekEdgeController
@@ -885,95 +859,91 @@ graph LR
   MeatgeekEdgePusherIot -. "`publish (MQTT 8883, QoS 1)`" .-> MeatgeekCloudIngestIothub
   MeatgeekCloudIngestIothub -. "`cosmos-storage-route`" .-> MeatgeekCloudDataTemperatures
   MeatgeekCloudIngestIothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngestEventhub
+  MeatgeekCloudIngestEventhub -. "`Event Hub trigger, consumer group
+api-broadcast`" .-> MeatgeekCloudApiBroadcast
+  MeatgeekCloudApiBroadcast -. "`each reading to device-{id}`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApiTemperatures -. "`history or current reading`" .-> MeatgeekCloudApiRepos
   MeatgeekCloudApiRepos -. "`query by deviceId`" .-> MeatgeekCloudDataTemperatures
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Smoker muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekEdgePusherSession,MeatgeekEdgePusherCollector,MeatgeekEdgeController,MeatgeekEdgePusherQueue,MeatgeekEdgePusherTracing,MeatgeekEdgePusherIot,MeatgeekCloudApiTemperatures,MeatgeekCloudApiRepos primary
+  class MeatgeekEdgePusherSession,MeatgeekEdgePusherCollector,MeatgeekEdgeController,MeatgeekEdgePusherQueue,MeatgeekEdgePusherTracing,MeatgeekEdgePusherIot,MeatgeekCloudApiBroadcast,MeatgeekCloudApiTemperatures,MeatgeekCloudApiRepos primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloudIngestIothub,MeatgeekCloudIngestEventhub indigo
+  class MeatgeekCloudIngestIothub,MeatgeekCloudIngestEventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudDataTemperatures green
-  linkStyle 0,1,2,3,4,5,9,10 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 6,7,8 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,10,11,12 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 6,7,8,9 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 Steps:
 
 - **1.** Pellet smoker → device-controller: grill and probe temperatures
 - **2.** collector → device-controller: GET get_status. Local HTTP poll of `/api/robots/MeatGeekBot/commands/get_status`, every 5 s.
-- **3.** cooksession → collector: active cook id, correlation id. `cookId = cooksession.ActiveCookID()` and `queueRecord.Correlation = correlationHolder.Get()`. Until the live SignalR path is proven (MG-24 AC5), the cook id comes from `cooksession.Reconcile` against the REST API at startup.
+- **3.** cooksession → collector: active cook id, correlation id. The cook id and correlation id come from one `cooksession` snapshot, the values the twin client last applied from the device twin's desired properties (see `cookStart`).
 - **4.** collector → disk queue: enqueue
 - **5.** disk queue → iothub client: drain
 - **6.** telemetry → iothub client: publisher.publish span, traceparent. Every message gets its own span and `traceparent` (W3C Trace Context), sampled always.
 - **7.** iothub client → IoT Hub: publish (MQTT 8883, QoS 1). Message properties: `messageId`, `$.ct=application/json`, `$.ce=utf-8`, `correlation.id` (cook-scoped) and `traceparent` (per message). Device SAS, renewed five minutes before it expires.
 - **8a.** IoT Hub → temperatures (`meatgeek.cloud.data.temperatures`): cosmos-storage-route. **Live.** IoT Hub writes the document itself, by managed identity, partition value from `{deviceid}`. No Function runs, so nothing reads `traceparent` back.
-- **8b.** IoT Hub → Event Hub: temperature-data: eventhub-realtime-route. **Live.** broadcastTemperature (HAR-60), an Event Hub trigger in the API on the `api-broadcast` consumer group, reads it and pushes each reading to its `device-{id}` SignalR group. (Opens `liveTemperatureTarget`.)
-- **9.** temperatures (`meatgeek.cloud.api.temperatures`) → cosmos repositories: history or current reading (Opens `readHistory`.)
-- **10.** cosmos repositories → temperatures (`meatgeek.cloud.data.temperatures`): query by deviceId
+- **8b.** IoT Hub → Event Hub: temperature-data: eventhub-realtime-route. **Live.** Every message is copied to the `temperature-data` Event Hub.
+- **9.** Event Hub: temperature-data → realtime broadcast: Event Hub trigger, consumer group api-broadcast. **Live.** `broadcastTemperature` (HAR-60), `cardinality: many`, identity-based. The device is the hub-stamped `iothub-connection-device-id`; the reading is mapped by `toTemperatureReading`, as `GET /temperatures/current` does, plus `enqueuedTimeUtc`.
+- **10.** realtime broadcast → SignalR Service: each reading to device-{id}. **Live.** SignalR output binding, target `temperature`, hub `temperatureHub`. `negotiate` puts a user in `device-{id}` for each device it owns. No app connects yet; the acceptance proofs are the only live client (`signalr live temperature` measured `signalr-delivery-ms` 18424, run 44673261258).
+- **11.** temperatures (`meatgeek.cloud.api.temperatures`) → cosmos repositories: history or current reading (Opens `readHistory`.)
+- **12.** cosmos repositories → temperatures (`meatgeek.cloud.data.temperatures`): query by deviceId
 
-## Flow: start a cook (today)
+## Flow: start a cook
 
-POST /cooks as the code does it now. `cook_started` goes to the owning user's SignalR
-connections, not to the Pi (MG-30). The Pi learns its cook from `cooksession.Reconcile`
-against the REST API at startup (last step), and from the device twin in the decided
-design. The `cook_started` envelope carries the cook-scoped `CorrelationContext.id`.
+POST /cooks as the code does it now. The active cook is device state: the API syncs the
+device twin's desired properties to Cosmos, and the Pi applies them and reports them back
+(HAR-58, HAR-66). The twin persists, so a Pi that is offline when the cook starts gets it
+when it next connects. `cook_started` goes to the owning user's SignalR connections, not
+to the Pi (MG-30); no app receives it yet. Sign-in (Easy Auth, then the principal) and the
+ownership check run first, as in the `api` view. Stopping a cook follows the same path:
+the twin's desired cook is cleared and `cook_stopped` goes to the owner.
 
 View `cookStart` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/
 
 ```mermaid
 ---
-title: "Flow: start a cook (today)"
+title: "Flow: start a cook"
 ---
 graph LR
   MeatgeekMobile@{ shape: rounded, label: "Mobile app" }
-  MeatgeekCloudApiEasyauth@{ shape: rectangle, label: "Easy Auth" }
-  Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
-  MeatgeekCloudApiPrincipal@{ shape: rectangle, label: "principal" }
-  MeatgeekEdgePusherSession@{ shape: rectangle, label: "cooksession" }
   MeatgeekCloudApiCooks@{ shape: rectangle, label: "cooks" }
-  MeatgeekCloudApiOwnership@{ shape: rectangle, label: "ownership check" }
-  MeatgeekCloudDataDevices@{ shape: cylinder, label: "devices" }
-  MeatgeekCloudApiRepos@{ shape: rectangle, label: "cosmos repositories" }
   MeatgeekCloudDataCooks@{ shape: cylinder, label: "cooks" }
+  MeatgeekCloudIngestIothub@{ shape: rectangle, label: "IoT Hub" }
+  MeatgeekEdgePusherTwin@{ shape: rectangle, label: "twin client" }
+  MeatgeekEdgePusherSession@{ shape: rectangle, label: "cooksession" }
   MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
-  MeatgeekMobile -. "`POST /cooks + Entra token`" .-> MeatgeekCloudApiEasyauth
-  MeatgeekCloudApiEasyauth -. "`validate token`" .-> Entra
-  MeatgeekCloudApiEasyauth -. "`X-MS-CLIENT-PRINCIPAL`" .-> MeatgeekCloudApiPrincipal
-  MeatgeekCloudApiPrincipal -. "`userId = tid:oid`" .-> MeatgeekCloudApiCooks
-  MeatgeekCloudApiCooks -. "`does the caller own this device?`" .-> MeatgeekCloudApiOwnership
-  MeatgeekCloudApiOwnership -. "`point read`" .-> MeatgeekCloudDataDevices
-  MeatgeekCloudApiCooks -. "`create cook`" .-> MeatgeekCloudApiRepos
-  MeatgeekCloudApiRepos -. "`insert, partition = caller userId`" .-> MeatgeekCloudDataCooks
+  MeatgeekMobile -. "`POST /cooks`" .-> MeatgeekCloudApiCooks
+  MeatgeekCloudApiCooks -. "`cook and device lock`" .-> MeatgeekCloudDataCooks
+  MeatgeekCloudApiCooks -. "`set desired: activeCookId, correlationId`" .-> MeatgeekCloudIngestIothub
+  MeatgeekCloudIngestIothub -. "`desired properties`" .-> MeatgeekEdgePusherTwin
+  MeatgeekEdgePusherTwin -. "`persist cook, correlation id, version`" .-> MeatgeekEdgePusherSession
+  MeatgeekEdgePusherTwin -. "`reported: applied`" .-> MeatgeekCloudIngestIothub
   MeatgeekCloudApiCooks -. "`cook_started to the owning userId`" .-> MeatgeekCloudRealtime
-  MeatgeekEdgePusherSession -. "`GET /cooks?deviceId&status=active`" .-> MeatgeekCloudApiCooks
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekMobile amber
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloudApiEasyauth,MeatgeekCloudApiPrincipal,MeatgeekEdgePusherSession,MeatgeekCloudApiCooks,MeatgeekCloudApiOwnership,MeatgeekCloudApiRepos primary
-  classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
-  class Entra muted
+  class MeatgeekCloudApiCooks,MeatgeekEdgePusherTwin,MeatgeekEdgePusherSession primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
-  class MeatgeekCloudDataDevices,MeatgeekCloudDataCooks green
+  class MeatgeekCloudDataCooks green
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloudRealtime indigo
-  linkStyle 0,1,2,3,4,5,6,7,9 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 8 stroke:#b45309,stroke-dasharray:8 4
+  class MeatgeekCloudIngestIothub,MeatgeekCloudRealtime indigo
+  linkStyle 0,1,2,3,4,5 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 6 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 Steps:
 
-- **1.** Mobile app → Easy Auth: POST /cooks + Entra token
-- **2.** Easy Auth → Microsoft Entra ID: validate token
-- **3.** Easy Auth → principal: X-MS-CLIENT-PRINCIPAL
-- **4.** principal → cooks (`meatgeek.cloud.api.cooks`): userId = tid:oid. Missing or incomplete header: 401, no default user.
-- **5.** cooks (`meatgeek.cloud.api.cooks`) → ownership check: does the caller own this device?
-- **6.** ownership check → devices: point read. `getDeviceOwnership`. A foreign or unregistered device gets 403 `DEVICE_NOT_OWNED`: no write, no event.
-- **7.** cooks (`meatgeek.cloud.api.cooks`) → cosmos repositories: create cook
-- **8.** cosmos repositories → cooks (`meatgeek.cloud.data.cooks`): insert, partition = caller userId
-- **9.** cooks (`meatgeek.cloud.api.cooks`) → SignalR Service: cook_started to the owning userId. Sent only after the write succeeds, on hub `temperatureHub`, to the caller's `userId` ("<tid>:<oid>"), never to the deviceId (MG-30). The envelope carries `correlation: CorrelationContext { id }`, taken from the request's `X-Request-ID` or the invocation id. No client app consumes it yet. (Opens `cookStartTarget`.)
-- **10.** cooksession → cooks (`meatgeek.cloud.api.cooks`): GET /cooks?deviceId&status=active. What sets the cook id on the Pi today: `cooksession.Reconcile` on data-pusher startup. From then every reading carries this cook id. (Opens `telemetry`.)
+- **1.** Mobile app → cooks (`meatgeek.cloud.api.cooks`): POST /cooks. Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The ownership check is one point read on `devices`: a foreign or unregistered device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The mobile app does not call the API yet; the live callers are the acceptance proofs.
+- **2.** cooks (`meatgeek.cloud.api.cooks`) → cooks (`meatgeek.cloud.data.cooks`): cook and device lock. One transactional batch in the caller partition: the cook and its device lock commit together, so a device holds at most one active cook (MG-84).
+- **3.** cooks (`meatgeek.cloud.api.cooks`) → IoT Hub: set desired: activeCookId, correlationId. After the write, synced to the device lock under the twin etag (`If-Match`): GET the twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Managed identity with `IoT Hub Twin Contributor`. A failed sync answers 503 `DEVICE_TWIN_UPDATE_FAILED`; the cook stays written and a retry of the same request heals the twin.
+- **4.** IoT Hub → twin client: desired properties. Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up. Patches apply in `$version` order.
+- **5.** twin client → cooksession: persist cook, correlation id, version. Written to `/var/lib/meatgeek-pusher/cooksession.json`. From then every reading carries this cook id and correlation id. (Opens `telemetry`.)
+- **6.** twin client → IoT Hub: reported: applied. `activeCookId`, `correlationId` and `appliedDesiredVersion`: the acknowledgement. Proven live by the `device twin` acceptance proof, with the device offline when the cook starts.
+- **7.** cooks (`meatgeek.cloud.api.cooks`) → SignalR Service: cook_started to the owning userId. Sent only after the write succeeds, on hub `temperatureHub`, to the caller's `userId` ("<tid>:<oid>"), never to the deviceId (MG-30). The envelope carries `correlation: CorrelationContext { id }`, the same id the twin carries. The `signalr isolation` proof receives it as the owner; no app consumes it yet.
 
 ## Flow: read temperature history
 
@@ -1196,189 +1166,3 @@ graph TB
   linkStyle 0,1 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,3,4,5,6,7 stroke:#8D8D8D
 ```
-
----
-
-# Decided, not built
-
-## Realtime: the decided design
-
-Two jobs, two patterns. Device state goes by IoT Hub device twin. Push to clients goes Event Hub -> Function -> SignalR. Red dotted is what gets removed.
-
-View `realtimeTarget` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/
-
-```mermaid
----
-title: "Realtime: the decided design"
----
-graph TB
-  subgraph MeatgeekCloud["`MeatGeek cloud`"]
-    subgraph MeatgeekCloud.Api["`Functions API`"]
-      MeatgeekCloud.Api.Cooks@{ shape: rectangle, label: "cooks" }
-      MeatgeekCloud.Api.Negotiate@{ shape: rectangle, label: "negotiate" }
-      MeatgeekCloud.Api.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
-    end
-    subgraph MeatgeekCloud.Ingest["`Ingest`"]
-      MeatgeekCloud.Ingest.Iothub@{ shape: rectangle, label: "IoT Hub" }
-      MeatgeekCloud.Ingest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
-    end
-    subgraph MeatgeekCloud.Data["`Cosmos DB`"]
-      MeatgeekCloud.Data.Temperatures@{ shape: cylinder, label: "temperatures" }
-    end
-    MeatgeekCloud.Realtime@{ shape: rectangle, label: "SignalR Service" }
-  end
-  subgraph MeatgeekEdge["`MeatGeek device`"]
-    subgraph MeatgeekEdge.Pusher["`data-pusher`"]
-      MeatgeekEdge.Pusher.Iot@{ shape: rectangle, label: "iothub client" }
-      MeatgeekEdge.Pusher.Twin@{ shape: rectangle, label: "twin client" }
-      MeatgeekEdge.Pusher.Signalr@{ shape: rectangle, label: "signalr client" }
-      MeatgeekEdge.Pusher.Session@{ shape: rectangle, label: "cooksession" }
-    end
-  end
-  MeatgeekMobile@{ shape: rounded, label: "Mobile app" }
-  MeatgeekWeb@{ shape: rounded, label: "Web app" }
-  MeatgeekCloud.Api.Cooks -. "`set twin desired properties`" .-> MeatgeekCloud.Ingest.Iothub
-  MeatgeekCloud.Ingest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloud.Ingest.Eventhub
-  MeatgeekCloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloud.Api.Broadcast
-  MeatgeekCloud.Api.Cooks -. "`cook_started, cook_stopped
-to the owning userId`" .-> MeatgeekCloud.Realtime
-  MeatgeekCloud.Api.Broadcast -. "`each reading, to its device group`" .-> MeatgeekCloud.Realtime
-  MeatgeekCloud.Api.Negotiate -. "`reset groups to owned
-devices, mint client token`" .-> MeatgeekCloud.Realtime
-  MeatgeekCloud.Ingest.Iothub -. "`desired properties`" .-> MeatgeekEdge.Pusher.Twin
-  MeatgeekEdge.Pusher.Twin -. "`reported properties`" .-> MeatgeekCloud.Ingest.Iothub
-  MeatgeekCloud.Realtime -. "`cook lifecycle events`" .-> MeatgeekEdge.Pusher.Signalr
-  MeatgeekEdge.Pusher.Twin -. "`sets active cook and correlation id`" .-> MeatgeekEdge.Pusher.Session
-  MeatgeekEdge.Pusher.Signalr -. "`sets active cook and correlation id`" .-> MeatgeekEdge.Pusher.Session
-  MeatgeekEdge.Pusher.Session -. "`GET /cooks?
-deviceId&status=active
-(Reconcile)`" .-> MeatgeekCloud.Api.Cooks
-  MeatgeekEdge.Pusher.Iot -. "`telemetry: messageId,
-$.ct=application/json, $.ce=utf-
-8, correlation.id, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
-  MeatgeekCloud.Ingest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloud.Data.Temperatures
-  MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekMobile
-  MeatgeekMobile -. "`negotiate`" .-> MeatgeekCloud.Api.Negotiate
-  MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekWeb
-  MeatgeekWeb -. "`REST`" .-> MeatgeekCloud.Api
-  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekEdge.Pusher.Iot,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.Pusher.Session primary
-  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime indigo
-  classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
-  class MeatgeekCloud.Data.Temperatures green
-  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
-  class MeatgeekMobile,MeatgeekWeb amber
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekEdge.Pusher.Twin sky
-  classDef red fill:#AC4D39,stroke:#853A2D,color:#FBD3CB
-  class MeatgeekEdge.Pusher.Signalr red
-  linkStyle 0,6,7,9,14,15,16 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,2,3,12,13 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 4,5,11 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 8,10 stroke:#AC4D39
-  linkStyle 17 stroke:#8D8D8D
-```
-
-## Flow: start a cook (decided design)
-
-The active cook reaches the Pi as device state, through the IoT Hub device twin. Clients hear about it through SignalR.
-
-View `cookStartTarget` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/cookStartTarget/
-
-```mermaid
----
-title: "Flow: start a cook (decided design)"
----
-graph LR
-  MeatgeekMobile@{ shape: rounded, label: "Mobile app" }
-  MeatgeekCloudApiCooks@{ shape: rectangle, label: "cooks" }
-  MeatgeekCloudDataCooks@{ shape: cylinder, label: "cooks" }
-  MeatgeekCloudIngestIothub@{ shape: rectangle, label: "IoT Hub" }
-  MeatgeekEdgePusherTwin@{ shape: rectangle, label: "twin client" }
-  MeatgeekEdgePusherSession@{ shape: rectangle, label: "cooksession" }
-  MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
-  MeatgeekMobile -. "`POST /cooks`" .-> MeatgeekCloudApiCooks
-  MeatgeekCloudApiCooks -. "`insert cook`" .-> MeatgeekCloudDataCooks
-  MeatgeekCloudApiCooks -. "`set desired: active cook, correlation id`" .-> MeatgeekCloudIngestIothub
-  MeatgeekCloudIngestIothub -. "`desired properties`" .-> MeatgeekEdgePusherTwin
-  MeatgeekEdgePusherTwin -. "`set active cook`" .-> MeatgeekEdgePusherSession
-  MeatgeekEdgePusherTwin -. "`reported: applied`" .-> MeatgeekCloudIngestIothub
-  MeatgeekCloudApiCooks -. "`cook_started`" .-> MeatgeekCloudRealtime
-  MeatgeekCloudRealtime -. "`cook_started, to the owner only`" .-> MeatgeekMobile
-  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
-  class MeatgeekMobile amber
-  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloudApiCooks,MeatgeekEdgePusherSession primary
-  classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
-  class MeatgeekCloudDataCooks green
-  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloudIngestIothub,MeatgeekCloudRealtime indigo
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekEdgePusherTwin sky
-  linkStyle 0,1 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,3,4,5,7 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 6 stroke:#b45309,stroke-dasharray:8 4
-```
-
-Steps:
-
-- **1.** Mobile app → cooks (`meatgeek.cloud.api.cooks`): POST /cooks. Sign-in and the ownership check are unchanged. (Opens `cookStart`.)
-- **2.** cooks (`meatgeek.cloud.api.cooks`) → cooks (`meatgeek.cloud.data.cooks`): insert cook
-- **3.** cooks (`meatgeek.cloud.api.cooks`) → IoT Hub: set desired: active cook, correlation id. Only after the write succeeds. The twin keeps it, so nothing is lost if the Pi is offline.
-- **4.** IoT Hub → twin client: desired properties. Immediately if connected; otherwise on the next connect.
-- **5.** twin client → cooksession: set active cook
-- **6.** twin client → IoT Hub: reported: applied. The acknowledgement the SignalR path never had.
-- **7.** cooks (`meatgeek.cloud.api.cooks`) → SignalR Service: cook_started
-- **8.** SignalR Service → Mobile app: cook_started, to the owner only
-
-## Flow: a live temperature reaches the app (decided design)
-
-The hot path beside the existing storage path.
-
-View `liveTemperatureTarget` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/liveTemperatureTarget/
-
-```mermaid
----
-title: "Flow: a live temperature reaches the app (decided design)"
----
-graph LR
-  MeatgeekMobile@{ shape: rounded, label: "Mobile app" }
-  MeatgeekCloudApiNegotiate@{ shape: rectangle, label: "negotiate" }
-  MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
-  MeatgeekEdgePusherIot@{ shape: rectangle, label: "iothub client" }
-  MeatgeekCloudIngestIothub@{ shape: rectangle, label: "IoT Hub" }
-  MeatgeekCloudDataTemperatures@{ shape: cylinder, label: "temperatures" }
-  MeatgeekCloudIngestEventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
-  MeatgeekCloudApiBroadcast@{ shape: rectangle, label: "realtime broadcast" }
-  MeatgeekMobile -. "`POST /negotiate`" .-> MeatgeekCloudApiNegotiate
-  MeatgeekMobile -. "`connect`" .-> MeatgeekCloudRealtime
-  MeatgeekEdgePusherIot -. "`publish reading`" .-> MeatgeekCloudIngestIothub
-  MeatgeekCloudIngestIothub -. "`cosmos-storage-route`" .-> MeatgeekCloudDataTemperatures
-  MeatgeekCloudIngestIothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngestEventhub
-  MeatgeekCloudIngestEventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApiBroadcast
-  MeatgeekCloudApiBroadcast -. "`send to the device group`" .-> MeatgeekCloudRealtime
-  MeatgeekCloudRealtime -. "`live temperature`" .-> MeatgeekMobile
-  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
-  class MeatgeekMobile amber
-  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloudApiNegotiate,MeatgeekEdgePusherIot,MeatgeekCloudApiBroadcast primary
-  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloudRealtime,MeatgeekCloudIngestIothub,MeatgeekCloudIngestEventhub indigo
-  classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
-  class MeatgeekCloudDataTemperatures green
-  linkStyle 0,7 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,6 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,3,4,5 stroke:#b45309,stroke-dasharray:8 4
-```
-
-Steps:
-
-- **1.** Mobile app → negotiate: POST /negotiate. Grants a connection scoped to devices the caller owns (MG-30).
-- **2.** Mobile app → SignalR Service: connect
-- **3.** iothub client → IoT Hub: publish reading
-- **4a.** IoT Hub → temperatures: cosmos-storage-route. Unchanged, and already live.
-- **4b.** IoT Hub → Event Hub: temperature-data: eventhub-realtime-route. Already live; it has had no reader until now.
-- **5.** Event Hub: temperature-data → realtime broadcast: Event Hub trigger
-- **6.** realtime broadcast → SignalR Service: send to the device group
-- **7.** SignalR Service → Mobile app: live temperature
