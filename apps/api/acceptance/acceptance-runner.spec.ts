@@ -13,6 +13,13 @@
  * to `/api/__simdevice/sent`, which only the stub has), and the stub makes them
  * readable over the next few polls of the device's current reading, or never.
  * HAR-75: history pages by continuation token, and `offset` is a 400.
+ *
+ * HAR-87: the chart device (HAR-84) is configured in every whole-suite run. By
+ * default the stub starts with it registered and a standing active cook on it
+ * whose chart is covered, the steady state live; `chartCook` starts it with no
+ * cook (a first run) or an uncovered one. A fake chart top-up (`--start …
+ * --step 5s`) is reported to the stub, which covers that cook's chart after a
+ * few chart reads.
  */
 import { randomUUID } from 'crypto';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
@@ -33,6 +40,11 @@ import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
 import volumeGroup, { topupDrainedAt, VOLUME } from './proofs/telemetry-volume.proof';
+import chartGroup, {
+  CHART,
+  CHART_RU_BUDGET,
+  chartCoverage,
+} from './proofs/volume-cook-chart.proof';
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 /** HAR-67: the acceptance peer's token, a second caller who owns nothing. */
@@ -53,6 +65,18 @@ const SIM_HISTORY_PAGE = 2;
 /** HAR-75: the fake simdevice stamps top-up readings from here, 50 ms apart:
  *  after every other reading the stub serves, as live top-ups are the newest. */
 const TOPUP_EPOCH = Date.UTC(2026, 10, 20);
+
+/** HAR-84: the second standing device, and its credential. */
+const CHART_DEVICE = `${SIM_DEVICE}-chart`;
+const CHART_KEY = 'Y2hhcnQtZGV2aWNlLWtleS1mb3ItdGVzdHMtb25seQ==';
+const CHART_CONNECTION_STRING = `HostName=stub-hub.azure-devices.net;DeviceId=${CHART_DEVICE};SharedAccessKey=${CHART_KEY}`;
+const chartEnv = {
+  ACCEPTANCE_CHART_DEVICE_ID: CHART_DEVICE,
+  SIMDEVICE_CHART_CONNECTION_STRING: CHART_CONNECTION_STRING,
+};
+/** HAR-87: the standing chart cook an earlier run started. */
+const STANDING_CHART_COOK_ID = '6f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b';
+const STANDING_CHART_START = '2026-11-01T06:00:07.250Z';
 
 type FakeMode = 'ok' | 'exit1' | 'topup-exit1' | 'hang' | 'leak-stderr' | 'leak-stdout';
 
@@ -176,6 +200,18 @@ interface StubOptions {
   /** HAR-77: answer this many of the SignalR client's `POST /client/negotiate`
    *  calls with 429, as the Free_F1 service did live (`Infinity`: all). */
   readonly signalRThrottle?: number;
+  /** HAR-87: the chart device's state when the run starts. `covered` (default):
+   *  registered, with a standing active cook whose chart covers its readings.
+   *  `uncovered`: registered, with a standing cook and no readings. `none`:
+   *  not registered and no cook, as before the first run. */
+  readonly chartCook?: 'covered' | 'uncovered' | 'none';
+  /** HAR-87: the RU the chart device's chart reports (default the route's). */
+  readonly chartCharge?: string;
+  /** HAR-87: after a chart top-up, the chart is covered from this chart read
+   *  on (1-based, default 2). */
+  readonly chartCoveredFromRead?: number;
+  /** HAR-87: a chart top-up is never rolled up. */
+  readonly chartTopupNeverRolledUp?: boolean;
 }
 
 interface StubCook {
@@ -224,6 +260,12 @@ interface Stub {
   /** HAR-75: the volume after each poll of the simulated device's current
    *  reading while a top-up is being routed. */
   readonly drainTotals: number[];
+  /** HAR-87: the arguments of each chart top-up the fake simdevice reported. */
+  readonly chartTopups: string[][];
+  /** HAR-87: the chart device's cooks. */
+  readonly chartCooks: () => Array<{ id: string; status: string; startTime: string }>;
+  /** HAR-87: whether the chart device is registered. */
+  readonly chartRegistered: () => boolean;
   close(): Promise<void>;
 }
 
@@ -280,6 +322,37 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   // The acceptance identity's profile persists between runs, as it does in dev.
   let profile: Record<string, unknown> | undefined;
   const requests: Stub['requests'] = [];
+  // HAR-87: the chart device and its standing cook, as an earlier run left them.
+  const chartCook = options.chartCook ?? 'covered';
+  /** The `--start` of the chart readings that are rolled up, as epoch ms. */
+  let chartCoveredFrom: number | undefined;
+  /** Chart reads left before a pending top-up is rolled up. */
+  let chartReadsToCover: number | undefined;
+  let chartPendingFrom: number | undefined;
+  const chartTopups: string[][] = [];
+  if (chartCook !== 'none') {
+    devices.set(CHART_DEVICE, {
+      id: CHART_DEVICE,
+      userId: 'stub-tenant:stub-user',
+      name: 'Acceptance chart device',
+      model: 'simdevice',
+      location: 'CI',
+      isActive: true,
+      connectionStatus: 'unknown',
+    });
+    cooks.push({
+      id: STANDING_CHART_COOK_ID,
+      userId: 'stub-tenant:stub-user',
+      deviceId: CHART_DEVICE,
+      name: 'acceptance standing chart cook',
+      status: 'active',
+      startTime: STANDING_CHART_START,
+      meatType: 'brisket',
+    });
+    if (chartCook === 'covered') {
+      chartCoveredFrom = Date.parse(STANDING_CHART_START);
+    }
+  }
   if (options.simActiveCook) {
     cooks.push({
       id: STALE_COOK_ID,
@@ -513,7 +586,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       if (request.method === 'POST' && url.pathname === '/api/__simdevice/sent') {
         // HAR-45: the fake simdevice reporting a top-up. Not an API route.
         const { args } = (await readJson(request)) as { args: string[] };
-        if (args.join(' ') === '--count 1') {
+        if (args.includes('--start')) {
+          // HAR-87: a chart top-up, rolled up after a few chart reads.
+          chartTopups.push(args);
+          chartPendingFrom = Date.parse(args[args.indexOf('--start') + 1]);
+          chartReadsToCover = options.chartCoveredFromRead ?? 2;
+        } else if (args.join(' ') === '--count 1') {
           // HAR-63: the one reading; broadcastTemperature pushes it live.
           twinReading = undefined;
           setTimeout(pushLiveReading, 20);
@@ -942,6 +1020,41 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         );
         if (!cook) {
           send(404, errorBody('NOT_FOUND'), route);
+        } else if (cook.deviceId === CHART_DEVICE) {
+          // HAR-87: the standing cook's chart, in 60 s buckets from its
+          // start minute to the minute of its last reading, once covered.
+          if (chartReadsToCover !== undefined && !options.chartTopupNeverRolledUp) {
+            chartReadsToCover -= 1;
+            if (chartReadsToCover <= 0) {
+              chartCoveredFrom = chartPendingFrom;
+              chartReadsToCover = undefined;
+            }
+          }
+          const startMs = Date.parse(cook.startTime);
+          const startMinute = Math.floor(startMs / 60_000) * 60_000;
+          const lastReading = startMs + (CHART.readings - 1) * CHART.stepSeconds * 1000;
+          const points =
+            chartCoveredFrom === startMs
+              ? Array.from(
+                  { length: Math.floor((lastReading - startMinute) / 60_000) + 1 },
+                  (_, k) => ({
+                    t: new Date(startMinute + k * 60_000).toISOString(),
+                    grill: { min: 224.9, max: 225.4, avg: 225.1 },
+                  })
+                )
+              : [];
+          send(
+            200,
+            {
+              cookId: cook.id,
+              deviceId: cook.deviceId,
+              startTime: cook.startTime,
+              bucketSeconds: 60,
+              points,
+            },
+            route,
+            options.chartCharge
+          );
         } else if (options.chartFault === 'bad-body') {
           send(200, { cookId: cook.id, deviceId: cook.deviceId, points: 'none' }, route);
         } else {
@@ -1039,6 +1152,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     simCooks: () =>
       cooks.filter(c => c.deviceId === SIM_DEVICE).map(({ id, status }) => ({ id, status })),
     drainTotals,
+    chartTopups,
+    chartCooks: () =>
+      cooks
+        .filter(c => c.deviceId === CHART_DEVICE)
+        .map(({ id, status, startTime }) => ({ id, status, startTime })),
+    chartRegistered: () => devices.has(CHART_DEVICE),
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
   };
 }
@@ -1086,9 +1205,26 @@ const line = o => process.stdout.write(JSON.stringify(o) + '\\n');
 const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stringify(SIM_DEVICE)}, timestamp, sentAt: new Date().toISOString() });
 const args = process.argv.slice(2).join(' ');
 const handedOver = conn === ${JSON.stringify(SIM_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.argv.some(a => a.includes(key));
+const chartHandedOver = conn === ${JSON.stringify(CHART_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.env.SIMDEVICE_CHART_CONNECTION_STRING && !process.argv.some(a => a.includes(key));
+// HAR-87: a chart top-up, stamped start + i × step.
+const chartTopup = /^--count ([1-9][0-9]*) --start ([^ ]+) --step ([1-9][0-9]*)s --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
 const topup = /^--count ([1-9][0-9]*) --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
 const twin = /^--twin --count ([01]) --timeout 60s$/.exec(args);
-if ((mode === 'ok' || mode === 'topup-exit1') && twin && handedOver) {
+if (mode === 'ok' && chartTopup && chartHandedOver) {
+  fetch(${JSON.stringify(notifyUrl)}, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ args: process.argv.slice(2) }),
+  }).then(() => {
+    const start = Date.parse(chartTopup[2]);
+    for (let i = 0; i < Number(chartTopup[1]); i++) {
+      line({ ...reading(new Date(start + i * Number(chartTopup[3]) * 1000).toISOString()), deviceId: ${JSON.stringify(CHART_DEVICE)} });
+    }
+  }, () => {
+    process.stderr.write('fake simdevice: could not report the chart top-up\\n');
+    process.exit(3);
+  });
+} else if ((mode === 'ok' || mode === 'topup-exit1') && twin && handedOver) {
   // HAR-68: reconnect, read the stub's twin (it applies desired to reported),
   // print the twin line, then the reading carrying the cook.
   fetch(${JSON.stringify(stub ? `${stub.baseUrl}/__simdevice/twin` : '')}, {
@@ -1180,6 +1316,7 @@ async function runAgainstStub(
       ACCEPTANCE_BEARER_TOKEN: TOKEN,
       ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
       ...simEnv(mode),
+      ...chartEnv,
     },
     groups
   );
@@ -1191,6 +1328,7 @@ const realIsolationWait = { ...ISOLATION_WAIT };
 const realTwinPoll = { ...TWIN_POLL };
 const realVolume = { ...VOLUME };
 const realStartRetry = { ...START_RETRY };
+const realChart = { ...CHART };
 
 beforeAll(() => {
   fakeDir = mkdtempSync(join(tmpdir(), 'acceptance-simdevice-'));
@@ -1216,6 +1354,11 @@ beforeAll(() => {
   VOLUME.pollCapMs = 300;
   // HAR-77: a throttled SignalR start() is retried after 1, 2, 4, 8 s live.
   START_RETRY.delaysMs = [1, 1, 1, 1];
+  // HAR-87: 12 h of readings 5 s apart, the chart re-read every 10 s for up to
+  // 15 min live. Here 10 min of them (120), and polls in milliseconds.
+  CHART.readings = 120;
+  CHART.pollIntervalMs = 5;
+  CHART.pollCapMs = 300;
 });
 
 afterAll(() => {
@@ -1225,6 +1368,7 @@ afterAll(() => {
   Object.assign(TWIN_POLL, realTwinPoll);
   Object.assign(VOLUME, realVolume);
   Object.assign(START_RETRY, realStartRetry);
+  Object.assign(CHART, realChart);
   rmSync(fakeDir, { recursive: true, force: true });
 });
 
@@ -1341,9 +1485,15 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // HAR-67 and HAR-68: the isolation and twin groups use every cooks route too.
     const twin = result.failures.filter(line => line.startsWith('FAIL device twin ›'));
     expect(twin).toHaveLength(twinFailures(route, true));
-    expect(result.failures).toHaveLength(2 + twin.length);
+    // HAR-87: the cook-chart group lists the chart device's active cooks; it
+    // starts or stops none while its standing cook is there.
+    const chart = result.failures.filter(line => line.startsWith('FAIL cook chart ›'));
+    expect(chart).toHaveLength(route === 'GET /cooks' ? 1 : 0);
+    expect(result.failures).toHaveLength(2 + twin.length + chart.length);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
-    expect(result.failures[result.failures.length - 1]).toContain('signalr isolation ›');
+    expect(result.failures[result.failures.length - 1 - chart.length]).toContain(
+      'signalr isolation ›'
+    );
     for (const failure of result.failures) {
       expect(failure).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
     }
@@ -1389,7 +1539,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
       .map(r => ({
         id: decodeURIComponent(r.path.slice('/api/cooks/'.length, -'/chart'.length)),
         as: r.authorization === `Bearer ${PEER_TOKEN}` ? 'peer' : 'owner',
-      }));
+      }))
+      // HAR-87's standing cook is read by the cook-chart group.
+      .filter(read => read.id !== STANDING_CHART_COOK_ID);
     expect(reads).toHaveLength(3);
     const cookId = reads[0].id;
     expect(reads).toEqual([
@@ -1494,6 +1646,8 @@ describe('live acceptance runner (against an in-process stub)', () => {
             'signalr isolation ›',
             'signalr live temperature ›',
             'telemetry round-trip ›',
+            // HAR-87: it checks the chart device is registered.
+            'cook chart ›',
           ]
         : ['devices ›'];
 
@@ -1822,6 +1976,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ACCEPTANCE_BEARER_TOKEN: TOKEN,
       ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
       ...simEnv(),
+      ...chartEnv,
     };
     const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
     const lines: string[] = [];
@@ -1937,9 +2092,14 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // twin group's cleanup to stop.
     const twin = result.failures.filter(line => line.startsWith('FAIL device twin ›'));
     expect(twin).toHaveLength(twinFailures(route, false));
-    expect(result.failures).toHaveLength(2 + twin.length);
+    // HAR-87: the cook-chart group lists the chart device's active cooks.
+    const chart = result.failures.filter(line => line.startsWith('FAIL cook chart ›'));
+    expect(chart).toHaveLength(route === 'GET /cooks' ? 1 : 0);
+    expect(result.failures).toHaveLength(2 + twin.length + chart.length);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
-    expect(result.failures[result.failures.length - 1]).toContain('signalr isolation ›');
+    expect(result.failures[result.failures.length - 1 - chart.length]).toContain(
+      'signalr isolation ›'
+    );
     for (const failure of result.failures) {
       expect(failure).toContain(route);
       expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
@@ -2029,6 +2189,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ACCEPTANCE_BEARER_TOKEN: TOKEN,
       ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
       ...simEnv(),
+      ...chartEnv,
     };
     const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
     const lines: string[] = [];
@@ -2831,13 +2992,6 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
 });
 
 describe('chart device (HAR-84)', () => {
-  const CHART_DEVICE = `${SIM_DEVICE}-chart`;
-  const CHART_KEY = 'Y2hhcnQtZGV2aWNlLWtleS1mb3ItdGVzdHMtb25seQ==';
-  const CHART_CONNECTION_STRING = `HostName=stub-hub.azure-devices.net;DeviceId=${CHART_DEVICE};SharedAccessKey=${CHART_KEY}`;
-  const chartEnv = {
-    ACCEPTANCE_CHART_DEVICE_ID: CHART_DEVICE,
-    SIMDEVICE_CHART_CONNECTION_STRING: CHART_CONNECTION_STRING,
-  };
   const baseEnv = () => ({
     ACCEPTANCE_BASE_URL: stub!.baseUrl,
     ACCEPTANCE_BEARER_TOKEN: TOKEN,
@@ -2996,6 +3150,257 @@ process.stdout.write(JSON.stringify({
       expect(result.output).not.toContain(CHART_KEY);
     }
     expect(stub.requests).toHaveLength(0);
+  });
+});
+
+describe('cook chart (HAR-87, against the stub and a fake simdevice)', () => {
+  const GROUP = 'cook chart ›';
+  const STEPS = [
+    'the chart device is configured (ACCEPTANCE_CHART_DEVICE_ID, SIMDEVICE_CHART_CONNECTION_STRING)',
+    'GET /devices/{id} finds the chart device registered to the caller (POST /devices on 404)',
+    'GET /cooks?deviceId=<chart>&status=active finds the standing cook (POST /cooks starts one when there is none)',
+    "GET /cooks/{cookId}/chart: is the standing cook's 12 h covered",
+    'simdevice tops the chart device up to 12 h of readings from the cook start when it is not',
+    'GET /cooks/{cookId}/chart covers 12 h once the top-up is rolled up',
+    `GET /cooks/{cookId}/chart of a 12 h cook costs at most ${CHART_RU_BUDGET} RU`,
+  ];
+  const metric = (result: Run, name: string) =>
+    result.lines.filter(line => line.startsWith(`METRIC ${name} `));
+  const chartRequests = (method: string, path: RegExp) =>
+    stub!.requests.filter(r => r.method === method && path.test(r.path));
+  /** One run of the cook-chart group alone. */
+  const runChart = (options: StubOptions = {}) => runAgainstStub(options, 'ok', [chartGroup]);
+  /** The stub's chart in 60 s buckets: start minute to last reading's minute. */
+  const pointsFor = (startTime: string) => {
+    const start = Date.parse(startTime);
+    const last = start + (CHART.readings - 1) * CHART.stepSeconds * 1000;
+    return Math.floor((last - Math.floor(start / 60_000) * 60_000) / 60_000) + 1;
+  };
+
+  it('(a) with no standing cook: registers the device, starts a cook, tops it up once and measures', async () => {
+    const result = await runChart({ chartCook: 'none' });
+
+    expect(result.failures).toEqual([]);
+    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    // Registered on the 404, and the cook started with the standing name.
+    expect(chartRequests('GET', new RegExp(`^/api/devices/${CHART_DEVICE}$`))).toHaveLength(1);
+    expect(chartRequests('POST', /^\/api\/devices$/)).toHaveLength(1);
+    expect(stub!.chartRegistered()).toBe(true);
+    expect(chartRequests('POST', /^\/api\/cooks$/)).toHaveLength(1);
+    const cooks = stub!.chartCooks();
+    expect(cooks).toHaveLength(1);
+    // It is never stopped.
+    expect(cooks[0].status).toBe('active');
+    expect(chartRequests('POST', /\/stop$/)).toHaveLength(0);
+    // One top-up, as the chart device, stamped from the cook's start.
+    expect(stub!.chartTopups).toEqual([
+      [
+        '--count',
+        String(CHART.readings),
+        '--start',
+        new Date(Date.parse(cooks[0].startTime)).toISOString(),
+        '--step',
+        '5s',
+        '--inflight',
+        '32',
+        '--interval',
+        '50ms',
+      ],
+    ]);
+    expect(
+      result.lines.some(line =>
+        new RegExp(`^\\s+EXEC\\s+simdevice \\(chart\\) --count ${CHART.readings} --start `).test(
+          line
+        )
+      )
+    ).toBe(true);
+    expect(metric(result, 'chart-topup-sent')).toEqual([
+      `METRIC chart-topup-sent ${CHART.readings}`,
+    ]);
+    expect(metric(result, 'chart-ru-12h')).toEqual(['METRIC chart-ru-12h 3.94']);
+    expect(metric(result, 'chart-points')).toEqual([
+      `METRIC chart-points ${pointsFor(cooks[0].startTime)}`,
+    ]);
+    expect(metric(result, 'chart-bucket-seconds')).toEqual(['METRIC chart-bucket-seconds 60']);
+    // Loaded; polled until covered (on the second read after the top-up); measured.
+    expect(chartRequests('GET', /\/chart$/)).toHaveLength(1 + 2 + 1);
+  });
+
+  it('(a) with an uncovered standing cook: tops that cook up, starting nothing', async () => {
+    const result = await runChart({ chartCook: 'uncovered', chartCoveredFromRead: 3 });
+
+    expect(result.failures).toEqual([]);
+    expect(chartRequests('POST', /^\/api\/devices$/)).toHaveLength(0);
+    expect(chartRequests('POST', /^\/api\/cooks$/)).toHaveLength(0);
+    expect(stub!.chartTopups).toHaveLength(1);
+    expect(stub!.chartTopups[0].slice(2, 4)).toEqual(['--start', STANDING_CHART_START]);
+    expect(stub!.chartCooks()).toEqual([
+      { id: STANDING_CHART_COOK_ID, status: 'active', startTime: STANDING_CHART_START },
+    ]);
+    expect(metric(result, 'chart-topup-sent')).toEqual([
+      `METRIC chart-topup-sent ${CHART.readings}`,
+    ]);
+    expect(chartRequests('GET', /\/chart$/)).toHaveLength(1 + 3 + 1);
+  });
+
+  it('(b) covered: sends nothing and measures one more load', async () => {
+    const result = await runChart();
+
+    expect(result.failures).toEqual([]);
+    expect(stub!.chartTopups).toEqual([]);
+    expect(result.lines.some(line => /EXEC\s+simdevice/.test(line))).toBe(false);
+    expect(chartRequests('POST', /^\/api\/devices$/)).toHaveLength(0);
+    expect(chartRequests('POST', /^\/api\/cooks$/)).toHaveLength(0);
+    expect(metric(result, 'chart-topup-sent')).toEqual(['METRIC chart-topup-sent 0']);
+    expect(metric(result, 'chart-ru-12h')).toEqual(['METRIC chart-ru-12h 3.94']);
+    expect(metric(result, 'chart-points')).toEqual([
+      `METRIC chart-points ${pointsFor(STANDING_CHART_START)}`,
+    ]);
+    // The coverage load, then the measurement.
+    expect(
+      chartRequests('GET', new RegExp(`/cooks/${STANDING_CHART_COOK_ID}/chart$`))
+    ).toHaveLength(2);
+  });
+
+  it('(b) the whole suite passes on a first run (no standing cook yet)', async () => {
+    const result = await runAgainstStub({ chartCook: 'none' });
+
+    expect(result.failures).toEqual([]);
+    expect(stub!.chartTopups).toHaveLength(1);
+    expect(stub!.chartCooks().map(c => c.status)).toEqual(['active']);
+  });
+
+  it.each([
+    ['40', true],
+    ['41', false],
+  ] as const)('(c) a chart costing %s RU is within the budget: %s', async (charge, passes) => {
+    const result = await runChart({ chartCharge: charge });
+
+    expect(metric(result, 'chart-ru-12h')).toEqual([`METRIC chart-ru-12h ${charge}`]);
+    if (passes) {
+      expect(result.failures).toEqual([]);
+      return;
+    }
+    expect(result.exitCode).toBe(1);
+    expect(result.failures).toEqual([
+      `FAIL ${GROUP} ${STEPS[6]} — GET /cooks/{cookId}/chart → 200: the chart of a 12 h cook ` +
+        `cost 41 RU, over the ${CHART_RU_BUDGET} RU budget (CHART_RU_BUDGET)`,
+    ]);
+  });
+
+  it('(c) fails naming the cap when the top-up is never rolled up', async () => {
+    const result = await runChart({ chartCook: 'uncovered', chartTopupNeverRolledUp: true });
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(
+      `FAIL ${GROUP} ${STEPS[5]} — GET /cooks/{cookId}/chart → 200`
+    );
+    expect(result.failures[0]).toContain(
+      `the chart is not covered after the ${CHART.pollCapMs / 1000} s cap: the chart has no points`
+    );
+    expect(result.lines).toContain(
+      `SKIP ${GROUP} ${STEPS[6]} (an earlier proof in this group failed)`
+    );
+    expect(metric(result, 'chart-ru-12h')).toEqual([]);
+  });
+
+  it('(d) fails clearly when neither chart variable is set, sending nothing', async () => {
+    stub = await startStub({ chartCook: 'none' });
+    const result = await run(
+      {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+      },
+      [chartGroup]
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.failures).toEqual([
+      `FAIL ${GROUP} ${STEPS[0]} — before any request: ACCEPTANCE_CHART_DEVICE_ID and ` +
+        'SIMDEVICE_CHART_CONNECTION_STRING are not set; the cook-chart proof needs the chart device',
+    ]);
+    STEPS.slice(1).forEach(step =>
+      expect(result.lines).toContain(
+        `SKIP ${GROUP} ${step} (an earlier proof in this group failed)`
+      )
+    );
+    expect(stub.requests).toHaveLength(0);
+  });
+
+  it.each(['ACCEPTANCE_CHART_DEVICE_ID', 'SIMDEVICE_CHART_CONNECTION_STRING'])(
+    '(d) fails at once naming the other variable when only %s is set',
+    async given => {
+      stub = await startStub();
+      const absent =
+        given === 'ACCEPTANCE_CHART_DEVICE_ID'
+          ? 'SIMDEVICE_CHART_CONNECTION_STRING'
+          : 'ACCEPTANCE_CHART_DEVICE_ID';
+      const result = await run(
+        {
+          ACCEPTANCE_BASE_URL: stub.baseUrl,
+          ACCEPTANCE_BEARER_TOKEN: TOKEN,
+          ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+          ...simEnv(),
+          [given]: chartEnv[given as keyof typeof chartEnv],
+        },
+        [chartGroup]
+      );
+
+      expect(result.exitCode).toBe(2);
+      expect(result.failures).toEqual([
+        `acceptance: ${given} is set but ${absent} is not; the chart device needs both or neither`,
+      ]);
+      expect(stub.requests).toHaveLength(0);
+    }
+  );
+
+  describe('chartCoverage', () => {
+    const lastReadingOffsetMs = () => (CHART.readings - 1) * CHART.stepSeconds * 1000;
+    const chartOf = (startTime: string, bucketSeconds: number, ts: number[]) => ({
+      cookId: STANDING_CHART_COOK_ID,
+      deviceId: CHART_DEVICE,
+      startTime,
+      bucketSeconds,
+      points: ts.map(t => ({ t: new Date(t).toISOString() })),
+    });
+
+    it('is covered when the last bucket holds the last reading, even if it starts before startTime + span − bucket', () => {
+      // startTime 2 s into its minute: buckets start on the minute, so the
+      // bucket holding the last reading starts 2 s + step before
+      // startTime + span − bucket.
+      const start = Date.parse('2026-11-01T06:00:02.000Z');
+      const minute = Date.parse('2026-11-01T06:00:00.000Z');
+      const bucket = 60;
+      const lastReading = start + lastReadingOffsetMs();
+      const lastBucket = minute + Math.floor((lastReading - minute) / 60_000) * 60_000;
+      expect(lastBucket).toBeLessThan(
+        start + CHART.readings * CHART.stepSeconds * 1000 - bucket * 1000
+      );
+      expect(
+        chartCoverage(chartOf(new Date(start).toISOString(), bucket, [minute, lastBucket])).covered
+      ).toBe(true);
+    });
+
+    it.each([
+      ['no points', [], 'the chart has no points'],
+      [
+        'a first point a bucket late',
+        [60_000, 'last'],
+        'more than one 60 s bucket after startTime',
+      ],
+      ['a last point a bucket short', [0, 'short'], 'ends before the last reading'],
+    ] as const)('is not covered with %s', (_, offsets, reason) => {
+      const start = Date.parse('2026-11-01T06:00:00.000Z');
+      const lastBucket = start + Math.floor(lastReadingOffsetMs() / 60_000) * 60_000;
+      const ts = offsets.map(o =>
+        o === 'last' ? lastBucket : o === 'short' ? lastBucket - 60_000 : start + o
+      );
+      const coverage = chartCoverage(chartOf(new Date(start).toISOString(), 60, ts));
+      expect(coverage.covered).toBe(false);
+      expect(coverage.reason).toContain(reason);
+    });
   });
 });
 

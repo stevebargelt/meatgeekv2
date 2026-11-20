@@ -128,8 +128,10 @@ func Main(ctx context.Context, env Env) int {
 	inflight := fs.Int("inflight", 1, "how many sends may await IoT Hub's acknowledgement at once")
 	twinMode := fs.Bool("twin", false, "read the device twin first: apply its desired cook, report it, print the twin, then send --count readings carrying that cook (--count 0 sends none)")
 	timeout := fs.Duration("timeout", defaultTwinTimeout, "with --twin, how long to wait for the twin before exiting 1")
+	startFlag := fs.String("start", "", "with --step, stamp reading i (0-based) start + i×step instead of the wall clock (RFC 3339); pacing still comes from --interval/--inflight")
+	step := fs.Duration("step", 0, "with --start, the gap between consecutive readings' timestamps (Go duration, at least 1ms)")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: simdevice [--twin [--timeout DURATION]] [--count N] [--interval DURATION] [--inflight N]\n"+
+		fmt.Fprintf(fs.Output(), "usage: simdevice [--twin [--timeout DURATION]] [--count N] [--interval DURATION] [--inflight N] [--start RFC3339 --step DURATION]\n"+
 			"Sends synthetic readings as the IoT Hub device named by $%s.\n", EnvConnectionString)
 		fs.PrintDefaults()
 	}
@@ -156,6 +158,32 @@ func Main(ctx context.Context, env Env) int {
 	}
 	if *inflight < 1 {
 		return fail(ExitUsage, "--inflight must be at least 1, got %d", *inflight)
+	}
+	// --start and --step stamp synthetic timestamps (HAR-87); one without the
+	// other is a usage error, not a silent fall-back to the wall clock.
+	stepSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "step" {
+			stepSet = true
+		}
+	})
+	startSet := *startFlag != ""
+	if startSet != stepSet {
+		if startSet {
+			return fail(ExitUsage, "--start needs --step")
+		}
+		return fail(ExitUsage, "--step needs --start")
+	}
+	var synthStart time.Time
+	if startSet {
+		t, err := time.Parse(time.RFC3339Nano, *startFlag)
+		if err != nil {
+			return fail(ExitUsage, "--start must be an RFC 3339 time, got %q", *startFlag)
+		}
+		if *step < time.Millisecond {
+			return fail(ExitUsage, "--step must be at least 1ms, got %s", *step)
+		}
+		synthStart = t.UTC().Truncate(time.Millisecond)
 	}
 
 	if strings.TrimSpace(connStr) == "" {
@@ -209,9 +237,19 @@ func Main(ctx context.Context, env Env) int {
 	}
 	// Millisecond timestamps, strictly increasing within the run, so the
 	// stdout `timestamp` equals the payload's and every reading is distinct.
+	// With --start/--step the n-th call (0-based) returns start + n×step
+	// instead of the clock; both senders call it once per reading, in
+	// reading order, so reading i carries start + i×step.
 	var last time.Time
+	stamped := 0
 	nextTimestamp := func() time.Time {
-		ts := now().UTC().Truncate(time.Millisecond)
+		var ts time.Time
+		if startSet {
+			ts = synthStart.Add(time.Duration(stamped) * *step).Truncate(time.Millisecond)
+			stamped++
+		} else {
+			ts = now().UTC().Truncate(time.Millisecond)
+		}
 		if !ts.After(last) {
 			ts = last.Add(time.Millisecond)
 		}

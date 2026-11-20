@@ -93,6 +93,13 @@ Every proof below also checks each response against the OpenAPI contract,
 |                                     | the same walk again                                                                                                                                                                    | at least 8,640 readings, and the last page's RU ≤ 1.5 × the first page's; prints `METRIC history-readings`, `history-pages`, `history-ru-first-page`, `history-ru-last-page`                                                                                                                                 |
 | `users.proof.ts`                    | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`                                                                                                              | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id                                                                                                                                                                     |
 |                                     | `GET /users/me`                                                                                                                                                                        | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                                                                                                                                                                                    |
+| `volume-cook-chart.proof.ts`        | checks the chart device is configured (`ACCEPTANCE_CHART_DEVICE_ID`, `SIMDEVICE_CHART_CONNECTION_STRING`)                                                                              | both set, else it fails naming both                                                                                                                                                                                                                                                                          |
+|                                     | `GET /devices/<chart device>`, then `POST /devices` on `404` only                                                                                                                      | `200`, or `404` and then `201`                                                                                                                                                                                                                                                                               |
+|                                     | `GET /cooks?deviceId=<chart device>&status=active`, then `POST /cooks` (`acceptance standing chart cook`, `brisket`, fresh UUID) only when none is active                              | `200`; `201` and an `active` cook. The cook is never stopped                                                                                                                                                                                                                                                 |
+|                                     | `GET /cooks/{cookId}/chart` for the standing cook                                                                                                                                      | `200`, the cook's chart; checks whether it covers the cook's 12 h (see below)                                                                                                                                                                                                                                |
+|                                     | `simdevice --count 8640 --start <cook startTime> --step 5s --inflight 32 --interval 50ms` as the chart device, only when not covered                                                   | exit `0`, 8,640 JSON lines stamped `startTime + i × 5 s`; prints `METRIC chart-topup-sent` (`0` when none was needed)                                                                                                                                                                                        |
+|                                     | after a top-up only: `GET /cooks/{cookId}/chart`, every 10 s for at most 15 min                                                                                                        | covered, else it fails naming the cap                                                                                                                                                                                                                                                                        |
+|                                     | `GET /cooks/{cookId}/chart` once more: the measurement                                                                                                                                 | covered, and `x-meatgeek-request-charge` ≤ 40 (`CHART_RU_BUDGET`); prints `METRIC chart-ru-12h`, `chart-points`, `chart-bucket-seconds`                                                                                                                                                                      |
 
 Every `devices.proof.ts`, `recipes.proof.ts` and `users.proof.ts` response body is also checked for
 keys starting with `_` at any depth (Cosmos system properties).
@@ -188,6 +195,50 @@ registered the device to the caller.
   per routed write is 20 writes/s, a 50 ms gap. Waiting for the top-up's end
   also drains the routing backlog before the measuring walk and later groups
   run on the same offer.
+
+`volume-cook-chart.proof.ts` (HAR-87, goal HAR-71 item 5) measures what loading
+a 12-hour cook's chart costs, `GET /cooks/{cookId}/chart` (HAR-86), and fails
+if it is over **40 RU** (`CHART_RU_BUDGET` in the proof file). The chart is
+served from per-device, per-hour rollup documents, so the cost is one point read
+of the cook and one single-partition query over about 13 hour documents. Its
+file name sorts after `cooks-lifecycle` and `telemetry-volume`, so it runs after
+both.
+
+- **The standing chart cook.** The server sets a cook's `startTime` when it
+  starts it, and `device-twin.proof.ts` starts and stops cooks on the simulated
+  device every run, so the proof keeps one active cook,
+  `acceptance standing chart cook`, on the second standing device, the chart
+  device (see [The chart device](#the-chart-device-har-84)), and never stops
+  it. Each run finds it with `GET /cooks?deviceId=<chart device>&status=active`
+  and starts one only when there is none. An active cook's chart covers every
+  reading from `startTime` on with no upper bound, so the readings are stamped
+  from `startTime` forward, whenever they are sent: `simdevice --start
+<startTime> --step 5s` stamps reading _i_ `startTime + i × 5 s`. (On the run
+  that starts the cook, most of those stamps are in the future. Nothing else
+  reads the chart device.)
+- **Covered.** The chart covers the cook when its first point is within one
+  bucket of `startTime` and its last point is the bucket holding the last
+  reading, `startTime + 12 h − 5 s`. Point `t`s are bucket starts on
+  `startTime`'s minute, so that last bucket can start a few seconds before
+  `startTime + 12 h − bucketSeconds`.
+- **The one-time top-up and its cost.** The first run finds the chart empty and
+  sends 8,640 readings as the chart device, paced as the volume top-up is
+  (`--inflight 32 --interval 50ms`, at most 200 RU/s of the shared 400): about
+  7 minutes of sending, ~86k RU of routed writes, plus the rollup trigger's
+  hour-document writes (paced at 100 RU/s, HAR-86). It then re-reads the chart
+  every 10 s, for at most 15 minutes, until the rollups cover it. Rollups have
+  no TTL, so every later run finds the chart covered and sends nothing
+  (`METRIC chart-topup-sent 0`). The raw readings expire after 7 days; the
+  chart never reads them. If that first run also has a full volume top-up to
+  do, the two together still fit the 35-minute suite limit, but only just.
+- **The budget.** `METRIC chart-ru-12h` is the RU of one more chart load after
+  coverage. Above 40 the proof fails. The fix is not to raise the budget: report
+  the number and the rollup document sizes on the issue, and decide the rollup
+  or endpoint change separately. `chart-bucket-seconds` grows as the standing
+  cook ages (its span runs to now), which does not change the documents read.
+- **If the cook is stopped by hand.** Do nothing. The next run finds no active
+  cook on the chart device, starts a new one and tops it up once (the one-time
+  cost again). The old cook's rollups stay, outside the new cook's window.
   `signalr-isolation.proof.ts` (HAR-67, goal HAR-55 items 5 and 7b) proves a
   caller who does not own the simulated device receives nothing from it over
   SignalR. The owner is the run's caller; the peer is the zero-role acceptance
@@ -319,8 +370,12 @@ PASS telemetry round-trip › GET /temperatures/current/{deviceId} returns the s
 | `signalr-cook-event-ms`        | `signalr-isolation.proof.ts`        | ms from just before the owner's `POST /cooks` to the owner's client receiving `cook_started` for that cook                                                                                                                            |
 | `contract-validated-responses` | the runner (HAR-77)                 | responses checked against openapi.yaml in the run. Printed with the `CONTRACT` line just above the totals                                                                                                                             |
 | `twin-apply-ms`                | `device-twin.proof.ts`              | ms from the start's `201` to the exit of `simdevice --twin --count 1`: a reconnect, two twin GETs, the reported patch and one reading's send                                                                                          |
+| `chart-topup-sent`             | `volume-cook-chart.proof.ts`        | readings the chart top-up sent; `0` when the chart was already covered                                                                                                                                                                |
+| `chart-ru-12h`                 | `volume-cook-chart.proof.ts`        | RU of one `GET /cooks/{cookId}/chart` of the standing 12 h cook; must be ≤ 40                                                                                                                                                         |
+| `chart-points`                 | `volume-cook-chart.proof.ts`        | points in that chart                                                                                                                                                                                                                  |
+| `chart-bucket-seconds`         | `volume-cook-chart.proof.ts`        | its `bucketSeconds`                                                                                                                                                                                                                   |
 
-There are no thresholds on them; the numbers are the deliverable. The CI job copies every line starting with
+There are no thresholds on them, except that `chart-ru-12h` must be ≤ 40; the numbers are the deliverable. The CI job copies every line starting with
 `METRIC ` into the run summary. Proofs print one with `api.metric(name, value)`.
 
 Any failed proof makes the process exit non-zero, and the `FAIL` line names the
@@ -479,9 +534,10 @@ The CI job's "Ensure the simulated device exists" step creates the chart device
 if it is missing, the same way as the first (log line `device <id>: created`
 or `device <id>: exists`); its id is derived in the workflow, not in Terraform.
 
-Two more variables name it. They are optional today (no proof uses them yet),
-but set both or neither: one without the other stops the run at once, naming
-both.
+Two more variables name it. The runner treats them as optional, but set both or
+neither: one without the other stops the run at once, naming both. The cook-chart
+proof (HAR-87, `volume-cook-chart.proof.ts`) needs them: without them it fails
+at its first step, naming both, and sends nothing.
 
 | Variable                            | Value                                                                                             |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -517,7 +573,8 @@ apps/api/acceptance/
 │   ├── telemetry-roundtrip.proof.ts
 │   ├── telemetry-volume.proof.ts
 │   ├── temperatures.proof.ts
-│   └── users.proof.ts
+│   ├── users.proof.ts
+│   └── volume-cook-chart.proof.ts
 └── acceptance-runner.spec.ts   # self-test, runs under `nx test api`
 ```
 
@@ -546,6 +603,15 @@ apps/api/acceptance/
   wrong desired cook id or a reported version one behind, or answer the start
   with `503 DEVICE_TWIN_UPDATE_FAILED`; each fails the proof and still leaves
   no cook active. Its poll pacing is `TWIN_POLL` in the proof file.
+  For the cook-chart proof every whole-suite run sets the chart variables, and
+  the stub starts with the chart device registered and a standing cook whose
+  chart is covered (the steady state live), or, per test, with no cook (a first
+  run) or an uncovered one. The fake reports a chart top-up
+  (`--start … --step 5s`) to the stub, which covers that cook's chart after a
+  few reads, or never. The self-test proves a first run starts a cook and tops
+  it up once, a covered chart sends nothing, 41 RU fails naming the budget (40
+  passes), and a missing variable fails clearly. `CHART` in the proof file
+  holds the reading count and poll pacing; the self-test shrinks them.
   Every stub response conforms to openapi.yaml (HAR-77): it sends
   `X-Request-ID`, the error envelope `{error, message, requestId}`, and Easy
   Auth's empty `401`. The self-test also proves the contract checks fail on an
