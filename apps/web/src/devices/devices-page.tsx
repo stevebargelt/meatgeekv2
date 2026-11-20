@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useApi } from '../api/api-context';
-import type { Device } from '../api/client';
+import type { Cook, Device } from '../api/client';
 import { problemFromError, problemFromResponse, type ApiProblem } from '../api/problem';
 import { ProblemMessage } from '../api/problem-message';
 import { DeviceRow } from './device-row';
@@ -10,6 +10,9 @@ type ListState =
   | { status: 'loading' }
   | { status: 'loaded'; devices: Device[] }
   | { status: 'error'; problem: ApiProblem };
+
+/** The caller's active cooks keyed by device id, or why they could not be read. */
+type ActiveCooks = Map<string, Cook> | { problem: ApiProblem } | undefined;
 
 export function DevicesPage() {
   const api = useApi();
@@ -45,11 +48,51 @@ export function DevicesPage() {
     };
   }, [api, reloads]);
 
+  // One GET /cooks?status=active for the page, not one call per device. It is
+  // not re-read when the device list is: renaming or registering a device does
+  // not start or stop a cook. A user has at most one active cook per device;
+  // 100 is the API's largest page.
+  const [activeCooks, setActiveCooks] = useState<ActiveCooks>(undefined);
+  useEffect(() => {
+    let current = true;
+    (async () => {
+      try {
+        const { data, error, response } = await api.GET('/cooks', {
+          params: { query: { status: 'active', limit: 100 } },
+        });
+        if (!current) return;
+        if (data === undefined) {
+          setActiveCooks({ problem: problemFromResponse(error, response) });
+        } else {
+          setActiveCooks(new Map(data.cooks.map(cook => [cook.deviceId, cook])));
+        }
+      } catch (err) {
+        if (current) setActiveCooks({ problem: problemFromError(err) });
+      }
+    })();
+    return () => {
+      current = false;
+    };
+  }, [api]);
+
   return (
     <section className="devices">
       <h1>Devices</h1>
       {notice && <ProblemMessage problem={notice} />}
-      <DeviceList state={state} onChanged={refresh} onNotFound={deviceGone} />
+      {state.status === 'loaded' && activeCooks && 'problem' in activeCooks && (
+        <ProblemMessage
+          problem={{
+            ...activeCooks.problem,
+            message: `Could not check which devices are cooking: ${activeCooks.problem.message}`,
+          }}
+        />
+      )}
+      <DeviceList
+        state={state}
+        activeCooks={activeCooks instanceof Map ? activeCooks : undefined}
+        onChanged={refresh}
+        onNotFound={deviceGone}
+      />
       <RegisterDeviceForm onRegistered={refresh} />
     </section>
   );
@@ -57,11 +100,12 @@ export function DevicesPage() {
 
 interface DeviceListProps {
   state: ListState;
+  activeCooks: Map<string, Cook> | undefined;
   onChanged: () => void;
   onNotFound: (problem: ApiProblem) => void;
 }
 
-function DeviceList({ state, onChanged, onNotFound }: DeviceListProps) {
+function DeviceList({ state, activeCooks, onChanged, onNotFound }: DeviceListProps) {
   if (state.status === 'loading') {
     return <p className="muted">Loading devices…</p>;
   }
@@ -79,6 +123,7 @@ function DeviceList({ state, onChanged, onNotFound }: DeviceListProps) {
           <th scope="col">ID</th>
           <th scope="col">Model</th>
           <th scope="col">Location</th>
+          <th scope="col">Cook</th>
         </tr>
       </thead>
       <tbody>
@@ -86,6 +131,7 @@ function DeviceList({ state, onChanged, onNotFound }: DeviceListProps) {
           <DeviceRow
             key={device.id}
             device={device}
+            activeCook={activeCooks?.get(device.id)}
             onChanged={onChanged}
             onNotFound={onNotFound}
           />

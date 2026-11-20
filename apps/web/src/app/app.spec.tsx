@@ -33,6 +33,18 @@ const BRISKET = {
 };
 const OFFSET = { ...BRISKET, id: 'offset-1', name: 'Offset', location: undefined };
 
+/** GET /cooks?status=active: the devices page's one call; no device is cooking. */
+function noActiveCooks(req: RecordedRequest): Response | undefined {
+  return req.method === 'GET' && req.url.startsWith(`${API}/cooks?`)
+    ? jsonResponse(200, { cooks: [], limit: 100, hasMore: false })
+    : undefined;
+}
+
+/** The requests that are not the devices page's active-cook lookup. */
+function deviceCalls(requests: RecordedRequest[]) {
+  return requests.filter(r => !r.url.startsWith(`${API}/cooks?`));
+}
+
 function signIn(account = TEST_ACCOUNT) {
   const instance = createFakeMsal(account);
   mockMsal = { instance, accounts: [account], inProgress: InteractionStatus.None };
@@ -53,7 +65,7 @@ function fakeApi(
   other: (req: RecordedRequest) => Response | undefined = () => undefined
 ) {
   return installFetch(req => {
-    const answer = other(req);
+    const answer = other(req) ?? noActiveCooks(req);
     if (answer) return answer;
     if (req.method === 'GET' && req.url === `${API}/devices`) {
       return jsonResponse(200, { devices });
@@ -128,7 +140,10 @@ describe('signed in', () => {
     expect(within(rows[0]).getByText('MeatGeek V1')).toBeTruthy();
     expect(within(rows[0]).getByText('Backyard')).toBeTruthy();
     expect(within(rows[1]).getByText('Offset')).toBeTruthy();
-    expect(requests.map(r => `${r.method} ${r.url}`)).toEqual([`GET ${API}/devices`]);
+    expect(requests.map(r => `${r.method} ${r.url}`)).toEqual([
+      `GET ${API}/devices`,
+      `GET ${API}/cooks?status=active&limit=100`,
+    ]);
   });
 
   it('shows the empty state when there are no devices', async () => {
@@ -164,9 +179,9 @@ describe('signed in', () => {
     await userEvent.clear(screen.getByLabelText('New name'));
     await userEvent.type(screen.getByLabelText('New name'), 'Renamed');
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(requests).toHaveLength(3));
+    await waitFor(() => expect(deviceCalls(requests)).toHaveLength(3));
 
-    expect(requests.map(r => r.method)).toEqual(['GET', 'PATCH', 'GET']);
+    expect(deviceCalls(requests).map(r => r.method)).toEqual(['GET', 'PATCH', 'GET']);
     expect(instance.acquireTokenSilent).toHaveBeenCalledWith({
       scopes: [TEST_CONFIG.apiScope],
       account: TEST_ACCOUNT,
@@ -212,6 +227,8 @@ describe('register a device', () => {
     signIn();
     let devices: unknown[] = [];
     const { requests } = installFetch(req => {
+      const cooks = noActiveCooks(req);
+      if (cooks) return cooks;
       if (req.method === 'POST') {
         devices = [BRISKET];
         return jsonResponse(201, BRISKET);
@@ -237,7 +254,7 @@ describe('register a device', () => {
       model: 'MeatGeek V1',
       location: 'Backyard',
     });
-    expect(requests.map(r => r.method)).toEqual(['GET', 'POST', 'GET']);
+    expect(deviceCalls(requests).map(r => r.method)).toEqual(['GET', 'POST', 'GET']);
   });
 
   it('leaves location out when it is blank', async () => {
@@ -292,7 +309,7 @@ describe('register a device', () => {
     expect(screen.getByText(/Device ID must be 1-128 characters/)).toBeTruthy();
     expect(screen.getByText('Name is required.')).toBeTruthy();
     expect(screen.getByText('Model must be at most 100 characters.')).toBeTruthy();
-    expect(requests.map(r => r.method)).toEqual(['GET']);
+    expect(deviceCalls(requests).map(r => r.method)).toEqual(['GET']);
   });
 });
 
@@ -308,6 +325,8 @@ describe('rename a device', () => {
     signIn();
     let devices = [BRISKET];
     const { requests } = installFetch(req => {
+      const cooks = noActiveCooks(req);
+      if (cooks) return cooks;
       if (req.method === 'PATCH') {
         devices = [{ ...BRISKET, name: 'Big Smoke' }];
         return jsonResponse(200, devices[0]);
@@ -351,6 +370,8 @@ describe('rename a device', () => {
     signIn();
     let devices: unknown[] = [BRISKET];
     const { requests } = installFetch(req => {
+      const cooks = noActiveCooks(req);
+      if (cooks) return cooks;
       if (req.method === 'PATCH') {
         devices = [];
         return jsonResponse(404, {
@@ -367,6 +388,6 @@ describe('rename a device', () => {
 
     expect(await screen.findByText(/meatgeek3 was not found/)).toBeTruthy();
     expect(await screen.findByText(/You have no devices yet/)).toBeTruthy();
-    expect(requests.map(r => r.method)).toEqual(['GET', 'PATCH', 'GET']);
+    expect(deviceCalls(requests).map(r => r.method)).toEqual(['GET', 'PATCH', 'GET']);
   });
 });

@@ -6,6 +6,7 @@ import { ApiProvider } from '../api/api-context';
 import { createApiClient } from '../api/client';
 import { createTokenGetter } from '../auth/token';
 import type { AppConfig } from '../config/config';
+import { CookDetailPage } from '../cooks/cook-detail-page';
 import { CooksPage } from '../cooks/cooks-page';
 import { DevicesPage } from '../devices/devices-page';
 
@@ -71,14 +72,22 @@ export function App({ config }: { config: AppConfig }) {
           </span>
         </header>
         <main className="app-main">
-          <Routes>
-            <Route path="/" element={<DevicesPage />} />
-            <Route path="/cooks" element={<CooksPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+          <AppRoutes />
         </main>
       </div>
     </ApiProvider>
+  );
+}
+
+/** The signed-in pages. */
+export function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/" element={<DevicesPage />} />
+      <Route path="/cooks" element={<CooksPage />} />
+      <Route path="/cooks/:id" element={<CookDetailPage />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
 
