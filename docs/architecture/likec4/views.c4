@@ -29,7 +29,7 @@ views {
 
   view system of meatgeek {
     title 'MeatGeek V2: containers'
-    description 'Everything that runs, plus the realtime decisions of 2026-11-19: sky dashed is decided and not built, red dotted is in the code and being removed, grey dotted is not built with no decision.'
+    description 'Everything that runs. Sky dashed is decided and not built: the mobile and web apps as SignalR clients. Grey dotted is not built, with no decision.'
     include *
     include edge.*, cloud.*, cloud.ingest.*, cloud.observability.*
     include pitmaster, smoker, entra
@@ -40,14 +40,15 @@ views {
     title 'MeatGeek device (Raspberry Pi)'
     include *
     include pusher.*
-    include meatgeek.cloud.ingest.iothub, meatgeek.cloud.realtime, meatgeek.cloud.api, meatgeek.cloud.observability.collector
+    include meatgeek.cloud.ingest.iothub, meatgeek.cloud.observability.collector
   }
 
   view cloud of meatgeek.cloud {
     title 'MeatGeek cloud (Azure)'
     include *
     include ingest.*, observability.*
-    include meatgeek.edge, meatgeek.mobile, meatgeek.web, entra
+    include api.cooks, api.negotiate, api.broadcast
+    include meatgeek.edge, meatgeek.edge.pusher.twin, meatgeek.mobile, meatgeek.web, entra
     include delivery.simdevice, operator
   }
 
@@ -61,7 +62,8 @@ views {
       /devices/{id}` answer 404, and temperatures current/history answer `404 DEVICE_NOT_FOUND`.
     '''
     include *
-    include meatgeek.cloud.data.*, meatgeek.cloud.realtime, entra, meatgeek.edge.pusher, meatgeek.cloud.observability.appinsights
+    include meatgeek.cloud.data.*, meatgeek.cloud.realtime, entra, meatgeek.cloud.observability.appinsights
+    include meatgeek.cloud.ingest.iothub, meatgeek.cloud.ingest.eventhub, meatgeek.edge.pusher.twin
   }
 
   view data of meatgeek.cloud.data {
@@ -123,11 +125,16 @@ views {
   dynamic view telemetry {
     title 'Flow: one temperature reading'
     description '''
-      Today. The storage path is live; the realtime path stops at Event Hub.
-      Two correlation axes ride on each reading. `correlation.id` is cook-scoped: it comes from
-      the `CorrelationContext.id` of the `cook_started` envelope (see `cookStart`), is held in
-      `correlationHolder` and is stamped on every message for the whole cook. `traceparent` is
-      per message, from the `publisher.publish` span; no Function reads it back.
+      Today. Both paths are live. Storage: IoT Hub's `cosmos-storage-route` writes Cosmos.
+      Push: Event Hub, then `broadcastTemperature`, then the SignalR group `device-{id}`.
+      No app negotiates or connects to SignalR yet, so the flow stops at SignalR; the only live
+      client is the acceptance proofs (`signalr negotiate`, `signalr live temperature`,
+      `signalr isolation`). Measured send-to-client delay: `METRIC signalr-delivery-ms` 18424
+      (run 44673261258), a single dev sample.
+      Two correlation axes ride on each reading. `correlation.id` is cook-scoped: the device
+      twin's desired `correlationId` (see `cookStart`), persisted in `cooksession` and stamped
+      on every message for the whole cook. `traceparent` is per message, from the
+      `publisher.publish` span; no Function reads it back.
     '''
 
     smoker -> meatgeek.edge.controller 'grill and probe temperatures'
@@ -136,9 +143,8 @@ views {
     }
     meatgeek.edge.pusher.session -> meatgeek.edge.pusher.collector 'active cook id, correlation id' {
       notes '''
-        `cookId = cooksession.ActiveCookID()` and `queueRecord.Correlation = correlationHolder.Get()`.
-        Until the live SignalR path is proven (MG-24 AC5), the cook id comes from
-        `cooksession.Reconcile` against the REST API at startup.
+        The cook id and correlation id come from one `cooksession` snapshot, the values the twin
+        client last applied from the device twin's desired properties (see `cookStart`).
       '''
     }
     meatgeek.edge.pusher.collector -> meatgeek.edge.pusher.queue 'enqueue'
@@ -158,9 +164,19 @@ views {
         notes '**Live.** IoT Hub writes the document itself, by managed identity, partition value from `{deviceid}`. No Function runs, so nothing reads `traceparent` back.'
       }
       meatgeek.cloud.ingest.iothub -> meatgeek.cloud.ingest.eventhub 'eventhub-realtime-route' {
-        notes '**Live.** broadcastTemperature (HAR-60), an Event Hub trigger in the API on the `api-broadcast` consumer group, reads it and pushes each reading to its `device-{id}` SignalR group.'
-        navigateTo liveTemperatureTarget
+        notes '**Live.** Every message is copied to the `temperature-data` Event Hub.'
       }
+    }
+    meatgeek.cloud.ingest.eventhub -> meatgeek.cloud.api.broadcast 'Event Hub trigger, consumer group api-broadcast' {
+      notes '**Live.** `broadcastTemperature` (HAR-60), `cardinality: many`, identity-based. The device is the hub-stamped `iothub-connection-device-id`; the reading is mapped by `toTemperatureReading`, as `GET /temperatures/current` does, plus `enqueuedTimeUtc`.'
+    }
+    meatgeek.cloud.api.broadcast -> meatgeek.cloud.realtime 'each reading to device-{id}' {
+      notes '''
+        **Live.** SignalR output binding, target `temperature`, hub `temperatureHub`. `negotiate`
+        puts a user in `device-{id}` for each device it owns. No app connects yet; the
+        acceptance proofs are the only live client (`signalr live temperature` measured
+        `signalr-delivery-ms` 18424, run 44673261258).
+      '''
     }
     meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'history or current reading' {
       navigateTo readHistory
@@ -170,38 +186,54 @@ views {
 
   dynamic view cookStart {
     variant sequence
-    title 'Flow: start a cook (today)'
+    title 'Flow: start a cook'
     description '''
-      POST /cooks as the code does it now. `cook_started` goes to the owning user's SignalR
-      connections, not to the Pi (MG-30). The Pi learns its cook from `cooksession.Reconcile`
-      against the REST API at startup (last step), and from the device twin in the decided
-      design. The `cook_started` envelope carries the cook-scoped `CorrelationContext.id`.
+      POST /cooks as the code does it now. The active cook is device state: the API syncs the
+      device twin's desired properties to Cosmos, and the Pi applies them and reports them back
+      (HAR-58, HAR-66). The twin persists, so a Pi that is offline when the cook starts gets it
+      when it next connects. `cook_started` goes to the owning user's SignalR connections, not
+      to the Pi (MG-30); no app receives it yet. Sign-in (Easy Auth, then the principal) and the
+      ownership check run first, as in the `api` view. Stopping a cook follows the same path:
+      the twin's desired cook is cleared and `cook_stopped` goes to the owner.
     '''
 
-    meatgeek.mobile -> meatgeek.cloud.api.easyauth 'POST /cooks + Entra token'
-    meatgeek.cloud.api.easyauth -> entra 'validate token'
-    meatgeek.cloud.api.easyauth -> meatgeek.cloud.api.principal 'X-MS-CLIENT-PRINCIPAL'
-    meatgeek.cloud.api.principal -> meatgeek.cloud.api.cooks 'userId = tid:oid' {
-      notes 'Missing or incomplete header: 401, no default user.'
+    meatgeek.mobile -> meatgeek.cloud.api.cooks 'POST /cooks' {
+      notes '''
+        Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The
+        ownership check is one point read on `devices`: a foreign or unregistered device gets
+        403 `DEVICE_NOT_OWNED`, with no write and no event. The mobile app does not call the
+        API yet; the live callers are the acceptance proofs.
+      '''
     }
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.ownership 'does the caller own this device?'
-    meatgeek.cloud.api.ownership -> meatgeek.cloud.data.devices 'point read' {
-      notes '`getDeviceOwnership`. A foreign or unregistered device gets 403 `DEVICE_NOT_OWNED`: no write, no event.'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.data.cooks 'cook and device lock' {
+      notes 'One transactional batch in the caller partition: the cook and its device lock commit together, so a device holds at most one active cook (MG-84).'
     }
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.api.repos 'create cook'
-    meatgeek.cloud.api.repos -> meatgeek.cloud.data.cooks 'insert, partition = caller userId'
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.ingest.iothub 'set desired: activeCookId, correlationId' {
+      notes '''
+        After the write, synced to the device lock under the twin etag (`If-Match`): GET the
+        twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Managed
+        identity with `IoT Hub Twin Contributor`. A failed sync answers 503
+        `DEVICE_TWIN_UPDATE_FAILED`; the cook stays written and a retry of the same request
+        heals the twin.
+      '''
+    }
+    meatgeek.cloud.ingest.iothub -> meatgeek.edge.pusher.twin 'desired properties' {
+      notes 'Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up. Patches apply in `$version` order.'
+    }
+    meatgeek.edge.pusher.twin -> meatgeek.edge.pusher.session 'persist cook, correlation id, version' {
+      notes 'Written to `/var/lib/meatgeek-pusher/cooksession.json`. From then every reading carries this cook id and correlation id.'
+      navigateTo telemetry
+    }
+    meatgeek.edge.pusher.twin -> meatgeek.cloud.ingest.iothub 'reported: applied' {
+      notes '`activeCookId`, `correlationId` and `appliedDesiredVersion`: the acknowledgement. Proven live by the `device twin` acceptance proof, with the device offline when the cook starts.'
+    }
     meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started to the owning userId' {
       notes '''
         Sent only after the write succeeds, on hub `temperatureHub`, to the caller's
         `userId` ("<tid>:<oid>"), never to the deviceId (MG-30). The envelope carries
-        `correlation: CorrelationContext { id }`, taken from the request's `X-Request-ID` or
-        the invocation id. No client app consumes it yet.
+        `correlation: CorrelationContext { id }`, the same id the twin carries. The
+        `signalr isolation` proof receives it as the owner; no app consumes it yet.
       '''
-      navigateTo cookStartTarget
-    }
-    meatgeek.edge.pusher.session -> meatgeek.cloud.api.cooks 'GET /cooks?deviceId&status=active' {
-      notes 'What sets the cook id on the Pi today: `cooksession.Reconcile` on data-pusher startup. From then every reading carries this cook id.'
-      navigateTo telemetry
     }
   }
 
@@ -225,65 +257,6 @@ views {
       '''
       navigateTo telemetryProof
     }
-  }
-
-  // ---- Decided 2026-11-19, not built yet --------------------------------------
-
-  view realtimeTarget {
-    title 'Realtime: the decided design'
-    description 'Two jobs, two patterns. Device state goes by IoT Hub device twin. Push to clients goes Event Hub -> Function -> SignalR. Red dotted is what gets removed.'
-    include
-      meatgeek.cloud.api.cooks, meatgeek.cloud.api.broadcast, meatgeek.cloud.api.negotiate,
-      meatgeek.cloud.ingest.iothub, meatgeek.cloud.ingest.eventhub, meatgeek.cloud.realtime,
-      meatgeek.edge.pusher.twin, meatgeek.edge.pusher.signalr, meatgeek.edge.pusher.session, meatgeek.edge.pusher.iot,
-      meatgeek.cloud.data.temperatures, meatgeek.mobile, meatgeek.web
-  }
-
-  dynamic view cookStartTarget {
-    variant sequence
-    title 'Flow: start a cook (decided design)'
-    description 'The active cook reaches the Pi as device state, through the IoT Hub device twin. Clients hear about it through SignalR.'
-
-    meatgeek.mobile -> meatgeek.cloud.api.cooks 'POST /cooks' {
-      notes 'Sign-in and the ownership check are unchanged.'
-      navigateTo cookStart
-    }
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.data.cooks 'insert cook'
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.ingest.iothub 'set desired: active cook, correlation id' {
-      notes 'Only after the write succeeds. The twin keeps it, so nothing is lost if the Pi is offline.'
-    }
-    meatgeek.cloud.ingest.iothub -> meatgeek.edge.pusher.twin 'desired properties' {
-      notes 'Immediately if connected; otherwise on the next connect.'
-    }
-    meatgeek.edge.pusher.twin -> meatgeek.edge.pusher.session 'set active cook'
-    meatgeek.edge.pusher.twin -> meatgeek.cloud.ingest.iothub 'reported: applied' {
-      notes 'The acknowledgement the SignalR path never had.'
-    }
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started'
-    meatgeek.cloud.realtime -> meatgeek.mobile 'cook_started, to the owner only'
-  }
-
-  dynamic view liveTemperatureTarget {
-    variant sequence
-    title 'Flow: a live temperature reaches the app (decided design)'
-    description 'The hot path beside the existing storage path.'
-
-    meatgeek.mobile -> meatgeek.cloud.api.negotiate 'POST /negotiate' {
-      notes 'Grants a connection scoped to devices the caller owns (MG-30).'
-    }
-    meatgeek.mobile -> meatgeek.cloud.realtime 'connect'
-    meatgeek.edge.pusher.iot -> meatgeek.cloud.ingest.iothub 'publish reading'
-    parallel {
-      meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route' {
-        notes 'Unchanged, and already live.'
-      }
-      meatgeek.cloud.ingest.iothub -> meatgeek.cloud.ingest.eventhub 'eventhub-realtime-route' {
-        notes 'Already live; it has had no reader until now.'
-      }
-    }
-    meatgeek.cloud.ingest.eventhub -> meatgeek.cloud.api.broadcast 'Event Hub trigger'
-    meatgeek.cloud.api.broadcast -> meatgeek.cloud.realtime 'send to the device group'
-    meatgeek.cloud.realtime -> meatgeek.mobile 'live temperature'
   }
 
   dynamic view telemetryProof {

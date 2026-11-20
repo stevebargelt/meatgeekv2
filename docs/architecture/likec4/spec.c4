@@ -48,7 +48,7 @@ specification {
   tag notBuilt {
     color gray
   }
-  // Owner decisions of 2026-11-19 (realtime). Not in the code yet.
+  // Owner decisions not in the code yet, and code decided for removal.
   tag decided {
     color sky
   }

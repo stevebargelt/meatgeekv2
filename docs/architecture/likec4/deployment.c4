@@ -8,9 +8,9 @@ deployment {
       controller = instanceOf meatgeek.edge.controller
       pusher = instanceOf meatgeek.edge.pusher {
         description '''
-          env: `IOTHUB_CONNECTION_STRING`, `SIGNALR_HUB_URL`, `API_BASE_URL`,
-          `OTEL_EXPORTER_OTLP_ENDPOINT`. Queue at `/var/lib/meatgeek-pusher/queue`, cook state at
-          `cooksession.DefaultStatePath` (`/var/lib/meatgeek-pusher/cooksession.json`).
+          env: `IOTHUB_CONNECTION_STRING`, `OTEL_EXPORTER_OTLP_ENDPOINT`. Queue at
+          `/var/lib/meatgeek-pusher/queue`, cook state (written only by the device twin client)
+          at `cooksession.DefaultStatePath` (`/var/lib/meatgeek-pusher/cooksession.json`).
         '''
       }
     }

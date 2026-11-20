@@ -126,7 +126,7 @@ Relationship kinds (`a -[kind]-> b`; a plain `->` means "live today"):
 
 **The rule:** a view that shows current state never draws a decided or not-built
 path as if it were live. Decided designs go in their own views, whose id ends in
-`Target` (for example `realtimeTarget`, `cookStartTarget`). A current-state view
+`Target` (for example `probeAlertTarget` in "Add a flow" below). A current-state view
 may still include a `#decided` or `#notBuilt` element, because the view styles
 render those dashed or faded, but its flows describe only what runs today.
 
@@ -232,6 +232,6 @@ detail on a step, and `navigateTo <viewId>` to link a step to another view
 (for example from a current-state flow to its `Target` counterpart). A flow that
 contains any decided or not-built step is a `Target` flow; the current-state flow
 next to it stops where today's code stops and says so in its description
-(see `telemetry` and `liveTemperatureTarget` in `views.c4`).
+(see `telemetry` in `views.c4`, which stops at SignalR because no app connects yet).
 
 After any change, run `npm run check` and look at the result in the preview.

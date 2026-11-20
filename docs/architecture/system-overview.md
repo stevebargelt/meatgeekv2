@@ -73,7 +73,8 @@ The existing Go-based device controller provides a solid foundation:
 | **Data Ingestion** | Azure IoT Hub | Device-to-cloud telemetry |
 | **Processing** | Azure Functions | Serverless data processing |
 | **Storage** | CosmosDB | NoSQL document storage |
-| **Real-time** | SignalR | Live updates to clients (decided, not built; see [`realtimeTarget`](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/)) |
+| **Real-time** | SignalR (Serverless) | Live temperatures and cook events pushed to clients (on `main` since HAR-60; no app connects yet; see [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/)) |
+| **Device state** | IoT Hub device twin | The active cook, in desired properties; the Pi reports what it applied (HAR-58, HAR-66; see [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/)) |
 | **API** | Azure Functions | REST API with OpenAPI specs |
 | **Mobile** | React Native | Primary user interface |
 | **Web** | React | Secondary interface |
@@ -82,9 +83,9 @@ The existing Go-based device controller provides a solid foundation:
 
 ### Data Flow
 
-What runs today is the [`system` view](https://stevebargelt.github.io/meatgeekv2/#/view/system/) of the architecture site; the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) follows one reading from the RTD sensors through the data pusher and IoT Hub's `cosmos-storage-route` into Cosmos DB, and the [`realtimeTarget` view](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/) shows the decided realtime design. The same views render on GitHub in [Architecture Diagrams](diagrams.md).
+What runs today is the [`system` view](https://stevebargelt.github.io/meatgeekv2/#/view/system/) of the architecture site; the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) follows one reading from the RTD sensors through the data pusher and IoT Hub's `cosmos-storage-route` into Cosmos DB, and on through `broadcastTemperature` to SignalR, and the [`cookStart` view](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) shows how a cook reaches the Pi through the device twin. The same views render on GitHub in [Architecture Diagrams](diagrams.md).
 
-The Event Hub → Functions → SignalR broadcast path is **on `main` up to SignalR** since HAR-60: IoT Hub routes to the Event Hub, and the API's `broadcastTemperature` consumes it and pushes each reading to its `device-{id}` SignalR group. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet, so nothing receives those pushes.
+The Event Hub → Functions → SignalR broadcast path is **on `main` up to SignalR** since HAR-60: IoT Hub routes to the Event Hub, and the API's `broadcastTemperature` consumes it and pushes each reading to its `device-{id}` SignalR group. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet; the acceptance proofs are the only live SignalR client, and measured a send-to-client delay of 18.4 s (`METRIC signalr-delivery-ms 18424`, run 44673261258). The Pi holds no SignalR connection: it learns its cook from the device twin. Both decisions are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
 
 ### Core Components
 
@@ -98,7 +99,7 @@ The Event Hub → Functions → SignalR broadcast path is **on `main` up to Sign
   - Direct route → CosmosDB for guaranteed storage
   - Event Hub route → Functions for real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app reads `temperature-data` and pushes each reading to its `device-{id}` SignalR group; the client apps that receive it are not built)
 - **Azure Functions**: Two distinct roles
-  - **Lightweight Functions**: SignalR broadcasting only (no database writes) (planned, not on `main`)
+  - **Lightweight Functions**: SignalR broadcasting only, no database writes (`broadcastTemperature`, on `main` since HAR-60)
   - **API Functions**: Cook management and queries
 - **CosmosDB**: Document database receiving telemetry directly from IoT Hub
 
@@ -129,13 +130,13 @@ The Event Hub → Functions → SignalR broadcast path is **on `main` up to Sign
 - **Dual-path telemetry processing** for resilience and performance
 - **Direct IoT Hub routing** to CosmosDB for guaranteed storage
 - **Event Hub triggers** for lightweight real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app)
-- **SignalR broadcasts** for immediate client updates (the API sends cook lifecycle events to the owner and, since HAR-60, `temperature` readings to `device-{id}` groups; no client receives them yet)
+- **SignalR broadcasts** for immediate client updates (the API sends cook lifecycle events to the owner and, since HAR-60, `temperature` readings to `device-{id}` groups; no app receives them yet, only the acceptance proofs)
 - **Cook session events** for business logic coordination
 
 #### Device Cook Session Management
-- **Device tracks active cook**: Data Pusher maintains cookId in memory
+- **Device tracks active cook**: the Data Pusher applies the device twin's desired `activeCookId` and `correlationId`, read on every connect and patched on change, and reports them back (HAR-58)
 - **Enriched telemetry**: All temperature messages include cookId when cook is active
-- **State recovery**: Device can recover cook state from API on restart
+- **State recovery**: `cooksession.json` keeps the last applied cook across a restart; the twin read on the next connect brings an offline Pi up to date
 - **Separation of concerns**: Storage and real-time processing are independent
 
 ### Observability Strategy
