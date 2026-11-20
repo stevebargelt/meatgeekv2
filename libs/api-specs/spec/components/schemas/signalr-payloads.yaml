@@ -10,17 +10,17 @@
 # produce a typed union per language (Go interface, TS discriminated union).
 #
 # EXCEPTION: SignalRConnectionInfo (below) is NOT a channel message — it is the
-# HTTP response body of POST /negotiate, produced by the Functions
-# `signalRConnectionInfo` input binding. It is kept in this SignalR-domain file
+# HTTP response body of POST /negotiate, a client access token the API mints
+# through the SignalR data-plane REST API. It is kept in this SignalR-domain file
 # so codegen groups the negotiate handshake type with the channel payloads.
 
 SignalRConnectionInfo:
   type: object
   description: |
-    SignalR connection info returned by POST /negotiate. Mirrors the
-    `signalRConnectionInfo` input binding output resolved by the Functions
-    runtime in apps/api/src/functions/signalr/negotiate.ts — the client uses
-    `url` + `accessToken` to open its WebSocket to the temperatureHub.
+    SignalR connection info returned by POST /negotiate
+    (apps/api/src/functions/signalr/negotiate.ts). `url` is
+    `{serviceUri}/client/?hub=temperatureHub`; `accessToken` is minted for the
+    caller's `userId`. The client uses both to open its connection.
   required:
     - url
     - accessToken

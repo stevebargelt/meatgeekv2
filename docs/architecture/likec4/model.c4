@@ -64,7 +64,7 @@ model {
         }
         signalr = component 'signalr client' {
           #retiring
-          description 'Listens on temperatureHub for cook_started and cook_stopped and hands the cook id and correlation.id to cooksession. It POSTs negotiate straight to SIGNALR_HUB_URL and does not speak the API negotiate handshake (MG-29), and the live SignalR path awaits the MG-24 bootstrap (AC5), so this has never worked live. To be removed.'
+          description 'Listens on temperatureHub for cook_started and cook_stopped and hands the cook id and correlation.id to cooksession. It POSTs negotiate straight to SIGNALR_HUB_URL and does not speak the API negotiate handshake (MG-29), and the live SignalR path awaits the MG-24 bootstrap (AC5), so this has never worked live. Since MG-30 the API sends cook events to the owning user, not the device, so it receives none. To be removed.'
         }
         twin = component 'twin client' {
           #decided
@@ -191,7 +191,8 @@ model {
           description 'GET and PUT /users/me'
         }
         negotiate = component 'negotiate' {
-          description 'POST /negotiate?deviceId: hands a client its SignalR connection details for temperatureHub, with userId bound to the deviceId query parameter. It does not check that the caller owns that device. Decided: scope it to devices the caller owns (MG-30).'
+          technology 'SignalR data-plane REST API, managed identity'
+          description 'POST /negotiate: hands the caller a SignalR client token for temperatureHub, minted for its userId (<tid>:<oid>), after resetting its group membership to device-{id} for exactly the devices it owns (MG-30). A deviceId query parameter is ignored.'
         }
         health = component 'health' {
           description 'GET /health/cosmos, and the storageHeartbeat timer that proves host storage authenticates.'
@@ -268,8 +269,8 @@ model {
 
       realtime = service 'SignalR Service' {
         #live
-        technology 'Default mode, hub temperatureHub'
-        description 'Terraform sets service_mode = "Default". Today: cook_started and cook_stopped sent to userId = deviceId, aimed at the Pi. The API side shipped in MG-14; the path has never been proven live (MG-24 AC5, procedure in docs/api/signalr-cook-events-smoke.md). Decided: push to clients only (live temperatures and cook events).'
+        technology 'Serverless mode, hub temperatureHub'
+        description 'Terraform sets service_mode = "Serverless": no hub server, no upstream. cook_started and cook_stopped are sent to the owning userId; negotiate puts a user in device-{id} for each device it owns (MG-30). The negotiate acceptance proof connects a client; receiving a cook event is not yet proven live (procedure in docs/api/signalr-cook-events-smoke.md). Decided: push to clients only (live temperatures and cook events).'
       }
 
       observability = area 'Observability' {
@@ -336,6 +337,15 @@ model {
       description 'The only writer of temperatures. Partition value from {deviceid}.'
     }
 
+    // Client connections (MG-30): negotiate and register-device manage groups.
+    cloud.api.negotiate -> cloud.realtime 'reset groups to owned devices, mint client token' {
+      technology 'REST api-version 2022-11-01, managed identity'
+    }
+    cloud.api.negotiate -> cloud.api.repos 'list devices by owner'
+    cloud.api.devices -> cloud.realtime 'add owner to device-{id} on register' {
+      technology 'REST api-version 2022-11-01, managed identity'
+    }
+
     // Realtime path: absent from apps/api/src/main.ts.
     // Decided: push to clients. Event Hub -> Function -> SignalR -> apps.
     cloud.ingest.eventhub -[decided]-> cloud.api.broadcast 'Event Hub trigger' {
@@ -366,14 +376,14 @@ model {
     }
 
     // Cook lifecycle.
-    cloud.api.cooks -[event]-> cloud.realtime 'cook_started, cook_stopped to userId = deviceId' {
+    cloud.api.cooks -[event]-> cloud.realtime 'cook_started, cook_stopped to the owning userId' {
       technology 'SignalR output binding, hub temperatureHub'
       description 'Emitted only after the Cosmos write succeeds. The envelope carries CorrelationContext { id }: the correlation.id the Pi stamps on every reading for the rest of the cook.'
     }
     cloud.realtime -[retiring]-> edge.pusher.signalr 'cook lifecycle events' {
       #retiring
       technology 'WebSocket, SIGNALR_HUB_URL'
-      description 'No acknowledgement, and an event sent while the Pi is offline is lost. Never proven live (MG-24 AC5).'
+      description 'Cook events now go to the owning userId (MG-30), not the device, so the Pi receives none. Never proven live (MG-24 AC5).'
     }
     edge.pusher.session -> cloud.api.cooks 'GET /cooks?deviceId&status=active (Reconcile)' {
       technology 'HTTPS, API_BASE_URL'

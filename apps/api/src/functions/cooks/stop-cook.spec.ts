@@ -14,7 +14,7 @@
  *     is a 403 DEVICE_NOT_OWNED with no write and no emit;
  *   - a Cosmos failure is a sanitized 5xx with no emit;
  *   - COOK_STOPPED is emitted ONLY after a successful update, scoped to
- *     userId = the persisted deviceId.
+ *     userId = the authenticated principal (the owner), never the deviceId.
  * One case drives the REAL principal helper end-to-end from an X-MS-CLIENT-PRINCIPAL
  * header to prove the auth-derived-identity path.
  *
@@ -236,12 +236,15 @@ describe('stopCookHandler', () => {
     expect(body.meatType).toBe('brisket');
     expect(body.userId).toBe(AUTH_USER_ID);
 
-    // COOK_STOPPED emitted AFTER the write, scoped to the persisted deviceId.
+    // COOK_STOPPED emitted AFTER the write, delivered to the OWNER: the
+    // authenticated principal's userId (HAR-57, MG-30), never the deviceId.
     const msgs = messages();
     expect(msgs).toHaveLength(1);
     const [msg] = msgs!;
     expect(msg.target).toBe('cook_stopped');
-    expect(msg.userId).toBe('meatgeek3');
+    expect(msg.userId).toBe(AUTH_USER_ID);
+    expect(msg.userId).not.toBe('meatgeek3');
+    expect(msg.arguments[0].deviceId).toBe('meatgeek3');
     const envelope = msg.arguments[0];
     expect(envelope).not.toHaveProperty('cookId');
     expect(envelope.payload.id).toBe('cook-abc');

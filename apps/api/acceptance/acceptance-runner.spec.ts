@@ -53,7 +53,19 @@ type RecipeRoute =
   | 'GET /recipes/{id}'
   | 'PATCH /recipes/{id}'
   | 'DELETE /recipes/{id}';
-type StubRoute = CookRoute | DeviceRoute | TemperatureRoute | UserRoute | RecipeRoute;
+type SignalRRoute = 'POST /negotiate';
+type StubRoute =
+  | CookRoute
+  | DeviceRoute
+  | TemperatureRoute
+  | UserRoute
+  | RecipeRoute
+  | SignalRRoute;
+
+/** HAR-57: the client access token the stub's POST /negotiate hands out. */
+const SIGNALR_CLIENT_TOKEN = 'stub-signalr-client-token-7d1e';
+/** The SignalR JSON protocol's record separator. */
+const RS = '\u001e';
 
 interface StubOptions {
   /** Answer this route with this status (and an RU header) instead. */
@@ -86,6 +98,8 @@ interface StubOptions {
   readonly simDrainPerPoll?: number;
   /** HAR-45: top-up readings never become readable. */
   readonly simTopupNeverRouted?: boolean;
+  /** HAR-57: the stub's SignalR endpoint refuses the client token (401). */
+  readonly signalRRejectsToken?: boolean;
 }
 
 interface StubCook {
@@ -112,6 +126,8 @@ interface StubDevice {
 
 interface Stub {
   readonly baseUrl: string;
+  /** HAR-57: requests the SignalR client made to the stub's `/client/` endpoint. */
+  readonly signalRRequests: Array<{ method: string; path: string; authorization?: string }>;
   readonly requests: Array<{ method: string; path: string; authorization?: string }>;
   /** HAR-45: the arguments of each top-up the fake simdevice reported. */
   readonly topups: string[][];
@@ -145,6 +161,7 @@ const RU: Record<StubRoute, string> = {
   'GET /recipes/{id}': '1.02',
   'PATCH /recipes/{id}': '12.38',
   'DELETE /recipes/{id}': '10.29',
+  'POST /negotiate': '2.66',
 };
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -172,10 +189,112 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   const volumeTotals: number[] = [];
   let simStored = options.simVolume ?? VOLUME.target;
   let simPending = 0;
+  const signalRRequests: Stub['signalRRequests'] = [];
+  // HAR-57: a minimal Azure SignalR client endpoint, long polling only. Per
+  // connection token: messages queued for the client, the poll being held, and
+  // whether the first (initialising) poll has been answered.
+  const signalRConnections = new Map<
+    string,
+    { outbox: string[]; held?: ServerResponse; started: boolean; closed: boolean }
+  >();
+  const flushPoll = (connection: { outbox: string[]; held?: ServerResponse; closed: boolean }) => {
+    const held = connection.held;
+    if (!held) return;
+    if (connection.outbox.length > 0) {
+      connection.held = undefined;
+      held.writeHead(200, { 'Content-Type': 'text/plain' });
+      held.end(connection.outbox.splice(0).join(''));
+    } else if (connection.closed) {
+      connection.held = undefined;
+      held.writeHead(204);
+      held.end();
+    }
+  };
 
   const server: Server = createServer((request, response: ServerResponse) => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://stub');
+      if (url.pathname.startsWith('/client/')) {
+        // HAR-57: the SignalR client, dialling the url POST /negotiate returned.
+        const authorization = request.headers['authorization'];
+        signalRRequests.push({
+          method: request.method ?? '',
+          path: url.pathname + url.search,
+          authorization,
+        });
+        if (
+          options.signalRRejectsToken ||
+          authorization !== `Bearer ${SIGNALR_CLIENT_TOKEN}` ||
+          url.searchParams.get('hub') !== 'temperatureHub'
+        ) {
+          response.writeHead(401);
+          response.end();
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/client/negotiate') {
+          const token = `conn-${signalRConnections.size + 1}`;
+          signalRConnections.set(token, { outbox: [], started: false, closed: false });
+          response.writeHead(200, { 'Content-Type': 'application/json' });
+          response.end(
+            JSON.stringify({
+              negotiateVersion: 1,
+              connectionId: token,
+              connectionToken: token,
+              availableTransports: [
+                { transport: 'LongPolling', transferFormats: ['Text', 'Binary'] },
+              ],
+            })
+          );
+          return;
+        }
+        const connection = signalRConnections.get(url.searchParams.get('id') ?? '');
+        if (url.pathname !== '/client/' || !connection) {
+          response.writeHead(404);
+          response.end();
+          return;
+        }
+        if (request.method === 'GET') {
+          if (!connection.started) {
+            connection.started = true;
+            response.writeHead(200);
+            response.end();
+            return;
+          }
+          connection.held?.writeHead(200).end();
+          connection.held = response;
+          flushPoll(connection);
+          // Never hold a poll for long: an empty 200 makes the client re-poll.
+          setTimeout(() => {
+            if (connection.held === response) {
+              connection.held = undefined;
+              response.writeHead(200).end();
+            }
+          }, 500);
+          return;
+        }
+        if (request.method === 'POST') {
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(chunk as Buffer);
+          const text = Buffer.concat(chunks).toString('utf8');
+          if (text.includes('"protocol":"json"')) {
+            connection.outbox.push(`{}${RS}`);
+            flushPoll(connection);
+          }
+          response.writeHead(200);
+          response.end();
+          return;
+        }
+        if (request.method === 'DELETE') {
+          connection.closed = true;
+          flushPoll(connection);
+          response.writeHead(202);
+          response.end();
+          return;
+        }
+        response.writeHead(405);
+        response.end();
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/__simdevice/sent') {
         // HAR-45: the fake simdevice reporting a top-up. Not an API route.
         const { args } = (await readJson(request)) as { args: string[] };
@@ -239,6 +358,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'GET' && recipeMatch) route = 'GET /recipes/{id}';
       else if (request.method === 'PATCH' && recipeMatch) route = 'PATCH /recipes/{id}';
       else if (request.method === 'DELETE' && recipeMatch) route = 'DELETE /recipes/{id}';
+      else if (request.method === 'POST' && url.pathname === '/api/negotiate')
+        route = 'POST /negotiate';
       if (!route) {
         send(404, { error: 'NOT_FOUND' });
         return;
@@ -248,6 +369,19 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         send(
           options.failRoute.status,
           { error: options.echoAuthorization ? `STUB_FAILURE ${authorization}` : 'STUB_FAILURE' },
+          route
+        );
+        return;
+      }
+
+      if (route === 'POST /negotiate') {
+        const { port } = server.address() as AddressInfo;
+        send(
+          200,
+          {
+            url: `http://127.0.0.1:${port}/client/?hub=temperatureHub`,
+            accessToken: SIGNALR_CLIENT_TOKEN,
+          },
           route
         );
         return;
@@ -504,6 +638,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   return {
     baseUrl: `http://127.0.0.1:${port}/api`,
     requests,
+    signalRRequests,
     topups,
     volumeTotals,
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
@@ -657,6 +792,7 @@ const TEMPERATURE_ROUTES: TemperatureRoute[] = [
   'GET /temperatures/history',
 ];
 const USER_ROUTES: UserRoute[] = ['PUT /users/me', 'GET /users/me'];
+const SIGNALR_ROUTES: SignalRRoute[] = ['POST /negotiate'];
 const RECIPE_ROUTES: RecipeRoute[] = [
   'POST /recipes',
   'GET /recipes/{id}',
@@ -684,6 +820,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ...TEMPERATURE_ROUTES,
       ...USER_ROUTES,
       ...RECIPE_ROUTES,
+      ...SIGNALR_ROUTES,
     ]) {
       const [method, path] = route.split(' ');
       const lines = requestLines.filter(line =>
@@ -779,6 +916,53 @@ describe('live acceptance runner (against an in-process stub)', () => {
       expect(result.failures[0]).toContain('recipes ›');
     }
   );
+
+  it('(a) HAR-57: connects a SignalR client with the negotiated url and token, then stops it', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toContain('PASS signalr negotiate › POST /negotiate returns a url');
+    expect(result.output).toContain('PASS signalr negotiate › a SignalR client connects');
+    const calls = stub!.signalRRequests.map(r => `${r.method} ${r.path.split('?')[0]}`);
+    expect(calls[0]).toBe('POST /client/negotiate');
+    expect(calls).toContain('GET /client/');
+    expect(calls).toContain('POST /client/');
+    // stop() ends the connection with a DELETE, after the handshake POST. (A
+    // close message the client POSTs can race the DELETE, so it need not be last.)
+    expect(calls.lastIndexOf('DELETE /client/')).toBeGreaterThan(calls.indexOf('POST /client/'));
+    // Every SignalR call presented the negotiated token, never the API bearer.
+    expect(
+      stub!.signalRRequests.every(r => r.authorization === `Bearer ${SIGNALR_CLIENT_TOKEN}`)
+    ).toBe(true);
+    // Neither the token nor the client url reaches the output.
+    expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
+    expect(result.output).not.toContain('/client/');
+  });
+
+  it.each(SIGNALR_ROUTES)(
+    '(b) exits non-zero and names %s when it returns a wrong status',
+    async route => {
+      const result = await runAgainstStub({ failRoute: { route, status: 503 } });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(`${route} → 503`);
+      expect(result.failures[0]).toContain('signalr negotiate ›');
+      expect(result.output).toContain('SKIP signalr negotiate › a SignalR client connects');
+      expect(stub!.signalRRequests).toEqual([]);
+    }
+  );
+
+  it('(b) HAR-57: fails the connect proof when SignalR refuses the token, printing neither token nor url', async () => {
+    const result = await runAgainstStub({ signalRRejectsToken: true });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain('FAIL signalr negotiate › a SignalR client connects');
+    expect(result.failures[0]).toContain('start() failed');
+    expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
+    expect(result.output).not.toContain('/client/');
+  });
 
   it('(a) runs the recipes proof in order and deletes the recipe it created', async () => {
     const result = await runAgainstStub();

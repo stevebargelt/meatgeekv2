@@ -175,8 +175,8 @@ The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) v
      "name": "Saturday Brisket"
    }
    ```
-5. After the write, the API emits `cook_started` on the `temperatureHub` SignalR hub to `userId = deviceId`
-6. Data Pusher receives the event and caches cookId (the live SignalR path is pending the MG-24 bootstrap; until then the Data Pusher recovers the active cook from the REST API on startup)
+5. After the write, the API emits `cook_started` on the `temperatureHub` SignalR hub to the owning user's `userId` (`"<tid>:<oid>"`), never to the device (MG-30). It reaches the owner's client connections; the Pi does not receive it
+6. The Data Pusher learns the active cook from the REST API on startup (`cooksession.Reconcile`), and from the device twin in the decided design, and caches cookId
 7. All subsequent temperature messages include cookId
 
 ### During Active Cook
@@ -187,7 +187,7 @@ Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId;
 
 Stopping goes through the same ownership read: `POST /cooks/{cookId}/stop` on a device the caller does not own is a 403 `DEVICE_NOT_OWNED`.
 
-For an owned device the API marks the cook completed and emits `cook_stopped` on `temperatureHub` to `userId = deviceId`, and the Data Pusher clears its cached cookId when that event arrives (the same SignalR path to the Pi as `cook_started`, which has not been proven live). The path has the same shape as starting a cook; see the [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view.
+For an owned device the API marks the cook completed and emits `cook_stopped` on `temperatureHub` to the owning user's `userId`, like `cook_started`. The Pi does not receive it; it learns the cook has ended the same way it learns a cook has started. The path has the same shape as starting a cook; see the [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view.
 
 ## Cook-Temperature Association Strategy
 

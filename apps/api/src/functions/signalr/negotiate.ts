@@ -1,47 +1,153 @@
-import { HttpRequest, HttpResponseInit, InvocationContext, input } from '@azure/functions';
-import { HUB_NAME, SIGNALR_CONNECTION_SETTING } from './envelope';
+import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 
-// SignalR connection-info INPUT binding. The Functions runtime resolves this to
-// a SignalRConnectionInfo ({ url, accessToken }) that the client uses to open
-// its WebSocket. `userId` is bound to the request `deviceId` query param so the
-// negotiated connection is placed in that device's user group — this is what
-// makes per-device fan-out work (see DEC-4 / MG-30 in main.ts).
-export const signalRConnInfoInput = input.generic({
-  type: 'signalRConnectionInfo',
-  name: 'connectionInfo',
-  hubName: HUB_NAME,
-  connectionStringSetting: SIGNALR_CONNECTION_SETTING,
-  userId: '{query.deviceId}',
-});
+import {
+  principalFromRequest,
+  unauthenticatedResponse,
+  type HeaderReader,
+  type PrincipalResult,
+} from '../../shared/auth/principal';
+import { CosmosConfigError } from '../../shared/cosmos/cosmos-adapter';
+import {
+  getDevicesRepository,
+  type DevicesRepository,
+} from '../../shared/cosmos/devices-repository';
+import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
+import {
+  deviceGroup,
+  getSignalRManagementClient,
+  SignalRUnavailableError,
+  type SignalRManagementPort,
+} from '../../shared/signalr/signalr-management';
+
+/**
+ * HAR-57 (MG-30) — POST /negotiate: a SignalR connection scoped to the caller.
+ *
+ *   1. The caller is the Easy Auth principal; without one, 401 and no SignalR
+ *      call.
+ *   2. The caller's devices are read from the devices container.
+ *   3. The caller's SignalR user is removed from every group, then added to
+ *      `device-{id}` for each device they own, and nothing else. A device that
+ *      changed hands since the last negotiate drops out here.
+ *   4. A client access token is minted for the principal's userId
+ *      (`"<tid>:<oid>"`), so cook events sent to that user reach the caller.
+ *
+ * The request carries no input: a `deviceId` query parameter, which earlier
+ * versions bound the connection to, is ignored entirely.
+ *
+ *   - 200 `{ url, accessToken }`, with the Cosmos request charge;
+ *   - 401 UNAUTHENTICATED: no principal;
+ *   - 500 INTERNAL_SERVER_ERROR: the devices read failed;
+ *   - 503 SIGNALR_UNAVAILABLE: a SignalR REST call failed or SignalR is not
+ *     configured. Neither the body nor the log carries the endpoint or the
+ *     underlying error text; the log carries a fixed code.
+ */
+
+/** Injection seam. Production wires Easy Auth, the devices repository and the
+ *  managed-identity SignalR client; tests pass fakes. Both getters run inside
+ *  the invocation, so a missing setting fails that request, not the import. */
+export interface NegotiateDeps {
+  resolvePrincipal(request: HeaderReader): PrincipalResult;
+  getRepository(): Pick<DevicesRepository, 'listDevicesByOwner'>;
+  getSignalR(): SignalRManagementPort;
+}
+
+export const defaultNegotiateDeps: NegotiateDeps = {
+  resolvePrincipal: principalFromRequest,
+  getRepository: getDevicesRepository,
+  getSignalR: getSignalRManagementClient,
+};
+
+function response(
+  status: number,
+  body: unknown,
+  correlationId: string,
+  requestCharge?: number
+): HttpResponseInit {
+  return {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Request-ID': correlationId,
+      ...requestChargeHeaders(requestCharge),
+    },
+    jsonBody: body,
+  };
+}
+
+/** A code safe to log for a failed devices read. Never the error's text. */
+function cosmosFailureCode(error: unknown): string {
+  if (error instanceof CosmosConfigError) {
+    return error.code;
+  }
+  const reported = error as { statusCode?: unknown; code?: unknown } | null | undefined;
+  for (const value of [reported?.statusCode, reported?.code]) {
+    if (typeof value === 'number') {
+      return `cosmos_status_${value}`;
+    }
+  }
+  return 'cosmos_failure';
+}
 
 export async function negotiateHandler(
   request: HttpRequest,
-  context: InvocationContext
+  context: InvocationContext,
+  deps: NegotiateDeps = defaultNegotiateDeps
 ): Promise<HttpResponseInit> {
   context.log('Processing SignalR negotiate request');
+  const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
 
-  const deviceId = request.query.get('deviceId');
-  if (!deviceId) {
-    return {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-      jsonBody: {
-        error: 'VALIDATION_ERROR',
-        message: 'Missing required query parameter: deviceId',
+  const principal = deps.resolvePrincipal(request);
+  if (!principal.authenticated) {
+    return unauthenticatedResponse(principal.reason, correlationId);
+  }
+  const { userId } = principal.principal;
+
+  let deviceIds: string[];
+  let requestCharge: number;
+  try {
+    const owned = await deps.getRepository().listDevicesByOwner(userId);
+    deviceIds = owned.devices.map(device => device.id);
+    requestCharge = owned.requestCharge;
+  } catch (error) {
+    context.error(`negotiate failed: ${cosmosFailureCode(error)}`);
+    return response(
+      500,
+      {
+        error: 'INTERNAL_SERVER_ERROR',
+        message: 'Failed to negotiate a SignalR connection',
         requestId: context.invocationId,
       },
-    };
+      correlationId,
+      chargeAfterError(0, error)
+    );
   }
 
-  // The runtime populated this from the signalRConnectionInfo input binding.
-  const connectionInfo = context.extraInputs.get(signalRConnInfoInput);
-
-  return {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Request-ID': context.invocationId,
-    },
-    jsonBody: connectionInfo,
-  };
+  try {
+    const signalR = deps.getSignalR();
+    await signalR.removeUserFromAllGroups(userId);
+    await Promise.all(deviceIds.map(id => signalR.addUserToGroup(deviceGroup(id), userId)));
+    const connection = await signalR.generateClientToken(userId);
+    context.log(
+      `negotiate ok: ${deviceIds.length} device group(s) (requestCharge=${requestCharge} RU)`
+    );
+    return response(
+      200,
+      { url: connection.url, accessToken: connection.accessToken },
+      correlationId,
+      requestCharge
+    );
+  } catch (error) {
+    const code = error instanceof SignalRUnavailableError ? error.code : 'signalr_failure';
+    context.error(`negotiate failed: ${code}`);
+    return response(
+      503,
+      {
+        error: 'SIGNALR_UNAVAILABLE',
+        message: 'Real-time updates are unavailable. Try again later.',
+        requestId: context.invocationId,
+      },
+      correlationId,
+      requestCharge
+    );
+  }
 }

@@ -8,39 +8,54 @@
 negotiate:
   post:
     operationId: negotiate
-    summary: SignalR negotiate
+    summary: SignalR negotiate, scoped to the caller
     description: |
-      SignalR handshake endpoint. Mirrors the SHIPPED handler
-      apps/api/src/functions/signalr/negotiate.ts: requires a `deviceId` QUERY
-      parameter (400 VALIDATION_ERROR if missing) and returns 200 with the
-      SignalRConnectionInfo ({ url, accessToken }) resolved by the Functions
-      `signalRConnectionInfo` input binding. The `deviceId` is bound to the
-      connection's SignalR user group so per-device fan-out works (DEC-4 / MG-30).
-      Response body is the bare connection info (NOT wrapped in ApiResponse).
+      SignalR handshake endpoint (HAR-57 / MG-30). Mirrors the shipped handler
+      apps/api/src/functions/signalr/negotiate.ts. It takes no parameters: the
+      caller is the Easy Auth principal, and the connection's SignalR user id is
+      the principal's `userId` (`"<tid>:<oid>"`). The handler removes that user
+      from every SignalR group, adds it to `device-{id}` for each device the
+      caller owns, and returns a 60-minute client access token minted for that
+      user id through the SignalR data-plane REST API. Cook events
+      (`cook_started`, `cook_stopped`) are sent to the owner's user id.
+
+      A `deviceId` query parameter, which earlier versions required, is ignored.
+      The response body is the bare connection info (NOT wrapped in
+      ApiResponse).
     tags: [cooks]
-    parameters:
-      - name: deviceId
-        in: query
-        required: true
-        description: |
-          Device whose user group the negotiated connection joins. Missing
-          deviceId is a 400 (handler rejects before resolving connection info).
-        schema:
-          type: string
     responses:
       '200':
-        description: SignalR connection info for the client to open its WebSocket.
+        description: SignalR connection info for the client to open its connection.
         headers:
           X-Request-ID:
-            description: Functions invocation id (correlation handle).
+            description: The caller's X-Request-ID, else the Functions invocation id.
+            schema:
+              type: string
+          x-meatgeek-request-charge:
+            description: Cosmos request charge (RU) of the devices read, as a decimal.
             schema:
               type: string
         content:
           application/json:
             schema:
               $ref: '../components/schemas/signalr-payloads.yaml#/SignalRConnectionInfo'
-      '400':
-        description: Missing deviceId query parameter.
+      '401':
+        description: No usable Easy Auth principal. No Cosmos or SignalR call is made.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/UnauthenticatedError'
+      '500':
+        description: INTERNAL_SERVER_ERROR with fixed text; reading the caller's devices failed.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '503':
+        description: |
+          SIGNALR_UNAVAILABLE with fixed text: a SignalR REST call failed or
+          SignalR is not configured. Neither the body nor the log names the
+          endpoint.
         content:
           application/json:
             schema:
