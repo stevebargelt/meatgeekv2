@@ -29,7 +29,9 @@ on:
   workflow_dispatch:
 
 # id-token: write  — azure/login and terraform mint an OIDC token for the dev
-#                    app-publish identity (development environment).
+#                    app-publish identity (development environment); the
+#                    acceptance suite step mints one more for the zero-role
+#                    acceptance peer identity (HAR-61/HAR-65).
 # contents: read   — checkout and the main-tip lookups.
 # actions: read    — look up the commit's CI/CD Pipeline runs.
 permissions:
@@ -355,9 +357,10 @@ jobs:
             exit 1
           fi
 
-      # The bearer token and the simulated device's connection string are each
-      # fetched, masked and used inside this one step, so neither ever
-      # reaches $GITHUB_ENV, a step output, or another step's process.
+      # The two bearer tokens (app-publish, and the acceptance peer's) and the
+      # simulated device's connection string are each fetched, masked and
+      # used inside this one step, so none ever reaches $GITHUB_ENV, a step
+      # output, or another step's process.
       # Both the full connection string and its SharedAccessKey value are
       # masked before the suite starts. The sed pattern spells the field name
       # with a [K] class so this script, which GitHub echoes into the log,
@@ -369,6 +372,9 @@ jobs:
           AUDIENCE: ${{ needs.deploy.outputs.audience }}
           HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
+          TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          APP_DEPLOY_CLIENT_ID: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
+          PEER_CLIENT_ID: ${{ vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID }}
         run: |
           set -euo pipefail
           SIMDEVICE_CONNECTION_STRING="$(az iot hub device-identity connection-string show \
@@ -396,6 +402,73 @@ jobs:
             exit 1
           fi
           export ACCEPTANCE_BEARER_TOKEN
+
+          # HAR-65: a second caller's token, for the HAR-55 cross-user proof.
+          # The acceptance peer holds no Azure roles and federates the same
+          # development subject as app-publish (HAR-61). It signs in from its
+          # own throwaway AZURE_CONFIG_DIR, so the app-publish login above is
+          # never touched. The JWT payload is decoded only to compare its
+          # appid/azp claim; no claim value is printed.
+          echo "acceptance peer token: minting"
+          if [ -z "$PEER_CLIENT_ID" ]; then
+            echo "vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID is empty on the development environment (bootstrap sets it, HAR-61)." >&2
+            exit 1
+          fi
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "No GitHub OIDC request endpoint: the job needs id-token: write." >&2
+            exit 1
+          fi
+          PEER_OIDC="$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r '.value // empty')" || {
+            echo "Requesting a GitHub OIDC token for the acceptance peer failed." >&2
+            exit 1
+          }
+          if [ -z "$PEER_OIDC" ]; then
+            echo "GitHub returned no OIDC token for the acceptance peer." >&2
+            exit 1
+          fi
+          echo "::add-mask::${PEER_OIDC}"
+          PEER_AZ="$(mktemp -d)"
+          trap 'rm -rf "$PEER_AZ"' EXIT
+          AZURE_CONFIG_DIR="$PEER_AZ" az login --service-principal \
+            -u "$PEER_CLIENT_ID" --tenant "$TENANT_ID" \
+            --federated-token "$PEER_OIDC" --allow-no-subscriptions -o none || {
+            echo "az login as the acceptance peer ($PEER_CLIENT_ID) failed." >&2
+            exit 1
+          }
+          ACCEPTANCE_PEER_BEARER_TOKEN="$(AZURE_CONFIG_DIR="$PEER_AZ" az account get-access-token \
+            --scope "${AUDIENCE}/.default" --query accessToken -o tsv)" || {
+            echo "az account get-access-token as the acceptance peer failed for ${AUDIENCE}/.default." >&2
+            exit 1
+          }
+          unset PEER_OIDC
+          rm -rf "$PEER_AZ"
+          if [ -z "$ACCEPTANCE_PEER_BEARER_TOKEN" ]; then
+            echo "az account get-access-token returned no acceptance peer token for ${AUDIENCE}/.default." >&2
+            exit 1
+          fi
+          echo "::add-mask::${ACCEPTANCE_PEER_BEARER_TOKEN}"
+          PEER_PAYLOAD="$(printf '%s' "$ACCEPTANCE_PEER_BEARER_TOKEN" | cut -d. -f2 | tr '_-' '/+')"
+          while [ $(( ${#PEER_PAYLOAD} % 4 )) -ne 0 ]; do PEER_PAYLOAD="${PEER_PAYLOAD}="; done
+          PEER_APPID="$(printf '%s' "$PEER_PAYLOAD" | base64 -d 2>/dev/null | jq -r '.appid // .azp // empty' 2>/dev/null)" || PEER_APPID=""
+          unset PEER_PAYLOAD
+          if [ -z "$PEER_APPID" ]; then
+            echo "The acceptance peer token has no readable appid/azp claim." >&2
+            exit 1
+          fi
+          if [ "$PEER_APPID" = "$APP_DEPLOY_CLIENT_ID" ]; then
+            echo "The acceptance peer token was issued to the app-publish identity: the logins are cross-wired." >&2
+            exit 1
+          fi
+          if [ "$PEER_APPID" != "$PEER_CLIENT_ID" ]; then
+            echo "The acceptance peer token was issued to a client other than AZURE_ACCEPTANCE_PEER_CLIENT_ID." >&2
+            exit 1
+          fi
+          unset PEER_APPID
+          echo "acceptance peer token: minted; appid check passed (issued to the peer, not app-publish)"
+          export ACCEPTANCE_PEER_BEARER_TOKEN
+
           npx nx run api:acceptance 2>&1 | tee "$RUNNER_TEMP/acceptance.log"
 
       # Proof results, METRIC lines and the RU-per-route table, also in the

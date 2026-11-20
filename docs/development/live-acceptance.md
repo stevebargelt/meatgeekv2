@@ -310,7 +310,14 @@ own to run it by hand.
 
 In CI the caller is the dev app-publish identity instead: the `acceptance` job
 mints an app-only token for `<audience>/.default`, so its cooks land in that
-service principal's partition. The same job builds simdevice, ensures the
+service principal's partition. The same step also signs in, from a separate
+`az` config directory, as the zero-role acceptance peer
+`meatgeek-v2-dev-acceptance-peer` (`vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID` on
+the `development` environment, set by bootstrap, HAR-61) and hands the suite a
+second masked app-only token as `ACCEPTANCE_PEER_BEARER_TOKEN`, after checking
+that its `appid`/`azp` claim is the peer's and not app-publish's (HAR-65). The
+suite does not require that variable yet, so it is not in the table above; the
+HAR-55 cross-user proof will add it. The same job builds simdevice, ensures the
 simulated device exists and hands the suite its masked connection string (see
 [CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)). The proof results and the RU-per-route table
 also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
