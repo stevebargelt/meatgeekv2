@@ -164,6 +164,14 @@ export type UpdateDeviceResult =
   | { readonly outcome: 'nameConflict'; readonly requestCharge: number }
   | { readonly outcome: 'concurrentUpdate'; readonly requestCharge: number };
 
+/** HAR-85: a delete's outcome. Unlike the other device routes, `foreign` and
+ *  `notFound` are told apart: DELETE answers 403 DEVICE_NOT_OWNED for the one
+ *  and 404 DEVICE_NOT_FOUND for the other. */
+export type DeleteDeviceResult =
+  | { readonly outcome: 'deleted'; readonly requestCharge: number }
+  | { readonly outcome: 'foreign'; readonly requestCharge: number }
+  | { readonly outcome: 'notFound'; readonly requestCharge: number };
+
 /** A user's devices, with the RU the list query cost. */
 export interface DeviceList {
   readonly devices: Device[];
@@ -371,6 +379,38 @@ export class DevicesRepository {
       }
       if (status === 409) {
         return { outcome: 'nameConflict', requestCharge: requestCharge + chargeOf(error) };
+      }
+      throw new DevicesStoreError(status, requestCharge + chargeOf(error));
+    }
+  }
+
+  /**
+   * HAR-85: deletes a device the caller owns. A point read settles ownership,
+   * then a point delete removes the document (partition key = device id).
+   * Nothing else is touched: the device's cooks stay in the owner's history and
+   * its readings expire on the temperatures container's TTL.
+   *
+   * A device someone else owns is `foreign` and is not deleted. A 404 from the
+   * delete (someone deleted it between the read and the delete) is `notFound`.
+   */
+  async deleteDevice(userId: string, deviceId: string): Promise<DeleteDeviceResult> {
+    const existing = await this.readDocument(deviceId);
+    let requestCharge = existing.requestCharge;
+    if (!existing.document) {
+      return { outcome: 'notFound', requestCharge };
+    }
+    if (existing.document.userId !== userId) {
+      return { outcome: 'foreign', requestCharge };
+    }
+
+    try {
+      const response = await this.container.item(deviceId, deviceId).delete();
+      requestCharge += response.requestCharge;
+      return { outcome: 'deleted', requestCharge };
+    } catch (error) {
+      const status = statusCodeOf(error);
+      if (status === 404) {
+        return { outcome: 'notFound', requestCharge: requestCharge + chargeOf(error) };
       }
       throw new DevicesStoreError(status, requestCharge + chargeOf(error));
     }

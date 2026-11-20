@@ -1,5 +1,6 @@
 /**
- * HAR-20 (MG-80) — the four devices handlers, with NO Azure and NO credentials.
+ * HAR-20 (MG-80) — the devices handlers, with NO Azure and NO credentials.
+ * HAR-85 adds DELETE /devices/{id}.
  *
  * Each handler runs over the REAL DevicesRepository on an in-memory container
  * that stamps Cosmos system properties on every document, so the
@@ -16,6 +17,7 @@ import { principalFromRequest } from '../../shared/auth/principal';
 import { CosmosConfigError } from '../../shared/cosmos/cosmos-adapter';
 import { DevicesRepository } from '../../shared/cosmos/devices-repository';
 import {
+  DELETE_CHARGE,
   FAKE_ACCOUNT_ENDPOINT,
   FakeDevicesContainer,
   QUERY_CHARGE,
@@ -23,6 +25,7 @@ import {
   WRITE_CHARGE,
 } from '../../shared/cosmos/fake-devices-container.testing';
 import { REQUEST_CHARGE_HEADER } from '../../shared/cosmos/request-charge';
+import { deleteDeviceHandler } from './delete-device';
 import type { DevicesHandlerDeps } from './devices-http';
 import { getDeviceHandler } from './get-device';
 import { getDevicesHandler } from './get-devices';
@@ -153,6 +156,11 @@ const ROUTES: Array<{ name: string; handler: Handler; request: () => RequestOpti
     handler: updateDeviceHandler,
     request: () => ({ params: { id: 'grill-1' }, body: { location: 'Garage' } }),
   },
+  {
+    name: 'DELETE /devices/{id}',
+    handler: deleteDeviceHandler,
+    request: () => ({ params: { id: 'grill-1' } }),
+  },
 ];
 
 describe('HAR-20 devices routes — shared contract', () => {
@@ -204,7 +212,7 @@ describe('HAR-20 devices routes — shared contract', () => {
     it('answers a sanitized 500 on a Cosmos failure, leaking no endpoint or claim', async () => {
       const { fake, deps } = setup();
       fake.seed(device());
-      for (const operation of ['read', 'query', 'create', 'replace'] as const) {
+      for (const operation of ['read', 'query', 'create', 'replace', 'delete'] as const) {
         fake.failNext(operation, 503);
       }
       const { ctx, errors, logs } = context();
@@ -656,6 +664,136 @@ describe('PATCH /devices/{id}', () => {
     expect(response.status).toBe(400);
     expect(response.jsonBody).toMatchObject({ error: 'VALIDATION_ERROR' });
     expect(fake.calls).toEqual([]);
+  });
+});
+
+describe('DELETE /devices/{id} (HAR-85)', () => {
+  it('answers 204 with no body, deletes the device, and carries the read and delete RU', async () => {
+    const { fake, deps } = setup();
+    fake.seed(device());
+    const { ctx, logs } = context();
+
+    const response = await deleteDeviceHandler(request({ params: { id: 'grill-1' } }), ctx, deps);
+
+    expect(response.status).toBe(204);
+    expect(response.jsonBody).toBeUndefined();
+    expect(response.body).toBeUndefined();
+    expect(header(response, 'X-Request-ID')).toBe('inv-7');
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE + DELETE_CHARGE));
+    expect(fake.stored('grill-1')).toBeUndefined();
+    expect(logs.join('\n')).toContain('deleteDevice deleted');
+  });
+
+  it('answers 403 DEVICE_NOT_OWNED for another user’s device and leaves it', async () => {
+    const { fake, deps } = setup();
+    fake.seed(device({ id: 'theirs', userId: OTHER_USER_ID }));
+
+    const response = await deleteDeviceHandler(
+      request({ params: { id: 'theirs' } }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.jsonBody).toEqual({
+      error: 'DEVICE_NOT_OWNED',
+      message: 'The device is not registered to the caller.',
+      requestId: 'inv-7',
+    });
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE));
+    expect(fake.stored('theirs')).toBeDefined();
+    expect(fake.calls.map(c => c.operation)).toEqual(['read']);
+  });
+
+  it('answers 403 even when ?userId= / x-user-id name the owner', async () => {
+    const { fake, deps } = setup();
+    fake.seed(device({ id: 'theirs', userId: OTHER_USER_ID }));
+
+    const response = await deleteDeviceHandler(
+      request({
+        params: { id: 'theirs' },
+        query: { userId: OTHER_USER_ID },
+        headers: { 'x-user-id': OTHER_USER_ID },
+      }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(403);
+    expect(fake.stored('theirs')).toBeDefined();
+  });
+
+  it('answers 404 DEVICE_NOT_FOUND when no device has the id, with the read RU', async () => {
+    const { deps } = setup();
+
+    const response = await deleteDeviceHandler(
+      request({ params: { id: 'nobody' } }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.jsonBody).toEqual({
+      error: 'DEVICE_NOT_FOUND',
+      message: 'Device not found',
+      requestId: 'inv-7',
+    });
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE));
+  });
+
+  it('answers 404 DEVICE_NOT_FOUND for a second delete of the same device', async () => {
+    const { fake, deps } = setup();
+    fake.seed(device());
+
+    const first = await deleteDeviceHandler(
+      request({ params: { id: 'grill-1' } }),
+      context().ctx,
+      deps
+    );
+    const second = await deleteDeviceHandler(
+      request({ params: { id: 'grill-1' } }),
+      context().ctx,
+      deps
+    );
+
+    expect([first.status, second.status]).toEqual([204, 404]);
+    expect(second.jsonBody).toMatchObject({ error: 'DEVICE_NOT_FOUND' });
+  });
+
+  it('answers 401 without a principal: no Cosmos call, no RU header, nothing deleted', async () => {
+    const { fake, deps, getRepository } = setup();
+    fake.seed(device());
+
+    const response = await deleteDeviceHandler(
+      request({ params: { id: 'grill-1' }, principal: null }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.jsonBody).toMatchObject({ error: 'UNAUTHENTICATED' });
+    expect(getRepository).not.toHaveBeenCalled();
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBeUndefined();
+    expect(fake.stored('grill-1')).toBeDefined();
+  });
+
+  it('answers a sanitized 500 carrying the read RU plus the failed delete’s', async () => {
+    const { fake, deps } = setup();
+    fake.seed(device());
+    fake.failNext('delete', 503);
+    const { ctx, errors } = context();
+
+    const response = await deleteDeviceHandler(request({ params: { id: 'grill-1' } }), ctx, deps);
+
+    expect(response.status).toBe(500);
+    expect(response.jsonBody).toEqual({
+      error: 'INTERNAL_SERVER_ERROR',
+      message: 'Failed to delete device',
+      requestId: 'inv-7',
+    });
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE + DELETE_CHARGE));
+    expect(errors.join('\n')).toContain('deleteDevice failed: cosmos_status_503');
+    expect(errors.join('\n')).not.toContain(FAKE_ACCOUNT_ENDPOINT);
   });
 });
 

@@ -35,6 +35,7 @@ import type { AcceptanceApi, ProofGroup, SimDeviceOptions } from './lib/proof';
 import { ProofFailure } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
 import { expectHubMessage, START_RETRY, startConnection } from './lib/signalr';
+import sweepGroup from './proofs/acceptance-device-sweep.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
@@ -86,7 +87,12 @@ type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 type CookItemRoute = 'GET /cooks/{cookId}';
 /** HAR-86: the cook chart. */
 type CookChartRoute = 'GET /cooks/{cookId}/chart';
-type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
+type DeviceRoute =
+  | 'GET /devices'
+  | 'POST /devices'
+  | 'GET /devices/{id}'
+  | 'PATCH /devices/{id}'
+  | 'DELETE /devices/{id}';
 type TemperatureRoute = 'GET /temperatures/current/{deviceId}' | 'GET /temperatures/history';
 type UserRoute = 'PUT /users/me' | 'GET /users/me';
 type RecipeRoute =
@@ -212,6 +218,13 @@ interface StubOptions {
   readonly chartCoveredFromRead?: number;
   /** HAR-87: a chart top-up is never rolled up. */
   readonly chartTopupNeverRolledUp?: boolean;
+  /** HAR-85: device ids already registered to the owner when the run starts,
+   *  as earlier runs left them. */
+  readonly devicesAtStart?: readonly string[];
+  /** HAR-85: DELETE /devices/{id} misbehaves: `peer-deletes` lets the peer
+   *  delete the owner's device (204); `keeps` answers the owner 204 but keeps
+   *  the device. */
+  readonly deviceDeleteFault?: 'peer-deletes' | 'keeps';
 }
 
 interface StubCook {
@@ -266,6 +279,8 @@ interface Stub {
   readonly chartCooks: () => Array<{ id: string; status: string; startTime: string }>;
   /** HAR-87: whether the chart device is registered. */
   readonly chartRegistered: () => boolean;
+  /** HAR-85: the ids of the devices registered now, sorted. */
+  readonly deviceIds: () => string[];
   close(): Promise<void>;
 }
 
@@ -289,6 +304,7 @@ const RU: Record<Exclude<StubRoute, SignalRRoute>, string> = {
   'POST /devices': '9.52',
   'GET /devices/{id}': '1',
   'PATCH /devices/{id}': '11.9',
+  'DELETE /devices/{id}': '9.71',
   'GET /temperatures/current/{deviceId}': '3.86',
   'GET /temperatures/history': '7.71',
   'PUT /users/me': '14.21',
@@ -318,6 +334,16 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 async function startStub(options: StubOptions = {}): Promise<Stub> {
   const cooks: StubCook[] = [];
   const devices = new Map<string, StubDevice>();
+  for (const id of options.devicesAtStart ?? []) {
+    devices.set(id, {
+      id,
+      userId: 'stub-tenant:stub-user',
+      name: `Left by an earlier run: ${id}`,
+      model: 'Acceptance Rig',
+      isActive: true,
+      connectionStatus: 'unknown',
+    });
+  }
   const recipes = new Map<string, Record<string, unknown>>();
   // The acceptance identity's profile persists between runs, as it does in dev.
   let profile: Record<string, unknown> | undefined;
@@ -712,6 +738,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         route = 'POST /devices';
       else if (request.method === 'GET' && deviceMatch) route = 'GET /devices/{id}';
       else if (request.method === 'PATCH' && deviceMatch) route = 'PATCH /devices/{id}';
+      else if (request.method === 'DELETE' && deviceMatch) route = 'DELETE /devices/{id}';
       else if (request.method === 'GET' && temperatureMatch)
         route = 'GET /temperatures/current/{deviceId}';
       else if (request.method === 'GET' && url.pathname === '/api/temperatures/history')
@@ -741,6 +768,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         'POST /cooks',
         'GET /cooks/{cookId}',
         'GET /cooks/{cookId}/chart',
+        'DELETE /devices/{id}',
       ];
       if (caller === 'peer' && !peerRoutes.includes(route)) {
         send(404, errorBody('NOT_FOUND'));
@@ -971,6 +999,24 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         };
         devices.set(device.id, device);
         send(201, device, route);
+      } else if (route === 'DELETE /devices/{id}') {
+        // HAR-85: 403 for the peer on the owner's device, 404 for no device.
+        const id = decodeURIComponent(deviceMatch![1]);
+        if (!devices.has(id)) {
+          send(404, errorBody('DEVICE_NOT_FOUND'), route);
+          return;
+        }
+        if (caller === 'peer' && options.deviceDeleteFault !== 'peer-deletes') {
+          send(403, errorBody('DEVICE_NOT_OWNED'), route);
+          return;
+        }
+        if (options.deviceDeleteFault !== 'keeps') {
+          devices.delete(id);
+        }
+        const headers: Record<string, string> = { 'X-Request-ID': responseRequestId };
+        if (options.omitChargeOn !== route) headers[REQUEST_CHARGE_HEADER] = RU[route];
+        response.writeHead(204, headers);
+        response.end();
       } else if (route === 'GET /devices/{id}' || route === 'PATCH /devices/{id}') {
         const device = devices.get(decodeURIComponent(deviceMatch![1]));
         if (!device) {
@@ -1158,6 +1204,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         .filter(c => c.deviceId === CHART_DEVICE)
         .map(({ id, status, startTime }) => ({ id, status, startTime })),
     chartRegistered: () => devices.has(CHART_DEVICE),
+    deviceIds: () => [...devices.keys()].sort(),
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
   };
 }
@@ -1395,6 +1442,7 @@ const DEVICE_ROUTES: DeviceRoute[] = [
   'GET /devices/{id}',
   'GET /devices',
   'PATCH /devices/{id}',
+  'DELETE /devices/{id}',
 ];
 const TEMPERATURE_ROUTES: TemperatureRoute[] = [
   'GET /temperatures/current/{deviceId}',
@@ -1628,28 +1676,35 @@ describe('live acceptance runner (against an in-process stub)', () => {
    *  HAR-68: the device twin group registers the simulated device first
    *  (201), so the isolation (HAR-67), live-temperature (HAR-63) and round
    *  trip groups, which run after it, take the 409 path and read
-   *  GET /devices/{id}. */
+   *  GET /devices/{id}. HAR-85: the sweep lists the devices first; the devices
+   *  group's first DELETE is the peer's, and its always-run cleanup then fails
+   *  too, as do the temperatures and cooks lifecycle cleanups. A refused
+   *  registration is no cleanup failure: the cleanup's DELETE may be 404. */
   const groupsUsing = (route: DeviceRoute): string[] =>
-    route === 'POST /devices'
-      ? [
-          'cooks lifecycle ›',
-          'device twin ›',
-          'devices ›',
-          'temperatures ›',
-          'signalr isolation ›',
-          'signalr live temperature ›',
-          'telemetry round-trip ›',
-        ]
-      : route === 'GET /devices/{id}'
-        ? [
-            'devices ›',
-            'signalr isolation ›',
-            'signalr live temperature ›',
-            'telemetry round-trip ›',
-            // HAR-87: it checks the chart device is registered.
-            'cook chart ›',
-          ]
-        : ['devices ›'];
+    route === 'GET /devices'
+      ? ['device sweep ›', 'devices ›']
+      : route === 'DELETE /devices/{id}'
+        ? ['cooks lifecycle ›', 'devices ›', 'devices ›', 'temperatures ›']
+        : route === 'POST /devices'
+          ? [
+              'cooks lifecycle ›',
+              'device twin ›',
+              'devices ›',
+              'temperatures ›',
+              'signalr isolation ›',
+              'signalr live temperature ›',
+              'telemetry round-trip ›',
+            ]
+          : route === 'GET /devices/{id}'
+            ? [
+                'devices ›',
+                'signalr isolation ›',
+                'signalr live temperature ›',
+                'telemetry round-trip ›',
+                // HAR-87: it checks the chart device is registered.
+                'cook chart ›',
+              ]
+            : ['devices ›'];
 
   it.each(DEVICE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',
@@ -1668,7 +1723,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       expect(result.failures).toHaveLength(groups.length + volume.length);
       groups.forEach(group => {
         const failure = result.failures.find(line => line.includes(group));
-        expect(failure).toContain(`${route} → 503`);
+        expect(failure).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
       });
     }
   );
@@ -1840,6 +1895,153 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(
       result.lines.some(line => /^\s+GET\s+\/recipes\/\{id\}\s+404\s.*RU 1\.02$/.test(line))
     ).toBe(true);
+  });
+
+  /** HAR-85: each DELETE /devices/{id} the run sent, in order: the device id
+   *  and who sent it. */
+  const deviceDeletes = () =>
+    stub!.requests
+      .filter(r => r.method === 'DELETE' && r.path.startsWith('/api/devices/'))
+      .map(r => ({
+        id: decodeURIComponent(r.path.slice('/api/devices/'.length)),
+        as: r.authorization === `Bearer ${PEER_TOKEN}` ? 'peer' : 'owner',
+      }));
+
+  it('(a) HAR-85: every proof deletes the device it registered; the peer cannot', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    const deletes = deviceDeletes();
+    const own = deletes[1]?.id;
+    expect(own).toMatch(/^acceptance-\d/);
+    expect(deletes).toEqual([
+      { id: expect.stringMatching(/^acceptance-cook-\d/), as: 'owner' },
+      { id: own, as: 'peer' },
+      { id: own, as: 'owner' },
+      { id: own, as: 'owner' },
+      { id: expect.stringMatching(/^acceptance-temp-\d/), as: 'owner' },
+    ]);
+    // Only the standing simulated and chart devices are left.
+    expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
+    // 403 to the peer, 204 then 404 to the owner, each with its RU; the GET
+    // between them is 404.
+    const deleteLines = result.lines.filter(line =>
+      /^\s+DELETE\s+\/devices\/\{id\}(\s+\(peer\))?\s+\d{3}\s/.test(line)
+    );
+    expect(deleteLines.map(line => /\s(\d{3})\s/.exec(line)?.[1])).toEqual([
+      '204',
+      '403',
+      '204',
+      '404',
+      '204',
+    ]);
+    expect(deleteLines.filter(line => !line.endsWith('RU 9.71'))).toEqual([]);
+    expect(deleteLines[1]).toContain('(peer)');
+    for (const step of [
+      'PASS devices › DELETE /devices/{id} as the peer is 403 DEVICE_NOT_OWNED and the device stays',
+      'PASS devices › DELETE /devices/{id} deletes the caller’s device',
+      'PASS devices › GET /devices/{id} is 404 after the delete',
+      'PASS devices › DELETE /devices/{id} again is 404 DEVICE_NOT_FOUND',
+      'PASS devices › always: DELETE /devices/{id} removes acceptance-<runId>',
+      'PASS temperatures › always: DELETE /devices/{id} removes acceptance-temp-<runId>',
+      'PASS cooks lifecycle › always: DELETE /devices/{id} removes acceptance-cook-<runId>',
+    ]) {
+      expect(result.lines).toContain(step);
+    }
+    // The standing chart device is there from the start, and is not swept.
+    expect(result.output).toMatch(/^METRIC acceptance-devices-before 1$/m);
+    expect(result.output).toMatch(/^METRIC acceptance-devices-swept 0$/m);
+  });
+
+  it('(a) HAR-85: the sweep deletes every acceptance-* device an earlier run left, first', async () => {
+    const left = [
+      'acceptance-20261119101500-aa11bb',
+      'acceptance-temp-20261119101500-aa11bb',
+      'acceptance-cook-20261119101500-aa11bb',
+      'acceptance-20261118090000-cc22dd',
+    ];
+    const result = await runAgainstStub({ devicesAtStart: [...left, 'backyard-smoker'] });
+
+    expect(result.failures).toEqual([]);
+    // The sweep runs before any other group: its deletes come first.
+    expect(deviceDeletes().slice(0, left.length)).toEqual(left.map(id => ({ id, as: 'owner' })));
+    expect(result.output).toMatch(/^METRIC acceptance-devices-before 6$/m);
+    expect(result.output).toMatch(/^METRIC acceptance-devices-swept 4$/m);
+    expect(result.output).toMatch(/^METRIC acceptance-devices-after 2$/m);
+    expect(
+      result.lines.indexOf(
+        'RUN  device sweep › DELETE /devices/{id} for every acceptance-* device an earlier run left'
+      )
+    ).toBeLessThan(result.lines.findIndex(line => line.startsWith('RUN  cooks lifecycle ›')));
+    // A device that is not an acceptance device stays, as do the standing ones.
+    expect(stub!.deviceIds()).toEqual(['backyard-smoker', SIM_DEVICE, CHART_DEVICE].sort());
+  });
+
+  it('HAR-85: the sweep never deletes the standing simulated or chart device, whatever its id', async () => {
+    const standing = ['acceptance-standing-sim', 'acceptance-standing-chart'];
+    // The stub's own chart device is replaced by `standing[1]`.
+    stub = await startStub({
+      devicesAtStart: [...standing, 'acceptance-old-run'],
+      chartCook: 'none',
+    });
+    const result = await run(
+      {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+        ACCEPTANCE_SIM_DEVICE_ID: standing[0],
+        ACCEPTANCE_CHART_DEVICE_ID: standing[1],
+        SIMDEVICE_CHART_CONNECTION_STRING: SIM_CONNECTION_STRING,
+      },
+      [sweepGroup]
+    );
+
+    expect(result.failures).toEqual([]);
+    expect(deviceDeletes()).toEqual([{ id: 'acceptance-old-run', as: 'owner' }]);
+    expect(stub.deviceIds()).toEqual([...standing].sort());
+  });
+
+  it('(b) HAR-85: a failed step still deletes the device its group registered', async () => {
+    const result = await runAgainstStub({
+      failRoute: { route: 'PATCH /devices/{id}', status: 503 },
+    });
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.lines).toContain(
+      'PASS devices › always: DELETE /devices/{id} removes acceptance-<runId>'
+    );
+    expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
+  });
+
+  it('(b) HAR-85: fails when the peer can delete the owner’s device', async () => {
+    const result = await runAgainstStub({ deviceDeleteFault: 'peer-deletes' });
+
+    expect(result.exitCode).not.toBe(0);
+    // The always-run cleanup then finds the device gone: 404, not its 204.
+    expect(result.failures).toHaveLength(2);
+    expect(result.failures[0]).toContain(
+      'FAIL devices › DELETE /devices/{id} as the peer is 403 DEVICE_NOT_OWNED and the device stays'
+    );
+    expect(result.failures[1]).toContain(
+      'FAIL devices › always: DELETE /devices/{id} removes acceptance-<runId> — DELETE /devices/{id} → 404: expected 204, got 404'
+    );
+    expect(result.failures[0]).toContain(
+      'DELETE /devices/{id} (peer) → 204: expected 403, got 204'
+    );
+  });
+
+  it('(b) HAR-85: fails when a delete answers 204 but the device is still there', async () => {
+    const result = await runAgainstStub({ deviceDeleteFault: 'keeps' });
+
+    expect(result.exitCode).not.toBe(0);
+    // The devices group sees its device again; the sweep is clean (nothing
+    // left by an earlier run), and the other groups only DELETE.
+    expect(result.failures).toEqual([
+      expect.stringContaining(
+        'FAIL devices › GET /devices/{id} is 404 after the delete — GET /devices/{id} → 200: expected 404, got 200'
+      ),
+    ]);
   });
 
   it('(b) exits non-zero when DELETE /recipes/{id} reports no RU', async () => {

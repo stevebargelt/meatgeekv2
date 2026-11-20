@@ -196,6 +196,7 @@ describe('MG-58: the storage heartbeat is the host-storage proof path', () => {
         'registerDevice',
         'getDevice',
         'updateDevice',
+        'deleteDevice',
         'getUserProfile',
         'putUserProfile',
         'listRecipes',

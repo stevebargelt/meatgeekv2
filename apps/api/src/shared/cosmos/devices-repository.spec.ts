@@ -14,6 +14,7 @@ import {
   toDevice,
 } from './devices-repository';
 import {
+  DELETE_CHARGE,
   FakeDevicesContainer,
   QUERY_CHARGE,
   READ_CHARGE,
@@ -346,5 +347,79 @@ describe('DevicesRepository.updateDevice', () => {
 
     expect(result.outcome).toBe('updated');
     expect(fake.calls.map(c => c.operation)).toEqual(['read', 'replace']);
+  });
+});
+
+describe('DevicesRepository.deleteDevice (HAR-85)', () => {
+  it('point-reads, then point-deletes the owner’s device keyed on the device id', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device());
+
+    const result = await repository.deleteDevice(OWNER, 'grill-1');
+
+    expect(result).toEqual({ outcome: 'deleted', requestCharge: READ_CHARGE + DELETE_CHARGE });
+    expect(fake.calls).toEqual([
+      { operation: 'read', id: 'grill-1', partitionKey: 'grill-1' },
+      { operation: 'delete', id: 'grill-1', partitionKey: 'grill-1' },
+    ]);
+    expect(fake.stored('grill-1')).toBeUndefined();
+  });
+
+  it('is foreign for someone else’s device and deletes nothing', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device({ userId: STRANGER }));
+
+    const result = await repository.deleteDevice(OWNER, 'grill-1');
+
+    expect(result).toEqual({ outcome: 'foreign', requestCharge: READ_CHARGE });
+    expect(fake.calls.map(c => c.operation)).toEqual(['read']);
+    expect(fake.stored('grill-1')).toBeDefined();
+  });
+
+  it('is notFound for an unknown device, without a delete', async () => {
+    const { fake, repository } = setup();
+
+    expect(await repository.deleteDevice(OWNER, 'nope')).toEqual({
+      outcome: 'notFound',
+      requestCharge: READ_CHARGE,
+    });
+    expect(fake.calls.map(c => c.operation)).toEqual(['read']);
+  });
+
+  it('is notFound without a read when the id could never be a device id', async () => {
+    const { fake, repository } = setup();
+
+    expect(await repository.deleteDevice(OWNER, '../etc')).toEqual({
+      outcome: 'notFound',
+      requestCharge: 0,
+    });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('is notFound when the device is deleted between the read and the delete', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device());
+    fake.beforeDelete = id => fake.remove(id);
+
+    expect(await repository.deleteDevice(OWNER, 'grill-1')).toEqual({
+      outcome: 'notFound',
+      requestCharge: READ_CHARGE + DELETE_CHARGE,
+    });
+  });
+
+  it('re-throws a failed delete as a DevicesStoreError with the total charge and no Cosmos text', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device());
+    fake.failNext('delete', 503);
+
+    const error = await repository.deleteDevice(OWNER, 'grill-1').catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(DevicesStoreError);
+    expect(error).toMatchObject({
+      statusCode: 503,
+      requestCharge: READ_CHARGE + DELETE_CHARGE,
+      message: 'devices store operation failed',
+    });
+    expect(fake.stored('grill-1')).toBeDefined();
   });
 });

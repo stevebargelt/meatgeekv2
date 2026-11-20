@@ -439,8 +439,9 @@ graph TB
   MeatgeekCloudApi.Cooks -. "`start, stop: 403
 DEVICE_NOT_OWNED`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Cooks -. "`write cook`" .-> MeatgeekCloudApi.Repos
-  MeatgeekCloudApi.Devices -. "`GET, PATCH /devices/{id}: 404`" .-> MeatgeekCloudApi.Ownership
-  MeatgeekCloudApi.Devices -. "`list by userId, register, update`" .-> MeatgeekCloudApi.Repos
+  MeatgeekCloudApi.Devices -. "`[...]`" .-> MeatgeekCloudApi.Ownership
+  MeatgeekCloudApi.Devices -. "`list by userId, register,
+update, delete`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Temperatures -. "`current, history: 404
 DEVICE_NOT_FOUND`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Temperatures -. "`query readings`" .-> MeatgeekCloudApi.Repos
@@ -454,7 +455,8 @@ to the owning userId`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Negotiate -. "`mint client token for the caller`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Broadcast -. "`each reading, to its device owner`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Ownership -. "`point read`" .-> MeatgeekCloudData.Devices
-  MeatgeekCloudApi.Repos -. "`list by userId, register, update`" .-> MeatgeekCloudData.Devices
+  MeatgeekCloudApi.Repos -. "`list by userId, register,
+update, delete`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Repos -. "`read only; partition = deviceId`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Cooks
   MeatgeekCloudApi.Repos -. "`point read, write; id = caller`" .-> MeatgeekCloudData.Users
@@ -518,7 +520,8 @@ graph TB
   end
   MeatgeekEdgePusher@{ shape: rectangle, label: "data-pusher" }
   MeatgeekCloudApi.Repos -. "`read only; partition = deviceId`" .-> MeatgeekCloudData.Temperatures
-  MeatgeekCloudApi.Repos -. "`list by userId, register, update`" .-> MeatgeekCloudData.Devices
+  MeatgeekCloudApi.Repos -. "`list by userId, register,
+update, delete`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Cooks
   MeatgeekCloudApi.Repos -. "`point read, write; id = caller`" .-> MeatgeekCloudData.Users
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Recipes

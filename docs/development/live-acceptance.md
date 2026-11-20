@@ -20,6 +20,7 @@ Every proof below also checks each response against the OpenAPI contract,
 
 | Proof file                          | Proof                                                                                                                                                                                  | Expects                                                                                                                                                                                                                                                                                                      |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `acceptance-device-sweep.proof.ts`  | `GET /devices`, then `DELETE /devices/{id}` for every `acceptance-*` device except the simulated and chart devices, then `GET /devices` again (HAR-85)                                 | `200`, `204` per device, then `200` with no `acceptance-*` device listed; prints `METRIC acceptance-devices-before`, `acceptance-devices-swept` and `acceptance-devices-after`                                                                                                                               |
 | `cooks-unauthenticated.proof.ts`    | `GET /cooks` with no `Authorization` header                                                                                                                                            | `401`                                                                                                                                                                                                                                                                                                        |
 | `cooks-lifecycle.proof.ts`          | `POST /devices` registering `acceptance-cook-<runId>` with a run-unique name                                                                                                           | `201`; the device id is the one sent                                                                                                                                                                                                                                                                         |
 |                                     | `POST /cooks` with a new UUID `id` on `acceptance-cook-<runId>`                                                                                                                        | `2xx`; body is an api-interfaces `Cook` with no Cosmos system property (`_rid`, `_self`, `_etag`, `_attachments`, `_ts`), status `active`                                                                                                                                                                    |
@@ -38,6 +39,7 @@ Every proof below also checks each response against the OpenAPI contract,
 |                                     | `GET /cooks?deviceId=<device>&status=active`                                                                                                                                           | `200`; returns no cook after the stop                                                                                                                                                                                                                                                                        |
 |                                     | `POST /cooks` on the unregistered `acceptance-unowned-<runId>`                                                                                                                         | `403`; `error` is `DEVICE_NOT_OWNED`                                                                                                                                                                                                                                                                         |
 |                                     | `GET /cooks?deviceId=acceptance-unowned-<runId>`                                                                                                                                       | `200`; returns no cook (the refused start wrote nothing)                                                                                                                                                                                                                                                     |
+|                                     | always, even after a failed step: `DELETE /devices/{id}` for `acceptance-cook-<runId>` (HAR-85)                                                                                        | `204` (`204` or `404` if the registration's `201` never came back)                                                                                                                                                                                                                                           |
 | `device-twin.proof.ts`              | `POST /devices` registering the simulated device to the owner, as `signalr-live-temperature.proof.ts` does                                                                             | `201`, or `409 DEVICE_CONFLICT` then `GET /devices/{id}` `200`                                                                                                                                                                                                                                               |
 |                                     | `GET /cooks?deviceId=<simulated device>&status=active`, and `POST /cooks/{cookId}/stop` for each cook listed                                                                           | `200`, then `200` per stop (an earlier run's cook is cleared, so the device lock is free)                                                                                                                                                                                                                    |
 |                                     | `POST /cooks` with a new UUID `id` on the simulated device and `X-Request-ID: acceptance-twin-<runId>`                                                                                 | `201`, status `active`. A `503 DEVICE_TWIN_UPDATE_FAILED` fails, printing its fixed `reason`                                                                                                                                                                                                                 |
@@ -52,6 +54,11 @@ Every proof below also checks each response against the OpenAPI contract,
 |                                     | `PATCH /devices/{id}` with a new `location`                                                                                                                                            | `200`; the device carries the new location                                                                                                                                                                                                                                                                   |
 |                                     | `GET /devices/{id}` for the registered device                                                                                                                                          | `200`; the patched location reads back                                                                                                                                                                                                                                                                       |
 |                                     | `GET /devices/<random uuid>`                                                                                                                                                           | `404`                                                                                                                                                                                                                                                                                                        |
+|                                     | `DELETE /devices/{id}` for `acceptance-<runId>` as the peer, then `GET /devices/{id}` as the owner (HAR-85)                                                                            | `403` with `error: DEVICE_NOT_OWNED`, then `200`: the device is still the owner's                                                                                                                                                                                                                            |
+|                                     | `DELETE /devices/{id}` for `acceptance-<runId>`                                                                                                                                        | `204`                                                                                                                                                                                                                                                                                                        |
+|                                     | `GET /devices/{id}` for it                                                                                                                                                             | `404`                                                                                                                                                                                                                                                                                                        |
+|                                     | `DELETE /devices/{id}` for it again                                                                                                                                                    | `404` with `error: DEVICE_NOT_FOUND`                                                                                                                                                                                                                                                                         |
+|                                     | always, even after a failed step, unless the `204` above came back: `DELETE /devices/{id}` for `acceptance-<runId>`                                                                    | `204` (`204` or `404` if the registration's `201` never came back)                                                                                                                                                                                                                                           |
 | `recipes.proof.ts`                  | `POST /recipes` named `Acceptance recipe <runId>`, `meatType: pork`                                                                                                                    | `201`; body is an api-interfaces `Recipe` with the name sent, a server-generated UUID `id`, and `createdAt` equal to `updatedAt`                                                                                                                                                                             |
 |                                     | `GET /recipes/{id}` for the new recipe                                                                                                                                                 | `200`; the same recipe, owned by the creating caller                                                                                                                                                                                                                                                         |
 |                                     | `GET /recipes`                                                                                                                                                                         | `200`; the recipe is listed, and every listed recipe has the caller as owner                                                                                                                                                                                                                                 |
@@ -83,6 +90,7 @@ Every proof below also checks each response against the OpenAPI contract,
 |                                     | `GET /temperatures/history?deviceId=acceptance-temp-<runId>`                                                                                                                           | `200`; exactly `{ readings: [], limit: 100, hasMore: false }` (owned, nothing routed): no `continuationToken`, `total` or `offset`                                                                                                                                                                           |
 |                                     | the same with `&offset=0`                                                                                                                                                              | `400` with `error: VALIDATION_ERROR` (HAR-75: history pages by continuation token only); no RU header                                                                                                                                                                                                        |
 |                                     | `GET /temperatures/history?deviceId=acceptance-temp-unowned-<runId>`                                                                                                                   | `404` with `error: DEVICE_NOT_FOUND`                                                                                                                                                                                                                                                                         |
+|                                     | always, even after a failed step: `DELETE /devices/{id}` for `acceptance-temp-<runId>` (HAR-85)                                                                                        | `204` (`204` or `404` if the registration's `201` never came back)                                                                                                                                                                                                                                           |
 | `telemetry-roundtrip.proof.ts`      | `POST /devices` registering the simulated device (`ACCEPTANCE_SIM_DEVICE_ID`) as `Simulated smoker (acceptance)`                                                                       | `201`, or `409 DEVICE_CONFLICT` then `GET /devices/{id}` `200` (already the caller's); `409` then `404` fails (someone else owns it)                                                                                                                                                                         |
 |                                     | `simdevice --count 1` (one reading through IoT Hub, as the simulated device)                                                                                                           | exit `0` and exactly one JSON line on stdout, with a `timestamp` and `sentAt`                                                                                                                                                                                                                                |
 |                                     | `GET /temperatures/current/<simulated device>`, every 1 s for at most 120 s                                                                                                            | a `200` whose `timestamp` is the sent one (`404 NO_READINGS` or an older reading: poll again); `deviceId` is the device, `grillTemp` a number, no `_` key; prints `METRIC roundtrip-ms`                                                                                                                      |
@@ -112,19 +120,39 @@ readings query for `NO_READINGS`), and both `GET /temperatures/history`
 responses (the ownership point read for the `404`; that plus the count and page
 queries for the empty `200`). The users figure includes the devices owner query that fills
 `User.devices`. Every recipes response carries one too, the `DELETE` `204` and the
-`404 RECIPE_NOT_FOUND` after it included (a point delete and a point read). A response without
+`404 RECIPE_NOT_FOUND` after it included (a point delete and a point read). So
+does every `DELETE /devices/{id}`: the `204` (a point read and a point delete),
+the peer's `403` and the `404`s (a point read). A response without
 it fails the proof. Responses that make no Cosmos call, such as a 401, carry no
 header.
 
-Acceptance cooks and devices are not cleaned up: there is no delete route for
-either yet (no `DELETE /cooks`, no `DELETE /devices`). Each run uses its own
-device ids. `devices.proof.ts` registers `acceptance-<runId>`.
+Each run uses its own device ids, and deletes them again (HAR-85).
+`devices.proof.ts` registers `acceptance-<runId>`.
 `cooks-lifecycle.proof.ts` registers `acceptance-cook-<runId>` and runs the
 cook lifecycle on it, because a cook may only start on a device the caller
 owns (HAR-26); a fresh device per run also means runs never trip the
 one-active-cook-per-device rule. Both register a run-unique name, so runs never
 collide on device id or on the `(userId, name)` pair. The cooks proof's last
 two steps use `acceptance-unowned-<runId>`, which is never registered.
+
+Each of the three groups that registers a device ends with a step marked
+`always`, which deletes it even when an earlier step failed. `devices.proof.ts`
+deletes its device as part of the proof (the peer's `403`, the owner's `204`,
+then `404`s), so its last step only runs when that did not happen. Cooks are not
+deleted (there is no `DELETE /cooks`): a deleted device's cooks stay in the
+owner's history, and its readings expire on the `temperatures` container TTL.
+
+A run that is killed (a job timeout, a cancelled deploy) cannot run those
+steps. So the first group, `acceptance-device-sweep.proof.ts` (its file name
+sorts first), deletes every `acceptance-*` device the owner holds before any
+other proof registers one. It never deletes the simulated or chart device,
+whose ids do not start with `acceptance-` and which it also excludes by id.
+Dev deploys run one at a time (the `app-deploy-dev` concurrency group), so no
+other CI run's devices are in flight; a local run signs in as you, a different
+owner, and sweeps only your `acceptance-*` devices. The three `METRIC
+acceptance-devices-*` lines in the run summary give the owner's device count
+before the sweep, how many it deleted, and the count after. Before HAR-85 the
+acceptance owner had 98 devices.
 
 `temperatures.proof.ts` registers its own device, `acceptance-temp-<runId>`, and
 is read-only otherwise. Telemetry only ever arrives through IoT Hub, and the
@@ -244,8 +272,9 @@ both.
   SignalR. The owner is the run's caller; the peer is the zero-role acceptance
   peer (`ACCEPTANCE_PEER_BEARER_TOKEN`), which a proof sends as with
   `api.request({ ..., as: 'peer' })`. The peer's `POST /negotiate` carries
-  `?deviceId=<simulated device>`, which negotiate must ignore: it adds a caller
-  only to the groups of devices it owns. The peer's connection records every
+  `?deviceId=<simulated device>`, which negotiate must ignore: it mints a token
+  for the caller's userId only, and every reading goes to the device owner's
+  userId (HAR-81). The peer's connection records every
   invocation at the protocol, before dispatch, so a message on a target nobody
   handles still counts as a leak. Silence is judged after a 15 s grace once the
   owner has received the same event, so a late leak is not missed. A leak fails
@@ -308,8 +337,9 @@ The acceptance profile is not cleaned up either: there is no `DELETE /users/me`.
 It is keyed by the caller's identity, so every run writes the same document,
 the CI service principal's profile. The first run creates it (`201`) and later
 runs replace it (`200`); each run writes its own `Acceptance <runId>` name, so
-the read-back proves that run's write. Its `devices` lists every acceptance
-device the identity has registered.
+the read-back proves that run's write. Its `devices` lists the devices the
+identity holds at that moment: the standing simulated and chart devices, plus
+the run-unique devices of groups that have not deleted theirs yet.
 
 ## Output
 
@@ -559,12 +589,14 @@ apps/api/acceptance/
 ├── live.acceptance.ts          # entry point for `nx run api:acceptance`
 ├── lib/
 │   ├── checks.ts               # shared response checks (system properties, error code)
+│   ├── devices.ts              # HAR-85: DELETE /devices/{id} and the always-run cleanup step
 │   ├── contract.ts             # HAR-77: openapi.yaml loaded and compiled; response and hub message checks
 │   ├── proof.ts                # the proof contract: defineProofs, AcceptanceApi
 │   ├── runner.ts               # env check, HTTP client, simdevice, redaction, output, RU table
 │   ├── signalr.ts              # SignalR helpers, including expectHubMessage
 │   └── telemetry.ts            # simulated-device registration and send helpers
 ├── proofs/
+│   ├── acceptance-device-sweep.proof.ts   # HAR-85: runs first; deletes stale acceptance-* devices
 │   ├── cooks-lifecycle.proof.ts
 │   ├── cooks-unauthenticated.proof.ts
 │   ├── device-twin.proof.ts
