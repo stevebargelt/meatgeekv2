@@ -59,7 +59,7 @@ BOOTSTRAP_SUITE_SHELL="${BOOTSTRAP_SUITE_SHELL:-bash}"
 # stopped executing, which is precisely the defect this guard exists to catch;
 # lowering the floor re-hides it. If assertions were intentionally REMOVED, say
 # so in the commit message and lower it there — never as a build fix.
-EXPECTED_MIN_BOOTSTRAP_TEST=348                  # bootstrap.test.sh
+EXPECTED_MIN_BOOTSTRAP_TEST=383                  # bootstrap.test.sh
 EXPECTED_MIN_OIDC_SUBJECT_INTEGRATION=78         # bootstrap.oidc-subject.integration.test.sh
 
 # Bash 3.2 has no associative arrays — a case lookup is the portable form.
