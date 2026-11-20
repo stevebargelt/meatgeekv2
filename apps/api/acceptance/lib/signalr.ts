@@ -53,6 +53,71 @@ export async function within<T>(promise: Promise<T>, ms: number, what: string): 
   }
 }
 
+/**
+ * HAR-81: the waits before each retry of a SignalR client `start()` the service
+ * refused with 429 — so up to 3 retries, 4 attempts in all. The dev SignalR is
+ * Free_F1; its client negotiate answers 429 while the service is at a limit
+ * (20 concurrent connections, or the daily message quota), and such a refusal
+ * can clear in seconds. The self-test shortens the waits.
+ */
+export const START_RETRY: { delaysMs: readonly number[] } = { delaysMs: [1_000, 2_000, 4_000] };
+
+/** What {@link startWithRetry} needs of a client: a `HubConnection` has it. */
+export interface Startable {
+  start(): Promise<void>;
+}
+
+/**
+ * True when `error` is the client's negotiation failure for a 429 answer. The
+ * client throws `HttpError` (with `statusCode`) or, from negotiate, an Error whose
+ * message ends `…: Status code '429'`.
+ */
+export function isThrottled(error: unknown): boolean {
+  if (error !== null && typeof error === 'object' && 'statusCode' in error) {
+    if ((error as { statusCode?: unknown }).statusCode === 429) {
+      return true;
+    }
+  }
+  return error instanceof Error && /Status code '429'/.test(error.message);
+}
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+/**
+ * HAR-81: `connection.start()`, each attempt bounded by
+ * {@link CONNECT_TIMEOUT_MS}. A 429 refusal is retried after each wait in
+ * {@link START_RETRY} (1 s, 2 s, 4 s); any other failure, a timeout included,
+ * fails at once. A failure is a ProofFailure `<what> failed: <masked error>`,
+ * plus `(after <n> attempts)` once it was retried, so a 429 that never clears
+ * still names the 429. A `HubConnection` whose start failed is Disconnected and
+ * starts again; its `onclose` handlers do not run for a failed start.
+ *
+ * Resolves with the number of attempts it took.
+ */
+export async function startWithRetry(
+  connection: Startable,
+  what: string,
+  secrets: readonly string[],
+  wait: (ms: number) => Promise<void> = sleep
+): Promise<number> {
+  const delays = START_RETRY.delaysMs;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await within(connection.start(), CONNECT_TIMEOUT_MS, what);
+      return attempt;
+    } catch (error) {
+      if (error instanceof ProofFailure) {
+        throw error;
+      }
+      if (!isThrottled(error) || attempt > delays.length) {
+        const attempts = attempt > 1 ? ` (after ${attempt} attempts)` : '';
+        throw new ProofFailure(`${what} failed${attempts}: ${describeError(error, secrets)}`);
+      }
+      await wait(delays[attempt - 1]);
+    }
+  }
+}
+
 /** The error's name and first line, with the url and token masked. */
 export function describeError(error: unknown, secrets: readonly string[]): string {
   const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);

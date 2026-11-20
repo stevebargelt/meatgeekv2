@@ -21,6 +21,7 @@ import {
   describeError,
   expectHubMessage,
   negotiateFailureMessage,
+  startWithRetry,
   within,
 } from '../lib/signalr';
 import type { SentReading } from '../lib/telemetry';
@@ -40,7 +41,8 @@ import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/tel
  *
  *   1. the simulated device is registered to the owner (as proof 7a does);
  *   2. the owner negotiates and connects, with handlers on `temperature`,
- *      `cook_started` and `cook_stopped`;
+ *      `cook_started` and `cook_stopped` (a 429 from the service is retried,
+ *      HAR-81, as is the peer's in step 3);
  *   3. the peer negotiates with `?deviceId=<simulated device>`, which must be
  *      ignored: 200, then it connects with the same three handlers. Every
  *      invocation the peer's connection receives, on ANY target, is recorded
@@ -196,14 +198,8 @@ export default defineProofs('signalr isolation', () => {
     side.hub = connection;
 
     await stopOnFailure(async () => {
-      try {
-        await within(connection.start(), CONNECT_TIMEOUT_MS, `${who} start()`);
-      } catch (error) {
-        if (error instanceof ProofFailure) {
-          throw error;
-        }
-        throw new ProofFailure(`${who} start() failed: ${describeError(error, secrets())}`);
-      }
+      // HAR-81: a 429 from the service is retried (1 s, 2 s, 4 s).
+      await startWithRetry(connection, `${who} start()`, secrets());
       if (connection.state !== HubConnectionState.Connected) {
         throw new ProofFailure(
           `after start() the ${who} connection is ${connection.state}, not Connected`

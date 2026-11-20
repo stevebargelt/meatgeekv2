@@ -3,7 +3,12 @@ import { HubConnectionBuilder, HubConnectionState, LogLevel } from '@microsoft/s
 import type { AcceptanceApi } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { NegotiateBody } from '../lib/signalr';
-import { CONNECT_TIMEOUT_MS, describeError, negotiateFailureMessage, within } from '../lib/signalr';
+import {
+  CONNECT_TIMEOUT_MS,
+  negotiateFailureMessage,
+  startWithRetry,
+  within,
+} from '../lib/signalr';
 
 /**
  * HAR-57 (MG-30) — POST /negotiate hands the caller a working SignalR
@@ -14,8 +19,8 @@ import { CONNECT_TIMEOUT_MS, describeError, negotiateFailureMessage, within } fr
  *      identity). It reads the caller's devices, so it reports its RU.
  *   2. A `@microsoft/signalr` client opens a connection with that url and token
  *      (`accessTokenFactory`), and `start()` resolves: the service accepted the
- *      token the API minted.
- *   3. The connection stops cleanly.
+ *      token the API minted. A 429 from the service is retried (HAR-81).
+ *   3. The connection stops cleanly; on any failure it is stopped anyway.
  *
  * Nothing here prints the url or the token, and the client's own logging is
  * off, so neither can reach the run output.
@@ -67,22 +72,21 @@ export default defineProofs('signalr negotiate', () => {
           .build();
 
         try {
-          await within(hub.start(), CONNECT_TIMEOUT_MS, 'start()');
-        } catch (error) {
-          await hub.stop().catch(() => undefined);
-          if (error instanceof ProofFailure) {
-            throw error;
+          // HAR-81: a 429 from the service is retried (1 s, 2 s, 4 s).
+          await startWithRetry(hub, 'start()', [url, accessToken]);
+          if (hub.state !== HubConnectionState.Connected) {
+            throw new ProofFailure(`after start() the connection is ${hub.state}, not Connected`);
           }
-          throw new ProofFailure(`start() failed: ${describeError(error, [url, accessToken])}`);
-        }
-        if (hub.state !== HubConnectionState.Connected) {
-          await hub.stop().catch(() => undefined);
-          throw new ProofFailure(`after start() the connection is ${hub.state}, not Connected`);
-        }
-
-        await within(hub.stop(), CONNECT_TIMEOUT_MS, 'stop()');
-        if ((hub.state as HubConnectionState) !== HubConnectionState.Disconnected) {
-          throw new ProofFailure(`after stop() the connection is ${hub.state}, not Disconnected`);
+          await within(hub.stop(), CONNECT_TIMEOUT_MS, 'stop()');
+          if ((hub.state as HubConnectionState) !== HubConnectionState.Disconnected) {
+            throw new ProofFailure(`after stop() the connection is ${hub.state}, not Disconnected`);
+          }
+        } finally {
+          // Every path leaves the client stopped (HAR-81): a failed start, a
+          // wrong state, or a stop() that timed out.
+          if ((hub.state as HubConnectionState) !== HubConnectionState.Disconnected) {
+            await within(hub.stop(), CONNECT_TIMEOUT_MS, 'stop()').catch(() => undefined);
+          }
         }
       },
     },

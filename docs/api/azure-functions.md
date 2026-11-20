@@ -35,15 +35,16 @@ yet wired.
 | `deleteRecipe`           | HTTP `DELETE` | `recipes/{id}`                    | Delete one of the caller's recipes                            |
 | `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                   |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
-| `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its `device-{id}` group       |
+| `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each device's newest reading to `device-{id}` |
 
 `broadcastTemperature` is the live-reading producer. IoT Hub routes every device
 message to the `temperature-data` event hub (`eventhub-realtime-route` in
 `apps/infrastructure/modules/iot-hub/main.tf`); the trigger reads it in batches
 (`cardinality: 'many'`) on the API's own consumer group,
 `%TEMPERATURE_BROADCAST_CONSUMER_GROUP%` (`api-broadcast`), through the
-identity-based `IOTHUB_EVENTS` connection. Each event becomes one SignalR message
-on the shared output binding (hub `temperatureHub`):
+identity-based `IOTHUB_EVENTS` connection. Each batch sends one SignalR message
+per device in it, carrying that device's newest reading, on the shared output
+binding (hub `temperatureHub`):
 
 ```json
 {
@@ -60,10 +61,20 @@ on the shared output binding (hub `temperatureHub`):
   message. `enqueuedTimeUtc` is the Event Hub enqueued time, so a client can
   measure delivery delay.
 - The body may arrive as an object, a JSON string or bytes; all three are decoded.
+- **The push is coalesced (HAR-81).** Per batch, only the newest reading of each
+  device is sent, newest by its `enqueuedTimeUtc` (on a tie, the later event in
+  the batch). Every reading is still stored, by IoT Hub's own `cosmos-storage`
+  route; only the live push is coalesced, and the message shape does not change.
+  A real device sends every 5 s, so a batch normally holds one reading per device
+  and nothing changes; a burst, such as the acceptance `telemetry-volume` top-up,
+  costs one message per device per batch instead of one per reading. That keeps
+  the dev SignalR (`Free_F1`, 20,000 messages a day) inside its daily quota.
 - An event with no device id, a non-JSON body, or no timestamp is skipped and
-  counted, never thrown, so one bad event does not fail or replay the batch. Each
-  batch logs one line, `broadcastTemperature sent=<n> skipped=<m>`, with no ids
-  and no bodies.
+  counted, never thrown, so one bad event does not fail or replay the batch, and
+  never displaces a good reading. Each batch logs one line,
+  `broadcastTemperature sent=<n> coalesced=<c> skipped=<m>` (`coalesced`: good
+  readings not sent because a newer one of the same device was), with no ids and
+  no bodies.
 - negotiate (HAR-57) puts each user in the `device-{id}` groups of the devices
   they own, so a reading reaches only its device's owners. Nothing is sent to
   `cook-` groups. It adds at most 4 groups at a time, and every SignalR REST

@@ -21,10 +21,23 @@ import { signalROutput, SignalRGroupMessage, TEMPERATURE } from './envelope';
  * {@link toTemperatureReading}, the same mapper GET /temperatures/current uses,
  * so the pushed reading is exactly what that endpoint would return.
  *
+ * COALESCED PUSH (HAR-81). Each batch pushes only the newest reading of each
+ * device, newest by the Event Hub enqueued time the message carries
+ * (`enqueuedTimeUtc`); on a tie the later event in the batch wins. Every reading
+ * is still stored (IoT Hub's own `cosmos-storage` route writes it; nothing here
+ * stores anything), only the live push is coalesced. A real device sends every
+ * 5 s, so a batch normally holds one reading per device and nothing changes for
+ * it; a burst (the acceptance top-up sends thousands of readings in minutes)
+ * costs one SignalR message per device per batch instead of one per reading,
+ * which keeps the dev SignalR (Free_F1, 20,000 messages a day) inside its quota.
+ * The `temperature` message itself is unchanged.
+ *
  * BAD EVENTS. An event with no device id, or one the mapper rejects, is skipped
  * and counted. Nothing here throws on a bad event: a throw fails the whole batch,
  * and the host would replay it, good readings included. The one log line per
- * batch carries counts only — no device ids, no bodies.
+ * batch carries counts only — no device ids, no bodies: `sent` messages, the
+ * good readings `coalesced` into a newer one of the same device, and `skipped`
+ * bad events.
  */
 
 /** The event hub IoT Hub's realtime route writes to. Terraform-owned name. */
@@ -129,7 +142,8 @@ function arrayOrEmpty(value: unknown): unknown[] {
 /**
  * The `cardinality: 'many'` handler: `events[i]` pairs with
  * `triggerMetadata.systemPropertiesArray[i]` and
- * `triggerMetadata.enqueuedTimeUtcArray[i]`.
+ * `triggerMetadata.enqueuedTimeUtcArray[i]`. Sends one message per device in the
+ * batch, carrying that device's newest reading.
  */
 export async function broadcastTemperatureHandler(
   events: unknown,
@@ -140,7 +154,9 @@ export async function broadcastTemperatureHandler(
   const systemPropertiesArray = arrayOrEmpty(metadata['systemPropertiesArray']);
   const enqueuedTimeUtcArray = arrayOrEmpty(metadata['enqueuedTimeUtcArray']);
 
-  const messages: SignalRGroupMessage[] = [];
+  // The newest message per group (= per device), in first-seen order.
+  const newest = new Map<string, { message: SignalRGroupMessage; enqueuedMs: number }>();
+  let readings = 0;
   let skipped = 0;
   batch.forEach((body, index) => {
     let message: SignalRGroupMessage | null = null;
@@ -149,13 +165,23 @@ export async function broadcastTemperatureHandler(
     } catch {
       message = null;
     }
-    if (message) {
-      messages.push(message);
-    } else {
+    if (!message) {
       skipped += 1;
+      return;
+    }
+    readings += 1;
+    // toGroupMessage only returns a message with a parseable ISO enqueuedTimeUtc.
+    const enqueuedMs = Date.parse(message.arguments[0].enqueuedTimeUtc);
+    const current = newest.get(message.groupName);
+    if (!current || enqueuedMs >= current.enqueuedMs) {
+      newest.set(message.groupName, { message, enqueuedMs });
     }
   });
 
+  const messages = [...newest.values()].map(entry => entry.message);
   context.extraOutputs.set(signalROutput, messages);
-  context.log(`broadcastTemperature sent=${messages.length} skipped=${skipped}`);
+  context.log(
+    `broadcastTemperature sent=${messages.length} coalesced=${readings - messages.length} ` +
+      `skipped=${skipped}`
+  );
 }

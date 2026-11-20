@@ -81,7 +81,7 @@ const T1 = '2026-11-19T10:00:05.000Z';
 const T2 = '2026-11-19T10:00:10.000Z';
 
 describe('broadcastTemperatureHandler', () => {
-  it('sends a 3-event, 2-device batch to device-<id> from the system property, not the body', async () => {
+  it('sends a 3-event, 2-device batch to device-<id> from the system property, not the body, one message per device', async () => {
     const events: TestEvent[] = [
       {
         deviceId: 'smoker-a',
@@ -109,20 +109,14 @@ describe('broadcastTemperatureHandler', () => {
     expect(captured.sets).toHaveLength(1);
     expect(captured.sets[0].output).toBe(signalROutput);
 
+    // HAR-81: one message per device, smoker-a's carrying its newer reading.
     const messages = captured.messages();
-    expect(messages).toHaveLength(3);
-    expect(messages.map(m => m.groupName)).toEqual([
-      'device-smoker-a',
-      'device-smoker-b',
-      'device-smoker-a',
-    ]);
+    expect(messages).toHaveLength(2);
+    expect(messages.map(m => m.groupName)).toEqual(['device-smoker-a', 'device-smoker-b']);
     expect(messages.every(m => m.target === TEMPERATURE)).toBe(true);
     expect(TEMPERATURE).toBe('temperature');
-    expect(messages.map(m => m.arguments[0].deviceId)).toEqual([
-      'smoker-a',
-      'smoker-b',
-      'smoker-a',
-    ]);
+    expect(messages.map(m => m.arguments[0].deviceId)).toEqual(['smoker-a', 'smoker-b']);
+    expect(messages.map(m => m.arguments[0].timestamp)).toEqual([T2, T1]);
     // Group-scoped only: no userId on a reading message.
     expect(messages.every(m => !('userId' in m))).toBe(true);
   });
@@ -178,7 +172,7 @@ describe('broadcastTemperatureHandler', () => {
         enqueuedTimeUtc: 'Thu, 19 Nov 2026 10:00:05 GMT',
         body: { timestamp: T0 },
       },
-      { deviceId: 'smoker-a', iothubEnqueuedTime: T2, body: { timestamp: T0 } },
+      { deviceId: 'smoker-b', iothubEnqueuedTime: T2, body: { timestamp: T0 } },
     ]);
     await run;
     expect(captured.messages().map(m => m.arguments[0].enqueuedTimeUtc)).toEqual([T1, T2]);
@@ -189,13 +183,13 @@ describe('broadcastTemperatureHandler', () => {
     const { run, captured } = invoke([
       { deviceId: 'smoker-a', iothubEnqueuedTime: T0, enqueuedTimeUtc: T0, body: reading },
       {
-        deviceId: 'smoker-a',
+        deviceId: 'smoker-b',
         iothubEnqueuedTime: T0,
         enqueuedTimeUtc: T0,
         body: JSON.stringify(reading),
       },
       {
-        deviceId: 'smoker-a',
+        deviceId: 'smoker-c',
         iothubEnqueuedTime: T0,
         enqueuedTimeUtc: T0,
         body: Buffer.from(JSON.stringify(reading), 'utf8'),
@@ -204,9 +198,13 @@ describe('broadcastTemperatureHandler', () => {
     await run;
 
     const payloads = captured.messages().map(m => m.arguments[0]);
-    expect(payloads).toHaveLength(3);
-    const expected = { deviceId: 'smoker-a', ...reading, enqueuedTimeUtc: T0 };
-    expect(payloads).toEqual([expected, expected, expected]);
+    expect(payloads).toEqual(
+      ['smoker-a', 'smoker-b', 'smoker-c'].map(deviceId => ({
+        deviceId,
+        ...reading,
+        enqueuedTimeUtc: T0,
+      }))
+    );
   });
 
   it('decodes a Buffer that is a slice of a larger allocation', () => {
@@ -248,7 +246,7 @@ describe('broadcastTemperatureHandler', () => {
       'device-smoker-a',
       'device-smoker-b',
     ]);
-    expect(captured.logs).toEqual(['broadcastTemperature sent=2 skipped=4']);
+    expect(captured.logs).toEqual(['broadcastTemperature sent=2 coalesced=0 skipped=4']);
   });
 
   it('logs one sanitized line per batch: counts only, no ids and no bodies', async () => {
@@ -263,7 +261,7 @@ describe('broadcastTemperatureHandler', () => {
     ]);
     await run;
 
-    expect(captured.logs).toEqual(['broadcastTemperature sent=1 skipped=1']);
+    expect(captured.logs).toEqual(['broadcastTemperature sent=1 coalesced=0 skipped=1']);
     const all = captured.logs.join('\n');
     expect(all).not.toContain('secret');
   });
@@ -284,8 +282,86 @@ describe('broadcastTemperatureHandler', () => {
 
     expect(sets).toEqual([[], []]);
     expect(logs).toEqual([
-      'broadcastTemperature sent=0 skipped=3',
-      'broadcastTemperature sent=0 skipped=0',
+      'broadcastTemperature sent=0 coalesced=0 skipped=3',
+      'broadcastTemperature sent=0 coalesced=0 skipped=0',
     ]);
+  });
+  describe('HAR-81: coalesces the push to the newest reading per device', () => {
+    /** Reading `i` of `deviceId`, enqueued `i` seconds after T0. */
+    const reading = (deviceId: string, i: number): TestEvent => {
+      const at = new Date(Date.parse(T0) + i * 1000).toISOString();
+      return {
+        deviceId,
+        iothubEnqueuedTime: at,
+        enqueuedTimeUtc: at,
+        body: { timestamp: at, grillTemp: 200 + i },
+      };
+    };
+    const secondsAfterT0 = (seconds: number) =>
+      new Date(Date.parse(T0) + seconds * 1000).toISOString();
+
+    it('a batch of 50 readings for A and 3 for B sends exactly 2 messages, each the newest of its device', async () => {
+      const a = Array.from({ length: 50 }, (_, i) => reading('smoker-a', i));
+      const b = Array.from({ length: 3 }, (_, i) => reading('smoker-b', i * 10));
+      // Interleaved, and out of order, as a burst across partitions can arrive.
+      const events = [...a.slice(0, 20), b[2], ...a.slice(40), b[0], ...a.slice(20, 40), b[1]];
+      expect(events).toHaveLength(53);
+      const { run, captured } = invoke(events);
+      await run;
+
+      const messages = captured.messages();
+      expect(messages).toHaveLength(2);
+      expect(messages.map(m => m.groupName)).toEqual(['device-smoker-a', 'device-smoker-b']);
+      expect(messages.every(m => m.target === TEMPERATURE)).toBe(true);
+      expect(messages[0].arguments[0]).toEqual({
+        deviceId: 'smoker-a',
+        timestamp: secondsAfterT0(49),
+        grillTemp: 249,
+        enqueuedTimeUtc: secondsAfterT0(49),
+      });
+      expect(messages[1].arguments[0]).toEqual({
+        deviceId: 'smoker-b',
+        timestamp: secondsAfterT0(20),
+        grillTemp: 220,
+        enqueuedTimeUtc: secondsAfterT0(20),
+      });
+      expect(captured.logs).toEqual(['broadcastTemperature sent=2 coalesced=51 skipped=0']);
+    });
+
+    it('still skips and counts bad events, and a bad event never displaces a good reading', async () => {
+      const events: TestEvent[] = [
+        reading('smoker-a', 1),
+        reading('smoker-a', 5),
+        // Newer than every good reading, but bad: no hub-stamped device id …
+        { enqueuedTimeUtc: secondsAfterT0(9), body: { deviceId: 'smoker-a', timestamp: T2 } },
+        // … a non-JSON body …
+        { deviceId: 'smoker-a', enqueuedTimeUtc: secondsAfterT0(9), body: 'not json {' },
+        // … and no timestamp anywhere.
+        { deviceId: 'smoker-b', enqueuedTimeUtc: secondsAfterT0(9), body: { grillTemp: 1 } },
+        reading('smoker-b', 2),
+        reading('smoker-a', 3),
+      ];
+      const { run, captured } = invoke(events);
+      await expect(run).resolves.toBeUndefined();
+
+      expect(captured.messages().map(m => [m.groupName, m.arguments[0].timestamp])).toEqual([
+        ['device-smoker-a', secondsAfterT0(5)],
+        ['device-smoker-b', secondsAfterT0(2)],
+      ]);
+      expect(captured.logs).toEqual(['broadcastTemperature sent=2 coalesced=2 skipped=3']);
+    });
+
+    it('picks the newest by enqueued time, not body timestamp, and the later event on a tie', async () => {
+      const { run, captured } = invoke([
+        // Enqueued later, but with an older body timestamp: it is still the newest.
+        { deviceId: 'smoker-a', enqueuedTimeUtc: T2, body: { timestamp: T0, grillTemp: 1 } },
+        { deviceId: 'smoker-a', enqueuedTimeUtc: T1, body: { timestamp: T2, grillTemp: 2 } },
+        { deviceId: 'smoker-b', enqueuedTimeUtc: T1, body: { timestamp: T1, grillTemp: 3 } },
+        { deviceId: 'smoker-b', enqueuedTimeUtc: T1, body: { timestamp: T1, grillTemp: 4 } },
+      ]);
+      await run;
+
+      expect(captured.messages().map(m => m.arguments[0].grillTemp)).toEqual([1, 4]);
+    });
   });
 });

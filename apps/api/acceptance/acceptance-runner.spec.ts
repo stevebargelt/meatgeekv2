@@ -27,7 +27,7 @@ import { Contract } from './lib/contract';
 import type { AcceptanceApi, ProofGroup, SimDeviceOptions } from './lib/proof';
 import { ProofFailure } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
-import { expectHubMessage } from './lib/signalr';
+import { expectHubMessage, START_RETRY } from './lib/signalr';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
@@ -134,6 +134,9 @@ interface StubOptions {
   readonly simTopupNeverRouted?: boolean;
   /** HAR-57: the stub's SignalR endpoint refuses the client token (401). */
   readonly signalRRejectsToken?: boolean;
+  /** HAR-81: the stub's client negotiate answers 429 to the first this-many
+   *  calls of the run, as Free_F1 does at its limit. */
+  readonly signalRThrottles?: number;
   /** HAR-59: POST /negotiate answers 503 SIGNALR_UNAVAILABLE with this `reason`. */
   readonly negotiateUnavailableReason?: string;
   /** HAR-63: what the stub pushes on target `temperature` to each open SignalR
@@ -315,6 +318,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   /** HAR-75: the timestamp of the last reading the last top-up "sent". */
   let topupLast: string | undefined;
   const signalRRequests: Stub['signalRRequests'] = [];
+  /** HAR-81: client negotiate calls so far, for `signalRThrottles`. */
+  let throttled = 0;
   // HAR-57: a minimal Azure SignalR client endpoint, long polling only. Per
   // connection token: messages queued for the client, the poll being held, and
   // whether the first (initialising) poll has been answered.
@@ -421,6 +426,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           return;
         }
         if (request.method === 'POST' && url.pathname === '/client/negotiate') {
+          throttled += 1;
+          if (throttled <= (options.signalRThrottles ?? 0)) {
+            response.writeHead(429, 'Too Many Requests');
+            response.end();
+            return;
+          }
           const token = `conn-${signalRConnections.size + 1}`;
           signalRConnections.set(token, { user, outbox: [], started: false, closed: false });
           response.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1123,6 +1134,7 @@ async function runAgainstStub(
 const realPoll = { ...ROUNDTRIP_POLL };
 const realLiveWait = { ...LIVE_WAIT };
 const realIsolationWait = { ...ISOLATION_WAIT };
+const realStartRetry = { ...START_RETRY };
 const realTwinPoll = { ...TWIN_POLL };
 const realVolume = { ...VOLUME };
 
@@ -1136,6 +1148,8 @@ beforeAll(() => {
   // HAR-67: 90 s for the owner's message and a 15 s grace for the peer live.
   ISOLATION_WAIT.capMs = 300;
   ISOLATION_WAIT.graceMs = 100;
+  // HAR-81: a 429 on connect is retried after 1 s, 2 s and 4 s live.
+  START_RETRY.delaysMs = [5, 10, 20];
   // HAR-68: the twin reading is polled every 2 s for up to 90 s live.
   TWIN_POLL.intervalMs = 5;
   TWIN_POLL.capMs = 300;
@@ -1154,6 +1168,7 @@ afterAll(() => {
   Object.assign(ROUNDTRIP_POLL, realPoll);
   Object.assign(LIVE_WAIT, realLiveWait);
   Object.assign(ISOLATION_WAIT, realIsolationWait);
+  Object.assign(START_RETRY, realStartRetry);
   Object.assign(TWIN_POLL, realTwinPoll);
   Object.assign(VOLUME, realVolume);
   rmSync(fakeDir, { recursive: true, force: true });
@@ -1527,6 +1542,36 @@ describe('live acceptance runner (against an in-process stub)', () => {
     }
     expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
     expect(result.output).not.toContain('/client/');
+  });
+
+  it('(a) HAR-81: a SignalR connect the service refuses with 429 is retried, and every client is still stopped', async () => {
+    // Three 429s: the first connect (the isolation owner) needs all three
+    // retries, and connects on its fourth attempt.
+    const result = await runAgainstStub({ signalRThrottles: 3 });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toContain('PASS signalr isolation › the owner negotiates and connects');
+    expect(result.output).toContain('PASS signalr live temperature › POST /negotiate returns 200');
+    expect(result.output).toContain('PASS signalr negotiate › a SignalR client connects');
+    const calls = stub!.signalRRequests.map(r => `${r.method} ${r.path.split('?')[0]}`);
+    const negotiates = calls.filter(call => call === 'POST /client/negotiate').length;
+    const stops = calls.filter(call => call === 'DELETE /client/').length;
+    // 3 refused + one each for the owner, the peer, live temperature and negotiate.
+    expect(negotiates).toBe(3 + 4);
+    expect(stops).toBe(4);
+  });
+
+  it('(b) HAR-81: a 429 that never clears fails the connect after 4 attempts, naming the 429', async () => {
+    const result = await runAgainstStub({ signalRThrottles: 1_000 });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(3);
+    for (const failure of result.failures) {
+      expect(failure).toContain('start() failed (after 4 attempts)');
+      expect(failure).toContain("Status code '429'");
+    }
+    const calls = stub!.signalRRequests.map(r => `${r.method} ${r.path.split('?')[0]}`);
+    expect(calls).toEqual(Array.from({ length: 3 * 4 }, () => 'POST /client/negotiate'));
   });
 
   it('(a) runs the recipes proof in order and deletes the recipe it created', async () => {
