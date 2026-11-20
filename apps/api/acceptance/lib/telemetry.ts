@@ -1,7 +1,7 @@
 import type { Device, RegisterDeviceRequest } from '@meatgeekv2/api-interfaces';
 
 import { expectErrorCode } from './checks';
-import type { AcceptanceApi } from './proof';
+import type { AcceptanceApi, SimDeviceRun } from './proof';
 import { ProofFailure } from './proof';
 
 /**
@@ -60,6 +60,38 @@ export async function registerSimulatedDevice(api: AcceptanceApi): Promise<void>
 }
 
 /**
+ * Fail unless `message`, one stdout line of simdevice, is a reading sent as the
+ * simulated device with a date `timestamp` and `sentAt`; return those two.
+ */
+export function parseSentReading(api: AcceptanceApi, message: unknown): SentReading {
+  const line = message as Record<string, unknown> | null;
+  const timestamp = line?.['timestamp'];
+  const sentAt = line?.['sentAt'];
+  if (!isDate(timestamp) || !isDate(sentAt)) {
+    throw new ProofFailure(
+      `simdevice line has timestamp ${JSON.stringify(timestamp)} and sentAt ` +
+        `${JSON.stringify(sentAt)}; both must be dates`
+    );
+  }
+  if (line?.['deviceId'] !== api.simulatedDeviceId) {
+    throw new ProofFailure(
+      `simdevice sent as ${JSON.stringify(line?.['deviceId'])}, not ${api.simulatedDeviceId}`
+    );
+  }
+  return { timestamp, sentAt };
+}
+
+/** Fail unless a simdevice run exited 0, naming its exit and first stderr line. */
+export function expectSimDeviceExit0(run: SimDeviceRun): void {
+  if (run.exitCode !== 0) {
+    throw new ProofFailure(
+      `simdevice exited ${run.exitCode ?? '(killed)'}, expected 0` +
+        (run.stderrFirstLine ? `: ${run.stderrFirstLine}` : '')
+    );
+  }
+}
+
+/**
  * Send one reading as the simulated device (`simdevice --count 1`) and return
  * what its one stdout line reports. Fails unless simdevice exits 0 and prints
  * exactly one JSON line, for the simulated device, with a date `timestamp` and
@@ -67,31 +99,12 @@ export async function registerSimulatedDevice(api: AcceptanceApi): Promise<void>
  */
 export async function sendOneReading(api: AcceptanceApi): Promise<SentReading> {
   const run = await api.runSimDevice(['--count', '1']);
-  if (run.exitCode !== 0) {
-    throw new ProofFailure(
-      `simdevice exited ${run.exitCode ?? '(killed)'}, expected 0` +
-        (run.stderrFirstLine ? `: ${run.stderrFirstLine}` : '')
-    );
-  }
+  expectSimDeviceExit0(run);
   if (run.messages.length !== 1 || run.unparsedLines > 0) {
     throw new ProofFailure(
       `simdevice printed ${run.messages.length} JSON line(s) and ` +
         `${run.unparsedLines} other line(s) on stdout, expected exactly one JSON line`
     );
   }
-  const message = run.messages[0] as Record<string, unknown> | null;
-  const timestamp = message?.['timestamp'];
-  const sentAt = message?.['sentAt'];
-  if (!isDate(timestamp) || !isDate(sentAt)) {
-    throw new ProofFailure(
-      `simdevice line has timestamp ${JSON.stringify(timestamp)} and sentAt ` +
-        `${JSON.stringify(sentAt)}; both must be dates`
-    );
-  }
-  if (message?.['deviceId'] !== api.simulatedDeviceId) {
-    throw new ProofFailure(
-      `simdevice sent as ${JSON.stringify(message?.['deviceId'])}, not ${api.simulatedDeviceId}`
-    );
-  }
-  return { timestamp, sentAt };
+  return parseSentReading(api, run.messages[0]);
 }
