@@ -66,7 +66,9 @@ on the shared output binding (hub `temperatureHub`):
   and no bodies.
 - negotiate (HAR-57) puts each user in the `device-{id}` groups of the devices
   they own, so a reading reaches only its device's owners. Nothing is sent to
-  `cook-` groups.
+  `cook-` groups. It adds at most 4 groups at a time, and every SignalR REST
+  call retries a `429` or `503` answer up to 3 times (waiting for `Retry-After`,
+  capped at 2 s, or 200/400/800 ms) before negotiate answers 503 (HAR-80).
 
 `storageHeartbeat` exists because, when it was added, it was the **only**
 registration that needed `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and

@@ -10,6 +10,9 @@ import type { AccessToken, TokenCredential } from '@azure/core-auth';
 import {
   CLIENT_TOKEN_MINUTES,
   deviceGroup,
+  MAX_ATTEMPTS,
+  RETRY_AFTER_CAP_MS,
+  RETRY_BACKOFF_MS,
   resolveSignalRServiceUri,
   SIGNALR_API_VERSION,
   SIGNALR_SERVICE_URI_SETTING,
@@ -26,6 +29,7 @@ interface Recorded {
   url: URL;
   method: string | undefined;
   authorization: string | undefined;
+  signal: AbortSignal | null | undefined;
 }
 
 function stubCredential(token: string | Error = 'mi-token') {
@@ -53,6 +57,7 @@ function stubFetch(
       url,
       method: init?.method,
       authorization: headers.get('Authorization') ?? undefined,
+      signal: init?.signal,
     });
     const result = answer(url);
     if (result instanceof Error) {
@@ -63,23 +68,47 @@ function stubFetch(
   return { fetch: fetchStub, calls };
 }
 
+/** Records every wait instead of waiting, so retry tests take no real time. */
+function stubSleep() {
+  const waits: number[] = [];
+  const sleep = async (ms: number): Promise<void> => {
+    waits.push(ms);
+  };
+  return { sleep, waits };
+}
+
 function client(
   fetchStub = stubFetch(),
-  credential = stubCredential()
+  credential = stubCredential(),
+  sleepStub = stubSleep()
 ): {
   client: SignalRManagementClient;
   fetchStub: ReturnType<typeof stubFetch>;
   credential: ReturnType<typeof stubCredential>;
+  sleepStub: ReturnType<typeof stubSleep>;
 } {
   return {
     client: new SignalRManagementClient(SERVICE_URI, HUB, {
       credential: credential.credential,
       fetch: fetchStub.fetch,
+      sleep: sleepStub.sleep,
     }),
     fetchStub,
     credential,
+    sleepStub,
   };
 }
+
+/** Answers with each of `answers` in turn, then repeats the last. */
+function sequence(...answers: Array<() => Response>): (url: URL) => Response {
+  let i = 0;
+  return () => answers[Math.min(i++, answers.length - 1)]();
+}
+
+const status =
+  (code: number, headers: Record<string, string> = {}) =>
+  () =>
+    new Response(null, { status: code, headers });
 
 async function failure(promise: Promise<unknown>): Promise<SignalRUnavailableError> {
   try {
@@ -165,6 +194,105 @@ describe('SignalRManagementClient group operations', () => {
     );
     expect(call.url.searchParams.get('api-version')).toBe(SIGNALR_API_VERSION);
     expect([...call.url.searchParams.keys()].sort()).toEqual(['api-version']);
+  });
+});
+
+describe('SignalRManagementClient retries throttling (HAR-80)', () => {
+  it('429 then 200 succeeds after one retry', async () => {
+    const {
+      client: c,
+      fetchStub,
+      sleepStub,
+    } = client(stubFetch(sequence(status(429), status(200))));
+
+    await c.addUserToGroup('device-x', USER_ID);
+
+    expect(fetchStub.calls).toHaveLength(2);
+    expect(sleepStub.waits).toEqual([RETRY_BACKOFF_MS[0]]);
+    // The retry is the same request.
+    const [first, second] = fetchStub.calls;
+    expect(second.method).toBe(first.method);
+    expect(second.url.toString()).toBe(first.url.toString());
+    expect(second.authorization).toBe(first.authorization);
+  });
+
+  it('503 four times throws signalr_<op>_status_503 after exactly 4 fetches', async () => {
+    const { client: c, fetchStub, sleepStub } = client(stubFetch(status(503)));
+
+    const error = await failure(c.removeUserFromAllGroups(USER_ID));
+
+    expect(MAX_ATTEMPTS).toBe(4);
+    expect(fetchStub.calls).toHaveLength(4);
+    expect(sleepStub.waits).toHaveLength(3);
+    expect(error.code).toBe('signalr_remove_user_from_all_groups_status_503');
+    expect(error.status).toBe(503);
+  });
+
+  it('Retry-After: 1 waits 1000 ms', async () => {
+    const { client: c, sleepStub } = client(
+      stubFetch(sequence(status(429, { 'Retry-After': '1' }), status(200)))
+    );
+
+    await c.addUserToGroup('device-x', USER_ID);
+
+    expect(sleepStub.waits).toEqual([1000]);
+  });
+
+  it('Retry-After: 30 is capped at 2000 ms', async () => {
+    const { client: c, sleepStub } = client(
+      stubFetch(sequence(status(429, { 'Retry-After': '30' }), status(200)))
+    );
+
+    await c.addUserToGroup('device-x', USER_ID);
+
+    expect(RETRY_AFTER_CAP_MS).toBe(2000);
+    expect(sleepStub.waits).toEqual([2000]);
+  });
+
+  it('with no Retry-After the waits are 200, 400, 800 ms', async () => {
+    const { client: c, fetchStub, sleepStub } = client(stubFetch(status(429)));
+
+    const error = await failure(c.addUserToGroup('device-x', USER_ID));
+
+    expect(sleepStub.waits).toEqual([200, 400, 800]);
+    expect(fetchStub.calls).toHaveLength(4);
+    expect(error.code).toBe('signalr_add_user_to_group_status_429');
+  });
+
+  it('a 403 throws after exactly 1 fetch and no wait', async () => {
+    const { client: c, fetchStub, sleepStub } = client(stubFetch(status(403)));
+
+    const error = await failure(c.addUserToGroup('device-x', USER_ID));
+
+    expect(fetchStub.calls).toHaveLength(1);
+    expect(sleepStub.waits).toEqual([]);
+    expect(error.code).toBe('signalr_add_user_to_group_status_403');
+  });
+
+  it('gives each retry a fresh timeout signal', async () => {
+    const { client: c, fetchStub } = client(
+      stubFetch(sequence(status(503), status(429), status(200)))
+    );
+
+    await c.addUserToGroup('device-x', USER_ID);
+
+    const signals = fetchStub.calls.map(call => call.signal);
+    expect(signals).toHaveLength(3);
+    for (const signal of signals) {
+      expect(signal).toBeInstanceOf(AbortSignal);
+    }
+    expect(new Set(signals).size).toBe(3);
+  });
+
+  it('a network failure on a retry fails at once', async () => {
+    const answers = [status(429), () => new TypeError('fetch failed')];
+    let i = 0;
+    const { client: c, fetchStub } = client(stubFetch(() => answers[i++]()));
+
+    const error = await failure(c.generateClientToken(USER_ID));
+
+    expect(fetchStub.calls).toHaveLength(2);
+    expect(error.code).toBe('signalr_generate_token_failed');
   });
 });
 

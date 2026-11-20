@@ -27,7 +27,10 @@ import {
  *   2. The caller's devices are read from the devices container.
  *   3. The caller's SignalR user is removed from every group, then added to
  *      `device-{id}` for each device they own, and nothing else. A device that
- *      changed hands since the last negotiate drops out here.
+ *      changed hands since the last negotiate drops out here. The adds run at
+ *      most {@link GROUP_ADD_CONCURRENCY} at a time (HAR-80), so a caller with
+ *      many devices does not burst SignalR into throttling; each SignalR call
+ *      also retries a `429`/`503` answer itself (see signalr-management.ts).
  *   4. A client access token is minted for the principal's userId
  *      (`"<tid>:<oid>"`), so cook events sent to that user reach the caller.
  *
@@ -38,12 +41,41 @@ import {
  *   - 401 UNAUTHENTICATED: no principal;
  *   - 500 INTERNAL_SERVER_ERROR: the devices read failed;
  *   - 503 SIGNALR_UNAVAILABLE: a SignalR REST call failed or SignalR is not
- *     configured. `reason` (HAR-59) is the fixed code naming the failed
+ *     configured, or SignalR was still throttling after its retries. The
+ *     first failed add fails negotiate. `reason` (HAR-59) is the fixed code naming the failed
  *     operation and, when the service answered, its status, e.g.
  *     `signalr_add_user_to_group_status_404`; any other error is
  *     `signalr_failure`. Neither the body nor the log carries the endpoint, a
  *     user id, a group, a token or the underlying error text.
  */
+
+/** The most `addUserToGroup` calls negotiate has in flight at once. */
+export const GROUP_ADD_CONCURRENCY = 4;
+
+/**
+ * Runs `task` over `items` with at most `limit` in flight. Rejects with the
+ * first failure; once one has failed, no new task starts.
+ */
+async function forEachBounded<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>
+): Promise<void> {
+  let next = 0;
+  let failed = false;
+  const worker = async (): Promise<void> => {
+    while (!failed && next < items.length) {
+      const item = items[next++];
+      try {
+        await task(item);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
 
 /** Injection seam. Production wires Easy Auth, the devices repository and the
  *  managed-identity SignalR client; tests pass fakes. Both getters run inside
@@ -128,7 +160,9 @@ export async function negotiateHandler(
   try {
     const signalR = deps.getSignalR();
     await signalR.removeUserFromAllGroups(userId);
-    await Promise.all(deviceIds.map(id => signalR.addUserToGroup(deviceGroup(id), userId)));
+    await forEachBounded(deviceIds, GROUP_ADD_CONCURRENCY, id =>
+      signalR.addUserToGroup(deviceGroup(id), userId)
+    );
     const connection = await signalR.generateClientToken(userId);
     context.log(
       `negotiate ok: ${deviceIds.length} device group(s) (requestCharge=${requestCharge} RU)`
