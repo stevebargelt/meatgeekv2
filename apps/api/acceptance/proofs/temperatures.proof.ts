@@ -14,12 +14,15 @@ import { defineProofs } from '../lib/proof';
  *   2. its current reading is 404 NO_READINGS (owned, nothing routed);
  *   3. `acceptance-temp-unowned-<runId>`, never registered, is 404
  *      DEVICE_NOT_FOUND;
- *   4. (HAR-35, MG-79 part 2) the new device's history is an empty first page
- *      `{ readings: [], total: 0, offset: 0, limit: 100, hasMore: false }`;
- *   5. the unowned device's history is 404 DEVICE_NOT_FOUND.
+ *   4. (HAR-35, MG-79 part 2) the new device's history is an empty first page,
+ *      exactly `{ readings: [], limit: 100, hasMore: false }`: no
+ *      `continuationToken`, and (HAR-75) no `total` or `offset`;
+ *   5. (HAR-75) `offset=0` is 400 VALIDATION_ERROR: history pages by
+ *      continuation token only;
+ *   6. the unowned device's history is 404 DEVICE_NOT_FOUND.
  *
- * Every step reaches Cosmos, so every response must carry its request charge
- * (the runner's default). Acceptance devices are not deleted: there is no delete
+ * Every step but the 400 reaches Cosmos, so those responses must carry their
+ * request charge (the runner's default). The 400 is answered before any read. Acceptance devices are not deleted: there is no delete
  * route.
  */
 
@@ -33,11 +36,12 @@ export default defineProofs('temperatures', () => {
       route: '/temperatures/current/{deviceId}',
     });
 
-  const history = (api: AcceptanceApi, deviceId: string) =>
+  const history = (api: AcceptanceApi, deviceId: string, query = '', expectRequestCharge = true) =>
     api.request<TemperatureHistoryResponse>({
       method: 'GET',
-      path: `/temperatures/history?deviceId=${encodeURIComponent(deviceId)}`,
+      path: `/temperatures/history?deviceId=${encodeURIComponent(deviceId)}${query}`,
       route: '/temperatures/history',
+      expectRequestCharge,
     });
 
   return [
@@ -82,8 +86,6 @@ export default defineProofs('temperatures', () => {
         api.expectStatus(response, 200);
         const expected: TemperatureHistoryResponse = {
           readings: [],
-          total: 0,
-          offset: 0,
           limit: 100,
           hasMore: false,
         };
@@ -101,6 +103,17 @@ export default defineProofs('temperatures', () => {
           matches,
           `body is ${JSON.stringify(body)}, not ${JSON.stringify(expected)}`
         );
+      },
+    },
+    {
+      name: 'GET /temperatures/history with offset=0 is 400 VALIDATION_ERROR',
+      async run(api: AcceptanceApi) {
+        if (!registered) {
+          throw new Error('no device was registered by an earlier proof');
+        }
+        const response = await history(api, registered.deviceId, '&offset=0', false);
+        api.expectStatus(response, 400);
+        expectErrorCode(api, response, 'VALIDATION_ERROR');
       },
     },
     {

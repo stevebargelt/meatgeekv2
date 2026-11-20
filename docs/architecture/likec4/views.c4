@@ -269,12 +269,11 @@ views {
       publish code); no Function is in the write path.
 
       Measured (single dev samples, not targets): `roundtrip-ms` 1211 (run 44603121177) and
-      1235 (run 44612029684); in run 44612029684, `history-total` 8700,
-      `history-ru-first-page` 11.95 RU (limit 100, offset 0), `history-ru-last-page` 24.12 RU
-      (limit 100, offset 8600), `history-ru-max-page` 238.26 RU (12 h window, limit 5000),
-      `topup-sent`/`topup-ms` 2175 / 109996 (~19.8 readings/s). `OFFSET` cost grows with the
-      skip, because Cosmos still reads the skipped readings, and every history request pays a
-      `COUNT(1)` over the device partition.
+      1235 (run 44612029684); `topup-sent`/`topup-ms` 2175 / 109996 (~19.8 readings/s, run
+      44612029684). Before HAR-75 history paged by `OFFSET` and every request paid a `COUNT(1)`:
+      in run 44612029684 the 100-reading page cost 11.95 RU at offset 0 and 24.12 RU at offset
+      8600. Since HAR-75 it pages by continuation token with no COUNT, and the volume proof fails
+      unless the last page of a walk costs at most 1.5 x the first.
     '''
 
     delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices (meatgeek-dev-simulated-smoker)' {
@@ -292,28 +291,22 @@ views {
     delivery.acceptance.roundtrip -> meatgeek.cloud.api.temperatures 'GET /temperatures/history?startTime=...' {
       notes 'The page holds the sent reading.'
     }
-    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history?limit=1' {
-      notes 'Reads `total` for the simulated device.'
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history?limit=1000, page by page' {
+      notes 'Walks the simulated device by continuation token, one page at a time, to count its readings.'
     }
     delivery.acceptance.volume -> delivery.simdevice 'simdevice --count N --inflight 32 --interval 50ms' {
-      notes 'Only if `total` is below 8,640 (12 h at one every 5 s). N = 8,640 - total + 60. Measured `topup-sent`/`topup-ms` 2175 / 109996, ~19.8 readings/s.'
+      notes 'Only if the walk counts fewer than 8,640 (12 h at one every 5 s). N = 8,640 - counted + 60. Measured `topup-sent`/`topup-ms` 2175 / 109996, ~19.8 readings/s.'
     }
     delivery.simdevice -> meatgeek.cloud.ingest.iothub 'N readings, MQTT QoS 1'
     meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route'
-    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history?limit=1, until total >= 8640' {
-      notes 'Polled every 10 s, 15 min cap. Measured `history-total` 8700.'
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/current/{id}, until the top-up end' {
+      notes 'After a top-up only. Polled every 10 s, 15 min cap, until the current reading is at or after the reading 32 places from the top-up last.'
     }
-    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'history, limit 100, offset 0' {
-      notes '`history-ru-first-page` 11.95 RU.'
+    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'the same walk again' {
+      notes 'Prints `history-ru-first-page`, `history-ru-last-page` and `history-pages`; fails unless the last page costs at most 1.5 x the first.'
     }
-    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'history, limit 100, last offset' {
-      notes '`history-ru-last-page` 24.12 RU at offset 8600: `OFFSET` cost grows with the skip.'
-    }
-    delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'history, 12 h window, limit 5000' {
-      notes '`history-ru-max-page` 238.26 RU for 5000 readings.'
-    }
-    meatgeek.cloud.api.temperatures -> meatgeek.cloud.data.temperatures 'COUNT(1) + OFFSET/LIMIT page, per request' {
-      notes 'Every history request pays a `COUNT(1)` over the device partition for its `total`. The job copies every `METRIC` line into the run summary.'
+    meatgeek.cloud.api.temperatures -> meatgeek.cloud.data.temperatures 'one page per request: maxItemCount + continuation token' {
+      notes 'No COUNT and no OFFSET (HAR-75), so a deep page costs what the first does. The job copies every `METRIC` line into the run summary.'
     }
   }
 

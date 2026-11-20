@@ -8,7 +8,8 @@ import type {
   StartCookRequest,
 } from '@meatgeekv2/api-interfaces';
 
-import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
+import { expectErrorCode } from '../lib/checks';
+import type { AcceptanceApi, AcceptanceResponse, Caller } from '../lib/proof';
 import { defineProofs } from '../lib/proof';
 
 /**
@@ -22,6 +23,13 @@ import { defineProofs } from '../lib/proof';
  * devices proof owns `acceptance-<runId>`) and the lifecycle runs on it. The
  * last proof starts a cook on `acceptance-unowned-<runId>`, which nobody
  * registered, and expects 403 DEVICE_NOT_OWNED with no cook written.
+ *
+ * HAR-75 reads the cook by id with `GET /cooks/{cookId}`: as the owner it is
+ * the started cook while active and `completed` with an `endTime` after the
+ * stop; as the acceptance peer it is 404 NOT_FOUND (the cook is in the owner's
+ * partition); an unknown UUID is 404; and the device's lock document,
+ * `active-device:<deviceId>`, which shares the owner's partition while the
+ * cook runs, is 404 rather than a cook.
  *
  * The cook uses a client-generated UUID id as MG-84 requires (the id is the
  * start's idempotency key). Acceptance devices and cooks are not deleted: there
@@ -85,6 +93,16 @@ async function cooksOnDevice(
   return { cooks, response };
 }
 
+/** HAR-75: `GET /cooks/{cookId}` as `as` (the owner unless told otherwise). */
+function getCook(api: AcceptanceApi, cookId: string, as: Caller = 'owner') {
+  return api.request<Cook>({
+    method: 'GET',
+    path: `/cooks/${encodeURIComponent(cookId)}`,
+    route: '/cooks/{cookId}',
+    as,
+  });
+}
+
 /** Page through GET /cooks until the cook is found or the list ends. */
 async function findCook(
   api: AcceptanceApi,
@@ -119,6 +137,8 @@ async function findCook(
 export default defineProofs('cooks lifecycle', () => {
   let device: RegisterDeviceRequest | undefined;
   let started: StartCookRequest | undefined;
+  /** HAR-75: the Cook the POST answered with. */
+  let startedCook: Cook | undefined;
 
   const registeredDevice = (): RegisterDeviceRequest => {
     if (!device) {
@@ -127,11 +147,18 @@ export default defineProofs('cooks lifecycle', () => {
     return device;
   };
 
-  const startedCook = (): StartCookRequest => {
+  const startRequest = (): StartCookRequest => {
     if (!started) {
       throw new Error('no cook was started by an earlier proof');
     }
     return started;
+  };
+
+  const startResponse = (): Cook => {
+    if (!startedCook) {
+      throw new Error('no cook was started by an earlier proof');
+    }
+    return startedCook;
   };
 
   return [
@@ -177,12 +204,56 @@ export default defineProofs('cooks lifecycle', () => {
           'cook.deviceId is not the one sent'
         );
         api.check(response, cook.status === 'active', `cook.status is ${cook.status}, not active`);
+        startedCook = cook;
+      },
+    },
+    {
+      name: 'GET /cooks/{cookId} as the owner returns the started cook',
+      async run(api: AcceptanceApi) {
+        const posted = startResponse();
+        const response = await getCook(api, posted.id);
+        api.expectStatus(response, 200);
+        const cook = expectCook(api, response, response.body);
+        for (const field of ['id', 'deviceId', 'status'] as const) {
+          api.check(
+            response,
+            cook[field] === posted[field],
+            `cook.${field} is ${JSON.stringify(cook[field])}, the POST answered ` +
+              JSON.stringify(posted[field])
+          );
+        }
+      },
+    },
+    {
+      name: 'GET /cooks/{cookId} as the peer is 404 NOT_FOUND',
+      async run(api: AcceptanceApi) {
+        const response = await getCook(api, startResponse().id, 'peer');
+        api.expectStatus(response, 404);
+        expectErrorCode(api, response, 'NOT_FOUND');
+      },
+    },
+    {
+      name: 'GET /cooks/{cookId} for an unknown id is 404 NOT_FOUND',
+      async run(api: AcceptanceApi) {
+        const response = await getCook(api, randomUUID());
+        api.expectStatus(response, 404);
+        expectErrorCode(api, response, 'NOT_FOUND');
+      },
+    },
+    {
+      name: 'GET /cooks/{cookId} for the device lock active-device:<deviceId> is 404 NOT_FOUND',
+      async run(api: AcceptanceApi) {
+        // The lock is in the owner's partition while the cook is active.
+        const { deviceId } = startResponse();
+        const response = await getCook(api, `active-device:${encodeURIComponent(deviceId)}`);
+        api.expectStatus(response, 404);
+        expectErrorCode(api, response, 'NOT_FOUND');
       },
     },
     {
       name: 'GET /cooks includes the new cook',
       async run(api: AcceptanceApi) {
-        const { id } = startedCook();
+        const { id } = startRequest();
         const { cook, response } = await findCook(api, id);
         api.check(response, cook !== undefined, `cook ${id} is not in the list`);
         api.check(response, cook.status === 'active', `cook.status is ${cook.status}, not active`);
@@ -191,7 +262,7 @@ export default defineProofs('cooks lifecycle', () => {
     {
       name: 'GET /cooks?deviceId&status=active returns exactly the new cook',
       async run(api: AcceptanceApi) {
-        const { id, deviceId } = startedCook();
+        const { id, deviceId } = startRequest();
         const { cooks, response } = await activeCooksOnDevice(api, deviceId);
         api.check(
           response,
@@ -205,7 +276,7 @@ export default defineProofs('cooks lifecycle', () => {
     {
       name: 'POST /cooks/{cookId}/stop stops the cook',
       async run(api: AcceptanceApi) {
-        const { id } = startedCook();
+        const { id } = startRequest();
         const response = await api.request({
           method: 'POST',
           path: `/cooks/${encodeURIComponent(id)}/stop`,
@@ -223,9 +294,25 @@ export default defineProofs('cooks lifecycle', () => {
       },
     },
     {
+      name: 'GET /cooks/{cookId} reads the cook back as completed with an endTime',
+      async run(api: AcceptanceApi) {
+        const { id } = startResponse();
+        const response = await getCook(api, id);
+        api.expectStatus(response, 200);
+        const cook = expectCook(api, response, response.body);
+        api.check(response, cook.id === id, `cook.id ${cook.id} is not the cook stopped`);
+        api.check(
+          response,
+          cook.status === 'completed',
+          `cook.status is ${cook.status}, not completed`
+        );
+        api.check(response, typeof cook.endTime === 'string', 'cook.endTime is not set');
+      },
+    },
+    {
       name: 'GET /cooks reads the cook back as stopped',
       async run(api: AcceptanceApi) {
-        const { id } = startedCook();
+        const { id } = startRequest();
         const { cook, response } = await findCook(api, id);
         api.check(response, cook !== undefined, `cook ${id} is not in the list`);
         api.check(
@@ -239,7 +326,7 @@ export default defineProofs('cooks lifecycle', () => {
     {
       name: 'GET /cooks?deviceId&status=active returns no cook after the stop',
       async run(api: AcceptanceApi) {
-        const { deviceId } = startedCook();
+        const { deviceId } = startRequest();
         const { cooks, response } = await activeCooksOnDevice(api, deviceId);
         api.check(
           response,

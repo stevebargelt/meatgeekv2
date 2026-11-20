@@ -179,7 +179,7 @@ model {
           description 'The only source of the caller identity: tid:oid from the injected header. Fails closed (401, no default user).'
         }
         cooks = component 'cooks' {
-          description 'GET /cooks, POST /cooks, POST /cooks/{cookId}/stop'
+          description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, POST /cooks/{cookId}/stop'
         }
         devices = component 'devices' {
           description 'GET and POST /devices, GET and PATCH /devices/{id}'
@@ -459,7 +459,7 @@ model {
         description 'Registers the simulated device (201, or 409 then GET), sends one reading with simdevice and times it until GET /temperatures/current returns it: METRIC roundtrip-ms.'
       }
       volume = component 'telemetry-volume.proof.ts' {
-        description 'Tops the simulated device up to one long cook of readings (12 h at one every 5 s = 8,640) and prints the request charge of three history pages.'
+        description 'Walks the simulated device history by continuation token, tops it up to one long cook of readings (12 h at one every 5 s = 8,640), walks again, and checks the last page costs at most 1.5 x the first.'
       }
     }
 
@@ -526,7 +526,7 @@ model {
   }
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices: 201, or 409 then GET /devices/{id}'
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.temperatures 'GET /temperatures/current/{id}, then history'
-  delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history: total, then three pages'
+  delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history: two walks by continuation token'
   delivery.acceptance -> meatgeek.cloud.api.negotiate 'POST /negotiate (signalr proofs)'
   delivery.acceptance -> meatgeek.cloud.realtime 'connects as a SignalR client' {
     technology '@microsoft/signalr'

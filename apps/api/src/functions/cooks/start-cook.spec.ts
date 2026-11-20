@@ -991,4 +991,293 @@ describe('startCookHandler', () => {
       expect(JSON.stringify(res)).not.toContain('azure-devices');
     });
   });
+
+  describe('HAR-75 — the body is validated field by field', () => {
+    /** A request whose json() behaves like the Functions runtime's: rejects on
+     *  a body that is not JSON, resolves `null` for a literal null. */
+    function rawRequest(json: () => Promise<unknown>, requestId?: string): HttpRequest {
+      const headers = new Map<string, string>();
+      if (requestId !== undefined) headers.set('X-Request-ID', requestId);
+      return {
+        json,
+        headers: { get: (k: string) => headers.get(k) ?? null },
+        query: { get: () => null },
+        params: {},
+      } as unknown as HttpRequest;
+    }
+
+    async function expect400(request: HttpRequest, message: string | RegExp) {
+      const { ctx, messages } = mockContext();
+      const ownership = fakeOwnership();
+      const { deps, writes } = authedDeps(fakeRepository(), ownership);
+      const res = await startCookHandler(request, ctx, deps);
+      expect(res.status).toBe(400);
+      expect(res.jsonBody).toEqual({
+        error: 'VALIDATION_ERROR',
+        message: typeof message === 'string' ? message : expect.stringMatching(message),
+        requestId: INVOCATION_ID,
+      });
+      expect(writes).toHaveLength(0);
+      expect(ownership.calls).toHaveLength(0);
+      expect(messages()).toBeUndefined();
+      return res;
+    }
+
+    it('400, not 500, when the body is not valid JSON', async () => {
+      await expect400(
+        rawRequest(async () => {
+          throw new SyntaxError('Unexpected token } in JSON at position 1');
+        }),
+        'Request body must be valid JSON'
+      );
+    });
+
+    it('400, not 500, when the body is JSON null', async () => {
+      await expect400(
+        rawRequest(async () => null),
+        'Request body must be a JSON object'
+      );
+    });
+
+    it.each([
+      ['an array', [validBody]],
+      ['a string', 'brisket'],
+      ['a number', 7],
+    ])('400 when the body is %s', async (_label, body) => {
+      await expect400(
+        rawRequest(async () => body),
+        'Request body must be a JSON object'
+      );
+    });
+
+    it.each([
+      ['userId', { userId: 'someone-else' }],
+      ['status', { status: 'completed' }],
+      ['startTime', { startTime: '2020-01-01T00:00:00Z' }],
+      ['targetTemp (a typo)', { targetTemp: { grill: 250 } }],
+    ])('400 naming an unknown key: %s', async (_label, extra) => {
+      const key = Object.keys(extra)[0];
+      await expect400(
+        mockRequest({ ...validBody, ...extra } as never),
+        `${key} is not a start-cook field`
+      );
+    });
+
+    const FIELD_CASES: Array<[string, Record<string, unknown>, RegExp]> = [
+      ['name not a string', { name: 42 }, /^name /],
+      ['name blank', { name: '   ' }, /^name /],
+      ['name of 101 characters', { name: 'n'.repeat(101) }, /^name /],
+      ['deviceId missing', { deviceId: undefined }, /^deviceId /],
+      ['deviceId empty', { deviceId: '' }, /^deviceId /],
+      ['deviceId not a string', { deviceId: 7 }, /^deviceId /],
+      ['meatType missing', { meatType: undefined }, /^meatType /],
+      ['meatType blank', { meatType: ' \t ' }, /^meatType /],
+      ['meatType of 101 characters', { meatType: 'm'.repeat(101) }, /^meatType /],
+      ['id missing', { id: undefined }, /^id /],
+      ['id not a UUID', { id: 'cook-123' }, /^id /],
+      ['weight a string', { weight: '12' }, /^weight /],
+      ['weight zero', { weight: 0 }, /^weight /],
+      ['weight negative', { weight: -1 }, /^weight /],
+      ['weight over 1000', { weight: 1000.5 }, /^weight /],
+      ['weight null', { weight: null }, /^weight /],
+      ['targetTemps not an object', { targetTemps: 250 }, /^targetTemps /],
+      ['targetTemps an array', { targetTemps: [250] }, /^targetTemps /],
+      ['targetTemps null', { targetTemps: null }, /^targetTemps /],
+      [
+        'targetTemps with an unknown probe',
+        { targetTemps: { probe5: 200 } },
+        /^targetTemps\.probe5 /,
+      ],
+      ['targetTemps.grill a string', { targetTemps: { grill: '250' } }, /^targetTemps\.grill /],
+      ['targetTemps.probe1 below 0', { targetTemps: { probe1: -1 } }, /^targetTemps\.probe1 /],
+      ['targetTemps.probe4 over 1000', { targetTemps: { probe4: 1001 } }, /^targetTemps\.probe4 /],
+      ['notes not a string', { notes: ['a'] }, /^notes /],
+      ['notes of 2001 characters', { notes: 'x'.repeat(2001) }, /^notes /],
+    ];
+
+    it.each(FIELD_CASES)('400 naming the field when %s', async (_label, patch, message) => {
+      const body: Record<string, unknown> = { ...validBody, ...patch };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) delete body[key];
+      }
+      // A JSON round trip, as the runtime would deliver it.
+      await expect400(
+        rawRequest(async () => JSON.parse(JSON.stringify(body))),
+        message
+      );
+    });
+
+    it('accepts every field at its bounds and stores name and meatType trimmed', async () => {
+      const { ctx } = mockContext();
+      const { deps, writes } = authedDeps();
+      const body = {
+        ...validBody,
+        name: ` ${'n'.repeat(100)} `,
+        meatType: ' pork shoulder ',
+        weight: 1000,
+        targetTemps: { grill: 0, probe1: 1000, probe2: 203.5, probe3: 165, probe4: 145 },
+        notes: 'x'.repeat(2000),
+      };
+
+      const res = await startCookHandler(
+        rawRequest(async () => body),
+        ctx,
+        deps
+      );
+
+      expect(res.status).toBe(201);
+      expect(writes[0]).toMatchObject({
+        name: 'n'.repeat(100),
+        meatType: 'pork shoulder',
+        weight: 1000,
+        targetTemps: body.targetTemps,
+        notes: body.notes,
+      });
+    });
+
+    it('accepts an empty notes string and an empty targetTemps object', async () => {
+      const { deps } = authedDeps();
+      const res = await startCookHandler(
+        rawRequest(async () => ({ ...validBody, notes: '', targetTemps: {} })),
+        mockContext().ctx,
+        deps
+      );
+      expect(res.status).toBe(201);
+    });
+
+    it('accepts every body the live acceptance proofs send', async () => {
+      // apps/api/acceptance/proofs: cooks-lifecycle, signalr-isolation and
+      // device-twin all start cooks with these fields only.
+      const bodies = [
+        {
+          id: COOK_ID,
+          name: 'Acceptance run-1',
+          deviceId: 'acceptance-cook-run-1',
+          meatType: 'acceptance',
+          notes: 'Synthetic cook written by the live acceptance suite.',
+        },
+        {
+          id: COOK_ID,
+          name: 'Acceptance x',
+          deviceId: 'acceptance-unowned-x',
+          meatType: 'acceptance',
+        },
+      ];
+      for (const body of bodies) {
+        const { deps } = authedDeps();
+        const res = await startCookHandler(
+          rawRequest(async () => body),
+          mockContext().ctx,
+          deps
+        );
+        expect(res.status).toBe(201);
+      }
+    });
+  });
+
+  describe("HAR-75 — every response carries X-Request-ID, the caller's when given", () => {
+    function requestIdOf(res: { headers?: unknown }): string | undefined {
+      return (res.headers as Record<string, string> | undefined)?.['X-Request-ID'];
+    }
+
+    function unauthenticated(): StartCookDeps {
+      return {
+        ...authedDeps().deps,
+        resolvePrincipal: (): PrincipalResult => ({
+          authenticated: false,
+          reason: 'principal_header_missing',
+        }),
+      };
+    }
+
+    function failing(): StartCookDeps {
+      return {
+        ...authedDeps().deps,
+        getRepository: () => ({
+          startCook: async () => {
+            throw Object.assign(new Error('https://acct.documents.azure.com/ failed'), {
+              code: 503,
+            });
+          },
+        }),
+      };
+    }
+
+    const busyRepo = () => {
+      const repo = fakeRepository();
+      void repo.startCook({ ...validBody, id: OTHER_COOK_ID, userId: PRINCIPAL_USER_ID } as Cook);
+      return repo;
+    };
+
+    const CASES: Array<[number, () => HttpRequest | undefined, () => StartCookDeps]> = [
+      [201, () => undefined, () => authedDeps().deps],
+      [400, () => mockRequest({ ...validBody, id: 'nope' }, 'caller-1'), () => authedDeps().deps],
+      [401, () => undefined, unauthenticated],
+      [
+        403,
+        () => undefined,
+        () => authedDeps(fakeRepository(), fakeOwnership({ meatgeek3: 'foreign' })).deps,
+      ],
+      [409, () => undefined, () => authedDeps(busyRepo()).deps],
+      [500, () => undefined, failing],
+      [
+        503,
+        () => undefined,
+        () => ({
+          ...authedDeps().deps,
+          syncDeviceTwin: fakeTwinSync('device_twin_sync_failed').sync,
+        }),
+      ],
+    ];
+
+    it.each(CASES)("%i echoes the caller's X-Request-ID", async (status, makeRequest, makeDeps) => {
+      const req = makeRequest() ?? mockRequest(validBody, 'caller-1');
+      const res = await startCookHandler(req, mockContext().ctx, makeDeps());
+      expect(res.status).toBe(status);
+      expect(requestIdOf(res)).toBe('caller-1');
+    });
+
+    it.each(CASES)('%i falls back to the invocation id', async (status, _makeRequest, makeDeps) => {
+      const req =
+        status === 400 ? mockRequest({ ...validBody, id: 'nope' }) : mockRequest(validBody);
+      const res = await startCookHandler(req, mockContext().ctx, makeDeps());
+      expect(res.status).toBe(status);
+      expect(requestIdOf(res)).toBe(INVOCATION_ID);
+    });
+
+    it('a 400 for invalid JSON carries it too', async () => {
+      const headers = new Map([['X-Request-ID', 'caller-2']]);
+      const res = await startCookHandler(
+        {
+          json: async () => {
+            throw new SyntaxError('bad');
+          },
+          headers: { get: (k: string) => headers.get(k) ?? null },
+          query: { get: () => null },
+          params: {},
+        } as unknown as HttpRequest,
+        mockContext().ctx,
+        authedDeps().deps
+      );
+      expect(res.status).toBe(400);
+      expect(requestIdOf(res)).toBe('caller-2');
+    });
+
+    it("cook_started keeps the caller's X-Request-ID as its correlation id, and the body keeps the invocation id", async () => {
+      const { ctx, messages } = mockContext();
+      const res = await startCookHandler(
+        mockRequest(validBody, 'caller-3'),
+        ctx,
+        authedDeps().deps
+      );
+      expect(res.status).toBe(201);
+      expect(messages()![0].arguments[0].correlation.id).toBe('caller-3');
+      const failed = await startCookHandler(
+        mockRequest(validBody, 'caller-3'),
+        mockContext().ctx,
+        failing()
+      );
+      expect((failed.jsonBody as { requestId: string }).requestId).toBe(INVOCATION_ID);
+    });
+  });
 });

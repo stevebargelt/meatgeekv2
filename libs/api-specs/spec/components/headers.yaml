@@ -3,10 +3,11 @@
 
 X-Request-ID:
   description: |
-    Correlation handle for the call. Most handlers echo the caller's
+    Correlation handle for the call. Handlers echo the caller's
     `X-Request-ID` request header when it is sent and otherwise use the
-    Functions invocation id. GET /cooks, POST /cooks and GET /health/cosmos
-    always send the invocation id, which is also the body's `requestId`.
+    Functions invocation id. GET /health/cosmos always sends the invocation
+    id. An error body's `requestId` is the invocation id (the shared 401 body
+    carries the same value as this header).
   schema:
     type: string
 

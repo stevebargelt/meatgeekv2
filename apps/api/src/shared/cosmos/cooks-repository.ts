@@ -241,6 +241,13 @@ export interface ListCooksOptions {
   readonly status?: CookStatus;
 }
 
+/** A partition document that is not a cook: it carries `docType` (today only
+ *  the MG-84 device lock). Cooks never carry one; the list query filters on
+ *  the same rule (`NOT IS_DEFINED(c.docType)`). */
+function isLockDocument(document: object): boolean {
+  return (document as { docType?: unknown }).docType !== undefined;
+}
+
 /** Clamps a requested page size into the safe range. */
 function clampPageSize(requested: number | undefined): number {
   if (requested === undefined || !Number.isFinite(requested) || requested <= 0) {
@@ -288,10 +295,17 @@ export class CooksRepository {
    * value routes the read to exactly one partition — NOT a cross-partition scan
    * filtered down to one document. A missing document (404) is a normal miss:
    * `cook` comes back `undefined`, not an error.
+   *
+   * HAR-75: the MG-84 device lock (`active-device:<deviceId>`) shares the
+   * partition but is not a cook. A document carrying `docType` is a miss too,
+   * so neither GET /cooks/{id} nor a stop can address a lock as a cook.
    */
   async getCook(userId: string, id: string): Promise<CookResult> {
     const { document, requestCharge } = await this.readCookWithEtag(userId, id);
-    return { cook: document && toCook(document), requestCharge };
+    if (document === undefined || isLockDocument(document)) {
+      return { cook: undefined, requestCharge };
+    }
+    return { cook: toCook(document), requestCharge };
   }
 
   /**

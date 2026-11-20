@@ -718,8 +718,8 @@ traceparent`" .-> Meatgeek
   Delivery.Acceptance.Roundtrip -. "`spawns: --count 1`" .-> Delivery.Simdevice
   Delivery.Acceptance.Roundtrip -. "`[...]`" .-> Meatgeek
   Delivery.Acceptance.Volume -. "`spawns: top-up to 8,640 readings`" .-> Delivery.Simdevice
-  Delivery.Acceptance.Volume -. "`GET /temperatures/history:
-total, then three pages`" .-> Meatgeek
+  Delivery.Acceptance.Volume -. "`GET /temperatures/history: two
+walks by continuation token`" .-> Meatgeek
   Meatgeek -. "`validates access tokens`" .-> Entra
   Delivery.Deploy -. "`needs: deploy`" .-> Delivery.Acceptance
   Delivery.Acceptance -. "`app-only token (OIDC)`" .-> Entra
@@ -1049,12 +1049,11 @@ Every Deploy Dev App acceptance job proves the telemetry path end to end:
 publish code); no Function is in the write path.
 
 Measured (single dev samples, not targets): `roundtrip-ms` 1211 (run 44603121177) and
-1235 (run 44612029684); in run 44612029684, `history-total` 8700,
-`history-ru-first-page` 11.95 RU (limit 100, offset 0), `history-ru-last-page` 24.12 RU
-(limit 100, offset 8600), `history-ru-max-page` 238.26 RU (12 h window, limit 5000),
-`topup-sent`/`topup-ms` 2175 / 109996 (~19.8 readings/s). `OFFSET` cost grows with the
-skip, because Cosmos still reads the skipped readings, and every history request pays a
-`COUNT(1)` over the device partition.
+1235 (run 44612029684); `topup-sent`/`topup-ms` 2175 / 109996 (~19.8 readings/s, run
+44612029684). Before HAR-75 history paged by `OFFSET` and every request paid a `COUNT(1)`:
+in run 44612029684 the 100-reading page cost 11.95 RU at offset 0 and 24.12 RU at offset
+8600. Since HAR-75 it pages by continuation token with no COUNT, and the volume proof fails
+unless the last page of a walk costs at most 1.5 x the first.
 
 View `telemetryProof` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/telemetryProof/
 
@@ -1078,25 +1077,24 @@ graph LR
   DeliveryAcceptanceRoundtrip -. "`GET /temperatures/current/{id}`" .-> MeatgeekCloudApiTemperatures
   MeatgeekCloudApiTemperatures -. "`newest reading by iothub-enqueuedtime`" .-> MeatgeekCloudDataTemperatures
   DeliveryAcceptanceRoundtrip -. "`GET /temperatures/history?startTime=...`" .-> MeatgeekCloudApiTemperatures
-  DeliveryAcceptanceVolume -. "`GET /temperatures/history?limit=1`" .-> MeatgeekCloudApiTemperatures
+  DeliveryAcceptanceVolume -. "`GET /temperatures/history?limit=1000,
+page by page`" .-> MeatgeekCloudApiTemperatures
   DeliveryAcceptanceVolume -. "`simdevice --count N --inflight 32
 --interval 50ms`" .-> DeliverySimdevice
   DeliverySimdevice -. "`N readings, MQTT QoS 1`" .-> MeatgeekCloudIngestIothub
   MeatgeekCloudIngestIothub -. "`cosmos-storage-route`" .-> MeatgeekCloudDataTemperatures
-  DeliveryAcceptanceVolume -. "`GET /temperatures/history?limit=1, until
-total >= 8640`" .-> MeatgeekCloudApiTemperatures
-  DeliveryAcceptanceVolume -. "`history, limit 100, offset 0`" .-> MeatgeekCloudApiTemperatures
-  DeliveryAcceptanceVolume -. "`history, limit 100, last offset`" .-> MeatgeekCloudApiTemperatures
-  DeliveryAcceptanceVolume -. "`history, 12 h window, limit 5000`" .-> MeatgeekCloudApiTemperatures
-  MeatgeekCloudApiTemperatures -. "`COUNT(1) + OFFSET/LIMIT page, per
-request`" .-> MeatgeekCloudDataTemperatures
+  DeliveryAcceptanceVolume -. "`GET /temperatures/current/{id}, until
+the top-up end`" .-> MeatgeekCloudApiTemperatures
+  DeliveryAcceptanceVolume -. "`the same walk again`" .-> MeatgeekCloudApiTemperatures
+  MeatgeekCloudApiTemperatures -. "`one page per request: maxItemCount +
+continuation token`" .-> MeatgeekCloudDataTemperatures
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class DeliveryAcceptanceRoundtrip,MeatgeekCloudApiDevices,DeliverySimdevice,DeliveryAcceptanceVolume,MeatgeekCloudApiTemperatures primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudIngestIothub indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudDataTemperatures green
-  linkStyle 0,1,4,5,6,7,8,11,12,13,14,15 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,4,5,6,7,8,11,12,13 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,3,9,10 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -1109,15 +1107,13 @@ Steps:
 - **5.** telemetry-roundtrip.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): GET /temperatures/current/{id}. Polled every 1 s, 120 s cap, until it returns the sent reading. Prints `METRIC roundtrip-ms`: 1211 and 1235.
 - **6.** temperatures (`meatgeek.cloud.api.temperatures`) → temperatures (`meatgeek.cloud.data.temperatures`): newest reading by iothub-enqueuedtime
 - **7.** telemetry-roundtrip.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): GET /temperatures/history?startTime=.... The page holds the sent reading.
-- **8.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): GET /temperatures/history?limit=1. Reads `total` for the simulated device.
-- **9.** telemetry-volume.proof.ts → simdevice: simdevice --count N --inflight 32 --interval 50ms. Only if `total` is below 8,640 (12 h at one every 5 s). N = 8,640 - total + 60. Measured `topup-sent`/`topup-ms` 2175 / 109996, ~19.8 readings/s.
+- **8.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): GET /temperatures/history?limit=1000, page by page. Walks the simulated device by continuation token, one page at a time, to count its readings.
+- **9.** telemetry-volume.proof.ts → simdevice: simdevice --count N --inflight 32 --interval 50ms. Only if the walk counts fewer than 8,640 (12 h at one every 5 s). N = 8,640 - counted + 60. Measured `topup-sent`/`topup-ms` 2175 / 109996, ~19.8 readings/s.
 - **10.** simdevice → IoT Hub: N readings, MQTT QoS 1
 - **11.** IoT Hub → temperatures (`meatgeek.cloud.data.temperatures`): cosmos-storage-route
-- **12.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): GET /temperatures/history?limit=1, until total >= 8640. Polled every 10 s, 15 min cap. Measured `history-total` 8700.
-- **13.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): history, limit 100, offset 0. `history-ru-first-page` 11.95 RU.
-- **14.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): history, limit 100, last offset. `history-ru-last-page` 24.12 RU at offset 8600: `OFFSET` cost grows with the skip.
-- **15.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): history, 12 h window, limit 5000. `history-ru-max-page` 238.26 RU for 5000 readings.
-- **16.** temperatures (`meatgeek.cloud.api.temperatures`) → temperatures (`meatgeek.cloud.data.temperatures`): COUNT(1) + OFFSET/LIMIT page, per request. Every history request pays a `COUNT(1)` over the device partition for its `total`. The job copies every `METRIC` line into the run summary.
+- **12.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): GET /temperatures/current/{id}, until the top-up end. After a top-up only. Polled every 10 s, 15 min cap, until the current reading is at or after the reading 32 places from the top-up last.
+- **13.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): the same walk again. Prints `history-ru-first-page`, `history-ru-last-page` and `history-pages`; fails unless the last page costs at most 1.5 x the first.
+- **14.** temperatures (`meatgeek.cloud.api.temperatures`) → temperatures (`meatgeek.cloud.data.temperatures`): one page per request: maxItemCount + continuation token. No COUNT and no OFFSET (HAR-75), so a deep page costs what the first does. The job copies every `METRIC` line into the run summary.
 
 ## Device software updates
 

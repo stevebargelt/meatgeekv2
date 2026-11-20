@@ -13,28 +13,29 @@ What `apps/api/src/main.ts` registers with the Functions host today. Everything
 below the next heading describes the target architecture, some of which is not
 yet wired.
 
-| Function                 | Trigger       | Route / schedule                  | Purpose                                                      |
-| ------------------------ | ------------- | --------------------------------- | ------------------------------------------------------------ |
-| `getCooks`               | HTTP `GET`    | `cooks`                           | List cooks                                                   |
-| `startCook`              | HTTP `POST`   | `cooks`                           | Start a cook (emits `cook_started` on SignalR)               |
-| `stopCook`               | HTTP `POST`   | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)                |
-| `negotiate`              | HTTP `POST`   | `negotiate`                       | SignalR client negotiate, scoped to the caller's own devices |
-| `getCurrentTemperatures` | HTTP `GET`    | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else)              |
-| `getTemperatureHistory`  | HTTP `GET`    | `temperatures/history`            | A page of a caller's device's readings                       |
-| `getDevices`             | HTTP `GET`    | `devices`                         | List the caller's devices                                    |
-| `registerDevice`         | HTTP `POST`   | `devices`                         | Register a device to the caller                              |
-| `getDevice`              | HTTP `GET`    | `devices/{id}`                    | One of the caller's devices (404 otherwise)                  |
-| `updateDevice`           | HTTP `PATCH`  | `devices/{id}`                    | Change name / location / configuration                       |
-| `getUserProfile`         | HTTP `GET`    | `users/me`                        | The caller's profile (404 until the first PUT)               |
-| `putUserProfile`         | HTTP `PUT`    | `users/me`                        | Create or replace the caller's profile                       |
-| `listRecipes`            | HTTP `GET`    | `recipes`                         | List the caller's recipes, newest first                      |
-| `createRecipe`           | HTTP `POST`   | `recipes`                         | Create a recipe owned by the caller                          |
-| `getRecipe`              | HTTP `GET`    | `recipes/{id}`                    | One of the caller's recipes (404 otherwise)                  |
-| `updateRecipe`           | HTTP `PATCH`  | `recipes/{id}`                    | Change any recipe field (409 on a race)                      |
-| `deleteRecipe`           | HTTP `DELETE` | `recipes/{id}`                    | Delete one of the caller's recipes                           |
-| `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                  |
-| `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                          |
-| `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its `device-{id}` group      |
+| Function                 | Trigger       | Route / schedule                  | Purpose                                                       |
+| ------------------------ | ------------- | --------------------------------- | ------------------------------------------------------------- |
+| `getCooks`               | HTTP `GET`    | `cooks`                           | List cooks                                                    |
+| `startCook`              | HTTP `POST`   | `cooks`                           | Start a cook (emits `cook_started` on SignalR)                |
+| `getCook`                | HTTP `GET`    | `cooks/{cookId}`                  | One of the caller's cooks (404 for another user's)            |
+| `stopCook`               | HTTP `POST`   | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)                 |
+| `negotiate`              | HTTP `POST`   | `negotiate`                       | SignalR client negotiate, scoped to the caller's own devices  |
+| `getCurrentTemperatures` | HTTP `GET`    | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else)               |
+| `getTemperatureHistory`  | HTTP `GET`    | `temperatures/history`            | A page of a caller's device's readings, by continuation token |
+| `getDevices`             | HTTP `GET`    | `devices`                         | List the caller's devices                                     |
+| `registerDevice`         | HTTP `POST`   | `devices`                         | Register a device to the caller                               |
+| `getDevice`              | HTTP `GET`    | `devices/{id}`                    | One of the caller's devices (404 otherwise)                   |
+| `updateDevice`           | HTTP `PATCH`  | `devices/{id}`                    | Change name / location / configuration                        |
+| `getUserProfile`         | HTTP `GET`    | `users/me`                        | The caller's profile (404 until the first PUT)                |
+| `putUserProfile`         | HTTP `PUT`    | `users/me`                        | Create or replace the caller's profile                        |
+| `listRecipes`            | HTTP `GET`    | `recipes`                         | List the caller's recipes, newest first                       |
+| `createRecipe`           | HTTP `POST`   | `recipes`                         | Create a recipe owned by the caller                           |
+| `getRecipe`              | HTTP `GET`    | `recipes/{id}`                    | One of the caller's recipes (404 otherwise)                   |
+| `updateRecipe`           | HTTP `PATCH`  | `recipes/{id}`                    | Change any recipe field (409 on a race)                       |
+| `deleteRecipe`           | HTTP `DELETE` | `recipes/{id}`                    | Delete one of the caller's recipes                            |
+| `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                   |
+| `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
+| `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its `device-{id}` group       |
 
 `broadcastTemperature` is the live-reading producer. IoT Hub routes every device
 message to the `temperature-data` event hub (`eventhub-realtime-route` in

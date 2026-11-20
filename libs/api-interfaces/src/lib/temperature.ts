@@ -20,19 +20,27 @@ export interface TemperatureHistoryRequest {
   cookId?: string;
   startTime?: string;
   endTime?: string;
+  /** Page size, 1-1000. Default 100. */
   limit?: number;
-  offset?: number;
+  /** Opaque cursor from a previous page's {@link TemperatureHistoryResponse.continuationToken}. */
+  continuationToken?: string;
 }
 
 /**
- * Response for temperature history queries
+ * Response for temperature history queries.
+ *
+ * Paged by continuation token, not offset (HAR-75): an offset re-charges every
+ * skipped reading and an exact `total` needs a separate COUNT query. To read
+ * the next page, send `continuationToken` back unchanged; it is present exactly
+ * when `hasMore` is true.
  */
 export interface TemperatureHistoryResponse {
   readings: TemperatureReading[];
-  total: number;
-  offset: number;
+  /** The page size applied. */
   limit: number;
   hasMore: boolean;
+  /** Opaque cursor for the next page; absent when `hasMore` is false. */
+  continuationToken?: string;
 }
 
 /**

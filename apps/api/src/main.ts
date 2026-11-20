@@ -8,6 +8,7 @@ import { initializeTelemetry } from './shared/telemetry/setup';
 initializeTelemetry();
 
 // Import function handlers
+import { getCookHandler } from './functions/cooks/get-cook';
 import { getCooksHandler } from './functions/cooks/list-cooks';
 import { startCookHandler } from './functions/cooks/start-cook';
 import { stopCookHandler } from './functions/cooks/stop-cook';
@@ -50,6 +51,15 @@ app.http('startCook', {
   route: 'cooks',
   extraOutputs: [signalROutput],
   handler: startCookHandler,
+});
+
+// HAR-75: one of the caller's cooks. A point read in the caller's partition,
+// so another user's cook and an absent one are the same 404.
+app.http('getCook', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'cooks/{cookId}',
+  handler: getCookHandler,
 });
 
 app.http('stopCook', {

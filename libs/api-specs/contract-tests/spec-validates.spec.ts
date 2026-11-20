@@ -116,7 +116,30 @@ describe('OpenAPI spec — structural validation', () => {
     expect(historyMissing.description).toMatch(/DEVICE_NOT_FOUND/);
     expect(
       ((history?.parameters ?? []) as OpenAPIV3.ParameterObject[]).map(param => param.name),
-    ).toEqual(['deviceId', 'cookId', 'startTime', 'endTime', 'limit', 'offset']);
+    ).toEqual(['deviceId', 'cookId', 'startTime', 'endTime', 'limit', 'continuationToken']);
+    // HAR-75: paged by continuation token; no total, no offset.
+    const historyBody = (historyOk.content?.['application/json']?.schema ??
+      {}) as OpenAPIV3.SchemaObject;
+    expect(Object.keys(historyBody.properties ?? {}).sort()).toEqual([
+      'continuationToken',
+      'hasMore',
+      'limit',
+      'readings',
+    ]);
+
+    // HAR-75: one of the caller's cooks.
+    const getCook = paths['/cooks/{cookId}']?.get;
+    expect(getCook?.operationId).toBe('getCook');
+    expect(Object.keys(getCook?.responses ?? {}).sort()).toEqual([
+      '200',
+      '400',
+      '401',
+      '404',
+      '500',
+    ]);
+    const cookMissing = getCook?.responses?.['404'] as OpenAPIV3.ResponseObject;
+    expect(cookMissing.description).toMatch(/NOT_FOUND/);
+    expect(cookMissing.headers?.['x-meatgeek-request-charge']).toBeDefined();
 
     // HAR-27 (MG-81): the caller's profile, identity from the principal only.
     expect(paths['/users/me']?.get).toBeDefined();

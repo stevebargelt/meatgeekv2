@@ -56,8 +56,6 @@ TemperatureHistoryResponse:
     enqueued-time window and ordering.
   required:
     - readings
-    - total
-    - offset
     - limit
     - hasMore
   additionalProperties: false
@@ -66,19 +64,18 @@ TemperatureHistoryResponse:
       type: array
       items:
         $ref: '#/TemperatureReading'
-    total:
-      type: integer
-      minimum: 0
-      description: Every matching document, including any that could not be mapped.
-    offset:
-      type: integer
-      minimum: 0
-      description: The `offset` applied (the query value, default 0).
     limit:
       type: integer
       minimum: 1
-      maximum: 5000
+      maximum: 1000
       description: The `limit` applied (the query value, default 100).
     hasMore:
       type: boolean
-      description: '`offset + limit < total`.'
+      description: True exactly when `continuationToken` is present.
+    continuationToken:
+      type: string
+      description: |
+        Opaque cursor for the next page (HAR-75). Present exactly when
+        `hasMore` is true; send it back unchanged as the `continuationToken`
+        query parameter, with the same filter. There is no `total` and no
+        `offset`.

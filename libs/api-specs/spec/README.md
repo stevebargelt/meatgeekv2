@@ -12,7 +12,7 @@ pull request) fails otherwise.
 spec/
   openapi.yaml                  # entrypoint: paths, x-signalr, components
   paths/
-    cooks.yaml                  # GET/POST /cooks, POST /cooks/{cookId}/stop
+    cooks.yaml                  # GET/POST /cooks, GET /cooks/{cookId}, POST /cooks/{cookId}/stop
     negotiate.yaml              # POST /negotiate (SignalR)
     temperatures.yaml           # /temperatures/current/{deviceId}, /temperatures/history
     devices.yaml                # /devices, /devices/{id}
@@ -105,7 +105,7 @@ bash libs/api-specs/contract-tests/oapi-codegen-smoke.sh
 ## Wire-shape notes
 
 - `GET /cooks` returns `CookListResponse` (NOT wrapped in `ApiResponse`).
-- `POST /cooks` and `POST /cooks/{cookId}/stop` return the `Cook` directly.
+- `GET /cooks/{cookId}`, `POST /cooks` and `POST /cooks/{cookId}/stop` return the `Cook` directly.
 - `GET /temperatures/current/{deviceId}` returns a bare `TemperatureReading`.
 - `GET /devices` wraps the array in `{ devices: [...] }`; `GET`/`PATCH
   /devices/{id}` and `POST /devices` return a bare `Device`.

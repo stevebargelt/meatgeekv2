@@ -1,5 +1,5 @@
 import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import type { Cook, StartCookRequest } from '@meatgeekv2/api-interfaces';
+import type { Cook } from '@meatgeekv2/api-interfaces';
 import {
   buildCookEnvelope,
   COOK_STARTED,
@@ -16,6 +16,8 @@ import type { CooksRepository } from '../../shared/cosmos/cooks-repository';
 import { getDeviceOwnership, type DeviceOwnership } from '../../shared/cosmos/devices-repository';
 import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
 import { syncDeviceTwin, type SyncDeviceTwin } from '../../shared/iothub/device-twin-sync';
+import { correlationIdOf, readJsonBody } from '../devices/devices-http';
+import { validateStartCook } from './cook-requests';
 import { deviceNotOwnedBody } from './device-ownership';
 import { deviceTwinUpdateFailedBody, runDeviceTwinStep } from './device-twin-step';
 
@@ -56,6 +58,13 @@ import { deviceTwinUpdateFailedBody, runDeviceTwinStep } from './device-twin-ste
  * cook stays committed and the answer is 503 DEVICE_TWIN_UPDATE_FAILED; a
  * retry of the same request replays and syncs again. `cook_started` is still
  * emitted on creation even when the answer is 503, because the cook exists.
+ *
+ * HAR-75 validates the whole body (cook-requests.ts): a body that is not valid
+ * JSON, is `null`, has an unknown key or breaks a field rule is 400
+ * VALIDATION_ERROR naming the field, before any Cosmos call. Every response
+ * carries `X-Request-ID`: the caller's when it sent one, else the invocation
+ * id. That same value is the correlation id the twin and `cook_started` carry.
+ * The body's `requestId` stays the invocation id.
  *
  * The `Cook` and `StartCookRequest` shapes are the canonical ones from
  * @meatgeekv2/api-interfaces — there is no local re-declaration here.
@@ -129,13 +138,6 @@ function statusCodeOf(error: unknown): number | undefined {
   return undefined;
 }
 
-/**
- * MG-84: the cook id is supplied by the client — generated once per start intent
- * and reused on every retry — and must be a UUID. The UUID shape also keeps
- * client ids out of the server's own document ids (`active-device:<deviceId>`).
- */
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /** JSON with object keys sorted, so two equal values compare equal whatever
  *  order their keys were written in. `undefined` members drop out, matching how
  *  an absent optional field is stored. */
@@ -161,19 +163,20 @@ function startFields(cook: Cook): unknown {
   };
 }
 
-/** A JSON response for a request that reached Cosmos: it carries the RU charge
- *  header (HAR-11) alongside the request id. */
+/** A JSON response. `X-Request-ID` is the caller's request id, else the
+ *  invocation id (HAR-75); the RU charge header (HAR-11) is set when the
+ *  request reached Cosmos. */
 function jsonResponse(
   status: number,
   body: unknown,
-  invocationId: string,
-  requestCharge: number
+  correlationId: string,
+  requestCharge?: number
 ): HttpResponseInit {
   return {
     status,
     headers: {
       'Content-Type': 'application/json',
-      'X-Request-ID': invocationId,
+      'X-Request-ID': correlationId,
       ...requestChargeHeaders(requestCharge),
     },
     jsonBody: body,
@@ -186,6 +189,10 @@ export async function startCookHandler(
   deps: StartCookDeps = defaultDeps
 ): Promise<HttpResponseInit> {
   context.log('Processing startCook request');
+  // Correlation id propagates from the inbound request when present, else the
+  // Functions invocation id. Every response's X-Request-ID, the twin and the
+  // SignalR envelope all carry it.
+  const correlationId = correlationIdOf(request, context);
 
   // RU spent by the Cosmos calls that completed, so a later failure still
   // reports them (HAR-11).
@@ -196,40 +203,24 @@ export async function startCookHandler(
     // from the validated Easy Auth principal — never the body, never 'user-1'.
     const principalResult = deps.resolvePrincipal(request);
     if (!principalResult.authenticated) {
-      return unauthenticatedResponse(principalResult.reason, context.invocationId);
+      return unauthenticatedResponse(principalResult.reason, correlationId);
     }
     const { userId } = principalResult.principal;
 
-    // Parse request body
-    const body = (await request.json()) as StartCookRequest;
-
-    // Validate required fields. name must be non-empty after trimming so a
-    // whitespace-only name never mints a Cook.
-    if (!body.name || body.name.trim().length === 0 || !body.deviceId || !body.meatType) {
-      return {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-        jsonBody: {
-          error: 'VALIDATION_ERROR',
-          message: 'Missing required fields: name (non-empty), deviceId, meatType',
-          requestId: context.invocationId,
-        },
-      };
+    // HAR-75: invalid JSON, `null`, an unknown key or a field that breaks its
+    // rule is a 400 naming the field, before any Cosmos call.
+    const parsed = await readJsonBody(request);
+    const validated = parsed
+      ? validateStartCook(parsed.body)
+      : ({ ok: false, message: 'Request body must be valid JSON' } as const);
+    if (!validated.ok) {
+      return jsonResponse(
+        400,
+        { error: 'VALIDATION_ERROR', message: validated.message, requestId: context.invocationId },
+        correlationId
+      );
     }
-
-    // MG-84: the client-supplied id is the idempotency key. No server-minted
-    // fallback: a request without one could not be retried safely.
-    if (typeof body.id !== 'string' || !UUID_PATTERN.test(body.id)) {
-      return {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-        jsonBody: {
-          error: 'VALIDATION_ERROR',
-          message: 'id is required and must be a UUID generated by the client',
-          requestId: context.invocationId,
-        },
-      };
-    }
+    const body = validated.value;
 
     // HAR-26 (MG-88, MG-83): the caller must own the device. One point read on
     // the devices container, before any write and before any SignalR output.
@@ -238,12 +229,7 @@ export async function startCookHandler(
     spent += ownership.requestCharge;
     if (ownership.status !== 'owned') {
       context.log(`startCook refused: device not owned (requestCharge=${spent} RU)`);
-      return jsonResponse(
-        403,
-        deviceNotOwnedBody(context.invocationId),
-        context.invocationId,
-        spent
-      );
+      return jsonResponse(403, deviceNotOwnedBody(context.invocationId), correlationId, spent);
     }
 
     // The new cook. Its `userId` is the authenticated principal — this is BOTH
@@ -253,7 +239,7 @@ export async function startCookHandler(
       id: body.id,
       userId,
       deviceId: body.deviceId,
-      name: body.name.trim(),
+      name: body.name,
       status: 'active',
       startTime: new Date().toISOString(),
       meatType: body.meatType,
@@ -285,7 +271,7 @@ export async function startCookHandler(
           requestId: context.invocationId,
           activeCookId: result.activeCookId,
         },
-        context.invocationId,
+        correlationId,
         requestCharge
       );
     }
@@ -304,15 +290,12 @@ export async function startCookHandler(
             message: 'A cook with this id already exists with a different request body.',
             requestId: context.invocationId,
           },
-          context.invocationId,
+          correlationId,
           requestCharge
         );
       }
     }
 
-    // Correlation id propagates from the inbound request when present, else the
-    // Functions invocation id. Both the twin and the SignalR envelope carry it.
-    const correlationId = request.headers.get('X-Request-ID') ?? context.invocationId;
     const storedCook = result.cook;
 
     // Emit AFTER the successful write, and only on creation. The message-level
@@ -343,7 +326,7 @@ export async function startCookHandler(
       return jsonResponse(
         503,
         deviceTwinUpdateFailedBody(storedCook.id, twin.reason, context.invocationId),
-        context.invocationId,
+        correlationId,
         requestCharge
       );
     }
@@ -351,7 +334,7 @@ export async function startCookHandler(
     return jsonResponse(
       result.outcome === 'created' ? 201 : 200,
       storedCook,
-      context.invocationId,
+      correlationId,
       requestCharge
     );
   } catch (error) {
@@ -363,17 +346,15 @@ export async function startCookHandler(
     const status = statusCodeOf(error);
     context.error(`Error in startCook (dependency status ${status ?? 'unknown'})`);
 
-    return {
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        ...requestChargeHeaders(chargeAfterError(spent, error)),
-      },
-      jsonBody: {
+    return jsonResponse(
+      500,
+      {
         error: 'INTERNAL_SERVER_ERROR',
         message: 'Failed to start cook',
         requestId: context.invocationId,
       },
-    };
+      correlationId,
+      chargeAfterError(spent, error)
+    );
   }
 }

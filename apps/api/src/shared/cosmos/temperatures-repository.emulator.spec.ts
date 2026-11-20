@@ -8,10 +8,11 @@
  * c.SystemProperties["iothub-enqueuedtime"] DESC`, reports a real request charge,
  * and returns documents with the system properties the mapping must strip.
  *
- * HAR-35 (MG-79 part 2) adds the history count and page queries: the real
- * engine evaluates the predicate (hub identity, `IS_OBJECT(c.Body)`, strict
- * `Body.cookId`), the string window on `iothub-enqueuedtime`, the ascending
- * ORDER BY and parameterised `OFFSET @offset LIMIT @limit`.
+ * HAR-35 (MG-79 part 2) adds the history page query: the real engine evaluates
+ * the predicate (hub identity, `IS_OBJECT(c.Body)`, strict `Body.cookId`), the
+ * string window on `iothub-enqueuedtime` and the ascending ORDER BY. HAR-75
+ * pages it by the SDK continuation token (no OFFSET, no COUNT), and a token
+ * the engine refuses becomes InvalidContinuationTokenError.
  *
  * Run it with `npx nx run api:test-emulator` (jest.emulator.config.ts). It is
  * excluded from `nx test api`. An unreachable emulator FAILS every case; it never
@@ -32,7 +33,7 @@ import { CosmosClient, type Container } from '@azure/cosmos';
 import type { TokenCredential } from '@azure/core-auth';
 
 import { CosmosAdapter } from './cosmos-adapter';
-import { TemperaturesRepository } from './temperatures-repository';
+import { InvalidContinuationTokenError, TemperaturesRepository } from './temperatures-repository';
 
 const EMULATOR_ENDPOINT = process.env['COSMOS_EMULATOR_ENDPOINT'] ?? 'https://localhost:8081';
 
@@ -373,72 +374,78 @@ describe('HAR-28 temperatures repository against the Cosmos emulator', () => {
       }
     });
 
+    /** Every page of a filter, walked by continuation token. */
     async function history(
       filter: { cookId?: string; startTime?: string; endTime?: string },
-      offset = 0,
       limit = 100
     ) {
       const full = { deviceId, ...filter };
-      const count = await repository.countReadings(full);
-      const page = await repository.getReadingsPage(full, offset, limit);
-      expectPositiveCharge(count.requestCharge);
-      expectPositiveCharge(page.requestCharge);
-      for (const reading of page.readings) {
-        expect(reading.deviceId).toBe(deviceId);
-        expect(systemKeys(reading)).toEqual([]);
-        for (const key of ['SystemProperties', 'Properties', 'iothub_name', 'id', 'Body']) {
-          expect(reading).not.toHaveProperty(key);
+      const pages: number[][] = [];
+      let continuationToken: string | undefined;
+      do {
+        const page = await repository.getReadingsPage(full, { limit, continuationToken });
+        expectPositiveCharge(page.requestCharge);
+        for (const reading of page.readings) {
+          expect(reading.deviceId).toBe(deviceId);
+          expect(systemKeys(reading)).toEqual([]);
+          for (const key of ['SystemProperties', 'Properties', 'iothub_name', 'id', 'Body']) {
+            expect(reading).not.toHaveProperty(key);
+          }
         }
-      }
-      return { total: count.total, temps: page.readings.map(reading => reading.grillTemp) };
+        pages.push(page.readings.map(reading => reading.grillTemp as number));
+        continuationToken = page.continuationToken;
+      } while (continuationToken !== undefined);
+      return { temps: pages.flat(), pages };
     }
 
-    it('counts and returns every valid reading oldest first, excluding foreign identities, non-object bodies and the other partition', async () => {
-      expect(await history({})).toEqual({ total: 6, temps: [200, 210, 220, 225, 230, 240] });
+    it('returns every valid reading oldest first, excluding foreign identities, non-object bodies and the other partition', async () => {
+      expect((await history({})).temps).toEqual([200, 210, 220, 225, 230, 240]);
     });
 
     it('bounds the window on enqueued time: start inclusive, end exclusive', async () => {
-      expect(await history({ startTime: at(10), endTime: at(30) })).toEqual({
-        total: 3,
-        temps: [210, 220, 225],
-      });
-      expect(await history({ startTime: at(30) })).toEqual({ total: 2, temps: [230, 240] });
-      expect(await history({ endTime: at(10) })).toEqual({ total: 1, temps: [200] });
+      expect((await history({ startTime: at(10), endTime: at(30) })).temps).toEqual([
+        210, 220, 225,
+      ]);
+      expect((await history({ startTime: at(30) })).temps).toEqual([230, 240]);
+      expect((await history({ endTime: at(10) })).temps).toEqual([200]);
     });
 
     it('matches cookId strictly', async () => {
-      expect(await history({ cookId: 'cook-a' })).toEqual({ total: 3, temps: [200, 220, 240] });
-      expect(await history({ cookId: 'cook-ab' })).toEqual({ total: 1, temps: [225] });
-      expect(await history({ cookId: 'cook' })).toEqual({ total: 0, temps: [] });
-      expect(await history({ cookId: 'cook-a', startTime: at(10), endTime: at(40) })).toEqual({
-        total: 1,
-        temps: [220],
-      });
+      expect((await history({ cookId: 'cook-a' })).temps).toEqual([200, 220, 240]);
+      expect((await history({ cookId: 'cook-ab' })).temps).toEqual([225]);
+      expect((await history({ cookId: 'cook' })).temps).toEqual([]);
+      expect(
+        (await history({ cookId: 'cook-a', startTime: at(10), endTime: at(40) })).temps
+      ).toEqual([220]);
     });
 
-    it('pages with OFFSET and LIMIT, total unchanged', async () => {
-      expect(await history({}, 0, 2)).toEqual({ total: 6, temps: [200, 210] });
-      expect(await history({}, 2, 2)).toEqual({ total: 6, temps: [220, 225] });
-      expect(await history({}, 4, 2)).toEqual({ total: 6, temps: [230, 240] });
-      expect(await history({}, 6, 2)).toEqual({ total: 6, temps: [] });
+    it('pages by continuation token, maxItemCount at a time', async () => {
+      const { pages } = await history({}, 2);
+      expect(pages.flat()).toEqual([200, 210, 220, 225, 230, 240]);
+      expect(pages.every(page => page.length <= 2)).toBe(true);
+    });
+
+    it('refuses a garbled continuation token as InvalidContinuationTokenError', async () => {
+      await expect(
+        repository.getReadingsPage(
+          { deviceId },
+          { limit: 2, continuationToken: 'not-a-cosmos-continuation-token' }
+        )
+      ).rejects.toBeInstanceOf(InvalidContinuationTokenError);
     });
 
     it('never reads the other partition', async () => {
       const other = { deviceId: neighbour };
-      const count = await repository.countReadings(other);
-      const page = await repository.getReadingsPage(other, 0, 100);
-      expect(count.total).toBe(3);
+      const page = await repository.getReadingsPage(other, { limit: 100 });
       expect(page.readings.map(reading => reading.grillTemp)).toEqual([300, 300, 300]);
       expect(page.readings.every(reading => reading.deviceId === neighbour)).toBe(true);
     });
 
     it('is an empty page with a real charge for a device with no documents', async () => {
       const empty = { deviceId: `emu-hist-${randomUUID()}` };
-      const count = await repository.countReadings(empty);
-      const page = await repository.getReadingsPage(empty, 0, 100);
-      expect(count.total).toBe(0);
+      const page = await repository.getReadingsPage(empty, { limit: 100 });
       expect(page.readings).toEqual([]);
-      expectPositiveCharge(count.requestCharge);
+      expect(page.continuationToken).toBeUndefined();
       expectPositiveCharge(page.requestCharge);
     });
   });

@@ -459,6 +459,26 @@ describe('MG-59 cooks repository', () => {
 
       await expect(repo.getCook(USER_A, 'cook-1')).rejects.toBeDefined();
     });
+
+    it('HAR-75: a device lock document in the partition is a miss, with its read charge', async () => {
+      const { container, staged } = fakeContainer();
+      const lockId = mod.activeDeviceLockId('grill-1');
+      staged.locks.set(lockId, {
+        resource: {
+          id: lockId,
+          userId: USER_A,
+          docType: mod.ACTIVE_DEVICE_LOCK_DOC_TYPE,
+          deviceId: 'grill-1',
+          cookId: 'cook-1',
+        },
+      });
+      const repo = new mod.CooksRepository(container);
+
+      const result = await repo.getCook(USER_A, lockId);
+
+      expect(result.cook).toBeUndefined();
+      expect(result.requestCharge).toBe(1);
+    });
   });
 
   describe('stopCook — read-then-update on the correctly-addressed document', () => {

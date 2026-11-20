@@ -5,6 +5,9 @@
  * The handler runs over the REAL DevicesRepository and TemperaturesRepository on
  * in-memory containers that stamp Cosmos system properties, and reads real
  * base64 X-MS-CLIENT-PRINCIPAL headers through the real principal.ts.
+ *
+ * HAR-75: paged by continuation token. `offset` is refused, there is no
+ * `total`, and no COUNT query is ever issued.
  */
 import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import type { Device, TemperatureHistoryResponse } from '@meatgeekv2/api-interfaces';
@@ -43,11 +46,15 @@ function encodedPrincipal(oid: string, tid = TID): string {
 
 function request(
   query: Record<string, string>,
-  principal: string | null = encodedPrincipal(OID)
+  principal: string | null = encodedPrincipal(OID),
+  requestId?: string
 ): HttpRequest {
   const headers = new Map<string, string>();
   if (principal !== null) {
     headers.set('x-ms-client-principal', principal);
+  }
+  if (requestId !== undefined) {
+    headers.set('x-request-id', requestId);
   }
   const params = new URLSearchParams(query);
   return {
@@ -129,10 +136,10 @@ function keysDeep(value: unknown): string[] {
   return [];
 }
 
-const ALL_CHARGES = String(READ_CHARGE + 2 * TEMPERATURES_QUERY_CHARGE);
+const ALL_CHARGES = String(READ_CHARGE + TEMPERATURES_QUERY_CHARGE);
 
 describe('GET /temperatures/history', () => {
-  it('200: a page of an owned device, oldest first, with total, offset, limit and hasMore', async () => {
+  it('200: a page of an owned device, oldest first, with limit and hasMore and no token', async () => {
     const { deps, temperatures } = ownedWithReadings(3);
     const { ctx } = context();
 
@@ -145,17 +152,27 @@ describe('GET /temperatures/history', () => {
         { deviceId: DEVICE, timestamp: '2026-08-14T16:00:01.000Z', grillTemp: 201 },
         { deviceId: DEVICE, timestamp: '2026-08-14T16:00:02.000Z', grillTemp: 202 },
       ],
-      total: 3,
-      offset: 0,
       limit: 100,
       hasMore: false,
     });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(ALL_CHARGES);
     expect(header(response, 'X-Request-ID')).toBe('inv-9');
-    expect(temperatures.queries).toHaveLength(2);
+    expect(temperatures.queries).toHaveLength(1);
   });
 
-  it('runs the count then the page, single-partition, with the normalised filter as parameters', async () => {
+  it("echoes the caller's X-Request-ID", async () => {
+    const { deps } = ownedWithReadings(1);
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE }, encodedPrincipal(OID), 'caller-req-1'),
+      context().ctx,
+      deps
+    );
+
+    expect(header(response, 'X-Request-ID')).toBe('caller-req-1');
+  });
+
+  it('runs one single-partition page query with the normalised filter, maxItemCount = limit, and no COUNT, OFFSET or LIMIT', async () => {
     const { deps, temperatures } = ownedWithReadings(1);
 
     await getTemperatureHistoryHandler(
@@ -166,7 +183,6 @@ describe('GET /temperatures/history', () => {
         startTime: '2026-08-14T18:00:00+02:00',
         endTime: '2026-08-14T17:00:00Z',
         limit: '25',
-        offset: '50',
       }),
       context().ctx,
       deps
@@ -177,32 +193,82 @@ describe('GET /temperatures/history', () => {
       'AND IS_OBJECT(c.Body) AND c.Body.cookId = @cookId ' +
       'AND c.SystemProperties["iothub-enqueuedtime"] >= @startTime ' +
       'AND c.SystemProperties["iothub-enqueuedtime"] < @endTime';
-    const filterParameters = [
+    expect(temperatures.queries).toHaveLength(1);
+    const [pageQuery] = temperatures.queries;
+    expect(pageQuery.query).toBe(
+      `SELECT * FROM c WHERE ${where} ORDER BY c.SystemProperties["iothub-enqueuedtime"] ASC`
+    );
+    expect(pageQuery.parameters).toEqual([
       { name: '@deviceId', value: DEVICE },
       { name: '@cookId', value: 'cook-7' },
       { name: '@startTime', value: '2026-08-14T16:00:00.000Z' },
       { name: '@endTime', value: '2026-08-14T17:00:00.000Z' },
-    ];
-    expect(temperatures.queries).toHaveLength(2);
-    const [count, pageQuery] = temperatures.queries;
-    expect(count.query).toBe(`SELECT VALUE COUNT(1) FROM c WHERE ${where}`);
-    expect(count.parameters).toEqual(filterParameters);
-    expect(pageQuery.query).toBe(
-      `SELECT * FROM c WHERE ${where} ` +
-        'ORDER BY c.SystemProperties["iothub-enqueuedtime"] ASC OFFSET @offset LIMIT @limit'
-    );
-    expect(pageQuery.parameters).toEqual([
-      ...filterParameters,
-      { name: '@offset', value: 50 },
-      { name: '@limit', value: 25 },
     ]);
+    expect(pageQuery.options).toEqual({
+      partitionKey: DEVICE,
+      maxItemCount: 25,
+      continuationToken: undefined,
+    });
+  });
+
+  it('never issues a COUNT query, on any page', async () => {
+    const { deps, temperatures } = ownedWithReadings(5);
+    let continuationToken: string | undefined;
+    do {
+      const response = await getTemperatureHistoryHandler(
+        request({
+          deviceId: DEVICE,
+          limit: '2',
+          ...(continuationToken ? { continuationToken } : {}),
+        }),
+        context().ctx,
+        deps
+      );
+      continuationToken = page(response).continuationToken;
+    } while (continuationToken !== undefined);
+
+    expect(temperatures.queries).toHaveLength(3);
     for (const query of temperatures.queries) {
-      expect(query.options['partitionKey']).toBe(DEVICE);
-      expect(query.options).not.toHaveProperty('enableCrossPartitionQuery');
+      expect(query.query).not.toMatch(/COUNT|OFFSET|LIMIT/);
     }
   });
 
-  it('200 with an empty page for an owned device with no readings, not 404', async () => {
+  it('round-trips the continuation token: each page resumes where the last ended, and the last has no token', async () => {
+    const { deps, temperatures } = ownedWithReadings(5);
+    const run = (continuationToken?: string) =>
+      getTemperatureHistoryHandler(
+        request({
+          deviceId: DEVICE,
+          limit: '2',
+          ...(continuationToken !== undefined ? { continuationToken } : {}),
+        }),
+        context().ctx,
+        deps
+      );
+
+    const first = page(await run());
+    expect(first.readings.map(r => r.grillTemp)).toEqual([200, 201]);
+    expect(first).toMatchObject({ limit: 2, hasMore: true });
+    expect(first.continuationToken).toEqual(expect.any(String));
+
+    const second = page(await run(first.continuationToken));
+    expect(second.readings.map(r => r.grillTemp)).toEqual([202, 203]);
+    expect(second).toMatchObject({ limit: 2, hasMore: true });
+
+    const last = page(await run(second.continuationToken));
+    expect(last.readings.map(r => r.grillTemp)).toEqual([204]);
+    expect(last).toEqual({ readings: last.readings, limit: 2, hasMore: false });
+    expect(last).not.toHaveProperty('continuationToken');
+
+    // The token reached the SDK exactly as the previous page returned it.
+    expect(temperatures.queries.map(q => q.options['continuationToken'])).toEqual([
+      undefined,
+      first.continuationToken,
+      second.continuationToken,
+    ]);
+  });
+
+  it('200 with an empty page and no token for an owned device with no readings, not 404', async () => {
     const { devices, deps } = setup();
     devices.seed(device());
 
@@ -213,35 +279,8 @@ describe('GET /temperatures/history', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(response.jsonBody).toEqual({
-      readings: [],
-      total: 0,
-      offset: 0,
-      limit: 100,
-      hasMore: false,
-    });
+    expect(response.jsonBody).toEqual({ readings: [], limit: 100, hasMore: false });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(ALL_CHARGES);
-  });
-
-  it('hasMore at the boundary: true while offset + limit < total, false once it equals total', async () => {
-    const { deps } = ownedWithReadings(5);
-    const run = (offset: string, limit: string) =>
-      getTemperatureHistoryHandler(
-        request({ deviceId: DEVICE, offset, limit }),
-        context().ctx,
-        deps
-      );
-
-    const before = page(await run('0', '4'));
-    expect(before).toMatchObject({ total: 5, offset: 0, limit: 4, hasMore: true });
-    expect(before.readings.map(r => r.grillTemp)).toEqual([200, 201, 202, 203]);
-
-    const exact = page(await run('1', '4'));
-    expect(exact).toMatchObject({ total: 5, offset: 1, limit: 4, hasMore: false });
-    expect(exact.readings.map(r => r.grillTemp)).toEqual([201, 202, 203, 204]);
-
-    const past = page(await run('5', '4'));
-    expect(past).toMatchObject({ readings: [], total: 5, hasMore: false });
   });
 
   it('never returns a document whose SystemProperties device id differs from the partition, and ignores Body.deviceId', async () => {
@@ -271,8 +310,6 @@ describe('GET /temperatures/history', () => {
 
     expect(page(response)).toEqual({
       readings: [{ deviceId: DEVICE, timestamp: '2026-08-14T16:00:01.000Z', grillTemp: 250 }],
-      total: 1,
-      offset: 0,
       limit: 100,
       hasMore: false,
     });
@@ -356,38 +393,86 @@ describe('GET /temperatures/history', () => {
     ['limit not a number', { deviceId: DEVICE, limit: 'ten' }],
     ['limit empty', { deviceId: DEVICE, limit: '' }],
     ['limit of 0', { deviceId: DEVICE, limit: '0' }],
-    ['limit of 5001', { deviceId: DEVICE, limit: '5001' }],
-    ['offset not an integer', { deviceId: DEVICE, offset: '1e3' }],
-    ['offset negative', { deviceId: DEVICE, offset: '-1' }],
+    ['limit of 1001', { deviceId: DEVICE, limit: '1001' }],
+    ['limit of 5000 (the old maximum)', { deviceId: DEVICE, limit: '5000' }],
+    ['continuationToken empty', { deviceId: DEVICE, continuationToken: '' }],
+    ['offset=0', { deviceId: DEVICE, offset: '0' }],
+    ['offset=100', { deviceId: DEVICE, offset: '100' }],
+    ['offset empty', { deviceId: DEVICE, offset: '' }],
   ];
 
   it.each(CASES)('400 VALIDATION_ERROR for %s, with no Cosmos call', async (_name, query) => {
     const { deps, devices, temperatures, getDevicesRepository } = setup();
 
-    const response = await getTemperatureHistoryHandler(request(query), context().ctx, deps);
+    const response = await getTemperatureHistoryHandler(
+      request(query, encodedPrincipal(OID), 'caller-req-400'),
+      context().ctx,
+      deps
+    );
 
     expect(response.status).toBe(400);
     expect(response.jsonBody).toMatchObject({ error: 'VALIDATION_ERROR', requestId: 'inv-9' });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBeUndefined();
+    expect(header(response, 'X-Request-ID')).toBe('caller-req-400');
     expect(getDevicesRepository).not.toHaveBeenCalled();
     expect(devices.calls).toEqual([]);
     expect(temperatures.queries).toEqual([]);
   });
 
-  it('accepts the bounds of limit (1 and 5000) and offset (0)', async () => {
-    for (const [limit, offset] of [
-      ['1', '0'],
-      ['5000', '0'],
-    ]) {
-      const { deps } = ownedWithReadings(2);
+  it('names offset in the 400, even alongside a token', async () => {
+    const { deps } = ownedWithReadings(1);
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE, offset: '0', continuationToken: 'fake-history-token:0' }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(400);
+    expect((response.jsonBody as { message: string }).message).toMatch(/^offset /);
+  });
+
+  it('accepts the bounds of limit (1 and 1000)', async () => {
+    for (const limit of ['1', '1000']) {
+      const { deps, temperatures } = ownedWithReadings(2);
       const response = await getTemperatureHistoryHandler(
-        request({ deviceId: DEVICE, limit, offset }),
+        request({ deviceId: DEVICE, limit }),
         context().ctx,
         deps
       );
       expect(response.status).toBe(200);
       expect(page(response).limit).toBe(Number(limit));
+      expect(page(response).readings).toHaveLength(Math.min(2, Number(limit)));
+      expect(temperatures.queries[0].options['maxItemCount']).toBe(Number(limit));
     }
+  });
+
+  it('400 VALIDATION_ERROR, not 500, for a token Cosmos refuses, charging both calls and leaking nothing', async () => {
+    const { deps, temperatures } = ownedWithReadings(3);
+    const { ctx, errors, logs } = context();
+
+    const response = await getTemperatureHistoryHandler(
+      request(
+        { deviceId: DEVICE, continuationToken: 'garbled{"not":"a token"' },
+        encodedPrincipal(OID),
+        'caller-req-token'
+      ),
+      ctx,
+      deps
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.jsonBody).toEqual({
+      error: 'VALIDATION_ERROR',
+      message: expect.stringContaining('continuationToken'),
+      requestId: 'inv-9',
+    });
+    expect(header(response, 'X-Request-ID')).toBe('caller-req-token');
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(ALL_CHARGES);
+    expect(temperatures.queries).toHaveLength(1);
+    expect(errors).toEqual([]);
+    const everything = [JSON.stringify(response), ...logs].join('\n');
+    expect(everything).not.toContain(FAKE_ACCOUNT_ENDPOINT);
   });
 
   it('404 DEVICE_NOT_FOUND for foreign and unknown devices, byte-identical, without reading temperatures', async () => {
@@ -439,24 +524,9 @@ describe('GET /temperatures/history', () => {
     expect(temperatures.queries).toEqual([]);
   });
 
-  it('500 when the count query fails, charging the ownership read plus the failed count', async () => {
+  it('500 when the page query fails, charging both calls, leaking no endpoint, database name, or claim', async () => {
     const { deps, temperatures } = ownedWithReadings(1);
     temperatures.failNext(503);
-    const { ctx, errors } = context();
-
-    const response = await getTemperatureHistoryHandler(request({ deviceId: DEVICE }), ctx, deps);
-
-    expect(response.status).toBe(500);
-    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(
-      String(READ_CHARGE + TEMPERATURES_QUERY_CHARGE)
-    );
-    expect(temperatures.queries).toHaveLength(1);
-    expect(errors.join('\n')).toContain('cosmos_status_503');
-  });
-
-  it('500 when the page query fails, charging all three calls, leaking no endpoint, database name, or claim', async () => {
-    const { deps, temperatures } = ownedWithReadings(1);
-    temperatures.failNext(503, 1);
     const { ctx, errors, logs } = context();
 
     const response = await getTemperatureHistoryHandler(request({ deviceId: DEVICE }), ctx, deps);
@@ -468,11 +538,24 @@ describe('GET /temperatures/history', () => {
       requestId: 'inv-9',
     });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(ALL_CHARGES);
-    expect(temperatures.queries).toHaveLength(2);
+    expect(temperatures.queries).toHaveLength(1);
     const everything = [JSON.stringify(response), ...errors, ...logs].join('\n');
     for (const secret of [FAKE_ACCOUNT_ENDPOINT, 'documents.azure.com', OID, TID, 'meatgeek-v2']) {
       expect(everything).not.toContain(secret);
     }
     expect(errors.join('\n')).toContain('cosmos_status_503');
+  });
+
+  it('500, not 400, when a page with a token fails with a non-400 status', async () => {
+    const { deps, temperatures } = ownedWithReadings(3);
+    temperatures.failNext(503);
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE, continuationToken: 'fake-history-token:1' }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(500);
   });
 });

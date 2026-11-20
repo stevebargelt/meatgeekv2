@@ -47,10 +47,45 @@ TargetTemperatures:
       minimum: -50
       maximum: 1000
 
+StartCookTargetTemperatures:
+  type: object
+  description: |
+    The `targetTemps` POST /cooks accepts (HAR-75): any subset of the grill
+    and the four probes, each a finite number from 0 to 1000 degrees F. Any
+    other key, or a value out of range, is 400 VALIDATION_ERROR naming it.
+  additionalProperties: false
+  properties:
+    grill:
+      type: number
+      format: double
+      minimum: 0
+      maximum: 1000
+      description: Grill chamber setpoint, degrees F.
+    probe1:
+      type: number
+      format: double
+      minimum: 0
+      maximum: 1000
+    probe2:
+      type: number
+      format: double
+      minimum: 0
+      maximum: 1000
+    probe3:
+      type: number
+      format: double
+      minimum: 0
+      maximum: 1000
+    probe4:
+      type: number
+      format: double
+      minimum: 0
+      maximum: 1000
+
 Cook:
   type: object
   description: |
-    Cook session, as GET /cooks (array items), POST /cooks and
+    Cook session, as GET /cooks (array items), GET /cooks/{cookId}, POST /cooks and
     POST /cooks/{cookId}/stop return it and as the cook_started and
     cook_stopped SignalR messages carry it. The repository projects every
     stored cook onto exactly these fields (toCook in
@@ -121,17 +156,18 @@ Cook:
 StartCookRequest:
   type: object
   description: |
-    Body for POST /cooks. The handler checks only that `name` is a
-    non-blank string, `deviceId` and `meatType` are present and non-empty,
-    and `id` is a UUID; anything else is 400 VALIDATION_ERROR. `weight`,
-    `targetTemps` and `notes` are stored as sent, without validation. Unknown
-    fields are ignored. A body that is not a JSON object is answered 500
-    (see the operation description).
+    Body for POST /cooks. Every field has a rule (HAR-75,
+    apps/api/src/functions/cooks/cook-requests.ts); a body that is not a JSON
+    object (invalid JSON, `null`, an array), has a field not listed here, or
+    breaks a field rule is 400 VALIDATION_ERROR with a message naming the
+    field. `name` and `meatType` are stored trimmed; `weight`, `targetTemps`
+    and `notes` are stored as sent when present.
   required:
     - id
     - name
     - deviceId
     - meatType
+  additionalProperties: false
   properties:
     id:
       type: string
@@ -148,7 +184,7 @@ StartCookRequest:
       type: string
       minLength: 1
       pattern: '\S'
-      description: Must contain a non-space character. Stored trimmed.
+      description: 1-100 characters after trimming. Stored trimmed.
     deviceId:
       type: string
       minLength: 1
@@ -158,14 +194,20 @@ StartCookRequest:
     meatType:
       type: string
       minLength: 1
+      pattern: '\S'
+      description: 1-100 characters after trimming. Stored trimmed.
     weight:
       type: number
       format: double
-      description: Pre-cook weight in pounds. Stored as sent.
+      exclusiveMinimum: true
+      minimum: 0
+      maximum: 1000
+      description: Pre-cook weight in pounds, greater than 0 and at most 1000.
     targetTemps:
-      $ref: '#/TargetTemperatures'
+      $ref: '#/StartCookTargetTemperatures'
     notes:
       type: string
+      maxLength: 2000
 
 CookListResponse:
   type: object

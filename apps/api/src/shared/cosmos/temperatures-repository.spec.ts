@@ -8,9 +8,9 @@ import {
   routedDocument,
 } from './fake-temperatures-container.testing';
 import {
+  InvalidContinuationTokenError,
   LATEST_READING_QUERY,
   TemperaturesRepository,
-  historyCountQuery,
   historyPageQuery,
   toTemperatureReading,
 } from './temperatures-repository';
@@ -295,19 +295,6 @@ describe('TemperaturesRepository history queries (HAR-35)', () => {
     return { fake, repository: new TemperaturesRepository(fake.asContainer()) };
   }
 
-  it('the count query text, parameters and partitionKey', async () => {
-    const { fake, repository } = seeded();
-
-    await repository.countReadings({ deviceId: DEVICE });
-
-    expect(fake.queries).toHaveLength(1);
-    const [query] = fake.queries;
-    expect(query.query).toBe(`SELECT VALUE COUNT(1) FROM c WHERE ${PREDICATE}`);
-    expect(query.parameters).toEqual([{ name: '@deviceId', value: DEVICE }]);
-    expect(query.options['partitionKey']).toBe(DEVICE);
-    expect(query.options).not.toHaveProperty('enableCrossPartitionQuery');
-  });
-
   it('the page query text, parameters and partitionKey, with every filter', async () => {
     const { fake, repository } = seeded();
     const filter = {
@@ -317,7 +304,10 @@ describe('TemperaturesRepository history queries (HAR-35)', () => {
       endTime: '2026-08-14T17:00:00.000Z',
     };
 
-    await repository.getReadingsPage(filter, 5, 50);
+    await repository.getReadingsPage(filter, {
+      limit: 50,
+      continuationToken: 'fake-history-token:1',
+    });
 
     expect(fake.queries).toHaveLength(1);
     const [query] = fake.queries;
@@ -325,43 +315,96 @@ describe('TemperaturesRepository history queries (HAR-35)', () => {
       `${PREDICATE} AND c.Body.cookId = @cookId ` +
       'AND c.SystemProperties["iothub-enqueuedtime"] >= @startTime ' +
       'AND c.SystemProperties["iothub-enqueuedtime"] < @endTime';
+    // HAR-75: no OFFSET and no LIMIT in the text; the page size and position
+    // are the SDK's maxItemCount and continuation token.
     expect(query.query).toBe(
-      `SELECT * FROM c WHERE ${where} ` +
-        'ORDER BY c.SystemProperties["iothub-enqueuedtime"] ASC OFFSET @offset LIMIT @limit'
+      `SELECT * FROM c WHERE ${where} ` + 'ORDER BY c.SystemProperties["iothub-enqueuedtime"] ASC'
     );
+    expect(query.query).not.toMatch(/OFFSET|LIMIT|COUNT/);
     expect(query.parameters).toEqual([
       { name: '@deviceId', value: DEVICE },
       { name: '@cookId', value: 'cook-1' },
       { name: '@startTime', value: '2026-08-14T16:00:00.000Z' },
       { name: '@endTime', value: '2026-08-14T17:00:00.000Z' },
-      { name: '@offset', value: 5 },
-      { name: '@limit', value: 50 },
     ]);
-    expect(query.options['partitionKey']).toBe(DEVICE);
-    expect(query.options).not.toHaveProperty('enableCrossPartitionQuery');
-    // The count runs over exactly the same predicate and parameters.
-    expect(historyCountQuery(filter)).toEqual({
-      query: `SELECT VALUE COUNT(1) FROM c WHERE ${where}`,
-      parameters: query.parameters.slice(0, 4),
+    expect(query.options).toEqual({
+      partitionKey: DEVICE,
+      maxItemCount: 50,
+      continuationToken: 'fake-history-token:1',
     });
-    expect(historyPageQuery(filter, 5, 50).query).toBe(query.query);
+    expect(historyPageQuery(filter).query).toBe(query.query);
   });
 
-  it('total excludes a foreign SystemProperties device id, a non-object Body and other partitions', async () => {
+  it('pages by continuation token until the query is drained, one query a page', async () => {
+    const { fake, repository } = seeded();
+
+    const first = await repository.getReadingsPage({ deviceId: DEVICE }, { limit: 2 });
+    expect(first.readings.map(reading => reading.grillTemp)).toEqual([200, 210]);
+    expect(first.continuationToken).toEqual(expect.any(String));
+
+    const second = await repository.getReadingsPage(
+      { deviceId: DEVICE },
+      { limit: 2, continuationToken: first.continuationToken }
+    );
+    expect(second.readings.map(reading => reading.grillTemp)).toEqual([225]);
+    expect(second.continuationToken).toBeUndefined();
+    expect(second.requestCharge).toBe(TEMPERATURES_QUERY_CHARGE);
+
+    expect(fake.queries).toHaveLength(2);
+    expect(fake.queries[0].options['continuationToken']).toBeUndefined();
+    expect(fake.queries[1].options['continuationToken']).toBe(first.continuationToken);
+  });
+
+  it('turns a token Cosmos refuses (400) into InvalidContinuationTokenError with its charge', async () => {
     const { repository } = seeded();
 
-    expect(await repository.countReadings({ deviceId: DEVICE })).toEqual({
-      total: 3,
-      requestCharge: TEMPERATURES_QUERY_CHARGE,
-    });
-    expect((await repository.countReadings({ deviceId: DEVICE, cookId: 'cook-1' })).total).toBe(2);
-    expect((await repository.countReadings({ deviceId: 'nobody' })).total).toBe(0);
+    const refused = repository.getReadingsPage(
+      { deviceId: DEVICE },
+      { limit: 2, continuationToken: 'garbled' }
+    );
+
+    await expect(refused).rejects.toBeInstanceOf(InvalidContinuationTokenError);
+    await expect(refused).rejects.toMatchObject({ requestCharge: TEMPERATURES_QUERY_CHARGE });
+    await expect(refused).rejects.not.toHaveProperty('message', expect.stringContaining('https'));
+  });
+
+  it('turns a status-less SDK failure on a token into InvalidContinuationTokenError', async () => {
+    const container = {
+      items: {
+        query: () => ({
+          fetchNext: async () => {
+            throw new SyntaxError('Unexpected token g in JSON at position 0');
+          },
+        }),
+      },
+    };
+    const repository = new TemperaturesRepository(container as never);
+
+    await expect(
+      repository.getReadingsPage({ deviceId: DEVICE }, { limit: 2, continuationToken: 'g' })
+    ).rejects.toBeInstanceOf(InvalidContinuationTokenError);
+  });
+
+  it('lets a 400 without a token, and a non-400 with one, propagate as they are', async () => {
+    const fake = new FakeTemperaturesContainer();
+    const repository = new TemperaturesRepository(fake.asContainer());
+    fake.failNext(400);
+    await expect(
+      repository.getReadingsPage({ deviceId: DEVICE }, { limit: 1 })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    fake.failNext(503);
+    await expect(
+      repository.getReadingsPage(
+        { deviceId: DEVICE },
+        { limit: 1, continuationToken: 'fake-history-token:0' }
+      )
+    ).rejects.toMatchObject({ statusCode: 503 });
   });
 
   it('pages oldest enqueued time first, mapped, ignoring Body.deviceId, with no _ key', async () => {
     const { repository } = seeded();
 
-    const page = await repository.getReadingsPage({ deviceId: DEVICE }, 0, 100);
+    const page = await repository.getReadingsPage({ deviceId: DEVICE }, { limit: 100 });
 
     expect(page).toEqual({
       readings: [
@@ -389,12 +432,19 @@ describe('TemperaturesRepository history queries (HAR-35)', () => {
     expect(JSON.stringify(page)).not.toContain('intruder');
   });
 
-  it('applies offset and limit after ordering', async () => {
+  it('excludes a foreign SystemProperties device id, a non-object Body and other partitions', async () => {
     const { repository } = seeded();
 
-    const page = await repository.getReadingsPage({ deviceId: DEVICE }, 1, 1);
-
-    expect(page.readings.map(reading => reading.grillTemp)).toEqual([210]);
+    const all = await repository.getReadingsPage({ deviceId: DEVICE }, { limit: 100 });
+    expect(all.readings).toHaveLength(3);
+    const tagged = await repository.getReadingsPage(
+      { deviceId: DEVICE, cookId: 'cook-1' },
+      { limit: 100 }
+    );
+    expect(tagged.readings).toHaveLength(2);
+    expect(
+      (await repository.getReadingsPage({ deviceId: 'nobody' }, { limit: 100 })).readings
+    ).toEqual([]);
   });
 
   it('drops a document that still maps to null from the page', async () => {
@@ -410,22 +460,19 @@ describe('TemperaturesRepository history queries (HAR-35)', () => {
     fake.seed(routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T16:00:00.000Z' }));
     const repository = new TemperaturesRepository(fake.asContainer());
 
-    expect((await repository.countReadings({ deviceId: DEVICE })).total).toBe(2);
-    const page = await repository.getReadingsPage({ deviceId: DEVICE }, 0, 100);
+    const page = await repository.getReadingsPage({ deviceId: DEVICE }, { limit: 100 });
     expect(page.readings).toEqual([
       { deviceId: DEVICE, timestamp: '2026-08-14T16:00:00.000Z', grillTemp: 225 },
     ]);
   });
 
-  it('lets a Cosmos failure propagate from either query', async () => {
+  it('lets a Cosmos failure propagate from the page query', async () => {
     const fake = new FakeTemperaturesContainer();
     const repository = new TemperaturesRepository(fake.asContainer());
-    fake.failNext(503);
-    await expect(repository.countReadings({ deviceId: DEVICE })).rejects.toMatchObject({
-      statusCode: 503,
-    });
     fake.failNext(429);
-    await expect(repository.getReadingsPage({ deviceId: DEVICE }, 0, 1)).rejects.toMatchObject({
+    await expect(
+      repository.getReadingsPage({ deviceId: DEVICE }, { limit: 1 })
+    ).rejects.toMatchObject({
       statusCode: 429,
     });
   });

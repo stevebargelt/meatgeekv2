@@ -11,7 +11,8 @@
  * HAR-45: the stub also keeps a volume of readings for the simulated device.
  * A fake top-up run tells the stub how many it "sent" (an unauthenticated POST
  * to `/api/__simdevice/sent`, which only the stub has), and the stub makes them
- * readable over the next few `limit=1` polls, or never.
+ * readable over the next few polls of the device's current reading, or never.
+ * HAR-75: history pages by continuation token, and `offset` is a 400.
  */
 import { randomUUID } from 'crypto';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
@@ -27,7 +28,7 @@ import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
-import volumeGroup, { VOLUME } from './proofs/telemetry-volume.proof';
+import volumeGroup, { topupDrainedAt, VOLUME } from './proofs/telemetry-volume.proof';
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 /** HAR-67: the acceptance peer's token, a second caller who owns nothing. */
@@ -45,10 +46,16 @@ const OLDER_READINGS = [
   '2026-11-19T16:42:00.000Z',
 ];
 const SIM_HISTORY_PAGE = 2;
+/** HAR-75: the fake simdevice stamps top-up readings from here, 50 ms apart:
+ *  after every other reading the stub serves, as live top-ups are the newest. */
+const TOPUP_EPOCH = Date.UTC(2026, 10, 20);
 
 type FakeMode = 'ok' | 'exit1' | 'topup-exit1' | 'hang' | 'leak-stderr' | 'leak-stdout';
 
 type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
+/** HAR-75: kept out of CookRoute, whose failure tests follow the cook through
+ *  every group that starts one. */
+type CookItemRoute = 'GET /cooks/{cookId}';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
 type TemperatureRoute = 'GET /temperatures/current/{deviceId}' | 'GET /temperatures/history';
 type UserRoute = 'PUT /users/me' | 'GET /users/me';
@@ -61,6 +68,7 @@ type RecipeRoute =
 type SignalRRoute = 'POST /negotiate';
 type StubRoute =
   | CookRoute
+  | CookItemRoute
   | DeviceRoute
   | TemperatureRoute
   | UserRoute
@@ -87,8 +95,17 @@ interface StubOptions {
   readonly omitChargeOn?: StubRoute;
   /** Answer every GET /temperatures/current with a 404 carrying this code. */
   readonly temperatureErrorCode?: string;
-  /** Answer GET /temperatures/history for an owned device with this `total`. */
-  readonly historyTotal?: number;
+  /** Answer GET /temperatures/history for an owned device (not the simulated
+   *  one) with this body instead of the empty first page. */
+  readonly emptyHistoryBody?: unknown;
+  /** HAR-75: GET /temperatures/history ignores `offset` instead of a 400. */
+  readonly historyAcceptsOffset?: boolean;
+  /** HAR-75: GET /cooks/{cookId} serves the cook to the peer too (a broken
+   *  partition), or serves the device lock as if it were a cook. */
+  readonly cookItemFault?: 'peer-reads' | 'lock-reads';
+  /** HAR-75: the RU the last page of a walk of the simulated device's volume
+   *  reports, instead of the route's usual charge. */
+  readonly simDeepPageCharge?: string;
   /** Echo the caller's Authorization header back in bodies and headers. */
   readonly echoAuthorization?: boolean;
   /** Start cooks on any device, registered or not (the pre-HAR-26 behaviour). */
@@ -106,8 +123,8 @@ interface StubOptions {
   /** HAR-45: readings the simulated device's volume starts with. Default
    *  `VOLUME.target`, so no top-up is needed. */
   readonly simVolume?: number;
-  /** HAR-45: how many top-up readings become readable per `limit=1` poll.
-   *  Default all of them at the next poll. */
+  /** HAR-45: how many top-up readings become readable per poll of the
+   *  simulated device's current reading. Default all of them at the next poll. */
   readonly simDrainPerPoll?: number;
   /** HAR-45: top-up readings never become readable. */
   readonly simTopupNeverRouted?: boolean;
@@ -180,8 +197,9 @@ interface Stub {
   readonly cookPushes: Array<{ target: string; cookId: string; connections: number }>;
   /** HAR-67: the simulated device's cooks. */
   readonly simCooks: () => Array<{ id: string; status: string }>;
-  /** HAR-45: the `total` each `limit=1` read of the simulated device returned. */
-  readonly volumeTotals: number[];
+  /** HAR-75: the volume after each poll of the simulated device's current
+   *  reading while a top-up is being routed. */
+  readonly drainTotals: number[];
   close(): Promise<void>;
 }
 
@@ -197,6 +215,7 @@ const RU: Record<StubRoute, string> = {
   'GET /cooks': '2.83',
   'POST /cooks': '11.43',
   'POST /cooks/{cookId}/stop': '20.1',
+  'GET /cooks/{cookId}': '1.17',
   'GET /devices': '3.11',
   'POST /devices': '9.52',
   'GET /devices/{id}': '1',
@@ -278,9 +297,11 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   const simRouted = () => !options.simNeverRouted && simPolls >= simVisibleFromPoll;
   const simServed = options.simServedTimestamp ?? SIM_TIMESTAMP;
   const topups: string[][] = [];
-  const volumeTotals: number[] = [];
+  const drainTotals: number[] = [];
   let simStored = options.simVolume ?? VOLUME.target;
   let simPending = 0;
+  /** HAR-75: the timestamp of the last reading the last top-up "sent". */
+  let topupLast: string | undefined;
   const signalRRequests: Stub['signalRRequests'] = [];
   // HAR-57: a minimal Azure SignalR client endpoint, long polling only. Per
   // connection token: messages queued for the client, the poll being held, and
@@ -459,7 +480,10 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           setTimeout(pushLiveReading, 20);
         } else {
           topups.push(args);
-          simPending += Number(args[args.indexOf('--count') + 1]);
+          const count = Number(args[args.indexOf('--count') + 1]);
+          simPending += count;
+          // The fake simdevice stamps its top-up readings from TOPUP_EPOCH, 50 ms apart.
+          topupLast = new Date(TOPUP_EPOCH + (count - 1) * 50).toISOString();
         }
         response.writeHead(204);
         response.end();
@@ -501,10 +525,10 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         ...(requestId === undefined ? {} : { requestId }),
       });
 
-      const send = (status: number, body: unknown, route?: StubRoute) => {
+      const send = (status: number, body: unknown, route?: StubRoute, charge?: string) => {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (route && options.omitChargeOn !== route) {
-          headers[REQUEST_CHARGE_HEADER] = RU[route];
+          headers[REQUEST_CHARGE_HEADER] = charge ?? RU[route];
         }
         if (options.echoAuthorization && authorization) {
           headers['x-echo-authorization'] = authorization;
@@ -528,6 +552,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       }
 
       const stopMatch = /^\/api\/cooks\/([^/]+)\/stop$/.exec(url.pathname);
+      const cookMatch = /^\/api\/cooks\/([^/]+)$/.exec(url.pathname);
       const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
       const temperatureMatch = /^\/api\/temperatures\/current\/([^/]+)$/.exec(url.pathname);
       const recipeMatch = /^\/api\/recipes\/([^/]+)$/.exec(url.pathname);
@@ -535,6 +560,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       if (request.method === 'GET' && url.pathname === '/api/cooks') route = 'GET /cooks';
       else if (request.method === 'POST' && url.pathname === '/api/cooks') route = 'POST /cooks';
       else if (request.method === 'POST' && stopMatch) route = 'POST /cooks/{cookId}/stop';
+      else if (request.method === 'GET' && cookMatch) route = 'GET /cooks/{cookId}';
       else if (request.method === 'GET' && url.pathname === '/api/devices') route = 'GET /devices';
       else if (request.method === 'POST' && url.pathname === '/api/devices')
         route = 'POST /devices';
@@ -567,6 +593,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         'POST /negotiate',
         'GET /temperatures/current/{deviceId}',
         'POST /cooks',
+        'GET /cooks/{cookId}',
       ];
       if (caller === 'peer' && !peerRoutes.includes(route)) {
         send(404, { error: 'NOT_FOUND' });
@@ -684,6 +711,20 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       if (route === 'GET /temperatures/current/{deviceId}') {
         const deviceId = decodeURIComponent(temperatureMatch![1]);
         const owned = owns(deviceId);
+        if (owned && deviceId === SIM_DEVICE && topupLast !== undefined) {
+          // HAR-75: while a top-up is routed, each poll makes a batch readable;
+          // once all of it is, the newest reading is its last.
+          if (!options.simTopupNeverRouted) {
+            const routed = Math.min(simPending, options.simDrainPerPoll ?? simPending);
+            simPending -= routed;
+            simStored += routed;
+          }
+          drainTotals.push(simStored);
+          if (simPending === 0) {
+            send(200, simReading(topupLast), route);
+            return;
+          }
+        }
         if (owned && deviceId === SIM_DEVICE && twinReading) {
           // HAR-68: the reading the twin run sent, tagged with its cook.
           const { timestamp, cookId } = twinReading;
@@ -706,74 +747,56 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         const code = owned ? 'NO_READINGS' : 'DEVICE_NOT_FOUND';
         send(404, { error: options.temperatureErrorCode ?? code }, route);
       } else if (route === 'GET /temperatures/history') {
-        /** One page of the simulated device's volume, `simStored` readings. */
-        const sendVolumePage = (limitParam: string | null) => {
-          const limit = Number(limitParam ?? '100');
-          const offset = Number(url.searchParams.get('offset') ?? '0');
-          const size = Math.max(0, Math.min(limit, simStored - offset));
-          const readings = Array.from({ length: size }, (_, i) =>
-            simReading(new Date(Date.UTC(2026, 10, 12) + (offset + i) * 5000).toISOString())
-          );
-          send(
-            200,
-            { readings, total: simStored, offset, limit, hasMore: offset + limit < simStored },
-            route
-          );
-        };
         // An owned device has an empty first page; anything else is not found.
         const deviceId = url.searchParams.get('deviceId') ?? '';
         if (!devices.has(deviceId)) {
           send(404, { error: 'DEVICE_NOT_FOUND' }, route);
           return;
         }
-        if (deviceId === SIM_DEVICE && !url.searchParams.has('startTime')) {
-          // HAR-45: the volume, read without a window. A `limit=1` read is a
-          // poll: top-up readings become readable a batch at a time.
-          const limitParam = url.searchParams.get('limit');
-          if (limitParam === '1' && !options.simTopupNeverRouted) {
-            const routed = Math.min(simPending, options.simDrainPerPoll ?? simPending);
-            simPending -= routed;
-            simStored += routed;
-          }
-          if (limitParam === '1') {
-            volumeTotals.push(simStored);
-          }
-          sendVolumePage(limitParam);
+        // HAR-75: offset paging is gone; refused before any read (no RU).
+        if (url.searchParams.has('offset') && !options.historyAcceptsOffset) {
+          send(400, { error: 'VALIDATION_ERROR', message: 'offset is not supported' });
           return;
         }
-        if (deviceId === SIM_DEVICE && url.searchParams.has('limit')) {
-          // HAR-45: the max page, `limit=5000` over a window; the stub does not
-          // filter on the window.
-          sendVolumePage(url.searchParams.get('limit'));
+        const token = url.searchParams.get('continuationToken');
+        /** A page of `all` from the position `prefix`-token names, `size` long. */
+        const pageOf = <T>(all: readonly T[], size: number, prefix: string) => {
+          const start = token === null ? 0 : Number(token.slice(prefix.length));
+          const next = Math.min(all.length, start + size);
+          const hasMore = next < all.length;
+          return {
+            start,
+            body: {
+              readings: all.slice(start, next),
+              limit: size,
+              hasMore,
+              ...(hasMore ? { continuationToken: `${prefix}${next}` } : {}),
+            },
+          };
+        };
+        if (deviceId === SIM_DEVICE && !url.searchParams.has('startTime')) {
+          // HAR-45/75: the volume, walked by token (`v-<position>`).
+          const limit = Number(url.searchParams.get('limit') ?? '100');
+          const all = Array.from({ length: simStored }, (_, i) =>
+            simReading(new Date(Date.UTC(2026, 10, 12) + i * 5000).toISOString())
+          );
+          const { start, body } = pageOf(all, limit, 'v-');
+          const deep = start > 0 && !body.hasMore ? options.simDeepPageCharge : undefined;
+          send(200, body, route, deep);
           return;
         }
         if (deviceId === SIM_DEVICE) {
-          // HAR-44: older readings plus the sent one, in pages of two.
+          // HAR-44: older readings plus the sent one, in pages of two (`w-<position>`).
           const startTime = url.searchParams.get('startTime');
           if (!startTime || Number.isNaN(Date.parse(startTime))) {
             send(400, { error: 'VALIDATION_ERROR' });
             return;
           }
           const all = [...OLDER_READINGS, ...(simRouted() ? [simServed] : [])].map(simReading);
-          const offset = Number(url.searchParams.get('offset') ?? '0');
-          send(
-            200,
-            {
-              readings: all.slice(offset, offset + SIM_HISTORY_PAGE),
-              total: all.length,
-              offset,
-              limit: SIM_HISTORY_PAGE,
-              hasMore: offset + SIM_HISTORY_PAGE < all.length,
-            },
-            route
-          );
+          send(200, pageOf(all, SIM_HISTORY_PAGE, 'w-').body, route);
           return;
         }
-        send(
-          200,
-          { readings: [], total: options.historyTotal ?? 0, offset: 0, limit: 100, hasMore: false },
-          route
-        );
+        send(200, options.emptyHistoryBody ?? { readings: [], limit: 100, hasMore: false }, route);
       } else if (route === 'GET /devices') {
         send(200, { devices: [...devices.values()] }, route);
       } else if (route === 'POST /devices') {
@@ -822,6 +845,22 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           .filter(cook => status === null || cook.status === status)
           .sort((a, b) => b.startTime.localeCompare(a.startTime));
         send(200, { cooks: sorted, limit: 100, hasMore: false }, route);
+      } else if (route === 'GET /cooks/{cookId}') {
+        // HAR-75: the caller's own cook only; a lock id is no cook.
+        const id = decodeURIComponent(cookMatch![1]);
+        const userId = caller === 'peer' ? 'stub-tenant:stub-peer' : 'stub-tenant:stub-user';
+        const cook = cooks.find(
+          candidate =>
+            candidate.id === id &&
+            (candidate.userId === userId || options.cookItemFault === 'peer-reads')
+        );
+        if (cook) {
+          send(200, cook, route);
+        } else if (id.startsWith('active-device:') && options.cookItemFault === 'lock-reads') {
+          send(200, { id, userId, deviceId: id.slice('active-device:'.length) }, route);
+        } else {
+          send(404, { error: 'NOT_FOUND' }, route);
+        }
       } else if (route === 'POST /cooks') {
         const body = (await readJson(request)) as Partial<StubCook>;
         if (!body?.id || !/^[0-9a-f-]{36}$/i.test(body.id) || !body.deviceId || !body.name) {
@@ -897,7 +936,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     cookPushes,
     simCooks: () =>
       cooks.filter(c => c.deviceId === SIM_DEVICE).map(({ id, status }) => ({ id, status })),
-    volumeTotals,
+    drainTotals,
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
   };
 }
@@ -990,7 +1029,7 @@ if ((mode === 'ok' || mode === 'topup-exit1') && twin && handedOver) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: process.argv.slice(2) }),
     }).then(() => {
-      for (let i = 0; i < Number(topup[1]); i++) line(reading(new Date(Date.UTC(2026, 10, 19) + i * 50).toISOString()));
+      for (let i = 0; i < Number(topup[1]); i++) line(reading(new Date(${TOPUP_EPOCH} + i * 50).toISOString()));
     }, () => {
       process.stderr.write('fake simdevice: could not report the top-up\\n');
       process.exit(3);
@@ -1063,11 +1102,13 @@ beforeAll(() => {
   // HAR-68: the twin reading is polled every 2 s for up to 90 s live.
   TWIN_POLL.intervalMs = 5;
   TWIN_POLL.capMs = 300;
-  // HAR-45: a long cook is 8,640 readings, re-read every 10 s for up to 15 min
-  // live. Here a few hundred (still over the 100-reading default page), and
-  // polls in milliseconds. The send interval is left as it is live.
+  // HAR-45: a long cook is 8,640 readings, walked 1,000 a page, and the
+  // current reading re-read every 10 s for up to 15 min live. Here a few
+  // hundred walked 100 a page (so a walk is several pages), and polls in
+  // milliseconds. The send interval is left as it is live.
   VOLUME.target = 240;
   VOLUME.margin = 6;
+  VOLUME.pageLimit = 100;
   VOLUME.pollIntervalMs = 5;
   VOLUME.pollCapMs = 300;
 });
@@ -1097,6 +1138,7 @@ function escape(text: string): string {
 }
 
 const ROUTES: CookRoute[] = ['POST /cooks', 'GET /cooks', 'POST /cooks/{cookId}/stop'];
+const COOK_ITEM_ROUTE: CookItemRoute = 'GET /cooks/{cookId}';
 const DEVICE_ROUTES: DeviceRoute[] = [
   'POST /devices',
   'GET /devices/{id}',
@@ -1132,6 +1174,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(requestLines.length).toBeGreaterThanOrEqual(5);
     for (const route of [
       ...ROUTES,
+      COOK_ITEM_ROUTE,
       ...DEVICE_ROUTES,
       ...TEMPERATURE_ROUTES,
       ...USER_ROUTES,
@@ -1192,6 +1235,80 @@ describe('live acceptance runner (against an in-process stub)', () => {
     for (const failure of result.failures) {
       expect(failure).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
     }
+  });
+
+  it('(a) HAR-75: reads the cook by id as the owner (twice), the peer, an unknown id and the lock', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    const reads = stub!.requests
+      .filter(r => r.method === 'GET' && /^\/api\/cooks\/[^/?]+$/.test(r.path))
+      .map(r => ({
+        id: decodeURIComponent(r.path.slice('/api/cooks/'.length)),
+        as: r.authorization === `Bearer ${PEER_TOKEN}` ? 'peer' : 'owner',
+      }));
+    expect(reads).toHaveLength(5);
+    const cookId = reads[0].id;
+    expect(reads).toEqual([
+      { id: cookId, as: 'owner' },
+      { id: cookId, as: 'peer' },
+      { id: expect.stringMatching(/^[0-9a-f-]{36}$/), as: 'owner' },
+      { id: expect.stringMatching(/^active-device:acceptance-cook-/), as: 'owner' },
+      { id: cookId, as: 'owner' },
+    ]);
+    expect(reads[2].id).not.toBe(cookId);
+    for (const step of [
+      'GET /cooks/{cookId} as the owner returns the started cook',
+      'GET /cooks/{cookId} as the peer is 404 NOT_FOUND',
+      'GET /cooks/{cookId} for an unknown id is 404 NOT_FOUND',
+      'GET /cooks/{cookId} for the device lock active-device:<deviceId> is 404 NOT_FOUND',
+      'GET /cooks/{cookId} reads the cook back as completed with an endTime',
+    ]) {
+      expect(result.lines).toContain(`PASS cooks lifecycle › ${step}`);
+    }
+  });
+
+  it.each([
+    [
+      'peer-reads',
+      'GET /cooks/{cookId} as the peer is 404 NOT_FOUND',
+      'GET /cooks/{cookId} (peer) → 200: expected 404',
+    ],
+    [
+      'lock-reads',
+      'GET /cooks/{cookId} for the device lock active-device:<deviceId> is 404 NOT_FOUND',
+      'GET /cooks/{cookId} → 200: expected 404',
+    ],
+  ] as const)(
+    '(b) HAR-75: exits non-zero when GET /cooks/{cookId} %s',
+    async (cookItemFault, step, shown) => {
+      const result = await runAgainstStub({ cookItemFault });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(`FAIL cooks lifecycle › ${step}`);
+      expect(result.failures[0]).toContain(shown);
+    }
+  );
+
+  it('(b) HAR-75: exits non-zero and names GET /cooks/{cookId} when it returns a wrong status', async () => {
+    const result = await runAgainstStub({ failRoute: { route: COOK_ITEM_ROUTE, status: 503 } });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(
+      'FAIL cooks lifecycle › GET /cooks/{cookId} as the owner returns the started cook'
+    );
+    expect(result.failures[0]).toContain('GET /cooks/{cookId} → 503');
+  });
+
+  it('(c) HAR-75: exits non-zero when GET /cooks/{cookId} omits the RU header', async () => {
+    const result = await runAgainstStub({ omitChargeOn: COOK_ITEM_ROUTE });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain('GET /cooks/{cookId}');
+    expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
   });
 
   /** HAR-26 and HAR-28: the cooks lifecycle and the temperatures proof also
@@ -1452,14 +1569,52 @@ describe('live acceptance runner (against an in-process stub)', () => {
     }
   );
 
-  it('(b) exits non-zero when GET /temperatures/history is not an empty first page', async () => {
-    const result = await runAgainstStub({ historyTotal: 1 });
+  it.each([
+    [
+      'still has the pre-HAR-75 total and offset',
+      { readings: [], total: 0, offset: 0, limit: 100, hasMore: false },
+      '"total":0',
+    ],
+    [
+      'has a continuationToken',
+      { readings: [], limit: 100, hasMore: false, continuationToken: 'x' },
+      '"continuationToken":"x"',
+    ],
+    ['has more pages', { readings: [], limit: 100, hasMore: true }, '"hasMore":true'],
+  ])(
+    '(b) exits non-zero when GET /temperatures/history for a new device %s',
+    async (_label, emptyHistoryBody, shown) => {
+      const result = await runAgainstStub({ emptyHistoryBody });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain('FAIL temperatures ›');
+      expect(result.failures[0]).toContain('GET /temperatures/history → 200');
+      expect(result.failures[0]).toContain(shown);
+    }
+  );
+
+  it('(b) HAR-75: exits non-zero when GET /temperatures/history accepts offset=0', async () => {
+    const result = await runAgainstStub({ historyAcceptsOffset: true });
 
     expect(result.exitCode).not.toBe(0);
     expect(result.failures).toHaveLength(1);
-    expect(result.failures[0]).toContain('FAIL temperatures ›');
-    expect(result.failures[0]).toContain('GET /temperatures/history → 200');
-    expect(result.failures[0]).toContain('"total":1');
+    expect(result.failures[0]).toContain(
+      'FAIL temperatures › GET /temperatures/history with offset=0 is 400 VALIDATION_ERROR'
+    );
+    expect(result.failures[0]).toContain('GET /temperatures/history → 200: expected 400');
+  });
+
+  it('(a) HAR-75: the temperatures proof sends offset=0 and expects no RU on its 400', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    expect(
+      stub!.requests.filter(r => /^\/api\/temperatures\/history\?.*&offset=0$/.test(r.path))
+    ).toHaveLength(1);
+    expect(result.lines.some(line => /^\s+GET\s+\/temperatures\/history\s+400\s/.test(line))).toBe(
+      true
+    );
   });
 
   it.each(TEMPERATURE_ROUTES)('(c) exits non-zero when %s omits the RU header', async route => {
@@ -1751,14 +1906,15 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
         r.authorization === `Bearer ${TOKEN}`
     );
     expect(current).toHaveLength(1 + 4);
-    // History was paged (two per page) until the sent reading turned up, from a
-    // window opening five minutes before the send. (The volume group's reads
-    // carry a `limit` or no window.)
+    // History was paged (two per page, HAR-75: by continuation token) until the
+    // sent reading turned up, from a window opening five minutes before the
+    // send. (The volume group's reads carry no window.)
     const history = stub!.requests
       .filter(r => r.path.startsWith(`/api/temperatures/history?deviceId=${SIM_DEVICE}&`))
       .map(r => new URL(r.path, 'http://stub').searchParams)
-      .filter(params => params.has('startTime') && !params.has('limit'));
-    expect(history.map(params => params.get('offset'))).toEqual([null, '2']);
+      .filter(params => params.has('startTime'));
+    expect(history.map(params => params.get('continuationToken'))).toEqual([null, 'w-2']);
+    expect(history.every(params => !params.has('offset'))).toBe(true);
     const opened = Date.parse(history[0].get('startTime') ?? '');
     expect(Date.now() - opened).toBeGreaterThanOrEqual(5 * 60 * 1000);
     expect(Date.now() - opened).toBeLessThan(6 * 60 * 1000);
@@ -2233,26 +2389,35 @@ describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', ()
   });
 });
 
-describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () => {
+describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevice)', () => {
   const GROUP = 'telemetry volume ›';
   const STEPS = [
-    'GET /temperatures/history?limit=1 reads the simulated device volume',
+    'GET /temperatures/history walks the simulated device page by page',
     'simdevice tops the volume up to one long cook when it is short',
-    'GET /temperatures/history?limit=1 reaches one long cook of readings',
-    'GET /temperatures/history pages report their request charge at that volume',
+    'GET /temperatures/current/{deviceId} shows the end of the top-up',
+    'GET /temperatures/history walked again: the last page costs at most 1.5 × the first',
   ];
   const volumeFailures = (result: Run) =>
     result.failures.filter(line => line.startsWith(`FAIL ${GROUP}`));
   const metric = (result: Run, name: string) =>
     result.lines.filter(line => line.startsWith(`METRIC ${name} `));
-  /** The volume group's history reads of the simulated device, as query params. */
+  /** The volume group's history reads of the simulated device (no window), as
+   *  their query after the deviceId. */
   const volumeReads = () =>
     stub!.requests
       .filter(r => r.path.startsWith(`/api/temperatures/history?deviceId=${SIM_DEVICE}`))
       .map(r => new URL(r.path, 'http://stub').searchParams)
-      .filter(params => !params.has('startTime') || params.has('limit'));
+      .filter(params => !params.has('startTime'))
+      .map(params => params.toString().replace(/^deviceId=[^&]+&?/, ''));
+  /** One walk of `readings` at the self-test's page size, as volumeReads shows it. */
+  const walk = (readings: number) =>
+    Array.from({ length: Math.max(1, Math.ceil(readings / VOLUME.pageLimit)) }, (_, page) =>
+      page === 0
+        ? `limit=${VOLUME.pageLimit}`
+        : `limit=${VOLUME.pageLimit}&continuationToken=v-${page * VOLUME.pageLimit}`
+    );
 
-  it('(a) measures without a top-up when the volume is already at the target', async () => {
+  it('(a) walks twice without a top-up when the volume is already at the target', async () => {
     const result = await runAgainstStub();
 
     expect(result.failures).toEqual([]);
@@ -2267,35 +2432,27 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     expect(execs).toHaveLength(sends.length + 2);
     expect(sends).toHaveLength(3);
     sends.forEach(line => expect(line).toMatch(/^\s+EXEC\s+simdevice --count 1\s/));
-    expect(metric(result, 'history-total-before')).toEqual([
-      `METRIC history-total-before ${VOLUME.target}`,
+    // Two walks, page by page by continuation token: never an offset, never a total.
+    const pages = walk(VOLUME.target);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(volumeReads()).toEqual([...pages, ...pages]);
+    expect(stub!.drainTotals).toEqual([]);
+    expect(metric(result, 'history-readings-before')).toEqual([
+      `METRIC history-readings-before ${VOLUME.target}`,
     ]);
     expect(metric(result, 'topup-sent')).toEqual(['METRIC topup-sent 0']);
-    expect(metric(result, 'history-total')).toEqual([`METRIC history-total ${VOLUME.target}`]);
-    // The stub charges 7.71 RU for every history read.
-    for (const name of ['history-ru-first-page', 'history-ru-last-page', 'history-ru-max-page']) {
+    expect(metric(result, 'history-readings')).toEqual([
+      `METRIC history-readings ${VOLUME.target}`,
+    ]);
+    expect(metric(result, 'history-pages')).toEqual([`METRIC history-pages ${pages.length}`]);
+    // The stub charges 7.71 RU for every history page.
+    for (const name of ['history-ru-first-page', 'history-ru-last-page']) {
       expect(metric(result, name)).toEqual([`METRIC ${name} 7.71`]);
     }
-    expect(metric(result, 'history-max-page-readings')).toEqual([
-      `METRIC history-max-page-readings ${VOLUME.target}`,
-    ]);
-
-    // Read, poll once, then the three pages: first, last (offset total − 100),
-    // and 5000 over the last 12 h.
-    const reads = volumeReads();
-    expect(reads.map(params => params.toString().replace(/^deviceId=[^&]+&?/, ''))).toEqual([
-      'limit=1',
-      'limit=1',
-      '',
-      `offset=${VOLUME.target - 100}`,
-      expect.stringMatching(/^startTime=[^&]+&limit=5000$/),
-    ]);
-    const opened = Date.parse(reads[4].get('startTime') ?? '');
-    expect(Date.now() - opened).toBeGreaterThanOrEqual(12 * 60 * 60 * 1000);
-    expect(Date.now() - opened).toBeLessThan(12 * 60 * 60 * 1000 + 60 * 1000);
+    expect(result.output).not.toMatch(/^METRIC history-(total|ru-max-page|max-page)/m);
   });
 
-  it('(b) tops up a short volume at the paced interval and waits for it to be readable', async () => {
+  it('(b) tops up a short volume, waits for its end in the current reading, then walks again', async () => {
     const before = 40;
     const count = VOLUME.target - before + VOLUME.margin;
     const result = await runAgainstStub({ simVolume: before, simDrainPerPoll: 80 });
@@ -2313,38 +2470,41 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
         ).test(line)
       )
     ).toBe(true);
-    expect(metric(result, 'history-total-before')).toEqual([
-      `METRIC history-total-before ${before}`,
+    expect(metric(result, 'history-readings-before')).toEqual([
+      `METRIC history-readings-before ${before}`,
     ]);
     expect(metric(result, 'topup-sent')).toEqual([`METRIC topup-sent ${count}`]);
     expect(metric(result, 'topup-ms')).toHaveLength(1);
     expect(metric(result, 'topup-ms')[0]).toMatch(/^METRIC topup-ms \d+$/);
-    // The total rose across the polls, 80 a poll, until it reached the target.
-    expect(stub!.volumeTotals).toEqual([before, 120, 200, before + count]);
-    expect(metric(result, 'history-total')).toEqual([`METRIC history-total ${before + count}`]);
+    // The current reading was polled, 80 readings routed a poll, until it
+    // showed the top-up's end; then the measuring walk saw all of it.
+    expect(stub!.drainTotals).toEqual([120, 200, before + count]);
+    expect(volumeReads()).toEqual([...walk(before), ...walk(before + count)]);
+    expect(metric(result, 'history-readings')).toEqual([
+      `METRIC history-readings ${before + count}`,
+    ]);
+    expect(metric(result, 'history-pages')).toEqual([
+      `METRIC history-pages ${walk(before + count).length}`,
+    ]);
     expect(metric(result, 'history-ru-first-page')).toHaveLength(1);
     expect(metric(result, 'history-ru-last-page')).toHaveLength(1);
-    expect(metric(result, 'history-ru-max-page')).toHaveLength(1);
-    // The last page is read at the fresh total.
-    expect(
-      volumeReads().some(params => params.get('offset') === String(before + count - 100))
-    ).toBe(true);
   });
 
-  it('(c) fails naming the cap and the last total when the volume never reaches the target', async () => {
+  it('(c) fails naming the cap when the top-up never reaches the current reading', async () => {
     const result = await runAgainstStub({ simVolume: 40, simTopupNeverRouted: true });
 
     expect(result.exitCode).not.toBe(0);
     const failures = volumeFailures(result);
     expect(failures).toHaveLength(1);
     expect(failures[0]).toContain(`${GROUP} ${STEPS[2]}`);
-    expect(failures[0]).toContain('GET /temperatures/history → 200');
+    expect(failures[0]).toContain('GET /temperatures/current/{deviceId} → 200');
     expect(failures[0]).toContain(
-      `total is 40, short of ${VOLUME.target}, after the ${VOLUME.pollCapMs / 1000} s cap`
+      `the current reading is "${SIM_TIMESTAMP}", before the top-up's end`
     );
-    expect(stub!.volumeTotals.length).toBeGreaterThan(2);
+    expect(failures[0]).toContain(`after the ${VOLUME.pollCapMs / 1000} s cap`);
+    expect(stub!.drainTotals.length).toBeGreaterThan(2);
     expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[3]}`);
-    expect(result.output).not.toMatch(/^METRIC history-(total|ru-[a-z-]+) /m);
+    expect(result.output).not.toMatch(/^METRIC history-(readings|pages|ru-[a-z-]+) /m);
     // Only this group failed.
     expect(result.failures).toEqual(failures);
   });
@@ -2364,7 +2524,44 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     );
     expect(result.output).not.toContain('more detail');
     expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[2]}`);
-    expect(result.output).not.toMatch(/^METRIC (topup-sent|history-total) /m);
+    expect(result.output).not.toMatch(/^METRIC (topup-sent|history-readings|history-pages) /m);
+  });
+
+  it.each([
+    ['11.56', true],
+    ['11.57', false],
+  ])(
+    '(f) HAR-75: a last page of %s RU against a first of 7.71 passes: %s (the bound is 1.5 ×)',
+    async (deep, passes) => {
+      const result = await runAgainstStub({ simDeepPageCharge: deep });
+
+      expect(metric(result, 'history-ru-first-page')).toEqual([
+        'METRIC history-ru-first-page 7.71',
+      ]);
+      expect(metric(result, 'history-ru-last-page')).toEqual([
+        `METRIC history-ru-last-page ${deep}`,
+      ]);
+      const failures = volumeFailures(result);
+      if (passes) {
+        expect(result.failures).toEqual([]);
+      } else {
+        expect(result.failures).toEqual(failures);
+        expect(failures).toHaveLength(1);
+        expect(failures[0]).toContain(`${GROUP} ${STEPS[3]}`);
+        expect(failures[0]).toContain(
+          `the last page (page ${walk(VOLUME.target).length}) cost ${deep} RU, more than 1.5 × ` +
+            "the first page's 7.71 RU"
+        );
+      }
+    }
+  );
+
+  it('(g) HAR-75: the drain point is the top-up reading `inflight` places from the end', () => {
+    const at = (i: number) => TOPUP_EPOCH + i * 50;
+    const sent = Array.from({ length: 100 }, (_, i) => at(i)).reverse();
+    expect(topupDrainedAt(sent, 32)).toBe(at(68));
+    expect(topupDrainedAt(sent, 1)).toBe(at(99));
+    expect(topupDrainedAt([at(0), at(1)], 32)).toBe(at(0));
   });
 
   it('(e) kills the top-up at count × 50 ms × 1.5 + 120 s, with 32 sends in flight', async () => {
