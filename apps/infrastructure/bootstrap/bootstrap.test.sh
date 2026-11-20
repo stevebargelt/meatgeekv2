@@ -446,7 +446,10 @@ else bad "D3: the environment/subject map must be enforced by a check that main 
 # BEHAVIOURAL: a COLLISION (two identities on one environment) must DIE. This is
 # the F8 defect itself — identities sharing a subject are selected only by the
 # client id a job passes — so the check has to bite, not just exist.
+# ACCEPTANCE_PEER_ENVIRONMENT follows APP_DEPLOY_ENVIRONMENT (HAR-61), so the
+# die below is the F8 collision itself, not the peer's own equality check.
 if ( APP_DEPLOY_ENVIRONMENT="$INFRA_APPLY_ENVIRONMENT" \
+     ACCEPTANCE_PEER_ENVIRONMENT="$INFRA_APPLY_ENVIRONMENT" \
      assert_federated_environment_map >/dev/null 2>&1 ); then
   bad "D3: two identities federating the SAME environment must DIE (that is the F8 collision)"
 else ok "D3: an environment-map COLLISION fails closed (F8 cannot silently return)"; fi
@@ -565,17 +568,18 @@ boot_code="$(grep -vE '^[[:space:]]*#' "$BOOT")"
 if printf '%s\n' "$boot_code" | grep -q 'subject="repo:${GITHUB_REPO}:environment:'; then
   bad "MG-42: no federated subject may be built from a hardcoded 'repo:\${GITHUB_REPO}' literal"
 else ok "MG-42: no hardcoded 'repo:\${GITHUB_REPO}:environment:' subject literal remains"; fi
-# ALL THREE identities compose through the helper — plan/read, app-deploy, apply.
+# ALL FOUR identities compose through the helper — plan/read, app-deploy,
+# acceptance peer (HAR-61), apply.
 subject_call_sites="$(printf '%s\n' "$boot_code" \
   | grep -c 'subject="\$(federated_environment_subject "\$env")"' || true)"
-[ "$subject_call_sites" -eq 3 ] \
-  && ok "MG-42: all THREE federated subjects (plan, app-deploy, apply) compose from the derived prefix" \
-  || bad "MG-42: expected 3 federated_environment_subject call sites, found ${subject_call_sites}"
+[ "$subject_call_sites" -eq 4 ] \
+  && ok "MG-42: all FOUR federated subjects (plan, app-deploy, acceptance peer, apply) compose from the derived prefix" \
+  || bad "MG-42: expected 4 federated_environment_subject call sites, found ${subject_call_sites}"
 # A bare assignment would swallow the helper's die inside the command
 # substitution and federate a bogus subject anyway — same rule as the az_discover
 # call sites (T4).
 if [ "$(printf '%s\n' "$boot_code" \
-        | grep -c 'subject="\$(federated_environment_subject "\$env")" || exit 1' || true)" -eq 3 ]; then
+        | grep -c 'subject="\$(federated_environment_subject "\$env")" || exit 1' || true)" -eq 4 ]; then
   ok "MG-42: every subject composition carries '|| exit 1' (a die cannot be swallowed)"
 else bad "MG-42: every 'subject=\$(federated_environment_subject …)' must carry '|| exit 1'"; fi
 # Resolution happens in main BEFORE any identity is provisioned, so an
@@ -2371,11 +2375,12 @@ prune_unexpected_federated_credentials app-1 "github-development-infra-apply" >/
   || bad "prune must not delete an expected credential (log: $(cat "$PRUNE_LOG"))"
 unset -f az
 rm -f "$PRUNE_LOG"
-# Every identity function prunes (three call sites: plan, app-deploy, infra-apply).
+# Every identity function prunes (four call sites: plan, app-deploy,
+# acceptance peer (HAR-61), infra-apply).
 prune_sites="$(grep -c 'prune_unexpected_federated_credentials "\$app_id"' "$BOOT" || true)"
-[ "${prune_sites:-0}" -eq 3 ] \
-  && ok "all three identities prune their federated credentials (${prune_sites}/3)" \
-  || bad "each identity must prune its federated credentials (found ${prune_sites}, expected 3)"
+[ "${prune_sites:-0}" -eq 4 ] \
+  && ok "all four identities prune their federated credentials (${prune_sites}/4)" \
+  || bad "each identity must prune its federated credentials (found ${prune_sites}, expected 4)"
 
 # ===========================================================================
 # MG-23: the infra-apply identity is OIDC-only, distinct, and emits its client id
@@ -2665,6 +2670,199 @@ else ok "T5: no unreachable 'state storage account not found' fallback remains";
 if grep -vE '^[[:space:]]*#' "$BOOT" | grep -A2 'az_discover "' | grep -q 'az storage account show'; then
   bad "T5: az_discover must not be used with 'az storage account show' — it is a LIST-style helper and show exits non-zero for not-found"
 else ok "T5: no az_discover invocation wraps 'az storage account show' (the lookup asserts non-empty directly)"; fi
+
+# ===========================================================================
+# HAR-61: the zero-role dev ACCEPTANCE PEER identity
+# ===========================================================================
+# The second caller for the HAR-55 cross-user SignalR proof. It shares the
+# `development` OIDC subject with the app-deploy identity — the ONE exception
+# the MG-23 F8 environment map allows — and that is safe only because it holds
+# no Azure role. Each half of that argument is asserted here.
+
+# --- the map exception is NAMED, NARROW, and still fails closed elsewhere ----
+[ "${ACCEPTANCE_PEER_ENVIRONMENT:-}" = "$APP_DEPLOY_ENVIRONMENT" ] \
+  && ok "HAR-61: ACCEPTANCE_PEER_ENVIRONMENT is the app-deploy environment ('${APP_DEPLOY_ENVIRONMENT}')" \
+  || bad "HAR-61: ACCEPTANCE_PEER_ENVIRONMENT must equal APP_DEPLOY_ENVIRONMENT (got '${ACCEPTANCE_PEER_ENVIRONMENT:-}')"
+if grep -Eq '^ACCEPTANCE_PEER_ENVIRONMENT="\$APP_DEPLOY_ENVIRONMENT"$' "$BOOT"; then
+  ok "HAR-61: the peer exception is a committed named constant bound to \$APP_DEPLOY_ENVIRONMENT (not env-overridable)"
+else bad "HAR-61: ACCEPTANCE_PEER_ENVIRONMENT must be the literal constant \"\$APP_DEPLOY_ENVIRONMENT\""; fi
+
+# The shipped map (peer + app-deploy sharing `development`) PASSES, and its log
+# line names the shared environment and the peer.
+har61_map_rc=0
+har61_map_out="$( ( assert_federated_environment_map ) 2>&1 )" || har61_map_rc=$?
+if [ "$har61_map_rc" -eq 0 ] \
+   && printf '%s' "$har61_map_out" | grep -qF "except '${APP_DEPLOY_ENVIRONMENT}'" \
+   && printf '%s' "$har61_map_out" | grep -qF "$AAD_ACCEPTANCE_PEER_APP_NAME"; then
+  ok "HAR-61: the map ACCEPTS exactly the peer and app-deploy sharing '${APP_DEPLOY_ENVIRONMENT}', and its log line names both"
+else bad "HAR-61: the shipped map must pass and name the shared environment and the peer (rc=${har61_map_rc}, out: ${har61_map_out})"; fi
+
+# The peer on ANY other environment dies: one another identity owns, or one
+# nobody uses, or none at all.
+for har61_env in "$PLAN_IDENTITY_ENVIRONMENTS" "$INFRA_APPLY_ENVIRONMENT" "development-acceptance" "$RECOVERY_APPROVAL_ENVIRONMENT" ""; do
+  har61_rc=0
+  har61_err="$( ( ACCEPTANCE_PEER_ENVIRONMENT="$har61_env"; assert_federated_environment_map ) 2>&1 )" || har61_rc=$?
+  if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | grep -q 'acceptance peer'; then
+    ok "HAR-61: a peer configured for '${har61_env}' (not the app-deploy environment) fails the map check"
+  else bad "HAR-61: a peer on '${har61_env}' must die naming the acceptance peer (rc=${har61_rc}, out: ${har61_err})"; fi
+done
+
+# The exception does not launder any OTHER duplicate. With the peer following
+# app-deploy wherever it goes, app-deploy colliding with infra-apply still dies
+# on the F8 collision itself — not merely on the peer check.
+har61_rc=0
+har61_err="$( ( APP_DEPLOY_ENVIRONMENT="$INFRA_APPLY_ENVIRONMENT"; ACCEPTANCE_PEER_ENVIRONMENT="$INFRA_APPLY_ENVIRONMENT"; assert_federated_environment_map ) 2>&1 )" || har61_rc=$?
+if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | grep -q 'more than one identity federates'; then
+  ok "HAR-61: app-deploy + infra-apply sharing an environment still dies, even with the peer alongside"
+else bad "HAR-61: the peer exception must not admit an app-deploy/infra-apply collision (rc=${har61_rc}, out: ${har61_err})"; fi
+# ...and a PLAN identity joining `development` (a third sharer of the subject)
+# dies too: the exception is for the peer, not for the environment.
+har61_rc=0
+har61_err="$( ( PLAN_IDENTITY_ENVIRONMENTS="production ${APP_DEPLOY_ENVIRONMENT}"; assert_federated_environment_map ) 2>&1 )" || har61_rc=$?
+if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | grep -q 'more than one identity federates'; then
+  ok "HAR-61: a plan identity sharing '${APP_DEPLOY_ENVIRONMENT}' still dies (the exception names the peer, not the environment)"
+else bad "HAR-61: a plan identity on '${APP_DEPLOY_ENVIRONMENT}' must still be a collision (rc=${har61_rc}, out: ${har61_err})"; fi
+
+# --- the peer is NEVER granted anything (static) -----------------------------
+har61_fn="$(awk '/^bootstrap_acceptance_peer_identity\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT")"
+if [ -n "$har61_fn" ] \
+   && ! printf '%s\n' "$har61_fn" | grep -nE 'role assignment create|ensure_role_assignment|ensure_conditioned_role_assignment'; then
+  ok "HAR-61: bootstrap_acceptance_peer_identity contains NO role grant (no 'role assignment create' / ensure_*role_assignment)"
+else bad "HAR-61: bootstrap_acceptance_peer_identity must exist and never grant a role"; fi
+if printf '%s\n' "$har61_fn" | grep -qE 'credential reset|--password|--years|client-secret|add-password'; then
+  bad "HAR-61: the acceptance peer must never mint a password or client secret"
+else ok "HAR-61: the acceptance peer mints no password or client secret"; fi
+har61_main="$(awk '/^main\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT" | grep -vE '^[[:space:]]*#')"
+har61_deploy_line="$(printf '%s\n' "$har61_main" | grep -n '^[[:space:]]*bootstrap_deploy_identity' | head -1 | cut -d: -f1)"
+har61_peer_line="$(printf '%s\n' "$har61_main" | grep -n '^[[:space:]]*bootstrap_acceptance_peer_identity' | head -1 | cut -d: -f1)"
+if [ -n "$har61_deploy_line" ] && [ -n "$har61_peer_line" ] && [ "$har61_peer_line" -gt "$har61_deploy_line" ]; then
+  ok "HAR-61: main() calls bootstrap_acceptance_peer_identity after bootstrap_deploy_identity"
+else bad "HAR-61: main() must call bootstrap_acceptance_peer_identity after bootstrap_deploy_identity (deploy@${har61_deploy_line:-none}, peer@${har61_peer_line:-none})"; fi
+
+# --- behaviour, against a stubbed az ----------------------------------------
+# The stub is defined at TOP LEVEL for the Bash 3.2 parser-bug reason above; it
+# reads HAR61_* globals and appends every call that matters to HAR61_LOG (a file,
+# so calls made inside command substitutions are still recorded).
+HAR61_LOG="$(mktemp)"
+HAR61_NEW_APP="55555555-5555-5555-5555-555555555555"
+HAR61_NEW_SP="66666666-6666-6666-6666-666666666666"
+har61_reset() {
+  HAR61_APP=""; HAR61_SP=""; HAR61_ROLES=""; HAR61_ROLES_FAIL=""
+  HAR61_FC_NAMES=""; HAR61_FC_SUBJECT=""
+  : > "$HAR61_LOG"
+}
+az() {
+  case "$*" in
+    *"ad app list"*)  printf '%s' "$HAR61_APP" ;;
+    *"ad app create"*) echo "APP-CREATE $*" >> "$HAR61_LOG"; echo "$HAR61_NEW_APP" ;;
+    *"ad sp list"*)   printf '%s' "$HAR61_SP" ;;
+    *"ad sp create"*) echo "SP-CREATE $*" >> "$HAR61_LOG"; echo "$HAR61_NEW_SP" ;;
+    *"role assignment list"*)
+      echo "ROLE-LIST $*" >> "$HAR61_LOG"
+      [ -n "$HAR61_ROLES_FAIL" ] && return 1
+      printf '%s' "$HAR61_ROLES" ;;
+    *"role assignment"*) echo "ROLE-MUTATE $*" >> "$HAR61_LOG" ;;
+    *"federated-credential list"*"[].name"*) printf '%s' "$HAR61_FC_NAMES" ;;
+    *"federated-credential list"*) printf '%s' "$HAR61_FC_SUBJECT" ;;
+    *"federated-credential create"*) echo "FC-CREATE $*" >> "$HAR61_LOG" ;;
+    *"federated-credential delete"*) echo "FC-DELETE $*" >> "$HAR61_LOG" ;;
+    *) echo "OTHER $*" >> "$HAR61_LOG" ;;
+  esac
+}
+har61_run() {
+  HAR61_RC=0
+  HAR61_OUT="$( ( OIDC_SUBJECT_PREFIX="repo:${GITHUB_REPO}"; bootstrap_acceptance_peer_identity ) 2>&1 )" || HAR61_RC=$?
+}
+HAR61_SUBJECT="repo:${GITHUB_REPO}:environment:${APP_DEPLOY_ENVIRONMENT}"
+
+# ABSENT: app and SP are created, roles are checked, one credential is minted.
+har61_reset
+har61_run
+if [ "$HAR61_RC" -eq 0 ] \
+   && grep -q "^APP-CREATE ad app create --display-name ${AAD_ACCEPTANCE_PEER_APP_NAME} " "$HAR61_LOG" \
+   && grep -q "^SP-CREATE ad sp create --id ${HAR61_NEW_APP} " "$HAR61_LOG"; then
+  ok "HAR-61: an ABSENT peer is created (app '${AAD_ACCEPTANCE_PEER_APP_NAME}' + its service principal)"
+else bad "HAR-61: an absent peer must be created (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"), out: ${HAR61_OUT})"; fi
+grep -q "^ROLE-LIST role assignment list --assignee ${HAR61_NEW_SP} --all " "$HAR61_LOG" \
+  && ok "HAR-61: the peer's role assignments are listed across the subscription (--assignee <sp object id> --all)" \
+  || bad "HAR-61: the zero-role check must list assignments with --assignee <sp object id> --all (log: $(cat "$HAR61_LOG"))"
+if [ "$(grep -c '^FC-CREATE' "$HAR61_LOG" || true)" -eq 1 ] \
+   && grep -A20 '^FC-CREATE' "$HAR61_LOG" | grep -qF '"name": "github-acceptance-peer-development"' \
+   && grep -A20 '^FC-CREATE' "$HAR61_LOG" | grep -qF "\"subject\": \"${HAR61_SUBJECT}\""; then
+  ok "HAR-61: exactly ONE federated credential, github-acceptance-peer-development -> ${HAR61_SUBJECT}"
+else bad "HAR-61: expected one credential github-acceptance-peer-development on ${HAR61_SUBJECT} (log: $(cat "$HAR61_LOG"))"; fi
+if grep -qE '^(ROLE-MUTATE|OTHER)' "$HAR61_LOG"; then
+  bad "HAR-61: the peer run issued an unexpected az call (a grant, a secret, or something unmodelled): $(grep -E '^(ROLE-MUTATE|OTHER)' "$HAR61_LOG")"
+else ok "HAR-61: the peer run grants no role and makes no other az call (no secret, no assignment)"; fi
+printf '%s' "$HAR61_OUT" | grep -qF "AZURE_ACCEPTANCE_PEER_CLIENT_ID = ${HAR61_NEW_APP}" \
+  && ok "HAR-61: the paste-ready AZURE_ACCEPTANCE_PEER_CLIENT_ID coordinate is emitted with the appId" \
+  || bad "HAR-61: the summary must emit 'AZURE_ACCEPTANCE_PEER_CLIENT_ID = <appId>' (out: ${HAR61_OUT})"
+printf '%s' "$HAR61_OUT" | grep -qF "functions_auth_allowed_client_app_ids gains \"${HAR61_NEW_APP}\"" \
+  && ok "HAR-61: the summary says the dev functions_auth_allowed_client_app_ids gains the same id" \
+  || bad "HAR-61: the summary must name the functions_auth_allowed_client_app_ids change (out: ${HAR61_OUT})"
+
+# PRESENT: everything is reused and a correct credential is left alone.
+har61_reset
+HAR61_APP="77777777-7777-7777-7777-777777777777"; HAR61_SP="88888888-8888-8888-8888-888888888888"
+HAR61_FC_NAMES="github-acceptance-peer-development"; HAR61_FC_SUBJECT="$HAR61_SUBJECT"
+har61_run
+if [ "$HAR61_RC" -eq 0 ] && ! grep -qE '^(APP-CREATE|SP-CREATE|FC-CREATE|FC-DELETE|ROLE-MUTATE|OTHER)' "$HAR61_LOG" \
+   && grep -q "^ROLE-LIST role assignment list --assignee ${HAR61_SP} --all " "$HAR61_LOG" \
+   && printf '%s' "$HAR61_OUT" | grep -qF "AZURE_ACCEPTANCE_PEER_CLIENT_ID = ${HAR61_APP}"; then
+  ok "HAR-61: a PRESENT peer is reused (no create, no credential churn) and its roles are still re-checked"
+else bad "HAR-61: a present peer must be reused and re-verified (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"), out: ${HAR61_OUT})"; fi
+
+# A stray credential on another environment is PRUNED.
+har61_reset
+HAR61_APP="77777777-7777-7777-7777-777777777777"; HAR61_SP="88888888-8888-8888-8888-888888888888"
+HAR61_FC_NAMES="github-acceptance-peer-development
+github-acceptance-peer-production"; HAR61_FC_SUBJECT="$HAR61_SUBJECT"
+har61_run
+if [ "$HAR61_RC" -eq 0 ] && grep -q '^FC-DELETE.*github-acceptance-peer-production' "$HAR61_LOG" \
+   && ! grep -q '^FC-DELETE.*github-acceptance-peer-development' "$HAR61_LOG"; then
+  ok "HAR-61: a peer credential on any other environment is deleted (one trust path only)"
+else bad "HAR-61: an unexpected peer credential must be pruned (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"))"; fi
+
+# ANY role assignment: the bootstrap DIES and federates nothing.
+har61_reset
+HAR61_APP="77777777-7777-7777-7777-777777777777"; HAR61_SP="88888888-8888-8888-8888-888888888888"
+HAR61_ROLES="$(printf 'Reader\t/subscriptions/11111111-1111-1111-1111-111111111111')"
+har61_run
+if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | grep -q 'must hold NONE' \
+   && printf '%s' "$HAR61_OUT" | grep -q 'Reader' \
+   && ! grep -qE '^(FC-CREATE|FC-DELETE|ROLE-MUTATE)' "$HAR61_LOG" \
+   && ! printf '%s' "$HAR61_OUT" | grep -q 'AZURE_ACCEPTANCE_PEER_CLIENT_ID'; then
+  ok "HAR-61: a peer holding ANY role assignment makes bootstrap DIE (names the role, federates nothing, emits nothing)"
+else bad "HAR-61: a peer with a role must die before federating (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"), out: ${HAR61_OUT})"; fi
+
+# The role listing ERRORS: that is not "no roles". Fail closed.
+har61_reset
+HAR61_APP="77777777-7777-7777-7777-777777777777"; HAR61_SP="88888888-8888-8888-8888-888888888888"
+HAR61_ROLES_FAIL=1
+har61_run
+if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | grep -q 'discovery failed' \
+   && ! grep -qE '^(FC-CREATE|FC-DELETE)' "$HAR61_LOG"; then
+  ok "HAR-61: a FAILED role listing is not read as zero roles (dies, federates nothing)"
+else bad "HAR-61: a failed role listing must die before federating (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"), out: ${HAR61_OUT})"; fi
+
+# Two apps with the peer's display name: refuse to guess.
+har61_reset
+HAR61_APP="$(printf '77777777-7777-7777-7777-777777777777\n99999999-9999-9999-9999-999999999999')"
+har61_run
+if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | grep -q 'AMBIGUOUS' && [ ! -s "$HAR61_LOG" ]; then
+  ok "HAR-61: an AMBIGUOUS peer display name dies before anything is created or federated"
+else bad "HAR-61: duplicate peer apps must die with nothing done (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"))"; fi
+
+# Called on its own with the peer pointed elsewhere: dies, touches nothing.
+har61_reset
+HAR61_RC=0
+HAR61_OUT="$( ( OIDC_SUBJECT_PREFIX="repo:${GITHUB_REPO}"; ACCEPTANCE_PEER_ENVIRONMENT="production"; bootstrap_acceptance_peer_identity ) 2>&1 )" || HAR61_RC=$?
+if [ "$HAR61_RC" -ne 0 ] && [ ! -s "$HAR61_LOG" ]; then
+  ok "HAR-61: bootstrap_acceptance_peer_identity refuses any environment but '${APP_DEPLOY_ENVIRONMENT}' even when called directly"
+else bad "HAR-61: the peer function must refuse a non-app-deploy environment before any az call (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"))"; fi
+
+unset -f az har61_reset har61_run
+rm -f "$HAR61_LOG"
 
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"

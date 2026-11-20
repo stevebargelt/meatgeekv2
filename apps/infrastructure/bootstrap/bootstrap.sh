@@ -250,6 +250,28 @@ APP_DEPLOY_ENVIRONMENT="development"
 # The GitHub Environment the dev INFRA-APPLY identity federates (MG-23).
 INFRA_APPLY_ENVIRONMENT="development-infra-apply"
 
+# THE ONE SANCTIONED EXCEPTION TO ONE-IDENTITY-PER-ENVIRONMENT (HAR-61).
+# The dev ACCEPTANCE PEER (bootstrap_acceptance_peer_identity) federates the SAME
+# environment as the app-deploy identity, on purpose and with the owner's
+# approval (HAR-55, option A). The HAR-55 live acceptance job runs in
+# `development` as the app-deploy identity and needs a SECOND caller the dev API
+# accepts, one that does NOT own the simulated device, to prove a cross-user
+# SignalR negotiate receives nothing. A second caller signing in from the same
+# job means the same OIDC subject.
+#
+# WHY THIS DOES NOT REOPEN MG-23 F8. F8 is dangerous because a one-line client-id
+# edit could swap a read-only identity for an apply-capable one under a shared
+# subject. The peer holds NO Azure role assignment at all, so the only swap the
+# shared subject makes possible is app-deploy -> peer, and that can only REDUCE
+# privilege. That argument holds only while the peer really holds nothing, so
+# bootstrap_acceptance_peer_identity lists its role assignments on EVERY run and
+# dies if there is even one.
+#
+# Narrow on purpose: the peer may share ${APP_DEPLOY_ENVIRONMENT} and nothing
+# else. assert_federated_environment_map dies if this is set to any other value,
+# including an environment nobody else uses. NOT env-overridable.
+ACCEPTANCE_PEER_ENVIRONMENT="$APP_DEPLOY_ENVIRONMENT"
+
 # The full set of GitHub Environments that an Azure identity federates — the
 # environment/subject map, DERIVED from the three variables above so it cannot
 # describe a map the code does not build. See the long note above the
@@ -260,7 +282,7 @@ INFRA_APPLY_ENVIRONMENT="development-infra-apply"
 # space-separated list), hence the shellcheck waiver.
 # shellcheck disable=SC2086
 GITHUB_ENVIRONMENTS="$(printf '%s\n' $PLAN_IDENTITY_ENVIRONMENTS \
-  "$APP_DEPLOY_ENVIRONMENT" "$INFRA_APPLY_ENVIRONMENT" \
+  "$APP_DEPLOY_ENVIRONMENT" "$INFRA_APPLY_ENVIRONMENT" "$ACCEPTANCE_PEER_ENVIRONMENT" \
   | grep -v '^[[:space:]]*$' | sort -u | tr '\n' ' ' | sed 's/ $//')"
 
 # The APPROVAL-ONLY GitHub Environment the workflow_dispatch RECOVERY path in
@@ -325,6 +347,15 @@ CI_PLAN_ROLE="${CI_PLAN_ROLE:-Reader}"
 # subscription. Emitted as AZURE_APP_DEPLOY_CLIENT_ID for the app-deploy job.
 AAD_DEPLOY_APP_NAME="${AAD_DEPLOY_APP_NAME:-meatgeek-v2-github-appdeploy}"
 DEPLOY_APP_ROLE="${DEPLOY_APP_ROLE:-Website Contributor}"
+
+# --- dev ACCEPTANCE PEER identity (HAR-61) ---------------------------------
+# A ZERO-ROLE app/SP: the second caller for the HAR-55 cross-user SignalR proof.
+# It federates the `development` environment alongside the app-deploy identity
+# (see ACCEPTANCE_PEER_ENVIRONMENT for why that is allowed) and holds no Azure
+# role assignment anywhere. Emitted as AZURE_ACCEPTANCE_PEER_CLIENT_ID. NOT
+# env-overridable: a different display name would silently bootstrap a second
+# peer beside the first.
+AAD_ACCEPTANCE_PEER_APP_NAME="meatgeek-v2-dev-acceptance-peer"
 
 # --- dev INFRA-APPLY identity (MG-23) --------------------------------------
 # The identity .github/workflows/infra-apply-dev.yml assumes to run the AUTOMATED
@@ -2255,6 +2286,113 @@ SUMMARY
 }
 
 # --------------------------------------------------------------------------
+# 3a. dev ACCEPTANCE PEER identity (create-if-absent) — HAR-61.
+#
+#     A dedicated app/SP that exists ONLY to be a second caller of the dev API:
+#     the HAR-55 live acceptance job signs in as it and proves that a user who
+#     does NOT own the simulated device receives nothing from it over SignalR.
+#
+#       WHO    One federated credential, `github-acceptance-peer-development`,
+#              on the SAME subject as the app-deploy identity
+#              (<prefix>:environment:development). That sharing is the one
+#              exception assert_federated_environment_map allows; see
+#              ACCEPTANCE_PEER_ENVIRONMENT for why it is safe.
+#       WHAT   NOTHING in Azure. No role assignment at any scope. The dev API
+#              admits it only because its appId is listed in the Function App's
+#              Easy Auth allowed client applications (a dev.tfvars change made
+#              after this run, not here).
+#       HOW    OIDC only. No client secret is ever minted.
+#
+#     ZERO ROLES IS ENFORCED, NOT ASSUMED. Every run lists the SP's role
+#     assignments across the subscription and DIES if there is even one. The
+#     shared subject is only harmless while this identity holds nothing, so a
+#     role someone added by hand must stop the bootstrap, not ride along.
+#     This function never grants a role; a test asserts it contains no grant
+#     call.
+# --------------------------------------------------------------------------
+bootstrap_acceptance_peer_identity() {
+  local env="$ACCEPTANCE_PEER_ENVIRONMENT"
+  local app_name="$AAD_ACCEPTANCE_PEER_APP_NAME"
+  local app_id sp_id roles cred_name subject
+
+  # Defence in depth: main() has already run assert_federated_environment_map,
+  # but this function must not federate any other environment even when called
+  # on its own.
+  [ -n "$env" ] && [ "$env" = "$APP_DEPLOY_ENVIRONMENT" ] \
+    || die "the acceptance peer may federate ONLY '${APP_DEPLOY_ENVIRONMENT}' (the app-deploy environment), but ACCEPTANCE_PEER_ENVIRONMENT is '${env}'. Refusing to mint a federated credential anywhere else."
+
+  log "── dev ACCEPTANCE PEER identity ${app_name} (zero Azure roles, second caller for HAR-55)"
+
+  app_id="$(az_discover_unique "AAD application '${app_name}'" \
+    az ad app list --display-name "$app_name" --query '[].appId' -o tsv)" || exit 1
+  if [ -z "$app_id" ] || [ "$app_id" = "null" ]; then
+    log "Creating AAD application: ${app_name}"
+    app_id="$(az ad app create --display-name "$app_name" --query appId -o tsv)" \
+      || die "failed to create the AAD application '${app_name}' for the dev acceptance peer — check tenant app-registration permissions."
+    ok "AAD application created: ${app_id}"
+  else
+    ok "AAD application already exists: ${app_id}"
+  fi
+
+  # Service principal (create-if-absent). NO password/secret.
+  sp_id="$(az_discover_unique "service principal for app ${app_id}" \
+    az ad sp list --filter "appId eq '${app_id}'" --query '[].id' -o tsv)" || exit 1
+  if [ -z "$sp_id" ] || [ "$sp_id" = "null" ]; then
+    log "Creating service principal for ${app_id}"
+    sp_id="$(az ad sp create --id "$app_id" --query id -o tsv)" \
+      || die "failed to create the service principal for the dev acceptance peer (${app_id}) — check you may create service principals in the tenant."
+    ok "Service principal created: ${sp_id}"
+  else
+    ok "Service principal already exists: ${sp_id}"
+  fi
+
+  # ZERO ROLES, fail-closed, BEFORE the federated credential is reconciled, so a
+  # peer that has picked up a role never gains a fresh trust path on this run.
+  # az_discover (not _unique): any count above zero is the failure, and a real
+  # Azure error must die rather than read as "no assignments".
+  roles="$(az_discover "role assignments held by the acceptance peer ${sp_id}" \
+    az role assignment list --assignee "$sp_id" --all \
+    --query '[].[roleDefinitionName, scope]' -o tsv)" || exit 1
+  roles="$(printf '%s\n' "$roles" | grep -v '^[[:space:]]*$' | grep -v '^null$' || true)"
+  if [ -n "$roles" ]; then
+    die "the dev acceptance peer ${app_name} (SP ${sp_id}) holds Azure role assignments. This identity must hold NONE: it shares the '${env}' OIDC subject with the app-deploy identity, and that is safe only while switching to it can never ADD privilege. Remove every assignment below, then re-run. If its federated credential already exists, it is a live path into these roles until they are removed.
+$(printf '%s\n' "$roles" | sed 's/^/    /')"
+  fi
+  ok "Acceptance peer holds no Azure role assignments (verified across the subscription)"
+
+  cred_name="github-acceptance-peer-${env}"
+  # Subject built from the LIVE sub-claim prefix (MG-42), never a literal.
+  subject="$(federated_environment_subject "$env")" || exit 1
+  ensure_federated_credential "$app_id" "$cred_name" "$subject" \
+    "GitHub Actions OIDC (zero-role acceptance peer) for the '${env}' environment of ${GITHUB_REPO}"
+  prune_unexpected_federated_credentials "$app_id" "$cred_name"
+
+  cat <<SUMMARY
+
+────────────────────────────────────────────────────────────────────
+dev ACCEPTANCE PEER identity — separate SP, ZERO Azure roles (HAR-61).
+
+  1) Add as an *Environment* variable on the GitHub '${env}' environment
+     (NO client secret exists or is needed):
+
+       AZURE_ACCEPTANCE_PEER_CLIENT_ID = ${app_id}
+
+  2) Add the SAME id to the dev Easy Auth allow-list in
+     environments/dev.tfvars, so the dev API accepts this caller:
+
+       # → functions_auth_allowed_client_app_ids gains "${app_id}"
+
+  Both are done in a follow-up issue after this run, not by bootstrap.
+
+  Federated subject: ${subject} (shared with the app-deploy identity;
+                     the one exception the environment map allows)
+  Roles: NONE, verified on this run. Re-running bootstrap re-verifies it and
+         fails if any role has been added.
+────────────────────────────────────────────────────────────────────
+SUMMARY
+}
+
+# --------------------------------------------------------------------------
 # 3b. dev INFRA-APPLY identity (create-if-absent) — MG-23.
 #
 #     The identity .github/workflows/infra-apply-dev.yml assumes to run the
@@ -2625,8 +2763,23 @@ SUMMARY
 # environment exists to hold a HUMAN approval on a destructive recovery apply;
 # minting an OIDC trust for it would turn the gate into just another machine
 # identity.
+#
+# ONE NAMED EXCEPTION (HAR-61): the zero-role acceptance peer may share
+# ${APP_DEPLOY_ENVIRONMENT} with the app-deploy identity, and only that. It is
+# safe because swapping to the peer can only REDUCE privilege, and
+# bootstrap_acceptance_peer_identity re-proves on every run that the peer holds
+# no role. The peer is therefore NOT added to the collision loop below; instead
+# it must equal APP_DEPLOY_ENVIRONMENT exactly, and any other value dies, so the
+# exception cannot be stretched to a second shared environment or used to mint
+# trust for a new one.
 assert_federated_environment_map() {
   local env seen="" dupes=""
+
+  [ -n "$ACCEPTANCE_PEER_ENVIRONMENT" ] \
+    || die "the acceptance peer is configured to federate an EMPTY GitHub Environment name; the resulting subject would end ':environment:' and would match nothing (or, worse, something unintended)."
+  [ "$ACCEPTANCE_PEER_ENVIRONMENT" = "$APP_DEPLOY_ENVIRONMENT" ] \
+    || die "ENVIRONMENT MAP COLLISION: the acceptance peer federates '${ACCEPTANCE_PEER_ENVIRONMENT}', but the only environment it may federate is '${APP_DEPLOY_ENVIRONMENT}' (shared with the app-deploy identity, HAR-61). That exception exists only because the peer holds no Azure role; it does not extend to any other environment."
+
   # Every environment an identity actually federates, in the same derivation
   # order GITHUB_ENVIRONMENTS is built from — listed WITH duplicates on purpose,
   # because duplicates are precisely what this check is looking for.
@@ -2649,7 +2802,7 @@ assert_federated_environment_map() {
       die "'${RECOVERY_APPROVAL_ENVIRONMENT}' must NOT be federated: it is the human-approval gate on the destructive recovery apply. Federating it would mint an OIDC trust for the one environment whose entire purpose is to require a person." ;;
   esac
 
-  log "Environment/subject map: ${GITHUB_ENVIRONMENTS// /, } (one identity each; '${RECOVERY_APPROVAL_ENVIRONMENT}' is approval-only, unfederated)"
+  log "Environment/subject map: ${GITHUB_ENVIRONMENTS// /, } (one identity each, except '${APP_DEPLOY_ENVIRONMENT}', which the app-deploy identity shares with the zero-role acceptance peer '${AAD_ACCEPTANCE_PEER_APP_NAME}' (HAR-61); '${RECOVERY_APPROVAL_ENVIRONMENT}' is approval-only, unfederated)"
 }
 
 main() {
@@ -2666,6 +2819,7 @@ main() {
   bootstrap_state_backend
   bootstrap_oidc_identity        # per-env PLAN/READ identities (Reader)
   bootstrap_deploy_identity      # dev APP-DEPLOYMENT identity (publish-only)
+  bootstrap_acceptance_peer_identity # dev ACCEPTANCE PEER (zero roles, HAR-61)
   bootstrap_infra_apply_identity # dev INFRA-APPLY identity (MG-23, RG-scoped)
   bootstrap_dev_api_registration # dev Entra API auth registration (access_as_user)
   # GitHub-side, not Azure-side. BOTH environments must EXIST WITH THE RIGHT
