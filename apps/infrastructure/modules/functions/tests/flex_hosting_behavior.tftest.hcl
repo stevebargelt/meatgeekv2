@@ -47,6 +47,8 @@ variables {
   temperatures_container_name            = "temperatures"
   users_container_name                   = "users"
   recipes_container_name                 = "recipes"
+  temperature_rollups_container_name     = "temperature-rollups"
+  leases_container_name                  = "leases"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   iothub_service_hostname                = "meatgeek-v2-dev-iothub-abc123def456.azure-devices.net"
@@ -322,6 +324,8 @@ run "app_settings_are_exactly_the_declared_collection" {
       "COSMOSDB_DATABASE_NAME",
       "COSMOSDB_DEVICES_CONTAINER_NAME",
       "COSMOSDB_RECIPES_CONTAINER_NAME",
+      "COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME",
+      "COSMOSDB_LEASES_CONTAINER_NAME",
       "COSMOSDB_TEMPERATURES_CONTAINER_NAME",
       "COSMOSDB_USERS_CONTAINER_NAME",
       "COSMOSDB__accountEndpoint",

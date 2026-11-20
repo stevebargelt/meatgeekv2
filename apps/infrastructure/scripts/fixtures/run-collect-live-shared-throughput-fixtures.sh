@@ -51,12 +51,12 @@ EX_VIOLATION=3
 DEST_DB="meatgeek-v2-dev-shared-db"
 ACCOUNT="meatgeekv2devcosmos"
 RG="meatgeek-v2-dev-rg"
-CONTAINERS="cooks users recipes temperatures devices"
+CONTAINERS="cooks users recipes temperatures devices temperature-rollups leases"
 
-# 7 end-to-end scenarios, each contributing 2 checks per shell (six scenarios:
+# 9 end-to-end scenarios, each contributing 2 checks per shell (eight scenarios:
 # collector-exit + gate-verdict; the die scenario: collector-exit + no-stdout) =
-# 14 checks per shell. Raise it whenever a case is added.
-MIN_CHECKS_PER_SHELL=14
+# 18 checks per shell. Raise it whenever a case is added.
+MIN_CHECKS_PER_SHELL=18
 
 SHELL_BINS=""
 for cand in bash sh; do
@@ -198,6 +198,18 @@ stage_clean "${DEDICATED}"
 rm -f "${DEDICATED}/container-tp-recipes.rc" "${DEDICATED}/container-tp-recipes.err"
 jq -n '{id:"recipes", resource:{throughput:400, minimumThroughput:"400"}}' > "${DEDICATED}/container-tp-recipes.out"
 
+# HAR-74: each of the two cook chart read-model containers holding a dedicated
+# offer must flip the end-to-end verdict to a VIOLATION, exactly as recipes does.
+ROLLUPS_DEDICATED="${WORK}/rollups-dedicated"
+stage_clean "${ROLLUPS_DEDICATED}"
+rm -f "${ROLLUPS_DEDICATED}/container-tp-temperature-rollups.rc" "${ROLLUPS_DEDICATED}/container-tp-temperature-rollups.err"
+jq -n '{id:"temperature-rollups", resource:{throughput:400, minimumThroughput:"400"}}' > "${ROLLUPS_DEDICATED}/container-tp-temperature-rollups.out"
+
+LEASES_DEDICATED="${WORK}/leases-dedicated"
+stage_clean "${LEASES_DEDICATED}"
+rm -f "${LEASES_DEDICATED}/container-tp-leases.rc" "${LEASES_DEDICATED}/container-tp-leases.err"
+jq -n '{id:"leases", resource:{throughput:400, minimumThroughput:"400"}}' > "${LEASES_DEDICATED}/container-tp-leases.out"
+
 # No database-level offer: db throughput-show 404s -> offerFound=false -> exit 3.
 DB_ABSENT="${WORK}/db-absent"
 stage_clean "${DB_ABSENT}"
@@ -254,6 +266,8 @@ for shell_bin in ${SHELL_BINS}; do
   {
     run_scenario "${shell_bin}" "${CLEAN}"          0 "${EX_PASS}"      "[clean] healthy destination -> gate PASS"
     run_scenario "${shell_bin}" "${DEDICATED}"      0 "${EX_VIOLATION}" "[violation] recipes holds a dedicated offer -> gate VIOLATION"
+    run_scenario "${shell_bin}" "${ROLLUPS_DEDICATED}" 0 "${EX_VIOLATION}" "[violation] temperature-rollups holds a dedicated offer -> gate VIOLATION"
+    run_scenario "${shell_bin}" "${LEASES_DEDICATED}"  0 "${EX_VIOLATION}" "[violation] leases holds a dedicated offer -> gate VIOLATION"
     run_scenario "${shell_bin}" "${DB_ABSENT}"      0 "${EX_VIOLATION}" "[violation] no database-level offer -> gate VIOLATION"
     run_scenario "${shell_bin}" "${MISPART}"        0 "${EX_VIOLATION}" "[violation] temperatures partitioned on /id, not /deviceId -> gate VIOLATION"
     run_scenario "${shell_bin}" "${DB_AUTH}"        0 "${EX_OP}"        "[fail-closed] db offer probe auth error -> queryOk=false -> gate exit 1"

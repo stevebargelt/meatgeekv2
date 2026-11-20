@@ -577,6 +577,16 @@ and authenticated-smoke-test procedure.
 > temperatures and recipes handlers move onto Cosmos in follow-up issues under
 > HAR-18.
 >
+> The cook chart read model adds two more containers to the same
+> shared-throughput database (**HAR-74**), published the same way:
+> `COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME` (`temperature-rollups`,
+> partitioned on `/deviceId`, no TTL, indexing only `/deviceId` and
+> `/hourStart`) and `COSMOSDB_LEASES_CONTAINER_NAME` (`leases`, partitioned on
+> `/id`). Terraform creates `leases` because the Functions Cosmos DB trigger,
+> running under the managed identity with local auth disabled, cannot create its
+> own lease container. Neither container has throughput of its own; nothing
+> reads them until the change-feed function lands in a later issue.
+>
 > `MEATGEEK_ENVIRONMENT` (**HAR-17**) tells the running app which environment
 > it is in (`dev` or `prod`, from the root's `environment` variable). It is a
 > plain label, not a credential.

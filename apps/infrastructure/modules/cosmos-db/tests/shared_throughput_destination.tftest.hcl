@@ -8,7 +8,8 @@
 # WHY THIS FILE EXISTS. MG-53 adds a parallel, shared-throughput destination —
 # azurerm_cosmosdb_sql_database.meatgeek_shared with a SINGLE 400 RU/s
 # database-level offer, and five *_shared containers that carry no throughput of
-# their own. Two properties of that destination are unrepairable-after-create and
+# their own. (HAR-74 adds two more containers to the same database; their shape is
+# pinned in chart_read_model_containers.tftest.hcl.) Two properties of that destination are unrepairable-after-create and
 # so are the ones worth a fast in-container guard:
 #
 #   1. The destination temperatures container's partition_key_paths. It MUST stay
@@ -75,7 +76,7 @@ variables {
 }
 
 # The single database-level offer is the whole point of the destination: 400 RU/s
-# at the DATABASE, shared by all five containers. This run fails closed if that
+# at the DATABASE, shared by every container in it. This run fails closed if that
 # offer is removed (a removed optional throughput plans as unknown, so `== 400`
 # errors) or set to any other value.
 run "destination_database_carries_a_single_400_rus_database_level_offer" {
@@ -83,7 +84,7 @@ run "destination_database_carries_a_single_400_rus_database_level_offer" {
 
   assert {
     condition     = azurerm_cosmosdb_sql_database.meatgeek_shared.throughput == 400
-    error_message = "The destination database azurerm_cosmosdb_sql_database.meatgeek_shared must carry a 400 RU/s DATABASE-level offer (throughput = 400). This single shared offer is what lets the five destination containers run with no throughput of their own; remove it and each container silently falls back to its own 400 RU/s minimum — the exact ~2000 RU/s defect MG-53 exists to correct."
+    error_message = "The destination database azurerm_cosmosdb_sql_database.meatgeek_shared must carry a 400 RU/s DATABASE-level offer (throughput = 400). This single shared offer is what lets the destination containers run with no throughput of their own; remove it and each container silently falls back to its own 400 RU/s minimum — the exact ~2000 RU/s defect MG-53 exists to correct."
   }
 
   # The destination is a NEW database inside the EXISTING account — not a second
