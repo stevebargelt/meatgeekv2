@@ -18,35 +18,31 @@ cook from the IoT Hub device twin.
 - **`POST /negotiate`** takes no parameters. The caller is the Easy Auth
   principal, and its SignalR user id is the principal's `userId`,
   `"<tid>:<oid>"`. The handler:
-  1. reads the caller's devices from the `devices` container;
-  2. removes that user from every SignalR group
-     (`DELETE /api/hubs/temperatureHub/users/{user}/groups`), then adds it to
-     `device-{id}` for each device the caller owns, and nothing else
-     (`PUT /api/hubs/temperatureHub/users/{user}/groups/{group}`);
-  3. mints a 60-minute client access token for that user id through the
+  1. mints a 60-minute client access token for that user id through the
      SignalR data-plane REST API (`POST /api/hubs/temperatureHub/:generateToken`,
      api-version `2024-12-01`) under the Function App's managed identity;
-  4. returns `200 { url, accessToken }`. `url` is
+  2. returns `200 { url, accessToken }`. `url` is
      `https://<signalr>.service.signalr.net/client/?hub=temperatureHub`.
+
+  It reads no devices and manages no groups (HAR-81): every message is sent to a
+  user id, so the token is all a connection needs.
 
   A `deviceId` query parameter is ignored. With no principal the answer is
   `401` and no SignalR call is made. If a SignalR call fails the answer is
   `503 { error: "SIGNALR_UNAVAILABLE", reason }`. `reason` is a fixed code that
   names the failed call and, when the service answered, its status, for
-  example `signalr_add_user_to_group_status_404`. Neither the body nor the log
-  carries the endpoint, a user id, a group or a token. The live acceptance
-  proof prints `reason` when negotiate fails.
+  example `signalr_generate_token_status_429`. Neither the body nor the log
+  carries the endpoint, a user id or a token. The live acceptance proof prints
+  `reason` when negotiate fails.
 
-- **`POST /devices`** adds the owner to the new device's `device-{id}` group
-  after the device is created. If that fails the device is still created (201),
-  and the next negotiate restores the membership.
 - **`cook_started` and `cook_stopped`** are sent by `startCook` and `stopCook`
   through the Functions SignalR output binding with `userId` set to the
   authenticated principal's `userId`, the cook's owner. Both handlers check
   device ownership (HAR-26) before any write or event. The envelope is
   unchanged: `type`, `timestamp`, `messageId`, `deviceId`, `userId`, `cookId`
   (on `cook_started` only), `correlation.id` and the cook as `payload`.
-- The `device-{id}` groups are for device readings, sent by a later issue.
+- **`temperature`** readings are sent by `broadcastTemperature` with `userId`
+  set to the device's stored owner (HAR-81).
 
 ## How the Pi gets its cook: the device twin (HAR-66)
 

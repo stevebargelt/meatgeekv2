@@ -74,13 +74,14 @@ export interface LiveTemperaturePayload extends TemperatureReading {
   enqueuedTimeUtc: string;
 }
 
-// Shape of a single group-scoped message written to the SignalR output binding
-// by broadcastTemperature. `groupName` is always `device-{deviceId}` (see
-// deviceGroup in shared/signalr): negotiate puts each user in the groups of the
-// devices they own, so a reading reaches exactly the device's owner(s).
-export interface SignalRGroupMessage {
+// Shape of a single live-reading message written to the SignalR output binding
+// by broadcastTemperature. `userId` is the device's owner as stored on the
+// device, so a reading reaches exactly that owner's connections, the same way
+// cook events do (HAR-81; before, it went to a `device-{id}` group that
+// negotiate filled).
+export interface SignalRTemperatureMessage {
   target: typeof TEMPERATURE;
-  groupName: string;
+  userId: string;
   arguments: [LiveTemperaturePayload];
 }
 

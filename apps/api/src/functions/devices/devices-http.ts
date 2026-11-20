@@ -11,10 +11,6 @@ import {
   type DevicesRepository,
 } from '../../shared/cosmos/devices-repository';
 import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
-import {
-  getSignalRManagementClient,
-  type SignalRGroupsPort,
-} from '../../shared/signalr/signalr-management';
 
 /**
  * HAR-20 (MG-80) — what the four devices handlers share: their injection seam
@@ -34,21 +30,18 @@ export type DevicesRepositoryPort = Pick<
   'listDevicesByOwner' | 'getDeviceOwnership' | 'registerDevice' | 'updateDevice'
 >;
 
-/** Injection seam. Production wires Easy Auth, the adapter-backed repository
- *  and the managed-identity SignalR client; tests pass fakes. The getters run
- *  inside the invocation, so a missing setting fails that request (as a
- *  sanitized 500, or a logged warning for SignalR), not the module import. */
+/** Injection seam. Production wires Easy Auth and the adapter-backed
+ *  repository; tests pass fakes. The getters run inside the invocation, so a
+ *  missing setting fails that request (as a sanitized 500), not the module
+ *  import. */
 export interface DevicesHandlerDeps {
   resolvePrincipal(request: HeaderReader): PrincipalResult;
   getRepository(): DevicesRepositoryPort;
-  /** HAR-57: register-device adds the owner to the new device's group. */
-  getSignalR(): SignalRGroupsPort;
 }
 
 export const defaultDevicesDeps: DevicesHandlerDeps = {
   resolvePrincipal: principalFromRequest,
   getRepository: getDevicesRepository,
-  getSignalR: getSignalRManagementClient,
 };
 
 /** The request id echoed in `X-Request-ID`: the caller's, else the invocation id. */

@@ -32,7 +32,7 @@ import {
   HUB_NAME,
   signalROutput,
   TEMPERATURE,
-  type SignalRGroupMessage,
+  type SignalRTemperatureMessage,
 } from '../functions/signalr/envelope';
 import { principalFromHeaderValue, unauthenticatedResponse } from '../shared/auth/principal';
 import {
@@ -337,9 +337,12 @@ describe('(d) SignalR: the messages the API builds match their x-signalr schemas
     };
   }
 
+  /** HAR-81: the push is addressed to the device's owner; no Cosmos here. */
+  const ownerDeps = { ownerOf: async () => 'tid-1:oid-owner' };
+
   function broadcastContext(): {
     context: InvocationContext;
-    sent: () => SignalRGroupMessage[];
+    sent: () => SignalRTemperatureMessage[];
   } {
     const set = jest.fn();
     const context = {
@@ -360,7 +363,7 @@ describe('(d) SignalR: the messages the API builds match their x-signalr schemas
       context,
       sent: () => {
         expect(set).toHaveBeenCalledWith(signalROutput, expect.any(Array));
-        return set.mock.calls[0][1] as SignalRGroupMessage[];
+        return set.mock.calls[0][1] as SignalRTemperatureMessage[];
       },
     };
   }
@@ -395,13 +398,14 @@ describe('(d) SignalR: the messages the API builds match their x-signalr schemas
           probe3Temp: 'not a number',
         },
       ],
-      context
+      context,
+      ownerDeps
     );
 
     const messages = sent();
     expect(messages).toHaveLength(1);
     expect(messages[0].target).toBe(TEMPERATURE);
-    expect(messages[0].groupName).toBe('device-meatgeek3');
+    expect(messages[0].userId).toBe('tid-1:oid-owner');
     const [reading] = messages[0].arguments;
     expect(reading.deviceId).toBe('meatgeek3');
     expectValid(compile(signalR().messages[TEMPERATURE]), reading);
@@ -409,7 +413,7 @@ describe('(d) SignalR: the messages the API builds match their x-signalr schemas
 
   it('temperature: a minimal reading (no cook, no temperatures) matches the schema', async () => {
     const { context, sent } = broadcastContext();
-    await broadcastTemperatureHandler([{}], context);
+    await broadcastTemperatureHandler([{}], context, ownerDeps);
 
     const [reading] = sent()[0].arguments;
     expectValid(compile(signalR().messages[TEMPERATURE]), reading);

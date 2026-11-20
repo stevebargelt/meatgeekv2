@@ -7,7 +7,9 @@
  * context.extraOutputs.set() to a binding by identity). The registered handler
  * is then driven with a host-shaped batch to prove the function a real event
  * would hit emits on that binding. No Event Hub and no SignalR Service are
- * involved; the live delivery proof is a later issue (after HAR-59).
+ * involved; the live delivery proof is a later issue (after HAR-59). The
+ * devices repository is replaced so the production owner lookup (HAR-81)
+ * answers without Cosmos.
  */
 import type { InvocationContext } from '@azure/functions';
 
@@ -16,7 +18,7 @@ import {
   HUB_NAME,
   SIGNALR_CONNECTION_SETTING,
   signalROutput,
-  SignalRGroupMessage,
+  SignalRTemperatureMessage,
 } from '../functions/signalr/envelope';
 
 interface EventHubRegistration {
@@ -44,6 +46,21 @@ jest.mock('@azure/functions', () => {
       timer: () => undefined,
       cosmosDB: () => undefined,
     },
+  };
+});
+
+const MOCK_OWNER = 'tid-1:oid-owner';
+
+jest.mock('../shared/cosmos/devices-repository', () => {
+  const actual = jest.requireActual('../shared/cosmos/devices-repository');
+  return {
+    ...actual,
+    getDevicesRepository: () => ({
+      getDeviceOwner: async (deviceId: string) => ({
+        userId: deviceId === 'meatgeek3' ? MOCK_OWNER : undefined,
+        requestCharge: 1,
+      }),
+    }),
   };
 });
 
@@ -81,7 +98,7 @@ describe('broadcastTemperature registration (main.ts)', () => {
   });
 
   it('the registered handler emits a host-shaped batch on that binding', async () => {
-    let captured: SignalRGroupMessage[] | undefined;
+    let captured: SignalRTemperatureMessage[] | undefined;
     const ctx = {
       invocationId: 'broadcast-integration',
       triggerMetadata: {
@@ -97,7 +114,7 @@ describe('broadcastTemperature registration (main.ts)', () => {
       extraOutputs: {
         set: (output: unknown, value: unknown) => {
           if (output === signalROutput) {
-            captured = value as SignalRGroupMessage[];
+            captured = value as SignalRTemperatureMessage[];
           }
         },
       },
@@ -112,7 +129,7 @@ describe('broadcastTemperature registration (main.ts)', () => {
     expect(JSON.parse(JSON.stringify(captured))).toEqual([
       {
         target: 'temperature',
-        groupName: 'device-meatgeek3',
+        userId: MOCK_OWNER,
         arguments: [
           {
             deviceId: 'meatgeek3',

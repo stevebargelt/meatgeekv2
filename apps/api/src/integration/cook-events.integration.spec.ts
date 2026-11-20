@@ -11,7 +11,7 @@
  *      would hit emits the right SignalR message on the right binding.
  *   2. HAR-57 (MG-30): cook events are delivered to the OWNER (message userId =
  *      the authenticated principal's userId), never to userId = deviceId, and
- *      negotiate scopes a connection to the caller's own device groups whatever
+ *      negotiate mints the token for the caller's own userId whatever
  *      `deviceId` query parameter the caller sends.
  *
  * The emitted envelopes are JSON-serialized exactly as the Functions SignalR
@@ -466,30 +466,18 @@ describe('POST /cooks/{cookId}/stop (stopCook) — cook_stopped producer', () =>
 describe('POST /negotiate — a connection scoped to the caller', () => {
   const CLIENT_URL = 'https://example.service.signalr.net/client/?hub=temperatureHub';
 
-  function negotiateDeps(ownedDeviceIds: string[]) {
+  function negotiateDeps() {
     const calls: string[] = [];
     const signalR: SignalRManagementPort = {
-      async removeUserFromAllGroups(userId) {
-        calls.push(`removeAll ${userId}`);
-      },
-      async addUserToGroup(group, userId) {
-        calls.push(`add ${group} ${userId}`);
-      },
       async generateClientToken(userId) {
         calls.push(`token ${userId}`);
         return { url: CLIENT_URL, accessToken: `token-for:${userId}` };
       },
     };
-    const deps = {
+    const deps: NegotiateDeps = {
       resolvePrincipal: () => AUTHED_PRINCIPAL,
-      getRepository: () => ({
-        listDevicesByOwner: async (userId: string) => ({
-          devices: ownedDeviceIds.map(id => ({ id, userId, name: id })),
-          requestCharge: 1,
-        }),
-      }),
       getSignalR: () => signalR,
-    } as unknown as NegotiateDeps;
+    };
     return { deps, calls };
   }
 
@@ -502,22 +490,18 @@ describe('POST /negotiate — a connection scoped to the caller', () => {
     return handler(req, mockContext().ctx, deps);
   }
 
-  it("returns a token for the principal and joins only the caller's device groups", async () => {
-    const { deps, calls } = negotiateDeps(['meatgeek3']);
+  it('returns a token for the principal, its only SignalR call (HAR-81)', async () => {
+    const { deps, calls } = negotiateDeps();
     const res = await invokeNegotiate(mockRequest({}), deps);
 
     const userId = AUTHED_PRINCIPAL.principal.userId;
     expect(res.status).toBe(200);
     expect(res.jsonBody).toEqual({ url: CLIENT_URL, accessToken: `token-for:${userId}` });
-    expect(calls).toEqual([
-      `removeAll ${userId}`,
-      `add device-meatgeek3 ${userId}`,
-      `token ${userId}`,
-    ]);
+    expect(calls).toEqual([`token ${userId}`]);
   });
 
   it('ignores a ?deviceId= for a device the caller does not own', async () => {
-    const { deps, calls } = negotiateDeps(['meatgeek3']);
+    const { deps, calls } = negotiateDeps();
     const res = await invokeNegotiate(mockRequest({ query: { deviceId: 'someone-elses' } }), deps);
 
     expect(res.status).toBe(200);

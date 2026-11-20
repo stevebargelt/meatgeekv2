@@ -222,15 +222,17 @@ twin sync or in simdevice is reported here, not fixed.
 
 `signalr-live-temperature.proof.ts` (HAR-63, goal HAR-55 item 7a) proves a
 live reading reaches its owner by push: simdevice → IoT Hub →
-`temperature-data` Event Hub → `broadcastTemperature` → SignalR group
-`device-{deviceId}`. `POST /negotiate` puts the caller in the group of every
-device it owns, so the proof registers the simulated device first and
-negotiates after. It opens one connection (dev SignalR is `Free_F1`: 20
+`temperature-data` Event Hub → `broadcastTemperature` → SignalR, addressed to
+the device owner's `userId` (HAR-81). `broadcastTemperature` reads the owner
+when it handles the reading, so the proof registers the simulated device to the
+caller before it sends; `POST /negotiate` only mints the caller's token. It
+opens one connection (dev SignalR is `Free_F1`: 20
 concurrent connections, 20,000 messages a day) and stops it whichever step
 fails. A new Event Hub consumer group can replay retained events, so older
 readings of the device may arrive first; the proof matches the one it sent by
 `timestamp`, as an instant. `broadcastTemperature` logs
-`broadcastTemperature sent=<n> skipped=<m>`, but App Insights shows nothing from
+`broadcastTemperature sent=<n> skipped=<m> unowned=<u> lookupFailed=<f>`, but
+App Insights shows nothing from
 dev (MG-37), so this proof's output is the only evidence of delivery: a timeout
 says how many `temperature` messages did arrive, how many for the device, and
 the last `timestamp` among them.

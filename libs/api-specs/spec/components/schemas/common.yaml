@@ -102,7 +102,7 @@ SignalRUnavailableError:
     reason:
       type: string
       pattern: '^signalr_(failure|[a-z_]+_(failed|status_[0-9]{3}))$'
-      example: signalr_add_user_to_group_status_404
+      example: signalr_generate_token_status_429
     requestId:
       type: string
 

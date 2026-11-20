@@ -5,9 +5,11 @@ import { HUB_NAME } from '../../functions/signalr/envelope';
 
 /**
  * HAR-57 (MG-30) — the API's client for the Azure SignalR Service data-plane
- * REST API. It mints client access tokens for a user and manages which groups a
- * user is in. negotiate and register-device use it; the cook producers still
- * send through the Functions SignalR output binding.
+ * REST API. It mints client access tokens for a user; negotiate uses it. Every
+ * message is sent through the Functions SignalR output binding, addressed to a
+ * user id. Since HAR-81 nothing manages group membership: per-device groups cost
+ * one REST call per owned device on every negotiate, which tripped the Free_F1
+ * service's throttling.
  *
  * WHY NOT THE FUNCTIONS BINDING
  * The SignalR connection-info input binding can only take its userId from a
@@ -32,7 +34,7 @@ import { HUB_NAME } from '../../functions/signalr/envelope';
  * SANITIZED FAILURES
  * Every failure is a {@link SignalRUnavailableError} carrying a fixed operation
  * name and, when the service answered, its numeric status. The error never
- * carries the endpoint, the user id, a group name, a token, or the text of the
+ * carries the endpoint, the user id, a token, or the text of the
  * underlying error, so a caller may log `error.code` verbatim.
  */
 
@@ -87,11 +89,6 @@ function retryDelayMs(response: Response, retry: number): number {
   return RETRY_BACKOFF_MS[Math.min(retry, RETRY_BACKOFF_MS.length - 1)];
 }
 
-/** The group a device's readings and events are sent to. */
-export function deviceGroup(deviceId: string): string {
-  return `device-${deviceId}`;
-}
-
 /** What a client needs to open its connection. */
 export interface SignalRClientConnection {
   /** `{serviceUri}/client/?hub={hub}` */
@@ -100,19 +97,14 @@ export interface SignalRClientConnection {
 }
 
 /** The operations this client performs; also the fixed names in its errors. */
-export type SignalROperation =
-  | 'configuration'
-  | 'credential'
-  | 'generate_token'
-  | 'remove_user_from_all_groups'
-  | 'add_user_to_group';
+export type SignalROperation = 'configuration' | 'credential' | 'generate_token';
 
 /**
  * A SignalR call failed, or SignalR is not configured. Carries only fixed text:
  * the operation and, when the service answered, its numeric status.
  */
 export class SignalRUnavailableError extends Error {
-  /** Safe to log, e.g. `signalr_add_user_to_group_status_403`. */
+  /** Safe to log, e.g. `signalr_generate_token_status_403`. */
   readonly code: string;
 
   constructor(
@@ -129,14 +121,8 @@ export class SignalRUnavailableError extends Error {
   }
 }
 
-/** The group operations register-device and negotiate depend on. */
-export interface SignalRGroupsPort {
-  removeUserFromAllGroups(userId: string): Promise<void>;
-  addUserToGroup(group: string, userId: string): Promise<void>;
-}
-
 /** Everything negotiate needs from SignalR. */
-export interface SignalRManagementPort extends SignalRGroupsPort {
+export interface SignalRManagementPort {
   generateClientToken(userId: string): Promise<SignalRClientConnection>;
 }
 
@@ -206,31 +192,6 @@ export class SignalRManagementClient implements SignalRManagementPort {
     };
   }
 
-  /** `DELETE /api/hubs/{hub}/users/{user}/groups` */
-  async removeUserFromAllGroups(userId: string): Promise<void> {
-    await this.call(
-      'remove_user_from_all_groups',
-      'DELETE',
-      `/api/hubs/${encodeURIComponent(this.hub)}/users/${encodeURIComponent(userId)}/groups`
-    );
-  }
-
-  /**
-   * `PUT /api/hubs/{hub}/users/{user}/groups/{group}` (HAR-59). The versioned
-   * API has no `/groups/{group}/users/{user}` route; that shape is the legacy
-   * `/api/v1` one. No `ttl`: the user stays in the group whether or not it has
-   * a connection yet, which is what negotiate needs before the client connects.
-   */
-  async addUserToGroup(group: string, userId: string): Promise<void> {
-    await this.call(
-      'add_user_to_group',
-      'PUT',
-      `/api/hubs/${encodeURIComponent(this.hub)}/users/${encodeURIComponent(
-        userId
-      )}/groups/${encodeURIComponent(group)}`
-    );
-  }
-
   /**
    * One authenticated REST call. A `429` or `503` answer is retried as
    * described under THROTTLING; when the last attempt is still throttled, or on
@@ -240,7 +201,7 @@ export class SignalRManagementClient implements SignalRManagementPort {
    */
   private async call(
     operation: SignalROperation,
-    method: 'POST' | 'PUT' | 'DELETE',
+    method: 'POST',
     path: string,
     query: URLSearchParams = new URLSearchParams()
   ): Promise<Response> {

@@ -80,6 +80,14 @@ non-owner receives nothing (HAR-63, HAR-67).
 - **Per-user fan-out**: look up the device's owners on every reading and send
   to each user. That is a Cosmos read per reading. `device-{id}` groups move
   the ownership check to negotiate, once per connection.
+  **Reversed by HAR-81.** Group membership cost one SignalR REST call per owned
+  device on every negotiate. With the acceptance owner at 98 devices, two
+  negotiates in a row sent about 200 REST calls in under 2 s, and the Free_F1
+  service throttled the whole instance: 429 on group adds and on client
+  connects (runs 44771533751 and 44777459208; neither connection nor message
+  quota was near its cap). `broadcastTemperature` now reads each device's owner
+  once per batch, not once per reading, and sends to that userId; negotiate
+  only mints the token.
 - **Azure Web PubSub.** It offers no capability this path needs that SignalR
   lacks, and the SignalR output binding, the service and its client library
   were already in place.

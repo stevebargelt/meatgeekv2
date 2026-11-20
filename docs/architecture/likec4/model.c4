@@ -195,7 +195,7 @@ model {
         }
         negotiate = component 'negotiate' {
           technology 'SignalR data-plane REST API, managed identity'
-          description 'POST /negotiate: hands the caller a SignalR client token for temperatureHub, minted for its userId (<tid>:<oid>), after resetting its group membership to device-{id} for exactly the devices it owns (MG-30). A deviceId query parameter is ignored.'
+          description 'POST /negotiate: hands the caller a SignalR client token for temperatureHub, minted for its userId (<tid>:<oid>) (MG-30). Its only SignalR call: every message is sent to a userId, so it reads no devices and manages no groups (HAR-81). A deviceId query parameter is ignored.'
         }
         health = component 'health' {
           description 'GET /health/cosmos, and the storageHeartbeat timer that proves host storage authenticates.'
@@ -216,7 +216,7 @@ model {
         }
         broadcast = component 'realtime broadcast' {
           technology 'Event Hub trigger, cardinality many; SignalR output binding'
-          description 'broadcastTemperature (HAR-60): sends each reading on temperature-data to device-{id}, the device taken from the hub-stamped iothub-connection-device-id, the reading mapped by toTemperatureReading (the same mapper as GET /temperatures/current) plus enqueuedTimeUtc. Bad events are skipped and counted, never thrown.'
+          description 'broadcastTemperature (HAR-60): sends each reading on temperature-data to the userId of the device owner (HAR-81: one point read of the device per batch), the device taken from the hub-stamped iothub-connection-device-id, the reading mapped by toTemperatureReading (the same mapper as GET /temperatures/current) plus enqueuedTimeUtc. Bad events are skipped and counted, never thrown.'
         }
 
         easyauth -> principal 'X-MS-CLIENT-PRINCIPAL'
@@ -275,9 +275,9 @@ model {
         technology 'Serverless mode, hub temperatureHub'
         description '''
           Terraform sets `service_mode = "Serverless"`: no hub server, no upstream. Push to clients
-          only: `broadcastTemperature` sends each reading to `device-{id}`, and `cook_started` and
-          `cook_stopped` go to the owning userId; negotiate puts a user in `device-{id}` for each
-          device it owns (MG-30). Proven live by the acceptance proofs: `signalr negotiate` (a
+          only, every message to a userId: `broadcastTemperature` sends each reading to the device
+          owner, and `cook_started` and `cook_stopped` go to the cook owner (HAR-81; before it,
+          readings went to `device-{id}` groups that negotiate filled, MG-30). Proven live by the acceptance proofs: `signalr negotiate` (a
           client connects with the token the API mints), `signalr live temperature` (a simulated
           reading reaches its owner by push, `METRIC signalr-delivery-ms` 18424 in run
           44673261258) and `signalr isolation` (a non-owner receives nothing, while the owner
@@ -351,13 +351,10 @@ model {
     }
 
     // Client connections (MG-30): negotiate and register-device manage groups.
-    cloud.api.negotiate -> cloud.realtime 'reset groups to owned devices, mint client token' {
+    cloud.api.negotiate -> cloud.realtime 'mint client token for the caller' {
       technology 'REST api-version 2024-12-01, managed identity'
     }
-    cloud.api.negotiate -> cloud.api.repos 'list devices by owner'
-    cloud.api.devices -> cloud.realtime 'add owner to device-{id} on register' {
-      technology 'REST api-version 2024-12-01, managed identity'
-    }
+    cloud.api.broadcast -> cloud.api.repos 'owner of each device in the batch'
 
     // Realtime path: push to clients. Event Hub -> Function -> SignalR (HAR-60), live.
     // The edges to the apps stay #decided on purpose: the mobile and web apps do not call
@@ -366,7 +363,7 @@ model {
     cloud.ingest.eventhub -[event]-> cloud.api.broadcast 'Event Hub trigger' {
       technology 'consumer group api-broadcast, identity-based'
     }
-    cloud.api.broadcast -> cloud.realtime 'each reading, to its device group' {
+    cloud.api.broadcast -> cloud.realtime 'each reading, to its device owner' {
       technology 'SignalR output binding, target temperature'
     }
     cloud.realtime -[decided]-> mobile 'live temperatures, cook events' {

@@ -20,7 +20,7 @@ yet wired.
 | `getCook`                | HTTP `GET`    | `cooks/{cookId}`                  | One of the caller's cooks (404 for another user's)            |
 | `getCookChart`           | HTTP `GET`    | `cooks/{cookId}/chart`            | HAR-86 — the whole cook as ≤ 720 points, from the rollups     |
 | `stopCook`               | HTTP `POST`   | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)                 |
-| `negotiate`              | HTTP `POST`   | `negotiate`                       | SignalR client negotiate, scoped to the caller's own devices  |
+| `negotiate`              | HTTP `POST`   | `negotiate`                       | SignalR client negotiate: a token for the caller's userId     |
 | `getCurrentTemperatures` | HTTP `GET`    | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else)               |
 | `getTemperatureHistory`  | HTTP `GET`    | `temperatures/history`            | A page of a caller's device's readings, by continuation token |
 | `getDevices`             | HTTP `GET`    | `devices`                         | List the caller's devices                                     |
@@ -36,7 +36,7 @@ yet wired.
 | `deleteRecipe`           | HTTP `DELETE` | `recipes/{id}`                    | Delete one of the caller's recipes                            |
 | `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                   |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
-| `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its `device-{id}` group       |
+| `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its device's owner            |
 | `rollupTemperatures`     | **Cosmos DB** | `temperatures` change feed        | HAR-86 — folds readings into per-device, per-hour rollups     |
 
 `broadcastTemperature` is the live-reading producer. IoT Hub routes every device
@@ -50,7 +50,7 @@ on the shared output binding (hub `temperatureHub`):
 ```json
 {
   "target": "temperature",
-  "groupName": "device-{deviceId}",
+  "userId": "<the device owner's userId>",
   "arguments": [{ "...TemperatureReading": "", "enqueuedTimeUtc": "<ISO 8601>" }]
 }
 ```
@@ -63,14 +63,24 @@ on the shared output binding (hub `temperatureHub`):
   measure delivery delay.
 - The body may arrive as an object, a JSON string or bytes; all three are decoded.
 - An event with no device id, a non-JSON body, or no timestamp is skipped and
-  counted, never thrown, so one bad event does not fail or replay the batch. Each
-  batch logs one line, `broadcastTemperature sent=<n> skipped=<m>`, with no ids
-  and no bodies.
-- negotiate (HAR-57) puts each user in the `device-{id}` groups of the devices
-  they own, so a reading reaches only its device's owners. Nothing is sent to
-  `cook-` groups. It adds at most 4 groups at a time, and every SignalR REST
-  call retries a `429` or `503` answer up to 3 times (waiting for `Retry-After`,
-  capped at 2 s, or 200/400/800 ms) before negotiate answers 503 (HAR-80).
+  counted, never thrown, so one bad event does not fail or replay the batch.
+- **Addressed to the owner (HAR-81).** `userId` is the `userId` stored on the
+  device, read once per distinct device per batch (a point read, partition key =
+  device id). A device with no stored owner is not pushed (`unowned`); a failed
+  owner read drops that device's readings from this batch's push
+  (`lookupFailed`). The readings are still stored either way. A change of owner
+  takes effect at the next reading.
+- Each batch logs one line,
+  `broadcastTemperature sent=<n> skipped=<m> unowned=<u> lookupFailed=<f>`, with
+  no ids, owners or bodies.
+- negotiate makes one SignalR REST call, the token. Before HAR-81 readings went
+  to `device-{id}` groups, and negotiate re-added the caller to one group per
+  owned device on every call. With the acceptance owner's 98 devices, two
+  negotiates in a row sent about 200 REST calls in under 2 s, and the Free_F1
+  service answered 429 to group adds and to client connects alike. The token
+  call still retries a `429` or `503` answer up to 3 times (waiting for
+  `Retry-After`, capped at 2 s, or 200/400/800 ms) before negotiate answers 503
+  (HAR-80).
 
 `rollupTemperatures` and `getCookChart` are the cook chart (HAR-86). A 12-hour
 cook is about 8,640 readings, and reading them all would cost hundreds of RU per
