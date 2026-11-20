@@ -289,44 +289,85 @@ const TIERS = {
 // typo'd twice quietly selecting one tier, is the same green-by-absence shape
 // this file exists to refuse — the operator believes they ran something they
 // did not. An unrecognised or surplus argument is a usage failure.
-const args = process.argv.slice(2);
-const unknown = args.filter(value => value !== '--sdk');
-if (unknown.length > 0 || args.length > 1) {
-  const offender = unknown[0] ?? args[1];
-  console.error(
-    `run-tests: unknown argument '${offender}' — expected no argument or exactly --sdk`
+// HAR-81: the exit code is SET, never forced with process.exit(). In CI the
+// step's stdout is a pipe, and on a pipe process.stdout.write() is
+// asynchronous: process.exit() ends the process without waiting for it, so
+// everything past the ~64 KiB pipe buffer is dropped. This suite prints far
+// more TAP than that, so a failing run used to exit 1 with its output cut
+// mid-line and every `not ok` line lost (CI run 44791467254: the log stops at
+// "ok 1 - emits a recor"). Returning from main() lets Node flush stdout and
+// stderr before the process ends. A failure also ends with a summary on stderr
+// that names how node --test ended and repeats its `not ok` lines.
+process.exitCode = main();
+
+function main() {
+  const args = process.argv.slice(2);
+  const unknown = args.filter(value => value !== '--sdk');
+  if (unknown.length > 0 || args.length > 1) {
+    const offender = unknown[0] ?? args[1];
+    console.error(
+      `run-tests: unknown argument '${offender}' — expected no argument or exactly --sdk`
+    );
+    return 1;
+  }
+  const tier = args[0] === '--sdk' ? TIERS.sdk : TIERS.default;
+
+  const files = readdirSync(DIR).filter(tier.match).sort();
+
+  if (files.length < tier.minFiles) {
+    console.error(
+      `run-tests[${tier.label}]: discovered ${files.length} test file(s) in ${DIR}, expected at least ${tier.minFiles} — refusing to report a pass`
+    );
+    return 1;
+  }
+
+  const result = spawnSync(
+    process.execPath,
+    ['--test', '--test-reporter=tap', ...files.map(name => path.join(DIR, name))],
+    { encoding: 'utf8', maxBuffer: maxOutputBytes() }
   );
-  process.exit(1);
-}
-const tier = args[0] === '--sdk' ? TIERS.sdk : TIERS.default;
+  process.stdout.write(result.stdout ?? '');
+  process.stderr.write(result.stderr ?? '');
 
-const files = readdirSync(DIR).filter(tier.match).sort();
+  if (result.error || result.status !== 0) {
+    console.error(failureSummary(tier.label, result));
+    return result.status ? result.status : 1;
+  }
 
-if (files.length < tier.minFiles) {
-  console.error(
-    `run-tests[${tier.label}]: discovered ${files.length} test file(s) in ${DIR}, expected at least ${tier.minFiles} — refusing to report a pass`
-  );
-  process.exit(1);
-}
+  const executed = Number(/^# tests (\d+)$/m.exec(result.stdout ?? '')?.[1]);
+  if (!Number.isInteger(executed) || executed < tier.minTests) {
+    console.error(
+      `run-tests[${tier.label}]: ${files.length} file(s) reported ${executed} test(s), expected at least ${tier.minTests} — the suite did not run to completion`
+    );
+    return 1;
+  }
 
-const result = spawnSync(
-  process.execPath,
-  ['--test', '--test-reporter=tap', ...files.map(name => path.join(DIR, name))],
-  { encoding: 'utf8' }
-);
-process.stdout.write(result.stdout ?? '');
-process.stderr.write(result.stderr ?? '');
-
-if (result.status !== 0) {
-  process.exit(result.status ?? 1);
+  console.log(`run-tests[${tier.label}]: ${executed} test(s) across ${files.length} file(s) passed`);
+  return 0;
 }
 
-const executed = Number(/^# tests (\d+)$/m.exec(result.stdout ?? '')?.[1]);
-if (!Number.isInteger(executed) || executed < tier.minTests) {
-  console.error(
-    `run-tests[${tier.label}]: ${files.length} file(s) reported ${executed} test(s), expected at least ${tier.minTests} — the suite did not run to completion`
-  );
-  process.exit(1);
+/**
+ * The child's output limit. spawnSync's default is 1 MiB; past it the child is
+ * killed and the output cut, the same silent truncation as above. 64 MiB is far
+ * beyond any suite here, and running into it is reported, not hidden.
+ */
+function maxOutputBytes() {
+  return 64 * 1024 * 1024;
 }
 
-console.log(`run-tests[${tier.label}]: ${executed} test(s) across ${files.length} file(s) passed`);
+/** How node --test ended, plus its `not ok` lines, for the end of a failed run. */
+function failureSummary(label, result) {
+  const how = result.error
+    ? `did not complete (${result.error.code ?? result.error.message})`
+    : result.signal
+      ? `was killed by ${result.signal}`
+      : `exited ${result.status}`;
+  const failed = (result.stdout ?? '')
+    .split('\n')
+    .filter(line => /^\s*not ok /.test(line))
+    .map(line => `  ${line.trim()}`);
+  const head = `run-tests[${label}]: node --test ${how}`;
+  return failed.length === 0
+    ? `${head}; it printed no 'not ok' line`
+    : [`${head}; ${failed.length} 'not ok' line(s):`, ...failed].join('\n');
+}
