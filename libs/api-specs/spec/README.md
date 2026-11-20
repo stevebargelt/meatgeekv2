@@ -6,6 +6,14 @@ operation is here if and only if `main.ts` registers it; the drift check in
 `apps/api/src/contract/contract.spec.ts` (run by `npx nx test api` on every
 pull request) fails otherwise.
 
+The bodies are checked too, against the deployed API. The live acceptance run
+(`docs/development/live-acceptance.md`, HAR-77) checks every response it
+receives: the status must be declared, a JSON body must match its schema, and
+a declared `X-Request-ID` must be present. It also checks every SignalR
+message it receives against `x-signalr`. A response the spec does not describe
+fails the Deploy Dev App run on `main`. So when a handler's output changes,
+change its schema in the same pull request.
+
 ## Layout
 
 ```
@@ -108,7 +116,7 @@ bash libs/api-specs/contract-tests/oapi-codegen-smoke.sh
 - `GET /cooks/{cookId}`, `POST /cooks` and `POST /cooks/{cookId}/stop` return the `Cook` directly.
 - `GET /temperatures/current/{deviceId}` returns a bare `TemperatureReading`.
 - `GET /devices` wraps the array in `{ devices: [...] }`; `GET`/`PATCH
-  /devices/{id}` and `POST /devices` return a bare `Device`.
+/devices/{id}` and `POST /devices` return a bare `Device`.
 - `GET /recipes` wraps the array in `{ recipes: [...] }`; `POST /recipes`,
   `GET`/`PATCH /recipes/{id}` return a bare `Recipe`; `DELETE /recipes/{id}`
   is `204` with no body.

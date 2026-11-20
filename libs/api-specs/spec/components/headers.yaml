@@ -7,7 +7,9 @@ X-Request-ID:
     `X-Request-ID` request header when it is sent and otherwise use the
     Functions invocation id. GET /health/cosmos always sends the invocation
     id. An error body's `requestId` is the invocation id (the shared 401 body
-    carries the same value as this header).
+    carries the same value as this header). Every response that declares it
+    sends it; the live acceptance run checks that (HAR-77). The shared 401
+    does not declare it: App Service Authentication's own 401 lacks it.
   schema:
     type: string
 

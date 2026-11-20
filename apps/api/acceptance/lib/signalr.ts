@@ -1,3 +1,4 @@
+import type { AcceptanceApi } from './proof';
 import { ProofFailure } from './proof';
 
 /**
@@ -62,4 +63,22 @@ export function describeError(error: unknown, secrets: readonly string[]): strin
     }
   }
   return line.replace(/https?:\/\/\S+/g, '<url>');
+}
+
+/**
+ * HAR-77: fail unless `message`, received on hub target `target`, matches the
+ * schema `x-signalr.messages.<target>` in openapi.yaml. The failure names the
+ * target and the first schema errors with their path in the message, never a
+ * value from it. Call it for every message a proof receives, once each: every
+ * call counts towards the run's `CONTRACT … hub messages`.
+ */
+export function expectHubMessage(
+  api: Pick<AcceptanceApi, 'contract'>,
+  target: string,
+  message: unknown
+): void {
+  const mismatch = api.contract.checkHubMessage(target, message);
+  if (mismatch !== undefined) {
+    throw new ProofFailure(mismatch);
+  }
 }

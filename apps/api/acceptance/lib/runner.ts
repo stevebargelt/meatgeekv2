@@ -4,6 +4,7 @@ import { readdirSync } from 'fs';
 import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../../src/shared/cosmos/request-charge';
+import { Contract, SPEC_PATH } from './contract';
 import {
   AcceptanceApi,
   AcceptanceResponse,
@@ -34,6 +35,13 @@ import {
  * caller with no devices, whose token is ACCEPTANCE_PEER_BEARER_TOKEN
  * (`request({ ..., as: 'peer' })`). The redactor masks that token too, and the
  * simdevice child gets neither token.
+ *
+ * HAR-77: at the start of a run it loads libs/api-specs/spec/openapi.yaml, and
+ * every request is checked against it (./contract): the route must be an
+ * operation in the spec, the status declared for it, a JSON body must match
+ * that status's schema and a declared X-Request-ID header must be present. A
+ * mismatch fails the proof. The run ends with a `CONTRACT validated …` line and
+ * `METRIC contract-validated-responses`.
  */
 
 export const REQUIRED_ENV = [
@@ -63,6 +71,9 @@ export interface RunOptions {
   readonly groups?: readonly ProofGroup[];
   readonly timeoutMs?: number;
   readonly runId?: string;
+  /** The OpenAPI document to check responses against. Defaults to
+   *  libs/api-specs/spec/openapi.yaml ({@link SPEC_PATH}). */
+  readonly specPath?: string;
 }
 
 export interface RunResult {
@@ -228,6 +239,15 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     return { exitCode: 2, failures: [line] };
   }
 
+  let contract: Contract;
+  try {
+    contract = await Contract.load(options.specPath ?? SPEC_PATH);
+  } catch (error) {
+    const line = `acceptance: the OpenAPI contract could not be loaded: ${describeError(error)}`;
+    write(line);
+    return { exitCode: 2, failures: [redact(line)] };
+  }
+
   const runId = options.runId ?? newRunId();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const groups = options.groups ?? loadProofGroups();
@@ -264,6 +284,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   const api: AcceptanceApi = {
     runId,
     simulatedDeviceId,
+    contract,
 
     async runSimDevice(
       args: readonly string[],
@@ -298,9 +319,16 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       const authenticated = request.authenticated ?? true;
       const expectCharge = request.expectRequestCharge ?? true;
       const as: Caller = request.as ?? 'owner';
-      const route = request.route ?? request.path.split('?')[0];
-      lastRequest = { method: request.method, route, as };
+      lastRequest = {
+        method: request.method,
+        route: request.route ?? request.path.split('?')[0],
+        as,
+      };
       lastExec = undefined;
+      // HAR-77: before anything is sent, the request must be a spec operation.
+      const operation = contract.resolve(request.method, request.path, request.route);
+      const route = operation.path;
+      lastRequest.route = route;
 
       // A proof's own headers go first, so the runner's always win (Headers
       // matches names case-insensitively).
@@ -326,9 +354,11 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       lastRequest.status = response.status;
 
       let body: unknown = text;
+      let json = false;
       if (text.length > 0) {
         try {
           body = JSON.parse(text);
+          json = true;
         } catch {
           // not JSON — keep the text
         }
@@ -376,6 +406,15 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
             : `${REQUEST_CHARGE_HEADER} header is not a number`) + (code ? ` (${code})` : ''),
           result
         );
+      }
+      const mismatch = contract.checkResponse(operation, {
+        status: response.status,
+        headers: response.headers,
+        body,
+        json,
+      });
+      if (mismatch !== undefined) {
+        throw new ProofFailure(mismatch, result);
       }
       return result;
     },
@@ -454,6 +493,13 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       `  ${route.padEnd(40)} ${String(entry.calls).padStart(5)} ${total.padStart(9)} ${avg.padStart(8)}`
     );
   }
+  const checked = contract.counts;
+  write('');
+  write(
+    `CONTRACT validated ${checked.responses} responses, ${checked.hubMessages} hub messages, ` +
+      `${checked.mismatches} mismatches`
+  );
+  write(`METRIC contract-validated-responses ${checked.responses}`);
   write('');
   write(
     `acceptance: ${passed} passed, ${failures.length} failed, ${skipped} skipped` +
