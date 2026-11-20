@@ -21,6 +21,7 @@ import {
   describeError,
   expectHubMessage,
   negotiateFailureMessage,
+  startConnection,
   within,
 } from '../lib/signalr';
 import type { SentReading } from '../lib/telemetry';
@@ -196,14 +197,7 @@ export default defineProofs('signalr isolation', () => {
     side.hub = connection;
 
     await stopOnFailure(async () => {
-      try {
-        await within(connection.start(), CONNECT_TIMEOUT_MS, `${who} start()`);
-      } catch (error) {
-        if (error instanceof ProofFailure) {
-          throw error;
-        }
-        throw new ProofFailure(`${who} start() failed: ${describeError(error, secrets())}`);
-      }
+      await startConnection(connection, `${who} start()`, secrets);
       if (connection.state !== HubConnectionState.Connected) {
         throw new ProofFailure(
           `after start() the ${who} connection is ${connection.state}, not Connected`

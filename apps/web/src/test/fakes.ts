@@ -1,4 +1,5 @@
 import type { AccountInfo } from '@azure/msal-browser';
+import type { Cook, Device } from '../api/client';
 import type { AppConfig } from '../config/config';
 
 export const TEST_CONFIG: AppConfig = {
@@ -67,4 +68,41 @@ export function installFetch(respond: (req: RecordedRequest) => Response | Promi
   });
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   return { requests, fetchMock };
+}
+
+export const BRISKET_BOX: Device = {
+  id: 'meatgeek3',
+  userId: 'tid:oid',
+  name: 'Brisket Box',
+  model: 'MeatGeek V1',
+  location: 'Backyard',
+  isActive: true,
+  connectionStatus: 'online',
+};
+
+export const OFFSET: Device = {
+  ...BRISKET_BOX,
+  id: 'offset-1',
+  name: 'Offset',
+  location: undefined,
+};
+
+/** A cook as the API returns it; override any field. */
+export function makeCook(overrides: Partial<Cook> = {}): Cook {
+  return {
+    id: '0b6f1d2e-6a51-4c3e-9f6e-8a1d2c3b4a5f',
+    userId: 'tid:oid',
+    deviceId: BRISKET_BOX.id,
+    name: 'Saturday brisket',
+    meatType: 'brisket',
+    status: 'active',
+    startTime: '2026-11-20T14:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/** The path and query of a recorded request, relative to the API base URL. */
+export function apiPath(req: RecordedRequest): string {
+  const url = new URL(req.url);
+  return url.pathname.replace(new URL(TEST_CONFIG.apiBaseUrl).pathname, '') + url.search;
 }
