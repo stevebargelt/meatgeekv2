@@ -172,12 +172,10 @@ views {
     variant sequence
     title 'Flow: start a cook (today)'
     description '''
-      POST /cooks as the code does it now. The SignalR steps to the Pi have never worked live:
-      the live path awaits the MG-24 SignalR Service bootstrap (AC5) and the Go client does not
-      speak the API negotiate handshake (MG-29). Until then `cooksession.Reconcile` against the
-      REST API at startup is the practical cook-id source (last step). See the decided design.
-      This is where the cook-scoped correlation axis starts: the `cook_started` envelope's
-      `CorrelationContext.id` becomes the `correlation.id` on every reading of the cook.
+      POST /cooks as the code does it now. `cook_started` goes to the owning user's SignalR
+      connections, not to the Pi (MG-30). The Pi learns its cook from `cooksession.Reconcile`
+      against the REST API at startup (last step), and from the device twin in the decided
+      design. The `cook_started` envelope carries the cook-scoped `CorrelationContext.id`.
     '''
 
     meatgeek.mobile -> meatgeek.cloud.api.easyauth 'POST /cooks + Entra token'
@@ -192,23 +190,18 @@ views {
     }
     meatgeek.cloud.api.cooks -> meatgeek.cloud.api.repos 'create cook'
     meatgeek.cloud.api.repos -> meatgeek.cloud.data.cooks 'insert, partition = caller userId'
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started to userId = deviceId' {
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.realtime 'cook_started to the owning userId' {
       notes '''
-        Sent only after the write succeeds, on hub `temperatureHub`, to `userId = deviceId`.
-        The envelope carries `correlation: CorrelationContext { id }`, taken from the request's
-        `X-Request-ID` or the invocation id.
+        Sent only after the write succeeds, on hub `temperatureHub`, to the caller's
+        `userId` ("<tid>:<oid>"), never to the deviceId (MG-30). The envelope carries
+        `correlation: CorrelationContext { id }`, taken from the request's `X-Request-ID` or
+        the invocation id. No client app consumes it yet.
       '''
-    }
-    meatgeek.cloud.realtime -> meatgeek.edge.pusher.signalr 'cook_started' {
-      notes 'Never proven live (MG-24 AC5). Being replaced by the device twin.'
       navigateTo cookStartTarget
     }
-    meatgeek.edge.pusher.signalr -> meatgeek.edge.pusher.session 'set active cook and correlation.id' {
-      notes '`cooksession.Store.SetActiveCookID` and `correlationHolder.Set`. From here every reading carries this cook id and `correlation.id`.'
-      navigateTo telemetry
-    }
     meatgeek.edge.pusher.session -> meatgeek.cloud.api.cooks 'GET /cooks?deviceId&status=active' {
-      notes 'What actually sets the cook id today: `cooksession.Reconcile` on data-pusher startup.'
+      notes 'What sets the cook id on the Pi today: `cooksession.Reconcile` on data-pusher startup. From then every reading carries this cook id.'
+      navigateTo telemetry
     }
   }
 

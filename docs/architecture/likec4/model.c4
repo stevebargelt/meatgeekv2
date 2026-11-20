@@ -64,7 +64,7 @@ model {
         }
         signalr = component 'signalr client' {
           #retiring
-          description 'Listens on temperatureHub for cook_started and cook_stopped and hands the cook id and correlation.id to cooksession. It POSTs negotiate straight to SIGNALR_HUB_URL and does not speak the API negotiate handshake (MG-29), and the live SignalR path awaits the MG-24 bootstrap (AC5), so this has never worked live. To be removed.'
+          description 'Listens on temperatureHub for cook_started and cook_stopped and hands the cook id and correlation.id to cooksession. It POSTs negotiate straight to SIGNALR_HUB_URL and does not speak the API negotiate handshake (MG-29), and the live SignalR path awaits the MG-24 bootstrap (AC5), so this has never worked live. Since MG-30 the API sends cook events to the owning user, not the device, so it receives none. To be removed.'
         }
         twin = component 'twin client' {
           #decided

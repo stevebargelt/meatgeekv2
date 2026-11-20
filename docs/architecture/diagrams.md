@@ -919,12 +919,10 @@ Steps:
 
 ## Flow: start a cook (today)
 
-POST /cooks as the code does it now. The SignalR steps to the Pi have never worked live:
-the live path awaits the MG-24 SignalR Service bootstrap (AC5) and the Go client does not
-speak the API negotiate handshake (MG-29). Until then `cooksession.Reconcile` against the
-REST API at startup is the practical cook-id source (last step). See the decided design.
-This is where the cook-scoped correlation axis starts: the `cook_started` envelope's
-`CorrelationContext.id` becomes the `correlation.id` on every reading of the cook.
+POST /cooks as the code does it now. `cook_started` goes to the owning user's SignalR
+connections, not to the Pi (MG-30). The Pi learns its cook from `cooksession.Reconcile`
+against the REST API at startup (last step), and from the device twin in the decided
+design. The `cook_started` envelope carries the cook-scoped `CorrelationContext.id`.
 
 View `cookStart` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/
 
@@ -937,14 +935,13 @@ graph LR
   MeatgeekCloudApiEasyauth@{ shape: rectangle, label: "Easy Auth" }
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   MeatgeekCloudApiPrincipal@{ shape: rectangle, label: "principal" }
+  MeatgeekEdgePusherSession@{ shape: rectangle, label: "cooksession" }
   MeatgeekCloudApiCooks@{ shape: rectangle, label: "cooks" }
   MeatgeekCloudApiOwnership@{ shape: rectangle, label: "ownership check" }
   MeatgeekCloudDataDevices@{ shape: cylinder, label: "devices" }
   MeatgeekCloudApiRepos@{ shape: rectangle, label: "cosmos repositories" }
   MeatgeekCloudDataCooks@{ shape: cylinder, label: "cooks" }
   MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
-  MeatgeekEdgePusherSignalr@{ shape: rectangle, label: "signalr client" }
-  MeatgeekEdgePusherSession@{ shape: rectangle, label: "cooksession" }
   MeatgeekMobile -. "`POST /cooks + Entra token`" .-> MeatgeekCloudApiEasyauth
   MeatgeekCloudApiEasyauth -. "`validate token`" .-> Entra
   MeatgeekCloudApiEasyauth -. "`X-MS-CLIENT-PRINCIPAL`" .-> MeatgeekCloudApiPrincipal
@@ -953,25 +950,20 @@ graph LR
   MeatgeekCloudApiOwnership -. "`point read`" .-> MeatgeekCloudDataDevices
   MeatgeekCloudApiCooks -. "`create cook`" .-> MeatgeekCloudApiRepos
   MeatgeekCloudApiRepos -. "`insert, partition = caller userId`" .-> MeatgeekCloudDataCooks
-  MeatgeekCloudApiCooks -. "`cook_started to userId = deviceId`" .-> MeatgeekCloudRealtime
-  MeatgeekCloudRealtime -. "`cook_started`" .-> MeatgeekEdgePusherSignalr
-  MeatgeekEdgePusherSignalr -. "`set active cook and correlation.id`" .-> MeatgeekEdgePusherSession
+  MeatgeekCloudApiCooks -. "`cook_started to the owning userId`" .-> MeatgeekCloudRealtime
   MeatgeekEdgePusherSession -. "`GET /cooks?deviceId&status=active`" .-> MeatgeekCloudApiCooks
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekMobile amber
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloudApiEasyauth,MeatgeekCloudApiPrincipal,MeatgeekCloudApiCooks,MeatgeekCloudApiOwnership,MeatgeekCloudApiRepos,MeatgeekEdgePusherSession primary
+  class MeatgeekCloudApiEasyauth,MeatgeekCloudApiPrincipal,MeatgeekEdgePusherSession,MeatgeekCloudApiCooks,MeatgeekCloudApiOwnership,MeatgeekCloudApiRepos primary
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra muted
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudDataDevices,MeatgeekCloudDataCooks green
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudRealtime indigo
-  classDef red fill:#AC4D39,stroke:#853A2D,color:#FBD3CB
-  class MeatgeekEdgePusherSignalr red
-  linkStyle 0,1,2,3,4,5,6,7,11 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,9 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 8 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 9,10 stroke:#AC4D39
 ```
 
 Steps:
@@ -984,10 +976,8 @@ Steps:
 - **6.** ownership check → devices: point read. `getDeviceOwnership`. A foreign or unregistered device gets 403 `DEVICE_NOT_OWNED`: no write, no event.
 - **7.** cooks (`meatgeek.cloud.api.cooks`) → cosmos repositories: create cook
 - **8.** cosmos repositories → cooks (`meatgeek.cloud.data.cooks`): insert, partition = caller userId
-- **9.** cooks (`meatgeek.cloud.api.cooks`) → SignalR Service: cook_started to userId = deviceId. Sent only after the write succeeds, on hub `temperatureHub`, to `userId = deviceId`. The envelope carries `correlation: CorrelationContext { id }`, taken from the request's `X-Request-ID` or the invocation id.
-- **10.** SignalR Service → signalr client: cook_started. Never proven live (MG-24 AC5). Being replaced by the device twin. (Opens `cookStartTarget`.)
-- **11.** signalr client → cooksession: set active cook and correlation.id. `cooksession.Store.SetActiveCookID` and `correlationHolder.Set`. From here every reading carries this cook id and `correlation.id`. (Opens `telemetry`.)
-- **12.** cooksession → cooks (`meatgeek.cloud.api.cooks`): GET /cooks?deviceId&status=active. What actually sets the cook id today: `cooksession.Reconcile` on data-pusher startup.
+- **9.** cooks (`meatgeek.cloud.api.cooks`) → SignalR Service: cook_started to the owning userId. Sent only after the write succeeds, on hub `temperatureHub`, to the caller's `userId` ("<tid>:<oid>"), never to the deviceId (MG-30). The envelope carries `correlation: CorrelationContext { id }`, taken from the request's `X-Request-ID` or the invocation id. No client app consumes it yet. (Opens `cookStartTarget`.)
+- **10.** cooksession → cooks (`meatgeek.cloud.api.cooks`): GET /cooks?deviceId&status=active. What sets the cook id on the Pi today: `cooksession.Reconcile` on data-pusher startup. From then every reading carries this cook id. (Opens `telemetry`.)
 
 ## Flow: read temperature history
 
