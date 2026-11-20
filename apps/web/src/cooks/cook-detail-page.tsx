@@ -4,7 +4,10 @@ import { useApi } from '../api/api-context';
 import type { Cook } from '../api/client';
 import { problemFromError, problemFromResponse, type ApiProblem } from '../api/problem';
 import { ProblemMessage, ProblemText } from '../api/problem-message';
+import type { TemperatureMessage } from '../live/hub';
 import { LivePanel } from '../live/live-panel';
+import { MAX_PUSHED_ROWS } from './chart-series';
+import { CookChart } from './cook-chart';
 import { formatDateTime, formatElapsed, useNow } from './time';
 import { deviceLabel, useDevices } from './use-devices';
 import { TARGET_KEYS, TARGET_LABELS } from './validation';
@@ -103,6 +106,17 @@ function CookDetail({
   const active = cook.status === 'active';
   const now = useNow(active);
   const targets = TARGET_KEYS.filter(key => cook.targetTemps?.[key] !== undefined);
+  const unit =
+    devices?.find(device => device.id === cook.deviceId)?.configuration?.temperatureUnit ??
+    'fahrenheit';
+  // Readings pushed over the live panel's connection, for the chart. Kept to
+  // the chart's cap: older ones can never be drawn.
+  const [pushed, setPushed] = useState<TemperatureMessage[]>([]);
+  const onReading = useCallback(
+    (message: TemperatureMessage) =>
+      setPushed(previous => [...previous, message].slice(-MAX_PUSHED_ROWS)),
+    []
+  );
 
   return (
     <section className="cook-detail">
@@ -139,9 +153,14 @@ function CookDetail({
 
       {active && <StopCook cook={cook} onStopped={onStopped} />}
 
-      {active && <LivePanel cook={cook} onCookStopped={message => onEnded(message.payload)} />}
-      {/* Filled by a later issue: the chart. */}
-      <section data-testid="cook-chart" aria-label="Temperature chart" />
+      {active && (
+        <LivePanel
+          cook={cook}
+          onCookStopped={message => onEnded(message.payload)}
+          onReading={onReading}
+        />
+      )}
+      <CookChart cookId={cook.id} cookStatus={cook.status} pushed={pushed} unit={unit} />
     </section>
   );
 }

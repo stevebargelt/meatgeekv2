@@ -42,6 +42,16 @@ function fakeApi(
           });
     }
     if (req.method === 'POST' && path === '/cooks/cook-1/stop') return stop(req);
+    // The chart (src/cooks/cook-chart.spec.tsx tests it): no points.
+    if (req.method === 'GET' && path === '/cooks/cook-1/chart') {
+      return jsonResponse(200, {
+        cookId: 'cook-1',
+        deviceId: BRISKET_BOX.id,
+        startTime: COOK.startTime,
+        bucketSeconds: 60,
+        points: [],
+      });
+    }
     // The live panel's calls (src/live/live-panel.spec.tsx tests the panel).
     if (path === `/devices/${BRISKET_BOX.id}`) return jsonResponse(200, BRISKET_BOX);
     if (req.method === 'POST' && path === '/negotiate') {
@@ -92,7 +102,7 @@ describe('cook detail', () => {
     const { unmount } = renderPages('/cooks/cook-1');
     await screen.findByRole('heading', { name: 'Saturday brisket' });
     expect(screen.getByTestId('cook-live-panel').getAttribute('aria-label')).toBe('Live readings');
-    expect(screen.getByTestId('cook-chart').textContent).toBe('');
+    expect(screen.getByTestId('cook-chart').getAttribute('aria-label')).toBe('Temperature chart');
     unmount();
 
     fakeApi({ ...COOK, status: 'completed', endTime: STOPPED_AT });

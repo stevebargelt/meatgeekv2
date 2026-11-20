@@ -273,3 +273,46 @@ ul.plain {
   font-size: 1.5rem;
   font-variant-numeric: tabular-nums;
 }
+
+.chart-frame {
+  min-height: 320px;
+}
+
+.chart-tooltip {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--fg);
+}
+
+.chart-tooltip-time {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.chart-tooltip th,
+.chart-tooltip td {
+  padding: 0.1rem 0.4rem;
+  text-align: right;
+  font-weight: normal;
+  white-space: nowrap;
+}
+
+.chart-tooltip thead th {
+  color: var(--muted);
+}
+
+.chart-tooltip tbody th {
+  text-align: left;
+}
+
+.chart-swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}

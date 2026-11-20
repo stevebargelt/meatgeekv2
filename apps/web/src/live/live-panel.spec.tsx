@@ -1,8 +1,10 @@
-import { act, screen, waitFor } from '@testing-library/react';
-import type { Cook, Device } from '../api/client';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import { ApiProvider } from '../api/api-context';
+import { createApiClient, type Cook, type Device } from '../api/client';
 import {
   BRISKET_BOX,
   OFFSET,
+  TEST_CONFIG,
   apiPath,
   createFakeHubs,
   installFetch,
@@ -14,6 +16,8 @@ import {
 } from '../test/fakes';
 import { renderPages } from '../test/render';
 import type { components } from '@meatgeekv2/api-specs/types';
+import { HubFactoryProvider } from './hub-context';
+import { LivePanel } from './live-panel';
 
 type TemperatureReading = components['schemas']['TemperatureReading'];
 
@@ -35,6 +39,10 @@ function fakeServer(server: ServerState) {
   const fetch = installFetch((req: RecordedRequest) => {
     const path = apiPath(req);
     if (req.method === 'GET' && path === '/cooks/cook-1') return jsonResponse(200, server.cook);
+    // The page's chart (src/cooks/cook-chart.spec.tsx tests it): not drawn here.
+    if (req.method === 'GET' && path === '/cooks/cook-1/chart') {
+      return jsonResponse(404, { error: 'NOT_FOUND', message: 'Cook not found' });
+    }
     if (req.method === 'GET' && path === '/devices') {
       return jsonResponse(200, { devices: [server.device] });
     }
@@ -363,6 +371,36 @@ describe('live cook panel', () => {
     const status = screen.getByText('Status', { selector: 'dt' }).nextElementSibling;
     expect(status?.textContent).toBe('completed');
     expect(screen.queryByRole('button', { name: 'Stop cook' })).toBeNull();
+  });
+
+  it('passes each temperature message it accepts to onReading, and no other', async () => {
+    fakeServer({ cook: COOK, device: device() });
+    const hubs = createFakeHubs();
+    const onReading = jest.fn();
+    const client = createApiClient({
+      baseUrl: TEST_CONFIG.apiBaseUrl,
+      getToken: async () => 'test-token',
+    });
+    render(
+      <ApiProvider client={client}>
+        <HubFactoryProvider createHub={hubs.createHub}>
+          <LivePanel cook={COOK} onCookStopped={jest.fn()} onReading={onReading} />
+        </HubFactoryProvider>
+      </ApiProvider>
+    );
+    await waitFor(() => expect(hubs.latest().start).toHaveBeenCalled());
+    await waitFor(() => expect(state()).toBe('waiting'));
+
+    push(hubs, { deviceId: OFFSET.id, timestamp: nowIso(), grillTemp: 999 });
+    expect(onReading).not.toHaveBeenCalled();
+
+    const first = makeTemperature({ timestamp: nowIso(), grillTemp: 226 });
+    const second = makeTemperature({ timestamp: nowIso(1000), grillTemp: 227 });
+    act(() => hubs.latest().emit('temperature', first));
+    act(() => hubs.latest().emit('temperature', second));
+    expect(onReading.mock.calls).toEqual([[first], [second]]);
+    // The backfill (GET /temperatures/current) is not a pushed message.
+    expect(channel('grill')).toBe('227 °F');
   });
 
   it('unmount stops the connection and leaves no timers running', async () => {
