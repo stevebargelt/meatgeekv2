@@ -325,6 +325,14 @@ node apps/infrastructure/scripts/iot-fixture/run-tests.mjs          # dependency
 node apps/infrastructure/scripts/iot-fixture/run-tests.mjs --sdk    # real-SDK tier — needs `npm ci` first
 ```
 
+Both `run-tests.mjs` wrappers set the exit code and let Node exit on its own;
+they never call `process.exit()` after printing the TAP. In CI, stdout is a pipe,
+and `process.exit()` drops whatever is still queued past the ~64 KiB pipe
+buffer. That is how CI run 44791467254 failed with its output cut mid-line and
+no `not ok` line (HAR-81). A failed run now ends with one stderr summary: how
+`node --test` ended (exit code, signal, or a spawn error such as an output-limit
+overrun) and every `not ok` line it printed.
+
 Three invocation rules, each of which fails in a different and non-obvious way
 if ignored:
 
