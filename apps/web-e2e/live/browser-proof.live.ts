@@ -53,8 +53,15 @@ test.afterEach(async ({ page }, testInfo) => {
   if (testInfo.status === testInfo.expectedStatus || !signedIn || page.isClosed()) return;
   // After sign-in only: the app's pages show no typed secret.
   if (new URL(page.url()).origin !== env.webBaseUrl) return;
-  const body = await page.screenshot({ fullPage: true }).catch(() => undefined);
-  if (body) await testInfo.attach('failure', { body, contentType: 'image/png' });
+  // HAR-101: to a file in the test's output dir, which CI uploads. An
+  // attachment given as a `body` is held in memory only, and the list
+  // reporter never writes it out.
+  const path = testInfo.outputPath('failure.png');
+  const taken = await page
+    .screenshot({ path, fullPage: true })
+    .then(() => true)
+    .catch(() => false);
+  if (taken) await testInfo.attach('failure', { path, contentType: 'image/png' });
 });
 
 /** Keeps the newest response to each API route the proof watches. */

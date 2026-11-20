@@ -614,9 +614,22 @@ end in a real browser:
    through the API with the token the page itself sent (taken from the page's
    requests, never printed).
 
-It is not in CI yet: the next issue adds it to the Deploy Dev App acceptance
-job, with the browser install, the secrets and the `<sim>-web` IoT device.
-Until then it runs by hand.
+It runs after every dev deploy, as the `web-acceptance` job in
+`.github/workflows/app-deploy-dev.yml` (HAR-101; see
+[CI/CD → Dev app deploy and live acceptance](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)),
+in parallel with the API suite's `acceptance` job, with `EXPECTED_WEB_SHA` set
+to the deployed commit. The job makes sure the IoT Hub device
+`<simulated_device_id>-web` exists, fetches and masks its connection string
+inside the run step, and takes the acceptance user's UPN from the
+`development` environment's `ACCEPTANCE_USER_UPN` variable and the password and
+TOTP secret from its `ACCEPTANCE_USER_PASSWORD` and
+`ACCEPTANCE_USER_TOTP_SECRET` secrets. The run summary gets one `PASS` or
+`FAIL` line per step (printed by `apps/web-e2e/live/step-reporter.ts`), the two
+`METRIC` lines and Playwright's summary line. On failure the proof's
+screenshot is uploaded as the `web-acceptance-screenshots` artifact, kept 7
+days. A last step checks the proof's raw output for leaked secrets (see
+[Secrets in the CI log](#secrets-in-the-ci-log)). You can still run it by hand,
+below.
 
 ### Inputs
 
@@ -640,8 +653,27 @@ string or any token anywhere. Playwright's trace, video, HTML report, failure
 page snapshot (`error-context.md`) and automatic screenshot are all off for it
 (`apps/web-e2e/playwright.live.config.ts`), because the sign-in pages show the
 UPN and what was typed. It takes its own full-page screenshot on failure, and
-only once sign-in has finished and the browser is back on the app; it is in
-`dist/.playwright/web-e2e-live/test-results/`.
+only once sign-in has finished and the browser is back on the app; it is
+`failure.png` under `dist/.playwright/web-e2e-live/test-results/`.
+
+### Secrets in the CI log
+
+GitHub masks the password and TOTP secret (repository secrets) and the
+connection string and its key (`::add-mask::`) in the job log, so the masked
+log cannot show whether the proof printed one. The `web-acceptance` job's last
+step, which runs whether the proof passed or not, checks the proof's **raw**
+output instead (the file `tee` wrote, before masking) and fails the job if it
+holds:
+
+- a connection string's `SharedAccessKey=` field;
+- the password;
+- the TOTP secret, as stored or normalized;
+- any 6-digit TOTP code for any 30 s window from 35 min before the check to
+  1 min after it, which covers the job's 30 min timeout. A code is matched
+  only as a whole 6-digit number.
+
+It prints one line per check (`leak check: password: none`, and so on) and,
+on a hit, line numbers only, never the text it found.
 
 ### Running it locally against production
 

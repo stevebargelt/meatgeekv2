@@ -8,6 +8,12 @@ name: Deploy Dev App
 #       -> Deploy Dev App (this file; workflow_run)
 #            deploy      publish the API to the dev Function App
 #            acceptance  `nx run api:acceptance` against it, as the same identity
+#            web-acceptance  (HAR-101, in parallel with acceptance) the live
+#                        browser proof, `nx e2e-live web-e2e`: the PRODUCTION web
+#                        app (Vercel builds main on its own), signed in as the
+#                        TOTP acceptance user, sees a reading pushed by
+#                        simdevice as <simulated_device_id>-web. The app-publish
+#                        login only manages that device in IoT Hub.
 #
 # Chaining after the infra apply, not after CI, means the infrastructure for a
 # commit (including the Easy Auth caller list the acceptance job depends on) is
@@ -19,7 +25,7 @@ name: Deploy Dev App
 # has a green CI/CD Pipeline push run (verified below, on every trigger).
 #
 # Docs: docs/development/ci-cd.md (Dev app deploy) and
-#       docs/development/live-acceptance.md (the suite).
+#       docs/development/live-acceptance.md (the suite and the browser proof).
 on:
   workflow_run:
     workflows: ['Apply Dev Infrastructure']
@@ -29,9 +35,9 @@ on:
   workflow_dispatch:
 
 # id-token: write  — azure/login and terraform mint an OIDC token for the dev
-#                    app-publish identity (development environment); the
-#                    acceptance suite step mints one more for the zero-role
-#                    acceptance peer identity (HAR-61/HAR-65).
+#                    app-publish identity (development environment, in all
+#                    three jobs); the acceptance suite step mints one more for
+#                    the zero-role acceptance peer identity (HAR-61/HAR-65).
 # contents: read   — checkout and the main-tip lookups.
 # actions: read    — look up the commit's CI/CD Pipeline runs.
 permissions:
@@ -526,3 +532,288 @@ jobs:
               echo "The suite produced no output; see the job log."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # HAR-101 (goal HAR-71): the live browser proof (HAR-99). On the PRODUCTION
+  # web app, which Vercel builds from main on its own, the acceptance user
+  # signs in through Microsoft's real pages with a TOTP code, starts a cook on
+  # the web device, sees a reading simdevice pushes, and stops the cook. In
+  # parallel with `acceptance`: it sends as its own device, and its first step
+  # waits up to 15 min for Vercel to serve this commit anyway.
+  web-acceptance:
+    needs: deploy
+    # Skipped when the deploy job published nothing, as `acceptance` is.
+    if: needs.deploy.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: development
+    steps:
+      # Full history: the proof's build check asks `git merge-base
+      # --is-ancestor` whether the commit production serves contains this one.
+      - name: Checkout the deployed commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.deploy.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # When production already serves a main commit newer than this checkout,
+      # the proof runs `git fetch origin <sha> <sha>` (isAncestorCommit in
+      # apps/web-e2e/live/helpers.ts). The checkout keeps no token, so prove
+      # here, before the proof's 15 min wait, that origin answers a fetch
+      # without one (the repository is public), and that the commit the proof
+      # will wait for is a full 40-character sha.
+      - name: Check origin answers a fetch without a token
+        env:
+          SHA: ${{ needs.deploy.outputs.sha }}
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "needs.deploy.outputs.sha is not a full 40-character commit sha: '$SHA'." >&2
+            exit 1
+          }
+          git config --get-regexp '^http\..*extraheader' >/dev/null && {
+            echo "The checkout left an auth header in git config; expected none (persist-credentials: false)." >&2
+            exit 1
+          }
+          git fetch --quiet --no-tags origin main || {
+            echo "git fetch from origin failed without a token; the proof's ancestor check would fail the same way." >&2
+            exit 1
+          }
+          echo "origin fetch without a token: ok (main is $(git rev-parse FETCH_HEAD))"
+          if git merge-base --is-ancestor "$SHA" FETCH_HEAD; then
+            echo "ancestor check: $SHA is on main"
+          else
+            echo "ancestor check: $SHA is not on main's tip; the proof will fail unless production serves it exactly" >&2
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      # simdevice (HAR-40) sends the reading the browser must show.
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/data-pusher/go.mod
+          cache-dependency-path: apps/data-pusher/go.sum
+
+      - name: Build simdevice
+        run: |
+          set -euo pipefail
+          make -C apps/data-pusher build
+          test -x apps/data-pusher/dist/simdevice
+
+      # As ci.yml's web-e2e job (HAR-98): the browser build is tied to the
+      # exact @playwright/test version, read from the lockfile, so that is the
+      # cache key.
+      - name: Resolve the installed @playwright/test version
+        id: playwright
+        run: |
+          version=$(node -p "require('./package-lock.json').packages['node_modules/@playwright/test'].version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium
+
+      # Runs on a cache hit too: the cache holds the browser only, not the apt
+      # packages Chromium links against.
+      - name: Install Chromium and its system dependencies
+        run: npx playwright install --with-deps chromium
+
+      # Only to manage the web device in IoT Hub: the proof calls the API as
+      # the acceptance user, through the browser, not as this identity.
+      - name: Azure login (OIDC — dev app-publish identity)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Pinned, never latest. Gives `az iot hub device-identity`.
+      - name: Install the azure-iot CLI extension
+        run: az extension add --name azure-iot --version 1.0.0 --yes
+
+      # The third standing device, <simulated_device_id>-web, the proof's own:
+      # the same show / create-on-not-found logic, flags and reasons as the
+      # `acceptance` job's step for its two devices. The proof registers it
+      # with the API as the acceptance user; this only makes it exist in the
+      # hub. stdout is discarded: device JSON carries the device's keys.
+      - name: Ensure the web device exists
+        env:
+          HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}-web
+        run: |
+          set -euo pipefail
+          err="$RUNNER_TEMP/web-device-show.err" rc=0
+          az iot hub device-identity show --hub-name "$HUB" --device-id "$DEVICE" \
+            --auth-type login -o none >/dev/null 2>"$err" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "device $DEVICE: exists"
+          elif [ "$rc" -eq 3 ] || grep -q 'DeviceNotFound' "$err"; then
+            az iot hub device-identity create --hub-name "$HUB" --device-id "$DEVICE" \
+              --auth-type login -o none >/dev/null
+            echo "device $DEVICE: created"
+          else
+            echo "az iot hub device-identity show for device $DEVICE failed (exit $rc), and not because the device is missing:" >&2
+            cat "$err" >&2
+            exit 1
+          fi
+
+      # The web device's connection string is fetched, masked (whole, and its
+      # SharedAccessKey value) and exported inside this one step, as the
+      # `acceptance` job does, so it never reaches $GITHUB_ENV, a step output
+      # or another step. The sed pattern spells the field with a [K] class so
+      # this script, which GitHub echoes into the log, never carries the
+      # literal field-and-equals text the leak check below greps for. The
+      # password and TOTP secret are repository secrets, which GitHub masks.
+      - name: Run the live browser proof
+        env:
+          HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          WEB_BASE_URL: https://meatgeekv2-web.vercel.app
+          EXPECTED_WEB_SHA: ${{ needs.deploy.outputs.sha }}
+          ACCEPTANCE_USER_UPN: ${{ vars.ACCEPTANCE_USER_UPN }}
+          ACCEPTANCE_USER_PASSWORD: ${{ secrets.ACCEPTANCE_USER_PASSWORD }}
+          ACCEPTANCE_USER_TOTP_SECRET: ${{ secrets.ACCEPTANCE_USER_TOTP_SECRET }}
+          ACCEPTANCE_WEB_DEVICE_ID: ${{ needs.deploy.outputs.simulated_device_id }}-web
+        run: |
+          set -euo pipefail
+          conn="$(az iot hub device-identity connection-string show \
+            --hub-name "$HUB" --device-id "$ACCEPTANCE_WEB_DEVICE_ID" --auth-type login \
+            --query connectionString -o tsv)" || {
+            echo "az iot hub device-identity connection-string show failed for device $ACCEPTANCE_WEB_DEVICE_ID." >&2
+            exit 1
+          }
+          if [ -z "$conn" ]; then
+            echo "az returned no connection string for device $ACCEPTANCE_WEB_DEVICE_ID." >&2
+            exit 1
+          fi
+          echo "::add-mask::${conn}"
+          key="$(printf '%s' "$conn" | tr ';' '\n' | sed -n 's/^SharedAccess[K]ey=//p')"
+          if [ -z "$key" ]; then
+            echo "The connection string for device $ACCEPTANCE_WEB_DEVICE_ID has no SharedAccessKey." >&2
+            exit 1
+          fi
+          echo "::add-mask::${key}"
+          unset key
+          SIMDEVICE_WEB_CONNECTION_STRING="$conn"
+          unset conn
+          export SIMDEVICE_WEB_CONNECTION_STRING
+          export ACCEPTANCE_SIMDEVICE_BIN="$GITHUB_WORKSPACE/apps/data-pusher/dist/simdevice"
+
+          npx nx e2e-live web-e2e 2>&1 | tee "$RUNNER_TEMP/web-acceptance.log"
+
+      # Proof step results, the two METRIC lines and Playwright's summary line,
+      # also in the run summary.
+      - name: Write the web acceptance summary
+        if: always()
+        env:
+          SHA: ${{ needs.deploy.outputs.sha }}
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/web-acceptance.log"
+          {
+            echo "## Live browser proof — production web app"
+            echo
+            echo "Commit \`$SHA\`, https://meatgeekv2-web.vercel.app"
+            echo
+            if [ -s "$LOG" ]; then
+              echo '```'
+              # PASS/FAIL/SKIP lines (live/step-reporter.ts), METRIC lines
+              # (e.g. `METRIC web-push-ms 1840`), and Playwright's own
+              # "1 passed (3.1m)" style summary. Colour codes stripped.
+              sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -E \
+                '^(PASS|FAIL|SKIP) |^METRIC |^ *[0-9]+ (passed|failed|flaky|skipped|interrupted|did not run)' || true
+              echo '```'
+            else
+              echo "The proof produced no output; see the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The proof's own failure screenshot, taken only after sign-in (the
+      # sign-in pages show the UPN and what was typed). Trace, video and
+      # Playwright's failure screenshot and page snapshot are off
+      # (playwright.live.config.ts); the glob keeps this to screenshots even so.
+      - name: Upload the proof's failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-acceptance-screenshots
+          path: dist/.playwright/web-e2e-live/test-results/**/*.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # The HAR-44-style leak check, over this job's raw proof output (the
+      # file tee wrote, before GitHub's masking, so a masked secret is still
+      # caught): no connection-string key field, no password, no TOTP secret,
+      # and no TOTP code from any 30 s window the job can have run in (the
+      # 30 min timeout, plus a margin). Line numbers only; nothing found is
+      # printed. The patterns are built so this script, echoed into the log,
+      # holds none of them literally.
+      - name: Check the proof's output for leaked secrets
+        if: always()
+        env:
+          ACCEPTANCE_USER_PASSWORD: ${{ secrets.ACCEPTANCE_USER_PASSWORD }}
+          ACCEPTANCE_USER_TOTP_SECRET: ${{ secrets.ACCEPTANCE_USER_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/web-acceptance.log"
+          if [ ! -f "$LOG" ]; then
+            echo "leak check: the proof did not run (no $LOG), so it wrote nothing to check."
+            exit 0
+          fi
+          node - "$LOG" <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const lines = readFileSync(process.argv[2], 'utf8').split('\n');
+          const findings = [];
+          const scan = (what, test) => {
+            const hits = lines.flatMap((line, i) => (test(line) ? [i + 1] : []));
+            if (hits.length) findings.push(`${what} on line(s) ${hits.join(', ')}`);
+            console.log(`leak check: ${what}: ${hits.length ? 'FOUND' : 'none'}`);
+          };
+          scan('connection-string key field', line => /SharedAccess[K]ey=/i.test(line));
+          const password = process.env.ACCEPTANCE_USER_PASSWORD ?? '';
+          if (password) scan('password', line => line.includes(password));
+          else console.log('leak check: password: not set, nothing to look for');
+          const rawSecret = (process.env.ACCEPTANCE_USER_TOTP_SECRET ?? '').trim();
+          const secret = rawSecret.replace(/[\s-]/g, '').replace(/=+$/, '').toUpperCase();
+          if (secret) {
+            scan('TOTP secret', line => {
+              const upper = line.toUpperCase();
+              return upper.includes(secret) || upper.includes(rawSecret.toUpperCase());
+            });
+            let codes;
+            try {
+              const { generateSync } = require('otplib');
+              const now = Math.floor(Date.now() / 1000);
+              codes = new Set();
+              for (let t = now - 35 * 60; t <= now + 60; t += 30) {
+                codes.add(generateSync({ secret, epoch: t, digits: 6 }));
+              }
+            } catch (error) {
+              console.log(`leak check: could not compute TOTP codes (${error.name})`);
+              process.exit(1);
+            }
+            scan(`TOTP code (${codes.size} windows)`, line =>
+              (line.match(/(?<!\d)\d{6}(?!\d)/g) ?? []).some(code => codes.has(code))
+            );
+          } else {
+            console.log('leak check: TOTP secret and codes: not set, nothing to look for');
+          }
+          if (findings.length) {
+            console.log(`leak check: FAILED: ${findings.join('; ')}`);
+            process.exit(1);
+          }
+          console.log(`leak check: passed (${lines.length} lines)`);
+          NODE
