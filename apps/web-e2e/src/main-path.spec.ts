@@ -74,7 +74,7 @@ test('sign in, start a cook, see a pushed reading and the chart, stop the cook',
   await expect(page).toHaveURL(/\/cooks\/[^/]+$/);
   const cookId = decodeURIComponent(new URL(page.url()).pathname.split('/').pop() as string);
   expect(cookId).toMatch(UUID);
-  await expect(page.getByRole('heading', { name: 'HAR-98 deliberate failure' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Saturday brisket' })).toBeVisible();
 
   // Live panel: connected, no reading yet.
   const panel = page.getByTestId('cook-live-panel');
