@@ -215,11 +215,11 @@ traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   class Meatgeek.Mobile,Meatgeek.Web,Meatgeek.Cloud.Observability.Collector amber
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class Meatgeek.Cloud.Data green
-  linkStyle 0,1,2,3,4,5,10,11,15,16,17,28,29,30,31,32,33,34,35,36,37,38,39,41,42,43,44 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,10,11,15,17,28,29,30,31,32,33,34,35,36,37,38,39,41,42,43,44 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 6,7,8,9,18,19,22,26,27,40 stroke:#8D8D8D
-  linkStyle 12,13,20,21,24 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 12,13,20,21 stroke:#0ea5e9,stroke-dasharray:8 4
   linkStyle 14 stroke:#AC4D39
-  linkStyle 23,25,45 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 16,23,24,25,45 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## MeatGeek cloud (Azure)
@@ -309,11 +309,11 @@ traceparent`" .-> MeatgeekCloud.Ingest.Iothub
   class MeatgeekCloud.Deviceupdate,Entra muted
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data green
-  linkStyle 0,3,4,5,11,12,16,17,19,20,21,22,23,24,25,26,27,28,30,31,32,33 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,3,5,11,12,16,17,19,20,21,22,23,24,25,26,27,28,30,31,32,33 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 1,2,9,18,29 stroke:#8D8D8D
+  linkStyle 4,13,14,15,34 stroke:#b45309,stroke-dasharray:8 4
   linkStyle 6 stroke:#AC4D39
-  linkStyle 7,8,10,14 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 13,15,34 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 7,8,10 stroke:#0ea5e9,stroke-dasharray:8 4
 ```
 
 ---
@@ -389,11 +389,11 @@ deviceId&status=active
   class MeatgeekEdge.Pusher.Signalr red
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.ObservabilityCollector amber
-  linkStyle 0,1,3,4,5,6,7,16,18,21 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,3,4,5,6,7,16,21 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,10,13,19,20,22 stroke:#8D8D8D
   linkStyle 8,15 stroke:#AC4D39
   linkStyle 9,12,14,17 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 11 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 11,18 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Functions API
@@ -493,20 +493,18 @@ deviceId&status=active
   MeatgeekEdge.Pusher -. "`[...]`" .-> MeatgeekCloudIngest
   MeatgeekCloudApi.Otel -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloudObservability.Appinsights
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery,MeatgeekCloudIngest,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekCloudApi.Repos,MeatgeekEdge.Pusher primary
+  class Delivery,MeatgeekCloudIngest,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Broadcast,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekCloudApi.Repos,MeatgeekEdge.Pusher primary
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekMobile amber
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekCloudApi.Broadcast sky
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudObservability.Appinsights,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.Temperatures,MeatgeekCloudData.Devices,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,23,24,27,28,29,30,31,32,34,37,38,39 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,3,21,25,33,35 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 22,26 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,23,24,25,27,28,29,30,31,32,34,37,38,39 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,21,33,35 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 3,22,26 stroke:#b45309,stroke-dasharray:8 4
   linkStyle 36 stroke:#AC4D39
 ```
 
@@ -619,17 +617,15 @@ read its connection string`" .-> MeatgeekCloudIngest.Iothub
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
   class Delivery.Acceptance slate
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery.Simdevice,MeatgeekEdge.Pusher,MeatgeekCloudObservability primary
+  class Delivery.Simdevice,MeatgeekCloudApi.Broadcast,MeatgeekEdge.Pusher,MeatgeekCloudObservability primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.Temperatures green
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekCloudApi.Broadcast sky
   linkStyle 0,5 stroke:#8D8D8D
-  linkStyle 1,6,11 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 2,4,9,12,13,14 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 3,7,8 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,6,7,11 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 2,4,8,9,12,13,14 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 3 stroke:#0ea5e9,stroke-dasharray:8 4
   linkStyle 10 stroke:#AC4D39
 ```
 
@@ -708,11 +704,11 @@ deviceId&status=active
   class MeatgeekCloudRealtime,MeatgeekCloudObservability.Workbook,MeatgeekCloudObservability.ActivityAlerts,MeatgeekCloudObservability.Budgets,MeatgeekCloudObservability.Appinsights,MeatgeekCloudObservability.Logs,MeatgeekCloudObservability.MetricAlerts,MeatgeekCloudObservability.ActionGroup,MeatgeekCloudIngest.Iothub indigo
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloudObservability.Collector amber
-  linkStyle 0,1,2,3,4,5,6,7,8,10,11,12,13,14,15,16,18,20,21,22,25,26 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,10,11,12,13,14,15,18,20,21,22,25,26 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 9,19,23 stroke:#8D8D8D
+  linkStyle 16,27 stroke:#b45309,stroke-dasharray:8 4
   linkStyle 17 stroke:#AC4D39
   linkStyle 24,28 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 27 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Delivery pipeline
@@ -843,9 +839,9 @@ traceparent`" .-> DevRg.Iothub
   class DevRg.Cosmos green
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class DevIdentity.Entra muted
-  linkStyle 0,3,6,7,8,9,10,11,12,13,14,15,16,19,21,22,23 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,2,20 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 4,5,17 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 0,3,6,8,9,10,11,12,13,14,15,16,19,21,22,23 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 1,2,5,7,20 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 4,17 stroke:#0ea5e9,stroke-dasharray:8 4
   linkStyle 18 stroke:#AC4D39
 ```
 
@@ -1266,20 +1262,20 @@ $.ct=application/json, $.ce=utf-
   MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekWeb
   MeatgeekWeb -. "`REST`" .-> MeatgeekCloud.Api
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekEdge.Pusher.Iot,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Negotiate,MeatgeekEdge.Pusher.Session primary
+  class MeatgeekEdge.Pusher.Iot,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.Pusher.Session primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime indigo
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekCloud.Api.Broadcast,MeatgeekEdge.Pusher.Twin sky
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data.Temperatures green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekMobile,MeatgeekWeb amber
+  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
+  class MeatgeekEdge.Pusher.Twin sky
   classDef red fill:#AC4D39,stroke:#853A2D,color:#FBD3CB
   class MeatgeekEdge.Pusher.Signalr red
-  linkStyle 0,2,4,6,7,9,14,15,16 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,3,12,13 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 5,11 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,6,7,9,14,15,16 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,2,3,12,13 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 4,5,11 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 8,10 stroke:#AC4D39
   linkStyle 17 stroke:#8D8D8D
 ```
@@ -1366,16 +1362,14 @@ graph LR
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekMobile amber
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloudApiNegotiate,MeatgeekEdgePusherIot primary
+  class MeatgeekCloudApiNegotiate,MeatgeekEdgePusherIot,MeatgeekCloudApiBroadcast primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudRealtime,MeatgeekCloudIngestIothub,MeatgeekCloudIngestEventhub indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudDataTemperatures green
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekCloudApiBroadcast sky
-  linkStyle 0,5,6,7 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,3,4 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,7 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,6 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,3,4,5 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 Steps:

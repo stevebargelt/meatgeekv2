@@ -34,9 +34,41 @@ yet wired.
 | `deleteRecipe`           | HTTP `DELETE` | `recipes/{id}`                    | Delete one of the caller's recipes                           |
 | `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                  |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                          |
+| `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its `device-{id}` group      |
 
-`storageHeartbeat` exists because it is the **only** registration that needs
-`AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and
+`broadcastTemperature` is the live-reading producer. IoT Hub routes every device
+message to the `temperature-data` event hub (`eventhub-realtime-route` in
+`apps/infrastructure/modules/iot-hub/main.tf`); the trigger reads it in batches
+(`cardinality: 'many'`) on the API's own consumer group,
+`%TEMPERATURE_BROADCAST_CONSUMER_GROUP%` (`api-broadcast`), through the
+identity-based `IOTHUB_EVENTS` connection. Each event becomes one SignalR message
+on the shared output binding (hub `temperatureHub`):
+
+```json
+{
+  "target": "temperature",
+  "groupName": "device-{deviceId}",
+  "arguments": [{ "...TemperatureReading": "", "enqueuedTimeUtc": "<ISO 8601>" }]
+}
+```
+
+- The device id is the hub-stamped `iothub-connection-device-id` system
+  property, never the body's `deviceId` (the MG-73 trust rule).
+- The reading is `toTemperatureReading` of the event shaped as the stored IoT Hub
+  document, so it is exactly what `GET /temperatures/current` returns for the same
+  message. `enqueuedTimeUtc` is the Event Hub enqueued time, so a client can
+  measure delivery delay.
+- The body may arrive as an object, a JSON string or bytes; all three are decoded.
+- An event with no device id, a non-JSON body, or no timestamp is skipped and
+  counted, never thrown, so one bad event does not fail or replay the batch. Each
+  batch logs one line, `broadcastTemperature sent=<n> skipped=<m>`, with no ids
+  and no bodies.
+- negotiate (HAR-57) puts each user in the `device-{id}` groups of the devices
+  they own, so a reading reaches only its device's owners. Nothing is sent to
+  `cook-` groups.
+
+`storageHeartbeat` exists because, when it was added, it was the **only**
+registration that needed `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and
 singleton lease in the host storage account, so the invocation appearing in
 `FunctionAppLogs` is itself the proof that host storage authenticates — a proof
 no HTTP trigger can give, which is why the host sat
@@ -45,12 +77,16 @@ while all seven endpoints answered 200. The handler only logs; it writes no blob
 and takes no Azure SDK dependency, because the storage dependency being proved is
 the **host's**, not the handler's. See
 [MG-58 host-storage verification](../infrastructure/mg58-host-storage-verification.md).
+Since HAR-60, `broadcastTemperature` also uses host storage: the Event Hub
+trigger keeps its partition leases and checkpoints there (the app identity holds
+Storage Blob Data Owner on the host account). The heartbeat stays the dedicated
+proof.
 
 HTTP `authLevel` is `anonymous` at the Functions runtime throughout, on purpose:
 the MG-24 platform layer (Easy Auth / `auth_settings_v2` with
 `unauthenticated_action = Return401`) validates the Entra bearer token before any
 function executes. That gate covers HTTP only — a timer is not reachable from the
-edge at all.
+edge at all, and neither is an Event Hub trigger.
 
 ## Function Architecture
 
@@ -60,98 +96,12 @@ These functions handle **Event Hub triggers** from IoT Hub and focus solely on r
 
 #### Temperature Broadcasting Function
 
-**Purpose**: Receive temperature telemetry and broadcast via SignalR (no storage)
-
-```typescript
-// apps/api/src/functions/temperatures/broadcast-temperature.ts
-import { EventHubHandler } from '@azure/functions';
-import { EventDataAdapter } from '@meatgeekv2/azure-client';
-import { SignalRService } from '../shared/services/signalr-service';
-import { trace, SpanStatusCode } from '@opentelemetry/api';
-
-const signalRService = new SignalRService();
-
-export const broadcastTemperature: EventHubHandler = async (messages, context) => {
-  const tracer = trace.getTracer('meatgeek.realtime');
-
-  return tracer.startActiveSpan('temperature.broadcast', async span => {
-    try {
-      span.setAttributes({
-        'message.count': messages.length,
-        'function.type': 'realtime',
-      });
-
-      // Process messages in parallel for better performance
-      const broadcastPromises = messages.map(async (eventData, index) => {
-        return tracer.startActiveSpan(`temperature.broadcast.${index}`, async msgSpan => {
-          try {
-            // Extract temperature data from EventData
-            const temp = EventDataAdapter.extractTemperatureData(eventData);
-            const deviceMetadata = EventDataAdapter.getDeviceMetadata(eventData);
-
-            msgSpan.setAttributes({
-              'device.id': deviceMetadata.deviceId,
-              'cook.id': temp.cookId || 'none',
-              'temperature.grill': temp.grillTemp || 0,
-            });
-
-            // Broadcast to device group (all users watching this device)
-            await signalRService.sendToGroup(`device-${temp.deviceId}`, 'temperatureUpdate', temp);
-
-            // If part of active cook, broadcast to cook group
-            if (temp.cookId) {
-              await signalRService.sendToGroup(`cook-${temp.cookId}`, 'temperatureUpdate', temp);
-            }
-
-            msgSpan.addEvent('temperature.broadcasted');
-            msgSpan.setStatus({ code: SpanStatusCode.OK });
-          } catch (error) {
-            msgSpan.recordException(error);
-            msgSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-            context.log.error(`Failed to broadcast temperature: ${error.message}`);
-            // Don't throw - continue processing other messages
-          } finally {
-            msgSpan.end();
-          }
-        });
-      });
-
-      await Promise.all(broadcastPromises);
-
-      span.setAttributes({
-        'broadcast.success_count': broadcastPromises.length,
-      });
-      span.setStatus({ code: SpanStatusCode.OK });
-    } catch (error) {
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-      context.log.error('Temperature broadcast failed:', error);
-    } finally {
-      span.end();
-    }
-  });
-};
-```
-
-**Function Configuration** (`broadcast-temperature/function.json`):
-
-```json
-{
-  "bindings": [
-    {
-      "type": "eventHubTrigger",
-      "name": "messages",
-      "direction": "in",
-      "eventHubName": "temperature-realtime",
-      "connection": "IOTHUB_EVENTS",
-      "cardinality": "many",
-      "consumerGroup": "realtime-functions"
-    }
-  ],
-  "scriptFile": "../dist/temperatures/broadcast-temperature.js",
-  "entryPoint": "broadcastTemperature"
-}
-```
+Built in HAR-60 as `broadcastTemperature`:
+`apps/api/src/functions/signalr/broadcast-temperature.ts`, registered in
+`apps/api/src/main.ts` with `app.eventHub(...)` (Functions v4 programming model,
+no `function.json`). What it does and what it sends is described under
+[Registered Functions](#registered-functions). It stores nothing; the Cosmos copy
+of each reading is written by IoT Hub's own `cosmos-storage` route.
 
 ### **API Functions**
 
@@ -491,7 +441,8 @@ IOTHUB_EVENTS__fullyQualifiedNamespace=<iot-eventhub-namespace-fqdn>
 # the live-reading broadcast trigger. A non-secret name, Terraform-owned
 # (module.iot_hub.temperature_broadcast_consumer_group_name, "api-broadcast").
 # The trigger connects through the IOTHUB_EVENTS__ prefix above, so there is no
-# second Event Hub setting. No app code reads it yet (HAR-55).
+# second Event Hub setting. Read by broadcastTemperature (HAR-60) as the
+# binding expression %TEMPERATURE_BROADCAST_CONSUMER_GROUP%.
 TEMPERATURE_BROADCAST_CONSUMER_GROUP=api-broadcast
 
 # IoT Hub service hostname (HAR-56), where the API will write device twin

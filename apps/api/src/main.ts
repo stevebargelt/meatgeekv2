@@ -13,6 +13,10 @@ import { startCookHandler } from './functions/cooks/start-cook';
 import { stopCookHandler } from './functions/cooks/stop-cook';
 import { negotiateHandler } from './functions/signalr/negotiate';
 import { signalROutput } from './functions/signalr/envelope';
+import {
+  broadcastTemperatureHandler,
+  TEMPERATURE_EVENT_HUB,
+} from './functions/signalr/broadcast-temperature';
 import { getCurrentTemperaturesHandler } from './functions/temperatures/get-current';
 import { getTemperatureHistoryHandler } from './functions/temperatures/get-history';
 import { getDevicesHandler } from './functions/devices/get-devices';
@@ -78,6 +82,21 @@ app.http('negotiate', {
   authLevel: 'anonymous',
   route: 'negotiate',
   handler: negotiateHandler,
+});
+
+// HAR-60: live readings by push. IoT Hub routes every device message to the
+// temperature-data event hub; this trigger reads it on the API's own consumer
+// group and sends each reading to its device's `device-{id}` SignalR group, the
+// groups negotiate puts each owner in. The connection is identity-based
+// (IOTHUB_EVENTS__fullyQualifiedNamespace; the app identity holds Azure Event
+// Hubs Data Receiver), so no Event Hub key is in app settings.
+app.eventHub('broadcastTemperature', {
+  connection: 'IOTHUB_EVENTS',
+  eventHubName: TEMPERATURE_EVENT_HUB,
+  consumerGroup: '%TEMPERATURE_BROADCAST_CONSUMER_GROUP%',
+  cardinality: 'many',
+  extraOutputs: [signalROutput],
+  handler: broadcastTemperatureHandler,
 });
 
 app.http('getCurrentTemperatures', {
@@ -192,12 +211,13 @@ app.http('cosmosHealth', {
   handler: cosmosHealthHandler,
 });
 
-// Host-storage heartbeat (MG-58). The ONLY timer in this app, and the only
-// registration that needs AzureWebJobsStorage: the host keeps this timer's
-// schedule status and singleton lease in the host storage account, so the
-// invocation itself is the proof that host storage authenticates. Every other
-// registration above is an HTTP trigger, which needs no host storage — which is
-// why the host sat Unhealthy for weeks while all of them answered 200.
+// Host-storage heartbeat (MG-58). The ONLY timer in this app: the host keeps
+// this timer's schedule status and singleton lease in the host storage account,
+// so the invocation itself is the proof that host storage authenticates. When it
+// was added, every other registration was an HTTP trigger, which needs no host
+// storage — which is why the host sat Unhealthy for weeks while all of them
+// answered 200. Since HAR-60, broadcastTemperature also uses host storage (Event
+// Hub partition leases and checkpoints); the heartbeat stays the dedicated proof.
 app.timer('storageHeartbeat', {
   schedule: STORAGE_HEARTBEAT_SCHEDULE,
   handler: storageHeartbeatHandler,
