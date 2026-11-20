@@ -3,7 +3,8 @@
 `apps/web` is the React (Vite) web client. It signs in with Entra ID, calls the
 API through a client generated from the OpenAPI contract, and today manages
 devices (list, register, rename) and cooks (start from a device, list, open,
-stop). The live panel and the chart come later.
+stop), and shows an active cook's readings live over SignalR. The chart comes
+later.
 
 Production: `https://meatgeekv2-web.vercel.app`, built from `main`
 by Vercel.
@@ -113,8 +114,54 @@ A 503 `DEVICE_TWIN_UPDATE_FAILED` means the cook is completed but the device
 was not told; **Retry** resends the stop, which the API makes safe. Other
 answers (404, 403, …) show the problem.
 
-Two empty regions are left for later issues: `data-testid="cook-live-panel"`
-(rendered only while the cook is active) and `data-testid="cook-chart"`.
+An active cook also has the live panel (below). `data-testid="cook-chart"` is
+an empty region left for the chart.
+
+### Live panel
+
+`src/live/live-panel.tsx`, `data-testid="cook-live-panel"`, rendered only while
+the cook is active. It shows the grill and probe 1-4 temperatures of the cook's
+device, the reading's time and its age ("12 s ago", updated every second). A
+channel with no value shows "—". Readings arrive in °F (the spec's
+`TemperatureReading`); a device whose `configuration.temperatureUnit` is
+`celsius` (from `GET /devices/{id}`) has them converted to °C.
+
+**Connection** (`src/live/live-connection.ts`, `src/live/hub.ts`). One
+connection per page: opened on mount, stopped on unmount.
+
+1. `POST /negotiate` returns `{url, accessToken}`. The panel builds a
+   `@microsoft/signalr` `HubConnection` with `.withUrl(url, {accessTokenFactory})`
+   (the factory returns the negotiate token) and `.withAutomaticReconnect()`.
+2. After every successful start and every automatic reconnect it calls
+   `GET /temperatures/current/{deviceId}` and shows the answer if it is newer
+   than what is on screen (404: no reading yet).
+3. When the connection **closes** (automatic reconnect gave up), or negotiate or
+   start fails (429, 503, 500, network), it negotiates again and starts a new
+   connection after 2, 5, 10, then every 30 s, for as long as the page is open.
+   Negotiating again gets a fresh 60-minute token and fresh device groups.
+4. A 401 from negotiate stops retrying and shows "Sign in again".
+
+Messages are typed from the spec's `x-signalr` schemas. `temperature` messages
+for another device are ignored; so is `cook_started`. `cook_stopped` for this
+cook stops the connection and re-reads the cook, so the page shows it completed
+and the panel goes away.
+
+**States**, shown as a badge and as `data-state` on the panel:
+
+| `data-state` | When                                                              | Badge                     |
+| ------------ | ----------------------------------------------------------------- | ------------------------- |
+| `connecting` | The first negotiate and start are in flight                       | Connecting…               |
+| `waiting`    | Connected, no reading yet (the first can take up to about 20 s)   | Waiting                   |
+| `live`       | Connected, and the reading is no older than 3 × `pollingInterval` | Live                      |
+| `stale`      | Reconnecting or closed                                            | Reconnecting…             |
+| `stale`      | Connected, but the reading is older than 3 × `pollingInterval`    | No reading for 1 min 40 s |
+| `stale`      | Negotiate answered 401                                            | Sign in again             |
+
+`pollingInterval` is the device's `configuration.pollingInterval` in seconds,
+30 when unset (the API's default), so the default stale threshold is 90 s.
+
+Tests inject a fake hub through `HubFactoryProvider` (`src/live/hub-context.tsx`,
+`FakeHub` in `src/test/fakes.ts`); no test opens a real connection.
 
 ## Commands
 
@@ -129,11 +176,32 @@ npx nx build web --skip-nx-cache       # dist/apps/web
 If Nx fails with a socket path that is too long (deep worktree paths), set
 `NX_SOCKET_DIR=/tmp/nx` or `NX_DAEMON=false`.
 
+## Content-Security-Policy
+
+`vercel.json` sends a `Content-Security-Policy` header on every path:
+
+| Directive         | Sources                                                                                                                       |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `default-src`     | `'self'`                                                                                                                      |
+| `connect-src`     | `'self'`, the API origin, `https://login.microsoftonline.com`, `https://*.service.signalr.net`, `wss://*.service.signalr.net` |
+| `frame-src`       | `https://login.microsoftonline.com` (MSAL's silent token renew)                                                               |
+| `img-src`         | `'self' data:`                                                                                                                |
+| `object-src`      | `'none'`                                                                                                                      |
+| `base-uri`        | `'self'`                                                                                                                      |
+| `frame-ancestors` | `'none'`                                                                                                                      |
+
+There is no `style-src` or `script-src`: the build has no inline script or
+style, so `default-src 'self'` covers both.
+
+The API origin is written out, so it must match `apiBaseUrl` in
+`public/config.json`. `src/csp.spec.ts` reads both files and fails if they
+differ: change them together.
+
 ## Deploy
 
 Vercel's Git integration builds every push to `main` with the repo-root
 `vercel.json`: `npm ci`, `npx nx build web --skip-nx-cache`, output
-`dist/apps/web`, and a rewrite of every path to `/index.html` for client-side
-routing. Vercel serves real files before applying rewrites, so `/config.json`
+`dist/apps/web`, a rewrite of every path to `/index.html` for client-side
+routing, and the Content-Security-Policy header above. Vercel serves real files before applying rewrites, so `/config.json`
 and `/assets/*` still resolve. No GitHub workflow deploys the web app, and
 there is no `nx deploy web` target.

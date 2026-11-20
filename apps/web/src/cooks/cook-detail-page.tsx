@@ -1,9 +1,10 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useApi } from '../api/api-context';
 import type { Cook } from '../api/client';
 import { problemFromError, problemFromResponse, type ApiProblem } from '../api/problem';
 import { ProblemMessage, ProblemText } from '../api/problem-message';
+import { LivePanel } from '../live/live-panel';
 import { formatDateTime, formatElapsed, useNow } from './time';
 import { deviceLabel, useDevices } from './use-devices';
 import { TARGET_KEYS, TARGET_LABELS } from './validation';
@@ -41,6 +42,22 @@ export function CookDetailPage() {
     };
   }, [api, id]);
 
+  // The cook ended elsewhere (a `cook_stopped` push): read it again. If that
+  // read fails, show the cook the push carried, which is the stored cook.
+  const reread = useCallback(
+    async (fallback: Cook) => {
+      let cook = fallback;
+      try {
+        const { data } = await api.GET('/cooks/{cookId}', { params: { path: { cookId: id } } });
+        if (data !== undefined) cook = data;
+      } catch {
+        // keep the fallback
+      }
+      setState({ status: 'loaded', cook });
+    },
+    [api, id]
+  );
+
   if (state.status === 'loading') {
     return <p className="muted">Loading cook…</p>;
   }
@@ -64,10 +81,24 @@ export function CookDetailPage() {
       </section>
     );
   }
-  return <CookDetail cook={state.cook} onStopped={cook => setState({ status: 'loaded', cook })} />;
+  return (
+    <CookDetail
+      cook={state.cook}
+      onStopped={cook => setState({ status: 'loaded', cook })}
+      onEnded={reread}
+    />
+  );
 }
 
-function CookDetail({ cook, onStopped }: { cook: Cook; onStopped: (cook: Cook) => void }) {
+function CookDetail({
+  cook,
+  onStopped,
+  onEnded,
+}: {
+  cook: Cook;
+  onStopped: (cook: Cook) => void;
+  onEnded: (fallback: Cook) => void;
+}) {
   const devices = useDevices();
   const active = cook.status === 'active';
   const now = useNow(active);
@@ -108,8 +139,8 @@ function CookDetail({ cook, onStopped }: { cook: Cook; onStopped: (cook: Cook) =
 
       {active && <StopCook cook={cook} onStopped={onStopped} />}
 
-      {/* Filled by later issues: the live panel (SignalR) and the chart. */}
-      {active && <section data-testid="cook-live-panel" aria-label="Live readings" />}
+      {active && <LivePanel cook={cook} onCookStopped={message => onEnded(message.payload)} />}
+      {/* Filled by a later issue: the chart. */}
       <section data-testid="cook-chart" aria-label="Temperature chart" />
     </section>
   );

@@ -42,6 +42,14 @@ function fakeApi(
           });
     }
     if (req.method === 'POST' && path === '/cooks/cook-1/stop') return stop(req);
+    // The live panel's calls (src/live/live-panel.spec.tsx tests the panel).
+    if (path === `/devices/${BRISKET_BOX.id}`) return jsonResponse(200, BRISKET_BOX);
+    if (req.method === 'POST' && path === '/negotiate') {
+      return jsonResponse(200, { url: 'https://mg.service.signalr.net/client/', accessToken: 't' });
+    }
+    if (path === `/temperatures/current/${BRISKET_BOX.id}`) {
+      return jsonResponse(404, { error: 'NO_READINGS', message: 'No reading', requestId: 'r' });
+    }
     return jsonResponse(500, {
       error: 'INTERNAL_SERVER_ERROR',
       message: 'unexpected',
@@ -56,7 +64,7 @@ function field(label: string): string | null {
 }
 
 function stops(requests: RecordedRequest[]) {
-  return requests.filter(r => r.method === 'POST');
+  return requests.filter(r => r.method === 'POST' && apiPath(r).endsWith('/stop'));
 }
 
 describe('cook detail', () => {
@@ -79,11 +87,11 @@ describe('cook detail', () => {
     expect(screen.queryByText('Ended', { selector: 'dt' })).toBeNull();
   });
 
-  it('has the live-panel and chart regions for an active cook, and no live panel once completed', async () => {
+  it('has the live panel and chart region for an active cook, and no live panel once completed', async () => {
     fakeApi(COOK);
     const { unmount } = renderPages('/cooks/cook-1');
     await screen.findByRole('heading', { name: 'Saturday brisket' });
-    expect(screen.getByTestId('cook-live-panel').textContent).toBe('');
+    expect(screen.getByTestId('cook-live-panel').getAttribute('aria-label')).toBe('Live readings');
     expect(screen.getByTestId('cook-chart').textContent).toBe('');
     unmount();
 
