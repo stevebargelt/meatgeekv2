@@ -43,8 +43,8 @@ type Broker struct {
 
 	mu              sync.Mutex
 	conns           []*conn // every connection ever accepted, in order
-	live            int
 	maxLive         int
+	overlapChecks   []chan struct{} // one per CONNECT; closed once maxLive is updated
 	received        []Message
 	desired         map[string]any
 	desiredVersion  int64
@@ -60,9 +60,19 @@ type conn struct {
 	n     int
 	nc    net.Conn
 	wmu   sync.Mutex
-	subs  []string // guarded by Broker.mu
-	alive bool     // guarded by Broker.mu
+	subs  []string      // guarded by Broker.mu
+	alive bool          // guarded by Broker.mu
+	done  chan struct{} // closed once serve has finished with the socket
 }
+
+// overlapGrace is how long an older connection may stay open after a newer
+// one sends CONNECT before the two count as concurrent. A client that closes
+// its socket before dialing (as AzureClient does) has its FIN delivered
+// ahead of the new SYN, so the old connection's reader sees EOF within
+// milliseconds; this only absorbs scheduling delay in the broker's own
+// goroutines. A client that really holds two connections keeps the old one
+// open past any grace and is counted.
+const overlapGrace = 2 * time.Second
 
 // NewBroker starts a broker on 127.0.0.1 with an empty twin at desired
 // $version 1 (a new device's twin). It stops when the test ends.
@@ -209,9 +219,18 @@ func (b *Broker) Connections() int {
 	return len(b.conns)
 }
 
-// MaxConcurrentConnections is the most connections ever live at once. IoT Hub
-// allows one per device, so this must stay 1.
+// MaxConcurrentConnections is the most connections ever open at once, as
+// seen when each connection sends CONNECT: the new connection plus every
+// older one still open overlapGrace later. IoT Hub allows one per device, so
+// this must stay 1. It waits for the checks of CONNECTs already received, so
+// the answer does not depend on goroutine scheduling.
 func (b *Broker) MaxConcurrentConnections() int {
+	b.mu.Lock()
+	checks := append([]chan struct{}(nil), b.overlapChecks...)
+	b.mu.Unlock()
+	for _, ch := range checks {
+		<-ch
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.maxLive
@@ -284,12 +303,8 @@ func (b *Broker) accept() {
 			return
 		}
 		b.mu.Lock()
-		c := &conn{n: len(b.conns) + 1, nc: nc, alive: true}
+		c := &conn{n: len(b.conns) + 1, nc: nc, alive: true, done: make(chan struct{})}
 		b.conns = append(b.conns, c)
-		b.live++
-		if b.live > b.maxLive {
-			b.maxLive = b.live
-		}
 		b.mu.Unlock()
 		go b.serve(c)
 	}
@@ -300,8 +315,8 @@ func (b *Broker) serve(c *conn) {
 		_ = c.nc.Close()
 		b.mu.Lock()
 		c.alive = false
-		b.live--
 		b.mu.Unlock()
+		close(c.done)
 	}()
 	for {
 		pkt, err := packets.ReadPacket(c.nc)
@@ -310,6 +325,7 @@ func (b *Broker) serve(c *conn) {
 		}
 		switch p := pkt.(type) {
 		case *packets.ConnectPacket:
+			b.checkOverlap(c)
 			ack := packets.NewControlPacket(packets.Connack).(*packets.ConnackPacket)
 			ack.ReturnCode = packets.Accepted
 			c.write(ack)
@@ -336,6 +352,43 @@ func (b *Broker) serve(c *conn) {
 			return
 		}
 	}
+}
+
+// checkOverlap records, in the background, how many connections are open
+// alongside c: c itself plus each older connection that is still open
+// overlapGrace after c's CONNECT.
+func (b *Broker) checkOverlap(c *conn) {
+	checked := make(chan struct{})
+	b.mu.Lock()
+	var older []*conn
+	for _, o := range b.conns {
+		if o != c && o.alive {
+			older = append(older, o)
+		}
+	}
+	b.overlapChecks = append(b.overlapChecks, checked)
+	b.mu.Unlock()
+	go func() {
+		defer close(checked)
+		graceOver := make(chan struct{})
+		timer := time.AfterFunc(overlapGrace, func() { close(graceOver) })
+		defer timer.Stop()
+		open := 1
+		for _, o := range older {
+			select {
+			case <-o.done:
+			case <-graceOver:
+				select {
+				case <-o.done:
+				default:
+					open++
+				}
+			}
+		}
+		b.mu.Lock()
+		b.maxLive = max(b.maxLive, open)
+		b.mu.Unlock()
+	}()
 }
 
 func (b *Broker) onPublish(c *conn, topic string, payload []byte) {
