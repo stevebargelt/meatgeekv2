@@ -111,9 +111,12 @@ max_daily_messages = 10000
 allowed_ip_ranges = ["0.0.0.0/0"]
 
 # HTTP posture (S2) — explicit, env-specific CORS origins (no wildcard).
-# Dev allows the local web/mobile dev servers only.
-functions_cors_allowed_origins = ["http://localhost:4200", "http://localhost:3000"]
-signalr_cors_allowed_origins   = ["http://localhost:4200", "http://localhost:3000"]
+# Dev allows the local web/mobile dev servers plus the Vercel PRODUCTION origin
+# of the web app (https://meatgeekv2-web.vercel.app, HAR-94). Vercel PREVIEW
+# origins (*.vercel.app per-branch/per-deploy URLs) are deliberately NOT allowed:
+# by the owner's decision, sign-in only works on the production origin.
+functions_cors_allowed_origins = ["http://localhost:4200", "http://localhost:3000", "https://meatgeekv2-web.vercel.app"]
+signalr_cors_allowed_origins   = ["http://localhost:4200", "http://localhost:3000", "https://meatgeekv2-web.vercel.app"]
 
 # Function App authentication (Easy Auth) — dev Entra API registration (MG-24 item 3).
 #
@@ -142,7 +145,7 @@ functions_auth_allowed_audiences = ["api://348570b2-44e5-41a6-ad15-2a7032366130"
 
 # allowed_applications = the CALLING client(s) Easy Auth accepts (validates the
 # token's appid/azp), NOT the API registration. A token from any OTHER client is
-# rejected. Dev has three callers:
+# rejected. Dev has four callers:
 #
 # 1. The Azure CLI PUBLIC client (04b07795-8ddb-461a-bbee-02f9e1bf7b46): by-hand
 #    smoke tests and acceptance runs with a DELEGATED token from
@@ -162,10 +165,18 @@ functions_auth_allowed_audiences = ["api://348570b2-44e5-41a6-ad15-2a7032366130"
 #    NOT own the simulated device. It also signs in with an APP-ONLY token for
 #    "<App ID URI>/.default", so it needs no pre-authorization either. It holds
 #    ZERO Azure roles; this entry is its only access to anything.
+# 4. The dev web SPA (`meatgeek-v2-dev-web`, the `development` environment's
+#    DEV_WEB_CLIENT_ID, HAR-82): the browser app at
+#    https://meatgeekv2-web.vercel.app signs the pitmaster in and calls the API
+#    with a DELEGATED user token for "<App ID URI>/access_as_user". It is a
+#    PUBLIC SPA client (auth code + PKCE, no client secret). The bootstrap
+#    pre-authorizes it for access_as_user on the dev API registration
+#    (preAuthorizedApplications), which is why sign-in shows no consent prompt.
 functions_auth_allowed_client_app_ids = [
   "04b07795-8ddb-461a-bbee-02f9e1bf7b46", # Azure CLI public client
   "8426e178-a4f6-49f8-868a-f070a4ae397f", # dev app-publish identity (AZURE_APP_DEPLOY_CLIENT_ID)
   "62d55e23-b8e8-412f-bcd5-147674ec53bd", # dev acceptance peer identity (AZURE_ACCEPTANCE_PEER_CLIENT_ID), zero Azure roles, second caller for the HAR-55 cross-user proof (HAR-61)
+  "508bb3be-30f9-4b03-8d95-93e086de85e1", # dev web SPA meatgeek-v2-dev-web (DEV_WEB_CLIENT_ID), HAR-82, delegated user tokens, pre-authorized for access_as_user
 ]
 
 # App-deployment identity → Function App publish role (MG-24 item 4).
