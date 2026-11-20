@@ -48,6 +48,12 @@ Thumbs.db
 .nx/cache
 .nx/workspace-data
 
+# OpenAPI types generated from libs/api-specs/spec/openapi.yaml by
+# `nx run api-specs:generate-types`. Never committed: web:build, web:test,
+# web:lint and web:typecheck depend on that target, so they are always fresh
+# from the spec and cannot drift (HAR-76).
+libs/api-specs/src/generated/
+
 # Local environment files
 .env
 .env.local
@@ -220,6 +226,9 @@ dist
 # Gatsby files
 .cache/
 public
+# ...except the web app's Vite public dir, which holds the committed runtime
+# config (apps/web/public/config.json, HAR-76).
+!apps/web/public/
 
 # Storybook build outputs
 .out

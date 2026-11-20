@@ -1,63 +1,85 @@
-import React from 'react';
-import './app.css';
+import { InteractionStatus } from '@azure/msal-browser';
+import { useMsal } from '@azure/msal-react';
+import { useMemo } from 'react';
+import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { ApiProvider } from '../api/api-context';
+import { createApiClient } from '../api/client';
+import { createTokenGetter } from '../auth/token';
+import type { AppConfig } from '../config/config';
+import { CooksPage } from '../cooks/cooks-page';
+import { DevicesPage } from '../devices/devices-page';
 
-const App: React.FC = () => {
-  return (
-    <div className="app">
-      <header className="app-header">
-        <h1>MeatGeek V2 Web App</h1>
-        <p className="app-subtitle">
-          Advanced BBQ Temperature Monitoring & Analytics
-        </p>
-      </header>
-      
-      <main className="app-main">
-        <div className="welcome-section">
-          <h2>Welcome to MeatGeek V2</h2>
-          <p>
-            This is the React web application for the MeatGeek V2 system. 
-            This interface provides advanced analytics and desktop-friendly 
-            features for your BBQ temperature monitoring.
-          </p>
-        </div>
-
-        <div className="features-section">
-          <h3>Planned Features</h3>
-          <div className="features-grid">
-            <div className="feature-card">
-              <h4>🌡️ Real-time Monitoring</h4>
-              <p>Live temperature updates from your BBQ devices</p>
-            </div>
-            <div className="feature-card">
-              <h4>📊 Advanced Analytics</h4>
-              <p>Historical data analysis and trend visualization</p>
-            </div>
-            <div className="feature-card">
-              <h4>🔥 Cook Management</h4>
-              <p>Comprehensive cook session tracking and notes</p>
-            </div>
-            <div className="feature-card">
-              <h4>📈 Data Export</h4>
-              <p>Export cook data in various formats for analysis</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="status-section">
-          <h3>Development Status</h3>
-          <p>
-            This is the initial web app structure created during Phase 0 
-            (Monorepo Setup) of the MeatGeek V2 development plan. The full 
-            web application will be implemented in Phase 4.
-          </p>
-        </div>
-      </main>
-
-      <footer className="app-footer">
-        <p>&copy; 2025 MeatGeek V2 - Cloud-based BBQ monitoring system</p>
-      </footer>
-    </div>
+/** The signed-in frame (header, nav, routes) or the sign-in page. */
+export function App({ config }: { config: AppConfig }) {
+  const { instance, accounts, inProgress } = useMsal();
+  const account = instance.getActiveAccount() ?? accounts[0];
+  const client = useMemo(
+    () =>
+      createApiClient({
+        baseUrl: config.apiBaseUrl,
+        getToken: createTokenGetter(instance, config.apiScope),
+      }),
+    [instance, config.apiBaseUrl, config.apiScope]
   );
-};
+
+  if (!account) {
+    return (
+      <div className="app">
+        <header className="app-header">
+          <span className="brand">MeatGeek</span>
+        </header>
+        <main className="status-page">
+          {inProgress === InteractionStatus.None ? (
+            <>
+              <h1>Sign in to MeatGeek</h1>
+              <p>Use your Microsoft account to see and manage your devices.</p>
+              <button
+                type="button"
+                onClick={() => instance.loginRedirect({ scopes: [config.apiScope] })}
+              >
+                Sign in
+              </button>
+            </>
+          ) : (
+            <p className="muted">Signing in…</p>
+          )}
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <ApiProvider client={client}>
+      <div className="app">
+        <header className="app-header">
+          <span className="brand">MeatGeek</span>
+          <nav aria-label="Main">
+            <NavLink to="/" end>
+              Devices
+            </NavLink>
+            <NavLink to="/cooks">Cooks</NavLink>
+          </nav>
+          <span className="user">
+            <span className="user-name">{account.name ?? account.username}</span>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => instance.logoutRedirect({ account })}
+            >
+              Sign out
+            </button>
+          </span>
+        </header>
+        <main className="app-main">
+          <Routes>
+            <Route path="/" element={<DevicesPage />} />
+            <Route path="/cooks" element={<CooksPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
+    </ApiProvider>
+  );
+}
 
 export default App;

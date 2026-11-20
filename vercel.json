@@ -1,0 +1,7 @@
+{
+  "framework": "vite",
+  "installCommand": "npm ci",
+  "buildCommand": "npx nx build web --skip-nx-cache",
+  "outputDirectory": "dist/apps/web",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
