@@ -8,7 +8,7 @@ MeatGeek V2 uses a **parallel processing architecture** where temperature teleme
 
 The [`ingest`](https://stevebargelt.github.io/meatgeekv2/#/view/ingest/) and [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) views show this flow: IoT Hub routes each message both directly to Cosmos DB (storage) and to an Event Hub (real-time).
 
-The real-time leg (Event Hub → Function → SignalR) is **on `main` since HAR-60**: `broadcastTemperature` in `apps/api` consumes the Event Hub and pushes each reading to its device's SignalR group. No app connects to SignalR yet; the acceptance proofs are the only live client.
+The real-time leg (Event Hub → Function → SignalR) is **on `main` since HAR-60**: `broadcastTemperature` in `apps/api` consumes the Event Hub and pushes each reading to the device owner's SignalR user (`userId`, HAR-81). No app connects to SignalR yet; the acceptance proofs are the only live client.
 
 ## Detailed Data Flow
 
@@ -165,7 +165,7 @@ The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) v
 
 ### During Active Cook
 
-Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId; IoT Hub stores it in Cosmos DB, and `broadcastTemperature` pushes it to the device's SignalR group. See the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view.
+Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId; IoT Hub stores it in Cosmos DB, and `broadcastTemperature` pushes it to the device owner's SignalR `userId`. See the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view.
 
 ### Ending a Cook
 
