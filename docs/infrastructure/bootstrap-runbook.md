@@ -615,12 +615,14 @@ the dev grant is on. Prod still does not set it.
 scoped to the IoT Hub alone. The API writes the active cook into device twin
 desired properties under that identity, at the host published as
 `IOTHUB_SERVICE_HOSTNAME`. The grant is `count`-guarded on the bool
-`api_device_twin_writer_enabled`, which defaults to `false` and is set in
-neither tfvars. It shipped **off** in HAR-56.
+`api_device_twin_writer_enabled`, which defaults to `false`. It shipped **off**
+in HAR-56; dev turned it on in HAR-64 (below), and `prod.tfvars` still does not
+set it.
 
 `IoT Hub Twin Contributor` is in
 [`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)
-with GUID `PENDING`. As with the simulated device grant above, in this order:
+(shipped with GUID `PENDING`). As with the simulated device grant above, in this
+order:
 
 1. Re-run `./bootstrap.sh` as the operator. It resolves the role's GUID live and
    reconciles the condition in place. Commit the resolved allowlist it prints.
@@ -629,6 +631,12 @@ with GUID `PENDING`. As with the simulated device grant above, in this order:
 
 Setting it before step 1 makes every `Apply Dev Infrastructure` run on `main`
 fail with `AuthorizationFailed` on the role assignment create.
+
+**Done for dev (HAR-64).** The owner re-ran `bootstrap.sh` from `main` on
+2026-11-20 for HAR-55. It resolved `IoT Hub Twin Contributor` to
+`494bdba2-168f-4f31-a0a1-191d2f7c028c`, which is now committed in the allowlist,
+and `dev.tfvars` sets `api_device_twin_writer_enabled = true`, so the dev grant
+is on. Prod still does not set it.
 
 ### Dev acceptance peer identity — zero roles, second caller for HAR-55 (HAR-61)
 
@@ -688,6 +696,11 @@ the HAR-56 `IoT Hub Twin Contributor` allowlist row together):
 The follow-up issue, not bootstrap, then adds the same appId to
 `functions_auth_allowed_client_app_ids` in `environments/dev.tfvars` and teaches
 the acceptance job to sign in as the peer.
+
+**Done for dev (HAR-64).** The 2026-11-20 run created the peer with appId
+`62d55e23-b8e8-412f-bcd5-147674ec53bd`, and `dev.tfvars` now lists it in
+`functions_auth_allowed_client_app_ids`, so Easy Auth accepts its app-only
+token. Teaching the acceptance job to mint that token is a separate issue.
 
 ### Dev app / API authentication registration (item 3)
 

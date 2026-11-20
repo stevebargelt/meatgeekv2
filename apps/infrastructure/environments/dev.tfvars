@@ -142,7 +142,7 @@ functions_auth_allowed_audiences = ["api://348570b2-44e5-41a6-ad15-2a7032366130"
 
 # allowed_applications = the CALLING client(s) Easy Auth accepts (validates the
 # token's appid/azp), NOT the API registration. A token from any OTHER client is
-# rejected. Dev has two callers:
+# rejected. Dev has three callers:
 #
 # 1. The Azure CLI PUBLIC client (04b07795-8ddb-461a-bbee-02f9e1bf7b46): by-hand
 #    smoke tests and acceptance runs with a DELEGATED token from
@@ -156,9 +156,16 @@ functions_auth_allowed_audiences = ["api://348570b2-44e5-41a6-ad15-2a7032366130"
 #    with an APP-ONLY token for "<App ID URI>/.default", to prove each dev deploy
 #    works without a human (MG-36). Client-credentials tokens need no
 #    pre-authorization; this entry is what lets Easy Auth accept it.
+# 3. The dev ACCEPTANCE PEER identity (`meatgeek-v2-dev-acceptance-peer`, the
+#    `development` environment's AZURE_ACCEPTANCE_PEER_CLIENT_ID, HAR-61): the
+#    second caller for the HAR-55 cross-user proof, a signed-in caller that does
+#    NOT own the simulated device. It also signs in with an APP-ONLY token for
+#    "<App ID URI>/.default", so it needs no pre-authorization either. It holds
+#    ZERO Azure roles; this entry is its only access to anything.
 functions_auth_allowed_client_app_ids = [
   "04b07795-8ddb-461a-bbee-02f9e1bf7b46", # Azure CLI public client
   "8426e178-a4f6-49f8-868a-f070a4ae397f", # dev app-publish identity (AZURE_APP_DEPLOY_CLIENT_ID)
+  "62d55e23-b8e8-412f-bcd5-147674ec53bd", # dev acceptance peer identity (AZURE_ACCEPTANCE_PEER_CLIENT_ID), zero Azure roles, second caller for the HAR-55 cross-user proof (HAR-61)
 ]
 
 # App-deployment identity → Function App publish role (MG-24 item 4).
@@ -201,3 +208,9 @@ ingestion_cap_gb = 2 # Hard daily ingestion cap on Log Analytics workspace
 
 # HAR-39 standing simulated device: the acceptance job creates it and sends as it.
 simulated_device_id = "meatgeek-dev-simulated-smoker"
+
+# HAR-56 API device-twin writer grant: IoT Hub Twin Contributor for the Function
+# App identity, scoped to the hub. Safe to switch on because the owner re-ran
+# bootstrap.sh on 2026-11-20 for HAR-55, which taught the infra-apply identity's
+# ABAC condition the role (allowlist GUID 494bdba2-168f-4f31-a0a1-191d2f7c028c).
+api_device_twin_writer_enabled = true

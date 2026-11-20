@@ -208,7 +208,7 @@ locals {
 
     # IoT Hub service hostname (HAR-56), where the API writes device twin desired
     # properties under its managed identity. Non-secret; the identity is granted
-    # IoT Hub Twin Contributor in the root module, which ships switched off.
+    # IoT Hub Twin Contributor in the root module (on in dev, off in prod).
     "IOTHUB_SERVICE_HOSTNAME" = var.iothub_service_hostname
 
     # SignalR — identity-based. Service URI is non-secret; the identity is

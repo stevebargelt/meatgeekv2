@@ -448,8 +448,8 @@ TEMPERATURE_BROADCAST_CONSUMER_GROUP=api-broadcast
 # IoT Hub service hostname (HAR-56), where the API will write device twin
 # desired properties under its managed identity. Non-secret, Terraform-owned
 # (module.iot_hub.hostname). No app code reads it yet (HAR-55). The identity's
-# IoT Hub Twin Contributor grant ships OFF (api_device_twin_writer_enabled =
-# false) until bootstrap.sh is re-run, so twin writes fail until it is switched on.
+# IoT Hub Twin Contributor grant is switched by api_device_twin_writer_enabled
+# (default false): ON in dev since HAR-64, OFF in prod, where twin writes fail.
 IOTHUB_SERVICE_HOSTNAME=<iot-hub-hostname>
 
 # SignalR — identity-based. NON-SECRET service URI only; the managed identity
