@@ -1,21 +1,15 @@
 package cooksession
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/sirupsen/logrus"
 )
 
 // newTestStore opens a Store at a unique temp path so tests do not
@@ -33,353 +27,185 @@ func newTestStore(t *testing.T) (*Store, string) {
 
 func strPtr(s string) *string { return &s }
 
-// captureLogs swaps the logrus output for the duration of the callback and
-// returns whatever was written. Lets tests assert on the "override" /
-// "unreachable" log lines that operators rely on.
-func captureLogs(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := logrus.StandardLogger().Out
-	origLevel := logrus.GetLevel()
-	buf := &bytes.Buffer{}
-	logrus.SetOutput(buf)
-	logrus.SetLevel(logrus.DebugLevel)
-	t.Cleanup(func() {
-		logrus.SetOutput(orig)
-		logrus.SetLevel(origLevel)
-	})
-	fn()
-	return buf.String()
+func deref(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
 }
 
-func TestSetActiveCookID_PersistsAcrossReopen(t *testing.T) {
+func TestApplyDesired_PersistsAllThreeAcrossReopen(t *testing.T) {
 	s, path := newTestStore(t)
-
-	if got := s.ActiveCookID(); got != nil {
-		t.Fatalf("fresh store: want nil cookId, got %q", *got)
+	if got := s.Snapshot(); got.CookID != nil || got.CorrelationID != nil || got.AppliedDesiredVersion != 0 {
+		t.Fatalf("fresh store not empty: %+v", got)
 	}
 
-	if err := s.SetActiveCookID(strPtr("cook-abc")); err != nil {
-		t.Fatalf("SetActiveCookID: %v", err)
+	if err := s.ApplyDesired(strPtr("cook-1"), strPtr("corr-1"), 7); err != nil {
+		t.Fatalf("ApplyDesired: %v", err)
 	}
 
-	// Reopen the same path and confirm the value survived.
 	s2, err := Open(path)
 	if err != nil {
-		t.Fatalf("Open (second): %v", err)
+		t.Fatalf("reopen: %v", err)
 	}
-	got := s2.ActiveCookID()
-	if got == nil || *got != "cook-abc" {
-		t.Fatalf("after reopen: want cook-abc, got %v", got)
+	got := s2.Snapshot()
+	if deref(got.CookID) != "cook-1" || deref(got.CorrelationID) != "corr-1" || got.AppliedDesiredVersion != 7 {
+		t.Fatalf("after reopen: %+v (cook=%s corr=%s)", got, deref(got.CookID), deref(got.CorrelationID))
 	}
 
-	// Confirm the file format on disk -- updatedAt should be present and
-	// recent, cookId should be the string we set.
+	// The file is the documented shape.
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read state file: %v", err)
+		t.Fatalf("read state: %v", err)
 	}
-	var ps persistedState
-	if err := json.Unmarshal(raw, &ps); err != nil {
-		t.Fatalf("unmarshal state: %v", err)
+	var onDisk map[string]any
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatalf("state file not JSON: %v", err)
 	}
-	if ps.CookID == nil || *ps.CookID != "cook-abc" {
-		t.Fatalf("file cookId: want cook-abc, got %v", ps.CookID)
-	}
-	if time.Since(ps.UpdatedAt) > time.Minute {
-		t.Fatalf("file updatedAt too old: %v", ps.UpdatedAt)
+	for _, k := range []string{"cookId", "correlationId", "appliedDesiredVersion", "updatedAt"} {
+		if _, ok := onDisk[k]; !ok {
+			t.Errorf("state file missing %q: %s", k, raw)
+		}
 	}
 
-	// Clearing also persists.
-	if err := s2.SetActiveCookID(nil); err != nil {
+	// Clearing persists nulls.
+	if err := s2.ApplyDesired(nil, nil, 8); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	s3, err := Open(path)
 	if err != nil {
-		t.Fatalf("Open (third): %v", err)
+		t.Fatalf("reopen 2: %v", err)
 	}
-	if got := s3.ActiveCookID(); got != nil {
-		t.Fatalf("after reopen post-clear: want nil, got %q", *got)
+	if got := s3.Snapshot(); got.CookID != nil || got.CorrelationID != nil || got.AppliedDesiredVersion != 8 {
+		t.Fatalf("after clear+reopen: %+v", got)
 	}
-}
-
-func TestActiveCookID_ReturnsIndependentCopy(t *testing.T) {
-	s, _ := newTestStore(t)
-	if err := s.SetActiveCookID(strPtr("cook-1")); err != nil {
-		t.Fatalf("SetActiveCookID: %v", err)
-	}
-	got := s.ActiveCookID()
-	if got == nil {
-		t.Fatal("got nil")
-	}
-	// Mutating the returned pointee must not affect internal state.
-	*got = "mutated"
-	again := s.ActiveCookID()
-	if again == nil || *again != "cook-1" {
-		t.Fatalf("internal state leaked through returned pointer: %v", again)
+	cook, corr, v := s3.AppliedDesired()
+	if cook != nil || corr != nil || v != 8 {
+		t.Fatalf("AppliedDesired = %v %v %d", cook, corr, v)
 	}
 }
 
-// Race coverage: many concurrent ActiveCookID readers running alongside
-// a SetActiveCookID writer must not data-race under -race.
-func TestConcurrentReadersAndWriter(t *testing.T) {
-	s, _ := newTestStore(t)
-	if err := s.SetActiveCookID(strPtr("seed")); err != nil {
+// A state file written before HAR-58 has only cookId; it still loads.
+func TestOpen_LegacyStateFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cooksession.json")
+	if err := os.WriteFile(path, []byte(`{"cookId":"old","updatedAt":"2026-01-01T00:00:00Z"}`), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got := s.Snapshot()
+	if deref(got.CookID) != "old" || got.CorrelationID != nil || got.AppliedDesiredVersion != 0 {
+		t.Fatalf("legacy load: %+v", got)
+	}
+}
 
+func TestSnapshot_ReturnsIndependentCopy(t *testing.T) {
+	s, _ := newTestStore(t)
+	cook, corr := "cook-1", "corr-1"
+	if err := s.ApplyDesired(&cook, &corr, 1); err != nil {
+		t.Fatalf("ApplyDesired: %v", err)
+	}
+	// Mutating the caller's input after the call must not affect state.
+	cook, corr = "x", "y"
+
+	got := s.Snapshot()
+	*got.CookID = "mutated"
+	*got.CorrelationID = "mutated"
+	again := s.Snapshot()
+	if deref(again.CookID) != "cook-1" || deref(again.CorrelationID) != "corr-1" {
+		t.Fatalf("internal state leaked: cook=%s corr=%s", deref(again.CookID), deref(again.CorrelationID))
+	}
+	if deref(s.ActiveCookID()) != "cook-1" {
+		t.Fatalf("ActiveCookID = %s", deref(s.ActiveCookID()))
+	}
+}
+
+// A failed write leaves the previous state in place: an error means nothing
+// was applied, so the twin does not report a version it did not persist.
+func TestApplyDesired_WriteFailureLeavesStateUnchanged(t *testing.T) {
+	s, path := newTestStore(t)
+	if err := s.ApplyDesired(strPtr("cook-1"), strPtr("corr-1"), 1); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Replace the directory with nothing so CreateTemp fails.
+	if err := os.RemoveAll(filepath.Dir(path)); err != nil {
+		t.Fatalf("remove dir: %v", err)
+	}
+	if err := s.ApplyDesired(strPtr("cook-2"), nil, 2); err == nil {
+		t.Fatal("ApplyDesired into a removed dir: want error")
+	}
+	got := s.Snapshot()
+	if deref(got.CookID) != "cook-1" || got.AppliedDesiredVersion != 1 {
+		t.Fatalf("state changed despite failed write: %+v", got)
+	}
+}
+
+func TestNewMemory_DoesNotTouchDisk(t *testing.T) {
+	s := NewMemory()
+	if s.Path() != "" {
+		t.Fatalf("memory store path = %q", s.Path())
+	}
+	if err := s.ApplyDesired(strPtr("c"), strPtr("r"), 3); err != nil {
+		t.Fatalf("ApplyDesired: %v", err)
+	}
+	if got := s.Snapshot(); deref(got.CookID) != "c" || deref(got.CorrelationID) != "r" || got.AppliedDesiredVersion != 3 {
+		t.Fatalf("memory store: %+v", got)
+	}
+}
+
+// Race coverage: many concurrent readers running alongside a writer must not
+// data-race under -race, and every snapshot is internally consistent (both
+// ids from the same applied version).
+func TestConcurrentReadersAndWriter(t *testing.T) {
+	s, _ := newTestStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
 	var wg sync.WaitGroup
-	// Readers.
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
+			for ctx.Err() == nil {
+				snap := s.Snapshot()
+				if snap.CookID == nil {
+					continue
+				}
+				v := strconv.FormatInt(snap.AppliedDesiredVersion, 10)
+				if *snap.CookID != "cook-"+v || deref(snap.CorrelationID) != "corr-"+v {
+					t.Errorf("torn snapshot: %s / %s / %s", *snap.CookID, deref(snap.CorrelationID), v)
 					return
-				default:
-					_ = s.ActiveCookID()
 				}
 			}
 		}()
 	}
-	// Writer.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		i := 0
-		for {
-			select {
-			case <-ctx.Done():
+		for i := int64(1); ctx.Err() == nil; i++ {
+			v := strconv.FormatInt(i, 10)
+			if err := s.ApplyDesired(strPtr("cook-"+v), strPtr("corr-"+v), i); err != nil {
+				t.Errorf("ApplyDesired: %v", err)
 				return
-			default:
-				id := "cook-" + itoa(i)
-				if err := s.SetActiveCookID(&id); err != nil {
-					t.Errorf("SetActiveCookID: %v", err)
-					return
-				}
-				i++
 			}
 		}
 	}()
-
 	wg.Wait()
 }
 
-// itoa avoids strconv import noise in the single line where we need it.
-func itoa(i int) string {
-	const digits = "0123456789"
-	if i == 0 {
-		return "0"
-	}
-	var b [20]byte
-	pos := len(b)
-	for i > 0 {
-		pos--
-		b[pos] = digits[i%10]
-		i /= 10
-	}
-	return string(b[pos:])
-}
-
-func TestReconcile_ActiveCookOverridesPersisted(t *testing.T) {
-	s, _ := newTestStore(t)
-	// Seed a now-stale value.
-	if err := s.SetActiveCookID(strPtr("cook-old")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	var capturedURL string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedURL = r.URL.String()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"cooks":[{"id":"cook-new","status":"active","deviceId":"meatgeek3"}],"total":1,"offset":0,"limit":20,"hasMore":false}`)
-	}))
-	defer srv.Close()
-
-	logs := captureLogs(t, func() {
-		if err := s.Reconcile(context.Background(), srv.URL, "meatgeek3"); err != nil {
-			t.Fatalf("Reconcile: %v", err)
-		}
-	})
-
-	if got := s.ActiveCookID(); got == nil || *got != "cook-new" {
-		t.Fatalf("after reconcile: want cook-new, got %v", got)
-	}
-
-	if !strings.Contains(capturedURL, "deviceId=meatgeek3") {
-		t.Errorf("request URL missing deviceId filter: %s", capturedURL)
-	}
-	if !strings.Contains(capturedURL, "status=active") {
-		t.Errorf("request URL missing status filter: %s", capturedURL)
-	}
-
-	// Operator-visible "override" log line is required so the reason for
-	// a swap is auditable in journald.
-	if !strings.Contains(logs, "reconciled active cook id") {
-		t.Errorf("expected override log line, got: %s", logs)
-	}
-	if !strings.Contains(logs, "cook-old") || !strings.Contains(logs, "cook-new") {
-		t.Errorf("override log missing previous/current values: %s", logs)
-	}
-}
-
-func TestReconcile_404ClearsPersisted(t *testing.T) {
-	s, _ := newTestStore(t)
-	if err := s.SetActiveCookID(strPtr("cook-old")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-
-	if err := s.Reconcile(context.Background(), srv.URL, "meatgeek3"); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	if got := s.ActiveCookID(); got != nil {
-		t.Fatalf("after 404 reconcile: want nil, got %q", *got)
-	}
-}
-
-func TestReconcile_UnreachableLeavesPersistedUnchanged(t *testing.T) {
-	s, _ := newTestStore(t)
-	if err := s.SetActiveCookID(strPtr("cook-old")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	// 127.0.0.1:1 is reliably refused by the OS without DNS or timeout
-	// games. Combined with the short reconcileTimeout this stays fast.
-	logs := captureLogs(t, func() {
-		err := s.Reconcile(context.Background(), "http://127.0.0.1:1", "meatgeek3")
-		if err == nil {
-			t.Fatal("Reconcile: want error, got nil")
-		}
-		if !errors.Is(err, ErrAPIUnreachable) {
-			t.Errorf("Reconcile: want ErrAPIUnreachable wrap, got %v", err)
-		}
-	})
-
-	if got := s.ActiveCookID(); got == nil || *got != "cook-old" {
-		t.Fatalf("persisted value changed despite unreachable API: %v", got)
-	}
-	if !strings.Contains(logs, "reconcile API call failed") {
-		t.Errorf("expected operator-visible unreachable warning, got: %s", logs)
-	}
-}
-
-func TestReconcile_CompletedCookClearsLocal(t *testing.T) {
-	// Scenario 6: cook_stopped happened while pusher was offline; the
-	// API now lists the previously-active cook as completed (or returns
-	// no active cooks at all). Either way, our local file must clear so
-	// subsequent TemperatureReadings don't carry the stale cookId.
-	s, _ := newTestStore(t)
-	if err := s.SetActiveCookID(strPtr("cook-abc")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Server is honest about status=active filter: returns an
-		// empty cooks list because cook-abc is now completed.
-		_, _ = io.WriteString(w, `{"cooks":[],"total":0,"offset":0,"limit":20,"hasMore":false}`)
-	}))
-	defer srv.Close()
-
-	if err := s.Reconcile(context.Background(), srv.URL, "meatgeek3"); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	if got := s.ActiveCookID(); got != nil {
-		t.Fatalf("after stopped-cook reconcile: want nil, got %q", *got)
-	}
-}
-
-func TestReconcile_NonActiveStatusInResponseIsIgnored(t *testing.T) {
-	// Defense-in-depth: if the API ignores the status filter (or a
-	// future schema change leaks a "paused" cook through), the picker
-	// must still only treat status="active" as active.
-	s, _ := newTestStore(t)
-	if err := s.SetActiveCookID(strPtr("cook-old")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"cooks":[{"id":"cook-stale","status":"completed"},{"id":"cook-pending","status":"planning"}],"total":2,"offset":0,"limit":20,"hasMore":false}`)
-	}))
-	defer srv.Close()
-
-	if err := s.Reconcile(context.Background(), srv.URL, "meatgeek3"); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if got := s.ActiveCookID(); got != nil {
-		t.Fatalf("want nil after no-active response, got %q", *got)
-	}
-}
-
-func TestReconcile_NoChangeDoesNotRewriteFile(t *testing.T) {
-	// Steady-state reconcile must not churn disk: when the API and the
-	// local state agree, the file's updatedAt is left alone.
-	s, path := newTestStore(t)
-	if err := s.SetActiveCookID(strPtr("cook-steady")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-
-	// Sleep a beat so mtime resolution can distinguish a rewrite.
-	time.Sleep(10 * time.Millisecond)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"cooks":[{"id":"cook-steady","status":"active"}],"total":1,"offset":0,"limit":20,"hasMore":false}`)
-	}))
-	defer srv.Close()
-
-	if err := s.Reconcile(context.Background(), srv.URL, "meatgeek3"); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	after, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat after: %v", err)
-	}
-	if !after.ModTime().Equal(before.ModTime()) {
-		t.Errorf("steady-state reconcile rewrote the file (before=%v after=%v)", before.ModTime(), after.ModTime())
-	}
-}
-
-func TestReconcile_RequiresBaseURLAndDeviceID(t *testing.T) {
-	s, _ := newTestStore(t)
-	if err := s.Reconcile(context.Background(), "", "meatgeek3"); err == nil {
-		t.Error("want error for empty apiBaseURL")
-	}
-	if err := s.Reconcile(context.Background(), "http://example.test", ""); err == nil {
-		t.Error("want error for empty deviceID")
-	}
-}
-
 func TestOpen_FallsBackWhenDefaultPathUnwritable(t *testing.T) {
-	// Probe via a path that should fail mkdir as non-root. We simulate
-	// the production failure mode by pointing at a path under a regular
-	// file (mkdir of a child fails with ENOTDIR).
+	// Point at a path under a regular file (mkdir of a child fails with
+	// ENOTDIR), the production failure mode of an unwritable /var/lib.
 	dir := t.TempDir()
 	occupied := filepath.Join(dir, "occupied")
 	if err := os.WriteFile(occupied, []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed occupied file: %v", err)
 	}
-	// Now ask for a state path whose parent is `occupied` (a regular
-	// file, not a dir): resolveWritablePath should fall back to the
-	// user home location.
 	requested := filepath.Join(occupied, "cooksession.json")
 
-	// Redirect HOME so the fallback lands in our test sandbox.
 	tmpHome := filepath.Join(dir, "home")
 	if err := os.MkdirAll(tmpHome, 0o755); err != nil {
 		t.Fatalf("mkdir home: %v", err)
@@ -393,9 +219,8 @@ func TestOpen_FallsBackWhenDefaultPathUnwritable(t *testing.T) {
 	if !strings.HasPrefix(s.Path(), tmpHome) {
 		t.Fatalf("expected path under fallback HOME=%s, got %s", tmpHome, s.Path())
 	}
-
-	if err := s.SetActiveCookID(strPtr("cook-fb")); err != nil {
-		t.Fatalf("SetActiveCookID on fallback: %v", err)
+	if err := s.ApplyDesired(strPtr("cook-fb"), nil, 1); err != nil {
+		t.Fatalf("ApplyDesired on fallback: %v", err)
 	}
 }
 
@@ -413,8 +238,8 @@ func TestOpen_CorruptStateFileStartsEmpty(t *testing.T) {
 		t.Fatalf("corrupt-recovery: want nil cookId, got %q", *got)
 	}
 	// And a write should heal the file.
-	if err := s.SetActiveCookID(strPtr("cook-healed")); err != nil {
-		t.Fatalf("SetActiveCookID after corrupt: %v", err)
+	if err := s.ApplyDesired(strPtr("cook-healed"), nil, 1); err != nil {
+		t.Fatalf("ApplyDesired after corrupt: %v", err)
 	}
 	s2, err := Open(path)
 	if err != nil {

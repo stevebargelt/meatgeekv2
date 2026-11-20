@@ -1,16 +1,15 @@
-// Package wire defines the V2 telemetry / SignalR wire types that the
+// Package wire defines the V2 telemetry wire types that the
 // data-pusher exchanges with the cloud side, plus the V1->V2 mappers that
 // translate the device-controller's local-HTTP JSON (apps/device-controller/
 // main.go:254-276) into those shapes.
 //
 // Source of truth for these structs is libs/api-specs/spec/components/schemas/
-// {temperature,device,signalr-payloads}.yaml. They are hand-written here
+// {temperature,device}.yaml. They are hand-written here
 // rather than codegen'd because the pusher only needs a small subset and
 // owns the V1->V2 translation seam end-to-end.
 package wire
 
 import (
-	"encoding/json"
 	"time"
 )
 
@@ -104,62 +103,10 @@ type V2SystemHealth struct {
 // message. The current implementation emits TemperatureReading directly;
 // this is reserved for ticket #6 / future batching needs.
 type DeviceTelemetryBatch struct {
-	DeviceID   string               `json:"deviceId"`
-	BatchID    string               `json:"batchId"`
-	Timestamp  time.Time            `json:"timestamp"`
-	CookID     *string              `json:"cookId,omitempty"`
-	Readings   []TemperatureReading `json:"readings"`
-	Status     *V2DeviceStatus      `json:"status,omitempty"`
-}
-
-// CorrelationContext mirrors signalr-payloads.yaml#/CorrelationContext.
-// `ID` is the only required field; it rides end-to-end (HTTP X-Request-ID
-// -> SignalR payload -> device IoT message property `correlation.id`).
-type CorrelationContext struct {
-	ID         string `json:"id"`
-	ParentID   string `json:"parentId,omitempty"`
-	TraceFlags string `json:"traceFlags,omitempty"`
-}
-
-// SignalRMessageType is the discriminator value enum for SignalR envelopes.
-type SignalRMessageType string
-
-const (
-	SignalRTemperatureUpdate  SignalRMessageType = "temperature_update"
-	SignalRCookStarted        SignalRMessageType = "cook_started"
-	SignalRCookStopped        SignalRMessageType = "cook_stopped"
-	SignalRCookPaused         SignalRMessageType = "cook_paused"
-	SignalRCookResumed        SignalRMessageType = "cook_resumed"
-	SignalRDeviceOnline       SignalRMessageType = "device_online"
-	SignalRDeviceOffline      SignalRMessageType = "device_offline"
-	SignalRAlertTriggered     SignalRMessageType = "alert_triggered"
-	SignalRSystemNotification SignalRMessageType = "system_notification"
-)
-
-// SignalREnvelopeBase mirrors signalr-payloads.yaml#/SignalREnvelopeBase.
-// The Payload field is left as json.RawMessage so the consumer (the
-// signalr package in step 4) can branch on Type and unmarshal the typed
-// payload only for the message kinds the pusher cares about.
-type SignalREnvelopeBase struct {
-	Type        SignalRMessageType `json:"type"`
-	Timestamp   time.Time          `json:"timestamp"`
-	MessageID   string             `json:"messageId"`
-	DeviceID    string             `json:"deviceId,omitempty"`
-	UserID      string             `json:"userId,omitempty"`
-	CookID      string             `json:"cookId,omitempty"`
-	Correlation CorrelationContext `json:"correlation"`
-	Payload     json.RawMessage    `json:"payload"`
-}
-
-// CookStartedMessage is the typed envelope for type=cook_started. Payload
-// is a Cook resource per cook.yaml — we keep it as RawMessage here and
-// only surface the fields the pusher actually consumes (cookId via the
-// envelope's CookID field).
-type CookStartedMessage struct {
-	SignalREnvelopeBase
-}
-
-// CookStoppedMessage is the typed envelope for type=cook_stopped.
-type CookStoppedMessage struct {
-	SignalREnvelopeBase
+	DeviceID  string               `json:"deviceId"`
+	BatchID   string               `json:"batchId"`
+	Timestamp time.Time            `json:"timestamp"`
+	CookID    *string              `json:"cookId,omitempty"`
+	Readings  []TemperatureReading `json:"readings"`
+	Status    *V2DeviceStatus      `json:"status,omitempty"`
 }

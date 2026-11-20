@@ -1,20 +1,25 @@
 // Command meatgeek-pusher is the data-pusher service. It polls the
 // local device-controller, maps each reading V1 -> V2, persists it to a
-// disk-backed FIFO queue, and drains the queue to Azure IoT Hub. A
-// SignalR consumer (when configured) drives cook-session lifecycle
-// updates that ride as IoT Hub message properties on outbound telemetry.
+// disk-backed FIFO queue, and drains the queue to Azure IoT Hub. The active
+// cook comes from the IoT Hub device twin: its desired properties carry the
+// cook id and correlation id, which ride on every outbound reading (the
+// `cookId` body field and the `correlation.id` message property).
 //
 // Architectural model (ticket #5): single-writer-through-queue.
 //
-//	[collector] --samples--> [enqueuer] --bytes--> [queue.Queue] --bytes--> [publisher] --> iothub.Client
-//	                              ^                                              ^
-//	                              |                                              |
-//	                       cooksession.Store <--SetActiveCookID-- [signalr consumer]
+//	[collector] --samples--> [enqueuer] --bytes--> [queue.Queue] --bytes--> [publisher] --> iothub.AzureClient
+//	                              ^                                                              |
+//	                              | Snapshot                         one MQTT connection: telemetry + twin
+//	                              |                                                              |
+//	                       cooksession.Store <------ApplyDesired------ [twin: GET on connect, desired patches]
 //
-// The collector is a pure producer; the publisher is the sole writer to
-// IoT Hub. Cook-session state lives only in cooksession.Store, removing
-// the race window the previous design had between in-flight polls and
-// SetActiveCook mutations.
+// The collector is a pure producer; the publisher is the sole writer of
+// telemetry. Cook-session state lives only in cooksession.Store (persisted,
+// so a boot with no network still stamps the last cook); the twin is its only
+// writer, and the enqueuer reads both ids in one snapshot. The IoT Hub client
+// connects at startup and stays connected, so desired patches arrive while the
+// device is idle; every (re)connect re-reads the twin, which is how a device
+// that was offline when a cook started picks it up (HAR-58).
 package main
 
 import (
@@ -26,7 +31,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,7 +39,6 @@ import (
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/publish"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
-	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/signalr"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
 
@@ -71,8 +74,6 @@ type Config struct {
 	Debug                bool
 	MockIoT              bool
 	MockDeviceID         string
-	SignalRHubURL        string
-	APIBaseURL           string
 	QueueDir             string
 	CookSessionStatePath string
 }
@@ -128,14 +129,6 @@ func parseFlags() Config {
 	flag.StringVar(&config.MockDeviceID, "mock-device-id",
 		getEnvString("MOCK_DEVICE_ID", "meatgeek-mock"),
 		"Device id used when --mock-iot is set (production sourced from the conn-string)")
-
-	flag.StringVar(&config.SignalRHubURL, "signalr-hub-url",
-		getEnvString("SIGNALR_HUB_URL", ""),
-		"SignalR hub URL for cook lifecycle events. Empty disables the SignalR consumer; cooksession.Reconcile is then the sole cook-id authority.")
-
-	flag.StringVar(&config.APIBaseURL, "api-base-url",
-		getEnvString("API_BASE_URL", ""),
-		"V2 API base URL used by cooksession.Reconcile at startup")
 
 	flag.StringVar(&config.QueueDir, "queue-dir",
 		getEnvString("QUEUE_DIR", defaultQueueDir),
@@ -197,28 +190,6 @@ func startReadingSpan(ctx context.Context, tracer trace.Tracer, sampleTraceparen
 	return tracer.Start(parent, "reading.enqueue")
 }
 
-// correlationHolder is a tiny atomic-string holder for the most-recently
-// observed SignalR correlation id. The SignalR consumer writes it on
-// every cook lifecycle envelope; the enqueuer reads it at the moment a
-// new sample is queued so the correlation rides with the reading even
-// if the SignalR connection drops between enqueue and publish.
-type correlationHolder struct {
-	v atomic.Value // string
-}
-
-func (h *correlationHolder) Get() string {
-	if v := h.v.Load(); v != nil {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return ""
-}
-
-func (h *correlationHolder) Set(s string) {
-	h.v.Store(s)
-}
-
 func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	// No long-lived process-scoped span is opened here. Rooting every worker's
 	// work in a single "main.run" span is exactly what produced one giant
@@ -228,13 +199,30 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	// — started from this span-less ctx — become their own roots per poll.
 
 	logrus.WithFields(logrus.Fields{
-		"deviceURL":     config.DeviceURL,
-		"pollInterval":  config.PollInterval,
-		"mockIoT":       config.MockIoT,
-		"signalRHubURL": config.SignalRHubURL,
-		"apiBaseURL":    config.APIBaseURL,
-		"queueDir":      config.QueueDir,
+		"deviceURL":    config.DeviceURL,
+		"pollInterval": config.PollInterval,
+		"mockIoT":      config.MockIoT,
+		"queueDir":     config.QueueDir,
 	}).Info("Starting data collection service")
+
+	// Cook session store: the twin writes it, the enqueuer reads it. Falls
+	// back to a user-home path if the configured path is not writable, so
+	// this works under `go run`.
+	sess, err := cooksession.Open(config.CookSessionStatePath)
+	if err != nil {
+		return fmt.Errorf("open cook session store: %w", err)
+	}
+	loaded := sess.Snapshot()
+	logrus.WithFields(logrus.Fields{
+		"cookId":                derefOrEmpty(loaded.CookID),
+		"correlationId":         derefOrEmpty(loaded.CorrelationID),
+		"appliedDesiredVersion": loaded.AppliedDesiredVersion,
+		"statePath":             sess.Path(),
+	}).Info("Cook session loaded")
+
+	// Graceful shutdown plumbing.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// IoT Hub client. The deviceId source is the connection string in
 	// production; for --mock-iot it falls back to the configured mock id.
@@ -247,17 +235,20 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	)
 
 	if config.MockIoT {
-		logrus.Info("Using mock IoT Hub client for development")
+		logrus.Info("Using mock IoT Hub client for development (no device twin: the cook session keeps its persisted state)")
 		iotClient = iothub.NewMockClient()
 		deviceID = config.MockDeviceID
 	} else {
 		if config.IoTHubConnStr == "" {
 			return fmt.Errorf("IoT Hub connection string is required when not using --mock-iot")
 		}
-		azureClient, err := iothub.NewAzureClient(config.IoTHubConnStr)
+		azureClient, err := iothub.NewAzureClient(config.IoTHubConnStr, iothub.WithCookTwin(sess))
 		if err != nil {
 			return fmt.Errorf("failed to create IoT Hub client: %w", err)
 		}
+		// Connect now and stay connected, so desired patches arrive while
+		// the device is idle and the twin GET on connect reconciles the cook.
+		azureClient.Start(ctx)
 		iotClient = azureClient
 		deviceID = azureClient.DeviceID()
 	}
@@ -269,29 +260,6 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 
 	if deviceID == "" {
 		return fmt.Errorf("deviceId resolved to empty string (mock or conn-string misconfigured)")
-	}
-
-	// Cook session store. Falls back to a user-home path if the
-	// configured path is not writable, so this works under `go run`.
-	sess, err := cooksession.Open(config.CookSessionStatePath)
-	if err != nil {
-		return fmt.Errorf("open cook session store: %w", err)
-	}
-	logrus.WithFields(logrus.Fields{
-		"cookId":    derefOrEmpty(sess.ActiveCookID()),
-		"statePath": sess.Path(),
-	}).Info("Cook session loaded")
-
-	// Best-effort startup reconcile against the API. Failure is
-	// non-fatal: we proceed with whatever the persisted state holds.
-	if config.APIBaseURL != "" {
-		reconCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := sess.Reconcile(reconCtx, config.APIBaseURL, deviceID); err != nil {
-			logrus.WithError(err).Warn("cooksession: reconcile failed at startup, continuing with persisted state")
-		}
-		cancel()
-	} else {
-		logrus.Debug("cooksession: no --api-base-url configured, skipping startup reconcile")
 	}
 
 	// Disk-backed outbound queue. The dir must exist; cooksession's
@@ -330,13 +298,6 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 		return fmt.Errorf("failed to create temperature collector: %w", err)
 	}
 
-	// Correlation context shared between SignalR consumer and enqueuer.
-	corr := &correlationHolder{}
-
-	// Graceful shutdown plumbing.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -344,20 +305,6 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 		logrus.WithField("signal", sig.String()).Info("Received shutdown signal")
 		cancel()
 	}()
-
-	// SignalR client (optional). When the hub URL is empty we rely on
-	// cooksession.Reconcile alone — handles the architect's "producer
-	// side does not exist yet" state without leaking a goroutine.
-	var sr *signalr.Client
-	if config.SignalRHubURL != "" {
-		sr = signalr.New(signalr.Options{})
-		if err := sr.Connect(ctx, config.SignalRHubURL, deviceID); err != nil {
-			logrus.WithError(err).Warn("signalr: Connect failed, continuing without SignalR")
-			sr = nil
-		}
-	} else {
-		logrus.Info("signalr: no --signalr-hub-url configured, running without SignalR (cooksession.Reconcile is the only cook-id source)")
-	}
 
 	var wg sync.WaitGroup
 
@@ -371,77 +318,16 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 		}
 	}()
 
-	// Goroutine 2: enqueuer. Drains the collector's Samples channel,
-	// maps V1->V2 with the CURRENT-at-collection-time cookId, snapshots
-	// the current correlation id, and writes the bytes to the queue.
+	// Goroutine 2: enqueuer. Drains the collector's Samples channel and
+	// writes each reading to the queue with the cook session current at
+	// collection time.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for sample := range tempCollector.Samples() {
-			// CONTINUE the per-reading trace that began at poll time (see
-			// startReadingSpan): the collector captured its `collector.poll`
-			// span's traceparent onto the Sample and injected the SAME context
-			// onto the device-controller request, so continuing from it keeps
-			// ONE trace id across poll -> device -> queue -> publish -> IoT.
-			readingCtx, readingSpan := startReadingSpan(ctx, tracer, sample.Traceparent)
-
-			rec, mErr := buildQueueRecord(readingCtx, sample.Status, sample.Timestamp, sess.ActiveCookID(), q.NextSeq(), corr.Get())
-			if mErr != nil {
-				logrus.WithError(mErr).Error("build queue record failed; dropping sample")
-				readingSpan.End()
-				continue
-			}
-			readingSpan.SetAttributes(telemetry.Dimensions{
-				DeviceID:       deviceID,
-				CookID:         cookIDFromPayload(rec.Payload),
-				CorrelationID:  rec.Correlation,
-				ProcessingPath: "reading-enqueue",
-			}.Attributes()...)
-			recBytes, mErr := json.Marshal(rec)
-			if mErr != nil {
-				logrus.WithError(mErr).Error("marshal queueRecord failed; dropping sample")
-				readingSpan.End()
-				continue
-			}
-			if eErr := q.Enqueue(recBytes); eErr != nil {
-				logrus.WithError(eErr).Error("queue.Enqueue failed; dropping sample")
-			}
-			readingSpan.End()
-		}
-		logrus.Info("enqueuer: samples channel closed, exiting")
+		runEnqueuer(ctx, tempCollector.Samples(), sess, q, deviceID, tracer)
 	}()
 
-	// Goroutine 3: signalr consumer. Updates cooksession on
-	// cook_started/cook_stopped and refreshes the correlation holder.
-	if sr != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for ev := range sr.Events() {
-				if ev.Correlation.ID != "" {
-					corr.Set(ev.Correlation.ID)
-				}
-				switch ev.Type {
-				case signalr.EventTypeCookStarted:
-					if ev.CookID != nil {
-						if err := sess.SetActiveCookID(ev.CookID); err != nil {
-							logrus.WithError(err).Error("cooksession: SetActiveCookID failed")
-						}
-					}
-				case signalr.EventTypeCookStopped:
-					if err := sess.SetActiveCookID(nil); err != nil {
-						logrus.WithError(err).Error("cooksession: clear failed")
-					}
-				default:
-					// cook_paused / cook_resumed: surfaced by the
-					// signalr package but not acted on at this layer.
-				}
-			}
-			logrus.Info("signalr consumer: events channel closed, exiting")
-		}()
-	}
-
-	// Goroutine 4: publisher. Drains the queue, mints messageId, stamps
+	// Goroutine 3: publisher. Drains the queue, mints messageId, stamps
 	// IoT Hub message properties, publishes. Failure to publish does NOT
 	// Ack — the record sits at the head and is retried after a delay.
 	wg.Add(1)
@@ -456,20 +342,52 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	<-ctx.Done()
 	logrus.Info("Shutting down gracefully...")
 
-	// Stop SignalR if running (closes the events channel so its
-	// consumer goroutine can exit).
-	if sr != nil {
-		if err := sr.Close(); err != nil {
-			logrus.WithError(err).Warn("signalr: Close returned error")
-		}
-	}
-
 	// Wait for all goroutines to finish. The deferred q.Close() then
 	// flushes pending fsyncs durably.
 	wg.Wait()
 
 	logrus.Info("All workers stopped")
 	return nil
+}
+
+// runEnqueuer drains samples until the channel closes. Each reading is mapped
+// V1->V2 with the cook id and correlation id from ONE cooksession snapshot
+// taken at enqueue time, so both always come from the same applied twin
+// version, and is written to q.
+func runEnqueuer(ctx context.Context, samples <-chan collector.Sample, sess *cooksession.Store, q *queue.Queue, deviceID string, tracer trace.Tracer) {
+	for sample := range samples {
+		// CONTINUE the per-reading trace that began at poll time (see
+		// startReadingSpan): the collector captured its `collector.poll`
+		// span's traceparent onto the Sample and injected the SAME context
+		// onto the device-controller request, so continuing from it keeps
+		// ONE trace id across poll -> device -> queue -> publish -> IoT.
+		readingCtx, readingSpan := startReadingSpan(ctx, tracer, sample.Traceparent)
+
+		snap := sess.Snapshot()
+		rec, mErr := buildQueueRecord(readingCtx, sample.Status, sample.Timestamp, snap.CookID, q.NextSeq(), derefOrEmpty(snap.CorrelationID))
+		if mErr != nil {
+			logrus.WithError(mErr).Error("build queue record failed; dropping sample")
+			readingSpan.End()
+			continue
+		}
+		readingSpan.SetAttributes(telemetry.Dimensions{
+			DeviceID:       deviceID,
+			CookID:         cookIDFromPayload(rec.Payload),
+			CorrelationID:  rec.Correlation,
+			ProcessingPath: "reading-enqueue",
+		}.Attributes()...)
+		recBytes, mErr := json.Marshal(rec)
+		if mErr != nil {
+			logrus.WithError(mErr).Error("marshal queueRecord failed; dropping sample")
+			readingSpan.End()
+			continue
+		}
+		if eErr := q.Enqueue(recBytes); eErr != nil {
+			logrus.WithError(eErr).Error("queue.Enqueue failed; dropping sample")
+		}
+		readingSpan.End()
+	}
+	logrus.Info("enqueuer: samples channel closed, exiting")
 }
 
 // buildQueueRecord renders one collected reading into the queue record the
