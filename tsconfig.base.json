@@ -27,7 +27,8 @@
       "@meatgeekv2/tracing": ["libs/tracing/src/index.ts"],
       "@meatgeekv2/ui-components": ["libs/ui-components/src/index.ts"],
       "@meatgeekv2/utils": ["libs/utils/src/index.ts"],
-      "@meatgeekv2/api-specs": ["libs/api-specs/src/index.ts"]
+      "@meatgeekv2/api-specs": ["libs/api-specs/src/index.ts"],
+      "@meatgeekv2/api-specs/types": ["libs/api-specs/src/generated/types.d.ts"]
     }
   },
   "exclude": ["node_modules", "tmp"]

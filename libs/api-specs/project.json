@@ -49,7 +49,15 @@
       "options": {
         "command": "npx openapi-typescript libs/api-specs/spec/openapi.yaml -o libs/api-specs/src/generated/types.d.ts",
         "cwd": "."
-      }
+      },
+      "inputs": [
+        "{projectRoot}/spec/**/*",
+        {
+          "externalDependencies": ["openapi-typescript"]
+        }
+      ],
+      "outputs": ["{projectRoot}/src/generated"],
+      "cache": true
     }
   },
   "tags": ["type:lib", "scope:shared"]

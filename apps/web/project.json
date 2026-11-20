@@ -17,7 +17,15 @@
         "production": {
           "mode": "production"
         }
-      }
+      },
+      "dependsOn": [
+        "^build",
+        {
+          "projects": ["api-specs"],
+          "target": "generate-types"
+        },
+        "typecheck"
+      ]
     },
     "serve": {
       "executor": "@nx/vite:dev-server",
@@ -52,8 +60,39 @@
         }
       }
     },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        {
+          "projects": ["api-specs"],
+          "target": "generate-types"
+        }
+      ],
+      "inputs": [
+        "default",
+        "^production",
+        {
+          "externalDependencies": ["typescript"]
+        }
+      ],
+      "cache": true,
+      "options": {
+        "commands": [
+          "tsc -p apps/web/tsconfig.app.json --noEmit",
+          "tsc -p apps/web/tsconfig.spec.json --noEmit"
+        ],
+        "parallel": false,
+        "cwd": "."
+      }
+    },
     "lint": {
-      "executor": "@nx/eslint:lint"
+      "executor": "@nx/eslint:lint",
+      "dependsOn": [
+        {
+          "projects": ["api-specs"],
+          "target": "generate-types"
+        }
+      ]
     },
     "test": {
       "executor": "@nx/jest:jest",
@@ -67,17 +106,14 @@
           "ci": true,
           "coverage": true
         }
-      }
-    },
-    "deploy": {
-      "executor": "nx:run-commands",
-      "options": {
-        "commands": [
-          "az staticwebapp deploy --name meatgeek-web-{args.env} --source-location ./dist/apps/web",
-          "echo 'Web app deployed to Azure Static Web Apps'"
-        ],
-        "parallel": false
-      }
+      },
+      "dependsOn": [
+        {
+          "projects": ["api-specs"],
+          "target": "generate-types"
+        },
+        "typecheck"
+      ]
     }
   },
   "tags": ["type:app", "scope:web", "platform:react"],
