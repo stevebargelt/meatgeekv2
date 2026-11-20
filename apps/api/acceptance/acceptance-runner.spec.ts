@@ -2710,6 +2710,175 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
   });
 });
 
+describe('chart device (HAR-84)', () => {
+  const CHART_DEVICE = `${SIM_DEVICE}-chart`;
+  const CHART_KEY = 'Y2hhcnQtZGV2aWNlLWtleS1mb3ItdGVzdHMtb25seQ==';
+  const CHART_CONNECTION_STRING = `HostName=stub-hub.azure-devices.net;DeviceId=${CHART_DEVICE};SharedAccessKey=${CHART_KEY}`;
+  const chartEnv = {
+    ACCEPTANCE_CHART_DEVICE_ID: CHART_DEVICE,
+    SIMDEVICE_CHART_CONNECTION_STRING: CHART_CONNECTION_STRING,
+  };
+  const baseEnv = () => ({
+    ACCEPTANCE_BASE_URL: stub!.baseUrl,
+    ACCEPTANCE_BEARER_TOKEN: TOKEN,
+    ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+  });
+
+  /** A one-proof group: send as `device`, then fail with whatever simdevice
+   *  printed, so it reaches the failure line and the output. */
+  const echoing = (device: 'simulated' | 'chart'): ProofGroup => ({
+    name: 'chart device',
+    create: () => [
+      {
+        name: `simdevice as the ${device} device`,
+        run: async api => {
+          const sent = await api.runSimDevice(['--count', '1'], { device });
+          throw new Error(
+            `simdevice said ${sent.stderrFirstLine} and ${JSON.stringify(sent.messages)}`
+          );
+        },
+      },
+    ],
+  });
+
+  it.each<FakeMode>(['leak-stderr', 'leak-stdout'])(
+    '(a) never prints the chart connection string or its key when simdevice prints them (%s)',
+    async mode => {
+      stub = await startStub();
+      const result = await run({ ...baseEnv(), ...simEnv(mode), ...chartEnv }, [echoing('chart')]);
+
+      // The leak reached the failure line, and was masked there...
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain('simdevice (chart) → exit');
+      expect(result.failures[0]).toContain('[redacted]');
+      expect(
+        result.lines.some(line => /^\s+EXEC\s+simdevice \(chart\) --count 1\s/.test(line))
+      ).toBe(true);
+      // ...and nowhere in the output is the credential, its key, or its parts.
+      for (const text of [result.output, ...result.failures]) {
+        expect(text).not.toContain(CHART_CONNECTION_STRING);
+        expect(text).not.toContain(CHART_KEY);
+        expect(text).not.toContain('SharedAccessKey=');
+        expect(text).not.toContain(`DeviceId=${CHART_DEVICE};`);
+      }
+    }
+  );
+
+  it('(b) hands each simdevice run only the credential of the device it sends as', async () => {
+    stub = await startStub();
+    const bin = join(fakeDir, 'simdevice-env-report');
+    writeFileSync(
+      bin,
+      `#!${process.execPath}
+const conn = process.env.SIMDEVICE_CONNECTION_STRING;
+process.stdout.write(JSON.stringify({
+  standing: conn === ${JSON.stringify(SIM_CONNECTION_STRING)},
+  chart: conn === ${JSON.stringify(CHART_CONNECTION_STRING)},
+  chartVariable: process.env.SIMDEVICE_CHART_CONNECTION_STRING !== undefined,
+  token: process.env.ACCEPTANCE_BEARER_TOKEN !== undefined,
+}) + '\\n');
+`
+    );
+    chmodSync(bin, 0o755);
+    const seen: Record<string, unknown> = {};
+    let chartDeviceId: string | undefined;
+    // In CI the runner's own process environment carries the chart credential.
+    process.env['SIMDEVICE_CHART_CONNECTION_STRING'] = CHART_CONNECTION_STRING;
+    try {
+      const result = await run(
+        { ...baseEnv(), ...simEnv(), ACCEPTANCE_SIMDEVICE_BIN: bin, ...chartEnv },
+        [
+          {
+            name: 'chart device',
+            create: () => [
+              {
+                name: 'each device gets its own credential',
+                run: async api => {
+                  chartDeviceId = api.chartDeviceId;
+                  seen['simulated'] = (await api.runSimDevice(['--count', '1'])).messages[0];
+                  seen['chart'] = (
+                    await api.runSimDevice(['--count', '1'], { device: 'chart' })
+                  ).messages[0];
+                },
+              },
+            ],
+          },
+        ]
+      );
+      expect(result.failures).toEqual([]);
+    } finally {
+      delete process.env['SIMDEVICE_CHART_CONNECTION_STRING'];
+    }
+
+    expect(chartDeviceId).toBe(CHART_DEVICE);
+    expect(seen['simulated']).toEqual({
+      standing: true,
+      chart: false,
+      chartVariable: false,
+      token: false,
+    });
+    expect(seen['chart']).toEqual({
+      standing: false,
+      chart: true,
+      chartVariable: false,
+      token: false,
+    });
+  });
+
+  it('(c) is optional: without it chartDeviceId is undefined and a chart run fails, unstarted', async () => {
+    stub = await startStub();
+    let chartDeviceId: string | undefined = 'unset';
+    const result = await run({ ...baseEnv(), ...simEnv() }, [
+      {
+        name: 'chart device',
+        create: () => [
+          {
+            name: 'reads the chart device id',
+            run: async api => {
+              chartDeviceId = api.chartDeviceId;
+            },
+          },
+          {
+            name: 'cannot send as an unconfigured chart device',
+            run: async api => {
+              await api.runSimDevice(['--count', '1'], { device: 'chart' });
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(chartDeviceId).toBeUndefined();
+    expect(result.failures).toEqual([
+      'FAIL chart device › cannot send as an unconfigured chart device — simdevice (chart) → ' +
+        'not started: the chart device is not configured: ACCEPTANCE_CHART_DEVICE_ID and ' +
+        'SIMDEVICE_CHART_CONNECTION_STRING are not set',
+    ]);
+  });
+
+  it.each([
+    ['ACCEPTANCE_CHART_DEVICE_ID', 'SIMDEVICE_CHART_CONNECTION_STRING'],
+    ['SIMDEVICE_CHART_CONNECTION_STRING', 'ACCEPTANCE_CHART_DEVICE_ID'],
+  ])('(d) stops at once when %s is set without %s', async (given, absent) => {
+    stub = await startStub();
+    for (const value of [undefined, '  ']) {
+      const result = await run({
+        ...baseEnv(),
+        ...simEnv(),
+        ...chartEnv,
+        [absent]: value,
+      });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.failures).toEqual([
+        `acceptance: ${given} is set but ${absent} is not; the chart device needs both or neither`,
+      ]);
+      expect(result.output).not.toContain(CHART_KEY);
+    }
+    expect(stub.requests).toHaveLength(0);
+  });
+});
+
 describe('OpenAPI contract (HAR-77, against the stub)', () => {
   const GROUP = 'contract';
   /** A one-proof group sending `request`, and checking the status when given. */
