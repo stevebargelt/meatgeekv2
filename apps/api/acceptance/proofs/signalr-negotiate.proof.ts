@@ -2,6 +2,8 @@ import { HubConnectionBuilder, HubConnectionState, LogLevel } from '@microsoft/s
 
 import type { AcceptanceApi } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
+import type { NegotiateBody } from '../lib/signalr';
+import { CONNECT_TIMEOUT_MS, describeError, negotiateFailureMessage, within } from '../lib/signalr';
 
 /**
  * HAR-57 (MG-30) — POST /negotiate hands the caller a working SignalR
@@ -23,60 +25,6 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  * names the SignalR call that failed and its status. Only a reason of the fixed
  * `signalr_…` shape is printed; anything else is reported as unrecognised.
  */
-
-/** How long `start()` and `stop()` may take before the proof fails. */
-const CONNECT_TIMEOUT_MS = 30_000;
-
-interface NegotiateBody {
-  url?: unknown;
-  accessToken?: unknown;
-  error?: unknown;
-  reason?: unknown;
-}
-
-/** The shape of every code negotiate puts in a 503 `reason`. */
-const SIGNALR_REASON = /^signalr_[a-z0-9_]{1,80}$/;
-
-/** The failure line for a non-200 negotiate: status, error code and `reason`. */
-function negotiateFailureMessage(status: number, body: unknown): string {
-  const { error, reason } = (body ?? {}) as NegotiateBody;
-  const code =
-    typeof error === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error) ? error : undefined;
-  let why: string;
-  if (reason === undefined) {
-    why = 'no reason in the body';
-  } else if (typeof reason === 'string' && SIGNALR_REASON.test(reason)) {
-    why = `reason ${reason}`;
-  } else {
-    why = 'reason unrecognised, not printed';
-  }
-  return `expected 200, got ${status}${code ? ` (${code})` : ''}; ${why}`;
-}
-
-/** Rejects with a fixed message if `promise` has not settled in `ms`. */
-async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new ProofFailure(`${what} did not finish in ${ms} ms`)), ms);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** The error's name and first line, with the url and token masked. */
-function describeError(error: unknown, secrets: readonly string[]): string {
-  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  let line = raw.split('\n')[0];
-  for (const secret of secrets) {
-    if (secret) {
-      line = line.split(secret).join('***');
-    }
-  }
-  return line.replace(/https?:\/\/\S+/g, '<url>');
-}
 
 export default defineProofs('signalr negotiate', () => {
   let connection: { url: string; accessToken: string } | undefined;

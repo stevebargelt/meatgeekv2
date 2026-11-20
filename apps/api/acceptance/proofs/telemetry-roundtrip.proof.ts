@@ -1,13 +1,10 @@
-import type {
-  Device,
-  RegisterDeviceRequest,
-  TemperatureHistoryResponse,
-  TemperatureReading,
-} from '@meatgeekv2/api-interfaces';
+import type { TemperatureHistoryResponse, TemperatureReading } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { expectErrorCode, expectNoSystemProperties } from '../lib/checks';
 import { defineProofs, ProofFailure } from '../lib/proof';
+import type { SentReading } from '../lib/telemetry';
+import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/telemetry';
 
 /**
  * HAR-44 (MG-79, the live criterion) — a reading sent to IoT Hub the way the Pi
@@ -38,26 +35,7 @@ export const ROUNDTRIP_POLL = {
 /** How far before `sentAt` the history window opens. */
 const HISTORY_LOOKBACK_MS = 5 * 60 * 1000;
 
-const DEVICE_NAME = 'Simulated smoker (acceptance)';
-
-interface SentReading {
-  readonly timestamp: string;
-  readonly sentAt: string;
-}
-
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-
-const isDate = (value: unknown): value is string =>
-  typeof value === 'string' && !Number.isNaN(Date.parse(value));
-
-/**
- * True when `value` is the same instant as `sent`. Compared as instants, not
- * strings: simdevice prints `timestamp` with three fractional digits
- * (`…05.120Z`), but the payload is Go's RFC3339Nano, which drops trailing
- * zeros (`…05.12Z`), and the API returns the payload's string verbatim.
- */
-const sameInstant = (value: unknown, sent: string): boolean =>
-  isDate(value) && Date.parse(value) === Date.parse(sent);
 
 /** Fail unless `value` is the sent reading in its contract shape. */
 function expectSentReading(
@@ -95,26 +73,7 @@ export default defineProofs('telemetry round-trip', () => {
     {
       name: 'POST /devices registers the simulated device to the caller',
       async run(api: AcceptanceApi) {
-        const deviceId = api.simulatedDeviceId;
-        const body: RegisterDeviceRequest = { deviceId, name: DEVICE_NAME, model: 'simdevice' };
-        const response = await api.request({ method: 'POST', path: '/devices', body });
-        if (response.status === 409) {
-          // Registered by an earlier run. Only a 200 here says it is the caller's.
-          expectErrorCode(api, response, 'DEVICE_CONFLICT');
-          const owned = await api.request<Device>({
-            method: 'GET',
-            path: `/devices/${encodeURIComponent(deviceId)}`,
-            route: '/devices/{id}',
-          });
-          api.check(
-            owned,
-            owned.status === 200,
-            `${deviceId} is registered, but not to the caller (expected 200, got ${owned.status})`
-          );
-          api.check(owned, owned.body?.id === deviceId, `device.id is not ${deviceId}`);
-        } else {
-          api.expectStatus(response, 201);
-        }
+        await registerSimulatedDevice(api);
         registered = true;
       },
     },
@@ -124,34 +83,7 @@ export default defineProofs('telemetry round-trip', () => {
         if (!registered) {
           throw new Error('the simulated device was not registered by an earlier proof');
         }
-        const run = await api.runSimDevice(['--count', '1']);
-        if (run.exitCode !== 0) {
-          throw new ProofFailure(
-            `simdevice exited ${run.exitCode ?? '(killed)'}, expected 0` +
-              (run.stderrFirstLine ? `: ${run.stderrFirstLine}` : '')
-          );
-        }
-        if (run.messages.length !== 1 || run.unparsedLines > 0) {
-          throw new ProofFailure(
-            `simdevice printed ${run.messages.length} JSON line(s) and ` +
-              `${run.unparsedLines} other line(s) on stdout, expected exactly one JSON line`
-          );
-        }
-        const message = run.messages[0] as Record<string, unknown> | null;
-        const timestamp = message?.['timestamp'];
-        const sentAt = message?.['sentAt'];
-        if (!isDate(timestamp) || !isDate(sentAt)) {
-          throw new ProofFailure(
-            `simdevice line has timestamp ${JSON.stringify(timestamp)} and sentAt ` +
-              `${JSON.stringify(sentAt)}; both must be dates`
-          );
-        }
-        if (message?.['deviceId'] !== api.simulatedDeviceId) {
-          throw new ProofFailure(
-            `simdevice sent as ${JSON.stringify(message?.['deviceId'])}, not ${api.simulatedDeviceId}`
-          );
-        }
-        sent = { timestamp, sentAt };
+        sent = await sendOneReading(api);
       },
     },
     {

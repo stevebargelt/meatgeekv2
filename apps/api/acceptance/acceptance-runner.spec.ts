@@ -23,6 +23,7 @@ import { join } from 'path';
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
 import type { AcceptanceApi, SimDeviceOptions } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
+import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
 import volumeGroup, { VOLUME } from './proofs/telemetry-volume.proof';
 
@@ -102,6 +103,13 @@ interface StubOptions {
   readonly signalRRejectsToken?: boolean;
   /** HAR-59: POST /negotiate answers 503 SIGNALR_UNAVAILABLE with this `reason`. */
   readonly negotiateUnavailableReason?: string;
+  /** HAR-63: what the stub pushes on target `temperature` to each open SignalR
+   *  connection after a `--count 1` send. It always pushes a replayed older
+   *  reading of the simulated device and the sent timestamp for another device
+   *  first; then `deliver` (default) the sent reading, `never` nothing,
+   *  `extra-field` the sent reading with an `iothub_name`, `no-enqueued` the
+   *  sent reading without `enqueuedTimeUtc`. */
+  readonly livePush?: 'deliver' | 'never' | 'extra-field' | 'no-enqueued';
 }
 
 interface StubCook {
@@ -133,6 +141,8 @@ interface Stub {
   readonly requests: Array<{ method: string; path: string; authorization?: string }>;
   /** HAR-45: the arguments of each top-up the fake simdevice reported. */
   readonly topups: string[][];
+  /** HAR-63: how many SignalR connections each `--count 1` send was pushed to. */
+  readonly livePushes: number[];
   /** HAR-45: the `total` each `limit=1` read of the simulated device returned. */
   readonly volumeTotals: number[];
   close(): Promise<void>;
@@ -199,6 +209,29 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     string,
     { outbox: string[]; held?: ServerResponse; started: boolean; closed: boolean }
   >();
+  const livePushes: number[] = [];
+  /** HAR-63: what broadcastTemperature would push to the simulated device's
+   *  group, sent to every open connection (all of them the caller's). */
+  const pushLiveReading = () => {
+    const push = options.livePush ?? 'deliver';
+    const invocation = (payload: unknown) =>
+      `${JSON.stringify({ type: 1, target: 'temperature', arguments: [payload] })}${RS}`;
+    const enqueuedTimeUtc = new Date().toISOString();
+    const sent: Record<string, unknown> = { ...simReading(simServed), enqueuedTimeUtc };
+    if (push === 'extra-field') sent['iothub_name'] = 'stub-hub';
+    if (push === 'no-enqueued') delete sent['enqueuedTimeUtc'];
+    const messages = [
+      invocation({ ...simReading(OLDER_READINGS[0]), enqueuedTimeUtc }),
+      invocation({ ...simReading(simServed), deviceId: 'someone-elses-device', enqueuedTimeUtc }),
+      ...(push === 'never' ? [] : [invocation(sent)]),
+    ];
+    const open = [...signalRConnections.values()].filter(c => c.started && !c.closed);
+    livePushes.push(open.length);
+    for (const connection of open) {
+      connection.outbox.push(...messages);
+      flushPoll(connection);
+    }
+  };
   const flushPoll = (connection: { outbox: string[]; held?: ServerResponse; closed: boolean }) => {
     const held = connection.held;
     if (!held) return;
@@ -300,8 +333,13 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       if (request.method === 'POST' && url.pathname === '/api/__simdevice/sent') {
         // HAR-45: the fake simdevice reporting a top-up. Not an API route.
         const { args } = (await readJson(request)) as { args: string[] };
-        topups.push(args);
-        simPending += Number(args[args.indexOf('--count') + 1]);
+        if (args.join(' ') === '--count 1') {
+          // HAR-63: the one reading; broadcastTemperature pushes it live.
+          setTimeout(pushLiveReading, 20);
+        } else {
+          topups.push(args);
+          simPending += Number(args[args.indexOf('--count') + 1]);
+        }
         response.writeHead(204);
         response.end();
         return;
@@ -656,6 +694,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     requests,
     signalRRequests,
     topups,
+    livePushes,
     volumeTotals,
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
   };
@@ -680,7 +719,8 @@ let fakeDir: string;
  * `mode` says. In `ok` mode it exits 2 unless it got `--count 1` (the round
  * trip) or `--count N --inflight M --interval D` (a HAR-45/46 top-up) and the credential
  * arrived through its environment, so the runner's hand-over is checked too.
- * A top-up is reported to the running stub first, so the stub can serve it.
+ * A top-up is reported to the running stub first, so the stub can serve it;
+ * so is a `--count 1` send (HAR-63), so the stub can push it to SignalR clients.
  * `topup-exit1` sends the round trip's reading but fails a top-up; `hang`
  * never exits.
  */
@@ -703,7 +743,17 @@ if (mode === 'ok' || mode === 'topup-exit1') {
   }
   if (!topup) {
     process.stderr.write('connected\\n');
-    line(reading(${JSON.stringify(SIM_TIMESTAMP)}));
+    const print = () => line(reading(${JSON.stringify(SIM_TIMESTAMP)}));
+    // HAR-63: tell the stub, so it can push the reading to SignalR clients.
+    if (${JSON.stringify(notifyUrl)}) {
+      fetch(${JSON.stringify(notifyUrl)}, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ args: process.argv.slice(2) }),
+      }).then(print, print);
+    } else {
+      print();
+    }
   } else if (mode === 'topup-exit1') {
     process.stderr.write('send reading 3 of ' + topup[1] + ': connection lost\\nmore detail\\n');
     process.exit(1);
@@ -759,6 +809,7 @@ async function runAgainstStub(options: StubOptions = {}, mode: FakeMode = 'ok'):
 }
 
 const realPoll = { ...ROUNDTRIP_POLL };
+const realLiveWait = { ...LIVE_WAIT };
 const realVolume = { ...VOLUME };
 
 beforeAll(() => {
@@ -766,6 +817,8 @@ beforeAll(() => {
   // The round-trip proof polls every 1 s for up to 120 s live; here, far less.
   ROUNDTRIP_POLL.intervalMs = 5;
   ROUNDTRIP_POLL.capMs = 300;
+  // HAR-63: the live push is waited for up to 90 s live; here, 300 ms.
+  LIVE_WAIT.capMs = 300;
   // HAR-45: a long cook is 8,640 readings, re-read every 10 s for up to 15 min
   // live. Here a few hundred (still over the 100-reading default page), and
   // polls in milliseconds. The send interval is left as it is live.
@@ -777,6 +830,7 @@ beforeAll(() => {
 
 afterAll(() => {
   Object.assign(ROUNDTRIP_POLL, realPoll);
+  Object.assign(LIVE_WAIT, realLiveWait);
   Object.assign(VOLUME, realVolume);
   rmSync(fakeDir, { recursive: true, force: true });
 });
@@ -881,11 +935,22 @@ describe('live acceptance runner (against an in-process stub)', () => {
   });
 
   /** HAR-26 and HAR-28: the cooks lifecycle and the temperatures proof also
-   *  register their own device, so a broken POST /devices fails them too. */
+   *  register their own device, so a broken POST /devices fails them too.
+   *  HAR-63: the live-temperature group registers the simulated device first
+   *  (201), so the round trip, which runs after it, takes the 409 path and
+   *  reads GET /devices/{id}. */
   const groupsUsing = (route: DeviceRoute): string[] =>
     route === 'POST /devices'
-      ? ['cooks lifecycle ›', 'devices ›', 'temperatures ›', 'telemetry round-trip ›']
-      : ['devices ›'];
+      ? [
+          'cooks lifecycle ›',
+          'devices ›',
+          'temperatures ›',
+          'signalr live temperature ›',
+          'telemetry round-trip ›',
+        ]
+      : route === 'GET /devices/{id}'
+        ? ['devices ›', 'telemetry round-trip ›']
+        : ['devices ›'];
 
   it.each(DEVICE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',
@@ -961,10 +1026,15 @@ describe('live acceptance runner (against an in-process stub)', () => {
       const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
       expect(result.exitCode).not.toBe(0);
-      expect(result.failures).toHaveLength(1);
-      expect(result.failures[0]).toContain(`${route} → 503`);
-      expect(result.failures[0]).toContain('signalr negotiate ›');
+      // HAR-63: the live-temperature group negotiates too.
+      expect(result.failures).toHaveLength(2);
+      for (const group of ['signalr live temperature ›', 'signalr negotiate ›']) {
+        expect(result.failures.find(line => line.includes(group))).toContain(`${route} → 503`);
+      }
       expect(result.output).toContain('SKIP signalr negotiate › a SignalR client connects');
+      expect(result.output).toContain(
+        'SKIP signalr live temperature › simdevice --count 1 sends one reading'
+      );
       expect(stub!.signalRRequests).toEqual([]);
     }
   );
@@ -975,14 +1045,20 @@ describe('live acceptance runner (against an in-process stub)', () => {
     });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
+    // HAR-63: the live-temperature group negotiates too, and reports it the same way.
+    expect(result.failures).toHaveLength(2);
     expect(result.failures[0]).toContain(
+      'FAIL signalr live temperature › POST /negotiate returns 200'
+    );
+    expect(result.failures[1]).toContain(
       'FAIL signalr negotiate › POST /negotiate returns a url and an accessToken'
     );
-    expect(result.failures[0]).toContain('POST /negotiate → 503');
-    expect(result.failures[0]).toContain(
-      'expected 200, got 503 (SIGNALR_UNAVAILABLE); reason signalr_add_user_to_group_status_404'
-    );
+    for (const failure of result.failures) {
+      expect(failure).toContain('POST /negotiate → 503');
+      expect(failure).toContain(
+        'expected 200, got 503 (SIGNALR_UNAVAILABLE); reason signalr_add_user_to_group_status_404'
+      );
+    }
   });
 
   it('(b) HAR-59: a reason that is not a fixed signalr_ code is not printed', async () => {
@@ -1001,9 +1077,15 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ signalRRejectsToken: true });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
-    expect(result.failures[0]).toContain('FAIL signalr negotiate › a SignalR client connects');
-    expect(result.failures[0]).toContain('start() failed');
+    // HAR-63: the live-temperature group connects too.
+    expect(result.failures).toHaveLength(2);
+    expect(result.failures[0]).toContain(
+      'FAIL signalr live temperature › POST /negotiate returns 200'
+    );
+    expect(result.failures[1]).toContain('FAIL signalr negotiate › a SignalR client connects');
+    for (const failure of result.failures) {
+      expect(failure).toContain('start() failed');
+    }
     expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
     expect(result.output).not.toContain('/client/');
   });
@@ -1411,6 +1493,107 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
   });
 });
 
+describe('signalr live temperature (HAR-63, against the stub and a fake simdevice)', () => {
+  const GROUP = 'signalr live temperature ›';
+  const STEPS = [
+    'POST /devices registers the simulated device to the caller',
+    'POST /negotiate returns 200 and a SignalR client listening for temperature connects',
+    'simdevice --count 1 sends one reading through IoT Hub',
+    'the sent reading arrives on target temperature, with enqueuedTimeUtc and no other field',
+    'the SignalR connection stops',
+  ];
+  const liveFailures = (result: Run) =>
+    result.failures.filter(line => line.startsWith(`FAIL ${GROUP}`));
+  /** Every SignalR connection the run opened was closed again (a DELETE each). */
+  const expectEveryConnectionStopped = () => {
+    const calls = stub!.signalRRequests.map(r => `${r.method} ${r.path.split('?')[0]}`);
+    const opened = calls.filter(call => call === 'POST /client/negotiate').length;
+    expect(opened).toBeGreaterThan(0);
+    expect(calls.filter(call => call === 'DELETE /client/')).toHaveLength(opened);
+  };
+
+  it('(a) passes when the sent reading is pushed after replayed and other-device messages, and prints METRIC signalr-delivery-ms', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    const metrics = result.lines.filter(line => line.startsWith('METRIC signalr-delivery-ms '));
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatch(/^METRIC signalr-delivery-ms \d+$/);
+    // The reading went to the one open connection, the proof's own; the round
+    // trip's later send found none open.
+    expect(stub!.livePushes).toEqual([1, 0]);
+    // Registration came before negotiate, so the group membership includes it.
+    const label = (step: number) => result.lines.indexOf(`RUN  ${GROUP} ${STEPS[step]}`);
+    const negotiate = result.lines.findIndex(
+      (line, i) => i > label(1) && /^\s+POST\s+\/negotiate\s+200\s/.test(line)
+    );
+    expect(label(0)).toBeLessThan(label(1));
+    expect(negotiate).toBeLessThan(label(2));
+    expectEveryConnectionStopped();
+    expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
+    expect(result.output).not.toContain('/client/');
+  });
+
+  it('(a) matches the sent timestamp as an instant: printed …33.120Z, pushed …33.12Z', async () => {
+    const result = await runAgainstStub({ simServedTimestamp: '2026-11-19T16:47:33.12Z' });
+
+    expect(result.failures).toEqual([]);
+    expect(result.lines).toContain(`PASS ${GROUP} ${STEPS[3]}`);
+  });
+
+  it('(b) fails naming the cap and what did arrive when the reading is never pushed, and stops the connection', async () => {
+    const result = await runAgainstStub({ livePush: 'never' });
+
+    expect(result.exitCode).not.toBe(0);
+    const failures = liveFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`FAIL ${GROUP} ${STEPS[3]}`);
+    expect(failures[0]).toContain(`connected and sent (timestamp ${SIM_TIMESTAMP}, sentAt `);
+    expect(failures[0]).toContain(
+      `nothing within the ${LIVE_WAIT.capMs / 1000} s cap; the connection is Connected`
+    );
+    // The replayed reading and the other device's were seen and passed over.
+    expect(failures[0]).toContain(
+      `Received 2 temperature message(s), 1 for ${SIM_DEVICE}, last timestamp "${OLDER_READINGS[0]}"`
+    );
+    expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[4]}`);
+    expect(result.output).not.toMatch(/^METRIC signalr-delivery-ms /m);
+    expectEveryConnectionStopped();
+    // Only this group failed.
+    expect(result.failures).toEqual(failures);
+  });
+
+  it.each([
+    ['extra-field', 'field(s) toTemperatureReading does not produce: iothub_name'],
+    ['no-enqueued', 'the reading arrived without a date enqueuedTimeUtc (undefined)'],
+  ] as const)(
+    '(c) fails when the pushed reading is %s, and stops the connection',
+    async (push, message) => {
+      const result = await runAgainstStub({ livePush: push });
+
+      const failures = liveFailures(result);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain(`FAIL ${GROUP} ${STEPS[3]}`);
+      expect(failures[0]).toContain(message);
+      expect(result.output).not.toMatch(/^METRIC signalr-delivery-ms /m);
+      expectEveryConnectionStopped();
+    }
+  );
+
+  it('(d) fails at the send when simdevice exits 1, and stops the connection', async () => {
+    const result = await runAgainstStub({}, 'exit1');
+
+    const failures = liveFailures(result);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(`FAIL ${GROUP} ${STEPS[2]}`);
+    expect(failures[0]).toContain('simdevice → exit 1');
+    expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[3]}`);
+    expectEveryConnectionStopped();
+  });
+});
+
 describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () => {
   const GROUP = 'telemetry volume ›';
   const STEPS = [
@@ -1436,9 +1619,12 @@ describe('telemetry volume (HAR-45, against the stub and a fake simdevice)', () 
     expect(result.failures).toEqual([]);
     expect(result.exitCode).toBe(0);
     STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
-    // No simdevice top-up: the only run is the round trip's.
+    // No simdevice top-up: the only runs are the live push's (HAR-63) and the
+    // round trip's, one reading each.
     expect(stub!.topups).toEqual([]);
-    expect(result.lines.filter(line => /^\s+EXEC\s/.test(line))).toHaveLength(1);
+    const execs = result.lines.filter(line => /^\s+EXEC\s/.test(line));
+    expect(execs).toHaveLength(2);
+    execs.forEach(line => expect(line).toMatch(/^\s+EXEC\s+simdevice --count 1\s/));
     expect(metric(result, 'history-total-before')).toEqual([
       `METRIC history-total-before ${VOLUME.target}`,
     ]);
