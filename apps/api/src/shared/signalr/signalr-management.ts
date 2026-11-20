@@ -22,6 +22,13 @@ import { HUB_NAME } from '../../functions/signalr/envelope';
  * (never DefaultAzureCredential). The Function App identity holds
  * `SignalR Service Owner`.
  *
+ * THROTTLING (HAR-80)
+ * A `429` or `503` answer is retried: up to {@link MAX_ATTEMPTS} attempts in
+ * total, each with a fresh timeout. Before a retry the client waits for the
+ * answer's `Retry-After` (seconds, capped at {@link RETRY_AFTER_CAP_MS}) or,
+ * without one, the next of {@link RETRY_BACKOFF_MS}. Every other non-2xx
+ * answer, a network failure and a timeout fail at once.
+ *
  * SANITIZED FAILURES
  * Every failure is a {@link SignalRUnavailableError} carrying a fixed operation
  * name and, when the service answered, its numeric status. The error never
@@ -49,6 +56,36 @@ export const CLIENT_TOKEN_MINUTES = 60;
 
 /** How long one REST call may take before it counts as a failure. */
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/** Statuses that mean "throttled, try again" (HAR-80). */
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([429, 503]);
+
+/** Attempts per call, the first included, when SignalR keeps throttling. */
+export const MAX_ATTEMPTS = 4;
+
+/** Waits before retries 1, 2 and 3 when the answer carries no `Retry-After`. */
+export const RETRY_BACKOFF_MS: readonly number[] = [200, 400, 800];
+
+/** The longest a `Retry-After` header may make one retry wait. */
+export const RETRY_AFTER_CAP_MS = 2_000;
+
+/** Production wait between retries. */
+function sleepFor(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * The wait before retry number `retry` (0-based): `Retry-After` in seconds,
+ * capped at {@link RETRY_AFTER_CAP_MS}, when present and numeric; otherwise the
+ * backoff step.
+ */
+function retryDelayMs(response: Response, retry: number): number {
+  const header = response.headers.get('Retry-After')?.trim();
+  if (header && /^\d+(\.\d+)?$/.test(header)) {
+    return Math.min(Number(header) * 1000, RETRY_AFTER_CAP_MS);
+  }
+  return RETRY_BACKOFF_MS[Math.min(retry, RETRY_BACKOFF_MS.length - 1)];
+}
 
 /** The group a device's readings and events are sent to. */
 export function deviceGroup(deviceId: string): string {
@@ -103,10 +140,14 @@ export interface SignalRManagementPort extends SignalRGroupsPort {
   generateClientToken(userId: string): Promise<SignalRClientConnection>;
 }
 
-/** Constructor seams, so unit tests run with a stub credential and a stub fetch. */
+/**
+ * Constructor seams, so unit tests run with a stub credential, a stub fetch and
+ * a stub sleep. `sleep` defaults to a `setTimeout` wait.
+ */
 export interface SignalRManagementSeams {
   readonly credential: TokenCredential;
   readonly fetch: typeof fetch;
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -191,8 +232,11 @@ export class SignalRManagementClient implements SignalRManagementPort {
   }
 
   /**
-   * One authenticated REST call. Any non-2xx answer, a network failure or a
-   * timeout becomes a {@link SignalRUnavailableError} for `operation`.
+   * One authenticated REST call. A `429` or `503` answer is retried as
+   * described under THROTTLING; when the last attempt is still throttled, or on
+   * any other non-2xx answer, a network failure or a timeout, the call fails
+   * with a {@link SignalRUnavailableError} for `operation` (and the last
+   * status).
    */
   private async call(
     operation: SignalROperation,
@@ -213,21 +257,28 @@ export class SignalRManagementClient implements SignalRManagementPort {
     }
 
     query.set('api-version', SIGNALR_API_VERSION);
-    let response: Response;
-    try {
-      response = await this.seams.fetch(`${this.serviceUri}${path}?${query.toString()}`, {
-        method,
-        headers: { Authorization: `Bearer ${bearer}` },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-    } catch {
-      // A fetch failure's text and cause carry the host; they are dropped.
-      throw new SignalRUnavailableError(operation);
+    const url = `${this.serviceUri}${path}?${query.toString()}`;
+    const sleep = this.seams.sleep ?? sleepFor;
+    for (let attempt = 1; ; attempt++) {
+      let response: Response;
+      try {
+        response = await this.seams.fetch(url, {
+          method,
+          headers: { Authorization: `Bearer ${bearer}` },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch {
+        // A fetch failure's text and cause carry the host; they are dropped.
+        throw new SignalRUnavailableError(operation);
+      }
+      if (response.ok) {
+        return response;
+      }
+      if (!RETRYABLE_STATUSES.has(response.status) || attempt >= MAX_ATTEMPTS) {
+        throw new SignalRUnavailableError(operation, response.status);
+      }
+      await sleep(retryDelayMs(response, attempt - 1));
     }
-    if (!response.ok) {
-      throw new SignalRUnavailableError(operation, response.status);
-    }
-    return response;
   }
 }
 

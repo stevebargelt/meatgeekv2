@@ -18,7 +18,7 @@ import {
   SignalRUnavailableError,
   type SignalRManagementPort,
 } from '../../shared/signalr/signalr-management';
-import { negotiateHandler, type NegotiateDeps } from './negotiate';
+import { GROUP_ADD_CONCURRENCY, negotiateHandler, type NegotiateDeps } from './negotiate';
 
 const TID = 'tid-bbbb-2222';
 const OID = 'oid-aaaa-1111';
@@ -162,6 +162,56 @@ describe('negotiateHandler', () => {
     expect(signalR.calls.filter(c => c.op === 'removeAll')).toHaveLength(1);
     // Every add comes after the remove-all.
     expect(signalR.calls.slice(1).every(c => c.op !== 'removeAll')).toBe(true);
+  });
+
+  it('with 10 owned devices, has at most 4 adds in flight at once and makes all 10 (HAR-80)', async () => {
+    const stub = signalRStub();
+    let inFlight = 0;
+    let peak = 0;
+    const record = stub.port.addUserToGroup.bind(stub.port);
+    stub.port.addUserToGroup = async (group, userId) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      try {
+        await record(group, userId);
+        // Yield a few turns so overlapping calls really overlap.
+        for (let i = 0; i < 3; i++) await new Promise(resolve => setImmediate(resolve));
+      } finally {
+        inFlight--;
+      }
+    };
+    const { fake, deps } = setup(stub);
+    const ids = Array.from({ length: 10 }, (_, i) => `grill-${i}`);
+    for (const id of ids) fake.seed(device(id));
+
+    const response = await negotiateHandler(request(), context().ctx, deps);
+
+    expect(response.status).toBe(200);
+    expect(GROUP_ADD_CONCURRENCY).toBe(4);
+    expect(peak).toBe(4);
+    const adds = stub.calls.filter(c => c.op === 'add');
+    expect(adds).toHaveLength(10);
+    expect(adds.map(a => (a as { group: string }).group).sort()).toEqual(
+      ids.map(id => `device-${id}`).sort()
+    );
+    expect(stub.calls[0]).toEqual({ op: 'removeAll', userId: USER_ID });
+    expect(stub.calls[stub.calls.length - 1]).toEqual({ op: 'token', userId: USER_ID });
+  });
+
+  it('stops starting adds after the first failure and answers 503', async () => {
+    const stub = signalRStub('add', new SignalRUnavailableError('add_user_to_group', 429));
+    const { fake, deps } = setup(stub);
+    for (let i = 0; i < 10; i++) fake.seed(device(`grill-${i}`));
+
+    const response = await negotiateHandler(request(), context().ctx, deps);
+
+    expect(response.status).toBe(503);
+    expect((response.jsonBody as { reason: string }).reason).toBe(
+      'signalr_add_user_to_group_status_429'
+    );
+    // The first batch of 4 started together; none after the failure, no token.
+    expect(stub.calls.filter(c => c.op === 'add')).toHaveLength(GROUP_ADD_CONCURRENCY);
+    expect(stub.calls.some(c => c.op === 'token')).toBe(false);
   });
 
   it('with no owned devices, still clears the groups and adds none', async () => {
