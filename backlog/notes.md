@@ -5,3 +5,5 @@
 **Still open follow-ups from earlier:** MG-76 (infra fixture-harness invisible to review lane — the class MG-78 belongs to), MG-47 (post-cleanup billing measurement, time-gated on a full post-2026-08-20 cycle).
 
 **HAR-70: MG-14, MG-29, MG-30, MG-31 and MG-83 closed by goal HAR-55.** MG-29 is obsolete (cook state reaches the Pi by device twin, HAR-58); MG-14's data-pusher SignalR smoke (AC5) is obsolete for the same reason; the rest are completed. Evidence run: Deploy Dev App 44747912598 on main `f29d094` (2026-11-20), all `signalr negotiate`, `signalr live temperature`, `signalr isolation` and `device twin` steps PASS. Each ticket's `## Closure` table cites its criteria and evidence.
+
+**HAR-73: React Native removed; MG-86 closed as obsolete.** `apps/mobile`, its Nx project and the `react-native` dependencies are gone (PR #107), and the mobile client will be a native iOS (Swift) app. MG-86 (the mobile jest harness) is closed as obsolete, with its record created in `backlog/done/`. MG-7 (mobile Sentry) stays open, with a note that it must be rewritten for the Sentry Cocoa SDK.
