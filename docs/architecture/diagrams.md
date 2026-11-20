@@ -909,7 +909,7 @@ Steps:
 - **6.** telemetry → iothub client: publisher.publish span, traceparent. Every message gets its own span and `traceparent` (W3C Trace Context), sampled always.
 - **7.** iothub client → IoT Hub: publish (MQTT 8883, QoS 1). Message properties: `messageId`, `$.ct=application/json`, `$.ce=utf-8`, `correlation.id` (cook-scoped) and `traceparent` (per message). Device SAS, renewed five minutes before it expires.
 - **8a.** IoT Hub → temperatures (`meatgeek.cloud.data.temperatures`): cosmos-storage-route. **Live.** IoT Hub writes the document itself, by managed identity, partition value from `{deviceid}`. No Function runs, so nothing reads `traceparent` back.
-- **8b.** IoT Hub → Event Hub: temperature-data: eventhub-realtime-route. **Dead end today.** The route delivers, but the API registers no Event Hub trigger, so nothing reads it. The decided design adds the consumer. (Opens `liveTemperatureTarget`.)
+- **8b.** IoT Hub → Event Hub: temperature-data: eventhub-realtime-route. **Live.** broadcastTemperature (HAR-60), an Event Hub trigger in the API on the `api-broadcast` consumer group, reads it and pushes each reading to its `device-{id}` SignalR group. (Opens `liveTemperatureTarget`.)
 - **9.** temperatures (`meatgeek.cloud.api.temperatures`) → cosmos repositories: history or current reading (Opens `readHistory`.)
 - **10.** cosmos repositories → temperatures (`meatgeek.cloud.data.temperatures`): query by deviceId
 

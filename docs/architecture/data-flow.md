@@ -64,14 +64,14 @@ endpoint: "meatgeek-temperatures"
 
 #### **Route 2: Real-time Path (Event Hub)**
 
-**Planned, not on `main`.** The `eventhub-realtime-route` and the `temperature-data` Event Hub exist in `apps/infrastructure/modules/iot-hub/main.tf`, but nothing consumes them; the design below is the intended consumer.
+**On `main` since HAR-60.** The `eventhub-realtime-route` and the `temperature-data` Event Hub are defined in `apps/infrastructure/modules/iot-hub/main.tf`; the API's `broadcastTemperature` consumes them (see [§4](#4-real-time-path-details)).
 
 ```yaml
-route_name: "RealTimeUpdates"
+route_name: "eventhub-realtime-route"
 source: "DeviceMessages"
-condition: "messageType = 'temperature'"  
+condition: "true"
 endpoint_type: "eventhub"
-endpoint: "realtime-events"
+endpoint: "eventhub-realtime"   # -> temperature-data
 ```
 
 **Benefits**:

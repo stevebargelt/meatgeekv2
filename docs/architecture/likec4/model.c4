@@ -157,7 +157,8 @@ model {
           the Terraform-owned database and container names (`COSMOSDB_DATABASE_NAME` and one
           `COSMOSDB_*_CONTAINER_NAME` per container), the IoT Hub host
           (`IOTHUB_SERVICE_HOSTNAME`) and its Event Hub consumer group
-          (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). Nothing reads those last two yet, and the
+          (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). broadcastTemperature reads the consumer group;
+          nothing reads `IOTHUB_SERVICE_HOSTNAME` yet, and the
           identity's IoT Hub Twin Contributor grant ships switched off. The one exception is the Application
           Insights connection string (`APPLICATIONINSIGHTS_CONNECTION_STRING`), with ingestion
           itself authenticated by Entra (`Authorization=AAD`) and sampled at

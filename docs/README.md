@@ -67,7 +67,7 @@ MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time a
 
 ## 🔄 Data Flow Summary
 
-The device controller reads the RTD sensors, and the data pusher stamps each reading with the active cook and sends it to Azure IoT Hub. IoT Hub's `cosmos-storage-route` writes each reading straight into the Cosmos DB `temperatures` container, with no Function in the path; its `eventhub-realtime-route` feeds an Event Hub that nothing reads yet. The API (Azure Functions) reads that history and serves cooks. See the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) for one reading's path.
+The device controller reads the RTD sensors, and the data pusher stamps each reading with the active cook and sends it to Azure IoT Hub. IoT Hub's `cosmos-storage-route` writes each reading straight into the Cosmos DB `temperatures` container, with no Function in the path; its `eventhub-realtime-route` feeds the `temperature-data` Event Hub, which the API's `broadcastTemperature` reads to push each reading to its device's SignalR group. The API (Azure Functions) reads that history and serves cooks. See the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) for one reading's path.
 
 ## 📱 Applications
 

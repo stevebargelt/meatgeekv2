@@ -96,7 +96,7 @@ The Event Hub → Functions → SignalR broadcast path is **planned, not on `mai
 #### 2. Cloud Infrastructure
 - **IoT Hub**: Device connectivity with **parallel message routing**
   - Direct route → CosmosDB for guaranteed storage
-  - Event Hub route → Functions for real-time processing (planned, not on `main`: the route and Event Hub exist, nothing consumes them)
+  - Event Hub route → Functions for real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app reads `temperature-data` and pushes each reading to its `device-{id}` SignalR group; the client apps that receive it are not built)
 - **Azure Functions**: Two distinct roles
   - **Lightweight Functions**: SignalR broadcasting only (no database writes) (planned, not on `main`)
   - **API Functions**: Cook management and queries
