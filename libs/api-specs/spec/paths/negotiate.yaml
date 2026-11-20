@@ -54,9 +54,10 @@ negotiate:
       '503':
         description: |
           SIGNALR_UNAVAILABLE with fixed text: a SignalR REST call failed or
-          SignalR is not configured. Neither the body nor the log names the
-          endpoint.
+          SignalR is not configured. `reason` is a fixed code naming the failed
+          operation and status (HAR-59). Neither the body nor the log names the
+          endpoint, a user id, a group or a token.
         content:
           application/json:
             schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+              $ref: '../components/schemas/common.yaml#/SignalRUnavailableError'

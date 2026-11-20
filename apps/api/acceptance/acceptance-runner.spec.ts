@@ -100,6 +100,8 @@ interface StubOptions {
   readonly simTopupNeverRouted?: boolean;
   /** HAR-57: the stub's SignalR endpoint refuses the client token (401). */
   readonly signalRRejectsToken?: boolean;
+  /** HAR-59: POST /negotiate answers 503 SIGNALR_UNAVAILABLE with this `reason`. */
+  readonly negotiateUnavailableReason?: string;
 }
 
 interface StubCook {
@@ -369,6 +371,20 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         send(
           options.failRoute.status,
           { error: options.echoAuthorization ? `STUB_FAILURE ${authorization}` : 'STUB_FAILURE' },
+          route
+        );
+        return;
+      }
+
+      if (route === 'POST /negotiate' && options.negotiateUnavailableReason !== undefined) {
+        send(
+          503,
+          {
+            error: 'SIGNALR_UNAVAILABLE',
+            message: 'Real-time updates are unavailable. Try again later.',
+            reason: options.negotiateUnavailableReason,
+            requestId: 'stub-invocation',
+          },
           route
         );
         return;
@@ -952,6 +968,34 @@ describe('live acceptance runner (against an in-process stub)', () => {
       expect(stub!.signalRRequests).toEqual([]);
     }
   );
+
+  it("(b) HAR-59: a 503 from POST /negotiate prints the body's reason, naming the failed SignalR call", async () => {
+    const result = await runAgainstStub({
+      negotiateUnavailableReason: 'signalr_add_user_to_group_status_404',
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(
+      'FAIL signalr negotiate › POST /negotiate returns a url and an accessToken'
+    );
+    expect(result.failures[0]).toContain('POST /negotiate → 503');
+    expect(result.failures[0]).toContain(
+      'expected 200, got 503 (SIGNALR_UNAVAILABLE); reason signalr_add_user_to_group_status_404'
+    );
+  });
+
+  it('(b) HAR-59: a reason that is not a fixed signalr_ code is not printed', async () => {
+    const result = await runAgainstStub({
+      negotiateUnavailableReason:
+        'PUT https://acct.service.signalr.net/api/hubs failed for tid:oid',
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures[0]).toContain('reason unrecognised, not printed');
+    expect(result.output).not.toContain('acct.service.signalr.net');
+    expect(result.output).not.toContain('tid:oid');
+  });
 
   it('(b) HAR-57: fails the connect proof when SignalR refuses the token, printing neither token nor url', async () => {
     const result = await runAgainstStub({ signalRRejectsToken: true });

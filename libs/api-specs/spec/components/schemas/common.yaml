@@ -76,6 +76,36 @@ UnauthenticatedError:
     requestId:
       type: string
 
+SignalRUnavailableError:
+  type: object
+  description: |
+    503 body for POST /negotiate when a SignalR data-plane REST call failed or
+    SignalR is not configured (HAR-59). Matches negotiateHandler in
+    apps/api/src/functions/signalr/negotiate.ts. `reason` is a fixed code that
+    names the failed operation and, when the service answered, its HTTP status
+    (`signalr_<operation>_status_<n>`), else `signalr_<operation>_failed`, or
+    `signalr_failure` for any other error. It never carries the endpoint, a
+    user id, a group, a token or the underlying error text.
+  required:
+    - error
+    - message
+    - reason
+    - requestId
+  additionalProperties: false
+  properties:
+    error:
+      type: string
+      enum:
+        - SIGNALR_UNAVAILABLE
+    message:
+      type: string
+    reason:
+      type: string
+      pattern: '^signalr_(failure|[a-z_]+_(failed|status_[0-9]{3}))$'
+      example: signalr_add_user_to_group_status_404
+    requestId:
+      type: string
+
 CookAlreadyActiveError:
   type: object
   description: |

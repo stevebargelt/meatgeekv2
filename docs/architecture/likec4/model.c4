@@ -339,11 +339,11 @@ model {
 
     // Client connections (MG-30): negotiate and register-device manage groups.
     cloud.api.negotiate -> cloud.realtime 'reset groups to owned devices, mint client token' {
-      technology 'REST api-version 2022-11-01, managed identity'
+      technology 'REST api-version 2024-12-01, managed identity'
     }
     cloud.api.negotiate -> cloud.api.repos 'list devices by owner'
     cloud.api.devices -> cloud.realtime 'add owner to device-{id} on register' {
-      technology 'REST api-version 2022-11-01, managed identity'
+      technology 'REST api-version 2024-12-01, managed identity'
     }
 
     // Realtime path: absent from apps/api/src/main.ts.
