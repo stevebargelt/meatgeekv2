@@ -795,11 +795,14 @@ jobs:
             });
             let codes;
             try {
-              const { generateSync } = require('otplib');
+              // Same guardrails as the proof's totpCode(): Entra's secret is
+              // 10 bytes, under otplib's default 16-byte minimum.
+              const { createGuardrails, generateSync } = require('otplib');
+              const guardrails = createGuardrails({ MIN_SECRET_BYTES: 1 });
               const now = Math.floor(Date.now() / 1000);
               codes = new Set();
               for (let t = now - 35 * 60; t <= now + 60; t += 30) {
-                codes.add(generateSync({ secret, epoch: t, digits: 6 }));
+                codes.add(generateSync({ secret, epoch: t, digits: 6, guardrails }));
               }
             } catch (error) {
               console.log(`leak check: could not compute TOTP codes (${error.name})`);
