@@ -4,7 +4,7 @@ import { useApi } from '../api/api-context';
 import type { Cook, Device } from '../api/client';
 import { formatDateTime, useNow } from '../cooks/time';
 import { formatDuration, formatTemperature, type TemperatureUnit } from './format';
-import type { CookStoppedMessage } from './hub';
+import type { CookStoppedMessage, TemperatureMessage } from './hub';
 import { useHubFactory } from './hub-context';
 import { openLiveConnection, type ConnectionStatus } from './live-connection';
 
@@ -31,15 +31,20 @@ export type PanelState = 'connecting' | 'waiting' | 'live' | 'stale';
  *
  * Opens one hub connection on mount and stops it on unmount. Shows
  * `temperature` messages for the cook's device, and after every start and
- * reconnect backfills with GET /temperatures/current. On `cook_stopped` for
- * this cook it stops the connection and calls `onCookStopped`.
+ * reconnect backfills with GET /temperatures/current. Each `temperature`
+ * message it accepts (the cook's device only) is also passed to `onReading`,
+ * so the page can use this one connection for other views (the chart). On
+ * `cook_stopped` for this cook it stops the connection and calls
+ * `onCookStopped`.
  */
 export function LivePanel({
   cook,
   onCookStopped,
+  onReading,
 }: {
   cook: Cook;
   onCookStopped: (message: CookStoppedMessage) => void;
+  onReading?: (message: TemperatureMessage) => void;
 }) {
   const api = useApi();
   const createHub = useHubFactory();
@@ -49,6 +54,8 @@ export function LivePanel({
   const now = useNow(true);
   const onCookStoppedRef = useRef(onCookStopped);
   onCookStoppedRef.current = onCookStopped;
+  const onReadingRef = useRef(onReading);
+  onReadingRef.current = onReading;
 
   useEffect(() => {
     let mounted = true;
@@ -85,7 +92,9 @@ export function LivePanel({
       },
       onConnected: () => void backfill(),
       onTemperature: message => {
-        if (message.deviceId === deviceId) show(message);
+        if (message.deviceId !== deviceId) return;
+        show(message);
+        if (mounted) onReadingRef.current?.(message);
       },
       onCookStopped: message => {
         if (message.payload.id !== cookId) return;

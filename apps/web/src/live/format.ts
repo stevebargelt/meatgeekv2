@@ -9,9 +9,18 @@ export type TemperatureUnit = components['schemas']['TemperatureUnit'];
  */
 export function formatTemperature(fahrenheit: number | undefined, unit: TemperatureUnit): string {
   if (fahrenheit === undefined) return '—';
+  return `${toDisplayUnit(fahrenheit, unit)} ${unitSymbol(unit)}`;
+}
+
+/** A °F value as a number in the device's unit, rounded to one decimal (formatTemperature's rule). */
+export function toDisplayUnit(fahrenheit: number, unit: TemperatureUnit): number {
   const value = unit === 'celsius' ? ((fahrenheit - 32) * 5) / 9 : fahrenheit;
   const rounded = Math.round(value * 10) / 10;
-  return `${Object.is(rounded, -0) ? 0 : rounded} ${unit === 'celsius' ? '°C' : '°F'}`;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+export function unitSymbol(unit: TemperatureUnit): string {
+  return unit === 'celsius' ? '°C' : '°F';
 }
 
 /** A duration as "12 s", "1 min 40 s" or "2 h 5 min". Negative counts as zero. */

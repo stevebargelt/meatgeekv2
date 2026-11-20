@@ -3,8 +3,8 @@
 `apps/web` is the React (Vite) web client. It signs in with Entra ID, calls the
 API through a client generated from the OpenAPI contract, and today manages
 devices (list, register, rename) and cooks (start from a device, list, open,
-stop), and shows an active cook's readings live over SignalR. The chart comes
-later.
+stop), shows an active cook's readings live over SignalR, and draws each
+cook's temperatures as one chart.
 
 Production: `https://meatgeekv2-web.vercel.app`, built from `main`
 by Vercel.
@@ -24,7 +24,13 @@ None of the values is a secret.
 
 The shape is validated at load (`src/config/config.ts`). A missing or malformed
 file renders a page listing each problem. An empty `clientId` renders "Sign-in
-is not configured yet": that is the state until the SPA app registration exists.
+is not configured yet".
+
+Production sign-in is configured in two places: HAR-95 puts the SPA app
+registration's client id in `config.json`, and HAR-94 sets the API's CORS
+(the web origin) and Easy Auth (the SPA client as an allowed audience/client).
+The app needs both: the id to sign in, and CORS plus Easy Auth for the API and
+SignalR to accept its calls.
 
 ## Sign-in
 
@@ -64,7 +70,7 @@ Errors follow the API's flat `{error, message, requestId}` body. The UI shows
 | ------------ | -------------------------------- | -------------------------------------------------------- |
 | `/`          | `src/devices/devices-page.tsx`   | Devices: list, register, rename, start a cook            |
 | `/cooks`     | `src/cooks/cooks-page.tsx`       | Cooks list, newest first, with device and status filters |
-| `/cooks/:id` | `src/cooks/cook-detail-page.tsx` | One cook, and Stop while it is active                    |
+| `/cooks/:id` | `src/cooks/cook-detail-page.tsx` | One cook, its chart, and Stop while it is active         |
 | `*`          |                                  | Redirects to `/`                                         |
 
 Times show in the browser's local time zone.
@@ -114,8 +120,8 @@ A 503 `DEVICE_TWIN_UPDATE_FAILED` means the cook is completed but the device
 was not told; **Retry** resends the stop, which the API makes safe. Other
 answers (404, 403, …) show the problem.
 
-An active cook also has the live panel (below). `data-testid="cook-chart"` is
-an empty region left for the chart.
+An active cook also has the live panel (below). Every cook has the chart
+(below).
 
 ### Live panel
 
@@ -160,8 +166,51 @@ and the panel goes away.
 `pollingInterval` is the device's `configuration.pollingInterval` in seconds,
 30 when unset (the API's default), so the default stale threshold is 90 s.
 
+Each `temperature` message the panel accepts (the cook's device only) is also
+passed to its optional `onReading` prop. The detail page uses it to feed the
+chart, so the page has exactly one hub connection.
+
 Tests inject a fake hub through `HubFactoryProvider` (`src/live/hub-context.tsx`,
 `FakeHub` in `src/test/fakes.ts`); no test opens a real connection.
+
+### Cook chart
+
+`src/cooks/cook-chart.tsx`, `data-testid="cook-chart"`, on every cook's detail
+page. One `recharts` `ComposedChart`, 320 px high, as wide as the card. For each
+channel with data (grill, probe 1-4, each its own colour, named in the legend)
+it draws the bucket's average as a line over a faint min-max band. The x axis
+is local time; the y axis and the tooltip (avg, min and max of each channel at
+the hovered time) are in the device's unit (`configuration.temperatureUnit`
+from `GET /devices`, °F when unset).
+
+**Data.** `GET /cooks/{cookId}/chart` once when the page opens: the
+server-reduced series (at most 720 buckets, each channel's `{min, max, avg}`,
+in °F; see the API's `getCookChart`). It is read again once when the cook goes
+from active to completed (stopped here, or a `cook_stopped` push).
+
+| Answer          | The chart region                  |
+| --------------- | --------------------------------- |
+| 200 with points | The chart                         |
+| 200, no points  | "No readings yet"                 |
+| 404             | "Chart not available"             |
+| anything else   | The problem message and **Retry** |
+
+**Live appending.** While the cook is active, the readings the live panel
+receives (`onReading`) are appended after the server series: a reading becomes
+its own point (`avg = min = max`) if its timestamp is at or after the last
+bucket's end (`t + bucketSeconds`); earlier ones are already in that bucket and
+are dropped. At most 2,000 pushed points are kept, the newest. The server
+series can lag the newest reading by about 30 s, so the newest few seconds may
+be missing from the last bucket until the next read.
+
+`src/cooks/chart-series.ts` does all of that as a pure function
+(`buildChartSeries`): server points and pushed readings in, rows in the display
+unit out (converted with `formatTemperature`'s rules), with channels that have
+no data left out.
+
+**Bundle.** The recharts view (`src/cooks/cook-chart-view.tsx`) is loaded with
+`React.lazy`, so it is its own chunk (about 454 kB, 129 kB gzipped) and only the
+cook detail page downloads it.
 
 ## Commands
 

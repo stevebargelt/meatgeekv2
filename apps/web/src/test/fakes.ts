@@ -194,3 +194,31 @@ export function makeTemperature(overrides: Partial<TemperatureMessage> = {}): Te
     ...overrides,
   };
 }
+
+/**
+ * jsdom has no layout and no ResizeObserver, so recharts' ResponsiveContainer
+ * would measure 0 × 0 and draw nothing. This one reports `width` × `height`
+ * for every observed element. Returns a function that restores the original.
+ */
+export function installResizeObserver(width = 800, height = 320): () => void {
+  const original = globalThis.ResizeObserver;
+  class FakeResizeObserver {
+    constructor(private readonly callback: ResizeObserverCallback) {}
+    observe(target: Element) {
+      this.callback(
+        [{ target, contentRect: { width, height } } as unknown as ResizeObserverEntry],
+        this as unknown as ResizeObserver
+      );
+    }
+    unobserve() {
+      // nothing to release
+    }
+    disconnect() {
+      // nothing to release
+    }
+  }
+  globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+  return () => {
+    globalThis.ResizeObserver = original;
+  };
+}
