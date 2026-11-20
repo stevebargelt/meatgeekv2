@@ -72,6 +72,15 @@ function avgLines(): Element[] {
 }
 
 describe('cook chart', () => {
+  // The chart view is a React.lazy chunk that pulls in recharts. The first
+  // render in this file would otherwise load it inside a waitFor, and on a
+  // busy CI runner that load alone outlasts waitFor's 1 s and the test fails
+  // with the chart still on "Loading chart…". Loading it here first means
+  // React.lazy's import() resolves from jest's module registry at once.
+  beforeAll(async () => {
+    await import('./cook-chart-view');
+  }, 30_000);
+
   let restoreResizeObserver: () => void;
   beforeEach(() => {
     restoreResizeObserver = installResizeObserver();
