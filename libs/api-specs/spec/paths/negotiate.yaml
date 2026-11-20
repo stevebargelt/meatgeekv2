@@ -9,12 +9,12 @@ negotiate:
     description: |
       SignalR handshake (HAR-57 / MG-30). It takes no parameters and no body:
       the caller is the Easy Auth principal, and the connection's SignalR user
-      id is the principal's `userId` (`"<tid>:<oid>"`). The handler reads the
-      caller's devices, removes that user from every SignalR group, adds it to
-      `device-{id}` for each device the caller owns, and returns a 60-minute
-      client access token minted for that user id through the SignalR
-      data-plane REST API. `temperature` messages reach the caller through
-      those groups; `cook_started` and `cook_stopped` are sent to the user id.
+      id is the principal's `userId` (`"<tid>:<oid>"`). The handler returns a
+      60-minute client access token minted for that user id through the
+      SignalR data-plane REST API, and makes no other call: it reads no
+      devices and manages no groups (HAR-81). Every message is sent to a user
+      id: `temperature` to the reading's device owner, `cook_started` and
+      `cook_stopped` to the cook's owner.
 
       A `deviceId` query parameter, which earlier versions required, is
       ignored. The response body is the bare connection info (NOT wrapped in
@@ -26,38 +26,22 @@ negotiate:
         headers:
           X-Request-ID:
             $ref: '../components/headers.yaml#/X-Request-ID'
-          x-meatgeek-request-charge:
-            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/signalr-payloads.yaml#/SignalRConnectionInfo'
       '401':
         $ref: '../components/responses.yaml#/Unauthenticated'
-      '500':
-        description: |
-          INTERNAL_SERVER_ERROR with fixed text: reading the caller's devices
-          failed. No SignalR call is made.
-        headers:
-          X-Request-ID:
-            $ref: '../components/headers.yaml#/X-Request-ID'
-          x-meatgeek-request-charge:
-            $ref: '../components/headers.yaml#/RequestCharge'
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '503':
         description: |
-          SIGNALR_UNAVAILABLE with fixed text: a SignalR REST call failed or
+          SIGNALR_UNAVAILABLE with fixed text: minting the token failed or
           SignalR is not configured. `reason` is a fixed code naming the failed
-          operation and status (HAR-59). Neither the body nor the log names the
-          endpoint, a user id, a group or a token.
+          operation and status (HAR-59), e.g.
+          `signalr_generate_token_status_429`. Neither the body nor the log
+          names the endpoint, a user id or a token.
         headers:
           X-Request-ID:
             $ref: '../components/headers.yaml#/X-Request-ID'
-          x-meatgeek-request-charge:
-            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:

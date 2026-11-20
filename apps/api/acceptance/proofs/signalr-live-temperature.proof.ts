@@ -126,7 +126,12 @@ export default defineProofs('signalr live temperature', () => {
         if (!registered) {
           throw new Error('the simulated device was not registered by an earlier proof');
         }
-        const response = await api.request<NegotiateBody>({ method: 'POST', path: '/negotiate' });
+        // HAR-81: negotiate reads no devices, so it reports no request charge.
+        const response = await api.request<NegotiateBody>({
+          method: 'POST',
+          path: '/negotiate',
+          expectRequestCharge: false,
+        });
         api.check(
           response,
           response.status === 200,

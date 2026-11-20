@@ -136,6 +136,9 @@ interface StubOptions {
   readonly signalRRejectsToken?: boolean;
   /** HAR-59: POST /negotiate answers 503 SIGNALR_UNAVAILABLE with this `reason`. */
   readonly negotiateUnavailableReason?: string;
+  /** HAR-81: POST /negotiate reports this request charge (by default none, as
+   *  the API does since it stopped reading devices). */
+  readonly negotiateCharge?: string;
   /** HAR-63: what the stub pushes on target `temperature` to each open SignalR
    *  connection after a `--count 1` send. It always pushes a replayed older
    *  reading of the simulated device and the sent timestamp for another device
@@ -226,7 +229,9 @@ const simReading = (timestamp: string) => ({
   probe2Temp: 149.8,
 });
 
-const RU: Record<StubRoute, string> = {
+/** The charge each route reports. `POST /negotiate` reads no Cosmos since
+ *  HAR-81, so it reports none. */
+const RU: Record<Exclude<StubRoute, SignalRRoute>, string> = {
   'GET /cooks': '2.83',
   'POST /cooks': '11.43',
   'POST /cooks/{cookId}/stop': '20.1',
@@ -244,8 +249,12 @@ const RU: Record<StubRoute, string> = {
   'GET /recipes/{id}': '1.02',
   'PATCH /recipes/{id}': '12.38',
   'DELETE /recipes/{id}': '10.29',
-  'POST /negotiate': '2.66',
 };
+
+/** What a route's charge header carries, or `undefined` for none. */
+function chargeOf(route: StubRoute): string | undefined {
+  return route === 'POST /negotiate' ? undefined : RU[route];
+}
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -561,7 +570,11 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
             ? options.alterBody.alter(body)
             : body;
         if (route && options.omitChargeOn !== route) {
-          headers[REQUEST_CHARGE_HEADER] = charge ?? RU[route];
+          const reported =
+            route === 'POST /negotiate' ? options.negotiateCharge : (charge ?? chargeOf(route));
+          if (reported !== undefined) {
+            headers[REQUEST_CHARGE_HEADER] = reported;
+          }
         }
         if (options.echoAuthorization && authorization) {
           headers['x-echo-authorization'] = authorization;
@@ -1230,7 +1243,6 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ...TEMPERATURE_ROUTES,
       ...USER_ROUTES,
       ...RECIPE_ROUTES,
-      ...SIGNALR_ROUTES,
     ]) {
       const [method, path] = route.split(' ');
       const lines = requestLines.filter(line =>
@@ -1243,6 +1255,11 @@ describe('live acceptance runner (against an in-process stub)', () => {
     }
     // The unauthenticated call is its own row, with no RU.
     expect(summaryRow(result.output, 'GET /cooks (no auth)')).toMatch(/-\s*$/);
+    // HAR-81: negotiate reads no devices, so every negotiate line has no RU.
+    const negotiateLines = requestLines.filter(line => /^\s+POST\s+\/negotiate\s/.test(line));
+    expect(negotiateLines.length).toBeGreaterThan(0);
+    // Request lines end `RU -`; the summary rows show `-` for both RU columns.
+    expect(negotiateLines.every(line => /(RU -|\s-\s+-)$/.test(line))).toBe(true);
 
     // HAR-26: one start on the registered device, one refused on the unowned one.
     // HAR-67: the isolation group starts one more as the owner and is refused
@@ -1487,7 +1504,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
   it("(b) HAR-59: a 503 from POST /negotiate prints the body's reason, naming the failed SignalR call", async () => {
     const result = await runAgainstStub({
-      negotiateUnavailableReason: 'signalr_add_user_to_group_status_404',
+      negotiateUnavailableReason: 'signalr_generate_token_status_429',
     });
 
     expect(result.exitCode).not.toBe(0);
@@ -1504,9 +1521,21 @@ describe('live acceptance runner (against an in-process stub)', () => {
     for (const failure of result.failures) {
       expect(failure).toContain('POST /negotiate → 503');
       expect(failure).toContain(
-        'expected 200, got 503 (SIGNALR_UNAVAILABLE); reason signalr_add_user_to_group_status_404'
+        'expected 200, got 503 (SIGNALR_UNAVAILABLE); reason signalr_generate_token_status_429'
       );
     }
+  });
+
+  it('(b) HAR-81: a request charge on POST /negotiate fails the negotiate proof', async () => {
+    // negotiate must read no devices; a charge means a Cosmos read came back.
+    const result = await runAgainstStub({ negotiateCharge: '2.66' });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(
+      'FAIL signalr negotiate › POST /negotiate returns a url and an accessToken'
+    );
+    expect(result.failures[0]).toContain('negotiate reported a request charge');
   });
 
   it('(b) HAR-59: a reason that is not a fixed signalr_ code is not printed', async () => {

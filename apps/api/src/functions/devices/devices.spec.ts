@@ -23,10 +23,6 @@ import {
   WRITE_CHARGE,
 } from '../../shared/cosmos/fake-devices-container.testing';
 import { REQUEST_CHARGE_HEADER } from '../../shared/cosmos/request-charge';
-import {
-  SignalRUnavailableError,
-  type SignalRGroupsPort,
-} from '../../shared/signalr/signalr-management';
 import type { DevicesHandlerDeps } from './devices-http';
 import { getDeviceHandler } from './get-device';
 import { getDevicesHandler } from './get-devices';
@@ -93,32 +89,14 @@ function context() {
   return { ctx, logs, errors, warnings };
 }
 
-/** A SignalR group stub that records every call; `failWith` makes adds throw. */
-function signalRStub(failWith?: unknown) {
-  const calls: Array<{ op: string; group?: string; userId: string }> = [];
-  const port: SignalRGroupsPort = {
-    async removeUserFromAllGroups(userId) {
-      calls.push({ op: 'removeAll', userId });
-    },
-    async addUserToGroup(group, userId) {
-      calls.push({ op: 'add', group, userId });
-      if (failWith !== undefined) {
-        throw failWith;
-      }
-    },
-  };
-  return { port, calls };
-}
-
-function setup(signalR = signalRStub()) {
+function setup() {
   const fake = new FakeDevicesContainer();
   const getRepository = jest.fn(() => new DevicesRepository(fake.asContainer()));
   const deps: DevicesHandlerDeps = {
     resolvePrincipal: principalFromRequest,
     getRepository,
-    getSignalR: () => signalR.port,
   };
-  return { fake, deps, getRepository, signalR };
+  return { fake, deps, getRepository };
 }
 
 function device(overrides: Partial<Device> = {}): Device {
@@ -334,8 +312,10 @@ describe('POST /devices', () => {
     expect(fake.calls.map(c => c.operation)).toEqual(['query', 'create']);
   });
 
-  it('adds the owner to the device-{id} SignalR group after the create (HAR-57)', async () => {
-    const { fake, deps, signalR } = setup();
+  it('registers with no SignalR dependency and no warning (HAR-81)', async () => {
+    // Readings are pushed to the owner's SignalR user, so a new device needs no
+    // group membership: the handler's deps carry no SignalR client at all.
+    const { fake, deps } = setup();
     const { ctx, warnings } = context();
 
     const response = await registerDeviceHandler(
@@ -346,48 +326,8 @@ describe('POST /devices', () => {
 
     expect(response.status).toBe(201);
     expect(fake.stored('grill-9')).toBeDefined();
-    expect(signalR.calls).toEqual([{ op: 'add', group: 'device-grill-9', userId: USER_ID }]);
+    expect(Object.keys(deps).sort()).toEqual(['getRepository', 'resolvePrincipal']);
     expect(warnings).toEqual([]);
-  });
-
-  it.each([
-    ['a SignalR error', new SignalRUnavailableError('add_user_to_group', 503)],
-    ['an unexpected error', new Error('https://secret.service.signalr.net exploded')],
-  ])(
-    'still answers 201 when the group add fails with %s, and logs a sanitized warning',
-    async (_c, failure) => {
-      const { fake, deps, signalR } = setup(signalRStub(failure));
-      const { ctx, warnings, errors } = context();
-
-      const response = await registerDeviceHandler(
-        request({ body: { deviceId: 'grill-9', name: 'New one', model: 'MeatGeek V2' } }),
-        ctx,
-        deps
-      );
-
-      expect(response.status).toBe(201);
-      expect((response.jsonBody as Device).id).toBe('grill-9');
-      expect(fake.stored('grill-9')).toBeDefined();
-      expect(signalR.calls).toEqual([{ op: 'add', group: 'device-grill-9', userId: USER_ID }]);
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toMatch(/^registerDevice: device group join failed: signalr_/);
-      expect(warnings.join(' ')).not.toMatch(/signalr\.net|https?:/);
-      expect(errors).toEqual([]);
-    }
-  );
-
-  it('makes no SignalR call when the register is a 409 conflict', async () => {
-    const { fake, deps, signalR } = setup();
-    fake.seed(device({ id: 'mine', name: 'Taken' }));
-
-    const response = await registerDeviceHandler(
-      request({ body: { deviceId: 'fresh', name: 'Taken', model: 'm' } }),
-      context().ctx,
-      deps
-    );
-
-    expect(response.status).toBe(409);
-    expect(signalR.calls).toEqual([]);
   });
 
   it('completes a partial configuration from DEFAULT_DEVICE_CONFIGURATION', async () => {

@@ -1,14 +1,19 @@
 import type { InvocationContext } from '@azure/functions';
 
 import { toTemperatureReading } from '../../shared/cosmos/temperatures-repository';
-import { broadcastTemperatureHandler, decodeBody } from './broadcast-temperature';
-import { signalROutput, SignalRGroupMessage, TEMPERATURE } from './envelope';
+import {
+  broadcastTemperatureHandler,
+  decodeBody,
+  type BroadcastTemperatureDeps,
+} from './broadcast-temperature';
+import { signalROutput, SignalRTemperatureMessage, TEMPERATURE } from './envelope';
 
 /**
  * HAR-60 — broadcastTemperature handler. Drives the handler with a batch the
  * way the Functions host hands it over for `cardinality: 'many'`: the bodies as
  * the first argument, and per-event system properties and enqueued times in
- * `triggerMetadata`, index-aligned with the bodies.
+ * `triggerMetadata`, index-aligned with the bodies. HAR-81: each device's owner
+ * comes from a fake lookup; by default `smoker-a` belongs to `owner-a` and so on.
  */
 
 interface TestEvent {
@@ -23,10 +28,27 @@ interface Captured {
   ctx: InvocationContext;
   sets: Array<{ output: unknown; value: unknown }>;
   logs: string[];
-  messages(): SignalRGroupMessage[];
+  messages(): SignalRTemperatureMessage[];
+  /** Every owner lookup, in call order. */
+  lookups: string[];
 }
 
-function invoke(events: TestEvent[]): { run: Promise<void>; captured: Captured } {
+/** `smoker-<x>` is owned by `owner-<x>`; anything else has no owner. */
+function defaultOwner(deviceId: string): string | undefined {
+  return deviceId.startsWith('smoker-') ? `owner-${deviceId.slice('smoker-'.length)}` : undefined;
+}
+
+function invoke(
+  events: TestEvent[],
+  ownerOf: (deviceId: string) => Promise<string | undefined> = async id => defaultOwner(id)
+): { run: Promise<void>; captured: Captured } {
+  const lookups: string[] = [];
+  const deps: BroadcastTemperatureDeps = {
+    ownerOf: deviceId => {
+      lookups.push(deviceId);
+      return ownerOf(deviceId);
+    },
+  };
   const sets: Array<{ output: unknown; value: unknown }> = [];
   const logs: string[] = [];
   const ctx = {
@@ -51,15 +73,17 @@ function invoke(events: TestEvent[]): { run: Promise<void>; captured: Captured }
     ctx,
     sets,
     logs,
+    lookups,
     messages: () => {
       const forSignalR = sets.filter(s => s.output === signalROutput);
-      return (forSignalR[forSignalR.length - 1]?.value ?? []) as SignalRGroupMessage[];
+      return (forSignalR[forSignalR.length - 1]?.value ?? []) as SignalRTemperatureMessage[];
     },
   };
   return {
     run: broadcastTemperatureHandler(
       events.map(e => e.body),
-      ctx
+      ctx,
+      deps
     ),
     captured,
   };
@@ -81,7 +105,7 @@ const T1 = '2026-11-19T10:00:05.000Z';
 const T2 = '2026-11-19T10:00:10.000Z';
 
 describe('broadcastTemperatureHandler', () => {
-  it('sends a 3-event, 2-device batch to device-<id> from the system property, not the body', async () => {
+  it("sends a 3-event, 2-device batch to each device's owner, found from the system property, not the body", async () => {
     const events: TestEvent[] = [
       {
         deviceId: 'smoker-a',
@@ -111,11 +135,7 @@ describe('broadcastTemperatureHandler', () => {
 
     const messages = captured.messages();
     expect(messages).toHaveLength(3);
-    expect(messages.map(m => m.groupName)).toEqual([
-      'device-smoker-a',
-      'device-smoker-b',
-      'device-smoker-a',
-    ]);
+    expect(messages.map(m => m.userId)).toEqual(['owner-a', 'owner-b', 'owner-a']);
     expect(messages.every(m => m.target === TEMPERATURE)).toBe(true);
     expect(TEMPERATURE).toBe('temperature');
     expect(messages.map(m => m.arguments[0].deviceId)).toEqual([
@@ -123,8 +143,117 @@ describe('broadcastTemperatureHandler', () => {
       'smoker-b',
       'smoker-a',
     ]);
-    // Group-scoped only: no userId on a reading message.
-    expect(messages.every(m => !('userId' in m))).toBe(true);
+    // User-addressed only (HAR-81): no group on a reading message.
+    expect(messages.every(m => !('groupName' in m))).toBe(true);
+    // One owner lookup per distinct device, not per reading.
+    expect(captured.lookups).toEqual(['smoker-a', 'smoker-b']);
+  });
+
+  it('looks each device up once however many readings the batch holds (HAR-81)', async () => {
+    const events: TestEvent[] = Array.from({ length: 50 }, (_, i) => ({
+      deviceId: i % 10 === 0 ? 'smoker-b' : 'smoker-a',
+      iothubEnqueuedTime: T0,
+      enqueuedTimeUtc: T0,
+      body: { timestamp: T0, grillTemp: 200 + i },
+    }));
+    const { run, captured } = invoke(events);
+    await run;
+
+    expect(captured.messages()).toHaveLength(50);
+    expect([...captured.lookups].sort()).toEqual(['smoker-a', 'smoker-b']);
+  });
+
+  it("sends a device's readings to its owner only, never to another owner", async () => {
+    const { run, captured } = invoke([
+      {
+        deviceId: 'smoker-a',
+        iothubEnqueuedTime: T0,
+        enqueuedTimeUtc: T0,
+        body: { timestamp: T0 },
+      },
+      {
+        deviceId: 'smoker-b',
+        iothubEnqueuedTime: T1,
+        enqueuedTimeUtc: T1,
+        body: { timestamp: T1 },
+      },
+    ]);
+    await run;
+
+    const byUser = captured.messages().map(m => [m.userId, m.arguments[0].deviceId]);
+    expect(byUser).toEqual([
+      ['owner-a', 'smoker-a'],
+      ['owner-b', 'smoker-b'],
+    ]);
+  });
+
+  it('does not push a reading whose device has no owner, and counts it as unowned', async () => {
+    const { run, captured } = invoke([
+      {
+        deviceId: 'smoker-a',
+        iothubEnqueuedTime: T0,
+        enqueuedTimeUtc: T0,
+        body: { timestamp: T0 },
+      },
+      {
+        deviceId: 'unregistered',
+        iothubEnqueuedTime: T0,
+        enqueuedTimeUtc: T0,
+        body: { timestamp: T0 },
+      },
+      {
+        deviceId: 'unregistered',
+        iothubEnqueuedTime: T1,
+        enqueuedTimeUtc: T1,
+        body: { timestamp: T1 },
+      },
+    ]);
+    await run;
+
+    expect(captured.messages().map(m => m.userId)).toEqual(['owner-a']);
+    expect(captured.logs).toEqual([
+      'broadcastTemperature sent=1 skipped=0 unowned=2 lookupFailed=0',
+    ]);
+  });
+
+  it("drops only the failed device's readings when an owner read throws, and logs no error text", async () => {
+    const { run, captured } = invoke(
+      [
+        {
+          deviceId: 'smoker-a',
+          iothubEnqueuedTime: T0,
+          enqueuedTimeUtc: T0,
+          body: { timestamp: T0 },
+        },
+        {
+          deviceId: 'smoker-b',
+          iothubEnqueuedTime: T0,
+          enqueuedTimeUtc: T0,
+          body: { timestamp: T0 },
+        },
+        {
+          deviceId: 'smoker-b',
+          iothubEnqueuedTime: T1,
+          enqueuedTimeUtc: T1,
+          body: { timestamp: T1 },
+        },
+      ],
+      async id => {
+        if (id === 'smoker-b') {
+          throw Object.assign(new Error('https://acct.documents.azure.com read failed'), {
+            code: 503,
+          });
+        }
+        return defaultOwner(id);
+      }
+    );
+    await expect(run).resolves.toBeUndefined();
+
+    expect(captured.messages().map(m => m.userId)).toEqual(['owner-a']);
+    expect(captured.logs).toEqual([
+      'broadcastTemperature sent=1 skipped=0 unowned=0 lookupFailed=2',
+    ]);
+    expect(captured.logs.join('\n')).not.toContain('documents.azure.com');
   });
 
   it('pushes exactly toTemperatureReading of the same event plus enqueuedTimeUtc', async () => {
@@ -244,26 +373,30 @@ describe('broadcastTemperatureHandler', () => {
     ]);
     await expect(run).resolves.toBeUndefined();
 
-    expect(captured.messages().map(m => m.groupName)).toEqual([
-      'device-smoker-a',
-      'device-smoker-b',
+    expect(captured.messages().map(m => m.userId)).toEqual(['owner-a', 'owner-b']);
+    expect(captured.logs).toEqual([
+      'broadcastTemperature sent=2 skipped=4 unowned=0 lookupFailed=0',
     ]);
-    expect(captured.logs).toEqual(['broadcastTemperature sent=2 skipped=4']);
   });
 
-  it('logs one sanitized line per batch: counts only, no ids and no bodies', async () => {
-    const { run, captured } = invoke([
-      {
-        deviceId: 'secret-device',
-        iothubEnqueuedTime: T0,
-        enqueuedTimeUtc: T0,
-        body: { timestamp: T0, cookId: 'secret-cook', grillTemp: 225 },
-      },
-      { deviceId: 'secret-device', body: 'secret-body' },
-    ]);
+  it('logs one sanitized line per batch: counts only, no ids, owners or bodies', async () => {
+    const { run, captured } = invoke(
+      [
+        {
+          deviceId: 'secret-device',
+          iothubEnqueuedTime: T0,
+          enqueuedTimeUtc: T0,
+          body: { timestamp: T0, cookId: 'secret-cook', grillTemp: 225 },
+        },
+        { deviceId: 'secret-device', body: 'secret-body' },
+      ],
+      async () => 'secret-owner'
+    );
     await run;
 
-    expect(captured.logs).toEqual(['broadcastTemperature sent=1 skipped=1']);
+    expect(captured.logs).toEqual([
+      'broadcastTemperature sent=1 skipped=1 unowned=0 lookupFailed=0',
+    ]);
     const all = captured.logs.join('\n');
     expect(all).not.toContain('secret');
   });
@@ -284,8 +417,8 @@ describe('broadcastTemperatureHandler', () => {
 
     expect(sets).toEqual([[], []]);
     expect(logs).toEqual([
-      'broadcastTemperature sent=0 skipped=3',
-      'broadcastTemperature sent=0 skipped=0',
+      'broadcastTemperature sent=0 skipped=3 unowned=0 lookupFailed=0',
+      'broadcastTemperature sent=0 skipped=0 unowned=0 lookupFailed=0',
     ]);
   });
 });
