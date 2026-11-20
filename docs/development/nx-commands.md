@@ -13,7 +13,7 @@ nx show projects
 
 # Show project details
 nx show project api
-nx show project mobile
+nx show project web
 
 # Show workspace configuration
 nx show
@@ -45,12 +45,11 @@ npm install typescript --save-dev
 # Build specific applications
 nx build api                    # Azure Functions API
 nx build web                    # React web application
-nx build mobile                 # React Native mobile app
 nx build device-controller      # Go device controller (calls make build)
 nx build data-pusher           # Go IoT service (calls make build)
 
 # Build with specific configurations
-nx build mobile --configuration=production
+nx build web --configuration=production
 nx build-arm device-controller # Cross-compile for Raspberry Pi (calls make build-arm)
 nx build api --configuration=development
 ```
@@ -74,8 +73,6 @@ nx run-many --target=build --projects=tag:type:app
 ```bash
 # Production builds
 nx build web --configuration=production
-nx build mobile --configuration=production --platform=ios
-nx build mobile --configuration=production --platform=android
 
 # Development builds with source maps
 nx build api --configuration=development
@@ -89,13 +86,11 @@ nx build web --configuration=development
 # Start individual development servers
 nx serve web                    # Web app at http://localhost:3000
 nx serve api                    # Azure Functions at http://localhost:7071
-nx serve mobile                 # React Native metro bundler
 nx serve device-simulator       # Device simulator for testing
 
 # Start with specific configurations
 nx serve web --port=3001
 nx serve api --port=7072
-nx serve mobile --platform=ios
 ```
 
 ### Multiple Services
@@ -142,7 +137,6 @@ nx run-many --target=test --projects=tag:type:lib
 ```bash
 # Run E2E tests
 nx e2e web-e2e                 # Web application E2E
-nx e2e mobile-e2e              # Mobile application E2E
 
 # Run E2E tests with specific browser
 nx e2e web-e2e --browser=chrome
@@ -228,20 +222,8 @@ make build-arm
 # ... etc
 ```
 
-### Mobile Applications
-```bash
-# Platform-specific builds
-nx build mobile --platform=ios
-nx build mobile --platform=android
-
-# Development servers by platform
-nx serve mobile --platform=ios
-nx serve mobile --platform=android
-
-# Device deployment
-nx run mobile:deploy --platform=ios --device=simulator
-nx run mobile:deploy --platform=android --device=emulator
-```
+### Mobile Application
+The mobile client will be a native iOS (Swift) app. It is planned and not built, and it is not an Nx project, so there are no `nx` commands for it. It shares only the OpenAPI contract in `libs/api-specs/spec` with the web app.
 
 ## Infrastructure Management
 
@@ -394,10 +376,6 @@ nx serve api --inspect=9229
 # Build and serve production build locally
 nx build web --configuration=production
 nx serve web --configuration=production --port=8080
-
-# Test production mobile build
-nx build mobile --configuration=production
-nx serve mobile --configuration=production
 ```
 
 ## Advanced Commands
@@ -406,7 +384,6 @@ nx serve mobile --configuration=production
 ```bash
 # Run custom deployment scripts
 nx run api:deploy-azure --env=prod
-nx run mobile:deploy-appstore --platform=ios
 
 # Run custom database operations
 nx run api:migrate-database --env=dev

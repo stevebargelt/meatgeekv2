@@ -97,7 +97,6 @@ nx run-many --target=serve --all
 
 # Or start services individually
 nx serve web          # React web app (http://localhost:3000)
-nx serve mobile       # React Native mobile app
 nx serve api          # Azure Functions (http://localhost:7071)
 ```
 
@@ -139,7 +138,7 @@ nx build api-interfaces
 
 The library and app generators don't scaffold everything this workspace needs. When you add a new project, wire up two things by hand:
 
-1. **Local ESLint override.** The root `.eslintrc.json` sets `ignorePatterns: ["**/*"]`, so every project must supply its own `.eslintrc.json` (extending the root config) to be lintable — otherwise `nx lint <project>` silently ignores all files. The existing projects (`api`, `web`, `mobile`, and the `libs/*`) each have one; copy an existing library's `.eslintrc.json` as the starting point.
+1. **Local ESLint override.** The root `.eslintrc.json` sets `ignorePatterns: ["**/*"]`, so every project must supply its own `.eslintrc.json` (extending the root config) to be lintable — otherwise `nx lint <project>` silently ignores all files. The existing projects (`api`, `web`, and the `libs/*`) each have one; copy an existing library's `.eslintrc.json` as the starting point.
 
 2. **Buildable-library `package.json`.** If the new library is compiled into a dependent app or library, give it a `package.json` whose `name` matches its `@meatgeekv2/*` alias in `tsconfig.base.json` (see [Buildable Library Pattern](../architecture/monorepo-structure.md#buildable-library-pattern)). Leave the `tsconfig.base.json` alias pointed at `libs/<name>/src` — it must resolve to source for Jest and IDE navigation.
 
@@ -173,7 +172,6 @@ make format                      # Format Go code
 meatgeekv2/
 ├── apps/                       # Deployable applications
 │   ├── api/                   # Azure Functions
-│   ├── mobile/                # React Native app
 │   ├── web/                   # React web app
 │   ├── device-controller/     # Go device controller
 │   ├── data-pusher/          # Go IoT service
@@ -241,10 +239,6 @@ nx test api --coverage
 # Test API endpoints with local Azure Functions
 nx serve api
 npm run test:integration
-
-# Test mobile app with simulator
-nx serve mobile --platform=ios
-nx test mobile --platform=ios
 ```
 
 ### End-to-End Testing
@@ -261,17 +255,6 @@ nx e2e web-e2e
 2. Attach VS Code debugger to port 7071
 3. Set breakpoints in TypeScript files
 4. Send requests to `http://localhost:7071/api/...`
-
-### Mobile App Debugging
-```bash
-# iOS simulator
-nx serve mobile --platform=ios
-nx run mobile:debug --platform=ios
-
-# Android emulator
-nx serve mobile --platform=android
-nx run mobile:debug --platform=android
-```
 
 ### Device Controller Debugging
 ```bash
@@ -370,7 +353,6 @@ nx run-many --target=build --all --parallel=4
 - **NX Documentation**: [https://nx.dev](https://nx.dev)
 - **Project Documentation**: See `/docs` directory
 - **Azure Functions**: [Azure Functions Documentation](https://docs.microsoft.com/en-us/azure/azure-functions/)
-- **React Native**: [React Native Documentation](https://reactnative.dev/)
 
 ## Next Steps
 

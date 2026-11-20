@@ -10,7 +10,7 @@
  * Like the MG-20/MG-21 guards next door, this is a *repo-tooling* invariant
  * rather than an api-interfaces behavior test. It lives here because
  * api-interfaces is a leaf shared lib already wired into the CI `lint-and-test`
- * matrix (`project: ['api','web','mobile','api-interfaces']`), so the guard runs
+ * matrix (`project: ['api','web','api-interfaces']`), so the guard runs
  * on every CI push, not only when someone remembers to run it locally.
  *
  * WHY THESE ASSERTIONS ARE WORTH THEIR WEIGHT. infra-apply-dev.yml applies

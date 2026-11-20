@@ -5,6 +5,8 @@ status: active
 title: "[Phase 3] mobile-sentry-integration"
 ---
 
+> **Needs a rewrite for a native iOS app (2026-11-20, HAR-73).** The React Native app this story targeted has been removed (goal HAR-71); the mobile client will be a native iOS (Swift) app. Rewrite the acceptance criteria below for the Sentry Cocoa SDK: install and init in the Swift app, dSYM upload instead of Hermes sourcemaps, iOS-only crash reporting, and `traceparent` injection from the Swift networking layer. The criteria below still describe the removed React Native app.
+
 #### Context
 Phase 3 implementation work — DO NOT start before Phase 1 #6 lands and the mobile app exists. Filed now to lock scope. Architecture is established in Phase 1 ticket #6.
 

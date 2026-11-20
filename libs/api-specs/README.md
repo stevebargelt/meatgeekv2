@@ -3,8 +3,10 @@
 The OpenAPI 3.0 contract for the MeatGeek V2 API: every HTTP route `apps/api`
 serves and every SignalR message it sends, and nothing else.
 
-The web and iOS clients share nothing with the API but this contract. It is
-kept true by a drift check that runs on every pull request (below).
+The web client and the mobile client share nothing with the API but this
+contract. The mobile client is a native iOS (Swift) app that is planned and
+not built. The contract is kept true by a drift check that runs on every pull
+request (below).
 
 ## Layout
 

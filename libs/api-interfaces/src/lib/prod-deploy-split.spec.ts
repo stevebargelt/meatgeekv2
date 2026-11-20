@@ -7,7 +7,7 @@
  * Like the MG-20 guard next door, this is a *repo-tooling* invariant rather than
  * an api-interfaces behavior test. It lives here because api-interfaces is a leaf
  * shared lib already wired into the CI `lint-and-test` matrix
- * (`project: ['api','web','mobile','api-interfaces']`), so the guard runs on
+ * (`project: ['api','web','api-interfaces']`), so the guard runs on
  * every CI push, not just locally.
  *
  * Packaging validity of the built Functions artifact is a *separate* concern and

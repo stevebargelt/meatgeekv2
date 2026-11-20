@@ -3,7 +3,7 @@
  *
  * This is a *repo-tooling* invariant, not an api-interfaces behavior test. It
  * lives here because api-interfaces is a leaf shared lib already wired into the
- * CI `lint-and-test` matrix (`project: ['api','web','mobile','api-interfaces']`),
+ * CI `lint-and-test` matrix (`project: ['api','web','api-interfaces']`),
  * so the guard executes on every CI push — not only when run locally.
  *
  * What it protects:

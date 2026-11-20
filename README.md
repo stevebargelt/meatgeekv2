@@ -30,7 +30,6 @@ nx run-many --target=build --all
 # Start development servers (in separate terminals)
 nx serve web          # React web app (http://localhost:3000)
 nx serve api          # Azure Functions (http://localhost:7071)  
-nx serve mobile       # React Native mobile app
 ```
 
 ### Local Configuration & Secrets
@@ -49,7 +48,8 @@ MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time a
 - **Azure Cloud Services** - Scalable, serverless architecture
 - **Terraform** - Infrastructure as Code
 - **OpenTelemetry** - End-to-end observability
-- **React Native & React** - Cross-platform client applications
+- **React** - Web client application
+- **Swift** - Native iOS client (planned, not built)
 - **Go** - High-performance device services
 - **TypeScript** - Type-safe development across all layers
 
@@ -66,15 +66,14 @@ RTD Sensors → Device Controller → Data Pusher → Azure IoT Hub → Azure Fu
 meatgeekv2/
 ├── apps/                           # Deployable applications
 │   ├── api/                       # Azure Functions API (TypeScript)
-│   ├── mobile/                    # React Native mobile app (primary)
-│   ├── web/                       # React web application (secondary)
+│   ├── web/                       # React web application
 │   ├── device-controller/         # Enhanced Raspberry Pi controller (Go)
 │   ├── data-pusher/              # IoT Hub integration service (Go)
 │   ├── device-simulator/         # Development and testing tool
 │   └── infrastructure/           # Terraform Infrastructure as Code
 ├── libs/                          # Shared libraries and utilities
 │   ├── api-interfaces/           # TypeScript types and interfaces
-│   ├── ui-components/            # Shared React/React Native components
+│   ├── ui-components/            # Shared React components
 │   ├── data-models/              # Domain models and business logic
 │   ├── realtime/                 # SignalR real-time communication
 │   ├── charts/                   # Data visualization components
@@ -93,8 +92,8 @@ meatgeekv2/
 | Device Controller | Go | Temperature monitoring on Raspberry Pi | ✅ Enhanced |
 | Data Pusher | Go | IoT Hub integration service | ✅ New |
 | Azure Functions | TypeScript | Serverless API and data processing | ✅ New |
-| Mobile App | React Native | Primary user interface | ✅ Foundation |
-| Web App | React | Secondary interface with analytics | ✅ Foundation |
+| Web App | React | User interface | ✅ Foundation |
+| iOS App | Swift (native) | Mobile client; shares only the OpenAPI contract with the web app | 📋 Planned, not built |
 | Infrastructure | Terraform | Cloud resource management | 🔄 In Progress |
 
 ## 🔧 Development Commands
@@ -110,7 +109,6 @@ nx affected:build                   # Build only affected projects
 # Development servers
 nx serve web                        # Web app at http://localhost:3000
 nx serve api                        # Azure Functions at http://localhost:7071
-nx serve mobile                     # React Native metro bundler
 
 # Testing
 nx test api                         # Test specific project
@@ -178,7 +176,7 @@ Comprehensive documentation is available in the `/docs` directory:
 ### Current (Phase 0)
 - **Monorepo Architecture**: Unified development with NX
 - **Type Safety**: Comprehensive TypeScript interfaces
-- **Cross-Platform**: React Native (mobile) + React (web) + Go (device)
+- **Platforms**: React (web) + Go (device); a native iOS (Swift) app is planned and not built
 - **Modern Tooling**: ESLint, Prettier, Jest configured
 - **Development Ready**: Hot reloading, testing, linting all set up
 

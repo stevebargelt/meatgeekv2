@@ -60,7 +60,7 @@ jobs:
     needs: setup
     strategy:
       matrix:
-        project: ['api', 'web', 'mobile', 'api-interfaces']
+        project: ['api', 'web', 'api-interfaces']
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

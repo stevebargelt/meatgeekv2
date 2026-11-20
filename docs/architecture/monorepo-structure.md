@@ -10,15 +10,14 @@ The entire MeatGeek V2 system is organized as an **NX monorepo** hosted at `http
 meatgeekv2/
 ├── apps/                           # Deployable applications
 │   ├── api/                       # Azure Functions API (TypeScript)
-│   ├── mobile/                    # React Native mobile app (primary)
-│   ├── web/                       # React web application (secondary)
+│   ├── web/                       # React web application
 │   ├── device-controller/         # Enhanced Raspberry Pi controller (Go)
 │   ├── data-pusher/              # IoT Hub integration service (Go)
 │   ├── device-simulator/         # Development and testing tool
 │   └── infrastructure/           # Terraform Infrastructure as Code
 ├── libs/                          # Shared libraries and utilities
 │   ├── api-interfaces/           # TypeScript types and interfaces
-│   ├── ui-components/            # Shared React/React Native components
+│   ├── ui-components/            # Shared React components
 │   ├── data-models/              # Domain models and business logic
 │   ├── realtime/                 # SignalR real-time communication
 │   ├── charts/                   # Data visualization components
@@ -56,23 +55,11 @@ apps/api/
 └── project.json                # NX project configuration
 ```
 
-#### 2. Mobile Application (`apps/mobile/`)
-**Purpose**: Primary user interface for BBQ monitoring  
-**Technology**: React Native with TypeScript  
+#### 2. Mobile Application (planned, not built)
+**Purpose**: Mobile interface for BBQ monitoring  
+**Technology**: Native iOS app in Swift  
 
-```
-apps/mobile/
-├── src/
-│   ├── screens/                # App screens (Home, Cook, History)
-│   ├── components/             # Mobile-specific components
-│   ├── navigation/             # React Navigation setup
-│   ├── services/               # API clients and real-time connections
-│   ├── store/                  # State management
-│   └── utils/                  # Mobile utilities
-├── android/                    # Android-specific configuration
-├── ios/                        # iOS-specific configuration
-└── project.json                # NX build and deployment configs
-```
+The mobile client will be a native iOS (Swift) app. It is planned and not built, and it is not an Nx project in this workspace. Because it is Swift, it shares no TypeScript code with the web app: the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`.
 
 #### 3. Web Application (`apps/web/`)
 **Purpose**: Secondary interface with advanced analytics  
@@ -366,7 +353,7 @@ export interface Cook {
 ```
 
 #### 2. UI Components (`libs/ui-components/`)
-**Purpose**: Reusable components across mobile and web  
+**Purpose**: Reusable React components for the web app  
 
 ```
 libs/ui-components/
@@ -444,7 +431,7 @@ When you add a new buildable library, give it a `package.json` whose `name` is i
 
 ### 1. Code Reuse and Consistency
 - **Shared interfaces** ensure type safety across applications
-- **Common components** reduce duplication between mobile and web
+- **Common components** reduce duplication across web screens
 - **Business logic libraries** prevent logic drift
 - **Unified coding standards** with shared ESLint/Prettier configs
 
@@ -475,13 +462,11 @@ nx dep-graph                        # Visualize project dependencies
 
 # Building projects
 nx build api                        # Build specific project
-nx build mobile --platform=ios     # Build with platform options
 nx affected:build                   # Build only affected projects
 nx run-many --target=build --all    # Build all projects
 
 # Development servers
 nx serve web                        # Start web development server
-nx serve mobile                     # Start React Native development
 
 # Testing and quality
 nx test api                         # Test specific project
@@ -502,14 +487,13 @@ The monorepo dependency graph flows from shared libraries to applications:
 ```
                     apps/api
                        ↑
-libs/api-interfaces ←──┼──→ apps/mobile
-                       ↑        ↑
-libs/data-models ──────┼────────┘
+libs/api-interfaces ───┤
+                       ↑
+libs/data-models ──────┤
                        ↑
 libs/tracing ──────────┘
 
-libs/ui-components ──→ apps/mobile
-                   └──→ apps/web
+libs/ui-components ──→ apps/web
 
 libs/charts ───────────→ apps/web
 ```
