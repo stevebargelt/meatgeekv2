@@ -342,6 +342,12 @@ module "azure_functions" {
   eventhub_namespace_fqdn     = module.iot_hub.eventhub_namespace_fqdn
   signalr_service_uri         = module.signalr.service_uri
 
+  # The cook chart read model's containers (HAR-74): the per-device, per-hour
+  # rollups and the change-feed trigger's lease container. Same source as the
+  # entity containers above, for the same reason.
+  temperature_rollups_container_name = module.cosmos_db.destination_container_names.temperature_rollups
+  leases_container_name              = module.cosmos_db.destination_container_names.leases
+
   # IoT Hub service endpoint and the live-reading broadcast consumer group
   # (HAR-56, goal HAR-55). Both non-secret. The hostname is where the API writes
   # device twins under its managed identity (functions_iothub_twin_contributor,

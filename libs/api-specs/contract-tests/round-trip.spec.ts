@@ -5,7 +5,40 @@ import { execFileSync } from 'child_process';
 
 import * as ts from 'typescript';
 
-import { MOCK_COOKS, MOCK_DEVICES } from '../src/lib/mock-data/fixtures';
+// A cook and a device shaped as the API returns them. Inline, so the check
+// depends on nothing but the spec.
+const COOK = {
+  id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
+  userId: 'tenant-id:object-id',
+  deviceId: 'meatgeek3',
+  name: 'Brisket',
+  status: 'active',
+  startTime: '2026-11-20T12:00:00.000Z',
+  meatType: 'brisket',
+  weight: 12.5,
+  targetTemps: { grill: 225, probe1: 203 },
+  notes: 'post oak',
+} as const;
+
+const DEVICE = {
+  id: 'meatgeek3',
+  userId: 'tenant-id:object-id',
+  name: 'Backyard smoker',
+  model: 'MeatGeek V1',
+  location: 'Austin, TX',
+  isActive: true,
+  connectionStatus: 'unknown',
+  configuration: {
+    temperatureUnit: 'fahrenheit',
+    pollingInterval: 30,
+    alertSettings: {
+      highTempThreshold: 0,
+      lowTempThreshold: 0,
+      enableSounds: false,
+      enablePushNotifications: false,
+    },
+  },
+} as const;
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const SPEC_PATH = path.resolve(__dirname, '..', 'spec', 'openapi.yaml');
@@ -115,18 +148,15 @@ describe('round-trip — spec → openapi-typescript → fixture conformance', (
   });
 
   it('a StartCookRequest fixture compiles against the generated type', () => {
-    const activeCook = MOCK_COOKS.find((c) => c.status === 'active');
-    if (!activeCook) throw new Error('fixtures missing an active cook');
-
     const startRequest = {
       // MG-84: the client-generated cook id (UUID) is required.
-      id: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
-      name: activeCook.name,
-      deviceId: activeCook.deviceId,
-      meatType: activeCook.meatType ?? 'brisket',
-      weight: activeCook.weight,
-      targetTemps: activeCook.targetTemps,
-      notes: activeCook.notes,
+      id: COOK.id,
+      name: COOK.name,
+      deviceId: COOK.deviceId,
+      meatType: COOK.meatType,
+      weight: COOK.weight,
+      targetTemps: COOK.targetTemps,
+      notes: COOK.notes,
     };
 
     const checkSource = `
@@ -150,16 +180,13 @@ export { fixture };
   });
 
   it('a Device fixture compiles against the generated Device type', () => {
-    const device = MOCK_DEVICES[0];
-    expect(device).toBeDefined();
-
     const checkSource = `
 ${generatedTypes}
 
 type Schemas = components['schemas'];
 type Device = Schemas['Device'];
 
-const fixture: Device = ${JSON.stringify(device, null, 2)};
+const fixture: Device = ${JSON.stringify(DEVICE, null, 2)};
 
 export { fixture };
 `;
@@ -168,6 +195,27 @@ export { fixture };
     if (diagnostics.length > 0) {
       throw new Error(
         `Device fixture failed to compile against generated TS:\n${formatDiagnostics(diagnostics)}`,
+      );
+    }
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('a Cook fixture compiles against the generated Cook type', () => {
+    const checkSource = `
+${generatedTypes}
+
+type Schemas = components['schemas'];
+type Cook = Schemas['Cook'];
+
+const fixture: Cook = ${JSON.stringify(COOK, null, 2)};
+
+export { fixture };
+`;
+
+    const diagnostics = compileCheck(checkSource);
+    if (diagnostics.length > 0) {
+      throw new Error(
+        `Cook fixture failed to compile against generated TS:\n${formatDiagnostics(diagnostics)}`,
       );
     }
     expect(diagnostics).toHaveLength(0);

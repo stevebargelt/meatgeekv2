@@ -37,24 +37,10 @@
         }
       }
     },
-    "serve": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "ts-node --project libs/api-specs/tsconfig.lib.json libs/api-specs/src/lib/mock-server/start.ts",
-        "cwd": "."
-      }
-    },
-    "mock": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "ts-node --project libs/api-specs/tsconfig.lib.json libs/api-specs/src/lib/mock-server/start.ts",
-        "cwd": "."
-      }
-    },
     "validate-spec": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "npx @apidevtools/swagger-parser validate libs/api-specs/spec/openapi.yaml",
+        "command": "node -e \"require('@apidevtools/swagger-parser').validate('libs/api-specs/spec/openapi.yaml').then(() => console.log('libs/api-specs/spec/openapi.yaml is valid'), e => { console.error(e.message); process.exit(1); })\"",
         "cwd": "."
       }
     },

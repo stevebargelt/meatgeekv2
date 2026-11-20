@@ -1,14 +1,16 @@
-# Temperature reading schemas.
-# Mirrors libs/api-interfaces/src/lib/temperature.ts. The getCurrent handler
-# returns a BARE TemperatureReading (not wrapped in ApiResponse) — the spec
-# preserves that quirk in paths/temperatures.yaml.
+# Temperature reading schemas. Mirrors libs/api-interfaces/src/lib/temperature.ts
+# and toTemperatureReading in apps/api/src/shared/cosmos/temperatures-repository.ts,
+# the one mapper GET /temperatures/current, GET /temperatures/history and the
+# `temperature` SignalR message all use.
 
 TemperatureReading:
   type: object
   description: |
-    A single sensor sample from one device. The current handler
-    (apps/api/src/functions/temperatures/get-current.ts) returns this shape
-    directly as the 200 body — no wrapping envelope.
+    One sensor sample from one device, as toTemperatureReading maps a stored
+    IoT Hub document. `deviceId` is the hub-authenticated device identity
+    (MG-73). A temperature the device did not send, or sent as something other
+    than a finite number, is omitted, never null. GET /temperatures/current
+    returns this shape directly as the 200 body.
   required:
     - deviceId
     - timestamp
@@ -18,47 +20,33 @@ TemperatureReading:
       type: string
     timestamp:
       type: string
-      format: date-time
+      description: |
+        The device's `Body.timestamp` exactly as sent when it parses as a date
+        (devices send ISO-8601), else the hub's enqueued time.
+      example: '2026-11-20T18:04:05.123Z'
     cookId:
       type: string
-      nullable: true
+      minLength: 1
       description: |
-        Cook session this reading belongs to. Strict tag-match semantics:
-        a reading is associated with a cook iff cookId equals the cook's id.
-        See GET /temperatures/history `cookId` query param docs.
+        Cook session this reading belongs to, when the device tagged it.
+        Strict tag-match semantics: see the GET /temperatures/history `cookId`
+        query parameter.
     grillTemp:
       type: number
       format: double
-      nullable: true
-      minimum: -50
-      maximum: 1000
-      description: |
-        Grill chamber reading in degrees F. Null when sensor is disconnected
-        or has not reported yet.
+      description: Grill chamber reading in degrees F, as the device sent it.
     probe1Temp:
       type: number
       format: double
-      nullable: true
-      minimum: -50
-      maximum: 1000
     probe2Temp:
       type: number
       format: double
-      nullable: true
-      minimum: -50
-      maximum: 1000
     probe3Temp:
       type: number
       format: double
-      nullable: true
-      minimum: -50
-      maximum: 1000
     probe4Temp:
       type: number
       format: double
-      nullable: true
-      minimum: -50
-      maximum: 1000
 
 TemperatureHistoryResponse:
   type: object
@@ -81,103 +69,16 @@ TemperatureHistoryResponse:
     total:
       type: integer
       minimum: 0
+      description: Every matching document, including any that could not be mapped.
     offset:
       type: integer
       minimum: 0
+      description: The `offset` applied (the query value, default 0).
     limit:
       type: integer
       minimum: 1
       maximum: 5000
+      description: The `limit` applied (the query value, default 100).
     hasMore:
       type: boolean
-
-TemperatureAlertType:
-  type: string
-  description: Trigger condition for a temperature alert. Named enum.
-  enum:
-    - high
-    - low
-    - target_reached
-
-ProbeName:
-  type: string
-  description: Identifier for a probe location. Named enum.
-  enum:
-    - grill
-    - probe1
-    - probe2
-    - probe3
-    - probe4
-
-TemperatureAlert:
-  type: object
-  description: Configured alert that fires when a probe crosses a threshold.
-  required:
-    - id
-    - type
-    - probe
-    - threshold
-    - isActive
-    - message
-  additionalProperties: false
-  properties:
-    id:
-      type: string
-    type:
-      $ref: '#/TemperatureAlertType'
-    probe:
-      $ref: '#/ProbeName'
-    threshold:
-      type: number
-      format: double
-      minimum: -50
-      maximum: 1000
-    isActive:
-      type: boolean
-    message:
-      type: string
-
-LiveTemperatureUpdate:
-  type: object
-  description: |
-    Real-time temperature payload pushed over SignalR (see
-    signalr-payloads.yaml for the envelope). Keys differ from
-    TemperatureReading — `temperatures.grill/probeN` rather than
-    `grillTemp/probeNTemp` to align with api-interfaces.
-  required:
-    - deviceId
-    - timestamp
-    - temperatures
-  additionalProperties: false
-  properties:
-    deviceId:
-      type: string
-    timestamp:
-      type: string
-      format: date-time
-    cookId:
-      type: string
-      nullable: true
-    temperatures:
-      type: object
-      additionalProperties: false
-      properties:
-        grill:
-          type: number
-          format: double
-        probe1:
-          type: number
-          format: double
-        probe2:
-          type: number
-          format: double
-        probe3:
-          type: number
-          format: double
-        probe4:
-          type: number
-          format: double
-    alerts:
-      type: array
-      items:
-        $ref: '#/TemperatureAlert'
+      description: '`offset + limit < total`.'

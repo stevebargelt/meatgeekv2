@@ -36,20 +36,19 @@ recipes-collection:
         description: The caller's recipes (possibly none).
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/recipe.yaml#/RecipeListResponse'
       '400':
-        $ref: '#/shared/validation-error'
+        $ref: '../components/responses.yaml#/RecipeValidationError'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
   post:
     operationId: createRecipe
@@ -71,20 +70,19 @@ recipes-collection:
         description: The created recipe.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/recipe.yaml#/Recipe'
       '400':
-        $ref: '#/shared/validation-error'
+        $ref: '../components/responses.yaml#/RecipeValidationError'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
 recipe-item:
   get:
@@ -95,28 +93,27 @@ recipe-item:
       in the caller's partition.
     tags: [recipes]
     parameters:
-      - $ref: '#/shared/recipe-id-parameter'
+      - $ref: '../components/parameters.yaml#/RecipeIdPath'
     responses:
       '200':
         description: The recipe.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/recipe.yaml#/Recipe'
       '400':
-        $ref: '#/shared/validation-error'
+        $ref: '../components/responses.yaml#/RecipeValidationError'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
-        $ref: '#/shared/recipe-not-found'
+        $ref: '../components/responses.yaml#/RecipeNotFound'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
   patch:
     operationId: updateRecipe
@@ -128,7 +125,7 @@ recipe-item:
       CONCURRENT_UPDATE and the client should read it again and retry.
     tags: [recipes]
     parameters:
-      - $ref: '#/shared/recipe-id-parameter'
+      - $ref: '../components/parameters.yaml#/RecipeIdPath'
     requestBody:
       required: true
       content:
@@ -140,32 +137,33 @@ recipe-item:
         description: The updated recipe.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/recipe.yaml#/Recipe'
       '400':
-        $ref: '#/shared/validation-error'
+        $ref: '../components/responses.yaml#/RecipeValidationError'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
-        $ref: '#/shared/recipe-not-found'
+        $ref: '../components/responses.yaml#/RecipeNotFound'
       '409':
         description: |
           CONCURRENT_UPDATE: the recipe changed between the read and the write.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
   delete:
     operationId: deleteRecipe
@@ -173,56 +171,20 @@ recipe-item:
     description: One point delete in the caller's partition. No body on success.
     tags: [recipes]
     parameters:
-      - $ref: '#/shared/recipe-id-parameter'
+      - $ref: '../components/parameters.yaml#/RecipeIdPath'
     responses:
       '204':
         description: Deleted.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
       '400':
-        $ref: '#/shared/validation-error'
+        $ref: '../components/responses.yaml#/RecipeValidationError'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
-        $ref: '#/shared/recipe-not-found'
+        $ref: '../components/responses.yaml#/RecipeNotFound'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
-
-# Pieces the operations above share. Not path items: openapi.yaml references
-# only recipes-collection and recipe-item.
-shared:
-  recipe-id-parameter:
-    name: id
-    in: path
-    required: true
-    description: The recipe id, a UUID. Anything else is 400 with no Cosmos call.
-    schema:
-      type: string
-      format: uuid
-
-  validation-error:
-    description: |
-      VALIDATION_ERROR: the body is not valid JSON, carries a server-owned
-      (`id`, `userId`, `createdAt`, `updatedAt`) or unknown field, breaks a
-      field rule, or is an empty patch; or the `{id}` is not a UUID; or the
-      `meatType` filter is unknown. Answered before any Cosmos call.
-    content:
-      application/json:
-        schema:
-          $ref: '../components/schemas/common.yaml#/ErrorResponse'
-
-  recipe-not-found:
-    description: |
-      RECIPE_NOT_FOUND: no such recipe in the caller's partition. Another
-      user's recipe answers exactly the same.
-    headers:
-      x-meatgeek-request-charge:
-        $ref: './devices.yaml#/shared/request-charge-header'
-    content:
-      application/json:
-        schema:
-          $ref: '../components/schemas/common.yaml#/ErrorResponse'
+        $ref: '../components/responses.yaml#/ServerError'

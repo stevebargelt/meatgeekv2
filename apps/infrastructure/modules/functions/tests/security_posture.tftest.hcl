@@ -41,6 +41,8 @@ variables {
   temperatures_container_name            = "temperatures"
   users_container_name                   = "users"
   recipes_container_name                 = "recipes"
+  temperature_rollups_container_name     = "temperature-rollups"
+  leases_container_name                  = "leases"
   eventhub_namespace_fqdn                = "meatgeek-v2-dev-eventhub-ns-abc123def456.servicebus.windows.net"
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   iothub_service_hostname                = "meatgeek-v2-dev-iothub-abc123def456.azure-devices.net"
@@ -301,6 +303,14 @@ run "entity_container_names_reach_the_app" {
     condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_RECIPES_CONTAINER_NAME"] == var.recipes_container_name
     error_message = "COSMOSDB_RECIPES_CONTAINER_NAME must be set from var.recipes_container_name (HAR-19)"
   }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME"] == var.temperature_rollups_container_name
+    error_message = "COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME must be set from var.temperature_rollups_container_name (HAR-74)"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["COSMOSDB_LEASES_CONTAINER_NAME"] == var.leases_container_name
+    error_message = "COSMOSDB_LEASES_CONTAINER_NAME must be set from var.leases_container_name (HAR-74)"
+  }
 }
 
 # MG-51 negative — an empty database name is refused at plan time. A blank
@@ -370,6 +380,28 @@ run "empty_recipes_container_name_is_refused" {
   }
   expect_failures = [
     var.recipes_container_name,
+  ]
+}
+
+# HAR-74 negative — a blank temperature-rollups container name is refused at plan time, as cooks is.
+run "empty_temperature_rollups_container_name_is_refused" {
+  command = plan
+  variables {
+    temperature_rollups_container_name = " "
+  }
+  expect_failures = [
+    var.temperature_rollups_container_name,
+  ]
+}
+
+# HAR-74 negative — a blank leases container name is refused at plan time, as cooks is.
+run "empty_leases_container_name_is_refused" {
+  command = plan
+  variables {
+    leases_container_name = " "
+  }
+  expect_failures = [
+    var.leases_container_name,
   ]
 }
 

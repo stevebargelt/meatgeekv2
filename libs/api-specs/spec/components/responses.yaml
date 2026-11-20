@@ -1,0 +1,97 @@
+# Responses shared by more than one operation. Listed in openapi.yaml
+# components.responses.
+
+Unauthenticated:
+  description: |
+    UNAUTHENTICATED. Two layers answer 401:
+      - App Service Authentication (Easy Auth) answers 401 itself, before any
+        function runs, when the bearer token is missing or is not a valid
+        Entra access token for the API audience. That response is the
+        platform's, with no body from this API.
+      - The handler answers 401 with the body below when the request reached
+        it without a usable Easy Auth principal (`X-MS-CLIENT-PRINCIPAL`
+        missing, unparseable, or without `oid`/`tid` claims). No Cosmos call
+        is made, so there is no x-meatgeek-request-charge header.
+  headers:
+    X-Request-ID:
+      $ref: './headers.yaml#/X-Request-ID'
+  content:
+    application/json:
+      schema:
+        $ref: './schemas/common.yaml#/UnauthenticatedError'
+
+PlatformUnauthenticated:
+  description: |
+    App Service Authentication (Easy Auth) answers 401 itself, before the
+    function runs, when the bearer token is missing or is not a valid Entra
+    access token for the API audience. The handler behind this route does not
+    read the principal, so this API never sends a 401 body of its own here.
+
+ServerError:
+  description: |
+    INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
+    failure. Carries x-meatgeek-request-charge when the Cosmos calls made
+    before the failure, or the failing call, reported a charge.
+  headers:
+    X-Request-ID:
+      $ref: './headers.yaml#/X-Request-ID'
+    x-meatgeek-request-charge:
+      $ref: './headers.yaml#/RequestCharge'
+  content:
+    application/json:
+      schema:
+        $ref: './schemas/common.yaml#/ErrorResponse'
+
+DeviceValidationError:
+  description: |
+    VALIDATION_ERROR: the body is not valid JSON, is not an object, has an
+    unknown field, or breaks a field rule. Answered before any Cosmos call.
+  headers:
+    X-Request-ID:
+      $ref: './headers.yaml#/X-Request-ID'
+  content:
+    application/json:
+      schema:
+        $ref: './schemas/common.yaml#/ErrorResponse'
+
+DeviceNotFound:
+  description: |
+    NOT_FOUND: no such device, or it belongs to someone else (the two are
+    indistinguishable on purpose).
+  headers:
+    X-Request-ID:
+      $ref: './headers.yaml#/X-Request-ID'
+    x-meatgeek-request-charge:
+      $ref: './headers.yaml#/RequestCharge'
+  content:
+    application/json:
+      schema:
+        $ref: './schemas/common.yaml#/ErrorResponse'
+
+RecipeValidationError:
+  description: |
+    VALIDATION_ERROR: the body is not valid JSON, is not an object, carries a
+    server-owned (`id`, `userId`, `createdAt`, `updatedAt`) or unknown field,
+    breaks a field rule, or is an empty patch; or the `{id}` is not a UUID; or
+    the `meatType` filter is unknown. Answered before any Cosmos call.
+  headers:
+    X-Request-ID:
+      $ref: './headers.yaml#/X-Request-ID'
+  content:
+    application/json:
+      schema:
+        $ref: './schemas/common.yaml#/ErrorResponse'
+
+RecipeNotFound:
+  description: |
+    RECIPE_NOT_FOUND: no such recipe in the caller's partition. Another user's
+    recipe answers exactly the same.
+  headers:
+    X-Request-ID:
+      $ref: './headers.yaml#/X-Request-ID'
+    x-meatgeek-request-charge:
+      $ref: './headers.yaml#/RequestCharge'
+  content:
+    application/json:
+      schema:
+        $ref: './schemas/common.yaml#/ErrorResponse'

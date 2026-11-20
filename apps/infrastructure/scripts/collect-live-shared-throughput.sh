@@ -32,7 +32,7 @@
 #       the outcome is carried explicitly as offerProbe.{queryOk,offerFound} and,
 #       when found, the full read-back as offerProbe.document.
 #   (b) PER-CONTAINER OFFER — `az cosmosdb sql container throughput show` for each
-#       of the five destination containers. Same outcome encoding: a container with
+#       of the seven destination containers. Same outcome encoding: a container with
 #       NO dedicated offer (the healthy shared case) exits nonzero, recorded as
 #       throughputProbe.{queryOk:true, offerFound:false}.
 #   (c) DEFINITIONS — `az cosmosdb sql container show` for each container against
@@ -89,7 +89,7 @@
 #   collect-live-shared-throughput.sh \
 #       --account-name <cosmos-account> --resource-group <rg> \
 #       --database-name <destination-db> \
-#       [--containers "cooks users recipes temperatures devices"]
+#       [--containers "cooks users recipes temperatures devices temperature-rollups leases"]
 #   AZ_BIN=/path/to/fake-az collect-live-shared-throughput.sh ...   # testing seam
 #
 set -u
@@ -103,9 +103,10 @@ EX_OP=1
 # collector testable without Azure or credentials.
 AZ_BIN="${AZ_BIN:-az}"
 
-# The five destination containers, spelled out ONCE and iterated by VALUE. This is
+# The seven destination containers, spelled out ONCE and iterated by VALUE. This is
 # the SAME set the gate validates the bundle carries exactly; keep them in sync.
-DEFAULT_CONTAINERS="cooks users recipes temperatures devices"
+# temperature-rollups and leases are the cook chart read model (HAR-74).
+DEFAULT_CONTAINERS="cooks users recipes temperatures devices temperature-rollups leases"
 
 die() { echo "${PROG}: FATAL: $*" >&2; exit "${EX_OP}"; }
 
@@ -219,8 +220,10 @@ fi
 # --- 3. Per container: throughput probe (b) + definition (c) ----------------
 ENTRIES="${WORK}/entries.jsonl"
 : > "${ENTRIES}"
+n_containers=0
 
 for name in ${CONTAINERS}; do
+  n_containers=$((n_containers + 1))
   # (b) dedicated-offer probe. Same outcome encoding as the database probe.
   C_ERR="${WORK}/${name}-tp.err"
   "${AZ_BIN}" cosmosdb sql container throughput show \
@@ -265,5 +268,5 @@ jq -n --argjson database "${DB_JSON}" --argjson containers "${CONTAINERS_JSON}" 
   '{database:$database, containers:$containers}' \
   || die "could not assemble the final read-back bundle"
 
-echo "${PROG}: assembled the read-back bundle for ${DATABASE_NAME} (5 containers) — piping to the assertion gate" >&2
+echo "${PROG}: assembled the read-back bundle for ${DATABASE_NAME} (${n_containers} containers) — piping to the assertion gate" >&2
 exit 0

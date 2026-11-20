@@ -1347,7 +1347,14 @@ name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 # (namespace_name -> azurerm_eventhub_namespace.main, eventhub_name ->
 # azurerm_eventhub.temperature_data), and its replace_triggered_by names both
 # `.id`s. That raises the floor by 2, from 20 to 22.
-NAME_REF_PAIR_FLOOR=22
+#
+# HAR-74 added azurerm_cosmosdb_sql_container.temperature_rollups_shared and
+# azurerm_cosmosdb_sql_container.leases_shared to modules/cosmos-db/main.tf. Each
+# reaches azurerm_cosmosdb_account.main (account_name) and
+# azurerm_cosmosdb_sql_database.meatgeek_shared (database_name) by configured
+# name, and each replace_triggered_by names both `.id`s. That raises the floor by
+# 4, from 22 to 26.
+NAME_REF_PAIR_FLOOR=26
 
 name_replace_hits=""
 name_ref_pairs=0

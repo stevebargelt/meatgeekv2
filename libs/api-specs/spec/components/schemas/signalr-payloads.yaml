@@ -1,18 +1,20 @@
-# SignalR message payloads.
+# SignalR schemas.
 #
-# Most schemas here describe messages emitted over the SignalR `temperatureHub`
-# channel — they are NOT HTTP endpoints. See openapi.yaml info.description
-# for the channel/transport prose note.
+# The hub, its negotiate route and the messages it carries are listed in the
+# top-level `x-signalr` extension of openapi.yaml. Each message below is the
+# single argument of a SignalR invocation whose target is the `x-signalr`
+# message key: a client subscribes with `connection.on('<key>', handler)`.
+# These are NOT HTTP endpoints.
 #
-# Every envelope carries a required `correlation.id` so producers/consumers
-# can stitch a single user action to log entries across device → IoT Hub →
-# Functions → SignalR → client. The discriminator on `type` lets generators
-# produce a typed union per language (Go interface, TS discriminated union).
+# The schemas describe exactly what the producers build:
+#   - temperature  : toGroupMessage in apps/api/src/functions/signalr/broadcast-temperature.ts
+#   - cook_started : buildCookEnvelope in apps/api/src/functions/signalr/envelope.ts
+#   - cook_stopped : buildCookEnvelope in apps/api/src/functions/signalr/envelope.ts
+# apps/api/src/contract/contract.spec.ts builds one of each with that code and
+# validates it against these schemas.
 #
-# EXCEPTION: SignalRConnectionInfo (below) is NOT a channel message — it is the
-# HTTP response body of POST /negotiate, a client access token the API mints
-# through the SignalR data-plane REST API. It is kept in this SignalR-domain file
-# so codegen groups the negotiate handshake type with the channel payloads.
+# SignalRConnectionInfo is the HTTP response body of POST /negotiate, kept here
+# so the negotiate handshake type sits with the messages.
 
 SignalRConnectionInfo:
   type: object
@@ -29,330 +31,145 @@ SignalRConnectionInfo:
     url:
       type: string
       format: uri
-      description: Absolute WebSocket/HTTP endpoint the client connects to.
+      description: Absolute endpoint the client connects to.
     accessToken:
       type: string
-      description: Short-lived JWT the client presents when opening the connection.
-
-SignalRMessageType:
-  type: string
-  description: |
-    Named enum of SignalR message types. Discriminator value for the
-    SignalRMessage oneOf.
-  enum:
-    - temperature_update
-    - cook_started
-    - cook_stopped
-    - cook_paused
-    - cook_resumed
-    - device_online
-    - device_offline
-    - alert_triggered
-    - system_notification
+      description: |
+        Client access token, valid for 60 minutes. Negotiate again for a new
+        one; negotiating also refreshes the caller's device groups.
 
 CorrelationContext:
   type: object
   description: |
-    Trace correlation block. `id` is the only required field — propagated
-    end-to-end (HTTP X-Request-ID → SignalR payload → device IoT message).
+    Trace correlation block. `id` is the X-Request-ID of the HTTP request that
+    caused the event when the caller sent one, else that request's Functions
+    invocation id.
   required:
     - id
   additionalProperties: false
   properties:
     id:
       type: string
-      description: Correlation id (W3C trace-id or Functions invocationId).
-    parentId:
-      type: string
-      description: Parent span id when this message is mid-trace.
-    traceFlags:
-      type: string
-      description: W3C trace flags (e.g. '01' for sampled).
 
-SignalREnvelopeBase:
+TemperatureMessage:
   type: object
   description: |
-    Shared envelope fields for every SignalR message. Concrete message
-    schemas extend this via allOf and tighten `type` to a single enum value.
+    SignalR target `temperature`. A live reading, sent to group
+    `device-{deviceId}`; negotiate puts each user in the groups of the devices
+    they own, so it reaches the device's owner. The fields are exactly a
+    TemperatureReading (what GET /temperatures/current would return for the
+    same IoT Hub message) plus `enqueuedTimeUtc`. Events that cannot be mapped
+    to a reading are dropped, not sent.
+  required:
+    - deviceId
+    - timestamp
+    - enqueuedTimeUtc
+  additionalProperties: false
+  properties:
+    deviceId:
+      $ref: './temperature.yaml#/TemperatureReading/properties/deviceId'
+    timestamp:
+      $ref: './temperature.yaml#/TemperatureReading/properties/timestamp'
+    cookId:
+      $ref: './temperature.yaml#/TemperatureReading/properties/cookId'
+    grillTemp:
+      $ref: './temperature.yaml#/TemperatureReading/properties/grillTemp'
+    probe1Temp:
+      $ref: './temperature.yaml#/TemperatureReading/properties/probe1Temp'
+    probe2Temp:
+      $ref: './temperature.yaml#/TemperatureReading/properties/probe2Temp'
+    probe3Temp:
+      $ref: './temperature.yaml#/TemperatureReading/properties/probe3Temp'
+    probe4Temp:
+      $ref: './temperature.yaml#/TemperatureReading/properties/probe4Temp'
+    enqueuedTimeUtc:
+      type: string
+      format: date-time
+      description: |
+        When Event Hubs enqueued the message, as UTC ISO-8601, so a client can
+        measure delivery delay.
+
+CookStartedMessage:
+  type: object
+  description: |
+    SignalR target `cook_started`. Sent to the cook's owner (SignalR user id
+    `"<tid>:<oid>"`) once, by the POST /cooks call that created the cook (201,
+    or a 503 after the cook was created). A replay (200) sends nothing.
+    `payload` is the persisted cook, in status `active`.
   required:
     - type
     - timestamp
     - messageId
+    - deviceId
+    - userId
+    - cookId
     - correlation
     - payload
+  additionalProperties: false
   properties:
     type:
-      $ref: '#/SignalRMessageType'
+      type: string
+      enum:
+        - cook_started
     timestamp:
       type: string
       format: date-time
+      description: When the message was built.
     messageId:
       type: string
-      description: ULID/UUID assigned at emit time; used for client-side dedupe.
+      format: uuid
+      description: Random UUID per message, for client-side de-duplication.
     deviceId:
       type: string
+      description: The cook's device.
     userId:
       type: string
+      description: The cook's owner.
     cookId:
       type: string
+      description: The device's active cook, which is `payload.id`.
     correlation:
       $ref: '#/CorrelationContext'
     payload:
-      description: Discriminated by `type` — see concrete envelope schemas.
-
-TemperatureUpdateMessage:
-  description: SignalR push of a fresh temperature sample.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - temperature_update
-        payload:
-          $ref: './temperature.yaml#/LiveTemperatureUpdate'
-
-CookStartedMessage:
-  description: SignalR push when a cook session transitions to active.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - cook_started
-        payload:
-          $ref: './cook.yaml#/Cook'
+      $ref: './cook.yaml#/Cook'
 
 CookStoppedMessage:
-  description: SignalR push when a cook completes or is cancelled.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - cook_stopped
-        payload:
-          $ref: './cook.yaml#/Cook'
-
-CookPausedMessage:
-  description: SignalR push when a cook is paused mid-run.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - cook_paused
-        payload:
-          $ref: './cook.yaml#/Cook'
-
-CookResumedMessage:
-  description: SignalR push when a paused cook resumes.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - cook_resumed
-        payload:
-          $ref: './cook.yaml#/Cook'
-
-DeviceOnlineMessage:
-  description: SignalR push when a device's connection transitions to online.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - device_online
-        payload:
-          type: object
-          required:
-            - deviceId
-            - connectionStatus
-            - timestamp
-          additionalProperties: false
-          properties:
-            deviceId:
-              type: string
-            connectionStatus:
-              $ref: './common.yaml#/ConnectionStatus'
-            timestamp:
-              type: string
-              format: date-time
-
-DeviceOfflineMessage:
-  description: SignalR push when a device misses its heartbeat window.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - device_offline
-        payload:
-          type: object
-          required:
-            - deviceId
-            - connectionStatus
-            - lastSeen
-          additionalProperties: false
-          properties:
-            deviceId:
-              type: string
-            connectionStatus:
-              $ref: './common.yaml#/ConnectionStatus'
-            lastSeen:
-              type: string
-              format: date-time
-
-AlertTriggeredMessage:
-  description: SignalR push when a configured TemperatureAlert fires.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - alert_triggered
-        payload:
-          type: object
-          required:
-            - alert
-            - deviceId
-            - triggeredAt
-            - currentValue
-          additionalProperties: false
-          properties:
-            alert:
-              $ref: './temperature.yaml#/TemperatureAlert'
-            deviceId:
-              type: string
-            cookId:
-              type: string
-            triggeredAt:
-              type: string
-              format: date-time
-            currentValue:
-              type: number
-              format: double
-
-SystemNotificationLevel:
-  type: string
-  description: Severity level for system notifications. Named enum.
-  enum:
-    - info
-    - warning
-    - error
-
-SystemNotificationMessage:
+  type: object
   description: |
-    SignalR push for operational notifications (maintenance windows,
-    capacity warnings, etc.) not tied to a specific cook or device.
-  allOf:
-    - $ref: '#/SignalREnvelopeBase'
-    - type: object
-      required:
-        - type
-        - payload
-        - correlation
-      properties:
-        type:
-          type: string
-          enum:
-            - system_notification
-        payload:
-          type: object
-          required:
-            - level
-            - title
-            - message
-          additionalProperties: false
-          properties:
-            level:
-              $ref: '#/SystemNotificationLevel'
-            title:
-              type: string
-            message:
-              type: string
-            actionUrl:
-              type: string
-              format: uri
-            metadata:
-              type: object
-              description: |
-                Free-form context bag. additionalProperties: true here is
-                intentional — this is a metadata-extras field, not a payload
-                body that codegen should produce a strict struct for.
-              additionalProperties: true
-
-SignalRMessage:
-  description: |
-    Discriminated union of every SignalR message. Producers/consumers MUST
-    branch on `type`. Generators should emit a typed union per language.
-  oneOf:
-    - $ref: '#/TemperatureUpdateMessage'
-    - $ref: '#/CookStartedMessage'
-    - $ref: '#/CookStoppedMessage'
-    - $ref: '#/CookPausedMessage'
-    - $ref: '#/CookResumedMessage'
-    - $ref: '#/DeviceOnlineMessage'
-    - $ref: '#/DeviceOfflineMessage'
-    - $ref: '#/AlertTriggeredMessage'
-    - $ref: '#/SystemNotificationMessage'
-  discriminator:
-    propertyName: type
-    mapping:
-      temperature_update: '#/TemperatureUpdateMessage'
-      cook_started: '#/CookStartedMessage'
-      cook_stopped: '#/CookStoppedMessage'
-      cook_paused: '#/CookPausedMessage'
-      cook_resumed: '#/CookResumedMessage'
-      device_online: '#/DeviceOnlineMessage'
-      device_offline: '#/DeviceOfflineMessage'
-      alert_triggered: '#/AlertTriggeredMessage'
-      system_notification: '#/SystemNotificationMessage'
+    SignalR target `cook_stopped`. Sent to the cook's owner once, by the
+    POST /cooks/{cookId}/stop call that moved the cook to `completed`. Stopping
+    an already-completed cook sends nothing. There is no envelope `cookId`:
+    the device has no active cook after a stop, and the stopped cook is
+    `payload.id`. `payload` is the persisted cook, in status `completed`.
+  required:
+    - type
+    - timestamp
+    - messageId
+    - deviceId
+    - userId
+    - correlation
+    - payload
+  additionalProperties: false
+  properties:
+    type:
+      type: string
+      enum:
+        - cook_stopped
+    timestamp:
+      type: string
+      format: date-time
+      description: When the message was built.
+    messageId:
+      type: string
+      format: uuid
+      description: Random UUID per message, for client-side de-duplication.
+    deviceId:
+      type: string
+      description: The cook's device.
+    userId:
+      type: string
+      description: The cook's owner.
+    correlation:
+      $ref: '#/CorrelationContext'
+    payload:
+      $ref: './cook.yaml#/Cook'

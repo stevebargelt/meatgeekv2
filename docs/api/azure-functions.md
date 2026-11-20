@@ -432,6 +432,13 @@ COSMOSDB_TEMPERATURES_CONTAINER_NAME=<cosmos-temperatures-container-name>
 COSMOSDB_USERS_CONTAINER_NAME=<cosmos-users-container-name>
 COSMOSDB_RECIPES_CONTAINER_NAME=<cosmos-recipes-container-name>
 
+# The cook chart read model (HAR-74): per-device, per-hour temperature rollups,
+# and the lease container for the Cosmos DB change-feed trigger. Terraform-owned
+# (module.cosmos_db.destination_container_names.temperature_rollups / .leases).
+# Nothing in the API reads them yet; the change-feed function is a later issue.
+COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME=<cosmos-temperature-rollups-container-name>
+COSMOSDB_LEASES_CONTAINER_NAME=<cosmos-leases-container-name>
+
 # IoT telemetry (Event Hubs-compatible) — identity-based. NON-SECRET
 # fully-qualified namespace only; the managed identity holds Azure Event Hubs
 # Data Receiver.

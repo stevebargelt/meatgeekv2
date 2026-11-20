@@ -1,0 +1,41 @@
+# Health path items. Top-level key is referenced from openapi.yaml's `paths`.
+# Handler: apps/api/src/functions/health/cosmos-health.ts (MG-51 / MG-59).
+
+health-cosmos:
+  get:
+    operationId: getCosmosHealth
+    summary: Check the API's own path to Cosmos
+    description: |
+      Runs two read-only metadata reads through the same shared Cosmos adapter
+      every handler uses: the configured database, then the cooks container.
+      Both must answer for 200. Nothing is created or written.
+
+      The handler does not read the caller's principal: authentication is App
+      Service Authentication's, which answers 401 before the function runs.
+      The body never names the account, database or container, and never
+      carries a dependency's error text.
+    tags: [health]
+    responses:
+      '200':
+        description: Healthy. `status` is `healthy`; there is no `error`.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/CosmosHealthResponse'
+      '401':
+        $ref: '../components/responses.yaml#/PlatformUnauthenticated'
+      '503':
+        description: |
+          Unhealthy. `status` is `unhealthy`; `error` is a missing setting's
+          code or `cosmos_probe_failed`, with `probeStatusCode` when the
+          dependency reported a numeric status.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/CosmosHealthResponse'

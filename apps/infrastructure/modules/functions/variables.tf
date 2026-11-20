@@ -161,6 +161,26 @@ variable "recipes_container_name" {
   }
 }
 
+variable "temperature_rollups_container_name" {
+  description = "Name of the Terraform-owned Cosmos container holding per-device, per-hour temperature rollups for the cook chart (non-secret), published to the app as COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME. Sourced from the cosmos-db module output (destination_container_names.temperature_rollups), NOT restated as a literal. NO DEFAULT on purpose, same as cooks_container_name (HAR-74)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.temperature_rollups_container_name)) > 0
+    error_message = "temperature_rollups_container_name must be non-empty — an empty setting is the same defect as an absent one (MG-51/HAR-74)."
+  }
+}
+
+variable "leases_container_name" {
+  description = "Name of the Terraform-owned Cosmos lease container the Functions Cosmos DB change-feed trigger uses (non-secret), published to the app as COSMOSDB_LEASES_CONTAINER_NAME. Terraform creates it because the trigger, authenticating with the managed identity under RBAC, cannot create its own lease container. Sourced from the cosmos-db module output (destination_container_names.leases). NO DEFAULT on purpose (HAR-74)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.leases_container_name)) > 0
+    error_message = "leases_container_name must be non-empty — an empty setting is the same defect as an absent one (MG-51/HAR-74)."
+  }
+}
+
 variable "eventhub_namespace_fqdn" {
   description = "Fully-qualified Event Hubs namespace hostname (non-secret) for the IoT telemetry stream. Runtime access is identity-based via an Azure Event Hubs Data Receiver role assignment."
   type        = string

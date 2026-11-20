@@ -256,6 +256,106 @@
         "offerFound": false,
         "queryOk": true
       }
+    },
+    {
+      "definition": {
+        "id": "temperature-rollups",
+        "resource": {
+          "_etag": "\"temperature-rollups-dst\"",
+          "_rid": "temperatureRollupsDST==",
+          "_self": "dbs/shared/colls/temperature-rollups/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "id": "temperature-rollups",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/*"
+              },
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/deviceId/?"
+              },
+              {
+                "path": "/hourStart/?"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/deviceId"
+            ],
+            "version": 1
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "temperature-rollups",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
+    },
+    {
+      "definition": {
+        "id": "leases",
+        "resource": {
+          "_etag": "\"leases-dst\"",
+          "_rid": "leasesDST==",
+          "_self": "dbs/shared/colls/leases/",
+          "_ts": 1723900000,
+          "conflictResolutionPolicy": {
+            "conflictResolutionPath": "/_ts",
+            "conflictResolutionProcedure": "",
+            "mode": "LastWriterWins"
+          },
+          "id": "leases",
+          "indexingPolicy": {
+            "automatic": true,
+            "compositeIndexes": [],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ],
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "indexingMode": "consistent"
+          },
+          "partitionKey": {
+            "kind": "Hash",
+            "paths": [
+              "/id"
+            ],
+            "version": 1
+          },
+          "uniqueKeyPolicy": {
+            "uniqueKeys": []
+          }
+        }
+      },
+      "name": "leases",
+      "throughputProbe": {
+        "offerFound": false,
+        "queryOk": true
+      }
     }
   ],
   "database": {

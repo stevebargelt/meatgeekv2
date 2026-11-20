@@ -1,37 +1,38 @@
-# Shared schemas: error envelopes, pagination, identifiers.
-# Handlers in apps/api/src/functions/** return a flat error envelope
-# {error, message, requestId} — NOT the nested api-interfaces ErrorResponse shape.
-# The spec models the actual wire shape.
+# Shared schemas: error bodies, health, shared enums.
+#
+# Every error the handlers in apps/api/src/functions/** return is FLAT:
+# {error: <code>, message, requestId}, plus a variant's extra fields. The 401
+# body has `reason` in place of `message`. libs/api-interfaces ErrorResponse
+# models the same shape, and ERROR_CODES there lists the same codes as ErrorCode
+# below (apps/api/src/contract/contract.spec.ts checks both).
 
 ErrorCode:
   type: string
   description: |
     Stable, machine-readable error code. Clients should branch on this.
-    Sourced from libs/utils/src/lib/constants.ts ERROR_CODES.
+    Every code the API emits, and nothing else.
   enum:
     - VALIDATION_ERROR
-    - INVALID_TEMPERATURE
+    - UNAUTHENTICATED
     - NOT_FOUND
-    - UNAUTHORIZED
-    - FORBIDDEN
-    - CONFLICT
+    - DEVICE_NOT_FOUND
+    - DEVICE_NOT_OWNED
+    - DEVICE_CONFLICT
+    - CONCURRENT_UPDATE
     - COOK_ALREADY_ACTIVE
     - COOK_ID_REUSED
-    - DEVICE_CONFLICT
-    - DEVICE_NOT_OWNED
-    - DEVICE_NOT_FOUND
     - NO_READINGS
-    - CONCURRENT_UPDATE
     - USER_NOT_FOUND
     - RECIPE_NOT_FOUND
+    - DEVICE_TWIN_UPDATE_FAILED
+    - SIGNALR_UNAVAILABLE
     - INTERNAL_SERVER_ERROR
-    - SERVICE_UNAVAILABLE
 
 ErrorResponse:
   type: object
   description: |
-    Error envelope returned by Phase-1 Functions handlers.
-    Matches apps/api/src/functions/**/*.ts handler returns exactly.
+    The error body every handler returns, except the variants below that add
+    fields. `requestId` is the Functions invocation id.
   required:
     - error
     - message
@@ -45,17 +46,16 @@ ErrorResponse:
       description: Human-readable diagnostic message. Not stable across releases.
     requestId:
       type: string
-      description: |
-        Echoes Functions' InvocationContext.invocationId. Used as the correlation
-        id for log/trace lookup and for X-Request-ID response header parity.
+      description: The Functions invocation id. Quote it when reporting a problem.
 
 UnauthenticatedError:
   type: object
   description: |
-    401 body when the request carries no usable Easy Auth principal
-    (X-MS-CLIENT-PRINCIPAL missing, unparseable, or without oid/tid claims).
-    Matches unauthenticatedResponse in apps/api/src/shared/auth/principal.ts.
-    `reason` is a fixed code; it never carries identity material.
+    401 body when the request reached the handler without a usable Easy Auth
+    principal (X-MS-CLIENT-PRINCIPAL missing, unparseable, or without oid/tid
+    claims). Built by unauthenticatedResponse in
+    apps/api/src/shared/auth/principal.ts. `reason` is a fixed code; it never
+    carries identity material. There is no `message`.
   required:
     - error
     - reason
@@ -80,7 +80,7 @@ SignalRUnavailableError:
   type: object
   description: |
     503 body for POST /negotiate when a SignalR data-plane REST call failed or
-    SignalR is not configured (HAR-59). Matches negotiateHandler in
+    SignalR is not configured (HAR-59). Built by negotiateHandler in
     apps/api/src/functions/signalr/negotiate.ts. `reason` is a fixed code that
     names the failed operation and, when the service answered, its HTTP status
     (`signalr_<operation>_status_<n>`), else `signalr_<operation>_failed`, or
@@ -170,38 +170,47 @@ CookAlreadyActiveError:
     activeCookId:
       type: string
 
-Pagination:
+CosmosHealthResponse:
   type: object
   description: |
-    Offset/limit pagination block reused across list endpoints.
-    Matches the CookListResponse and TemperatureHistoryResponse field set.
+    Body of GET /health/cosmos (apps/api/src/functions/health/cosmos-health.ts).
+    An allowlisted projection: it never names the account, database or
+    container, and never carries a dependency's error text.
   required:
-    - total
-    - offset
-    - limit
-    - hasMore
+    - status
+    - responseTime
+    - requestId
   additionalProperties: false
   properties:
-    total:
-      type: integer
+    status:
+      type: string
+      enum:
+        - healthy
+        - unhealthy
+    responseTime:
+      type: number
       minimum: 0
-      description: Total number of items matching the query (across all pages).
-    offset:
+      description: Milliseconds the probe took.
+    error:
+      type: string
+      description: |
+        Present only when unhealthy. A fixed code: the name of a missing Cosmos
+        setting (the shared adapter's CosmosConfigError code), or
+        `cosmos_probe_failed`.
+      example: cosmos_probe_failed
+    probeStatusCode:
       type: integer
-      minimum: 0
-      description: Zero-based index of the first item in this page.
-    limit:
-      type: integer
-      minimum: 1
-      maximum: 500
-      description: Maximum number of items returned in this page.
-    hasMore:
-      type: boolean
-      description: True iff the next page would contain at least one item.
+      description: |
+        The numeric status Cosmos or the credential reported, when it reported
+        one: 404 means the configured database or container is absent, 403 the
+        identity lacks its data-plane role, 401 the token was refused.
+    requestId:
+      type: string
+      description: The Functions invocation id.
 
 TemperatureUnit:
   type: string
-  description: User-facing temperature unit (handlers emit Fahrenheit only today).
+  description: User-facing temperature unit.
   enum:
     - fahrenheit
     - celsius

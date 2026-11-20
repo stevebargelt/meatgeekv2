@@ -117,8 +117,9 @@ resource "azurerm_cosmosdb_account" "main" {
 # false throughput comments on the source database and source devices container
 # were corrected). Everything below is a NEW, parallel destination that provisions
 # throughput the way the code always intended: a SINGLE 400 RU/s offer at the
-# DATABASE level, shared by all five containers, none of which declares its own
-# throughput.
+# DATABASE level, shared by every container in it (the five below, plus the two
+# HAR-74 read-model containers at the end of this file), none of which declares its
+# own throughput.
 #
 # Why a whole new database rather than an edit to the source: Azure cannot convert
 # an existing dedicated-throughput container to shared throughput, and a database
@@ -150,7 +151,7 @@ resource "azurerm_cosmosdb_sql_database" "meatgeek_shared" {
   account_name        = azurerm_cosmosdb_account.main.name
 
   # The fix: a SINGLE database-level shared-throughput offer. Up to 25 containers
-  # under this database share this 400 RU/s pool, so the five destination
+  # under this database share this 400 RU/s pool, so the seven destination
   # containers below carry NO throughput of their own.
   throughput = 400
 
@@ -379,6 +380,84 @@ resource "azurerm_cosmosdb_sql_container" "recipes_shared" {
       }
     }
   }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]
+  }
+}
+
+# =============================================================================
+# HAR-74 — cook chart read model: temperature-rollups + leases (CREATE ONLY)
+# =============================================================================
+#
+# Two more containers under the SAME shared-throughput database. Like the five
+# above, neither declares throughput or autoscale_settings: both draw on the
+# single 400 RU/s database-level offer (the database allows up to 25 containers),
+# so the standing cost of adding them is $0. The live shared-throughput gate
+# (scripts/assert-live-shared-throughput.sh) asserts neither holds an offer of its
+# own.
+#
+# Nothing reads or writes them yet. A Cosmos DB change-feed trigger in the API (a
+# later issue) folds each reading in `temperatures` into per-device, per-hour
+# bucket documents in `temperature-rollups`, and the whole-cook chart reads about
+# 13 of those for a 12-hour cook instead of ~8,640 raw readings.
+
+# Per-device, per-hour temperature rollup buckets.
+#
+# No default_ttl on purpose: a chart of a past cook outlives the raw readings' TTL
+# in `temperatures`, and one device-hour document is a few KB.
+#
+# Indexing is narrowed to the only two paths the single query uses:
+#   WHERE c.deviceId = @d AND c.hourStart >= @from AND c.hourStart < @to
+# Everything else is excluded, which keeps the per-write RU cost of the change-feed
+# upserts low.
+resource "azurerm_cosmosdb_sql_container" "temperature_rollups_shared" {
+  name                = "temperature-rollups"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+
+  partition_key_paths   = ["/deviceId"]
+  partition_key_version = 1
+  # No throughput — shared from the database-level offer above.
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/deviceId/?"
+    }
+
+    included_path {
+      path = "/hourStart/?"
+    }
+
+    excluded_path {
+      path = "/*"
+    }
+  }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]
+  }
+}
+
+# Lease container for the Functions Cosmos DB (change-feed) trigger.
+#
+# The trigger authenticates with the Function App's managed identity. Under RBAC
+# (local auth is disabled on this account) a data-plane role cannot create
+# containers, so the trigger's createLeaseContainerIfNotExists cannot be used and
+# Terraform must create the lease container. Partitioned on /id as the Functions
+# extension requires; default indexing; no TTL.
+resource "azurerm_cosmosdb_sql_container" "leases_shared" {
+  name                = "leases"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name
+
+  partition_key_paths   = ["/id"]
+  partition_key_version = 1
+  # No throughput — shared from the database-level offer above.
 
   lifecycle {
     replace_triggered_by = [azurerm_cosmosdb_account.main.id, azurerm_cosmosdb_sql_database.meatgeek_shared.id]

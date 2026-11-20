@@ -32,27 +32,28 @@ user-me:
         description: The caller's profile.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/user.yaml#/User'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '404':
         description: USER_NOT_FOUND — the caller has no profile yet.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'
 
   put:
     operationId: putUserProfile
@@ -77,10 +78,9 @@ user-me:
         description: The profile existed and was replaced.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
@@ -89,10 +89,9 @@ user-me:
         description: The profile was created.
         headers:
           X-Request-ID:
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
@@ -102,22 +101,27 @@ user-me:
           VALIDATION_ERROR: the body is not valid JSON, carries `id`, `userId`
           or another unknown field, or breaks a field rule. Answered before
           any Cosmos call.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '401':
-        $ref: './devices.yaml#/shared/unauthenticated'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '409':
         description: |
           CONCURRENT_UPDATE: the profile changed between the read and the
           write.
         headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            $ref: './devices.yaml#/shared/request-charge-header'
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
-        $ref: './devices.yaml#/shared/server-error'
+        $ref: '../components/responses.yaml#/ServerError'

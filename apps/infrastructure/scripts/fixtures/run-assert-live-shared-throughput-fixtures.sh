@@ -30,7 +30,7 @@
 #     defect apart from "I could not tell".
 #   * FAIL-CLOSED (exit 1) on anything that prevented an assertion from provably
 #     running — a probe that could not run (queryOk=false), a missing/empty/invalid/
-#     wrong-shape bundle, a bundle not carrying EXACTLY the five destination
+#     wrong-shape bundle, a bundle not carrying EXACTLY the seven destination
 #     containers, a malformed container entry (no throughputProbe, no destination
 #     definition), a bad --expected-throughput, or a
 #     --database-name mismatch. "Cannot tell" is NEVER reported as "nothing wrong".
@@ -79,9 +79,12 @@ DEVICEID="${HERE}/shared-throughput-temperatures-deviceid.json"
 DB_ABSENT="${HERE}/shared-throughput-db-offer-absent.json"
 DEDICATED="${HERE}/shared-throughput-container-dedicated-offer.json"
 MISPART="${HERE}/shared-throughput-temperatures-mispartitioned.json"
+# HAR-74: one of the two cook chart read-model containers (temperature-rollups)
+# holding its own dedicated offer — a one-field mutation of NO_OFFER.
+ROLLUPS_DEDICATED="${HERE}/shared-throughput-rollups-dedicated-offer.json"
 
 for required in "${PRESENT}" "${NO_OFFER}" "${DEVICEID}" \
-                "${DB_ABSENT}" "${DEDICATED}" "${MISPART}"; do
+                "${DB_ABSENT}" "${DEDICATED}" "${MISPART}" "${ROLLUPS_DEDICATED}"; do
   [ -f "${required}" ] || { echo "FATAL: required fixture missing: ${required}" >&2; exit 2; }
 done
 
@@ -107,19 +110,20 @@ DEVICEID 0 file -
 DB_ABSENT 3 file database-offer
 DEDICATED 3 file container-offer:recipes
 MISPART 3 file partition-key:temperatures
+ROLLUPS_DEDICATED 3 file container-offer:temperature-rollups
 PRESENT 0 stdin -
 PRESENT 0 dash -
 "
 
-# 8 table cases + 2 derived violations (autoscale/wrong-RU)
+# 9 table cases + 3 derived violations (autoscale/wrong-RU/leases offer)
 # + 1 [retired] control (a leftover sourceDefinition is ignored)
 # + 3 derived operational FATALs (db-queryOk/container-queryOk/queryOk-nonbool)
-# + 9 structural fail-closed cases + 3 argument cases (bad-expected/db-name
-# mismatch/db-name match) + 3 [pair] mutation controls + 1 [shape] control
-# + 1 [defang] control = 31.
+# + 10 structural fail-closed cases + 3 argument cases (bad-expected/db-name
+# mismatch/db-name match) + 4 [pair] mutation controls + 1 [shape] control
+# + 1 [defang] control = 35.
 # Raise this floor whenever a case is added, so the harness cannot quietly run
 # fewer than it advertises.
-MIN_CHECKS_PER_SHELL=31
+MIN_CHECKS_PER_SHELL=35
 
 # Resolve each shell to an ABSOLUTE path.
 SHELL_BINS=""
@@ -147,6 +151,14 @@ AUTOSCALE="${WORK}/db-offer-autoscale.json"
 jq '.database.offerProbe.document.resource = {"autoscaleSettings": {"maxThroughput": 4000}}' \
    "${PRESENT}" > "${AUTOSCALE}" \
   || { echo "FATAL: could not derive the autoscale control" >&2; exit 2; }
+
+# The HAR-74 lease container holding its own dedicated offer. The committed
+# ROLLUPS_DEDICATED fixture covers temperature-rollups; this covers leases, so each
+# of the two new containers is proven to fail the gate when it carries an offer.
+LEASES_DEDICATED="${WORK}/leases-dedicated-offer.json"
+jq '(.containers[] | select(.name=="leases") | .throughputProbe) = {"queryOk": true, "offerFound": true}' \
+   "${NO_OFFER}" > "${LEASES_DEDICATED}" \
+  || { echo "FATAL: could not derive the leases dedicated-offer control" >&2; exit 2; }
 
 # --- Run-time derived OPERATIONAL-FAILURE documents (fail-closed, exit 1) -----
 # A database offer probe that could not RUN (queryOk=false). "Could not tell
@@ -194,12 +206,18 @@ NO_DATABASE="${WORK}/no-database.json"
 jq 'del(.database)' "${PRESENT}" > "${NO_DATABASE}" || { echo "FATAL: could not derive no-database" >&2; exit 2; }
 NO_CONTAINERS="${WORK}/no-containers.json"
 jq 'del(.containers)' "${PRESENT}" > "${NO_CONTAINERS}" || { echo "FATAL: could not derive no-containers" >&2; exit 2; }
-# A bundle carrying only FOUR of the five destination containers — the omitted
-# one would silently skip its offer/partition/parity checks (the vacuous-PASS
-# shape this gate's set validation exists to close).
+# A bundle carrying only FOUR of the seven destination containers — the omitted
+# ones would silently skip their offer/partition checks (the vacuous-PASS shape
+# this gate's set validation exists to close).
 FOUR_CONTAINERS="${WORK}/four-containers.json"
-jq '.containers |= map(select(.name != "devices"))' "${PRESENT}" > "${FOUR_CONTAINERS}" \
+jq '.containers |= map(select(.name != "devices" and .name != "temperature-rollups" and .name != "leases"))' "${PRESENT}" > "${FOUR_CONTAINERS}" \
   || { echo "FATAL: could not derive four-containers" >&2; exit 2; }
+# A bundle carrying the five MG-53 containers but NOT the HAR-74 pair — exactly
+# what the pre-HAR-74 collector produced. The gate must refuse it rather than pass
+# without having looked at temperature-rollups or leases.
+FIVE_CONTAINERS="${WORK}/five-containers.json"
+jq '.containers |= map(select(.name != "temperature-rollups" and .name != "leases"))' "${PRESENT}" > "${FIVE_CONTAINERS}" \
+  || { echo "FATAL: could not derive five-containers" >&2; exit 2; }
 # A duplicated container name — per-name lookup becomes ambiguous.
 DUPLICATE="${WORK}/duplicate-container.json"
 jq '.containers += [ (.containers[] | select(.name=="cooks")) ]' "${PRESENT}" > "${DUPLICATE}" \
@@ -249,6 +267,7 @@ resolve_fixture() {
     DB_ABSENT) printf '%s\n' "${DB_ABSENT}" ;;
     DEDICATED) printf '%s\n' "${DEDICATED}" ;;
     MISPART)   printf '%s\n' "${MISPART}" ;;
+    ROLLUPS_DEDICATED) printf '%s\n' "${ROLLUPS_DEDICATED}" ;;
     *)         printf '%s\n' "" ;;
   esac
 }
@@ -362,6 +381,19 @@ for shell_bin in ${SHELL_BINS}; do
     fi
   fi
 
+  checks=$((checks + 1))
+  "${shell_bin}" "${GATE}" "${LEASES_DEDICATED}" >"${OUT}" 2>&1
+  code=$?
+  if assert_code "[derived] leases holds a dedicated offer" "${EX_VIOLATION}" "${code}"; then
+    if grep -q "VIOLATION \[container-offer:leases\]" "${OUT}"; then
+      echo "    · named the violating subject 'container-offer:leases'"
+    else
+      echo "  ✗ [derived] leases dedicated offer: exit 3 but did NOT name container-offer:leases" >&2
+      sed 's/^/      /' "${OUT}" >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
   # --- DERIVED OPERATIONAL FAIL-CLOSED cases (exit 1) -------------------------
   checks=$((checks + 1)); assert_fatal "db-offer probe could not run (queryOk=false)" "${DB_QUERY_FALSE}"
   checks=$((checks + 1)); assert_fatal "container throughput probe could not run (queryOk=false)" "${CONTAINER_QUERY_FALSE}"
@@ -373,7 +405,8 @@ for shell_bin in ${SHELL_BINS}; do
   checks=$((checks + 1)); assert_fatal "wrong top-level type" "${WRONGTYPE}"
   checks=$((checks + 1)); assert_fatal "no .database object" "${NO_DATABASE}"
   checks=$((checks + 1)); assert_fatal "no .containers array" "${NO_CONTAINERS}"
-  checks=$((checks + 1)); assert_fatal "only four of five containers" "${FOUR_CONTAINERS}"
+  checks=$((checks + 1)); assert_fatal "only four of seven containers" "${FOUR_CONTAINERS}"
+  checks=$((checks + 1)); assert_fatal "the five pre-HAR-74 containers without temperature-rollups and leases" "${FIVE_CONTAINERS}"
   checks=$((checks + 1)); assert_fatal "duplicated container name" "${DUPLICATE}"
   checks=$((checks + 1)); assert_fatal "malformed container entry (no throughputProbe)" "${MALFORMED}"
   checks=$((checks + 1)); assert_fatal "malformed container entry (no destination definition)" "${NO_DEFINITION}"
@@ -460,6 +493,27 @@ for shell_bin in ${SHELL_BINS}; do
     echo "  ✓ [pair/container] dedicated-offer is a one-field mutation of its clean counterpart (only ${DEDICATED_CONTAINER}'s throughputProbe differs)"
   fi
 
+  # ROLLUPS pair (HAR-74): same shape as the CONTAINER pair, for the committed
+  # temperature-rollups dedicated-offer fixture.
+  checks=$((checks + 1))
+  rpair_err=""
+  ronoofr_blanked="$(jq -S '.containers |= map(.throughputProbe = {})' "${NO_OFFER}" 2>/dev/null)" || rpair_err="NO_OFFER not parseable"
+  rded_blanked="$(jq -S '.containers |= map(.throughputProbe = {})' "${ROLLUPS_DEDICATED}" 2>/dev/null)" || rpair_err="ROLLUPS_DEDICATED not parseable"
+  rded_offer_names="$(jq -r '.containers[] | select(.throughputProbe.offerFound == true) | .name' "${ROLLUPS_DEDICATED}" 2>/dev/null)"
+  if [ -z "${rpair_err}" ]; then
+    if [ "${rded_offer_names}" != "temperature-rollups" ]; then
+      rpair_err="the rollups dedicated-offer fixture's offers are on '${rded_offer_names}', expected exactly 'temperature-rollups'"
+    elif [ "${ronoofr_blanked}" != "${rded_blanked}" ]; then
+      rpair_err="rollups-dedicated-offer differs from its clean counterpart by MORE than one container's throughputProbe"
+    fi
+  fi
+  if [ -n "${rpair_err}" ]; then
+    echo "  ✗ [pair/rollups] ${rpair_err}" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ✓ [pair/rollups] rollups-dedicated-offer is a one-field mutation of its clean counterpart (only temperature-rollups' throughputProbe differs)"
+  fi
+
   # TEMPERATURES pair: null out the temperatures destination partition key paths on
   # both and the remainder must be equal; the clean side is on /deviceId, the
   # violation side off it.
@@ -508,8 +562,8 @@ for shell_bin in ${SHELL_BINS}; do
       shape_err="the clean baseline no longer carries a present ${EXPECTED_RU} RU/s database-level offer (found=${p_found}, ru=${p_ru})"
     elif [ "${p_container_offers}" != "0" ]; then
       shape_err="the clean baseline carries ${p_container_offers} dedicated container offer(s); a clean destination carries none"
-    elif [ "${p_names}" != "cooks,devices,recipes,temperatures,users" ]; then
-      shape_err="the clean baseline does not carry EXACTLY the five destination containers (got ${p_names})"
+    elif [ "${p_names}" != "cooks,devices,leases,recipes,temperature-rollups,temperatures,users" ]; then
+      shape_err="the clean baseline does not carry EXACTLY the seven destination containers (got ${p_names})"
     elif [ "${p_temp}" != '["/deviceId"]' ]; then
       shape_err="the clean baseline's temperatures container is not on /deviceId (got ${p_temp})"
     fi
@@ -518,7 +572,7 @@ for shell_bin in ${SHELL_BINS}; do
     echo "  ✗ [shape] ${shape_err}" >&2
     failures=$((failures + 1))
   else
-    echo "  ✓ [shape] the three clean baselines are identical and each carries the healthy invariants (400 RU/s db offer, no container offers, five containers, temperatures on /deviceId)"
+    echo "  ✓ [shape] the three clean baselines are identical and each carries the healthy invariants (400 RU/s db offer, no container offers, seven containers, temperatures on /deviceId)"
   fi
 
   # --- DEFANG case: the clean PASS depends on assertion (b) having run ---------

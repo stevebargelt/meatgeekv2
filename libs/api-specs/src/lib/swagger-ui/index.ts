@@ -27,9 +27,7 @@ export interface MountSwaggerUiOptions {
 
 /**
  * Mount Swagger UI for the supplied (dereferenced) OpenAPI document on an
- * existing Express application. Extracted from the mock-server so other dev
- * tooling (e.g. an auxiliary docs server) can reuse it without dragging the
- * mock route handlers along.
+ * existing Express application, e.g. an auxiliary docs server.
  */
 export function mountSwaggerUi(
   app: Application,

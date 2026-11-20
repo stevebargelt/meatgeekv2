@@ -42,7 +42,8 @@ This library contains all the shared TypeScript interfaces used throughout the M
 ### Common Types (`common.ts`)
 - `ApiResponse<T>` - Standard API response wrapper
 - `PaginatedResponse<T>` - Paginated data responses
-- `ErrorResponse` - Standardized error responses
+- `ErrorResponse` - The flat error body the API returns, `{ error, message, requestId }`, with its variants (`CookAlreadyActiveError`, `DeviceTwinUpdateFailedError`, `SignalRUnavailableError`, `UnauthenticatedError`)
+- `ERROR_CODES` / `ErrorCode` - Every error code the API emits; equal to the OpenAPI `ErrorCode` enum (checked by `nx test api`)
 - `HealthCheck` - System health monitoring
 - `WebSocketMessage<T>` - Real-time messaging structure
 

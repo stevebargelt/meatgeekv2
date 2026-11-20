@@ -1,52 +1,48 @@
-# SignalR negotiate path item.
-# Top-level key is referenced from openapi.yaml's `paths` block.
-#
-# Implementation status:
-#   - negotiate : POST implemented (apps/api/src/functions/signalr/negotiate.ts;
-#                 route 'negotiate', POST — apps/api/src/main.ts).
+# SignalR negotiate path item. Top-level key is referenced from openapi.yaml's
+# `paths`. Handler: apps/api/src/functions/signalr/negotiate.ts. The hub and its
+# messages are described by the top-level `x-signalr` extension.
 
 negotiate:
   post:
     operationId: negotiate
     summary: SignalR negotiate, scoped to the caller
     description: |
-      SignalR handshake endpoint (HAR-57 / MG-30). Mirrors the shipped handler
-      apps/api/src/functions/signalr/negotiate.ts. It takes no parameters: the
-      caller is the Easy Auth principal, and the connection's SignalR user id is
-      the principal's `userId` (`"<tid>:<oid>"`). The handler removes that user
-      from every SignalR group, adds it to `device-{id}` for each device the
-      caller owns, and returns a 60-minute client access token minted for that
-      user id through the SignalR data-plane REST API. Cook events
-      (`cook_started`, `cook_stopped`) are sent to the owner's user id.
+      SignalR handshake (HAR-57 / MG-30). It takes no parameters and no body:
+      the caller is the Easy Auth principal, and the connection's SignalR user
+      id is the principal's `userId` (`"<tid>:<oid>"`). The handler reads the
+      caller's devices, removes that user from every SignalR group, adds it to
+      `device-{id}` for each device the caller owns, and returns a 60-minute
+      client access token minted for that user id through the SignalR
+      data-plane REST API. `temperature` messages reach the caller through
+      those groups; `cook_started` and `cook_stopped` are sent to the user id.
 
-      A `deviceId` query parameter, which earlier versions required, is ignored.
-      The response body is the bare connection info (NOT wrapped in
+      A `deviceId` query parameter, which earlier versions required, is
+      ignored. The response body is the bare connection info (NOT wrapped in
       ApiResponse).
-    tags: [cooks]
+    tags: [signalr]
     responses:
       '200':
         description: SignalR connection info for the client to open its connection.
         headers:
           X-Request-ID:
-            description: The caller's X-Request-ID, else the Functions invocation id.
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/X-Request-ID'
           x-meatgeek-request-charge:
-            description: Cosmos request charge (RU) of the devices read, as a decimal.
-            schema:
-              type: string
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
               $ref: '../components/schemas/signalr-payloads.yaml#/SignalRConnectionInfo'
       '401':
-        description: No usable Easy Auth principal. No Cosmos or SignalR call is made.
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/UnauthenticatedError'
+        $ref: '../components/responses.yaml#/Unauthenticated'
       '500':
-        description: INTERNAL_SERVER_ERROR with fixed text; reading the caller's devices failed.
+        description: |
+          INTERNAL_SERVER_ERROR with fixed text: reading the caller's devices
+          failed. No SignalR call is made.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:
@@ -57,6 +53,11 @@ negotiate:
           SignalR is not configured. `reason` is a fixed code naming the failed
           operation and status (HAR-59). Neither the body nor the log names the
           endpoint, a user id, a group or a token.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
         content:
           application/json:
             schema:

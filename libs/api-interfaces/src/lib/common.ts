@@ -29,16 +29,73 @@ export interface PaginatedResponse<T> {
 }
 
 /**
- * Standard error response
+ * Every error code the API emits. Matches the `ErrorCode` enum in
+ * libs/api-specs/spec/components/schemas/common.yaml; the drift check in
+ * apps/api/src/contract/contract.spec.ts fails when the two differ.
+ */
+export const ERROR_CODES = [
+  'VALIDATION_ERROR',
+  'UNAUTHENTICATED',
+  'NOT_FOUND',
+  'DEVICE_NOT_FOUND',
+  'DEVICE_NOT_OWNED',
+  'DEVICE_CONFLICT',
+  'CONCURRENT_UPDATE',
+  'COOK_ALREADY_ACTIVE',
+  'COOK_ID_REUSED',
+  'NO_READINGS',
+  'USER_NOT_FOUND',
+  'RECIPE_NOT_FOUND',
+  'DEVICE_TWIN_UPDATE_FAILED',
+  'SIGNALR_UNAVAILABLE',
+  'INTERNAL_SERVER_ERROR',
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
+
+/**
+ * The error body the API returns, exactly as it is on the wire: flat, not
+ * nested. `requestId` is the Functions invocation id. Variants that add fields
+ * extend this interface; the 401 body is {@link UnauthenticatedError}.
  */
 export interface ErrorResponse {
-  error: {
-    code: string;
-    message: string;
-    details?: Record<string, unknown>;
-    requestId: string;
-    timestamp: string;
-  };
+  error: ErrorCode;
+  message: string;
+  requestId: string;
+}
+
+/** 409 from POST /cooks: the device already has an active cook. */
+export interface CookAlreadyActiveError extends ErrorResponse {
+  error: 'COOK_ALREADY_ACTIVE';
+  activeCookId: string;
+}
+
+/** 503 from POST /cooks and POST /cooks/{cookId}/stop: the cook was written,
+ *  the device twin was not. `reason` is a fixed code. */
+export interface DeviceTwinUpdateFailedError extends ErrorResponse {
+  error: 'DEVICE_TWIN_UPDATE_FAILED';
+  cookId: string;
+  reason: string;
+}
+
+/** 503 from POST /negotiate. `reason` is a fixed code. */
+export interface SignalRUnavailableError extends ErrorResponse {
+  error: 'SIGNALR_UNAVAILABLE';
+  reason: string;
+}
+
+/** Why a handler found no usable Easy Auth principal. */
+export type UnauthenticatedReason =
+  | 'principal_header_missing'
+  | 'principal_header_unparseable'
+  | 'principal_object_id_missing'
+  | 'principal_tenant_id_missing';
+
+/** 401 body a handler returns. It has `reason` in place of `message`. */
+export interface UnauthenticatedError {
+  error: 'UNAUTHENTICATED';
+  reason: UnauthenticatedReason;
+  requestId: string;
 }
 
 /**

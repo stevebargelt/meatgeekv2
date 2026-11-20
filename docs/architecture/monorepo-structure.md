@@ -394,17 +394,17 @@ export class TemperatureCalculator {
 ```
 
 #### 4. OpenAPI Specifications (`libs/api-specs/`)
-**Purpose**: Contract-first API development  
+**Purpose**: The API contract the clients share: every HTTP route `apps/api` serves and every SignalR message it sends. `npx nx test api` fails when the spec and `apps/api/src/main.ts` disagree (see `libs/api-specs/README.md`).
 
 ```
 libs/api-specs/
-├── specs/                      # OpenAPI specifications
-│   ├── meatgeek-api.yaml      # Main API spec
-│   ├── components/            # Reusable components
+├── spec/                      # OpenAPI 3.0 specification
+│   ├── openapi.yaml           # Entrypoint (paths, x-signalr, components)
+│   ├── components/            # Schemas, responses, headers, parameters
 │   └── paths/                 # API endpoint definitions
-├── tools/                     # Code generation scripts
-├── generated/                 # Auto-generated types and clients
-└── project.json               # Build and validation commands
+├── contract-tests/            # Spec-only checks (nx test api-specs)
+├── src/                       # Swagger UI helper; generated/ types (not checked in)
+└── project.json               # validate-spec, generate-types
 ```
 
 ### Buildable Library Pattern
