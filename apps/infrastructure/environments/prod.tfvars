@@ -33,9 +33,26 @@ location = "West US 2"
 appinsights_retention_days = 365
 log_retention_days         = 90
 
-# IoT Hub - Standard tier for production
-iot_hub_sku_name     = "S1" # Standard tier - 400,000 messages/day
-iot_hub_sku_capacity = 2    # 2 units for redundancy
+# IoT Hub - Standard tier for production, sized by daily message quota (HAR-62).
+# IoT Hub is single-region and its SLA does not depend on unit count, so extra units
+# add message capacity only. The unit count follows from the load:
+#   Load:      device_count = 100. Each device sends one reading every 5 s
+#              (POLL_INTERVAL default 5*time.Second in apps/data-pusher/cmd/main.go):
+#              86,400 s / 5 s = 17,280 device-to-cloud messages per device per day,
+#              x 100 devices = 1,728,000 messages a day for the fleet.
+#   Size:      one reading is well under the 4 KB metering block, so it counts as
+#              one message.
+#   Twin:      twin reads and updates are a few per cook per device and do not
+#              change the result.
+#   Capacity:  one S1 unit allows 400,000 messages a day, so
+#              ceil(1,728,000 / 400,000) = ceil(4.32) = 5 units = 2,000,000 a day,
+#              about 86% of quota used.
+#   Over quota: IoT Hub rejects device-to-cloud messages until the daily reset.
+#              data-pusher keeps them in its durable on-disk queue and retries.
+#   Next step: S2 provides 6,000,000 messages a day per unit and is the next step if
+#              the fleet or the poll rate grows.
+iot_hub_sku_name     = "S1" # Standard tier - 400,000 messages/day per unit
+iot_hub_sku_capacity = 5    # 5 x 400,000 = 2,000,000/day for 1,728,000/day of load (~86%)
 
 # CosmosDB - V2-owned account (created by the cosmos-db module)
 #
@@ -74,13 +91,24 @@ instance_memory_in_mb  = 2048
 maximum_instance_count = 100 # Flex default ceiling — room for production burst
 always_ready           = 1   # one pre-warmed instance: no cold starts on prod traffic
 
-# SignalR - Standard tier for production
-signalr_sku_name     = "Standard_S1" # Standard tier - 1,000 concurrent connections
-signalr_sku_capacity = 2             # 2 units for redundancy
+# SignalR - Standard tier for production, sized by concurrent connections (HAR-62).
+# SignalR is single-region and its SLA does not depend on unit count, so extra units
+# add capacity only.
+#   Connections: one Standard unit holds 1,000 concurrent connections. Since HAR-58
+#                the Pis hold none; only the app clients connect. 100 owners at a few
+#                clients each is a few hundred connections, so 1 unit.
+#   Messages:    one unit includes 1,000,000 messages a day. Above that, Standard
+#                bills overage rather than refusing. So message volume, up to the
+#                1,728,000 readings a day pushed to watching clients, is a cost and
+#                not a cap.
+signalr_sku_name     = "Standard_S1" # Standard tier - 1,000 concurrent connections per unit
+signalr_sku_capacity = 1             # a few hundred app-client connections fit in one unit
 
 # Device settings for production
-device_count       = 100
-max_daily_messages = 1000000
+device_count = 100
+# max_daily_messages is the documented sizing input for the IoT Hub arithmetic above:
+# 100 devices x 17,280 readings/day = 1,728,000. No resource reads it today.
+max_daily_messages = 1728000
 
 # Security - Restricted IP ranges (should be customized)
 allowed_ip_ranges = [
