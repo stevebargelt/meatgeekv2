@@ -7,5 +7,6 @@
     "noEmit": true,
     "strict": true
   },
-  "include": ["playwright.config.ts", "src/**/*.ts"]
+  "include": ["playwright.config.ts", "playwright.live.config.ts", "src/**/*.ts", "live/**/*.ts"],
+  "exclude": ["live/**/*.test.ts"]
 }

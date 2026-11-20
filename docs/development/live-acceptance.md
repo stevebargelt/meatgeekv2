@@ -551,6 +551,125 @@ run the chart credential as its `SIMDEVICE_CONNECTION_STRING`; no simdevice run
 gets the credential of the device it is not sending as. Without the variables,
 a chart run fails as `simdevice (chart) → not started`.
 
+## Live browser proof
+
+The suite above proves the API. The live browser proof (HAR-99, goal HAR-71)
+proves the **production web app**, `https://meatgeekv2-web.vercel.app`, end to
+end in a real browser:
+
+1. **Wait for the build.** It polls `<web>/version.json` every 15 s, for at
+   most 15 min, until the `sha` there is `EXPECTED_WEB_SHA` or a commit that
+   contains it (`git merge-base --is-ancestor`, fetching either commit from
+   `origin` if this clone lacks it), so a newer `main` commit already in
+   production also counts. On timeout the failure names both shas.
+2. **Sign in** through Microsoft's real pages as the acceptance user: UPN,
+   password, then a TOTP code computed from the user's authenticator secret
+   (choosing the authenticator-app code if Microsoft asks which method), then
+   **No** on "Stay signed in?". Signed in means the app header shows the user
+   and `GET /devices` answered `200`. If Microsoft asks for no second factor,
+   the run notes it and carries on.
+3. **Device.** If `ACCEPTANCE_WEB_DEVICE_ID` is not on the devices page, it is
+   registered through the page's register form.
+4. **Clean slate.** A cook left running on that device (a "Cooking: …" link)
+   is opened and stopped through the UI.
+5. **Start a cook** through the UI, named `acceptance web <run id>` (the
+   GitHub run id, or a UTC timestamp locally). Its page opens and the live
+   panel is `waiting` or `live`.
+6. **A pushed reading.** simdevice sends 10 readings, 1 s apart, as the web
+   device, with a grill value no earlier run is likely to have left on screen
+   (300.0 to 399.9 °F, from the run's start time; `simdevice --grill`). Within
+   60 s the live panel must be `data-state="live"` showing that value.
+7. **Stop** through the UI: the cook shows `completed` and the live panel goes.
+8. **Cleanup.** If a cook from step 5 was not stopped on screen, it is stopped
+   through the API with the token the page itself sent (taken from the page's
+   requests, never printed).
+
+It is not in CI yet: the next issue adds it to the Deploy Dev App acceptance
+job, with the browser install, the secrets and the `<sim>-web` IoT device.
+Until then it runs by hand.
+
+### Inputs
+
+All from the environment. Global setup checks them before a browser starts: a
+missing one fails the run at once, naming every missing variable, never a
+value.
+
+| Variable                          | Value                                                                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `WEB_BASE_URL`                    | The web app's origin. Optional, default `https://meatgeekv2-web.vercel.app`                                 |
+| `EXPECTED_WEB_SHA`                | The full 40-character commit production must serve (or contain), usually the merge commit                   |
+| `ACCEPTANCE_USER_UPN`             | The acceptance user's sign-in name, in the dev tenant                                                       |
+| `ACCEPTANCE_USER_PASSWORD`        | Its password                                                                                                |
+| `ACCEPTANCE_USER_TOTP_SECRET`     | Its authenticator-app secret (base32; spaces, dashes, lower case and `=` padding are accepted)              |
+| `ACCEPTANCE_WEB_DEVICE_ID`        | The IoT Hub device the proof sends as, owned by the acceptance user (`<simulated device id>-web`)           |
+| `SIMDEVICE_WEB_CONNECTION_STRING` | That device's connection string. Only simdevice's own environment gets it, as `SIMDEVICE_CONNECTION_STRING` |
+| `ACCEPTANCE_SIMDEVICE_BIN`        | Path to the built `simdevice`, the same binary the API suite uses                                           |
+
+The proof writes none of the password, the TOTP secret or code, the connection
+string or any token anywhere. Playwright's trace, video, HTML report, failure
+page snapshot (`error-context.md`) and automatic screenshot are all off for it
+(`apps/web-e2e/playwright.live.config.ts`), because the sign-in pages show the
+UPN and what was typed. It takes its own full-page screenshot on failure, and
+only once sign-in has finished and the browser is back on the app; it is in
+`dist/.playwright/web-e2e-live/test-results/`.
+
+### Running it locally against production
+
+Export the variables yourself, in your shell only (never in a file), then run
+the `e2e-live` target. It needs Chromium for Playwright and Go for simdevice.
+
+```bash
+npx playwright install chromium          # once
+make -C apps/data-pusher build           # builds dist/simdevice
+
+export EXPECTED_WEB_SHA=$(git rev-parse origin/main)
+export ACCEPTANCE_USER_UPN=...           # from wherever the team keeps the acceptance user
+read -rs ACCEPTANCE_USER_PASSWORD && export ACCEPTANCE_USER_PASSWORD
+read -rs ACCEPTANCE_USER_TOTP_SECRET && export ACCEPTANCE_USER_TOTP_SECRET
+export ACCEPTANCE_WEB_DEVICE_ID=meatgeek-dev-simulated-smoker-web
+export ACCEPTANCE_SIMDEVICE_BIN="$PWD/apps/data-pusher/dist/simdevice"
+HUB_HOST=$(az iot hub list -g meatgeek-v2-dev-rg --query '[0].properties.hostName' -o tsv)
+export SIMDEVICE_WEB_CONNECTION_STRING=$(az iot hub device-identity connection-string show \
+  --hub-name "$HUB_HOST" --device-id "$ACCEPTANCE_WEB_DEVICE_ID" --auth-type login \
+  --query connectionString -o tsv)
+
+npx nx e2e-live web-e2e
+```
+
+`read -rs` keeps the two secrets out of your shell history. The device must
+already exist in IoT Hub; the proof registers it with the API, not with the
+hub. The unit tests for the proof's pure parts (env checks, the build and
+ancestor checks, the TOTP code) run with `npx nx test web-e2e` and need none of
+this.
+
+### The two METRIC lines
+
+| Line                           | Meaning                                                                                                                                                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `METRIC web-deploy-wait-s <n>` | Seconds step 1 waited for production to serve `EXPECTED_WEB_SHA` or later. `0` when it already did. Large values mean Vercel was slow to build or promote the merge commit                                                     |
+| `METRIC web-push-ms <ms>`      | Milliseconds from the first reading's timestamp (stamped by simdevice just before the send) to the browser showing that value in the live panel: device → IoT Hub → Function → SignalR → browser, plus up to 100 ms of polling |
+
+### When Microsoft changes its sign-in pages
+
+The sign-in step drives Microsoft's pages by the element ids they have used for
+years (`#i0116` UPN, `#i0118` password, `#idSIButton9` Next / Sign in,
+`#idTxtBx_SAOTCC_OTC` code, `[data-value="PhoneAppOTP"]` the authenticator-app
+method, `#idBtn_Back` "No" on "Stay signed in?"), never copy text. Each waits
+at most 30 s. When one does not appear, the run fails with
+**`Microsoft sign-in page changed at step <x>`**, naming the selectors it
+waited for and the page (`origin` and path only, never the query).
+
+To fix it, sign in by hand as the acceptance user in a private window, open
+the browser's developer tools at the step named, find the element's new `id`,
+and update the `MS` map at the top of `apps/web-e2e/live/microsoft-sign-in.ts`;
+it is the only place the selectors live. Two traps: the UPN page already holds
+an off-screen, `aria-hidden` `#i0118` (class `moveOffScreen`) for password
+managers, which is why the password selector excludes it; and `name`
+selectors such as `input[name="passwd"]` match that same helper. A failure
+that names the password (`Microsoft rejected the password`), the TOTP code or
+an unknown UPN is the account, not the page: check the secrets and this
+machine's clock.
+
 ## How it is built
 
 ```

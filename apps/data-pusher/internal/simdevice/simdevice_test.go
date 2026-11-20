@@ -655,3 +655,62 @@ func TestMain_StartStepUsageErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestMain_GrillSetsEveryReadingsGrillTemp(t *testing.T) {
+	for _, extra := range [][]string{nil, {"--inflight", "3"}} {
+		args := append([]string{"--count", "4", "--grill", "317.4"}, extra...)
+		res := runMain(t, args, map[string]string{EnvConnectionString: validConn}, nil)
+		if res.code != ExitOK {
+			t.Fatalf("args %q: exit = %d; stderr=%q", args, res.code, res.stderr)
+		}
+		calls := res.mock.Calls()
+		if len(calls) != 4 {
+			t.Fatalf("args %q: publish calls = %d, want 4", args, len(calls))
+		}
+		for i, call := range calls {
+			var reading wire.TemperatureReading
+			if err := json.Unmarshal(call.Payload, &reading); err != nil {
+				t.Fatalf("args %q: call %d payload: %v", args, i, err)
+			}
+			if reading.GrillTemp == nil || *reading.GrillTemp != 317.4 {
+				t.Errorf("args %q: call %d grillTemp = %v, want 317.4", args, i, reading.GrillTemp)
+			}
+			if reading.Probe1Temp == nil {
+				t.Errorf("args %q: call %d lost its probe1Temp", args, i)
+			}
+		}
+	}
+}
+
+func TestMain_WithoutGrillKeepsTheSyntheticCurve(t *testing.T) {
+	res := runMain(t, []string{"--count", "2"}, map[string]string{EnvConnectionString: validConn}, nil)
+	if res.code != ExitOK {
+		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
+	}
+	for i, call := range res.mock.Calls() {
+		var reading wire.TemperatureReading
+		if err := json.Unmarshal(call.Payload, &reading); err != nil {
+			t.Fatalf("call %d payload: %v", i, err)
+		}
+		want := *SyntheticStatus("sim-device-1", i).Temps.GrillTemp
+		if reading.GrillTemp == nil || *reading.GrillTemp != want {
+			t.Errorf("call %d grillTemp = %v, want the synthetic %v", i, reading.GrillTemp, want)
+		}
+	}
+}
+
+func TestMain_GrillUsageErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"--grill", "hot"},
+		{"--grill", "NaN"},
+		{"--grill", "+Inf"},
+	} {
+		res := runMain(t, args, map[string]string{EnvConnectionString: validConn}, nil)
+		if res.code != ExitUsage {
+			t.Errorf("args %q: exit = %d, want %d", args, res.code, ExitUsage)
+		}
+		if len(res.mock.Calls()) != 0 {
+			t.Errorf("args %q: published despite bad usage", args)
+		}
+	}
+}

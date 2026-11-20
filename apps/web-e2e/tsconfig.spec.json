@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022"],
+    "module": "commonjs",
+    "allowJs": true,
+    "types": ["jest", "node"],
+    "noEmit": true,
+    "strict": true
+  },
+  "include": ["jest.config.ts", "live/**/*.test.ts"]
+}
