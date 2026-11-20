@@ -4,7 +4,7 @@
 API through a client generated from the OpenAPI contract, and today manages
 devices: list, register and rename. Cooks and the live panel come later.
 
-Production: `https://meatgeekv2-device-controller.vercel.app`, built from `main`
+Production: `https://meatgeekv2-web.vercel.app`, built from `main`
 by Vercel.
 
 ## Runtime config

@@ -271,7 +271,7 @@ nx deploy api --functionApp=$(terraform output -raw function_app_name)
 > Vercel's Git integration builds every push to `main` with the settings in the
 > repo-root `vercel.json` (`npm ci`, then `npx nx build web --skip-nx-cache`,
 > serving `dist/apps/web`) and publishes it to
-> `https://meatgeekv2-device-controller.vercel.app`. The `web` project has no
+> `https://meatgeekv2-web.vercel.app`. The `web` project has no
 > `deploy` target; HAR-76 removed the old `az staticwebapp deploy` one, because
 > there is no Static Web App. See [Web app](../applications/web-app.md).
 
