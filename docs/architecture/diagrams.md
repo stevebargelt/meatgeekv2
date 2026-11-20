@@ -382,7 +382,9 @@ Every route is anonymous at the Functions runtime on purpose: Easy Auth (default
 Return401) has already validated the token. The cook, device and temperature routes first
 call `getDeviceOwnership`, one point read on `devices`. For a device the caller does not
 own: cooks start/stop answer `403 DEVICE_NOT_OWNED` (no write, no event), `GET`/`PATCH
-/devices/{id}` answer 404, and temperatures current/history answer `404 DEVICE_NOT_FOUND`.
+/devices/{id}` answer 404, `DELETE /devices/{id}` answers `403 DEVICE_NOT_OWNED` (nothing
+deleted) and `404 DEVICE_NOT_FOUND` for an unknown device, and temperatures current/history
+answer `404 DEVICE_NOT_FOUND`.
 
 View `api` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/api/
 
