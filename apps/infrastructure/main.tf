@@ -531,7 +531,7 @@ resource "azurerm_role_assignment" "simulated_device_registry_contributor" {
 # ALONE, not the RG. Read/write on twins only: no device registry, no device
 # keys, no cloud-to-device messages.
 # Guarded by count on var.api_device_twin_writer_enabled and switched off by
-# default. The role is in bootstrap/tf-managed-role-allowlist.tsv, but the live
+# default; dev.tfvars switches it on (HAR-64), prod does not. The role is in bootstrap/tf-managed-role-allowlist.tsv, but the live
 # ABAC condition on the infra-apply identity only learns it when bootstrap.sh is
 # re-run; setting api_device_twin_writer_enabled in a tfvars before that re-run
 # fails every dev apply with AuthorizationFailed. Covered by

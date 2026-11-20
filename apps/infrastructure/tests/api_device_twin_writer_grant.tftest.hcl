@@ -4,8 +4,8 @@
 # apply (static check 15). It pins the switch on
 # azurerm_role_assignment.functions_iothub_twin_contributor:
 #
-#   - OFF when api_device_twin_writer_enabled is unset (the shipped state: neither
-#     tfvars sets it, so merging the grant adds no role assignment live);
+#   - OFF when api_device_twin_writer_enabled is unset (the default, which
+#     prod.tfvars keeps; dev.tfvars sets it true since HAR-64);
 #   - OFF when it is explicitly false;
 #   - ON (exactly one) when it is true, and then it is `IoT Hub Twin
 #     Contributor`, scoped to the IoT Hub ALONE (not the RG), granted to the

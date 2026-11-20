@@ -159,7 +159,7 @@ model {
           (`IOTHUB_SERVICE_HOSTNAME`) and its Event Hub consumer group
           (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). broadcastTemperature reads the consumer group;
           nothing reads `IOTHUB_SERVICE_HOSTNAME` yet, and the
-          identity's IoT Hub Twin Contributor grant ships switched off. The one exception is the Application
+          identity's IoT Hub Twin Contributor grant is on in dev only. The one exception is the Application
           Insights connection string (`APPLICATIONINSIGHTS_CONNECTION_STRING`), with ingestion
           itself authenticated by Entra (`Authorization=AAD`) and sampled at
           `APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=50`. Apart from it, no connection string or
