@@ -12,10 +12,12 @@ import { LATEST_READING_CANDIDATES } from './temperatures-repository';
  *
  *   - the current-reading query: newest `SystemProperties["iothub-enqueuedtime"]`
  *     first, at most {@link LATEST_READING_CANDIDATES};
- *   - HAR-35's history queries: the clauses of the history predicate that the
+ *   - HAR-35's history query: the clauses of the history predicate that the
  *     query TEXT carries (hub identity, `IS_OBJECT(c.Body)`, `@cookId`, the
- *     `@startTime`/`@endTime` window), then `COUNT(1)` or oldest-first
- *     `OFFSET @offset LIMIT @limit`.
+ *     `@startTime`/`@endTime` window), oldest first. HAR-75: read with
+ *     `fetchNext`, `maxItemCount` documents a page, resumed from an opaque
+ *     continuation token. A token the fake did not issue is refused as Cosmos
+ *     refuses one: a 400 that reports {@link TEMPERATURES_QUERY_CHARGE}.
  *
  * Stored documents carry Cosmos
  * system properties, so tests can prove the mapping strips them. Every query
@@ -24,6 +26,9 @@ import { LATEST_READING_CANDIDATES } from './temperatures-repository';
  */
 
 export const TEMPERATURES_QUERY_CHARGE = 3.25;
+
+/** The prefix of the fake's continuation tokens: `<prefix><documents skipped>`. */
+const TOKEN_PREFIX = 'fake-history-token:';
 
 export interface FakeTemperaturesQuery {
   readonly query: string;
@@ -89,7 +94,7 @@ function matchesHistoryClauses(
 export class FakeTemperaturesContainer {
   readonly queries: FakeTemperaturesQuery[] = [];
   private readonly documents: StoredDocument[] = [];
-  private failNextStatus: number | undefined;
+  private failNextStatus: number | string | undefined;
   private failAfterQueries = 0;
 
   /** Seeds a document as IoT Hub would have routed it, system properties added. */
@@ -107,8 +112,10 @@ export class FakeTemperaturesContainer {
 
   /** Makes a query throw an SDK-shaped error whose text names the account (and
    *  reports {@link TEMPERATURES_QUERY_CHARGE}): the next one, or the one after
-   *  `skip` more queries succeed. */
-  failNext(statusCode = 503, skip = 0): void {
+   *  `skip` more queries succeed. A number is an HTTP status; a string is a
+   *  connection-level failure as the SDK throws it (`RestError` with that
+   *  string `code`, e.g. `'ECONNRESET'`, and no status). */
+  failNext(statusCode: number | string = 503, skip = 0): void {
     this.failNextStatus = statusCode;
     this.failAfterQueries = skip;
   }
@@ -117,53 +124,93 @@ export class FakeTemperaturesContainer {
     return this as unknown as Container;
   }
 
+  /** Records the query, then throws the staged failure when one is due. */
+  private record(query: FakeTemperaturesQuery): void {
+    this.queries.push(query);
+    if (this.failNextStatus !== undefined && this.failAfterQueries > 0) {
+      this.failAfterQueries -= 1;
+    } else if (this.failNextStatus !== undefined) {
+      const statusCode = this.failNextStatus;
+      this.failNextStatus = undefined;
+      throw sdkError(statusCode);
+    }
+  }
+
   get items() {
     return {
       query: (
         spec: { query: string; parameters: Array<{ name: string; value: unknown }> },
         options: Record<string, unknown>
-      ) => ({
-        fetchAll: async () => {
-          this.queries.push({ query: spec.query, parameters: spec.parameters, options });
-          if (this.failNextStatus !== undefined && this.failAfterQueries > 0) {
-            this.failAfterQueries -= 1;
-          } else if (this.failNextStatus !== undefined) {
-            const statusCode = this.failNextStatus;
-            this.failNextStatus = undefined;
-            throw Object.assign(
-              new Error(`Request to ${FAKE_ACCOUNT_ENDPOINT} failed with status ${statusCode}`),
-              { code: statusCode, statusCode, requestCharge: TEMPERATURES_QUERY_CHARGE }
-            );
-          }
-          const parameter = (name: string) => spec.parameters.find(p => p.name === name)?.value;
+      ) => {
+        const parameter = (name: string) => spec.parameters.find(p => p.name === name)?.value;
+        const matching = () => {
           const deviceId = parameter('@deviceId');
-          const matching = this.documents.filter(
+          return this.documents.filter(
             d =>
               d['deviceId'] === options['partitionKey'] &&
               d['deviceId'] === deviceId &&
               matchesHistoryClauses(d, spec.query, parameter)
           );
-          if (spec.query.startsWith('SELECT VALUE COUNT(1) ')) {
-            return { resources: [matching.length], requestCharge: TEMPERATURES_QUERY_CHARGE };
-          }
-          if (spec.query.endsWith(' ASC OFFSET @offset LIMIT @limit')) {
-            const offset = Number(parameter('@offset'));
-            const limit = Number(parameter('@limit'));
-            const resources = matching
-              .sort((a, b) => enqueuedTime(a).localeCompare(enqueuedTime(b)))
-              .slice(offset, offset + limit)
+        };
+        return {
+          /** The current-reading query. */
+          fetchAll: async () => {
+            this.record({ query: spec.query, parameters: spec.parameters, options });
+            const resources = matching()
+              .sort((a, b) => enqueuedTime(b).localeCompare(enqueuedTime(a)))
+              .slice(0, LATEST_READING_CANDIDATES)
               .map(d => ({ ...d }));
             return { resources, requestCharge: TEMPERATURES_QUERY_CHARGE };
-          }
-          const resources = matching
-            .sort((a, b) => enqueuedTime(b).localeCompare(enqueuedTime(a)))
-            .slice(0, LATEST_READING_CANDIDATES)
-            .map(d => ({ ...d }));
-          return { resources, requestCharge: TEMPERATURES_QUERY_CHARGE };
-        },
-      }),
+          },
+          /** HAR-75: one page of the history query. */
+          fetchNext: async () => {
+            this.record({ query: spec.query, parameters: spec.parameters, options });
+            if (!spec.query.endsWith(' ASC')) {
+              throw new Error(`fake temperatures container: unexpected fetchNext query`);
+            }
+            const token = options['continuationToken'];
+            let skip = 0;
+            if (token !== undefined) {
+              const parsed =
+                typeof token === 'string' && token.startsWith(TOKEN_PREFIX)
+                  ? Number(token.slice(TOKEN_PREFIX.length))
+                  : NaN;
+              if (!Number.isInteger(parsed) || parsed < 0) {
+                throw sdkError(400);
+              }
+              skip = parsed;
+            }
+            const size = Number(options['maxItemCount']);
+            const all = matching().sort((a, b) => enqueuedTime(a).localeCompare(enqueuedTime(b)));
+            const resources = all.slice(skip, skip + size).map(d => ({ ...d }));
+            const next = skip + resources.length;
+            const hasMoreResults = next < all.length;
+            return {
+              resources,
+              hasMoreResults,
+              continuationToken: hasMoreResults ? `${TOKEN_PREFIX}${next}` : undefined,
+              requestCharge: TEMPERATURES_QUERY_CHARGE,
+            };
+          },
+        };
+      },
     };
   }
+}
+
+/** An SDK-shaped error whose text names the account and that reports
+ *  {@link TEMPERATURES_QUERY_CHARGE}. */
+function sdkError(statusCode: number | string): Error {
+  if (typeof statusCode === 'string') {
+    return Object.assign(new Error(`connect ${statusCode} ${FAKE_ACCOUNT_ENDPOINT}`), {
+      name: 'RestError',
+      code: statusCode,
+    });
+  }
+  return Object.assign(
+    new Error(`Request to ${FAKE_ACCOUNT_ENDPOINT} failed with status ${statusCode}`),
+    { code: statusCode, statusCode, requestCharge: TEMPERATURES_QUERY_CHARGE }
+  );
 }
 
 /**

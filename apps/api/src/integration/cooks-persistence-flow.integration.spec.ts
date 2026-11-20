@@ -14,6 +14,7 @@ import type { Container } from '@azure/cosmos';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 import type { Cook } from '@meatgeekv2/api-interfaces';
 
+import { getCookHandler } from '../functions/cooks/get-cook';
 import { getCooksHandler } from '../functions/cooks/list-cooks';
 import { startCookHandler } from '../functions/cooks/start-cook';
 import { stopCookHandler } from '../functions/cooks/stop-cook';
@@ -283,19 +284,55 @@ function containerContract() {
 }
 
 describe('MG-59 cooks persistence flow', () => {
+  it('HAR-75: a body that carries userId is 400 VALIDATION_ERROR naming it, and nothing is written', async () => {
+    const store = containerContract();
+    const startContext = context('start-request');
+    const started = await startCookHandler(
+      request({
+        identity: OWNER,
+        body: {
+          id: '0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f',
+          name: 'Sunday brisket',
+          deviceId: 'grill-7',
+          meatType: 'brisket',
+          userId: 'user-1',
+        },
+      }),
+      startContext.context,
+      {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+        getDeviceOwnership: store.getDeviceOwnership,
+        syncDeviceTwin: store.syncDeviceTwin,
+      }
+    );
+
+    expect(started.status).toBe(400);
+    expect(started.jsonBody).toMatchObject({
+      error: 'VALIDATION_ERROR',
+      message: 'userId is not a start-cook field',
+    });
+    const listed = await getCooksHandler(
+      request({ identity: OWNER }),
+      context('list-request').context,
+      { getRepository: () => store.repository }
+    );
+    expect((listed.jsonBody as { cooks: Cook[] }).cooks).toEqual([]);
+  });
+
   it('writes with the authenticated partition, reads it in a separate request, then stops and reads the final state', async () => {
     const store = containerContract();
     const startContext = context('start-request');
     const started = await startCookHandler(
       request({
         identity: OWNER,
-        // userId is deliberately malicious/legacy input: only Easy Auth may set it.
+        // No userId in the body: only Easy Auth sets it (a body that carries
+        // one is refused; see the HAR-75 case below).
         body: {
           id: '0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f',
           name: '  Sunday brisket  ',
           deviceId: 'grill-7',
           meatType: 'brisket',
-          userId: 'user-1',
         },
       }),
       startContext.context,
@@ -359,6 +396,59 @@ describe('MG-59 cooks persistence flow', () => {
       { partitionKey: 'tenant-owner:owner-oid', userId: 'tenant-owner:owner-oid' },
       { partitionKey: 'tenant-owner:owner-oid', userId: 'tenant-owner:owner-oid' },
     ]);
+  });
+
+  it("HAR-75: GET /cooks/{cookId} reads the owner's cook before and after the stop; another caller, an unknown id and the device lock are 404", async () => {
+    const store = containerContract();
+    const deps = {
+      resolvePrincipal: principalFromRequest,
+      getRepository: () => store.repository,
+      getDeviceOwnership: store.getDeviceOwnership,
+      syncDeviceTwin: store.syncDeviceTwin,
+    };
+    const started = await startCookHandler(
+      request({
+        identity: OWNER,
+        body: {
+          id: '2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b',
+          name: 'Pork butt',
+          deviceId: 'grill-9',
+          meatType: 'pork',
+        },
+      }),
+      context('owner-start').context,
+      deps
+    );
+    expect(started.status).toBe(201);
+    const created = started.jsonBody as Cook;
+    const getCook = (identity: typeof OWNER, cookId: string) =>
+      getCookHandler(request({ identity, params: { cookId } }), context('get').context, {
+        resolvePrincipal: principalFromRequest,
+        getRepository: () => store.repository,
+      });
+
+    const active = await getCook(OWNER, created.id);
+    expect(active.status).toBe(200);
+    expect(active.jsonBody).toEqual(created);
+
+    expect((await getCook(OTHER, created.id)).status).toBe(404);
+    expect((await getCook(OWNER, '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a')).status).toBe(404);
+    // The MG-84 lock exists in the owner's partition while the cook runs.
+    expect([...store.cooks.keys()]).toContain('tenant-owner:owner-oid/active-device:grill-9');
+    const lock = await getCook(OWNER, 'active-device:grill-9');
+    expect(lock.status).toBe(404);
+    expect(lock.jsonBody).toMatchObject({ error: 'NOT_FOUND' });
+
+    const stopped = await stopCookHandler(
+      request({ identity: OWNER, params: { cookId: created.id } }),
+      context('owner-stop').context,
+      deps
+    );
+    expect(stopped.status).toBe(200);
+    const completed = await getCook(OWNER, created.id);
+    expect(completed.status).toBe(200);
+    expect(completed.jsonBody).toEqual(stopped.jsonBody);
+    expect(completed.jsonBody).toMatchObject({ status: 'completed', endTime: expect.any(String) });
   });
 
   it('does not stop a cook addressed by an authenticated caller in another partition', async () => {

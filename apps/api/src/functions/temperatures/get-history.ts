@@ -5,6 +5,7 @@ import { principalFromRequest, unauthenticatedResponse } from '../../shared/auth
 import { DEVICE_ID_PATTERN, getDevicesRepository } from '../../shared/cosmos/devices-repository';
 import {
   getTemperaturesRepository,
+  InvalidContinuationTokenError,
   type TemperatureHistoryFilter,
   type TemperaturesRepository,
 } from '../../shared/cosmos/temperatures-repository';
@@ -20,19 +21,24 @@ import type { TemperaturesHandlerDeps } from './get-current';
 /**
  * HAR-35 (MG-79 part 2) — GET /temperatures/history: one page of the readings
  * IoT Hub routed into the `temperatures` container for a device the caller
- * owns, as a TemperatureHistoryResponse `{ readings, total, offset, limit,
- * hasMore }`.
+ * owns, as a TemperatureHistoryResponse `{ readings, limit, hasMore,
+ * continuationToken? }`.
  *
  *   - 401 without a usable Easy Auth principal (no Cosmos call);
- *   - 400 VALIDATION_ERROR for a bad query parameter (no Cosmos call);
+ *   - 400 VALIDATION_ERROR for a bad query parameter, including any `offset`
+ *     (no Cosmos call), or for a continuation token Cosmos refuses;
  *   - 404 DEVICE_NOT_FOUND for a device that does not exist OR belongs to someone
  *     else, with one body for both, as GET /temperatures/current does;
  *   - 200 with the page otherwise. An owned device with no readings is an empty
  *     page, not a 404.
  *
- * Ownership is one point read on the devices container; `total` and the page
- * are two single-partition queries on the temperatures container over the same
- * predicate (temperatures-repository.ts, historyPredicate). The window
+ * HAR-75: paged by continuation token, never offset. An offset page re-charges
+ * every skipped document (at 8,600 readings in, it cost twice the first page)
+ * and `total` needed a separate COUNT, so both are gone. Ownership is one point
+ * read on the devices container, and the page is one single-partition query
+ * with `maxItemCount = limit` and the SDK token (temperatures-repository.ts,
+ * historyPageQuery). `hasMore` is true exactly when a `continuationToken` is
+ * returned; send it back unchanged for the next page. The window
  * (`startTime` inclusive, `endTime` exclusive) and the ascending order are on
  * the hub-stamped `iothub-enqueuedtime`, never the device-supplied
  * `Body.timestamp`; each reading's `timestamp` still follows
@@ -41,14 +47,11 @@ import type { TemperaturesHandlerDeps } from './get-current';
  */
 
 export const HISTORY_DEFAULT_LIMIT = 100;
-export const HISTORY_MAX_LIMIT = 5000;
+export const HISTORY_MAX_LIMIT = 1000;
 export const COOK_ID_MAX_LENGTH = 128;
 
 /** The repository surface this handler uses. */
-export type TemperatureHistoryRepositoryPort = Pick<
-  TemperaturesRepository,
-  'countReadings' | 'getReadingsPage'
->;
+export type TemperatureHistoryRepositoryPort = Pick<TemperaturesRepository, 'getReadingsPage'>;
 
 /** Injection seam: the shared temperatures seam, with the history queries. */
 export interface TemperatureHistoryHandlerDeps
@@ -64,8 +67,8 @@ export const defaultTemperatureHistoryDeps: TemperatureHistoryHandlerDeps = {
 
 interface HistoryQuery {
   readonly filter: TemperatureHistoryFilter;
-  readonly offset: number;
   readonly limit: number;
+  readonly continuationToken?: string;
 }
 
 const INTEGER = /^-?\d+$/;
@@ -86,9 +89,7 @@ function integerParam(
   }
   const value = Number(raw);
   if (value < min || value > max) {
-    return max === Number.MAX_SAFE_INTEGER
-      ? `${name} must be at least ${min}`
-      : `${name} must be between ${min} and ${max}`;
+    return `${name} must be between ${min} and ${max}`;
   }
   return value;
 }
@@ -108,6 +109,12 @@ function timeParam(raw: string | null, name: string): string | undefined | { err
 
 /** The validated query, or the message to 400 with. Reads only the query. */
 function parseHistoryQuery(request: HttpRequest): HistoryQuery | string {
+  // HAR-75: offset paging is gone. Refuse it by name rather than ignore it, so a
+  // client still sending it learns why it is not getting the page it asked for.
+  if (request.query.get('offset') !== null) {
+    return 'offset is not supported: page with continuationToken';
+  }
+
   const deviceId = request.query.get('deviceId') ?? '';
   if (!DEVICE_ID_PATTERN.test(deviceId)) {
     return 'deviceId is required: 1-128 characters of A-Z, a-z, 0-9, ".", "_", ":" or "-"';
@@ -144,9 +151,9 @@ function parseHistoryQuery(request: HttpRequest): HistoryQuery | string {
   if (typeof limit === 'string') {
     return limit;
   }
-  const offset = integerParam(request.query.get('offset'), 'offset', 0, 0, Number.MAX_SAFE_INTEGER);
-  if (typeof offset === 'string') {
-    return offset;
+  const continuationToken = request.query.get('continuationToken');
+  if (continuationToken !== null && continuationToken.length === 0) {
+    return 'continuationToken must not be empty';
   }
 
   const filter: TemperatureHistoryFilter = {
@@ -155,7 +162,11 @@ function parseHistoryQuery(request: HttpRequest): HistoryQuery | string {
     ...(startTime !== undefined ? { startTime } : {}),
     ...(endTime !== undefined ? { endTime } : {}),
   };
-  return { filter, offset, limit };
+  return {
+    filter,
+    limit,
+    ...(continuationToken !== null ? { continuationToken } : {}),
+  };
 }
 
 export async function getTemperatureHistoryHandler(
@@ -175,7 +186,7 @@ export async function getTemperatureHistoryHandler(
   if (typeof query === 'string') {
     return validationError(query, correlationId, context);
   }
-  const { filter, offset, limit } = query;
+  const { filter, limit, continuationToken } = query;
 
   let spent: number | undefined;
   try {
@@ -194,23 +205,39 @@ export async function getTemperatureHistoryHandler(
       );
     }
 
-    const count = await temperatures.countReadings(filter);
-    spent += count.requestCharge;
-    const page = await temperatures.getReadingsPage(filter, offset, limit);
+    const page = await temperatures.getReadingsPage(filter, { limit, continuationToken });
     spent += page.requestCharge;
 
     const body: TemperatureHistoryResponse = {
       readings: page.readings,
-      total: count.total,
-      offset,
       limit,
-      hasMore: offset + limit < count.total,
+      hasMore: page.continuationToken !== undefined,
     };
+    if (page.continuationToken !== undefined) {
+      body.continuationToken = page.continuationToken;
+    }
     context.log(
-      `getTemperatureHistory ${page.readings.length} of ${count.total} (requestCharge=${spent} RU)`
+      `getTemperatureHistory ${page.readings.length} reading(s), hasMore=${body.hasMore} ` +
+        `(requestCharge=${spent} RU)`
     );
     return jsonResponse(200, body, correlationId, spent);
   } catch (error) {
+    if (error instanceof InvalidContinuationTokenError) {
+      // The token is the caller's input: a 400, not a failure of ours. Report
+      // the RU the ownership read and the refused query spent.
+      const charge = (spent ?? 0) + (error.requestCharge ?? 0);
+      context.log(`getTemperatureHistory invalid continuationToken (requestCharge=${charge} RU)`);
+      return jsonResponse(
+        400,
+        errorBody(
+          'VALIDATION_ERROR',
+          'continuationToken is not valid: send back the token from the previous page unchanged',
+          context
+        ),
+        correlationId,
+        charge
+      );
+    }
     return serverError(
       'getTemperatureHistory',
       'Failed to retrieve temperature history',

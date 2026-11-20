@@ -14,6 +14,7 @@ import {
   getCooksRepository,
 } from '../../shared/cosmos/cooks-repository';
 import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/request-charge';
+import { correlationIdOf } from '../devices/devices-http';
 
 /**
  * MG-59 — list a SINGLE authenticated user's persisted cooks.
@@ -52,6 +53,11 @@ import { requestChargeHeaders, requestChargeOfError } from '../../shared/cosmos/
  * already projected to the Cook contract by the repository, so no Cosmos system
  * property (`_rid`, `_self`, `_etag`, ...) reaches the body.
  *
+ * REQUEST ID (HAR-75)
+ * Every response, the 400s, 401 and 500 included, carries `X-Request-ID`: the
+ * caller's when it sent one, else the invocation id. The body's `requestId`
+ * stays the invocation id.
+ *
  * SANITIZED FAILURES
  * A dependency failure returns a fixed 500 shape with a request id and nothing
  * else; the raw error is NOT logged, because a Cosmos SDK error can carry the
@@ -81,11 +87,15 @@ function isCookStatus(value: string): value is CookStatus {
   return Object.prototype.hasOwnProperty.call(COOK_STATUSES, value);
 }
 
-function validationError(message: string, requestId: string): HttpResponseInit {
+function validationError(
+  message: string,
+  correlationId: string,
+  context: InvocationContext
+): HttpResponseInit {
   return {
     status: 400,
-    headers: { 'Content-Type': 'application/json' },
-    jsonBody: { error: 'VALIDATION_ERROR', message, requestId },
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': correlationId },
+    jsonBody: { error: 'VALIDATION_ERROR', message, requestId: context.invocationId },
   };
 }
 
@@ -115,12 +125,13 @@ export async function getCooksHandler(
   deps: ListCooksHandlerDeps = defaultDeps
 ): Promise<HttpResponseInit> {
   context.log('Processing getCooks request');
+  const correlationId = correlationIdOf(request, context);
 
   // Identity FIRST: reject before any query is issued, so an unauthenticated
   // caller never spends a single RU of the shared pool.
   const auth = principalFromRequest(request);
   if (!auth.authenticated) {
-    return unauthenticatedResponse(auth.reason, context.invocationId);
+    return unauthenticatedResponse(auth.reason, correlationId);
   }
   const userId = auth.principal.userId;
 
@@ -133,7 +144,8 @@ export async function getCooksHandler(
   if (statusParam !== null && !isCookStatus(statusParam)) {
     return validationError(
       `status must be one of: ${Object.keys(COOK_STATUSES).join(', ')}`,
-      context.invocationId
+      correlationId,
+      context
     );
   }
   const deviceIdParam = request.query.get('deviceId');
@@ -143,7 +155,8 @@ export async function getCooksHandler(
   ) {
     return validationError(
       `deviceId must be 1 to ${MAX_DEVICE_ID_LENGTH} characters`,
-      context.invocationId
+      correlationId,
+      context
     );
   }
 
@@ -183,7 +196,7 @@ export async function getCooksHandler(
       status: 200,
       headers: {
         'Content-Type': 'application/json',
-        'X-Request-ID': context.invocationId,
+        'X-Request-ID': correlationId,
         ...requestChargeHeaders(page.requestCharge),
       },
       jsonBody: response,
@@ -199,6 +212,7 @@ export async function getCooksHandler(
       status: 500,
       headers: {
         'Content-Type': 'application/json',
+        'X-Request-ID': correlationId,
         ...requestChargeHeaders(requestChargeOfError(error)),
       },
       jsonBody: {

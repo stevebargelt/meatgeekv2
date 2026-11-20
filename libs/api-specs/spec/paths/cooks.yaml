@@ -2,6 +2,7 @@
 #
 #   - cooks-collection GET  : apps/api/src/functions/cooks/list-cooks.ts
 #   - cooks-collection POST : apps/api/src/functions/cooks/start-cook.ts
+#   - cook-item GET         : apps/api/src/functions/cooks/get-cook.ts
 #   - cook-stop POST        : apps/api/src/functions/cooks/stop-cook.ts
 #
 # Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
@@ -24,6 +25,9 @@ cooks-collection:
       read.
 
       There is no `userId` parameter: a `userId` in the query is ignored.
+
+      Every response carries X-Request-ID: the caller's `X-Request-ID` when
+      sent, else the invocation id (HAR-75).
     tags: [cooks]
     parameters:
       - name: deviceId
@@ -77,8 +81,11 @@ cooks-collection:
       '400':
         description: |
           VALIDATION_ERROR: `status` is not a CookStatus, or `deviceId` is
-          empty or longer than 128 characters. No read is issued. This
-          response carries neither X-Request-ID nor x-meatgeek-request-charge.
+          empty or longer than 128 characters. No read is issued, so there is
+          no x-meatgeek-request-charge.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
         content:
           application/json:
             schema:
@@ -106,8 +113,10 @@ cooks-collection:
           this user. One active cook per user and device; since only the
           device's owner can start a cook on it (below), that is in effect one
           active cook per device. Stop it first.
-        - 400 VALIDATION_ERROR: `name` is missing or blank, `deviceId` or
-          `meatType` is missing or empty, or `id` is not a UUID.
+        - 400 VALIDATION_ERROR (HAR-75): the body is not valid JSON, is
+          `null` or is not an object; it has a field StartCookRequest does
+          not list; or a field breaks its rule (see StartCookRequest). The
+          message names the field. No Cosmos call is made.
         - 403 DEVICE_NOT_OWNED (HAR-26, MG-88): `deviceId` is not a device the
           caller registered. Checked with one point read on the devices
           container after validation and before any write: no cook, no device
@@ -115,9 +124,7 @@ cooks-collection:
           unregistered device get the same body, so the answer does not reveal
           whether another user owns the id.
         - 503 DEVICE_TWIN_UPDATE_FAILED (HAR-66): see below.
-        - 500 INTERNAL_SERVER_ERROR: a Cosmos failure, or a body that is not
-          valid JSON or is JSON `null` (the handler does not answer those
-          with 400).
+        - 500 INTERNAL_SERVER_ERROR: a Cosmos failure.
 
       Device twin (HAR-66). After a 201, and after a 200 replay, the API sets
       the device's IoT Hub twin desired properties from Cosmos under its
@@ -130,9 +137,10 @@ cooks-collection:
       resending the same request replays (200) and retries the twin update.
       `cook_started` is still emitted when this call created the cook.
 
-      The response's `X-Request-ID` is always the invocation id; the caller's
-      `X-Request-ID` is used only as the twin's and the SignalR message's
-      correlation id.
+      Every response carries X-Request-ID: the caller's `X-Request-ID` when
+      sent, else the invocation id (HAR-75). The same value is the twin's
+      and the `cook_started` message's correlation id. The body's
+      `requestId` is the invocation id.
     tags: [cooks]
     requestBody:
       required: true
@@ -167,9 +175,13 @@ cooks-collection:
               $ref: '../components/schemas/cook.yaml#/Cook'
       '400':
         description: |
-          VALIDATION_ERROR: `name` missing or blank, `deviceId` or `meatType`
-          missing or empty, or `id` not a UUID. No Cosmos call is made. This
-          response carries neither X-Request-ID nor x-meatgeek-request-charge.
+          VALIDATION_ERROR: the body is not a JSON object (invalid JSON,
+          `null`, an array), has an unknown field, or breaks a field rule;
+          `message` names the field. No Cosmos call is made, so there is no
+          x-meatgeek-request-charge.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
         content:
           application/json:
             schema:
@@ -220,6 +232,77 @@ cooks-collection:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
+
+cook-item:
+  get:
+    operationId: getCook
+    summary: Get one of the caller's cooks
+    description: |
+      Returns the caller's cook `{cookId}` as a bare Cook (NOT wrapped in
+      ApiResponse), projected onto the Cook contract fields only (HAR-75).
+
+      One point read of (caller, `{cookId}`) in the cooks container, which is
+      partitioned on the caller's user id. A cook that does not exist and a
+      cook that belongs to another user are the same 404 NOT_FOUND: another
+      user's cook is in another partition and is never read. The device lock
+      documents that share the partition (ids `active-device:<deviceId>`) are
+      not cooks and are 404 too. No device ownership read is made.
+
+      Every response carries X-Request-ID: the caller's `X-Request-ID` when
+      sent, else the invocation id. Every response that reached Cosmos, the
+      404 included, carries x-meatgeek-request-charge.
+    tags: [cooks]
+    parameters:
+      - name: cookId
+        in: path
+        required: true
+        description: |
+          Id of the cook. Opaque (cooks started before MG-84 have
+          `cook-<epoch-ms>` ids); 1-128 characters, otherwise 400.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    responses:
+      '200':
+        description: The cook.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/Cook'
+      '400':
+        description: |
+          VALIDATION_ERROR: `{cookId}` is empty or longer than 128
+          characters. No Cosmos call is made.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '401':
+        $ref: '../components/responses.yaml#/Unauthenticated'
+      '404':
+        description: |
+          NOT_FOUND: no cook with this id in the caller's partition. Absent,
+          another user's, and a device lock id all answer the same.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: '../components/responses.yaml#/ServerError'
 
 cook-stop:
   post:
@@ -315,7 +398,7 @@ cook-stop:
               $ref: '../components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
 
 # Pieces the operations above share. Not path items: openapi.yaml references
-# only cooks-collection and cook-stop.
+# only cooks-collection, cook-item and cook-stop.
 shared:
   device-not-owned:
     description: |
@@ -336,10 +419,12 @@ shared:
     description: |
       INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
       failure. Carries x-meatgeek-request-charge when the Cosmos calls made
-      before the failure, or the failing call, reported a charge. This
-      response carries no X-Request-ID; the body's `requestId` is the
-      invocation id.
+      before the failure, or the failing call, reported a charge. Carries
+      X-Request-ID (the caller's, else the invocation id) since HAR-75; the
+      body's `requestId` is the invocation id.
     headers:
+      X-Request-ID:
+        $ref: '../components/headers.yaml#/X-Request-ID'
       x-meatgeek-request-charge:
         $ref: '../components/headers.yaml#/RequestCharge'
     content:

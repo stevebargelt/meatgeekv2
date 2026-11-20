@@ -190,8 +190,9 @@ describe('(a) routes: main.ts registrations equal the spec operations', () => {
 
   it('fails, naming the operation, when the spec describes a route main.ts does not serve', () => {
     const altered = structuredClone(validated);
+    // PATCH /cooks/{id} is not served (HAR-75 added only GET /cooks/{cookId}).
     altered.paths['/cooks/{id}'] = {
-      get: { operationId: 'getCook', responses: { '200': { description: 'ok' } } },
+      patch: { operationId: 'updateCook', responses: { '200': { description: 'ok' } } },
     };
 
     const drift = compareRoutes(
@@ -201,10 +202,10 @@ describe('(a) routes: main.ts registrations equal the spec operations', () => {
 
     expect(drift.missingFromSpec).toEqual([]);
     expect(drift.missingFromApi).toEqual([
-      { method: 'GET', path: '/cooks/{id}', source: 'getCook' },
+      { method: 'PATCH', path: '/cooks/{id}', source: 'updateCook' },
     ]);
     expect(formatRouteDrift(drift)).toContain(
-      'Operations the spec describes that main.ts does not register:\n  - GET /cooks/{id} (getCook)'
+      'Operations the spec describes that main.ts does not register:\n  - PATCH /cooks/{id} (updateCook)'
     );
   });
 });

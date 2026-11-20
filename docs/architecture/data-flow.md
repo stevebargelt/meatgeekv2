@@ -118,7 +118,7 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 **Partitioning Strategy**:
 - **Partition Key**: `/deviceId`
 - **Benefits**: All readings for one device are co-located, and the partition value comes from the hub, not the device payload
-- **Queries**: Per device, single-partition: the current reading is the newest by `iothub-enqueuedtime` (`GET /temperatures/current/{deviceId}`); history is a count plus a page ordered by `iothub-enqueuedtime`, with an optional time window and `cookId` as a tag filter on `Body.cookId` (`GET /temperatures/history`)
+- **Queries**: Per device, single-partition: the current reading is the newest by `iothub-enqueuedtime` (`GET /temperatures/current/{deviceId}`); history is one page per request ordered by `iothub-enqueuedtime`, paged by continuation token (no `COUNT`, no `OFFSET`), with an optional time window and `cookId` as a tag filter on `Body.cookId` (`GET /temperatures/history`)
 - **Ownership**: Both routes first point-read the device in `devices`; a device the caller does not own, or that does not exist, is a 404
 
 ### 4. Real-time Path Details
@@ -226,15 +226,15 @@ For an owned device the API marks the cook completed, clears the device twin's d
 - **Real-time push**: ~18.4 s from send to a SignalR client, measured in dev by `apps/api/acceptance/proofs/signalr-live-temperature.proof.ts` (`METRIC signalr-delivery-ms`): 18424 ms (run 44673261258). It times one `simdevice` reading from send, through the Event Hub and `broadcastTemperature`, until the owner's SignalR client receives it. A single dev sample, not a target. No app receives the pushes yet.
 
 ### History read cost
-Measured in dev by `apps/api/acceptance/proofs/telemetry-volume.proof.ts` (run 44612029684) on the simulated device holding 8700 readings (`history-total`; the proof tops it up to at least one 12 h cook at one reading every 5 s, 8,640):
+Before HAR-75, history paged by `OFFSET` and every request also paid a `COUNT(1)` over the device's partition for `total`. Measured in dev by `apps/api/acceptance/proofs/telemetry-volume.proof.ts` (run 44612029684) on the simulated device holding 8700 readings:
 
-| Request | Request charge |
+| Request (before HAR-75) | Request charge |
 |---|---|
-| `GET /temperatures/history`, limit 100, offset 0 (`history-ru-first-page`) | 11.95 RU |
-| `GET /temperatures/history`, limit 100, offset 8600 (`history-ru-last-page`) | 24.12 RU |
-| `GET /temperatures/history`, 12 h window, limit 5000, 5000 readings (`history-ru-max-page`) | 238.26 RU |
+| `GET /temperatures/history`, limit 100, offset 0 | 11.95 RU |
+| `GET /temperatures/history`, limit 100, offset 8600 | 24.12 RU |
+| `GET /temperatures/history`, 12 h window, limit 5000, 5000 readings | 238.26 RU |
 
-`OFFSET` cost grows with the skip: the same 100-reading page costs 11.95 RU at offset 0 and 24.12 RU at offset 8,600. Every history request also pays the `COUNT(1)` over the device's partition that fills `total`. These are single dev samples, not targets; each run's summary carries the current values.
+`OFFSET` cost grows with the skip: the same 100-reading page cost twice as much at offset 8,600. Since HAR-75 history pages by continuation token (`maxItemCount` = `limit`, at most 1,000) with no `COUNT`, so a deep page costs what the first does. The volume proof walks the device 1,000 readings a page and fails unless the last page costs at most 1.5 × the first; each `Deploy Dev App` run's summary carries `history-ru-first-page`, `history-ru-last-page` and `history-pages`.
 
 ### Cost Optimization
 - **Reduced Function executions** (no storage operations)

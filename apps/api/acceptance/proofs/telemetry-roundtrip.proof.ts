@@ -21,7 +21,8 @@ import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/tel
  *      reading, matched on its body `timestamp` as an instant, then `METRIC roundtrip-ms` is
  *      printed: send acknowledgement (`sentAt`) to that `200`;
  *   4. `GET /temperatures/history` from `sentAt − 5 min` (the window is on the
- *      hub's enqueued time, never before the send) holds the same reading.
+ *      hub's enqueued time, never before the send) holds the same reading,
+ *      paged by continuation token (HAR-75).
  *
  * Readings are not cleaned up: they expire on the temperatures container TTL.
  */
@@ -135,7 +136,8 @@ export default defineProofs('telemetry round-trip', () => {
         const { timestamp, sentAt } = sentReading();
         const deviceId = api.simulatedDeviceId;
         const startTime = new Date(Date.parse(sentAt) - HISTORY_LOOKBACK_MS).toISOString();
-        let offset = 0;
+        let read = 0;
+        let continuationToken: string | undefined;
 
         for (;;) {
           const response = await api.request<TemperatureHistoryResponse>({
@@ -143,7 +145,9 @@ export default defineProofs('telemetry round-trip', () => {
             path:
               `/temperatures/history?deviceId=${encodeURIComponent(deviceId)}` +
               `&startTime=${encodeURIComponent(startTime)}` +
-              (offset > 0 ? `&offset=${offset}` : ''),
+              (continuationToken !== undefined
+                ? `&continuationToken=${encodeURIComponent(continuationToken)}`
+                : ''),
             route: '/temperatures/history',
           });
           api.expectStatus(response, 200);
@@ -154,15 +158,21 @@ export default defineProofs('telemetry round-trip', () => {
             expectSentReading(api, response, match, deviceId);
             return;
           }
+          read += readings.length;
           if (response.body.hasMore !== true) {
             throw new ProofFailure(
-              `no reading with timestamp ${timestamp} in the ${offset + readings.length} ` +
-                `reading(s) since ${startTime}`,
+              `no reading with timestamp ${timestamp} in the ${read} reading(s) since ${startTime}`,
               response
             );
           }
-          api.check(response, readings.length > 0, 'hasMore is true on an empty page');
-          offset += readings.length;
+          // HAR-75: the next page resumes from the token, never an offset.
+          api.check(
+            response,
+            typeof response.body.continuationToken === 'string' &&
+              response.body.continuationToken.length > 0,
+            'hasMore is true without a continuationToken'
+          );
+          continuationToken = response.body.continuationToken;
         }
       },
     },

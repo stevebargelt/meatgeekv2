@@ -107,10 +107,14 @@ function deps(page: CookPage | Error): {
 function mockRequest(options: {
   principalHeader?: string;
   query?: Record<string, string>;
+  requestId?: string;
 }): HttpRequest {
   const headers = new Map<string, string>();
   if (options.principalHeader !== undefined) {
     headers.set('x-ms-client-principal', options.principalHeader);
+  }
+  if (options.requestId !== undefined) {
+    headers.set('x-request-id', options.requestId);
   }
   const query = new Map<string, string>(Object.entries(options.query ?? {}));
   return {
@@ -455,4 +459,56 @@ describe('getCooksHandler', () => {
       expect(chargeHeader(res)).toBeUndefined();
     });
   });
+});
+
+describe('HAR-75 — every GET /cooks response carries X-Request-ID', () => {
+  const requestIdOf = (res: { headers?: unknown }) =>
+    (res.headers as Record<string, string> | undefined)?.['X-Request-ID'];
+
+  const CASES: Array<[string, number, Record<string, string>, CookPage | Error, boolean]> = [
+    ['200', 200, {}, pageOf([sampleCook()]), true],
+    ['400 for a bad status', 400, { status: 'burnt' }, pageOf([]), true],
+    ['400 for an over-long deviceId', 400, { deviceId: 'd'.repeat(129) }, pageOf([]), true],
+    ['401', 401, {}, pageOf([]), false],
+    ['500', 500, {}, new Error('https://mgv2-secret-account.documents.azure.com/ failed'), true],
+  ];
+
+  it.each(CASES)(
+    "%s echoes the caller's X-Request-ID",
+    async (_label, status, query, page, authenticated) => {
+      const { getCooksHandler } = loadModule();
+      const { ctx } = mockContext();
+      const res = await getCooksHandler(
+        mockRequest({
+          principalHeader: authenticated ? encodedPrincipal() : undefined,
+          query,
+          requestId: 'caller-req-9',
+        }),
+        ctx,
+        deps(page).deps
+      );
+      expect(res.status).toBe(status);
+      expect(requestIdOf(res)).toBe('caller-req-9');
+      // The body's requestId stays the invocation id, except on the shared
+      // 401 (principal.ts), whose body echoes the same id as its header, as
+      // on every other route.
+      const bodyId = (res.jsonBody as { requestId?: string }).requestId;
+      expect(bodyId).toBe(status === 401 ? 'caller-req-9' : status === 200 ? undefined : 'inv-42');
+    }
+  );
+
+  it.each(CASES)(
+    '%s falls back to the invocation id',
+    async (_label, status, query, page, authenticated) => {
+      const { getCooksHandler } = loadModule();
+      const { ctx } = mockContext();
+      const res = await getCooksHandler(
+        mockRequest({ principalHeader: authenticated ? encodedPrincipal() : undefined, query }),
+        ctx,
+        deps(page).deps
+      );
+      expect(res.status).toBe(status);
+      expect(requestIdOf(res)).toBe('inv-42');
+    }
+  );
 });

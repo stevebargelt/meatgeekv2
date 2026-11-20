@@ -3,6 +3,7 @@ import type { SqlParameter } from '@azure/cosmos';
 import type { TemperatureReading } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
+import { requestChargeOfError } from './request-charge';
 
 /**
  * HAR-28 (MG-79 part 1) — reads telemetry from the `temperatures` container.
@@ -72,11 +73,11 @@ export interface TemperatureHistoryFilter {
 }
 
 /**
- * The WHERE clause shared by the history count and page queries, so `total`
- * and the page agree. It carries everything SQL can express of
- * {@link toTemperatureReading}'s exclusion rules: the hub identity must be the
- * partition's device, and `Body` must be a JSON object. The window is on the
- * hub-stamped enqueued time, never the device-supplied `Body.timestamp`.
+ * The WHERE clause of the history page query. It carries everything SQL can
+ * express of {@link toTemperatureReading}'s exclusion rules: the hub identity
+ * must be the partition's device, and `Body` must be a JSON object. The window
+ * is on the hub-stamped enqueued time, never the device-supplied
+ * `Body.timestamp`.
  */
 export function historyPredicate(filter: TemperatureHistoryFilter): {
   readonly where: string;
@@ -103,24 +104,16 @@ export function historyPredicate(filter: TemperatureHistoryFilter): {
   return { where: clauses.join(' AND '), parameters };
 }
 
-/** `SELECT VALUE COUNT(1)` over the history predicate. */
-export function historyCountQuery(filter: TemperatureHistoryFilter) {
-  const { where, parameters } = historyPredicate(filter);
-  return { query: `SELECT VALUE COUNT(1) FROM c WHERE ${where}`, parameters };
-}
-
-/** One page over the history predicate, oldest enqueued time first. */
-export function historyPageQuery(filter: TemperatureHistoryFilter, offset: number, limit: number) {
+/**
+ * HAR-75 — the history query, oldest enqueued time first. There is no `OFFSET`
+ * and no `LIMIT`: the page size is the SDK's `maxItemCount` and the position
+ * is the SDK continuation token, so a deep page costs what the first one does.
+ */
+export function historyPageQuery(filter: TemperatureHistoryFilter) {
   const { where, parameters } = historyPredicate(filter);
   return {
-    query:
-      `SELECT * FROM c WHERE ${where} ` +
-      `ORDER BY c.SystemProperties["${ENQUEUED_TIME}"] ASC OFFSET @offset LIMIT @limit`,
-    parameters: [
-      ...parameters,
-      { name: '@offset', value: offset },
-      { name: '@limit', value: limit },
-    ],
+    query: `SELECT * FROM c WHERE ${where} ORDER BY c.SystemProperties["${ENQUEUED_TIME}"] ASC`,
+    parameters,
   };
 }
 
@@ -204,16 +197,59 @@ export type LatestReading =
     }
   | { readonly status: 'none'; readonly requestCharge: number };
 
-/** How many documents match a history filter, with the RU the count cost. */
-export interface HistoryCount {
-  readonly total: number;
-  readonly requestCharge: number;
-}
-
 /** One page of history readings, with the RU the page query cost. */
 export interface HistoryPage {
   readonly readings: TemperatureReading[];
+  /** Opaque token for the next page; `undefined` when the query is drained. */
+  readonly continuationToken?: string;
   readonly requestCharge: number;
+}
+
+/** How a history page is addressed: a page size and, after the first page,
+ *  the token the previous page returned. */
+export interface HistoryPageOptions {
+  readonly limit: number;
+  readonly continuationToken?: string;
+}
+
+/**
+ * HAR-75 — the caller sent a continuation token Cosmos would not resume from
+ * (garbled, truncated, or from another query). The handler answers 400.
+ * Carries only the RU the refused call reported, never the SDK's error text.
+ */
+export class InvalidContinuationTokenError extends Error {
+  constructor(readonly requestCharge: number | undefined) {
+    super('invalid continuation token');
+    this.name = 'InvalidContinuationTokenError';
+  }
+}
+
+/** The numeric status on a thrown error, read without its text. */
+function statusCodeOf(error: unknown): number | undefined {
+  const reported = error as { code?: unknown; statusCode?: unknown } | null | undefined;
+  for (const value of [reported?.statusCode, reported?.code]) {
+    if (typeof value === 'number') {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * HAR-75 — whether a failure on a tokened history page means Cosmos refused
+ * the token. A 400 from the engine, or a client-side parse failure, which has
+ * no status and no string `code` (a `SyntaxError`, a plain `Error`). A
+ * connection-level SDK failure carries a string `code` (`ECONNREFUSED`,
+ * `ECONNRESET`, `ETIMEDOUT`, `TimeoutError`) and is the dependency's fault,
+ * not the caller's: it propagates and the handler answers 500.
+ */
+function isRefusedToken(error: unknown): boolean {
+  const status = statusCodeOf(error);
+  if (status !== undefined) {
+    return status === 400;
+  }
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code !== 'string';
 }
 
 export class TemperaturesRepository {
@@ -252,42 +288,39 @@ export class TemperaturesRepository {
   }
 
   /**
-   * HAR-35 — how many documents in `filter.deviceId`'s partition match the
-   * history predicate ({@link historyCountQuery}). One single-partition query.
+   * HAR-75 — one page of the history query ({@link historyPageQuery}), oldest
+   * enqueued time first, each document through {@link toTemperatureReading}.
+   * A document that still maps to `null` is dropped, so a page can hold fewer
+   * than `limit` readings while there are more. One single-partition query
+   * (`partitionKey: deviceId`), one `fetchNext`: `maxItemCount` is the page
+   * size and the SDK continuation token is the position. No COUNT is issued.
    *
-   * Callers must have checked that the caller owns the device first.
-   */
-  async countReadings(filter: TemperatureHistoryFilter): Promise<HistoryCount> {
-    const response = await this.container.items
-      .query<number>(historyCountQuery(filter), { partitionKey: filter.deviceId })
-      .fetchAll();
-    const [total] = response.resources;
-    return {
-      total: typeof total === 'number' && Number.isFinite(total) ? total : 0,
-      requestCharge: response.requestCharge,
-    };
-  }
-
-  /**
-   * HAR-35 — one page of the history predicate ({@link historyPageQuery}),
-   * oldest enqueued time first, each document through
-   * {@link toTemperatureReading}. A document that still maps to `null` is
-   * dropped from the page (it stays in {@link countReadings}' total). One
-   * single-partition query; never cross-partition.
+   * A token Cosmos refuses ({@link isRefusedToken}: a 400, or a client-side
+   * parse failure with no status and no string `code`) throws
+   * {@link InvalidContinuationTokenError}. A network failure (string `code`),
+   * any other status, and every failure without a token propagate as they are.
    *
    * Callers must have checked that the caller owns the device first.
    */
   async getReadingsPage(
     filter: TemperatureHistoryFilter,
-    offset: number,
-    limit: number
+    options: HistoryPageOptions
   ): Promise<HistoryPage> {
-    const response = await this.container.items
-      .query<JsonObject>(historyPageQuery(filter, offset, limit), {
-        partitionKey: filter.deviceId,
-        maxItemCount: limit,
-      })
-      .fetchAll();
+    let response;
+    try {
+      response = await this.container.items
+        .query<JsonObject>(historyPageQuery(filter), {
+          partitionKey: filter.deviceId,
+          maxItemCount: options.limit,
+          continuationToken: options.continuationToken,
+        })
+        .fetchNext();
+    } catch (error) {
+      if (options.continuationToken !== undefined && isRefusedToken(error)) {
+        throw new InvalidContinuationTokenError(requestChargeOfError(error));
+      }
+      throw error;
+    }
     const readings: TemperatureReading[] = [];
     for (const document of response.resources) {
       const reading = toTemperatureReading(document, filter.deviceId);
@@ -295,7 +328,11 @@ export class TemperaturesRepository {
         readings.push(reading);
       }
     }
-    return { readings, requestCharge: response.requestCharge };
+    return {
+      readings,
+      continuationToken: response.hasMoreResults ? response.continuationToken : undefined,
+      requestCharge: response.requestCharge,
+    };
   }
 }
 
