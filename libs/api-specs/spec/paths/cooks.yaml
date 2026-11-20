@@ -3,6 +3,7 @@
 #   - cooks-collection GET  : apps/api/src/functions/cooks/list-cooks.ts
 #   - cooks-collection POST : apps/api/src/functions/cooks/start-cook.ts
 #   - cook-item GET         : apps/api/src/functions/cooks/get-cook.ts
+#   - cook-chart GET        : apps/api/src/functions/cooks/get-cook-chart.ts
 #   - cook-stop POST        : apps/api/src/functions/cooks/stop-cook.ts
 #
 # Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
@@ -304,6 +305,93 @@ cook-item:
       '500':
         $ref: '../components/responses.yaml#/ServerError'
 
+cook-chart:
+  get:
+    operationId: getCookChart
+    summary: Chart of one of the caller's cooks
+    description: |
+      Returns the caller's cook `{cookId}` as at most 720 chart points (HAR-86),
+      read from the per-device, per-hour rollup documents the
+      `rollupTemperatures` change-feed trigger writes, never from the raw
+      readings.
+
+      Ownership: one point read of (caller, `{cookId}`) in the cooks
+      container, exactly as GET /cooks/{cookId}. Absent, another user's, and a
+      device lock id (`active-device:<deviceId>`) are the same 404 NOT_FOUND.
+
+      Window: a cook with an `endTime` covers `[startTime, endTime)` on its
+      device. An active cook covers every reading from `startTime` on, with no
+      upper bound. It is a time window, not a `cookId` tag match. Readings are
+      kept per minute, so the minute containing `startTime` is included whole.
+
+      Buckets: `bucketSeconds` is the smallest of 60, 120, 300, 600, 900,
+      1800, 3600, 7200, 14400 and 21600 that keeps the window at 720 buckets
+      or fewer. The span runs from the start of `startTime`'s minute to
+      `endTime`, or, for an active cook, to the later of now and the end of
+      the last minute with data. Bucket `k` starts at that first minute plus
+      `k × bucketSeconds`. A window longer than 180 days overflows even 6 h
+      buckets; only the newest 720 are then returned. Each channel of a point is the `min`, `max` and
+      `avg` of that channel's readings in the bucket. Buckets with no reading
+      and channels with no reading are left out, so `points` may be empty.
+
+      The change feed is at-least-once: a batch redelivered after a host
+      crash is counted twice, which can lean one minute's `avg`; `min` and
+      `max` are exact. The chart can lag the newest reading by about 30 s.
+
+      Every response carries X-Request-ID. Every response that reached
+      Cosmos carries x-meatgeek-request-charge: the sum of the cook point read
+      and every page of the rollup query.
+    tags: [cooks]
+    parameters:
+      - name: cookId
+        in: path
+        required: true
+        description: Id of the cook. Opaque; 1-128 characters, otherwise 400.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    responses:
+      '200':
+        description: The cook's chart.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/cook.yaml#/CookChart'
+      '400':
+        description: |
+          VALIDATION_ERROR: `{cookId}` is empty or longer than 128
+          characters. No Cosmos call is made.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '401':
+        $ref: '../components/responses.yaml#/Unauthenticated'
+      '404':
+        description: |
+          NOT_FOUND: no cook with this id in the caller's partition. Absent,
+          another user's, and a device lock id all answer the same.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: '#/shared/cook-server-error'
+
 cook-stop:
   post:
     operationId: stopCook
@@ -398,7 +486,7 @@ cook-stop:
               $ref: '../components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
 
 # Pieces the operations above share. Not path items: openapi.yaml references
-# only cooks-collection, cook-item and cook-stop.
+# only cooks-collection, cook-item, cook-chart and cook-stop.
 shared:
   device-not-owned:
     description: |

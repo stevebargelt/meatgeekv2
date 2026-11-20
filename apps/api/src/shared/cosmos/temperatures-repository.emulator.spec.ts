@@ -181,6 +181,7 @@ describe('HAR-28 temperatures repository against the Cosmos emulator', () => {
         temperaturesContainerName: tfContainer.name,
         usersContainerName: 'unused-by-this-tier',
         recipesContainerName: 'unused-by-this-tier',
+        temperatureRollupsContainerName: 'unused-by-this-tier',
       },
       {
         credentialFactory: () => unusedCredential,

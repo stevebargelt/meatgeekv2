@@ -48,6 +48,9 @@ jest.mock('@azure/functions', () => {
       // trigger. This suite is about the timer, so it is swallowed; its wiring
       // is asserted in broadcast-temperature.integration.spec.ts.
       eventHub: () => undefined,
+      // HAR-86: the rollupTemperatures change-feed trigger; asserted in
+      // rollup-temperatures.integration.spec.ts.
+      cosmosDB: () => undefined,
     },
   };
 });
@@ -179,11 +182,12 @@ describe('MG-58: the storage heartbeat is the host-storage proof path', () => {
       });
     });
 
-    it('leaves the nineteen HTTP registrations in place', () => {
+    it('leaves the twenty HTTP registrations in place', () => {
       expect(httpRegistrations).toEqual([
         'getCooks',
         'startCook',
         'getCook',
+        'getCookChart',
         'stopCook',
         'negotiate',
         'getCurrentTemperatures',

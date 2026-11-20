@@ -60,6 +60,8 @@ type CookRoute = 'GET /cooks' | 'POST /cooks' | 'POST /cooks/{cookId}/stop';
 /** HAR-75: kept out of CookRoute, whose failure tests follow the cook through
  *  every group that starts one. */
 type CookItemRoute = 'GET /cooks/{cookId}';
+/** HAR-86: the cook chart. */
+type CookChartRoute = 'GET /cooks/{cookId}/chart';
 type DeviceRoute = 'GET /devices' | 'POST /devices' | 'GET /devices/{id}' | 'PATCH /devices/{id}';
 type TemperatureRoute = 'GET /temperatures/current/{deviceId}' | 'GET /temperatures/history';
 type UserRoute = 'PUT /users/me' | 'GET /users/me';
@@ -73,6 +75,7 @@ type SignalRRoute = 'POST /negotiate';
 type StubRoute =
   | CookRoute
   | CookItemRoute
+  | CookChartRoute
   | DeviceRoute
   | TemperatureRoute
   | UserRoute
@@ -107,6 +110,9 @@ interface StubOptions {
   /** HAR-75: GET /cooks/{cookId} serves the cook to the peer too (a broken
    *  partition), or serves the device lock as if it were a cook. */
   readonly cookItemFault?: 'peer-reads' | 'lock-reads';
+  /** HAR-86: GET /cooks/{cookId}/chart serves the chart to the peer too, or
+   *  answers with a body CookChart does not allow. */
+  readonly chartFault?: 'peer-reads' | 'bad-body';
   /** HAR-75: the RU the last page of a walk of the simulated device's volume
    *  reports, instead of the route's usual charge. */
   readonly simDeepPageCharge?: string;
@@ -231,6 +237,7 @@ const RU: Record<StubRoute, string> = {
   'POST /cooks': '11.43',
   'POST /cooks/{cookId}/stop': '20.1',
   'GET /cooks/{cookId}': '1.17',
+  'GET /cooks/{cookId}/chart': '3.94',
   'GET /devices': '3.11',
   'POST /devices': '9.52',
   'GET /devices/{id}': '1',
@@ -599,6 +606,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
 
       const stopMatch = /^\/api\/cooks\/([^/]+)\/stop$/.exec(url.pathname);
       const cookMatch = /^\/api\/cooks\/([^/]+)$/.exec(url.pathname);
+      const chartMatch = /^\/api\/cooks\/([^/]+)\/chart$/.exec(url.pathname);
       const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
       const temperatureMatch = /^\/api\/temperatures\/current\/([^/]+)$/.exec(url.pathname);
       const recipeMatch = /^\/api\/recipes\/([^/]+)$/.exec(url.pathname);
@@ -607,6 +615,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'POST' && url.pathname === '/api/cooks') route = 'POST /cooks';
       else if (request.method === 'POST' && stopMatch) route = 'POST /cooks/{cookId}/stop';
       else if (request.method === 'GET' && cookMatch) route = 'GET /cooks/{cookId}';
+      else if (request.method === 'GET' && chartMatch) route = 'GET /cooks/{cookId}/chart';
       else if (request.method === 'GET' && url.pathname === '/api/devices') route = 'GET /devices';
       else if (request.method === 'POST' && url.pathname === '/api/devices')
         route = 'POST /devices';
@@ -640,6 +649,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         'GET /temperatures/current/{deviceId}',
         'POST /cooks',
         'GET /cooks/{cookId}',
+        'GET /cooks/{cookId}/chart',
       ];
       if (caller === 'peer' && !peerRoutes.includes(route)) {
         send(404, errorBody('NOT_FOUND'));
@@ -907,6 +917,38 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           send(200, { id, userId, deviceId: id.slice('active-device:'.length) }, route);
         } else {
           send(404, errorBody('NOT_FOUND'), route);
+        }
+      } else if (route === 'GET /cooks/{cookId}/chart') {
+        // HAR-86: the caller's own cook only, as GET /cooks/{cookId}.
+        const id = decodeURIComponent(chartMatch![1]);
+        const userId = caller === 'peer' ? 'stub-tenant:stub-peer' : 'stub-tenant:stub-user';
+        const cook = cooks.find(
+          candidate =>
+            candidate.id === id &&
+            (candidate.userId === userId || options.chartFault === 'peer-reads')
+        );
+        if (!cook) {
+          send(404, errorBody('NOT_FOUND'), route);
+        } else if (options.chartFault === 'bad-body') {
+          send(200, { cookId: cook.id, deviceId: cook.deviceId, points: 'none' }, route);
+        } else {
+          send(
+            200,
+            {
+              cookId: cook.id,
+              deviceId: cook.deviceId,
+              startTime: cook.startTime,
+              ...(cook.endTime ? { endTime: cook.endTime } : {}),
+              bucketSeconds: 60,
+              points: [
+                {
+                  t: cook.startTime.slice(0, 16) + ':00.000Z',
+                  grill: { min: 224.9, max: 225.4, avg: 225.1 },
+                },
+              ],
+            },
+            route
+          );
         }
       } else if (route === 'POST /cooks') {
         const body = (await readJson(request)) as Partial<StubCook>;
@@ -1190,6 +1232,7 @@ function escape(text: string): string {
 
 const ROUTES: CookRoute[] = ['POST /cooks', 'GET /cooks', 'POST /cooks/{cookId}/stop'];
 const COOK_ITEM_ROUTE: CookItemRoute = 'GET /cooks/{cookId}';
+const COOK_CHART_ROUTE: CookChartRoute = 'GET /cooks/{cookId}/chart';
 const DEVICE_ROUTES: DeviceRoute[] = [
   'POST /devices',
   'GET /devices/{id}',
@@ -1226,6 +1269,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
     for (const route of [
       ...ROUTES,
       COOK_ITEM_ROUTE,
+      COOK_CHART_ROUTE,
       ...DEVICE_ROUTES,
       ...TEMPERATURE_ROUTES,
       ...USER_ROUTES,
@@ -1317,6 +1361,53 @@ describe('live acceptance runner (against an in-process stub)', () => {
     ]) {
       expect(result.lines).toContain(`PASS cooks lifecycle › ${step}`);
     }
+  });
+
+  it('(a) HAR-86: reads the chart as the owner, for an unknown id, and as the peer', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    const reads = stub!.requests
+      .filter(r => r.method === 'GET' && /^\/api\/cooks\/[^/?]+\/chart$/.test(r.path))
+      .map(r => ({
+        id: decodeURIComponent(r.path.slice('/api/cooks/'.length, -'/chart'.length)),
+        as: r.authorization === `Bearer ${PEER_TOKEN}` ? 'peer' : 'owner',
+      }));
+    expect(reads).toHaveLength(3);
+    const cookId = reads[0].id;
+    expect(reads).toEqual([
+      { id: cookId, as: 'owner' },
+      { id: expect.stringMatching(/^[0-9a-f-]{36}$/), as: 'owner' },
+      { id: cookId, as: 'peer' },
+    ]);
+    expect(reads[1].id).not.toBe(cookId);
+    for (const step of [
+      'GET /cooks/{cookId}/chart as the owner is the chart of the started cook',
+      'GET /cooks/{cookId}/chart for an unknown id is 404 NOT_FOUND',
+      "GET /cooks/{cookId}/chart as the peer is 404 NOT_FOUND for the owner's cook",
+    ]) {
+      expect(result.lines).toContain(`PASS cooks lifecycle › ${step}`);
+    }
+  });
+
+  it.each([
+    [
+      'peer-reads',
+      "GET /cooks/{cookId}/chart as the peer is 404 NOT_FOUND for the owner's cook",
+      'GET /cooks/{cookId}/chart (peer) → 200: expected 404',
+    ],
+    [
+      'bad-body',
+      'GET /cooks/{cookId}/chart as the owner is the chart of the started cook',
+      'GET /cooks/{cookId}/chart → 200: contract: GET /cooks/{cookId}/chart (getCookChart) 200: the body does not match the schema',
+    ],
+  ] as const)('(b) HAR-86: exits non-zero when the chart %s', async (chartFault, step, shown) => {
+    const result = await runAgainstStub({ chartFault });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(`FAIL cooks lifecycle › ${step}`);
+    expect(result.failures[0]).toContain(shown);
   });
 
   it.each([

@@ -72,6 +72,8 @@ paths:
     $ref: './paths/cooks.yaml#/cooks-collection'
   /cooks/{cookId}:
     $ref: './paths/cooks.yaml#/cook-item'
+  /cooks/{cookId}/chart:
+    $ref: './paths/cooks.yaml#/cook-chart'
   /cooks/{cookId}/stop:
     $ref: './paths/cooks.yaml#/cook-stop'
   /negotiate:
@@ -180,6 +182,12 @@ components:
       $ref: './components/schemas/cook.yaml#/StartCookRequest'
     CookListResponse:
       $ref: './components/schemas/cook.yaml#/CookListResponse'
+    CookChartChannel:
+      $ref: './components/schemas/cook.yaml#/CookChartChannel'
+    CookChartPoint:
+      $ref: './components/schemas/cook.yaml#/CookChartPoint'
+    CookChart:
+      $ref: './components/schemas/cook.yaml#/CookChart'
 
     # Temperature
     TemperatureReading:
