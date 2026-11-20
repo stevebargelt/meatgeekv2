@@ -243,7 +243,7 @@ func (dp *DataPusher) enrichTemperatureData(temps TemperatureReading) Temperatur
 
 ### Latency
 - **Storage**: ~1.2 s from send to readable through the API, measured in dev by `apps/api/acceptance/proofs/telemetry-roundtrip.proof.ts` (`METRIC roundtrip-ms`): 1211 ms (run 44603121177) and 1235 ms (run 44612029684). It times one `simdevice` reading from send, through IoT Hub's `cosmos-storage-route`, until `GET /temperatures/current/{deviceId}` returns it. Single dev samples, not targets; each `Deploy Dev App` run's summary carries the current value.
-- **Real-time and client updates**: not measured; the Event Hub has no consumer on `main` and no client calls the API yet.
+- **Real-time and client updates**: not measured. `broadcastTemperature` consumes the Event Hub and stamps each push with `enqueuedTimeUtc` so a client can measure delay, but no client receives the pushes or calls the API yet.
 
 ### History read cost
 Measured in dev by `apps/api/acceptance/proofs/telemetry-volume.proof.ts` (run 44612029684) on the simulated device holding 8700 readings (`history-total`; the proof tops it up to at least one 12 h cook at one reading every 5 s, 8,640):

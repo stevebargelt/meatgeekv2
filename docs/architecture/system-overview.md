@@ -84,7 +84,7 @@ The existing Go-based device controller provides a solid foundation:
 
 What runs today is the [`system` view](https://stevebargelt.github.io/meatgeekv2/#/view/system/) of the architecture site; the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) follows one reading from the RTD sensors through the data pusher and IoT Hub's `cosmos-storage-route` into Cosmos DB, and the [`realtimeTarget` view](https://stevebargelt.github.io/meatgeekv2/#/view/realtimeTarget/) shows the decided realtime design. The same views render on GitHub in [Architecture Diagrams](diagrams.md).
 
-The Event Hub → Functions → SignalR broadcast path is **planned, not on `main`**: IoT Hub routes to the Event Hub, but no function consumes it. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet.
+The Event Hub → Functions → SignalR broadcast path is **on `main` up to SignalR** since HAR-60: IoT Hub routes to the Event Hub, and the API's `broadcastTemperature` consumes it and pushes each reading to its `device-{id}` SignalR group. The mobile and web apps are scaffolds that do not call the REST API or SignalR yet, so nothing receives those pushes.
 
 ### Core Components
 
@@ -128,8 +128,8 @@ The Event Hub → Functions → SignalR broadcast path is **planned, not on `mai
 ### Parallel Processing Architecture
 - **Dual-path telemetry processing** for resilience and performance
 - **Direct IoT Hub routing** to CosmosDB for guaranteed storage
-- **Event Hub triggers** for lightweight real-time processing (planned, not on `main`)
-- **SignalR broadcasts** for immediate client updates (planned, not on `main`; the API emits only cook lifecycle events today)
+- **Event Hub triggers** for lightweight real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app)
+- **SignalR broadcasts** for immediate client updates (the API sends cook lifecycle events to the owner and, since HAR-60, `temperature` readings to `device-{id}` groups; no client receives them yet)
 - **Cook session events** for business logic coordination
 
 #### Device Cook Session Management
