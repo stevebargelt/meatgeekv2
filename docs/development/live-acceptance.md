@@ -14,6 +14,10 @@ proof the ticket adds. You can also run it by hand, as below.
 
 ## What it checks today
 
+Every proof below also checks each response against the OpenAPI contract,
+`libs/api-specs/spec/openapi.yaml` (HAR-77). See
+[Contract validation](#contract-validation).
+
 | Proof file                          | Proof                                                                                                                                                                                  | Expects                                                                                                                                                                                                                                                                                                      |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `cooks-unauthenticated.proof.ts`    | `GET /cooks` with no `Authorization` header                                                                                                                                            | `401`                                                                                                                                                                                                                                                                                                        |
@@ -262,6 +266,9 @@ RU per route
   POST /cooks                                  1     11.43    11.43
   POST /cooks/{cookId}/stop                    1      20.1     20.1
 
+CONTRACT validated 4 responses, 0 hub messages, 1 mismatches
+METRIC contract-validated-responses 4
+
 acceptance: 3 passed, 1 failed, 1 skipped
 ```
 
@@ -281,20 +288,21 @@ PASS telemetry round-trip › GET /temperatures/current/{deviceId} returns the s
 
 `METRIC <name> <value>` lines report a measurement, not a pass/fail:
 
-| Metric                    | Proof file                          | Value                                                                                                                                                                                                                                 |
-| ------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `roundtrip-ms`            | `telemetry-roundtrip.proof.ts`      | ms from simdevice's `sentAt` (IoT Hub acknowledged the publish) to the `GET /temperatures/current` response that first carried the reading; overstated by up to one poll (1 s)                                                        |
-| `history-readings-before` | `telemetry-volume.proof.ts`         | readings the first walk of the simulated device's history counted                                                                                                                                                                     |
-| `topup-sent`              | `telemetry-volume.proof.ts`         | readings the top-up sent; `0` when none was needed                                                                                                                                                                                    |
-| `topup-ms`                | `telemetry-volume.proof.ts`         | how long the top-up's simdevice run took; `0` when none was needed                                                                                                                                                                    |
-| `history-readings`        | `telemetry-volume.proof.ts`         | readings the measuring walk counted (≥ 8,640)                                                                                                                                                                                         |
-| `history-pages`           | `telemetry-volume.proof.ts`         | pages of 1,000 the measuring walk took                                                                                                                                                                                                |
-| `history-ru-first-page`   | `telemetry-volume.proof.ts`         | RU of the measuring walk's first page (`limit=1000`, no token)                                                                                                                                                                        |
-| `history-ru-last-page`    | `telemetry-volume.proof.ts`         | RU of its last page, reached by continuation token; must be ≤ 1.5 × the first                                                                                                                                                         |
-| `signalr-delivery-ms`     | `signalr-live-temperature.proof.ts` | ms from just before `simdevice --count 1` starts to the client receiving the reading on target `temperature`. Includes simdevice's start-up and IoT Hub connect, so it overstates hub-to-client delivery by about the `EXEC` duration |
-| `isolation-peer-messages` | `signalr-isolation.proof.ts`        | messages the peer received on any target, by the end of the 15 s grace after `cook_stopped` (or by the failing check). The proof fails unless it is `0`                                                                               |
-| `signalr-cook-event-ms`   | `signalr-isolation.proof.ts`        | ms from just before the owner's `POST /cooks` to the owner's client receiving `cook_started` for that cook                                                                                                                            |
-| `twin-apply-ms`           | `device-twin.proof.ts`              | ms from the start's `201` to the exit of `simdevice --twin --count 1`: a reconnect, two twin GETs, the reported patch and one reading's send                                                                                          |
+| Metric                         | Proof file                          | Value                                                                                                                                                                                                                                 |
+| ------------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `roundtrip-ms`                 | `telemetry-roundtrip.proof.ts`      | ms from simdevice's `sentAt` (IoT Hub acknowledged the publish) to the `GET /temperatures/current` response that first carried the reading; overstated by up to one poll (1 s)                                                        |
+| `history-readings-before`      | `telemetry-volume.proof.ts`         | readings the first walk of the simulated device's history counted                                                                                                                                                                     |
+| `topup-sent`                   | `telemetry-volume.proof.ts`         | readings the top-up sent; `0` when none was needed                                                                                                                                                                                    |
+| `topup-ms`                     | `telemetry-volume.proof.ts`         | how long the top-up's simdevice run took; `0` when none was needed                                                                                                                                                                    |
+| `history-readings`             | `telemetry-volume.proof.ts`         | readings the measuring walk counted (≥ 8,640)                                                                                                                                                                                         |
+| `history-pages`                | `telemetry-volume.proof.ts`         | pages of 1,000 the measuring walk took                                                                                                                                                                                                |
+| `history-ru-first-page`        | `telemetry-volume.proof.ts`         | RU of the measuring walk's first page (`limit=1000`, no token)                                                                                                                                                                        |
+| `history-ru-last-page`         | `telemetry-volume.proof.ts`         | RU of its last page, reached by continuation token; must be ≤ 1.5 × the first                                                                                                                                                         |
+| `signalr-delivery-ms`          | `signalr-live-temperature.proof.ts` | ms from just before `simdevice --count 1` starts to the client receiving the reading on target `temperature`. Includes simdevice's start-up and IoT Hub connect, so it overstates hub-to-client delivery by about the `EXEC` duration |
+| `isolation-peer-messages`      | `signalr-isolation.proof.ts`        | messages the peer received on any target, by the end of the 15 s grace after `cook_stopped` (or by the failing check). The proof fails unless it is `0`                                                                               |
+| `signalr-cook-event-ms`        | `signalr-isolation.proof.ts`        | ms from just before the owner's `POST /cooks` to the owner's client receiving `cook_started` for that cook                                                                                                                            |
+| `contract-validated-responses` | the runner (HAR-77)                 | responses checked against openapi.yaml in the run. Printed with the `CONTRACT` line just above the totals                                                                                                                             |
+| `twin-apply-ms`                | `device-twin.proof.ts`              | ms from the start's `201` to the exit of `simdevice --twin --count 1`: a reconnect, two twin GETs, the reported patch and one reading's send                                                                                          |
 
 There are no thresholds on them; the numbers are the deliverable. The CI job copies every line starting with
 `METRIC ` into the run summary. Proofs print one with `api.metric(name, value)`.
@@ -307,6 +315,53 @@ from an error body), never prints simdevice's stdout or stderr raw (stdout is
 parsed as JSON lines; of stderr only the first line is reported, on failure),
 and masks in every line, as a second guard, both bearer tokens, the
 `SIMDEVICE_CONNECTION_STRING` value, and its `SharedAccessKey` value.
+
+### Contract validation
+
+At start-up the runner loads and dereferences
+`libs/api-specs/spec/openapi.yaml` with `@apidevtools/swagger-parser`. It
+compiles every response schema and every `x-signalr` message schema with `ajv`
+and `ajv-formats` (`apps/api/acceptance/lib/contract.ts`). If the spec cannot
+be loaded, the run exits `2` before any request.
+
+Every `api.request(...)`, the unauthenticated ones included, is checked:
+
+- **Before it is sent:** the method and route must be an operation in the
+  spec. A proof's `route` must be one of the spec's paths, and the request's
+  `path` must fit it. With no `route`, the spec path that `path` fits is used,
+  and a literal segment wins over a `{parameter}`. Anything else fails the
+  proof with no request sent.
+- **When it comes back:**
+  - The status must be declared for the operation.
+  - A JSON body must match that status's `application/json` schema. A JSON
+    body is also a mismatch when the status declares no body. A non-JSON or
+    empty body is not checked against a schema; Easy Auth's own `401` is an
+    example.
+  - If the response declares `X-Request-ID`, the header must be present.
+
+A mismatch fails the proof with a line such as:
+
+```
+FAIL devices › … — POST /devices → 201: contract: POST /devices (registerDevice) 201: the body does not match the schema: /isActive must be boolean; (root) must NOT have additional properties 'colour'
+```
+
+The line names the operation, the status and up to three Ajv errors with their
+path in the body. It never prints a value from the body, and the redactor
+masks it like every other line.
+
+There is no per-proof opt-out. If the spec is wrong, fix the spec. If the API
+is wrong, fix the handler.
+
+SignalR proofs check each message they receive with `expectHubMessage(api,
+target, message)` from `lib/signalr.ts`, against `x-signalr.messages.<target>`.
+`signalr-live-temperature` checks every `temperature` message it received.
+`signalr-isolation` checks every message the owner received on
+`temperature`, `cook_started` and `cook_stopped`. (`device-twin` opens no
+SignalR connection; it reads the twin through `simdevice`.)
+
+The run ends with `CONTRACT validated <n> responses, <m> hub messages,
+<k> mismatches` and `METRIC contract-validated-responses <n>`. A green run
+shows `0 mismatches`.
 
 ## Running it locally against dev
 
@@ -397,8 +452,11 @@ apps/api/acceptance/
 ├── live.acceptance.ts          # entry point for `nx run api:acceptance`
 ├── lib/
 │   ├── checks.ts               # shared response checks (system properties, error code)
+│   ├── contract.ts             # HAR-77: openapi.yaml loaded and compiled; response and hub message checks
 │   ├── proof.ts                # the proof contract: defineProofs, AcceptanceApi
-│   └── runner.ts               # env check, HTTP client, simdevice, redaction, output, RU table
+│   ├── runner.ts               # env check, HTTP client, simdevice, redaction, output, RU table
+│   ├── signalr.ts              # SignalR helpers, including expectHubMessage
+│   └── telemetry.ts            # simulated-device registration and send helpers
 ├── proofs/
 │   ├── cooks-lifecycle.proof.ts
 │   ├── cooks-unauthenticated.proof.ts
@@ -437,10 +495,16 @@ apps/api/acceptance/
   wrong desired cook id or a reported version one behind, or answer the start
   with `503 DEVICE_TWIN_UPDATE_FAILED`; each fails the proof and still leaves
   no cook active. Its poll pacing is `TWIN_POLL` in the proof file.
+  Every stub response conforms to openapi.yaml (HAR-77): it sends
+  `X-Request-ID`, the error envelope `{error, message, requestId}`, and Easy
+  Auth's empty `401`. The self-test also proves the contract checks fail on an
+  undeclared status, a body that breaks its schema, a missing `X-Request-ID`,
+  a route that is not in the spec, and a hub message of the wrong shape.
 - The acceptance code is not part of the API build; `dist/apps/api` contains
   none of it.
-- It uses only Node built-ins (`fetch`, `http`, `crypto`, `child_process`); no
-  extra dependencies.
+- Besides Node built-ins (`fetch`, `http`, `crypto`, `child_process`) it uses
+  `@microsoft/signalr`, plus `@apidevtools/swagger-parser`, `ajv` and
+  `ajv-formats` for the contract. All of them are root dependencies already.
 
 ## Adding a proof for your ticket
 
@@ -479,6 +543,9 @@ apps/api/acceptance/
      output and RU table group by route, not by id. Extra request headers go in
      `headers` (e.g. `{ 'X-Request-ID': … }`); they never replace the bearer
      token.
+   - Every response is checked against openapi.yaml (see
+     [Contract validation](#contract-validation)). `route` must be a spec path.
+     A status, field or header your proof relies on must be in the spec first.
    - `api.expectStatus(response, 201)` or `api.expectStatus(response, '2xx')`.
    - `api.check(response, condition, message)` fails the proof with the route
      and status attached. Annotate the parameter as `api: AcceptanceApi` so
@@ -496,7 +563,9 @@ apps/api/acceptance/
 3. **Make the stub serve it.** The self-test runs every proof file against the
    stub in `acceptance-runner.spec.ts`. If your proof calls a route the stub does
    not implement, add that route to the stub, so `nx test api` keeps proving the
-   proof passes against a correct server and fails against a broken one.
+   proof passes against a correct server and fails against a broken one. The
+   stub's answers must conform to openapi.yaml, or the self-test fails on the
+   contract check.
 4. **If the route reads or writes Cosmos, return the RU header** from the
    handler: merge `requestChargeHeaders(charge)` from
    `apps/api/src/shared/cosmos/request-charge.ts` into its response headers, and

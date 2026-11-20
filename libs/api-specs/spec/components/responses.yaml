@@ -12,9 +12,11 @@ Unauthenticated:
         it without a usable Easy Auth principal (`X-MS-CLIENT-PRINCIPAL`
         missing, unparseable, or without `oid`/`tid` claims). No Cosmos call
         is made, so there is no x-meatgeek-request-charge header.
-  headers:
-    X-Request-ID:
-      $ref: './headers.yaml#/X-Request-ID'
+    X-Request-ID is not declared here because only the handler's 401 sends
+    it (equal to the body's `requestId`). The platform's 401, which is the
+    one a missing or invalid token gets in a deployment, has neither the
+    header nor a body (HAR-77: the live acceptance run checks every declared
+    X-Request-ID is present).
   content:
     application/json:
       schema:

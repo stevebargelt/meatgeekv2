@@ -5,6 +5,8 @@
  * file name, so adding a proof never means editing the runner.
  */
 
+import type { Contract } from './contract';
+
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 /**
@@ -21,7 +23,8 @@ export interface RequestOptions {
   /** Path relative to ACCEPTANCE_BASE_URL, starting with `/`, query included. */
   readonly path: string;
   /** Route template used in output and the RU summary, e.g.
-   *  `/cooks/{cookId}/stop`. Defaults to `path` without its query string. */
+   *  `/cooks/{cookId}/stop`. It must be a path in openapi.yaml that `path`
+   *  fits (HAR-77). Defaults to the spec path `path` fits. */
   readonly route?: string;
   /** JSON request body. */
   readonly body?: unknown;
@@ -92,7 +95,16 @@ export interface AcceptanceApi {
   /** Print `METRIC <name> <value>`. The CI job copies these lines to the run
    *  summary. `name` is lower-case kebab-case; `value` a finite number. */
   metric(name: string, value: number): void;
+  /**
+   * Send a request and check the response against the OpenAPI contract
+   * (HAR-77): the status is declared for the operation, a JSON body matches
+   * that status's schema, and a declared `X-Request-ID` header is present. A
+   * mismatch, or a route that is not in the spec, fails the proof.
+   */
   request<T = unknown>(options: RequestOptions): Promise<AcceptanceResponse<T>>;
+  /** The run's OpenAPI contract, for checking received SignalR messages
+   *  (`expectHubMessage` in ./signalr). */
+  readonly contract: Pick<Contract, 'checkHubMessage'>;
   /** Fail unless the status matches: an exact code, or `'2xx'`. */
   expectStatus(response: AcceptanceResponse, expected: number | '2xx'): void;
   /** Fail with `message`, attributed to `response`'s route and status, unless

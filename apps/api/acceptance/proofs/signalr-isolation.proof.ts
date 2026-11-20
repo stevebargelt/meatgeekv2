@@ -16,7 +16,13 @@ import { expectErrorCode } from '../lib/checks';
 import type { AcceptanceApi, Caller } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { NegotiateBody } from '../lib/signalr';
-import { CONNECT_TIMEOUT_MS, describeError, negotiateFailureMessage, within } from '../lib/signalr';
+import {
+  CONNECT_TIMEOUT_MS,
+  describeError,
+  expectHubMessage,
+  negotiateFailureMessage,
+  within,
+} from '../lib/signalr';
 import type { SentReading } from '../lib/telemetry';
 import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/telemetry';
 
@@ -49,6 +55,9 @@ import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/tel
  *      receives `cook_stopped`; after a further 15 s grace the peer has still
  *      received nothing (`isolation-peer-messages`, which must be 0);
  *   7. both connections stop.
+ *
+ * Every message the owner receives, on any of its three targets, must match
+ * that target's schema in openapi.yaml `x-signalr` (HAR-77).
  *
  * Whichever step fails, both connections are stopped before the failure is
  * reported. Client logging is off and errors are masked, so no SignalR url or
@@ -203,8 +212,16 @@ export default defineProofs('signalr isolation', () => {
     });
   };
 
-  /** Wait up to the cap for an owner message matching `isWanted`. */
-  const waitForOwner = async (what: string, isWanted: (message: Received) => boolean) => {
+  /** How many of the owner's messages have been checked against the contract. */
+  let ownerChecked = 0;
+
+  /** Wait up to the cap for an owner message matching `isWanted`, then check
+   *  every owner message not yet checked against openapi.yaml (HAR-77). */
+  const waitForOwner = async (
+    api: AcceptanceApi,
+    what: string,
+    isWanted: (message: Received) => boolean
+  ) => {
     const capMs = ISOLATION_WAIT.capMs;
     const deadline = Date.now() + capMs;
     let match = owner.received.find(isWanted);
@@ -230,6 +247,11 @@ export default defineProofs('signalr isolation', () => {
           `${owner.received.length} message(s)` +
           (owner.received.length > 0 ? ` (${byTarget(owner.received)})` : '')
       );
+    }
+    while (ownerChecked < owner.received.length) {
+      const { target, payload } = owner.received[ownerChecked];
+      ownerChecked += 1;
+      expectHubMessage(api, target, payload);
     }
     return match;
   };
@@ -334,6 +356,7 @@ export default defineProofs('signalr isolation', () => {
           const { timestamp } = sent;
           const deviceId = api.simulatedDeviceId;
           await waitForOwner(
+            api,
             `temperature message for ${deviceId} with timestamp ${timestamp}`,
             message =>
               message.target === 'temperature' &&
@@ -387,6 +410,7 @@ export default defineProofs('signalr isolation', () => {
           cookId = body.id;
           const id = body.id;
           const match = await waitForOwner(
+            api,
             `cook_started for cook ${id}`,
             message =>
               message.target === 'cook_started' &&
@@ -413,6 +437,7 @@ export default defineProofs('signalr isolation', () => {
           });
           api.expectStatus(response, '2xx');
           await waitForOwner(
+            api,
             `cook_stopped for cook ${id}`,
             message =>
               message.target === 'cook_stopped' &&

@@ -22,8 +22,12 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
+import { DEFAULT_USER_PREFERENCES } from '../src/shared/cosmos/users-repository';
+import { Contract } from './lib/contract';
 import type { AcceptanceApi, ProofGroup, SimDeviceOptions } from './lib/proof';
+import { ProofFailure } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
+import { expectHubMessage } from './lib/signalr';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
@@ -137,8 +141,9 @@ interface StubOptions {
    *  reading of the simulated device and the sent timestamp for another device
    *  first; then `deliver` (default) the sent reading, `never` nothing,
    *  `extra-field` the sent reading with an `iothub_name`, `no-enqueued` the
-   *  sent reading without `enqueuedTimeUtc`. */
-  readonly livePush?: 'deliver' | 'never' | 'extra-field' | 'no-enqueued';
+   *  sent reading without `enqueuedTimeUtc`, `wrong-type` (HAR-77) the sent
+   *  reading with a string `grillTemp`. */
+  readonly livePush?: 'deliver' | 'never' | 'extra-field' | 'no-enqueued' | 'wrong-type';
   /** HAR-67: also push this target to the peer's connections, as a broken
    *  group or user scoping would. By default the peer gets nothing. */
   readonly peerLeak?: 'temperature' | 'cook_started';
@@ -152,6 +157,13 @@ interface StubOptions {
    *  desired activeCookId that is not the active cook; `reported-version`, a
    *  reported appliedDesiredVersion one behind desired.$version. */
   readonly twinFault?: 'desired-cook' | 'reported-version';
+  /** HAR-77: answer this route without the X-Request-ID header. */
+  readonly omitRequestIdOn?: StubRoute;
+  /** HAR-77: rewrite the body of this route's 2xx answer. */
+  readonly alterBody?: { readonly route: StubRoute; readonly alter: (body: unknown) => unknown };
+  /** HAR-77: answer a request without a token with this JSON body (the
+   *  handler's 401) instead of Easy Auth's empty one. */
+  readonly unauthenticatedBody?: unknown;
 }
 
 interface StubCook {
@@ -355,6 +367,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     const sent: Record<string, unknown> = { ...simReading(simServed), enqueuedTimeUtc };
     if (push === 'extra-field') sent['iothub_name'] = 'stub-hub';
     if (push === 'no-enqueued') delete sent['enqueuedTimeUtc'];
+    if (push === 'wrong-type') sent['grillTemp'] = '225.4';
     const messages = [
       invocation({ ...simReading(OLDER_READINGS[0]), enqueuedTimeUtc }),
       invocation({ ...simReading(simServed), deviceId: 'someone-elses-device', enqueuedTimeUtc }),
@@ -525,8 +538,18 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         ...(requestId === undefined ? {} : { requestId }),
       });
 
+      // HAR-77: every API response carries X-Request-ID, as the handlers'
+      // do: the caller's when it sent one, else the invocation id.
+      const responseRequestId = requestId ?? 'stub-invocation';
       const send = (status: number, body: unknown, route?: StubRoute, charge?: string) => {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (!route || options.omitRequestIdOn !== route) {
+          headers['X-Request-ID'] = responseRequestId;
+        }
+        const altered =
+          route && options.alterBody?.route === route && status >= 200 && status < 300
+            ? options.alterBody.alter(body)
+            : body;
         if (route && options.omitChargeOn !== route) {
           headers[REQUEST_CHARGE_HEADER] = charge ?? RU[route];
         }
@@ -534,7 +557,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           headers['x-echo-authorization'] = authorization;
         }
         response.writeHead(status, headers);
-        response.end(JSON.stringify(body));
+        response.end(JSON.stringify(altered));
       };
 
       const caller =
@@ -544,12 +567,25 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
             ? 'peer'
             : undefined;
       if (!caller) {
-        send(401, {
-          error:
-            options.echoAuthorization && authorization ? `BAD ${authorization}` : 'UNAUTHENTICATED',
-        });
+        if (options.echoAuthorization && authorization) {
+          send(401, { error: `BAD ${authorization}` });
+          return;
+        }
+        if (options.unauthenticatedBody !== undefined) {
+          send(401, options.unauthenticatedBody);
+          return;
+        }
+        // Easy Auth answers a missing token itself: no body, no X-Request-ID.
+        response.writeHead(401);
+        response.end();
         return;
       }
+      /** HAR-77: the error envelope the handlers write (ErrorResponse). */
+      const errorBody = (code: string, message = `stub: ${code}`) => ({
+        error: code,
+        message,
+        requestId: 'stub-invocation',
+      });
 
       const stopMatch = /^\/api\/cooks\/([^/]+)\/stop$/.exec(url.pathname);
       const cookMatch = /^\/api\/cooks\/([^/]+)$/.exec(url.pathname);
@@ -583,7 +619,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'POST' && url.pathname === '/api/negotiate')
         route = 'POST /negotiate';
       if (!route) {
-        send(404, { error: 'NOT_FOUND' });
+        send(404, errorBody('NOT_FOUND'));
         return;
       }
       // HAR-67: the peer owns nothing. The stub serves it only the routes the
@@ -596,7 +632,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         'GET /cooks/{cookId}',
       ];
       if (caller === 'peer' && !peerRoutes.includes(route)) {
-        send(404, { error: 'NOT_FOUND' });
+        send(404, errorBody('NOT_FOUND'));
         return;
       }
 
@@ -639,14 +675,15 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       if (route === 'PUT /users/me') {
         const body = (await readJson(request)) as Record<string, unknown>;
         if (!body?.['name'] || !body['email'] || 'id' in body || 'userId' in body) {
-          send(400, { error: 'VALIDATION_ERROR' });
+          send(400, errorBody('VALIDATION_ERROR'));
           return;
         }
         const created = profile === undefined;
         profile = {
           id: 'stub-tenant:stub-user',
           createdAt: (profile?.['createdAt'] as string) ?? new Date().toISOString(),
-          preferences: {},
+          // As the API does on create: the defaults, deep-merged with nothing.
+          preferences: structuredClone(DEFAULT_USER_PREFERENCES),
           devices: [...devices.keys()],
           name: body['name'],
           email: body['email'],
@@ -656,7 +693,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       }
       if (route === 'GET /users/me') {
         if (!profile) {
-          send(404, { error: 'USER_NOT_FOUND' }, route);
+          send(404, errorBody('USER_NOT_FOUND'), route);
           return;
         }
         send(200, profile, route);
@@ -670,7 +707,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       if (route === 'POST /recipes') {
         const body = (await readJson(request)) as Record<string, unknown>;
         if (!body?.['name'] || !body['meatType'] || 'id' in body || 'userId' in body) {
-          send(400, { error: 'VALIDATION_ERROR' });
+          send(400, errorBody('VALIDATION_ERROR'));
           return;
         }
         const now = new Date().toISOString();
@@ -689,12 +726,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         const id = decodeURIComponent(recipeMatch[1]);
         const recipe = recipes.get(id);
         if (!recipe) {
-          send(404, { error: 'RECIPE_NOT_FOUND' }, route);
+          send(404, errorBody('RECIPE_NOT_FOUND'), route);
           return;
         }
         if (route === 'DELETE /recipes/{id}') {
           recipes.delete(id);
-          const headers: Record<string, string> = {};
+          const headers: Record<string, string> = { 'X-Request-ID': responseRequestId };
           if (options.omitChargeOn !== route) headers[REQUEST_CHARGE_HEADER] = RU[route];
           response.writeHead(204, headers);
           response.end();
@@ -737,7 +774,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           if (simRouted()) {
             send(200, simReading(simServed), route);
           } else if (simPolls === 1) {
-            send(404, { error: 'NO_READINGS' }, route);
+            send(404, errorBody('NO_READINGS'), route);
           } else {
             send(200, simReading(OLDER_READINGS[OLDER_READINGS.length - 1]), route);
           }
@@ -745,17 +782,17 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         }
         // Nothing else writes telemetry in the stub: an owned device has no readings.
         const code = owned ? 'NO_READINGS' : 'DEVICE_NOT_FOUND';
-        send(404, { error: options.temperatureErrorCode ?? code }, route);
+        send(404, errorBody(options.temperatureErrorCode ?? code), route);
       } else if (route === 'GET /temperatures/history') {
         // An owned device has an empty first page; anything else is not found.
         const deviceId = url.searchParams.get('deviceId') ?? '';
         if (!devices.has(deviceId)) {
-          send(404, { error: 'DEVICE_NOT_FOUND' }, route);
+          send(404, errorBody('DEVICE_NOT_FOUND'), route);
           return;
         }
         // HAR-75: offset paging is gone; refused before any read (no RU).
         if (url.searchParams.has('offset') && !options.historyAcceptsOffset) {
-          send(400, { error: 'VALIDATION_ERROR', message: 'offset is not supported' });
+          send(400, errorBody('VALIDATION_ERROR', 'offset is not supported'));
           return;
         }
         const token = url.searchParams.get('continuationToken');
@@ -789,7 +826,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           // HAR-44: older readings plus the sent one, in pages of two (`w-<position>`).
           const startTime = url.searchParams.get('startTime');
           if (!startTime || Number.isNaN(Date.parse(startTime))) {
-            send(400, { error: 'VALIDATION_ERROR' });
+            send(400, errorBody('VALIDATION_ERROR'));
             return;
           }
           const all = [...OLDER_READINGS, ...(simRouted() ? [simServed] : [])].map(simReading);
@@ -802,14 +839,14 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       } else if (route === 'POST /devices') {
         const body = (await readJson(request)) as Partial<StubDevice> & { deviceId?: string };
         if (!body?.deviceId || !/^[A-Za-z0-9._:-]{1,128}$/.test(body.deviceId) || !body.name) {
-          send(400, { error: 'VALIDATION_ERROR' });
+          send(400, errorBody('VALIDATION_ERROR'));
           return;
         }
         if (
           devices.has(body.deviceId) ||
           (options.simOwnedByOther && body.deviceId === SIM_DEVICE)
         ) {
-          send(409, { error: 'DEVICE_CONFLICT' }, route);
+          send(409, errorBody('DEVICE_CONFLICT'), route);
           return;
         }
         const device: StubDevice = {
@@ -826,7 +863,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       } else if (route === 'GET /devices/{id}' || route === 'PATCH /devices/{id}') {
         const device = devices.get(decodeURIComponent(deviceMatch![1]));
         if (!device) {
-          send(404, { error: 'NOT_FOUND' }, route);
+          send(404, errorBody('NOT_FOUND'), route);
           return;
         }
         if (route === 'PATCH /devices/{id}') {
@@ -859,17 +896,17 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         } else if (id.startsWith('active-device:') && options.cookItemFault === 'lock-reads') {
           send(200, { id, userId, deviceId: id.slice('active-device:'.length) }, route);
         } else {
-          send(404, { error: 'NOT_FOUND' }, route);
+          send(404, errorBody('NOT_FOUND'), route);
         }
       } else if (route === 'POST /cooks') {
         const body = (await readJson(request)) as Partial<StubCook>;
         if (!body?.id || !/^[0-9a-f-]{36}$/i.test(body.id) || !body.deviceId || !body.name) {
-          send(400, { error: 'VALIDATION_ERROR' });
+          send(400, errorBody('VALIDATION_ERROR'));
           return;
         }
         // HAR-26: a cook only starts on a device the caller registered.
         if (!options.allowAnyDevice && !owns(body.deviceId)) {
-          send(403, { error: 'DEVICE_NOT_OWNED' }, route);
+          send(403, errorBody('DEVICE_NOT_OWNED'), route);
           return;
         }
         const cook: StubCook = {
@@ -907,7 +944,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       } else {
         const cook = cooks.find(candidate => candidate.id === decodeURIComponent(stopMatch![1]));
         if (!cook) {
-          send(404, { error: 'NOT_FOUND' }, route);
+          send(404, errorBody('NOT_FOUND'), route);
           return;
         }
         cook.status = 'completed';
@@ -1277,7 +1314,8 @@ describe('live acceptance runner (against an in-process stub)', () => {
     [
       'lock-reads',
       'GET /cooks/{cookId} for the device lock active-device:<deviceId> is 404 NOT_FOUND',
-      'GET /cooks/{cookId} → 200: expected 404',
+      // HAR-77: a lock is not a Cook, so the contract catches it first.
+      "GET /cooks/{cookId} → 200: contract: GET /cooks/{cookId} (getCook) 200: the body does not match the schema: (root) must have required property 'name'",
     ],
   ] as const)(
     '(b) HAR-75: exits non-zero when GET /cooks/{cookId} %s',
@@ -1464,7 +1502,11 @@ describe('live acceptance runner (against an in-process stub)', () => {
     });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures[0]).toContain('reason unrecognised, not printed');
+    // HAR-77: the spec's reason pattern refuses it before the proof looks; the
+    // contract line names the field, never its value.
+    expect(result.failures[0]).toContain(
+      'POST /negotiate → 503: contract: POST /negotiate (negotiate) 503: the body does not match the schema: /reason must match pattern'
+    );
     expect(result.output).not.toContain('acct.service.signalr.net');
     expect(result.output).not.toContain('tid:oid');
   });
@@ -1573,7 +1615,8 @@ describe('live acceptance runner (against an in-process stub)', () => {
     [
       'still has the pre-HAR-75 total and offset',
       { readings: [], total: 0, offset: 0, limit: 100, hasMore: false },
-      '"total":0',
+      // HAR-77: the contract refuses the extra fields before the proof looks.
+      "(root) must NOT have additional properties 'total'; (root) must NOT have additional properties 'offset'",
     ],
     [
       'has a continuationToken',
@@ -2105,6 +2148,11 @@ describe('signalr live temperature (HAR-63, against the stub and a fake simdevic
   it.each([
     ['extra-field', 'field(s) toTemperatureReading does not produce: iothub_name'],
     ['no-enqueued', 'the reading arrived without a date enqueuedTimeUtc (undefined)'],
+    // HAR-77: a wrong type the proof's own checks pass over; the contract does not.
+    [
+      'wrong-type',
+      'contract: hub message temperature: the message does not match the schema: /grillTemp must be number',
+    ],
   ] as const)(
     '(c) fails when the pushed reading is %s, and stops the connection',
     async (push, message) => {
@@ -2645,5 +2693,256 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
     expect(lines.some(line => /^\s+EXEC\s+simdevice --count 1\s+exit killed\s/.test(line))).toBe(
       true
     );
+  });
+});
+
+describe('OpenAPI contract (HAR-77, against the stub)', () => {
+  const GROUP = 'contract';
+  /** A one-proof group sending `request`, and checking the status when given. */
+  const one = (request: Parameters<AcceptanceApi['request']>[0], status?: number): ProofGroup => ({
+    name: GROUP,
+    create: () => [
+      {
+        name: `${request.method} ${request.path}`,
+        async run(api) {
+          const response = await api.request(request);
+          if (status !== undefined) api.expectStatus(response, status);
+        },
+      },
+    ],
+  });
+  const contractLine = (result: Run) => result.lines.find(line => line.startsWith('CONTRACT '));
+
+  it('prints the CONTRACT summary and METRIC contract-validated-responses after a passing run', async () => {
+    const result = await runAgainstStub();
+
+    expect(result.failures).toEqual([]);
+    // One line per request above the RU table, whose rows look the same.
+    const requests = result.lines
+      .slice(0, result.lines.indexOf('RU per route'))
+      .filter(line => /^\s+(GET|POST|PATCH|PUT|DELETE)\s+\//.test(line));
+    const summary = contractLine(result);
+    // Every response was checked, and the SignalR proofs checked what they received.
+    expect(summary).toMatch(
+      new RegExp(
+        `^CONTRACT validated ${requests.length} responses, [1-9]\\d* hub messages, 0 mismatches$`
+      )
+    );
+    expect(result.lines).toContain(`METRIC contract-validated-responses ${requests.length}`);
+    // Both sit just above the totals, inside what the CI summary copies.
+    const totals = result.lines.findIndex(line => line.startsWith('acceptance: '));
+    expect(result.lines.indexOf(summary!)).toBeGreaterThan(result.lines.indexOf('RU per route'));
+    expect(result.lines.indexOf(summary!)).toBeLessThan(totals);
+  });
+
+  it('passes a conforming response and counts it', async () => {
+    const result = await runAgainstStub({}, 'ok', [one({ method: 'GET', path: '/devices' }, 200)]);
+
+    expect(result.failures).toEqual([]);
+    expect(result.lines).toContain(`PASS ${GROUP} › GET /devices`);
+    expect(contractLine(result)).toBe(
+      'CONTRACT validated 1 responses, 0 hub messages, 0 mismatches'
+    );
+    expect(result.lines).toContain('METRIC contract-validated-responses 1');
+  });
+
+  it('fails the proof on a status the operation does not declare, listing the declared ones', async () => {
+    const result = await runAgainstStub(
+      { failRoute: { route: 'GET /devices', status: 418 } },
+      'ok',
+      [one({ method: 'GET', path: '/devices' })]
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.failures).toEqual([
+      `FAIL ${GROUP} › GET /devices — GET /devices → 418: contract: GET /devices (getDevices) 418: ` +
+        'the status is not declared (the spec declares 200, 401, 500)',
+    ]);
+    expect(contractLine(result)).toBe(
+      'CONTRACT validated 1 responses, 0 hub messages, 1 mismatches'
+    );
+  });
+
+  it('fails the proof on a body that breaks the schema, naming the field', async () => {
+    const result = await runAgainstStub(
+      {
+        alterBody: {
+          route: 'POST /devices',
+          alter: body => ({ ...(body as object), isActive: 'yes', colour: 'red-1.2' }),
+        },
+      },
+      'ok',
+      [one({ method: 'POST', path: '/devices', body: { deviceId: 'contract-1', name: 'Smoker' } })]
+    );
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(
+      `FAIL ${GROUP} › POST /devices — POST /devices → 201: contract: POST /devices (registerDevice) 201: ` +
+        'the body does not match the schema: '
+    );
+    expect(result.failures[0]).toContain("(root) must NOT have additional properties 'colour'");
+    expect(result.failures[0]).toContain('/isActive must be boolean');
+    // The line names the field, never its value.
+    expect(result.failures[0]).not.toContain('red-1.2');
+  });
+
+  it('fails the proof when the declared X-Request-ID header is missing', async () => {
+    const result = await runAgainstStub({ omitRequestIdOn: 'GET /devices' }, 'ok', [
+      one({ method: 'GET', path: '/devices' }, 200),
+    ]);
+
+    expect(result.failures).toEqual([
+      `FAIL ${GROUP} › GET /devices — GET /devices → 200: contract: GET /devices (getDevices) 200: ` +
+        'the declared X-Request-ID header is missing',
+    ]);
+  });
+
+  it('checks an unauthenticated request against the 401 response too', async () => {
+    const unauthenticated = one(
+      { method: 'GET', path: '/cooks', authenticated: false, expectRequestCharge: false },
+      401
+    );
+
+    // Easy Auth's own 401: no body, and the 401 declares no X-Request-ID.
+    const platform = await runAgainstStub({}, 'ok', [unauthenticated]);
+    expect(platform.failures).toEqual([]);
+    expect(contractLine(platform)).toBe(
+      'CONTRACT validated 1 responses, 0 hub messages, 0 mismatches'
+    );
+    await stub!.close();
+
+    // The handler's 401 body must be an UnauthenticatedError.
+    const handler = await runAgainstStub(
+      {
+        unauthenticatedBody: {
+          error: 'UNAUTHENTICATED',
+          reason: 'principal_header_missing',
+          requestId: 'i',
+        },
+      },
+      'ok',
+      [unauthenticated]
+    );
+    expect(handler.failures).toEqual([]);
+    await stub!.close();
+
+    const wrong = await runAgainstStub(
+      { unauthenticatedBody: { error: 'UNAUTHENTICATED' } },
+      'ok',
+      [unauthenticated]
+    );
+    expect(wrong.failures).toEqual([
+      `FAIL ${GROUP} › GET /cooks — GET /cooks → 401: contract: GET /cooks (listCooks) 401: ` +
+        "the body does not match the schema: (root) must have required property 'reason'; " +
+        "(root) must have required property 'requestId'",
+    ]);
+  });
+
+  it('fails at request time, before sending, on a route that is not in the spec', async () => {
+    const result = await runAgainstStub({}, 'ok', [
+      one({ method: 'GET', path: '/cookz' }),
+      one({ method: 'DELETE', path: '/cooks/abc', route: '/cooks/{cookId}' }),
+      one({ method: 'GET', path: '/devices/abc', route: '/cooks/{cookId}' }),
+    ]);
+
+    expect(result.failures).toEqual([
+      `FAIL ${GROUP} › GET /cookz — GET /cookz → no response: ` +
+        'contract: GET /cookz matches no operation in openapi.yaml',
+      `FAIL ${GROUP} › DELETE /cooks/abc — DELETE /cooks/{cookId} → no response: ` +
+        'contract: DELETE /cooks/{cookId} is not an operation in openapi.yaml',
+      `FAIL ${GROUP} › GET /devices/abc — GET /cooks/{cookId} → no response: ` +
+        'contract: the path /devices/abc does not fit the route /cooks/{cookId}',
+    ]);
+    // Nothing was sent.
+    expect(stub!.requests).toEqual([]);
+    expect(contractLine(result)).toBe(
+      'CONTRACT validated 0 responses, 0 hub messages, 0 mismatches'
+    );
+  });
+
+  it('derives the route from the path when a proof gives none, a literal segment winning', async () => {
+    const result = await runAgainstStub({}, 'ok', [
+      one({ method: 'GET', path: '/devices/abc' }, 404),
+      one({ method: 'GET', path: '/temperatures/history?deviceId=abc' }, 404),
+    ]);
+
+    expect(result.failures).toEqual([]);
+    expect(result.lines.some(line => /^\s+GET\s+\/devices\/\{id\}\s+404\s/.test(line))).toBe(true);
+    expect(summaryRow(result.output, 'GET /devices/{id}')).toBeDefined();
+    expect(summaryRow(result.output, 'GET /temperatures/history')).toBeDefined();
+  });
+
+  it('exits 2 before any request when the spec cannot be loaded', async () => {
+    stub = await startStub();
+    const lines: string[] = [];
+    const result = await runAcceptance({
+      env: {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+      },
+      write: line => lines.push(line),
+      specPath: join(fakeDir, 'missing-openapi.yaml'),
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.failures[0]).toMatch(/^acceptance: the OpenAPI contract could not be loaded: /);
+    expect(stub.requests).toEqual([]);
+  });
+
+  describe('expectHubMessage', () => {
+    let contract: Contract;
+    const started = {
+      type: 'cook_started',
+      timestamp: '2026-11-20T12:00:00.000Z',
+      messageId: '6f1c2b8e-3d4a-4f6b-9c7d-0e1f2a3b4c5d',
+      deviceId: 'meatgeek3',
+      userId: 'tid:oid',
+      cookId: '0b7c1d52-9e1f-4c3a-8d2e-5f6a7b8c9d0e',
+      correlation: { id: 'invocation-1' },
+      payload: {
+        id: '0b7c1d52-9e1f-4c3a-8d2e-5f6a7b8c9d0e',
+        userId: 'tid:oid',
+        deviceId: 'meatgeek3',
+        name: 'Brisket',
+        status: 'active',
+        startTime: '2026-11-20T12:00:00.000Z',
+        meatType: 'brisket',
+      },
+    };
+
+    beforeAll(async () => {
+      contract = await Contract.load();
+    });
+
+    it('passes a message that matches its target and counts it', () => {
+      expect(() => expectHubMessage({ contract }, 'cook_started', started)).not.toThrow();
+      expect(contract.counts).toMatchObject({ hubMessages: 1, mismatches: 0 });
+    });
+
+    it('fails a message of the wrong shape, naming the target and the field', () => {
+      const wrong = { ...started, payload: { ...started.payload, status: 'smoking' } };
+      const { cookId: _cookId, ...noCookId } = started;
+
+      expect(() => expectHubMessage({ contract }, 'cook_started', wrong)).toThrow(ProofFailure);
+      expect(() => expectHubMessage({ contract }, 'cook_started', wrong)).toThrow(
+        'contract: hub message cook_started: the message does not match the schema: ' +
+          '/payload/status must be equal to one of the allowed values'
+      );
+      expect(() => expectHubMessage({ contract }, 'cook_started', noCookId)).toThrow(
+        "(root) must have required property 'cookId'"
+      );
+      // A cook_started envelope is not a valid cook_stopped one.
+      expect(() => expectHubMessage({ contract }, 'cook_stopped', started)).toThrow(
+        "contract: hub message cook_stopped: the message does not match the schema: (root) must NOT have additional properties 'cookId'"
+      );
+    });
+
+    it('fails a message on a target x-signalr does not list', () => {
+      expect(() => expectHubMessage({ contract }, 'cook_paused', started)).toThrow(
+        'contract: hub message cook_paused: the target is not in x-signalr.messages'
+      );
+    });
   });
 });

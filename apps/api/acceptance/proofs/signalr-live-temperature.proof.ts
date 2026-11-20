@@ -8,7 +8,13 @@ import {
 import type { AcceptanceApi } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { NegotiateBody } from '../lib/signalr';
-import { CONNECT_TIMEOUT_MS, describeError, negotiateFailureMessage, within } from '../lib/signalr';
+import {
+  CONNECT_TIMEOUT_MS,
+  describeError,
+  expectHubMessage,
+  negotiateFailureMessage,
+  within,
+} from '../lib/signalr';
 import type { SentReading } from '../lib/telemetry';
 import { isDate, registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/telemetry';
 
@@ -30,8 +36,10 @@ import { isDate, registerSimulatedDevice, sameInstant, sendOneReading } from '..
  *      whose `timestamp` is the sent one (as an instant). Other messages are
  *      ignored: a new consumer group can replay retained events first. The
  *      payload carries `enqueuedTimeUtc` and no field `toTemperatureReading`
- *      would not produce. Prints `METRIC signalr-delivery-ms`: receive time
- *      minus the time before the send;
+ *      would not produce. Every message received by then, the sent one and the
+ *      ignored ones, matches the `temperature` schema in openapi.yaml (HAR-77).
+ *      Prints `METRIC signalr-delivery-ms`: receive time minus the time before
+ *      the send;
  *   5. the connection stops.
  *
  * Whichever step fails, the connection is stopped before the failure is
@@ -231,6 +239,9 @@ export default defineProofs('signalr live temperature', () => {
             throw new ProofFailure(
               `the reading carries field(s) toTemperatureReading does not produce: ${extra.join(', ')}`
             );
+          }
+          for (const message of received) {
+            expectHubMessage(api, 'temperature', message.payload);
           }
           api.metric('signalr-delivery-ms', match.receivedAt - sendStartedAt);
         });
