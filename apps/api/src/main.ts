@@ -9,6 +9,7 @@ initializeTelemetry();
 
 // Import function handlers
 import { getCookHandler } from './functions/cooks/get-cook';
+import { getCookChartHandler } from './functions/cooks/get-cook-chart';
 import { getCooksHandler } from './functions/cooks/list-cooks';
 import { startCookHandler } from './functions/cooks/start-cook';
 import { stopCookHandler } from './functions/cooks/stop-cook';
@@ -20,6 +21,10 @@ import {
 } from './functions/signalr/broadcast-temperature';
 import { getCurrentTemperaturesHandler } from './functions/temperatures/get-current';
 import { getTemperatureHistoryHandler } from './functions/temperatures/get-history';
+import {
+  ROLLUP_TRIGGER_SETTINGS,
+  rollupTemperaturesHandler,
+} from './functions/temperatures/rollup-temperatures';
 import { getDevicesHandler } from './functions/devices/get-devices';
 import { getDeviceHandler } from './functions/devices/get-device';
 import { registerDeviceHandler } from './functions/devices/register-device';
@@ -60,6 +65,16 @@ app.http('getCook', {
   authLevel: 'anonymous',
   route: 'cooks/{cookId}',
   handler: getCookHandler,
+});
+
+// HAR-86: the whole cook as at most 720 points, read from the rollup documents
+// rollupTemperatures (below) writes. Ownership is the cook point read, as for
+// getCook: another user's cook is a 404.
+app.http('getCookChart', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'cooks/{cookId}/chart',
+  handler: getCookChartHandler,
 });
 
 app.http('stopCook', {
@@ -107,6 +122,27 @@ app.eventHub('broadcastTemperature', {
   cardinality: 'many',
   extraOutputs: [signalROutput],
   handler: broadcastTemperatureHandler,
+});
+
+// HAR-86: the cook chart's read model. A change-feed trigger on `temperatures`
+// folds each batch of stored readings into per-device, per-hour documents in
+// `temperature-rollups`. Identity-based (COSMOSDB__accountEndpoint; the app
+// identity holds Cosmos DB Built-in Data Contributor at account scope). The
+// `leases` container is Terraform's (HAR-74): data-plane RBAC cannot create
+// containers, so createLeaseContainerIfNotExists is false. startFromBeginning
+// rolls up the readings already stored when the lease is first created. The
+// batch size and poll delay are explained at ROLLUP_TRIGGER_SETTINGS. The change
+// feed is at-least-once; see temperature-rollups-repository.ts.
+app.cosmosDB('rollupTemperatures', {
+  connection: 'COSMOSDB',
+  databaseName: '%COSMOSDB_DATABASE_NAME%',
+  containerName: '%COSMOSDB_TEMPERATURES_CONTAINER_NAME%',
+  leaseContainerName: '%COSMOSDB_LEASES_CONTAINER_NAME%',
+  createLeaseContainerIfNotExists: false,
+  startFromBeginning: true,
+  maxItemsPerInvocation: ROLLUP_TRIGGER_SETTINGS.maxItemsPerInvocation,
+  feedPollDelay: ROLLUP_TRIGGER_SETTINGS.feedPollDelay,
+  handler: rollupTemperaturesHandler,
 });
 
 app.http('getCurrentTemperatures', {

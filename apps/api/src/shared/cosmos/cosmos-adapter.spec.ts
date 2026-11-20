@@ -31,6 +31,7 @@ const DEVICES_CONTAINER_SETTING = 'COSMOSDB_DEVICES_CONTAINER_NAME';
 const TEMPERATURES_CONTAINER_SETTING = 'COSMOSDB_TEMPERATURES_CONTAINER_NAME';
 const USERS_CONTAINER_SETTING = 'COSMOSDB_USERS_CONTAINER_NAME';
 const RECIPES_CONTAINER_SETTING = 'COSMOSDB_RECIPES_CONTAINER_NAME';
+const ROLLUPS_CONTAINER_SETTING = 'COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME';
 
 // Realistic-shaped values used ONLY to prove they never surface in an error or
 // log line. If a test's asserted message ever contained one of these, the leak
@@ -42,6 +43,7 @@ const DEVICES_CONTAINER = 'devices';
 const TEMPERATURES_CONTAINER = 'temperatures';
 const USERS_CONTAINER = 'users';
 const RECIPES_CONTAINER = 'recipes';
+const ROLLUPS_CONTAINER = 'temperature-rollups';
 
 const VALID_ENV = {
   [ENDPOINT_SETTING]: ACCOUNT_ENDPOINT,
@@ -51,6 +53,7 @@ const VALID_ENV = {
   [TEMPERATURES_CONTAINER_SETTING]: TEMPERATURES_CONTAINER,
   [USERS_CONTAINER_SETTING]: USERS_CONTAINER,
   [RECIPES_CONTAINER_SETTING]: RECIPES_CONTAINER,
+  [ROLLUPS_CONTAINER_SETTING]: ROLLUPS_CONTAINER,
 };
 
 const CONFIG: CosmosConfig = {
@@ -61,6 +64,7 @@ const CONFIG: CosmosConfig = {
   temperaturesContainerName: TEMPERATURES_CONTAINER,
   usersContainerName: USERS_CONTAINER,
   recipesContainerName: RECIPES_CONTAINER,
+  temperatureRollupsContainerName: ROLLUPS_CONTAINER,
 };
 
 /** Re-imports the module with a given env, mirroring the MG-51 health spec. */
@@ -353,6 +357,39 @@ describe('MG-59 shared Cosmos adapter', () => {
         expect(thrown).toBeInstanceOf(mod.CosmosConfigError);
         expect(thrown?.code).toBe('cosmos_recipes_container_not_configured');
         expect(thrown?.message).toContain(RECIPES_CONTAINER_SETTING);
+        expect(thrown?.message).not.toContain(ACCOUNT_ENDPOINT);
+        expect(thrown?.message).not.toContain(DATABASE_NAME);
+      }
+    });
+
+    it('HAR-86: addresses the configured temperature-rollups container by name', () => {
+      const mod = loadValid();
+      const { seams, double } = seamsWith();
+      const adapter = new mod.CosmosAdapter(CONFIG, seams);
+
+      const container = adapter.getTemperatureRollupsContainer();
+
+      expect(double.client.database).toHaveBeenCalledWith(DATABASE_NAME);
+      expect(double.containerReads).toEqual([ROLLUPS_CONTAINER]);
+      expect(container).toBe(double.container);
+      expect(adapter.temperatureRollupsContainerName).toBe(ROLLUPS_CONTAINER);
+    });
+
+    it('HAR-86: fails loud with its own fixed code when COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME is unset', () => {
+      const mod = loadValid();
+      for (const unset of [undefined, '  ']) {
+        let thrown: InstanceType<typeof mod.CosmosConfigError> | undefined;
+        try {
+          mod.resolveCosmosConfig({
+            ...VALID_ENV,
+            [ROLLUPS_CONTAINER_SETTING]: unset,
+          } as NodeJS.ProcessEnv);
+        } catch (error) {
+          thrown = error as InstanceType<typeof mod.CosmosConfigError>;
+        }
+        expect(thrown).toBeInstanceOf(mod.CosmosConfigError);
+        expect(thrown?.code).toBe('cosmos_temperature_rollups_container_not_configured');
+        expect(thrown?.message).toContain(ROLLUPS_CONTAINER_SETTING);
         expect(thrown?.message).not.toContain(ACCOUNT_ENDPOINT);
         expect(thrown?.message).not.toContain(DATABASE_NAME);
       }

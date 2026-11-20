@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 
 import type {
   Cook,
+  CookChart,
   CookListResponse,
   Device,
   RegisterDeviceRequest,
@@ -30,6 +31,12 @@ import { defineProofs } from '../lib/proof';
  * partition); an unknown UUID is 404; and the device's lock document,
  * `active-device:<deviceId>`, which shares the owner's partition while the
  * cook runs, is 404 rather than a cook.
+ *
+ * HAR-86 reads the cook's chart with `GET /cooks/{cookId}/chart`: 200 for the
+ * owner (the HAR-77 contract check validates the body against CookChart), 404
+ * for an unknown id, and 404 for the peer. The cook is minutes old and its
+ * device sends nothing, so `points` may be empty; the proof does not look at
+ * them (the chart's data is proved by HAR-87's standing cook).
  *
  * The cook uses a client-generated UUID id as MG-84 requires (the id is the
  * start's idempotency key). Acceptance devices and cooks are not deleted: there
@@ -99,6 +106,16 @@ function getCook(api: AcceptanceApi, cookId: string, as: Caller = 'owner') {
     method: 'GET',
     path: `/cooks/${encodeURIComponent(cookId)}`,
     route: '/cooks/{cookId}',
+    as,
+  });
+}
+
+/** HAR-86: `GET /cooks/{cookId}/chart` as `as` (the owner unless told otherwise). */
+function getCookChart(api: AcceptanceApi, cookId: string, as: Caller = 'owner') {
+  return api.request<CookChart>({
+    method: 'GET',
+    path: `/cooks/${encodeURIComponent(cookId)}/chart`,
+    route: '/cooks/{cookId}/chart',
     as,
   });
 }
@@ -246,6 +263,45 @@ export default defineProofs('cooks lifecycle', () => {
         // The lock is in the owner's partition while the cook is active.
         const { deviceId } = startResponse();
         const response = await getCook(api, `active-device:${encodeURIComponent(deviceId)}`);
+        api.expectStatus(response, 404);
+        expectErrorCode(api, response, 'NOT_FOUND');
+      },
+    },
+    {
+      name: 'GET /cooks/{cookId}/chart as the owner is the chart of the started cook',
+      async run(api: AcceptanceApi) {
+        const posted = startResponse();
+        const response = await getCookChart(api, posted.id);
+        api.expectStatus(response, 200);
+        api.check(
+          response,
+          response.body?.cookId === posted.id,
+          `chart.cookId ${response.body?.cookId} is not the cook asked for`
+        );
+        api.check(
+          response,
+          response.body.deviceId === posted.deviceId,
+          `chart.deviceId ${response.body.deviceId} is not the cook's device`
+        );
+        api.check(
+          response,
+          response.body.startTime === posted.startTime,
+          `chart.startTime ${response.body.startTime} is not the cook's startTime`
+        );
+      },
+    },
+    {
+      name: 'GET /cooks/{cookId}/chart for an unknown id is 404 NOT_FOUND',
+      async run(api: AcceptanceApi) {
+        const response = await getCookChart(api, randomUUID());
+        api.expectStatus(response, 404);
+        expectErrorCode(api, response, 'NOT_FOUND');
+      },
+    },
+    {
+      name: "GET /cooks/{cookId}/chart as the peer is 404 NOT_FOUND for the owner's cook",
+      async run(api: AcceptanceApi) {
+        const response = await getCookChart(api, startResponse().id, 'peer');
         api.expectStatus(response, 404);
         expectErrorCode(api, response, 'NOT_FOUND');
       },

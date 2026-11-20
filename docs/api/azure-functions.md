@@ -18,6 +18,7 @@ yet wired.
 | `getCooks`               | HTTP `GET`    | `cooks`                           | List cooks                                                    |
 | `startCook`              | HTTP `POST`   | `cooks`                           | Start a cook (emits `cook_started` on SignalR)                |
 | `getCook`                | HTTP `GET`    | `cooks/{cookId}`                  | One of the caller's cooks (404 for another user's)            |
+| `getCookChart`           | HTTP `GET`    | `cooks/{cookId}/chart`            | HAR-86 — the whole cook as ≤ 720 points, from the rollups     |
 | `stopCook`               | HTTP `POST`   | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)                 |
 | `negotiate`              | HTTP `POST`   | `negotiate`                       | SignalR client negotiate: a token for the caller's userId     |
 | `getCurrentTemperatures` | HTTP `GET`    | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else)               |
@@ -36,6 +37,7 @@ yet wired.
 | `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                   |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
 | `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its device's owner            |
+| `rollupTemperatures`     | **Cosmos DB** | `temperatures` change feed        | HAR-86 — folds readings into per-device, per-hour rollups     |
 
 `broadcastTemperature` is the live-reading producer. IoT Hub routes every device
 message to the `temperature-data` event hub (`eventhub-realtime-route` in
@@ -79,6 +81,64 @@ on the shared output binding (hub `temperatureHub`):
   call still retries a `429` or `503` answer up to 3 times (waiting for
   `Retry-After`, capped at 2 s, or 200/400/800 ms) before negotiate answers 503
   (HAR-80).
+
+`rollupTemperatures` and `getCookChart` are the cook chart (HAR-86). A 12-hour
+cook is about 8,640 readings, and reading them all would cost hundreds of RU per
+chart against the shared 400 RU/s offer, so the chart reads a reduced series
+instead.
+
+- **The trigger.** `app.cosmosDB` on the `temperatures` container
+  (`%COSMOSDB_TEMPERATURES_CONTAINER_NAME%` in `%COSMOSDB_DATABASE_NAME%`),
+  through the identity-based `COSMOSDB` connection (`COSMOSDB__accountEndpoint`;
+  the app identity holds Cosmos DB Built-in Data Contributor at account scope).
+  Its leases live in the Terraform-made `leases` container
+  (`%COSMOSDB_LEASES_CONTAINER_NAME%`, HAR-74) and
+  `createLeaseContainerIfNotExists` is `false`, because data-plane RBAC cannot
+  create containers. `startFromBeginning: true` rolls up the readings already
+  stored the first time the lease is created; after that it has no effect.
+- **The documents.** One per device per UTC hour in `temperature-rollups`
+  (`COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME`, partition `/deviceId`), id
+  `<deviceId>:<yyyy-mm-ddThh>` (the device id URI-encoded), with `deviceId`,
+  `hourStart` (ISO, UTC) and `slots` keyed by minute `0`..`59`. Each slot holds,
+  per channel (`grill`, `probe1`..`probe4`), `{n, min, max, sum}`. A channel a
+  reading does not carry is not counted.
+- **The fold.** Each changed document goes through `toTemperatureReading` with its
+  own `deviceId`, so the device is the hub identity and the time is
+  `Body.timestamp`, else the enqueued time (MG-73). Documents that do not map are
+  skipped. The whole batch is folded in memory, then each touched hour document
+  gets **one** read-merge-replace with `IfMatch` on its etag. A 412 (replaced
+  since the read) or a 409 (created since the read) starts again from a fresh
+  read, at most 5 times; then the batch throws.
+- **Failure.** Any failure is logged as a fixed code
+  (`rollupTemperatures failed: <code>`) and thrown. With the Cosmos DB extension
+  4.x an unhandled exception leaves the lease un-checkpointed, so the change feed
+  delivers the batch again. Each batch logs one line,
+  `rollupTemperatures documents=<n> readings=<r> skipped=<s> buckets=<b> requestCharge=<ru>`,
+  with no ids.
+- **At-least-once.** The change feed delivers each reading at least once. A batch
+  that was written but not checkpointed (a host crash between the two, or a
+  failure part-way through a batch) is folded again, which double-counts `n` and
+  `sum` for those readings and leans that minute's average towards them. `min`
+  and `max` are unaffected. This is accepted: exactly-once would need a write per
+  reading, which is the cost the read model exists to avoid.
+- **Throughput.** `maxItemsPerInvocation: 100` keeps each backfill batch to one
+  or two hour documents and about 5 RU of change-feed read.
+  `feedPollDelay: 30000` makes a drained feed poll every 30 s, so a device
+  reporting every 5 s costs one document write per 30 s rather than per 5 s; the
+  chart can lag by up to 30 s. Because the poll delay does not apply while a
+  backlog drains, the handler also paces itself: it does not return until its
+  writes' RU at 100 RU/s have elapsed, a quarter of the shared offer.
+- **The chart.** `GET /cooks/{cookId}/chart` point-reads the cook in the caller's
+  partition, as `GET /cooks/{cookId}` does (absent, another user's and a lock id
+  are 404 `NOT_FOUND`; a bad id is 400). A stopped cook covers
+  `[startTime, endTime)`; an active cook covers every reading from `startTime`
+  on, with no upper bound. One single-partition query reads the device's hour
+  documents from the hour containing `startTime` (and before `endTime`), minute
+  slots outside the window are dropped, and the minutes are merged into the
+  smallest of 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400 and 21600 s
+  buckets that keeps the chart at 720 points or fewer. Each channel of a point is
+  `{min, max, avg}` with `avg = Σsum / Σn`; empty buckets and channels are left
+  out. `x-meatgeek-request-charge` is the point read plus every query page.
 
 `storageHeartbeat` exists because, when it was added, it was the **only**
 registration that needed `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and
@@ -448,7 +508,10 @@ COSMOSDB_RECIPES_CONTAINER_NAME=<cosmos-recipes-container-name>
 # The cook chart read model (HAR-74): per-device, per-hour temperature rollups,
 # and the lease container for the Cosmos DB change-feed trigger. Terraform-owned
 # (module.cosmos_db.destination_container_names.temperature_rollups / .leases).
-# Nothing in the API reads them yet; the change-feed function is a later issue.
+# Since HAR-86 the shared adapter reads COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME
+# (the rollupTemperatures trigger writes it, GET /cooks/{cookId}/chart reads it;
+# cosmos_temperature_rollups_container_not_configured without it), and the trigger
+# names COSMOSDB_LEASES_CONTAINER_NAME as %COSMOSDB_LEASES_CONTAINER_NAME%.
 COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME=<cosmos-temperature-rollups-container-name>
 COSMOSDB_LEASES_CONTAINER_NAME=<cosmos-leases-container-name>
 

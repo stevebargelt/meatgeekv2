@@ -42,6 +42,9 @@ jest.mock('@azure/functions', () => {
       // HAR-60: main.ts registers the broadcastTemperature Event Hub trigger;
       // its wiring is asserted in broadcast-temperature.integration.spec.ts.
       eventHub: () => undefined,
+      // HAR-86: the rollupTemperatures change-feed trigger; asserted in
+      // rollup-temperatures.integration.spec.ts.
+      cosmosDB: () => undefined,
     },
   };
 });

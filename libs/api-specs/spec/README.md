@@ -20,7 +20,8 @@ change its schema in the same pull request.
 spec/
   openapi.yaml                  # entrypoint: paths, x-signalr, components
   paths/
-    cooks.yaml                  # GET/POST /cooks, GET /cooks/{cookId}, POST /cooks/{cookId}/stop
+    cooks.yaml                  # GET/POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart,
+                                # POST /cooks/{cookId}/stop
     negotiate.yaml              # POST /negotiate (SignalR)
     temperatures.yaml           # /temperatures/current/{deviceId}, /temperatures/history
     devices.yaml                # /devices, /devices/{id}
@@ -33,7 +34,7 @@ spec/
     responses.yaml              # shared responses (401, 500, device/recipe 400/404)
     schemas/
       common.yaml               # ErrorCode, error bodies, health, shared enums
-      cook.yaml                 # Cook, StartCookRequest, CookListResponse
+      cook.yaml                 # Cook, StartCookRequest, CookListResponse, CookChart
       temperature.yaml          # TemperatureReading, TemperatureHistoryResponse
       device.yaml               # Device, configuration, requests, list wrapper
       user.yaml                 # User, preferences, PutUserProfileRequest

@@ -61,6 +61,9 @@ jest.mock('@azure/functions', () => {
       },
       // Not HTTP routes: the drift check is about app.http only.
       eventHub: () => undefined,
+      // HAR-86: the rollupTemperatures change-feed trigger; asserted in
+      // rollup-temperatures.integration.spec.ts.
+      cosmosDB: () => undefined,
       timer: () => undefined,
     },
   };

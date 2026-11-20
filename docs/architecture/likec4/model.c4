@@ -179,7 +179,7 @@ model {
           description 'The only source of the caller identity: tid:oid from the injected header. Fails closed (401, no default user).'
         }
         cooks = component 'cooks' {
-          description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, POST /cooks/{cookId}/stop'
+          description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart, POST /cooks/{cookId}/stop'
         }
         devices = component 'devices' {
           description 'GET and POST /devices, GET and PATCH /devices/{id}'

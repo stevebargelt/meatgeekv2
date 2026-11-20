@@ -44,6 +44,7 @@ jest.mock('@azure/functions', () => {
       // (cook-events, cosmos-health-registration, storage-heartbeat).
       http: () => undefined,
       timer: () => undefined,
+      cosmosDB: () => undefined,
     },
   };
 });

@@ -138,3 +138,43 @@ export interface CookStatusUpdate {
   };
   alerts: string[];
 }
+/**
+ * HAR-86 — one channel of one {@link CookChartPoint}: the readings of that
+ * channel inside the bucket, reduced to their minimum, maximum and mean.
+ */
+export interface CookChartChannel {
+  min: number;
+  max: number;
+  /** Σsum / Σn over the minute slots merged into the bucket. */
+  avg: number;
+}
+
+/**
+ * HAR-86 — one bucket of a {@link CookChart}. A channel with no reading in the
+ * bucket is absent; a bucket with no reading at all is not in `points`.
+ */
+export interface CookChartPoint {
+  /** Bucket start, ISO 8601 (UTC). */
+  t: string;
+  grill?: CookChartChannel;
+  probe1?: CookChartChannel;
+  probe2?: CookChartChannel;
+  probe3?: CookChartChannel;
+  probe4?: CookChartChannel;
+}
+
+/**
+ * HAR-86 — `GET /cooks/{cookId}/chart`: the whole cook as at most 720 points,
+ * read from the per-device, per-hour rollup documents (never the raw readings).
+ */
+export interface CookChart {
+  cookId: string;
+  deviceId: string;
+  startTime: string;
+  /** Present for a cook that has ended; the window is then `[startTime, endTime)`. */
+  endTime?: string;
+  /** Width of each bucket: 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400 or 21600. */
+  bucketSeconds: number;
+  /** Buckets with data, oldest first. */
+  points: CookChartPoint[];
+}

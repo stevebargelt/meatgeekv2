@@ -174,6 +174,7 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
         temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: 'unused-by-this-tier',
         recipesContainerName: tfRecipes.name,
+        temperatureRollupsContainerName: 'unused-by-this-tier',
       },
       {
         credentialFactory: () => unusedCredential,

@@ -239,3 +239,83 @@ CookListResponse:
       description: |
         Opaque cursor for the next page. Present exactly when `hasMore` is
         true; send it back unchanged as the `continuationToken` query param.
+
+CookChartChannel:
+  type: object
+  description: |
+    One channel of one chart point: the readings of that channel in the
+    bucket. `avg` is the sum of the readings over their count.
+  required:
+    - min
+    - max
+    - avg
+  additionalProperties: false
+  properties:
+    min:
+      type: number
+      format: double
+    max:
+      type: number
+      format: double
+    avg:
+      type: number
+      format: double
+
+CookChartPoint:
+  type: object
+  description: |
+    One bucket of a CookChart. A channel with no reading in the bucket is
+    absent.
+  required:
+    - t
+  additionalProperties: false
+  properties:
+    t:
+      type: string
+      format: date-time
+      description: Bucket start (UTC).
+    grill:
+      $ref: '#/CookChartChannel'
+    probe1:
+      $ref: '#/CookChartChannel'
+    probe2:
+      $ref: '#/CookChartChannel'
+    probe3:
+      $ref: '#/CookChartChannel'
+    probe4:
+      $ref: '#/CookChartChannel'
+
+CookChart:
+  type: object
+  description: |
+    Response of GET /cooks/{cookId}/chart (HAR-86). Matches CookChart in
+    libs/api-interfaces/src/lib/cook.ts. Built from the per-device, per-hour
+    rollup documents, never from raw readings.
+  required:
+    - cookId
+    - deviceId
+    - startTime
+    - bucketSeconds
+    - points
+  additionalProperties: false
+  properties:
+    cookId:
+      type: string
+    deviceId:
+      type: string
+    startTime:
+      type: string
+      format: date-time
+    endTime:
+      type: string
+      format: date-time
+      description: Present when the cook has ended; the window is then `[startTime, endTime)`.
+    bucketSeconds:
+      type: integer
+      enum: [60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 21600]
+    points:
+      type: array
+      maxItems: 720
+      description: Buckets with at least one reading, oldest first. May be empty.
+      items:
+        $ref: '#/CookChartPoint'

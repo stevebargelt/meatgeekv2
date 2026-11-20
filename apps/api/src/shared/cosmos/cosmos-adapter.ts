@@ -36,6 +36,7 @@ const DEVICES_CONTAINER_SETTING = 'COSMOSDB_DEVICES_CONTAINER_NAME';
 const TEMPERATURES_CONTAINER_SETTING = 'COSMOSDB_TEMPERATURES_CONTAINER_NAME';
 const USERS_CONTAINER_SETTING = 'COSMOSDB_USERS_CONTAINER_NAME';
 const RECIPES_CONTAINER_SETTING = 'COSMOSDB_RECIPES_CONTAINER_NAME';
+const TEMPERATURE_ROLLUPS_CONTAINER_SETTING = 'COSMOSDB_TEMPERATURE_ROLLUPS_CONTAINER_NAME';
 
 /**
  * The fixed failure vocabulary for configuration. Each names the setting that
@@ -51,7 +52,8 @@ export type CosmosConfigFailure =
   | 'cosmos_devices_container_not_configured'
   | 'cosmos_temperatures_container_not_configured'
   | 'cosmos_users_container_not_configured'
-  | 'cosmos_recipes_container_not_configured';
+  | 'cosmos_recipes_container_not_configured'
+  | 'cosmos_temperature_rollups_container_not_configured';
 
 const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
   [ACCOUNT_ENDPOINT_SETTING]: 'cosmos_account_endpoint_not_configured',
@@ -61,6 +63,7 @@ const CONFIG_FAILURE_FOR_SETTING: Record<string, CosmosConfigFailure> = {
   [TEMPERATURES_CONTAINER_SETTING]: 'cosmos_temperatures_container_not_configured',
   [USERS_CONTAINER_SETTING]: 'cosmos_users_container_not_configured',
   [RECIPES_CONTAINER_SETTING]: 'cosmos_recipes_container_not_configured',
+  [TEMPERATURE_ROLLUPS_CONTAINER_SETTING]: 'cosmos_temperature_rollups_container_not_configured',
 };
 
 /**
@@ -94,6 +97,9 @@ export interface CosmosConfig {
   readonly usersContainerName: string;
   /** HAR-36 (MG-82): the recipes container, partitioned on `/userId` (= the owner). */
   readonly recipesContainerName: string;
+  /** HAR-86: the cook chart's per-device, per-hour rollup documents (HAR-74),
+   *  partitioned on `/deviceId`. Written by the rollupTemperatures trigger. */
+  readonly temperatureRollupsContainerName: string;
 }
 
 function requireSetting(env: NodeJS.ProcessEnv, settingName: string): string {
@@ -118,6 +124,7 @@ export function resolveCosmosConfig(env: NodeJS.ProcessEnv = process.env): Cosmo
     temperaturesContainerName: requireSetting(env, TEMPERATURES_CONTAINER_SETTING),
     usersContainerName: requireSetting(env, USERS_CONTAINER_SETTING),
     recipesContainerName: requireSetting(env, RECIPES_CONTAINER_SETTING),
+    temperatureRollupsContainerName: requireSetting(env, TEMPERATURE_ROLLUPS_CONTAINER_SETTING),
   };
 }
 
@@ -196,6 +203,10 @@ export class CosmosAdapter {
     return this.config.recipesContainerName;
   }
 
+  get temperatureRollupsContainerName(): string {
+    return this.config.temperatureRollupsContainerName;
+  }
+
   private getClient(): CosmosClient {
     if (!this.client) {
       // credentialFactory runs exactly once; the credential is retained so its
@@ -245,6 +256,11 @@ export class CosmosAdapter {
   /** The recipes container, addressed by the Terraform-published name. */
   getRecipesContainer(): Container {
     return this.getContainer(this.config.recipesContainerName);
+  }
+
+  /** HAR-86: the temperature-rollups container, addressed by the Terraform-published name. */
+  getTemperatureRollupsContainer(): Container {
+    return this.getContainer(this.config.temperatureRollupsContainerName);
   }
 }
 
