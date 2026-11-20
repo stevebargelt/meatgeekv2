@@ -1,8 +1,10 @@
 // Package simdevice is a software IoT Hub device for dev: it sends synthetic
 // temperature readings as one device, built and published through exactly the
 // code the data-pusher on the Pi uses (internal/publish for the payload and
-// message properties, an iothub client for the MQTT send). The cmd/simdevice
-// binary is a thin wrapper around Main.
+// message properties, an iothub client for the MQTT send). With --twin it
+// first reads the device twin through the Pi's twin code (iothub.WithCookTwin
+// on an in-memory cooksession) and stamps the applied cook on its readings.
+// The cmd/simdevice binary is a thin wrapper around Main.
 package simdevice
 
 import (
@@ -17,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/cooksession"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/publish"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
@@ -32,9 +35,12 @@ const EnvConnectionString = "SIMDEVICE_CONNECTION_STRING"
 // Exit codes returned by Main.
 const (
 	ExitOK         = 0
-	ExitSendFailed = 1
+	ExitSendFailed = 1 // a send failed, or --twin got no twin response in time
 	ExitUsage      = 2
 )
+
+// defaultTwinTimeout is --timeout's default.
+const defaultTwinTimeout = 30 * time.Second
 
 // timeFormat is RFC 3339 with exactly three fractional digits, UTC.
 const timeFormat = "2006-01-02T15:04:05.000Z07:00"
@@ -57,6 +63,32 @@ func AzureClientFactory(connectionString string) (Client, error) {
 	return iothub.NewAzureClient(connectionString)
 }
 
+// TwinClient is a Client with the device twin on: what --twin needs.
+// *iothub.AzureClient satisfies it.
+type TwinClient interface {
+	Client
+	Start(ctx context.Context)
+	WaitTwinSynced(ctx context.Context) error
+	GetTwin(ctx context.Context) (iothub.Twin, error)
+}
+
+// TwinClientFactory builds a twin-enabled client. Main passes
+// iothub.WithCookTwin and iothub.WithTwinTimeout in opts.
+type TwinClientFactory func(connectionString string, opts ...iothub.Option) (TwinClient, error)
+
+// AzureTwinClientFactory is the production twin factory: the Pi's MQTT client
+// and twin code.
+func AzureTwinClientFactory(connectionString string, opts ...iothub.Option) (TwinClient, error) {
+	return iothub.NewAzureClient(connectionString, opts...)
+}
+
+// TwinLine is the stdout line --twin prints after reading the twin back.
+type TwinLine struct {
+	Event    string              `json:"event"` // always "twin"
+	Desired  iothub.TwinDesired  `json:"desired"`
+	Reported iothub.TwinReported `json:"reported"`
+}
+
 // Sent is one stdout line: the identifiers of a message that IoT Hub accepted.
 type Sent struct {
 	MessageID string `json:"messageId"`
@@ -72,12 +104,14 @@ type Env struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 	NewClient ClientFactory
-	Tracer    trace.Tracer
-	Now       func() time.Time
+	// NewTwinClient builds the client for --twin.
+	NewTwinClient TwinClientFactory
+	Tracer        trace.Tracer
+	Now           func() time.Time
 }
 
 // Main runs the command and returns its exit code. Nothing but one JSON line
-// per sent message goes to Stdout. No path writes the connection string or
+// per sent message (and, with --twin, the twin line first) goes to Stdout. No path writes the connection string or
 // its key anywhere: errors go through a redactor before reaching Stderr.
 func Main(ctx context.Context, env Env) int {
 	connStr := env.Getenv(EnvConnectionString)
@@ -92,8 +126,10 @@ func Main(ctx context.Context, env Env) int {
 	count := fs.Int("count", 1, "number of readings to send")
 	interval := fs.Duration("interval", 0, "gap between sends (Go duration, e.g. 500ms, 2s); with --inflight > 1, between send starts")
 	inflight := fs.Int("inflight", 1, "how many sends may await IoT Hub's acknowledgement at once")
+	twinMode := fs.Bool("twin", false, "read the device twin first: apply its desired cook, report it, print the twin, then send --count readings carrying that cook (--count 0 sends none)")
+	timeout := fs.Duration("timeout", defaultTwinTimeout, "with --twin, how long to wait for the twin before exiting 1")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: simdevice [--count N] [--interval DURATION] [--inflight N]\n"+
+		fmt.Fprintf(fs.Output(), "usage: simdevice [--twin [--timeout DURATION]] [--count N] [--interval DURATION] [--inflight N]\n"+
 			"Sends synthetic readings as the IoT Hub device named by $%s.\n", EnvConnectionString)
 		fs.PrintDefaults()
 	}
@@ -106,8 +142,14 @@ func Main(ctx context.Context, env Env) int {
 	if fs.NArg() > 0 {
 		return fail(ExitUsage, "unexpected arguments %q (the connection string is read only from $%s)", fs.Args(), EnvConnectionString)
 	}
-	if *count < 1 {
+	if *twinMode && *count < 0 {
+		return fail(ExitUsage, "--count must not be negative, got %d", *count)
+	}
+	if !*twinMode && *count < 1 {
 		return fail(ExitUsage, "--count must be at least 1, got %d", *count)
+	}
+	if *timeout <= 0 {
+		return fail(ExitUsage, "--timeout must be positive, got %s", *timeout)
 	}
 	if *interval < 0 {
 		return fail(ExitUsage, "--interval must not be negative, got %s", *interval)
@@ -123,18 +165,44 @@ func Main(ctx context.Context, env Env) int {
 	if err != nil {
 		return fail(ExitUsage, "%s is not a valid device connection string: %v", EnvConnectionString, err)
 	}
-	client, err := env.NewClient(connStr)
-	if err != nil {
-		return fail(ExitUsage, "create IoT Hub client: %v", err)
-	}
-	defer client.Close()
-
+	enc := json.NewEncoder(env.Stdout)
 	tracer := env.Tracer
 	if tracer == nil {
 		tracer = otel.Tracer("meatgeek-simdevice")
 	}
-	sender := Sender{Client: client, DeviceID: parsed.DeviceID, Tracer: tracer}
-	enc := json.NewEncoder(env.Stdout)
+	sender := Sender{DeviceID: parsed.DeviceID, Tracer: tracer}
+
+	if *twinMode {
+		if env.NewTwinClient == nil {
+			return fail(ExitUsage, "--twin is not available in this build (no twin client)")
+		}
+		session := cooksession.NewMemory()
+		tc, err := env.NewTwinClient(connStr, iothub.WithCookTwin(session), iothub.WithTwinTimeout(*timeout))
+		if err != nil {
+			return fail(ExitUsage, "create IoT Hub client: %v", err)
+		}
+		defer tc.Close()
+		if code := readTwin(ctx, tc, *timeout, enc, fail); code != ExitOK {
+			return code
+		}
+		snap := session.Snapshot()
+		sender.Client = tc
+		sender.CookID = snap.CookID
+		if snap.CorrelationID != nil {
+			sender.CorrelationID = *snap.CorrelationID
+		}
+		if *count == 0 {
+			return ExitOK
+		}
+	} else {
+		client, err := env.NewClient(connStr)
+		if err != nil {
+			return fail(ExitUsage, "create IoT Hub client: %v", err)
+		}
+		defer client.Close()
+		sender.Client = client
+	}
+
 	now := env.Now
 	if now == nil {
 		now = time.Now
@@ -182,6 +250,26 @@ func Main(ctx context.Context, env Env) int {
 		if err := enc.Encode(sent); err != nil {
 			return fail(ExitSendFailed, "write stdout: %v", err)
 		}
+	}
+	return ExitOK
+}
+
+// readTwin is --twin's twin phase: connect, let the twin code GET the twin,
+// apply its desired cook to the client's CookState and report it, then GET
+// the twin again and print it as one TwinLine. All of it must finish within timeout.
+func readTwin(ctx context.Context, tc TwinClient, timeout time.Duration, enc *json.Encoder, fail func(code int, format string, a ...any) int) int {
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	tc.Start(ctx)
+	if err := tc.WaitTwinSynced(tctx); err != nil {
+		return fail(ExitSendFailed, "no twin response from IoT Hub within %s: %v", timeout, err)
+	}
+	tw, err := tc.GetTwin(tctx)
+	if err != nil {
+		return fail(ExitSendFailed, "no twin response from IoT Hub within %s on the second GET: %v", timeout, err)
+	}
+	if err := enc.Encode(TwinLine{Event: "twin", Desired: tw.Desired, Reported: tw.Reported}); err != nil {
+		return fail(ExitSendFailed, "write stdout: %v", err)
 	}
 	return ExitOK
 }
@@ -302,11 +390,15 @@ loop:
 	return ExitOK
 }
 
-// Sender publishes readings as one device.
+// Sender publishes readings as one device. CookID and CorrelationID, when
+// set, ride on every reading as the Pi's do: the payload's cookId and the
+// correlation.id message property.
 type Sender struct {
-	Client   Client
-	DeviceID string
-	Tracer   trace.Tracer
+	Client        Client
+	DeviceID      string
+	Tracer        trace.Tracer
+	CookID        *string
+	CorrelationID string
 }
 
 // prepared is one reading ready to publish: its payload and properties, the
@@ -325,7 +417,7 @@ type prepared struct {
 // is acknowledged (or has failed).
 func (s Sender) Prepare(ctx context.Context, status wire.V1Status, ts time.Time, seq uint64) (prepared, error) {
 	spanCtx, span := s.Tracer.Start(ctx, "simdevice.publish", trace.WithNewRoot())
-	payload, err := publish.ReadingPayload(status, ts, nil)
+	payload, err := publish.ReadingPayload(status, ts, s.CookID)
 	if err != nil {
 		span.End()
 		return prepared{}, err
@@ -333,7 +425,7 @@ func (s Sender) Prepare(ctx context.Context, status wire.V1Status, ts time.Time,
 	messageID := publish.MessageID(s.DeviceID, ts, seq)
 	return prepared{
 		payload: payload,
-		props:   publish.Properties(spanCtx, messageID, ""),
+		props:   publish.Properties(spanCtx, messageID, s.CorrelationID),
 		sent:    Sent{MessageID: messageID, DeviceID: s.DeviceID, Timestamp: ts.UTC().Format(timeFormat)},
 		ctx:     spanCtx,
 		span:    span,

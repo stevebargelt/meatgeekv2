@@ -196,11 +196,11 @@ func TestCollector_NeverImportsCookSession(t *testing.T) {
 
 // TestEndToEnd_CollectorQueueMockClient drives the wiring the queue runner
 // uses in main.go: collector produces a Sample, the Sample is mapped to a
-// TemperatureReading (with a SignalR-injected cookId), enqueued, then
+// TemperatureReading (with the twin-applied cookId), enqueued, then
 // dequeued and published via a fake publisher. The fake publisher's
 // recorded messageId must equal wire.MintMessageId(deviceId, ts, 1)
 // (deterministic) and its correlation.id property must match the
-// SignalR-injected value.
+// twin-applied correlation id.
 func TestEndToEnd_CollectorQueueMockClient(t *testing.T) {
 	logrus.SetLevel(logrus.PanicLevel)
 
@@ -228,7 +228,7 @@ func TestEndToEnd_CollectorQueueMockClient(t *testing.T) {
 	t.Cleanup(func() { _ = q.Close() })
 
 	const deviceID = "meatgeek3"
-	const injectedCorrelationID = "corr-from-signalr-cook-started"
+	const injectedCorrelationID = "corr-from-twin-desired"
 	const injectedCookID = "cook-abc-123"
 
 	ctx, cancel := context.WithCancel(context.Background())

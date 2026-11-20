@@ -79,3 +79,23 @@ func TestBinary_MalformedConnectionStringDoesNotLeak(t *testing.T) {
 		t.Errorf("stdout must be empty; got %q", stdout)
 	}
 }
+
+// The real binary, with the production twin client, exits non-zero with a
+// clear message when no twin response arrives within --timeout. Nothing
+// listens on 127.0.0.1:8883, so the connect itself fails and is retried.
+func TestBinary_TwinTimeoutExitsNonZero(t *testing.T) {
+	conn := "HostName=127.0.0.1;DeviceId=sim-device-1;SharedAccessKey=" + fakeKey
+	code, stdout, stderr := runBinary(t, &conn, "--twin --timeout 1s")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "no twin response from IoT Hub within 1s") {
+		t.Errorf("stderr should say no twin response arrived; got %q", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout must be empty; got %q", stdout)
+	}
+	if strings.Contains(stdout+stderr, fakeKey) {
+		t.Errorf("key leaked: %q", stderr)
+	}
+}

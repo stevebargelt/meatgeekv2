@@ -1,20 +1,18 @@
-// Package cooksession owns the active-cook-id state the data-pusher
-// stamps onto every TemperatureReading it ships to IoT Hub.
+// Package cooksession owns the active-cook state the data-pusher stamps onto
+// every TemperatureReading it ships to IoT Hub: the active cook id, the
+// correlation id that rides as the `correlation.id` message property, and the
+// device twin desired `$version` those two came from.
 //
-// Authority boundary (architect's decision recorded in BACKLOG.md ticket #5):
-// the V2 API is the source of truth for cook lifecycle. This package's
-// persisted file is a RESTART CACHE ONLY -- it lets the pusher resume after
-// a process crash without waiting for the next SignalR notification, and it
-// lets the pusher continue running with a sane cookId while offline. The
-// Reconcile call re-syncs against the API at boot and after extended
-// disconnects; SignalR cook_started/cook_stopped updates flow in through
-// SetActiveCookID at runtime.
+// Authority boundary: the active cook is device state, carried by the IoT Hub
+// device twin's desired properties (HAR-55). internal/iothub reads the twin on
+// every connect and applies each desired patch through ApplyDesired; this
+// package's persisted file is a RESTART CACHE ONLY, so a boot with no network
+// still stamps the last cook it was told about.
 //
-// The seam between cook_stopped emission on the cloud side and the pusher
-// observing it MAY carry a stale cookId for a tick or two. TemperatureReading
-// consumers (CosmosDB ingest + the Functions real-time path) treat the cookId
-// tag as informational and tolerate the brief disagreement; the alternative
-// (blocking telemetry until reconciliation) would lose readings.
+// The seam between the API clearing the cook and the device applying the
+// twin patch MAY carry a stale cookId for a tick or two. TemperatureReading
+// consumers treat the cookId tag as informational and tolerate the brief
+// disagreement; blocking telemetry until the twin is read would lose readings.
 package cooksession
 
 import (
@@ -38,20 +36,37 @@ const DefaultStatePath = "/var/lib/meatgeek-pusher/cooksession.json"
 // the configured path is not writable.
 const fallbackStatePathSegment = ".meatgeek-pusher/cooksession.json"
 
-// persistedState is the on-disk JSON shape.
+// persistedState is the on-disk JSON shape. A file written before HAR-58
+// carries only cookId and updatedAt; the missing fields load as nil / 0, and
+// the twin read on the next connect overwrites all three.
 type persistedState struct {
-	CookID    *string   `json:"cookId"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	CookID                *string   `json:"cookId"`
+	CorrelationID         *string   `json:"correlationId"`
+	AppliedDesiredVersion int64     `json:"appliedDesiredVersion"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
-// Store is the in-memory + on-disk cook-session state holder. It is safe
-// for concurrent use: many goroutines may call ActiveCookID() while a
-// single writer goroutine drives SetActiveCookID / Reconcile.
+// Session is a consistent snapshot of the store: both ids come from the same
+// applied twin desired version.
+type Session struct {
+	CookID                *string
+	CorrelationID         *string
+	AppliedDesiredVersion int64
+}
+
+// Store is the in-memory + on-disk cook-session state holder. It is safe for
+// concurrent use: many goroutines may read while the twin applies updates.
 type Store struct {
-	mu       sync.RWMutex
-	path     string
-	cookID   *string
-	updated  time.Time
+	mu      sync.RWMutex
+	path    string // "" for an in-memory store
+	state   Session
+	updated time.Time
+}
+
+// NewMemory returns a Store that keeps its state in memory only. simdevice
+// uses it so its twin mode runs the Pi's twin code without touching disk.
+func NewMemory() *Store {
+	return &Store{}
 }
 
 // Open loads (or initializes) the state file at the given path. If path
@@ -92,94 +107,83 @@ func Open(path string) (*Store, error) {
 		return s, nil
 	}
 
-	s.cookID = ps.CookID
+	s.state = Session{
+		CookID:                ps.CookID,
+		CorrelationID:         ps.CorrelationID,
+		AppliedDesiredVersion: ps.AppliedDesiredVersion,
+	}
 	s.updated = ps.UpdatedAt
 	return s, nil
 }
 
-// Path returns the file path the store is using. Useful for tests and
-// operator logs.
+// Path returns the file path the store is using ("" for an in-memory store).
+// Useful for tests and operator logs.
 func (s *Store) Path() string {
 	return s.path
 }
 
-// ActiveCookID returns a copy of the current active cook id, or nil if
-// no cook is active. The returned pointer is independent of internal
-// state -- callers may retain it without holding any lock.
-func (s *Store) ActiveCookID() *string {
+// Snapshot returns a copy of the current state. The pointers are independent
+// of internal state, so callers may retain them without holding any lock.
+func (s *Store) Snapshot() Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.cookID == nil {
-		return nil
+	return Session{
+		CookID:                copyPtr(s.state.CookID),
+		CorrelationID:         copyPtr(s.state.CorrelationID),
+		AppliedDesiredVersion: s.state.AppliedDesiredVersion,
 	}
-	id := *s.cookID
-	return &id
 }
 
-// SetActiveCookID updates the in-memory and on-disk cook id atomically.
-// Passing nil clears the active cook (used on cook_stopped). The on-disk
-// write is best-effort durable: tmp-file + rename so a crash mid-write
-// leaves the previous good state intact.
-func (s *Store) SetActiveCookID(cookID *string) error {
+// ActiveCookID returns a copy of the current active cook id, or nil if
+// no cook is active.
+func (s *Store) ActiveCookID() *string {
+	return s.Snapshot().CookID
+}
+
+// AppliedDesired returns the twin desired properties last applied and their
+// `$version`. It and ApplyDesired make *Store an iothub.CookState.
+func (s *Store) AppliedDesired() (activeCookID, correlationID *string, version int64) {
+	snap := s.Snapshot()
+	return snap.CookID, snap.CorrelationID, snap.AppliedDesiredVersion
+}
+
+// ApplyDesired replaces the state with the given twin desired values. nil
+// clears a field. The on-disk write is tmp-file + rename, so a crash mid-write
+// leaves the previous good state intact; the in-memory state changes only
+// after the write succeeds, so an error means nothing was applied.
+func (s *Store) ApplyDesired(activeCookID, correlationID *string, version int64) error {
+	next := Session{
+		CookID:                copyPtr(activeCookID),
+		CorrelationID:         copyPtr(correlationID),
+		AppliedDesiredVersion: version,
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Copy the input so callers cannot mutate our state via the pointer.
-	var stored *string
-	if cookID != nil {
-		v := *cookID
-		stored = &v
+	now := time.Now().UTC()
+	if s.path != "" {
+		if err := writeAtomic(s.path, persistedState{
+			CookID:                next.CookID,
+			CorrelationID:         next.CorrelationID,
+			AppliedDesiredVersion: next.AppliedDesiredVersion,
+			UpdatedAt:             now,
+		}); err != nil {
+			return fmt.Errorf("cooksession: persist state: %w", err)
+		}
 	}
 
-	s.cookID = stored
-	s.updated = time.Now().UTC()
-
-	if err := writeAtomic(s.path, persistedState{CookID: s.cookID, UpdatedAt: s.updated}); err != nil {
-		return fmt.Errorf("cooksession: persist state: %w", err)
-	}
-
-	if stored == nil {
-		logrus.Info("cooksession: cleared active cook id")
-	} else {
-		logrus.WithField("cookId", *stored).Info("cooksession: set active cook id")
-	}
-	return nil
-}
-
-// setFromReconcile is the internal path used by Reconcile. It compares
-// the incoming value to the current in-memory value and only writes when
-// they differ, so a steady-state reconcile loop does not churn disk.
-// Returns true if a write happened.
-func (s *Store) setFromReconcile(cookID *string, source string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if stringPtrEqual(s.cookID, cookID) {
-		return false, nil
-	}
-
-	prev := stringPtrValue(s.cookID)
-	next := stringPtrValue(cookID)
-
-	var stored *string
-	if cookID != nil {
-		v := *cookID
-		stored = &v
-	}
-	s.cookID = stored
-	s.updated = time.Now().UTC()
-
-	if err := writeAtomic(s.path, persistedState{CookID: s.cookID, UpdatedAt: s.updated}); err != nil {
-		return false, fmt.Errorf("cooksession: persist state: %w", err)
-	}
+	prev := s.state
+	s.state = next
+	s.updated = now
 
 	logrus.WithFields(logrus.Fields{
-		"source":   source,
-		"previous": prev,
-		"current":  next,
-	}).Info("cooksession: reconciled active cook id (override)")
-
-	return true, nil
+		"previousCookId":        stringPtrValue(prev.CookID),
+		"cookId":                stringPtrValue(next.CookID),
+		"correlationId":         stringPtrValue(next.CorrelationID),
+		"appliedDesiredVersion": next.AppliedDesiredVersion,
+	}).Info("cooksession: applied twin desired properties")
+	return nil
 }
 
 // writeAtomic does a tmp+rename write so a crash mid-write does not leave
@@ -256,14 +260,12 @@ func ensureWritableDir(dir string) error {
 	return nil
 }
 
-func stringPtrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
+func copyPtr(p *string) *string {
+	if p == nil {
+		return nil
 	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
+	v := *p
+	return &v
 }
 
 func stringPtrValue(p *string) string {

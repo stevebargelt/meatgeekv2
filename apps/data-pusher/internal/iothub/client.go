@@ -3,6 +3,7 @@ package iothub
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -56,6 +57,9 @@ const (
 	defaultSASTokenTTL     = 1 * time.Hour
 	defaultConnectTimeout  = 10 * time.Second
 	defaultPublishTimeout  = 10 * time.Second
+	defaultRefreshMargin   = 5 * time.Minute
+	defaultReconnectMin    = 1 * time.Second
+	defaultReconnectMax    = 60 * time.Second
 	mqttAPIVersion         = "2021-04-12"
 	deviceEventTopicPrefix = "devices/"
 	deviceEventTopicSuffix = "/messages/events/"
@@ -69,16 +73,31 @@ type Client interface {
 	Close() error
 }
 
-// AzureClient is the paho-MQTT-backed production implementation.
+// AzureClient is the paho-MQTT-backed production implementation. One
+// AzureClient holds the device's one MQTT connection (IoT Hub allows one per
+// device id): telemetry publishes and, when WithCookTwin is set, the device
+// twin share it.
 type AzureClient struct {
 	conn           *DeviceConnectionString
+	brokerURL      string
 	sasTokenTTL    time.Duration
 	connectTimeout time.Duration
 	publishTimeout time.Duration
+	twinTimeout    time.Duration
+	refreshMargin  time.Duration
+	reconnectMin   time.Duration
+	reconnectMax   time.Duration
+	twinState      CookState
 
 	mu         sync.Mutex
 	mqttClient mqtt.Client
 	sasExpiry  time.Time
+	lost       chan struct{} // closed when the current connection drops or is replaced
+	markLost   func()
+	twin       *twin
+	started    bool
+	stop       context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // Option configures an AzureClient.
@@ -111,9 +130,47 @@ func WithPublishTimeout(d time.Duration) Option {
 	}
 }
 
+// WithCookTwin turns on the device twin: on every connect the client
+// subscribes to the twin topics, GETs the twin, applies its desired cook to
+// state and reports it; desired patches are applied as they arrive. The twin
+// runs only while the client is started (Start).
+func WithCookTwin(state CookState) Option {
+	return func(c *AzureClient) {
+		c.twinState = state
+	}
+}
+
+// WithBrokerURL replaces the broker address, `tls://<HostName>:8883` from the
+// connection string. A `tcp://` URL connects without TLS. Tests point it at
+// an iothubtest.Broker; production never sets it.
+func WithBrokerURL(u string) Option {
+	return func(c *AzureClient) {
+		if u != "" {
+			c.brokerURL = u
+		}
+	}
+}
+
+// WithTwinTimeout overrides how long a twin request (subscribe, GET, reported
+// patch) waits for IoT Hub's response (default 30s).
+func WithTwinTimeout(d time.Duration) Option {
+	return func(c *AzureClient) {
+		if d > 0 {
+			c.twinTimeout = d
+		}
+	}
+}
+
+// withReconnectBackoff overrides the reconnect backoff bounds (tests).
+func withReconnectBackoff(lo, hi time.Duration) Option {
+	return func(c *AzureClient) {
+		c.reconnectMin, c.reconnectMax = lo, hi
+	}
+}
+
 // NewAzureClient parses the per-device IoT Hub connection string and
-// returns a client ready to publish. The MQTT session is connected
-// lazily on the first PublishTelemetry call.
+// returns a client ready to publish. Nothing connects until Start (which
+// connects at once and stays connected) or, without Start, the first publish.
 func NewAzureClient(connectionString string, opts ...Option) (*AzureClient, error) {
 	parsed, err := ParseDeviceConnectionString(connectionString)
 	if err != nil {
@@ -121,12 +178,26 @@ func NewAzureClient(connectionString string, opts ...Option) (*AzureClient, erro
 	}
 	c := &AzureClient{
 		conn:           parsed,
+		brokerURL:      fmt.Sprintf("tls://%s:8883", parsed.HostName),
 		sasTokenTTL:    defaultSASTokenTTL,
 		connectTimeout: defaultConnectTimeout,
 		publishTimeout: defaultPublishTimeout,
+		twinTimeout:    defaultTwinTimeout,
+		refreshMargin:  defaultRefreshMargin,
+		reconnectMin:   defaultReconnectMin,
+		reconnectMax:   defaultReconnectMax,
+		markLost:       func() {},
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	// A token shorter than twice the margin would be refreshed constantly;
+	// refresh such a token halfway through its life instead.
+	if c.refreshMargin > c.sasTokenTTL/2 {
+		c.refreshMargin = c.sasTokenTTL / 2
+	}
+	if c.twinState != nil {
+		c.twin = newTwin(c.twinState, c.twinTimeout)
 	}
 	return c, nil
 }
@@ -139,24 +210,107 @@ func (c *AzureClient) DeviceID() string { return c.conn.DeviceID }
 // HostName returns the IoT Hub hostname sourced from the connection string.
 func (c *AzureClient) HostName() string { return c.conn.HostName }
 
-// ensureConnectedLocked makes sure we have a live MQTT session whose
-// SAS token has at least 5 minutes of life remaining. Caller must hold c.mu.
+// Start connects to IoT Hub now and keeps the connection up until ctx is
+// done or Close is called: it reconnects (with backoff) when the connection
+// drops and reconnects with a fresh SAS token before the current one expires.
+// Every connect, including those two, re-establishes the twin subscriptions
+// and re-reads the twin. Start returns at once; calling it again is a no-op.
+func (c *AzureClient) Start(ctx context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.started {
+		return
+	}
+	c.started = true
+	ctx, c.stop = context.WithCancel(ctx)
+	if c.twin != nil {
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.twin.run(ctx)
+		}()
+	}
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.supervise(ctx)
+	}()
+}
+
+// supervise is Start's connection loop.
+func (c *AzureClient) supervise(ctx context.Context) {
+	backoff := c.reconnectMin
+	sleep := func(d time.Duration) bool {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
+	for ctx.Err() == nil {
+		c.mu.Lock()
+		err := c.ensureConnectedLocked()
+		lost, refreshAt := c.lost, c.sasExpiry.Add(-c.refreshMargin)
+		c.mu.Unlock()
+		if err != nil {
+			logrus.WithError(err).WithField("retryIn", backoff.String()).Warn("iothub: connect failed")
+			if c.twin != nil {
+				c.twin.noteErr(err)
+			}
+			if !sleep(backoff) {
+				return
+			}
+			backoff = min(backoff*2, c.reconnectMax)
+			continue
+		}
+
+		connectedAt := time.Now()
+		timer := time.NewTimer(time.Until(refreshAt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			// SAS token near expiry: the next ensureConnectedLocked reconnects.
+			continue
+		case <-lost:
+			timer.Stop()
+		}
+		// The connection dropped. Back off before redialling, unless it had
+		// been up long enough to count as healthy.
+		if time.Since(connectedAt) >= c.reconnectMax {
+			backoff = c.reconnectMin
+		}
+		if !sleep(backoff) {
+			return
+		}
+		backoff = min(backoff*2, c.reconnectMax)
+	}
+}
+
+// ensureConnectedLocked makes sure we have a live MQTT session whose SAS
+// token is not within the refresh margin (5 minutes) of expiry. Each new
+// connection is handed to the twin. Caller must hold c.mu.
 func (c *AzureClient) ensureConnectedLocked() error {
-	if c.mqttClient != nil && c.mqttClient.IsConnectionOpen() && time.Now().Before(c.sasExpiry.Add(-5*time.Minute)) {
+	if c.mqttClient != nil && c.mqttClient.IsConnectionOpen() && time.Now().Before(c.sasExpiry.Add(-c.refreshMargin)) {
 		return nil
 	}
-	if c.mqttClient != nil {
-		c.mqttClient.Disconnect(250)
-		c.mqttClient = nil
-	}
+	c.dropLocked()
 
 	sas, expiry, err := GenerateSASToken(c.conn.HostName, c.conn.DeviceID, c.conn.SharedAccessKey, c.sasTokenTTL)
 	if err != nil {
 		return fmt.Errorf("iothub: mint SAS token: %w", err)
 	}
 
+	lost := make(chan struct{})
+	var lostOnce sync.Once
+	markLost := func() { lostOnce.Do(func() { close(lost) }) }
+
 	opts := mqtt.NewClientOptions().
-		AddBroker(fmt.Sprintf("tls://%s:8883", c.conn.HostName)).
+		AddBroker(c.brokerURL).
 		SetClientID(c.conn.DeviceID).
 		SetUsername(fmt.Sprintf("%s/%s/?api-version=%s", c.conn.HostName, c.conn.DeviceID, mqttAPIVersion)).
 		SetPassword(sas).
@@ -164,6 +318,10 @@ func (c *AzureClient) ensureConnectedLocked() error {
 		SetCleanSession(true).
 		SetAutoReconnect(false).
 		SetConnectTimeout(c.connectTimeout).
+		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+			logrus.WithError(err).Warn("iothub: connection lost")
+			markLost()
+		}).
 		SetTLSConfig(&tls.Config{
 			ServerName: c.conn.HostName,
 			MinVersion: tls.VersionTLS12,
@@ -172,15 +330,30 @@ func (c *AzureClient) ensureConnectedLocked() error {
 	client := mqtt.NewClient(opts)
 	token := client.Connect()
 	if !token.WaitTimeout(c.connectTimeout) {
-		return fmt.Errorf("iothub: connect to %s:8883 timed out after %s", c.conn.HostName, c.connectTimeout)
+		return fmt.Errorf("iothub: connect to %s timed out after %s", c.brokerURL, c.connectTimeout)
 	}
 	if err := token.Error(); err != nil {
-		return fmt.Errorf("iothub: connect to %s:8883 failed: %w", c.conn.HostName, err)
+		return fmt.Errorf("iothub: connect to %s failed: %w", c.brokerURL, err)
 	}
 
 	c.mqttClient = client
 	c.sasExpiry = expiry
+	c.lost = lost
+	c.markLost = markLost
+	logrus.WithField("sasExpiry", expiry.UTC().Format(time.RFC3339)).Info("iothub: connected")
+	if c.twin != nil {
+		c.twin.connected(twinConn{client: client, lost: lost})
+	}
 	return nil
+}
+
+// dropLocked closes the current connection, if any. Caller must hold c.mu.
+func (c *AzureClient) dropLocked() {
+	if c.mqttClient != nil {
+		c.mqttClient.Disconnect(250)
+		c.mqttClient = nil
+	}
+	c.markLost()
 }
 
 // PublishTelemetry publishes payload to `devices/<deviceId>/messages/events/`
@@ -213,10 +386,7 @@ func (c *AzureClient) PublishTelemetry(ctx context.Context, payload []byte, prop
 	if err := publish(); err != nil {
 		logrus.WithError(err).Warn("iothub: publish failed, retrying once")
 		c.mu.Lock()
-		if c.mqttClient != nil {
-			c.mqttClient.Disconnect(250)
-			c.mqttClient = nil
-		}
+		c.dropLocked()
 		c.mu.Unlock()
 		if err2 := publish(); err2 != nil {
 			return fmt.Errorf("iothub: publish failed after retry: %w", err2)
@@ -266,14 +436,51 @@ func (c *AzureClient) PublishTelemetryAsync(ctx context.Context, payload []byte,
 	}, nil
 }
 
-// Close shuts down the MQTT session if one exists.
+// WaitTwinSynced blocks until the twin has been read, applied and reported
+// once since the client started, or ctx is done. On ctx it returns an error
+// that carries the last twin failure, if any. Requires WithCookTwin.
+func (c *AzureClient) WaitTwinSynced(ctx context.Context) error {
+	if c.twin == nil {
+		return errors.New("iothub: twin not enabled (WithCookTwin)")
+	}
+	select {
+	case <-c.twin.synced:
+		return nil
+	case <-ctx.Done():
+		if last := c.twin.lastError(); last != nil {
+			return fmt.Errorf("%w (last twin error: %v)", ctx.Err(), last)
+		}
+		return ctx.Err()
+	}
+}
+
+// GetTwin reads the whole twin over the current connection. It does not apply
+// anything. Requires WithCookTwin and a started, connected client.
+func (c *AzureClient) GetTwin(ctx context.Context) (Twin, error) {
+	if c.twin == nil {
+		return Twin{}, errors.New("iothub: twin not enabled (WithCookTwin)")
+	}
+	tw, err := c.twin.get(ctx)
+	if err != nil {
+		return Twin{}, fmt.Errorf("iothub: twin GET: %w", err)
+	}
+	return tw, nil
+}
+
+// Close stops Start's goroutines and shuts down the MQTT session if one
+// exists.
 func (c *AzureClient) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.mqttClient != nil {
-		c.mqttClient.Disconnect(250)
-		c.mqttClient = nil
+	stop := c.stop
+	c.mu.Unlock()
+	if stop != nil {
+		stop()
 	}
+	c.wg.Wait()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dropLocked()
 	return nil
 }
 
