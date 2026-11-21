@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
 
@@ -137,12 +138,16 @@ func TestCollector_PollEmitsSampleWithAllHardwareFlags(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	// The test takes the first sample, whenever it comes: if a poll fails
+	// (say the client's 10s timeout on a starved machine), the next tick
+	// polls again. No assertion depends on the interval.
 	c, err := New(srv.URL, 50*time.Millisecond, noop.NewTracerProvider().Tracer(""))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Done only at the hang guard (or when the test ends).
+	ctx, cancel := context.WithCancel(await.Context(t))
 	defer cancel()
 
 	startErr := make(chan error, 1)
@@ -170,7 +175,7 @@ func TestCollector_PollEmitsSampleWithAllHardwareFlags(t *testing.T) {
 	}
 
 	cancel()
-	if err := <-startErr; err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+	if err := <-startErr; err != nil && err != context.Canceled {
 		t.Fatalf("Start returned unexpected error: %v", err)
 	}
 }
@@ -216,12 +221,15 @@ func TestEndToEnd_CollectorQueueMockClient(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	// As above: the first sample, from whichever poll succeeds first.
 	c, err := New(srv.URL, 50*time.Millisecond, noop.NewTracerProvider().Tracer(""))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	q, err := queue.Open(t.TempDir(), queue.Options{FlushEveryN: 1, FlushInterval: 10 * time.Millisecond})
+	// FlushEveryN 1 fsyncs every Enqueue, so the background flush timer has
+	// nothing to do here; it is set long so it never fires either.
+	q, err := queue.Open(t.TempDir(), queue.Options{FlushEveryN: 1, FlushInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("queue.Open: %v", err)
 	}
@@ -231,7 +239,7 @@ func TestEndToEnd_CollectorQueueMockClient(t *testing.T) {
 	const injectedCorrelationID = "corr-from-twin-desired"
 	const injectedCookID = "cook-abc-123"
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(await.Context(t))
 	t.Cleanup(cancel)
 
 	collectorDone := make(chan struct{})
@@ -246,8 +254,8 @@ func TestEndToEnd_CollectorQueueMockClient(t *testing.T) {
 	var sample Sample
 	select {
 	case sample = <-c.Samples():
-	case <-time.After(2 * time.Second):
-		t.Fatal("never observed a sample from collector")
+	case <-ctx.Done():
+		t.Fatalf("never observed a sample from collector before the hang guard: %v", ctx.Err())
 	}
 
 	reading := wire.MapV1ToTemperatureReading(sample.Status, sample.Timestamp, &cookID)

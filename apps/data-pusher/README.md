@@ -253,8 +253,7 @@ input, and every error is redacted before it is printed.
 ### Tests
 
 ```bash
-make test                 # full suite
-go test -race ./...       # with race detector
+make test                 # full suite, with the race detector (go test -race)
 ```
 
 Tests wait on events, never on the wall clock: no `time.Sleep`, no
@@ -269,9 +268,12 @@ Tests wait on events, never on the wall clock: no `time.Sleep`, no
   context is done.
 - `internal/clock` and `internal/clock/clocktest` — code that times itself
   (backoff, refresh, timeouts) takes a `clock.Clock`, `clock.Real()` in
-  production. Tests pass `clocktest.New(start)`, whose timers fire only on
-  `Advance`. The fake is an `await.Source`, so a test can wait until the code
-  has reached a timer (`Pending()`) before advancing past it.
+  production: the IoT Hub client through `iothub.WithClock`, simdevice through
+  `simdevice.Env.Clock` (its `--interval` gap, `--twin` timeout and send
+  timeout). `clock.WithTimeout` is `context.WithTimeout` on a `Clock`. Tests
+  pass `clocktest.New(start)`, whose timers fire only on `Advance`. The fake
+  is an `await.Source`, so a test can wait until the code has reached a timer
+  (`Pending()`) before advancing past it.
 - `internal/iothub/iothubtest` — the fake IoT Hub is an `await.Source` that
   signals every connection, packet and twin change.
 

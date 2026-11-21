@@ -5,8 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock/clocktest"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub/iothubtest"
 
@@ -14,8 +19,15 @@ import (
 )
 
 // runTwinMain runs Main with the real twin client (the Pi's code) pointed at
-// the fake hub b.
+// the fake hub b, on a clock that never moves: no timeout can fire, so only
+// the hub's answers decide the result.
 func runTwinMain(t *testing.T, b *iothubtest.Broker, args ...string) runResult {
+	t.Helper()
+	return twinMain(t, b, clocktest.New(clockStart), args...)
+}
+
+// twinMain is runTwinMain on clk.
+func twinMain(t *testing.T, b *iothubtest.Broker, clk clock.Clock, args ...string) runResult {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	code := Main(context.Background(), Env{
@@ -31,6 +43,7 @@ func runTwinMain(t *testing.T, b *iothubtest.Broker, args ...string) runResult {
 			return iothub.NewAzureClient(cs, append(opts, iothub.WithBrokerURL(b.URL()))...)
 		},
 		Tracer: otel.Tracer("simdevice-twin-test"),
+		Clock:  clk,
 	})
 	return runResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
@@ -102,10 +115,42 @@ func TestTwin_NoCookAndCountZero(t *testing.T) {
 	}
 }
 
+// An unresponsive hub: Main gives up once --timeout has passed on its clock.
+// The test advances the clock past it as soon as Main has armed it.
 func TestTwin_NoTwinResponseExitsNonZero(t *testing.T) {
+	const timeout = 300 * time.Millisecond
 	b := iothubtest.NewBroker(t)
 	b.SetUnresponsive(true)
-	res := runTwinMain(t, b, "--twin", "--timeout", "300ms")
+	clk := clocktest.New(clockStart)
+	var (
+		mu   sync.Mutex
+		done bool
+		res  runResult
+		sig  await.Signal
+	)
+	go func() {
+		r := twinMain(t, b, clk, "--twin", "--timeout", "300ms")
+		mu.Lock()
+		done, res = true, r
+		mu.Unlock()
+		sig.Notify()
+	}()
+	await.Until(t, "Main to arm its 300ms twin timeout", func() bool {
+		for _, d := range clk.Pending() {
+			if d == timeout {
+				return true
+			}
+		}
+		return false
+	}, func() any { return clk.Pending() }, clk)
+	clk.Advance(timeout)
+	await.Until(t, "Main to return", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return done
+	}, func() any { return clk.Pending() }, &sig)
+	mu.Lock()
+	defer mu.Unlock()
 	if res.code == ExitOK {
 		t.Fatal("exit 0 with no twin response")
 	}
