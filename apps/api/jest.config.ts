@@ -12,4 +12,9 @@ export default {
   // the default run so `nx test api` stays green without one.
   testPathIgnorePatterns: ['/node_modules/', '\\.emulator\\.spec\\.ts$'],
   coverageDirectory: '../../coverage/apps/api',
+  // HAR-111: the suite's one hang guard. Jest's 5 s default failed deterministic
+  // work (contract.spec's OpenAPI dereference in beforeAll) on CPU starvation
+  // alone in test-repeat's 8-copy load row; 30 s matches apps/web. No spec sets
+  // its own timeout, and nothing waits on it: it only bounds a hang.
+  testTimeout: 30_000,
 };

@@ -24,6 +24,11 @@ import { CosmosClient, type Container } from '@azure/cosmos';
 import type { TokenCredential } from '@azure/core-auth';
 
 import { CosmosAdapter } from './cosmos-adapter';
+import {
+  createEmulatorContainer,
+  EMULATOR_TIER_DATABASE,
+  emulatorTierDatabase,
+} from './emulator-tier.testing';
 import { DevicesRepository } from './devices-repository';
 import { DEFAULT_USER_PREFERENCES, UsersRepository } from './users-repository';
 
@@ -32,8 +37,6 @@ const EMULATOR_ENDPOINT = process.env['COSMOS_EMULATOR_ENDPOINT'] ?? 'https://lo
 /** The Cosmos emulator's documented, public, fixed account key. Test tier only. */
 const EMULATOR_KEY =
   'C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==';
-
-const PROBE_TIMEOUT_MS = 15_000;
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
 const COSMOS_MODULE_MAIN_TF = path.join(REPO_ROOT, 'apps/infrastructure/modules/cosmos-db/main.tf');
@@ -73,26 +76,20 @@ function describeError(error: unknown): string {
   return [name, code, message].filter(part => part !== undefined && part !== '').join(': ');
 }
 
+/**
+ * Readiness: await the emulator's own answer to a database-account read. There
+ * is no deadline of its own, so a slow but healthy emulator passes; the only
+ * hang guard is `testTimeout` in jest.emulator.config.ts.
+ */
 async function probeEmulator(client: CosmosClient): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
   try {
-    await Promise.race([
-      client.getDatabaseAccount(),
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`no response within ${PROBE_TIMEOUT_MS}ms`)),
-          PROBE_TIMEOUT_MS
-        );
-      }),
-    ]);
+    await client.getDatabaseAccount();
   } catch (error) {
     throw new Error(
       `Cosmos emulator unreachable at ${EMULATOR_ENDPOINT} (${describeError(error)}). ` +
         'Start one and trust its certificate as described in docs/development/ci-cd.md ' +
         '(Cosmos emulator tier). This tier fails rather than skips.'
     );
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -110,10 +107,8 @@ function expectPositiveCharge(requestCharge: number): void {
   expect(requestCharge).toBeGreaterThan(0);
 }
 
-jest.setTimeout(60_000);
-
 describe('HAR-27 users repository against the Cosmos emulator', () => {
-  const databaseName = `har27-${randomUUID()}`;
+  const databaseName = EMULATOR_TIER_DATABASE;
   const tfUsers = terraformContainer('users_shared');
   const tfDevices = terraformContainer('devices_shared');
   let client: CosmosClient;
@@ -129,9 +124,9 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
     });
     await probeEmulator(client);
 
-    const { database } = await client.databases.createIfNotExists({ id: databaseName });
+    const database = await emulatorTierDatabase(client);
     for (const tf of [tfUsers, tfDevices]) {
-      await database.containers.createIfNotExists({
+      await createEmulatorContainer(database, {
         id: tf.name,
         partitionKey: { paths: [tf.partitionKeyPath] },
         uniqueKeyPolicy: { uniqueKeys: [{ paths: tf.uniqueKeyPaths }] },
@@ -165,10 +160,6 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await client
-        .database(databaseName)
-        .delete()
-        .catch(() => undefined);
       client.dispose();
     }
   });

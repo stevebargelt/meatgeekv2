@@ -33,7 +33,9 @@ function stubCredential(token: string | Error = TOKEN) {
       if (token instanceof Error) {
         throw token;
       }
-      return { token, expiresOnTimestamp: Date.now() + 3_600_000 };
+      // A fixed expiry: the client reads only `token`, never the expiry, and
+      // keeps no token cache, so no clock is compared against it.
+      return { token, expiresOnTimestamp: Date.parse('2099-01-01T00:00:00.000Z') };
     },
   };
   return { credential, scopes };
