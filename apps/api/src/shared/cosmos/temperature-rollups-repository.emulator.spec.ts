@@ -36,6 +36,12 @@ import { buildCookChart, chartWindowOf } from '../../functions/cooks/get-cook-ch
 import { rollupTemperaturesHandler } from '../../functions/temperatures/rollup-temperatures';
 import { CosmosAdapter } from './cosmos-adapter';
 import {
+  deleteEmulatorContainers,
+  EMULATOR_TIER_DATABASE,
+  emulatorContainerId,
+  emulatorTierDatabase,
+} from './emulator-tier.testing';
+import {
   foldReadings,
   rollupDocumentId,
   TemperatureRollupsRepository,
@@ -135,7 +141,7 @@ function context(): InvocationContext {
 }
 
 describe('HAR-86 temperature rollups against the Cosmos emulator', () => {
-  const databaseName = `har86-${randomUUID()}`;
+  const databaseName = EMULATOR_TIER_DATABASE;
   const tfContainer = terraformRollupsContainer();
   let client: CosmosClient;
   let container: Container;
@@ -154,9 +160,9 @@ describe('HAR-86 temperature rollups against the Cosmos emulator', () => {
     });
     await probeEmulator(client);
 
-    const { database } = await client.databases.createIfNotExists({ id: databaseName });
+    const database = await emulatorTierDatabase(client);
     await database.containers.createIfNotExists({
-      id: tfContainer.name,
+      id: emulatorContainerId(tfContainer.name),
       partitionKey: { paths: [tfContainer.partitionKeyPath] },
       indexingPolicy: {
         indexingMode: 'consistent',
@@ -175,7 +181,7 @@ describe('HAR-86 temperature rollups against the Cosmos emulator', () => {
         temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: 'unused-by-this-tier',
         recipesContainerName: 'unused-by-this-tier',
-        temperatureRollupsContainerName: tfContainer.name,
+        temperatureRollupsContainerName: emulatorContainerId(tfContainer.name),
       },
       {
         credentialFactory: () => unusedCredential,
@@ -191,10 +197,7 @@ describe('HAR-86 temperature rollups against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await client
-        .database(databaseName)
-        .delete()
-        .catch(() => undefined);
+      await deleteEmulatorContainers(client, [tfContainer.name]);
       client.dispose();
     }
   });

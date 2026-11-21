@@ -26,6 +26,12 @@ import type { TokenCredential } from '@azure/core-auth';
 import type { Device } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
+import {
+  deleteEmulatorContainers,
+  EMULATOR_TIER_DATABASE,
+  emulatorContainerId,
+  emulatorTierDatabase,
+} from './emulator-tier.testing';
 import { DevicesRepository } from './devices-repository';
 
 const EMULATOR_ENDPOINT = process.env['COSMOS_EMULATOR_ENDPOINT'] ?? 'https://localhost:8081';
@@ -111,7 +117,7 @@ function expectPositiveCharge(requestCharge: number): void {
 }
 
 describe('HAR-20 devices repository against the Cosmos emulator', () => {
-  const databaseName = `har20-${randomUUID()}`;
+  const databaseName = EMULATOR_TIER_DATABASE;
   const tfContainer = terraformDevicesContainer();
   let client: CosmosClient;
   let container: Container;
@@ -125,9 +131,9 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
     });
     await probeEmulator(client);
 
-    const { database } = await client.databases.createIfNotExists({ id: databaseName });
+    const database = await emulatorTierDatabase(client);
     await database.containers.createIfNotExists({
-      id: tfContainer.name,
+      id: emulatorContainerId(tfContainer.name),
       partitionKey: { paths: [tfContainer.partitionKeyPath] },
       uniqueKeyPolicy: { uniqueKeys: [{ paths: tfContainer.uniqueKeyPaths }] },
     });
@@ -138,7 +144,7 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
         accountEndpoint: EMULATOR_ENDPOINT,
         databaseName,
         cooksContainerName: 'unused-by-this-tier',
-        devicesContainerName: tfContainer.name,
+        devicesContainerName: emulatorContainerId(tfContainer.name),
         temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: 'unused-by-this-tier',
         recipesContainerName: 'unused-by-this-tier',
@@ -158,10 +164,7 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await client
-        .database(databaseName)
-        .delete()
-        .catch(() => undefined);
+      await deleteEmulatorContainers(client, [tfContainer.name]);
       client.dispose();
     }
   });

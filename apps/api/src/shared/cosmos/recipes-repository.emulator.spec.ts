@@ -26,6 +26,12 @@ import type { TokenCredential } from '@azure/core-auth';
 import type { Recipe } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
+import {
+  deleteEmulatorContainers,
+  EMULATOR_TIER_DATABASE,
+  emulatorContainerId,
+  emulatorTierDatabase,
+} from './emulator-tier.testing';
 import { RecipesRepository } from './recipes-repository';
 
 const EMULATOR_ENDPOINT = process.env['COSMOS_EMULATOR_ENDPOINT'] ?? 'https://localhost:8081';
@@ -129,7 +135,7 @@ function steppedRepository(container: Container): RecipesRepository {
 }
 
 describe('HAR-36 recipes repository against the Cosmos emulator', () => {
-  const databaseName = `har36-${randomUUID()}`;
+  const databaseName = EMULATOR_TIER_DATABASE;
   const tfRecipes = terraformContainer('recipes_shared');
   let client: CosmosClient;
   let container: Container;
@@ -143,9 +149,9 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
     });
     await probeEmulator(client);
 
-    const { database } = await client.databases.createIfNotExists({ id: databaseName });
+    const database = await emulatorTierDatabase(client);
     await database.containers.createIfNotExists({
-      id: tfRecipes.name,
+      id: emulatorContainerId(tfRecipes.name),
       partitionKey: { paths: [tfRecipes.partitionKeyPath] },
       indexingPolicy: {
         indexingMode: 'consistent',
@@ -163,7 +169,7 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
         devicesContainerName: 'unused-by-this-tier',
         temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: 'unused-by-this-tier',
-        recipesContainerName: tfRecipes.name,
+        recipesContainerName: emulatorContainerId(tfRecipes.name),
         temperatureRollupsContainerName: 'unused-by-this-tier',
       },
       {
@@ -180,10 +186,7 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await client
-        .database(databaseName)
-        .delete()
-        .catch(() => undefined);
+      await deleteEmulatorContainers(client, [tfRecipes.name]);
       client.dispose();
     }
   });

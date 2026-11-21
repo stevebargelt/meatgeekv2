@@ -37,6 +37,12 @@ import type { Cook } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
+  deleteEmulatorContainers,
+  EMULATOR_TIER_DATABASE,
+  emulatorContainerId,
+  emulatorTierDatabase,
+} from './emulator-tier.testing';
+import {
   ACTIVE_DEVICE_LOCK_DOC_TYPE,
   CooksRepository,
   activeDeviceLockId,
@@ -154,7 +160,7 @@ async function partitionDocuments(
 // Real network round-trips; the emulator is slower than a fake.
 
 describe('HAR-12 cooks repository against the Cosmos emulator', () => {
-  const databaseName = `har12-${randomUUID()}`;
+  const databaseName = EMULATOR_TIER_DATABASE;
   const tfContainer = terraformCooksContainer();
   let client: CosmosClient;
   let container: Container;
@@ -169,9 +175,9 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     });
     await probeEmulator(client);
 
-    const { database } = await client.databases.createIfNotExists({ id: databaseName });
+    const database = await emulatorTierDatabase(client);
     await database.containers.createIfNotExists({
-      id: tfContainer.name,
+      id: emulatorContainerId(tfContainer.name),
       partitionKey: { paths: [tfContainer.partitionKeyPath] },
     });
 
@@ -181,7 +187,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
       {
         accountEndpoint: EMULATOR_ENDPOINT,
         databaseName,
-        cooksContainerName: tfContainer.name,
+        cooksContainerName: emulatorContainerId(tfContainer.name),
         devicesContainerName: 'unused-by-this-tier',
         temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: 'unused-by-this-tier',
@@ -202,10 +208,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await client
-        .database(databaseName)
-        .delete()
-        .catch(() => undefined);
+      await deleteEmulatorContainers(client, [tfContainer.name]);
       client.dispose();
     }
   });

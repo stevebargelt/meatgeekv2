@@ -24,6 +24,12 @@ import { CosmosClient, type Container } from '@azure/cosmos';
 import type { TokenCredential } from '@azure/core-auth';
 
 import { CosmosAdapter } from './cosmos-adapter';
+import {
+  deleteEmulatorContainers,
+  EMULATOR_TIER_DATABASE,
+  emulatorContainerId,
+  emulatorTierDatabase,
+} from './emulator-tier.testing';
 import { DevicesRepository } from './devices-repository';
 import { DEFAULT_USER_PREFERENCES, UsersRepository } from './users-repository';
 
@@ -103,7 +109,7 @@ function expectPositiveCharge(requestCharge: number): void {
 }
 
 describe('HAR-27 users repository against the Cosmos emulator', () => {
-  const databaseName = `har27-${randomUUID()}`;
+  const databaseName = EMULATOR_TIER_DATABASE;
   const tfUsers = terraformContainer('users_shared');
   const tfDevices = terraformContainer('devices_shared');
   let client: CosmosClient;
@@ -119,10 +125,10 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
     });
     await probeEmulator(client);
 
-    const { database } = await client.databases.createIfNotExists({ id: databaseName });
+    const database = await emulatorTierDatabase(client);
     for (const tf of [tfUsers, tfDevices]) {
       await database.containers.createIfNotExists({
-        id: tf.name,
+        id: emulatorContainerId(tf.name),
         partitionKey: { paths: [tf.partitionKeyPath] },
         uniqueKeyPolicy: { uniqueKeys: [{ paths: tf.uniqueKeyPaths }] },
       });
@@ -134,9 +140,9 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
         accountEndpoint: EMULATOR_ENDPOINT,
         databaseName,
         cooksContainerName: 'unused-by-this-tier',
-        devicesContainerName: tfDevices.name,
+        devicesContainerName: emulatorContainerId(tfDevices.name),
         temperaturesContainerName: 'unused-by-this-tier',
-        usersContainerName: tfUsers.name,
+        usersContainerName: emulatorContainerId(tfUsers.name),
         recipesContainerName: 'unused-by-this-tier',
         temperatureRollupsContainerName: 'unused-by-this-tier',
       },
@@ -155,10 +161,7 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await client
-        .database(databaseName)
-        .delete()
-        .catch(() => undefined);
+      await deleteEmulatorContainers(client, [tfUsers.name, tfDevices.name]);
       client.dispose();
     }
   });
