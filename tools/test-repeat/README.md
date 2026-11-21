@@ -80,8 +80,9 @@ On every pull request to `main` (opened, synchronize, reopened, labeled):
 1. `select` runs the harness self-tests, then maps
    `git diff --name-only <base>...HEAD` onto the registry's `paths` globs.
 2. One matrix job per selected suite (and shard) runs it with N = 50. The Cosmos
-   emulator suite has its own job with the same pinned emulator and readiness
-   step as `ci.yml`'s `api-cosmos-emulator`.
+   emulator suite has its own job on `windows-2025`, with the same pinned
+   emulator and start script (`.github/scripts/cosmos-emulator.ps1`) as
+   `ci.yml`'s `api-cosmos-emulator`.
 3. `summary` totals the shards into one table in the job summary — suite,
    affected?, runs requested, runs passed, first failing run, duration — with a
    row for every suite (an unaffected one says "not affected"). It fails if any

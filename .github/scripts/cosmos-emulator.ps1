@@ -37,7 +37,7 @@ $PinnedVersion = '2.14.28.0'
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
 # the deployed 400 RU/s shared database has one physical partition.
-$PartitionCount = 3
+$PartitionCount = 10
 $DefaultPartitionCount = 1
 
 $InstallDir = Join-Path $env:ProgramFiles 'Azure Cosmos DB Emulator'

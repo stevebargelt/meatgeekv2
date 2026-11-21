@@ -10,11 +10,12 @@
  * thrown away with its job.
  *
  * Why: the emulator runs with a small, fixed number of partitions
- * (AZURE_COSMOS_EMULATOR_PARTITION_COUNT in ci.yml and test-repeat.yml). A
- * database and container per spec file ran it out under eight concurrent copies
- * (503 "high demand in this region"), and the create/delete churn of repeated
- * runs brought the emulator down (ECONNREFUSED after a few runs). A fixed set of
- * containers costs the same partitions however many copies or runs use it.
+ * (PartitionCount in .github/scripts/cosmos-emulator.ps1, which ci.yml and
+ * test-repeat.yml both use). A database and container per spec file ran it out
+ * under eight concurrent copies (503 "high demand in this region"). A fixed set
+ * of containers costs the same partitions however many copies or runs use it.
+ * (The ECONNREFUSED after a few repeated runs was the classic Linux emulator
+ * image crashing natively, not the layout: HAR-113, docs/development/ci-cd.md.)
  *
  * Sharing is safe because every case keys its data by a fresh random user or
  * device id (the partition key) and reads only inside it.
