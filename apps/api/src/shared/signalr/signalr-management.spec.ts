@@ -39,7 +39,9 @@ function stubCredential(token: string | Error = 'mi-token') {
       if (token instanceof Error) {
         throw token;
       }
-      return { token, expiresOnTimestamp: Date.now() + 3_600_000 };
+      // A fixed expiry: the client reads only `token`, never the expiry, and
+      // keeps no token cache, so no clock is compared against it.
+      return { token, expiresOnTimestamp: Date.parse('2099-01-01T00:00:00.000Z') };
     },
   };
   return { credential, scopes };
@@ -295,12 +297,21 @@ describe('SignalRManagementClient on the wire (real fetch, loopback server)', ()
   });
 
   it('sends the token call with the documented path, api-version and Content-Length: 0', async () => {
+    const signals: Array<AbortSignal | null | undefined> = [];
     const c = new SignalRManagementClient(base, HUB, {
       credential: stubCredential().credential,
-      fetch: (input, init) => fetch(input, init),
+      // Real loopback I/O: record the client's AbortSignal.timeout, then drop it,
+      // so a starved machine cannot turn a slow answer into a failure.
+      fetch: (input, init) => {
+        signals.push(init?.signal);
+        return fetch(input, { ...init, signal: undefined });
+      },
     });
 
     const connection = await c.generateClientToken(USER_ID);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
 
     expect(connection.accessToken).toBe('wire-token');
     const version = `api-version=${SIGNALR_API_VERSION}`;

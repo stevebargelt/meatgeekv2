@@ -37,6 +37,11 @@ import type { Cook } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
+  createEmulatorContainer,
+  EMULATOR_TIER_DATABASE,
+  emulatorTierDatabase,
+} from './emulator-tier.testing';
+import {
   ACTIVE_DEVICE_LOCK_DOC_TYPE,
   CooksRepository,
   activeDeviceLockId,
@@ -51,7 +56,6 @@ const EMULATOR_KEY =
   'C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==';
 
 /** Bound on the reachability probe, so a dead endpoint fails fast and clearly. */
-const PROBE_TIMEOUT_MS = 15_000;
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
 const COSMOS_MODULE_MAIN_TF = path.join(REPO_ROOT, 'apps/infrastructure/modules/cosmos-db/main.tf');
@@ -88,28 +92,28 @@ function describeError(error: unknown): string {
   return [name, code, message].filter(part => part !== undefined && part !== '').join(': ');
 }
 
+/**
+ * Readiness: await the emulator's own answer to a database-account read. There
+ * is no deadline of its own, so a slow but healthy emulator passes; the only
+ * hang guard is `testTimeout` in jest.emulator.config.ts.
+ */
 async function probeEmulator(client: CosmosClient): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
   try {
-    await Promise.race([
-      client.getDatabaseAccount(),
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`no response within ${PROBE_TIMEOUT_MS}ms`)),
-          PROBE_TIMEOUT_MS
-        );
-      }),
-    ]);
+    await client.getDatabaseAccount();
   } catch (error) {
     throw new Error(
       `Cosmos emulator unreachable at ${EMULATOR_ENDPOINT} (${describeError(error)}). ` +
         'Start one and trust its certificate as described in docs/development/ci-cd.md ' +
         '(Cosmos emulator tier). This tier fails rather than skips.'
     );
-  } finally {
-    clearTimeout(timer);
   }
 }
+
+/** Fixed instants: no assertion here depends on the wall clock. */
+const START_TIME = '2026-03-01T12:00:00.000Z';
+const STOP_TIME = '2026-03-01T14:00:00.000Z';
+const stopAt = (minutesAfterStop: number) =>
+  new Date(Date.parse(STOP_TIME) + minutesAfterStop * 60_000).toISOString();
 
 function newCook(userId: string, overrides: Partial<Cook> = {}): Cook {
   return {
@@ -118,7 +122,7 @@ function newCook(userId: string, overrides: Partial<Cook> = {}): Cook {
     deviceId: `grill-${randomUUID().slice(0, 8)}`,
     name: 'Emulator brisket',
     status: 'active',
-    startTime: new Date().toISOString(),
+    startTime: START_TIME,
     meatType: 'brisket',
     ...overrides,
   };
@@ -153,10 +157,9 @@ async function partitionDocuments(
 }
 
 // Real network round-trips; the emulator is slower than a fake.
-jest.setTimeout(60_000);
 
 describe('HAR-12 cooks repository against the Cosmos emulator', () => {
-  const databaseName = `har12-${randomUUID()}`;
+  const databaseName = EMULATOR_TIER_DATABASE;
   const tfContainer = terraformCooksContainer();
   let client: CosmosClient;
   let container: Container;
@@ -171,8 +174,8 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     });
     await probeEmulator(client);
 
-    const { database } = await client.databases.createIfNotExists({ id: databaseName });
-    await database.containers.createIfNotExists({
+    const database = await emulatorTierDatabase(client);
+    await createEmulatorContainer(database, {
       id: tfContainer.name,
       partitionKey: { paths: [tfContainer.partitionKeyPath] },
     });
@@ -204,10 +207,6 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await client
-        .database(databaseName)
-        .delete()
-        .catch(() => undefined);
       client.dispose();
     }
   });
@@ -292,7 +291,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     // The refused batch rolled back: no contender cook was written.
     expect((await repository.getCook(userId, contender.id)).cook).toBeUndefined();
 
-    await repository.stopCook(userId, holder.id, new Date().toISOString());
+    await repository.stopCook(userId, holder.id, STOP_TIME);
     const afterStop = await repository.startCook(contender);
     expect(afterStop.outcome).toBe('created');
   });
@@ -309,7 +308,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     expect(during.cookId).toBe(cook.id);
     expectPositiveCharge(during.requestCharge);
 
-    await repository.stopCook(userId, cook.id, new Date().toISOString());
+    await repository.stopCook(userId, cook.id, STOP_TIME);
     expect(
       (await repository.getActiveCookIdForDevice(userId, 'grill-twin')).cookId
     ).toBeUndefined();
@@ -319,7 +318,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     const userId = `user-${randomUUID()}`;
     const cook = newCook(userId);
     await repository.startCook(cook);
-    const endTime = new Date(Date.now() + 60_000).toISOString();
+    const endTime = stopAt(1);
 
     const stopped = await repository.stopCook(userId, cook.id, endTime);
     expect(stopped.transitioned).toBe(true);
@@ -336,7 +335,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     expect(docs).toEqual([{ id: cook.id }]);
 
     // A repeated stop returns the persisted final state and writes nothing.
-    const again = await repository.stopCook(userId, cook.id, new Date().toISOString());
+    const again = await repository.stopCook(userId, cook.id, STOP_TIME);
     expect(again.transitioned).toBe(false);
     expect(again.cook).toEqual({ ...cook, status: 'completed', endTime });
     expectPositiveCharge(again.requestCharge);
@@ -350,9 +349,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     const userId = `user-${randomUUID()}`;
     const cook = newCook(userId);
     await repository.startCook(cook);
-    const endTimes = [1, 2, 3].map(minutes =>
-      new Date(Date.now() + minutes * 60_000).toISOString()
-    );
+    const endTimes = [1, 2, 3].map(stopAt);
 
     const results = await Promise.all(
       endTimes.map(endTime => repository.stopCook(userId, cook.id, endTime))
@@ -424,7 +421,7 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
 
     for (const cook of [xDoneOld, xDoneNew, yDone]) {
       expect((await repository.startCook(cook)).outcome).toBe('created');
-      await repository.stopCook(userId, cook.id, new Date().toISOString());
+      await repository.stopCook(userId, cook.id, STOP_TIME);
     }
     for (const cook of [xActive, yActive]) {
       expect((await repository.startCook(cook)).outcome).toBe('created');

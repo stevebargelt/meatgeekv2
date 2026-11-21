@@ -236,10 +236,13 @@ export class UsersRepository {
    *   (`adapter.getUsersContainer()`).
    * @param devices where `User.devices` comes from: the devices repository's
    *   owner query. Both are injected so unit tests run on fakes.
+   * @param now the clock that stamps `createdAt` on a new profile. Injected so
+   *   tests can pin it; defaults to the real clock.
    */
   constructor(
     private readonly container: Container,
-    private readonly devices: DeviceOwnerSource
+    private readonly devices: DeviceOwnerSource,
+    private readonly now: () => Date = () => new Date()
   ) {}
 
   /** Point read of the raw document with its ETag. Partition key = userId. A 404
@@ -330,7 +333,7 @@ export class UsersRepository {
       name: input.name,
       email: input.email,
       preferences: mergeUserPreferences(DEFAULT_USER_PREFERENCES, input.preferences),
-      createdAt: new Date().toISOString(),
+      createdAt: this.now().toISOString(),
     };
     try {
       const response = await this.container.items.create<StoredUser>(document);
