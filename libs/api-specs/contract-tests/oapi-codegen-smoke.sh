@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # oapi-codegen-smoke.sh — run deepmap/oapi-codegen against the spec and emit
-# Go source to /tmp/api.go. Documented smoke test for ticket #4's Go codegen
-# path; not auto-invoked by nx test.
+# Go source for a person to inspect. A manual codegen tool, NOT a test: it
+# asserts nothing, and it pulls an image over the network, so no CI job or Nx
+# target runs it (HAR-118).
 #
 # Usage:
 #   bash libs/api-specs/contract-tests/oapi-codegen-smoke.sh
 #   OUTPUT=/tmp/custom.go bash libs/api-specs/contract-tests/oapi-codegen-smoke.sh
+#
+# Without OUTPUT it writes to a fresh `mktemp` file and prints the path, so two
+# copies running at once never write the same file.
 #
 # Inspect the generated Go file for any of the failure modes documented in
 # contract-tests/README.md (map[string]interface{}, missing enums, etc.).
@@ -21,7 +25,7 @@ if [[ ! -f "${REPO_ROOT}/${SPEC_PATH}" ]]; then
   exit 1
 fi
 
-OUTPUT="${OUTPUT:-/tmp/api.go}"
+OUTPUT="${OUTPUT:-$(mktemp "${TMPDIR:-/tmp}/oapi-codegen-smoke.XXXXXX")}"
 OAPI_CODEGEN_IMAGE="${OAPI_CODEGEN_IMAGE:-deepmap/oapi-codegen:latest}"
 PACKAGE="${PACKAGE:-apispecs}"
 

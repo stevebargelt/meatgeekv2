@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 
 import * as ts from 'typescript';
 
@@ -43,6 +43,14 @@ const DEVICE = {
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const SPEC_PATH = path.resolve(__dirname, '..', 'spec', 'openapi.yaml');
 
+// The CLI's entry point, run with this Node rather than through `npx`, so the
+// result does not depend on PATH or the caller's npm configuration.
+const OPENAPI_TYPESCRIPT_CLI = path.join(
+  path.dirname(require.resolve('openapi-typescript/package.json')),
+  'bin',
+  'cli.js',
+);
+
 /**
  * Generate TS types from the OpenAPI spec via the openapi-typescript CLI.
  *
@@ -50,30 +58,33 @@ const SPEC_PATH = path.resolve(__dirname, '..', 'spec', 'openapi.yaml');
  * v7 of openapi-typescript pulls in ESM-only dependencies that Jest's
  * default CJS transformer cannot load. The CLI is a separate process and
  * sidesteps the issue entirely.
+ *
+ * It waits for the CLI to exit and sets no deadline of its own: the only bound
+ * is the Jest timeout on the `beforeAll` that awaits it. `signal` lets that
+ * hook's `afterAll` stop the process if Jest gives up on it first.
  */
-function generateTypes(specPath: string): string {
-  const tmpOut = path.join(
-    fs.mkdtempSync(path.join(os.tmpdir(), 'api-specs-roundtrip-')),
-    'types.ts',
-  );
-  execFileSync(
-    'npx',
-    ['--no-install', 'openapi-typescript', specPath, '-o', tmpOut],
-    {
-      cwd: REPO_ROOT,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      // Generation parses YAML, dereferences $refs, walks every schema.
-      // 60s gives a generous floor for cold containers.
-      timeout: 60_000,
-    },
-  );
-  const out = fs.readFileSync(tmpOut, 'utf8');
+async function generateTypes(specPath: string, signal: AbortSignal): Promise<string> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'api-specs-roundtrip-'));
+  const tmpOut = path.join(dir, 'types.ts');
   try {
-    fs.rmSync(path.dirname(tmpOut), { recursive: true, force: true });
-  } catch {
-    /* ignore */
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        [OPENAPI_TYPESCRIPT_CLI, specPath, '-o', tmpOut],
+        { cwd: REPO_ROOT, signal },
+        (error, _stdout, stderr) => {
+          if (error) {
+            reject(new Error(`openapi-typescript did not generate ${tmpOut}: ${error.message}\n${stderr}`));
+          } else {
+            resolve();
+          }
+        },
+      );
+    });
+    return fs.readFileSync(tmpOut, 'utf8');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-  return out;
 }
 
 /**
@@ -131,10 +142,16 @@ describe('round-trip — spec → openapi-typescript → fixture conformance', (
   jest.setTimeout(90_000);
 
   let generatedTypes = '';
+  const generation = new AbortController();
 
-  beforeAll(() => {
-    generatedTypes = generateTypes(SPEC_PATH);
+  beforeAll(async () => {
+    generatedTypes = await generateTypes(SPEC_PATH, generation.signal);
     expect(generatedTypes.length).toBeGreaterThan(0);
+  });
+
+  afterAll(() => {
+    // A no-op once the CLI has exited; stops it if the hook above timed out.
+    generation.abort();
   });
 
   it('produces named schema types (smoke for codegen friendliness)', () => {

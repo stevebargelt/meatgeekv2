@@ -660,22 +660,20 @@ describe('TemperatureCalculator', () => {
       );
       const result = calc.estimateCompletionTime(readings, 300, 'probe1Temp');
       // slope > 0 (170 > 100 over the window), so we get a positive estimate
-      if (result.estimatedMinutes !== null) {
-        expect(result.confidence).toBe('low');
-      }
+      expect(result.estimatedMinutes as number).toBeGreaterThan(0);
+      expect(result.confidence).toBe('low');
     });
 
-    it('computes estimatedCompletionTime as Date.now() + estimatedMinutes*60000 (ISO)', () => {
+    it('computes estimatedCompletionTime as the frozen now + estimatedMinutes*60000 (ISO)', () => {
+      // The clock is frozen at 01:00:00.000Z by this describe's beforeEach.
+      // +10°F/min, last=170, target=200 → ceil(30/10)=3 min → 01:03:00.000Z.
       const readings = readingsForProbe(
         'probe1Temp',
         [100, 110, 120, 130, 140, 150, 160, 170]
       );
       const result = calc.estimateCompletionTime(readings, 200, 'probe1Temp');
-      expect(result.estimatedMinutes).not.toBeNull();
-      const expected = new Date(
-        Date.now() + (result.estimatedMinutes as number) * 60_000
-      ).toISOString();
-      expect(result.estimatedCompletionTime).toBe(expected);
+      expect(result.estimatedMinutes).toBe(3);
+      expect(result.estimatedCompletionTime).toBe('2026-01-01T01:03:00.000Z');
     });
 
     it('honors the probe parameter (estimates against probe2Temp readings)', () => {
