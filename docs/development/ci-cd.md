@@ -147,7 +147,7 @@ A fourth environment, `development-infra-apply-recovery`, gates the recovery `wo
 
 1. fails at once if `vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID` is empty;
 2. requests a GitHub OIDC ID token for audience `api://AzureADTokenExchange` from `ACTIONS_ID_TOKEN_REQUEST_URL` with `ACTIONS_ID_TOKEN_REQUEST_TOKEN` (present because the workflow holds `id-token: write`), and masks it;
-3. signs in as the peer with `az login --service-principal --federated-token … --allow-no-subscriptions` under a throwaway `AZURE_CONFIG_DIR` (`mktemp -d`), so the `azure/login` session as app-publish, which the rest of the step uses, is never touched;
+3. signs in as the peer with `az login --service-principal --federated-token … --allow-no-subscriptions` under a throwaway `AZURE_CONFIG_DIR` (`mktemp -d`) with `AZURE_CORE_COLLECT_TELEMETRY=no` (az's detached telemetry uploader would otherwise still be writing into that directory when the step removes it), so the `azure/login` session as app-publish, which the rest of the step uses, is never touched;
 4. mints `az account get-access-token --scope "<functions_auth_audience>/.default"` from that config dir, deletes the dir, and masks the token;
 5. decodes the token's payload and fails unless its `appid` (v1) or `azp` (v2) claim equals the peer's client id and differs from `AZURE_APP_DEPLOY_CLIENT_ID`, which catches a cross-wired login. Claim values are compared, never printed. On success the log shows `acceptance peer token: minted; appid check passed`.
 
