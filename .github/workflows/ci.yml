@@ -60,7 +60,10 @@ jobs:
     needs: setup
     strategy:
       matrix:
-        project: ['api', 'web', 'api-interfaces']
+        # HAR-107: data-models, utils, api-specs and web-e2e (its Jest tier,
+        # apps/web-e2e/live/*.test.ts) ran in no workflow before; every Jest
+        # project in the repo is now linted and tested here.
+        project: ['api', 'web', 'api-interfaces', 'data-models', 'utils', 'api-specs', 'web-e2e']
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

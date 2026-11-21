@@ -1,0 +1,289 @@
+name: test-repeat
+
+# HAR-107 (goal HAR-106: every test in MeatGeek is deterministic). Runs each
+# test suite a pull request affects 50 times in a row, with the race detector on
+# the Go suites, and reports one table in the job summary. A suite that fails
+# once in 50 runs is flaky, and this is where that shows.
+#
+# Selection is tools/test-repeat/suites.mjs's path globs matched against the
+# pull request's changed files (`git diff --name-only <base>...HEAD`):
+#
+#   - a change to the harness (tools/test-repeat/** or this file) runs every
+#     suite ONCE, proving each command still works in CI without putting
+#     not-yet-fixed suites through 50 runs;
+#   - label `test-repeat:all` runs every suite 50 times;
+#   - label `test-repeat:load` adds one pass of each selected suite with 8
+#     copies running at once (--parallel 8).
+#
+# No secret, no environment, no OIDC permission: `contents: read` is the whole
+# token, so it runs on fork pull requests exactly like ci.yml's web-e2e job.
+# Keep it that way.
+#
+# Every label event re-runs the workflow (the newest run cancels the older
+# one): a run skipped because an unrelated label was added would leave a green
+# "skipped" check standing in for a red one.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-repeat-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      selection: ${{ steps.select.outputs.selection }}
+      matrix: ${{ steps.select.outputs.matrix }}
+      has_matrix: ${{ steps.select.outputs.has_matrix }}
+      emulator_matrix: ${{ steps.select.outputs.emulator_matrix }}
+      has_emulator: ${{ steps.select.outputs.has_emulator }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # The three-dot diff needs the merge base.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Harness self-tests
+        # Node built-ins only: nothing to install.
+        run: node tools/test-repeat/run-tests.mjs
+
+      - name: Select affected suites
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: >-
+          node tools/test-repeat/test-repeat.mjs select
+          --affected "$BASE_SHA"
+          --labels "$PR_LABELS"
+          --github-output
+
+  repeat:
+    needs: select
+    if: needs.select.outputs.has_matrix == 'true'
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    # Shards keep a job near 25 minutes; this is the hang backstop.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: ${{ matrix.npm && 'npm' || '' }}
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        if: matrix.npm
+        run: corepack enable
+
+      - name: Install dependencies
+        if: matrix.npm
+        run: npm ci
+
+      - name: Setup Go
+        if: matrix.go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.goModFile }}
+          cache-dependency-path: ${{ matrix.goSumFile }}
+
+      - name: Setup Terraform
+        if: matrix.terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.9'
+          # The wrapper intercepts stdin, which hangs `terraform fmt -`
+          # (bootstrap.test.sh). Same setting as validate-infrastructure.
+          terraform_wrapper: false
+
+      - name: Resolve the installed @playwright/test version
+        if: matrix.chromium
+        id: playwright
+        run: |
+          version=$(node -p "require('./package-lock.json').packages['node_modules/@playwright/test'].version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        if: matrix.chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium
+
+      - name: Install Chromium and its system dependencies
+        if: matrix.chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run ${{ matrix.name }}
+        env:
+          SUITE: ${{ matrix.suite }}
+          RUNS: ${{ matrix.runs }}
+          SHARD: ${{ matrix.shard }}
+          PARALLEL: ${{ matrix.parallel }}
+          KIND: ${{ matrix.kind }}
+          KEY: ${{ matrix.key }}
+        run: >-
+          node tools/test-repeat/test-repeat.mjs run "$SUITE"
+          --runs "$RUNS" --shard "$SHARD" --parallel "$PARALLEL" --kind "$KIND"
+          --result "$RUNNER_TEMP/test-repeat/results/$KEY.json"
+          --log-dir "$RUNNER_TEMP/test-repeat/logs/$KEY"
+
+      - name: Upload result and failing-run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-repeat-${{ matrix.key }}
+          path: ${{ runner.temp }}/test-repeat/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload Playwright traces and screenshots
+        if: failure() && matrix.chromium
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ matrix.key }}
+          path: dist/.playwright/web-e2e
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The api Cosmos emulator suite, in its own job because it needs the
+  # emulator service. Same pinned image, settings and readiness step as ci.yml's
+  # api-cosmos-emulator job; keep the two in step.
+  repeat-emulator:
+    needs: select
+    if: needs.select.outputs.has_emulator == 'true'
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.emulator_matrix) }}
+    services:
+      cosmos:
+        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:9a4f69121f20c1d6502db84625c71ebb441ab61b01880a7b2d3d8031c6dac429
+        ports:
+          - 8081:8081
+        env:
+          AZURE_COSMOS_EMULATOR_PARTITION_COUNT: '3'
+          AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE: 'false'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for the Cosmos emulator (bounded)
+        # Readiness = the emulator logged its final `Started` line (every
+        # partition is up) AND its certificate is downloadable. Bounded at 5
+        # minutes; on timeout the job fails with the emulator's own log tail.
+        env:
+          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
+        run: |
+          cert="$RUNNER_TEMP/cosmos-emulator.pem"
+          if ! timeout 300 bash -c '
+            until docker logs "$COSMOS_CONTAINER_ID" 2>&1 | tr -d "\r" | grep -qx "Started"; do sleep 5; done
+            until curl -skf https://localhost:8081/_explorer/emulator.pem -o "$0"; do sleep 5; done
+          ' "$cert"; then
+            echo "::error::Cosmos emulator not ready within 300s"
+            docker logs --tail 50 "$COSMOS_CONTAINER_ID" || true
+            exit 1
+          fi
+          echo "NODE_EXTRA_CA_CERTS=$cert" >> "$GITHUB_ENV"
+
+      - name: Run ${{ matrix.name }}
+        env:
+          SUITE: ${{ matrix.suite }}
+          RUNS: ${{ matrix.runs }}
+          SHARD: ${{ matrix.shard }}
+          PARALLEL: ${{ matrix.parallel }}
+          KIND: ${{ matrix.kind }}
+          KEY: ${{ matrix.key }}
+        run: >-
+          node tools/test-repeat/test-repeat.mjs run "$SUITE"
+          --runs "$RUNS" --shard "$SHARD" --parallel "$PARALLEL" --kind "$KIND"
+          --result "$RUNNER_TEMP/test-repeat/results/$KEY.json"
+          --log-dir "$RUNNER_TEMP/test-repeat/logs/$KEY"
+
+      - name: Upload result and failing-run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-repeat-${{ matrix.key }}
+          path: ${{ runner.temp }}/test-repeat/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # One table for the whole run. Fails when any selected pass failed or never
+  # reported, so this is the one check to require.
+  summary:
+    needs: [select, repeat, repeat-emulator]
+    if: always() && needs.select.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download results
+        # Nothing to download when nothing was selected, or when every job
+        # died before uploading; the summary reports the missing results.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-repeat-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/test-repeat
+
+      - name: Summarise
+        env:
+          SELECTION: ${{ needs.select.outputs.selection }}
+        run: |
+          printf '%s' "$SELECTION" > "$RUNNER_TEMP/selection.json"
+          node tools/test-repeat/test-repeat.mjs summary \
+            --selection "$RUNNER_TEMP/selection.json" \
+            --results "$RUNNER_TEMP/test-repeat/results" \
+            --step-summary
