@@ -16,9 +16,8 @@ func TestGenerateSASToken_FormatAndExpiry(t *testing.T) {
 	deviceID := "meatgeek3"
 	key := base64.StdEncoding.EncodeToString([]byte("secret-key-bytes"))
 
-	before := time.Now()
-	token, expiry, err := GenerateSASToken(host, deviceID, key, 1*time.Hour)
-	after := time.Now()
+	now := time.Unix(1_700_000_000, 0).Add(400 * time.Millisecond) // mid-second: se truncates
+	token, expiry, err := generateSASTokenFrom(now, host, deviceID, key, 1*time.Hour)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,10 +44,8 @@ func TestGenerateSASToken_FormatAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("se=%q is not a unix timestamp: %v", se, err)
 	}
-	minExpected := before.Add(1 * time.Hour).Unix()
-	maxExpected := after.Add(1 * time.Hour).Unix()
-	if seUnix < minExpected || seUnix > maxExpected+1 {
-		t.Errorf("se=%d outside expected window [%d..%d]", seUnix, minExpected, maxExpected+1)
+	if want := now.Add(1 * time.Hour).Unix(); seUnix != want {
+		t.Errorf("se=%d, want now+1h = %d", seUnix, want)
 	}
 	if expiry.Unix() != seUnix {
 		t.Errorf("returned expiry %d does not match token se %d", expiry.Unix(), seUnix)
@@ -59,6 +56,23 @@ func TestGenerateSASToken_FormatAndExpiry(t *testing.T) {
 	}
 	if parsed.Get("skn") != "" {
 		t.Errorf("device-scoped SAS must omit skn; got %q", parsed.Get("skn"))
+	}
+}
+
+// GenerateSASToken is generateSASTokenFrom on the system clock: same token
+// for the same expiry second.
+func TestGenerateSASToken_MatchesTokenMintedAtItsExpiry(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString([]byte("secret-key-bytes"))
+	token, expiry, err := GenerateSASToken("foo.azure-devices.net", "meatgeek3", key, time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateSASToken: %v", err)
+	}
+	want, wantExpiry, err := generateSASTokenAt("foo.azure-devices.net", "meatgeek3", key, expiry.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != want || !expiry.Equal(wantExpiry) {
+		t.Errorf("GenerateSASToken = %q, %v; want %q, %v", token, expiry, want, wantExpiry)
 	}
 }
 

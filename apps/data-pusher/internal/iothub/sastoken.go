@@ -21,11 +21,16 @@ import (
 // `skn` (policy name) is intentionally omitted: this is a device-scoped
 // SAS minted from the device's own key.
 func GenerateSASToken(hostName, deviceID, sharedAccessKey string, ttl time.Duration) (string, time.Time, error) {
+	return generateSASTokenFrom(time.Now(), hostName, deviceID, sharedAccessKey, ttl)
+}
+
+// generateSASTokenFrom is GenerateSASToken minted at now instead of the
+// system clock: the token expires at now+ttl, truncated to the second.
+func generateSASTokenFrom(now time.Time, hostName, deviceID, sharedAccessKey string, ttl time.Duration) (string, time.Time, error) {
 	if ttl <= 0 {
 		return "", time.Time{}, fmt.Errorf("iothub: SAS token TTL must be positive, got %s", ttl)
 	}
-	expiryUnix := time.Now().Add(ttl).Unix()
-	return generateSASTokenAt(hostName, deviceID, sharedAccessKey, expiryUnix)
+	return generateSASTokenAt(hostName, deviceID, sharedAccessKey, now.Add(ttl).Unix())
 }
 
 // generateSASTokenAt is the deterministic core of GenerateSASToken with

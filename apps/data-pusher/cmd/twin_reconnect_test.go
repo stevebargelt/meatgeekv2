@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock/clocktest"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/collector"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/cooksession"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
@@ -28,7 +31,6 @@ const twinTestConnStr = "HostName=test-hub.azure-devices.net;DeviceId=pi-1;Share
 // enqueuer writes and the publisher sends carries cookId c1 in its body and
 // correlation.id r1 as a message property.
 func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
-	const wait = 10 * time.Second
 	tracer := otel.Tracer("twin-reconnect-test")
 	broker := iothubtest.NewBroker(t)
 
@@ -37,10 +39,13 @@ func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cooksession.Open: %v", err)
 	}
+	// The client's clock is fake: its reconnect backoff (default 1s) passes
+	// only when the test advances it, and no timeout can fire on its own.
+	clk := clocktest.New(time.Unix(1_700_000_000, 0))
 	client, err := iothub.NewAzureClient(twinTestConnStr,
 		iothub.WithBrokerURL(broker.URL()),
 		iothub.WithCookTwin(sess),
-		iothub.WithTwinTimeout(2*time.Second))
+		iothub.WithClock(clk))
 	if err != nil {
 		t.Fatalf("NewAzureClient: %v", err)
 	}
@@ -49,9 +54,7 @@ func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
 	defer cancel()
 	client.Start(ctx)
 
-	syncCtx, syncCancel := context.WithTimeout(ctx, wait)
-	defer syncCancel()
-	if err := client.WaitTwinSynced(syncCtx); err != nil {
+	if err := client.WaitTwinSynced(await.Context(t)); err != nil {
 		t.Fatalf("first twin sync: %v", err)
 	}
 	if got := sess.Snapshot(); got.CookID != nil || got.AppliedDesiredVersion != 1 {
@@ -64,13 +67,25 @@ func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
 		t.Fatalf("desired $version = %d, want 2", v)
 	}
 
-	// Start reconnects on its own and the GET on connect applies the cook.
-	iothubtest.Eventually(t, wait, func() bool {
-		s := sess.Snapshot()
-		return s.CookID != nil && *s.CookID == "c1" && s.CorrelationID != nil && *s.CorrelationID == "r1" && s.AppliedDesiredVersion == 2
-	}, "cook session after reconnect = %+v", sess.Snapshot())
-	if broker.Connections() < 2 {
-		t.Fatalf("connections = %d, want a reconnect", broker.Connections())
+	// Start reconnects on its own once its backoff has passed...
+	await.Until(t, "the reconnect backoff after the drop", func() bool { return slices.Contains(clk.Pending(), time.Second) },
+		func() any { return clk.Pending() }, clk)
+	clk.Advance(time.Second)
+	await.Until(t, "a reconnect", func() bool { return broker.Connections() >= 2 },
+		func() any { return broker.Connections() }, broker)
+
+	// ...and the GET on connect applies the cook, then reports what it applied.
+	await.Until(t, "a reported patch with appliedDesiredVersion 2", func() bool {
+		for _, p := range broker.ReportedPatches() {
+			if p["appliedDesiredVersion"] == float64(2) && p["activeCookId"] == "c1" && p["correlationId"] == "r1" {
+				return true
+			}
+		}
+		return false
+	}, func() any { return broker.ReportedPatches() }, broker)
+	// The device applies before it reports, so the session already holds it.
+	if s := sess.Snapshot(); s.CookID == nil || *s.CookID != "c1" || s.CorrelationID == nil || *s.CorrelationID != "r1" || s.AppliedDesiredVersion != 2 {
+		t.Fatalf("cook session after reconnect = %+v", s)
 	}
 
 	// ...and it was persisted, not just held in memory.
@@ -82,16 +97,6 @@ func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
 		t.Fatalf("persisted session = %+v", got)
 	}
 
-	// The device reported what it applied.
-	iothubtest.Eventually(t, wait, func() bool {
-		for _, p := range broker.ReportedPatches() {
-			if p["appliedDesiredVersion"] == float64(2) && p["activeCookId"] == "c1" && p["correlationId"] == "r1" {
-				return true
-			}
-		}
-		return false
-	}, "reported patch with appliedDesiredVersion 2; got %v", broker.ReportedPatches())
-
 	// The next reading goes through the real enqueuer and publisher.
 	q, err := queue.Open(t.TempDir(), queue.Options{})
 	if err != nil {
@@ -99,7 +104,7 @@ func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
 	}
 	defer q.Close()
 	samples := make(chan collector.Sample, 1)
-	samples <- collector.Sample{Status: simdevice.SyntheticStatus("pi-1", 0), Timestamp: time.Now().UTC()}
+	samples <- collector.Sample{Status: simdevice.SyntheticStatus("pi-1", 0), Timestamp: clk.Now().UTC()}
 	close(samples)
 	runEnqueuer(ctx, samples, sess, q, client.DeviceID(), tracer)
 
@@ -108,7 +113,8 @@ func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
 		runPublisher(ctx, q, client, client.DeviceID(), tracer)
 		close(pubDone)
 	}()
-	iothubtest.Eventually(t, wait, func() bool { return len(broker.Telemetry()) == 1 }, "one telemetry message")
+	await.Until(t, "one telemetry message", func() bool { return len(broker.Telemetry()) == 1 },
+		func() any { return broker.Telemetry() }, broker)
 	cancel()
 	<-pubDone
 

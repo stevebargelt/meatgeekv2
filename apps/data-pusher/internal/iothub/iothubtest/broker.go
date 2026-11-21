@@ -7,6 +7,11 @@
 // Like the real hub, it only sends twin responses and desired patches to a
 // connection that has subscribed to their topics, and a desired change made
 // while no device is connected is delivered to nobody: the device has to GET.
+//
+// The broker is an await.Source: it signals after every change a test can
+// observe (a connection accepted or closed, a packet handled, a twin response
+// sent, the stored twin edited), so tests wait with await.Until on its state
+// instead of polling against a deadline.
 package iothubtest
 
 import (
@@ -18,9 +23,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/eclipse/paho.mqtt.golang/packets"
+
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
 )
 
 // Message is one PUBLISH the broker received from a device.
@@ -37,15 +43,23 @@ type Telemetry struct {
 	Properties url.Values
 }
 
+// Response is one twin response the broker sent.
+type Response struct {
+	Conn    int    // 1-based connection number
+	Request string // the request topic it answers
+	Status  int
+}
+
 // Broker is the fake hub. All methods are safe for concurrent use.
 type Broker struct {
-	ln net.Listener
+	ln  net.Listener
+	sig await.Signal
 
 	mu              sync.Mutex
-	conns           []*conn // every connection ever accepted, in order
-	maxLive         int
-	overlapChecks   []chan struct{} // one per CONNECT; closed once maxLive is updated
+	conns           []*conn   // every connection ever accepted, in order
+	overlaps        [][]*conn // per CONNECT: the older connections open then
 	received        []Message
+	responses       []Response
 	desired         map[string]any
 	desiredVersion  int64
 	reported        map[string]any
@@ -64,15 +78,6 @@ type conn struct {
 	alive bool          // guarded by Broker.mu
 	done  chan struct{} // closed once serve has finished with the socket
 }
-
-// overlapGrace is how long an older connection may stay open after a newer
-// one sends CONNECT before the two count as concurrent. A client that closes
-// its socket before dialing (as AzureClient does) has its FIN delivered
-// ahead of the new SYN, so the old connection's reader sees EOF within
-// milliseconds; this only absorbs scheduling delay in the broker's own
-// goroutines. A client that really holds two connections keeps the old one
-// open past any grace and is counted.
-const overlapGrace = 2 * time.Second
 
 // NewBroker starts a broker on 127.0.0.1 with an empty twin at desired
 // $version 1 (a new device's twin). It stops when the test ends.
@@ -93,6 +98,10 @@ func NewBroker(t testing.TB) *Broker {
 	t.Cleanup(b.Close)
 	return b
 }
+
+// Changed implements await.Source: the channel closes at the broker's next
+// change.
+func (b *Broker) Changed() <-chan struct{} { return b.sig.Changed() }
 
 // URL is the broker address for iothub.WithBrokerURL.
 func (b *Broker) URL() string { return "tcp://" + b.ln.Addr().String() }
@@ -118,6 +127,7 @@ func (b *Broker) SetDesired(props map[string]any) int64 {
 	b.desiredVersion++
 	v := b.desiredVersion
 	b.mu.Unlock()
+	b.sig.Notify()
 	b.SendDesiredPatch(v, props)
 	return v
 }
@@ -127,6 +137,7 @@ func (b *Broker) SetDesired(props map[string]any) int64 {
 func (b *Broker) SetDesiredQuietly(props map[string]any) int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	defer b.sig.Notify()
 	for k, v := range props {
 		if v == nil {
 			delete(b.desired, k)
@@ -219,21 +230,38 @@ func (b *Broker) Connections() int {
 	return len(b.conns)
 }
 
-// MaxConcurrentConnections is the most connections ever open at once, as
-// seen when each connection sends CONNECT: the new connection plus every
-// older one still open overlapGrace later. IoT Hub allows one per device, so
-// this must stay 1. It waits for the checks of CONNECTs already received, so
-// the answer does not depend on goroutine scheduling.
+// MaxConcurrentConnections is the most connections the device has held open
+// at once that the broker can prove without a clock: for each CONNECT, the new
+// connection plus every older connection that was open then and that the
+// client still has open now. A connection open now was open the whole time
+// since it was accepted, so the two really overlapped. A connection the
+// client has closed counts as closed even if the broker's reader has not got
+// to the close yet: the check asks the kernel (see peerOpen), so the answer
+// does not depend on goroutine scheduling. IoT Hub allows one connection per
+// device, so this must stay 1.
 func (b *Broker) MaxConcurrentConnections() int {
 	b.mu.Lock()
-	checks := append([]chan struct{}(nil), b.overlapChecks...)
+	overlaps := make([][]*conn, len(b.overlaps))
+	copy(overlaps, b.overlaps)
 	b.mu.Unlock()
-	for _, ch := range checks {
-		<-ch
+	most := 0
+	for _, older := range overlaps {
+		open := 1
+		for _, o := range older {
+			if o.clientHasOpen() {
+				open++
+			}
+		}
+		most = max(most, open)
 	}
+	return most
+}
+
+// Responses is every twin response the broker sent, in order.
+func (b *Broker) Responses() []Response {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.maxLive
+	return append([]Response(nil), b.responses...)
 }
 
 // Subscriptions returns the topic filters connection n (1-based) subscribed to.
@@ -271,19 +299,6 @@ func (b *Broker) Telemetry() []Telemetry {
 	return out
 }
 
-// Eventually polls cond until it is true or timeout passes, then fails the
-// test with msg.
-func Eventually(t testing.TB, timeout time.Duration, cond func() bool, msg string, args ...any) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s: "+msg, append([]any{timeout}, args...)...)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func (b *Broker) liveConns() []*conn {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -306,6 +321,7 @@ func (b *Broker) accept() {
 		c := &conn{n: len(b.conns) + 1, nc: nc, alive: true, done: make(chan struct{})}
 		b.conns = append(b.conns, c)
 		b.mu.Unlock()
+		b.sig.Notify()
 		go b.serve(c)
 	}
 }
@@ -317,78 +333,78 @@ func (b *Broker) serve(c *conn) {
 		c.alive = false
 		b.mu.Unlock()
 		close(c.done)
+		b.sig.Notify()
 	}()
 	for {
 		pkt, err := packets.ReadPacket(c.nc)
 		if err != nil {
 			return
 		}
-		switch p := pkt.(type) {
-		case *packets.ConnectPacket:
-			b.checkOverlap(c)
-			ack := packets.NewControlPacket(packets.Connack).(*packets.ConnackPacket)
-			ack.ReturnCode = packets.Accepted
-			c.write(ack)
-		case *packets.SubscribePacket:
-			b.mu.Lock()
-			c.subs = append(c.subs, p.Topics...)
-			b.mu.Unlock()
-			ack := packets.NewControlPacket(packets.Suback).(*packets.SubackPacket)
-			ack.MessageID = p.MessageID
-			for _, q := range p.Qoss {
-				ack.ReturnCodes = append(ack.ReturnCodes, min(q, 1))
-			}
-			c.write(ack)
-		case *packets.PublishPacket:
-			if p.Qos == 1 {
-				ack := packets.NewControlPacket(packets.Puback).(*packets.PubackPacket)
-				ack.MessageID = p.MessageID
-				c.write(ack)
-			}
-			b.onPublish(c, p.TopicName, p.Payload)
-		case *packets.PingreqPacket:
-			c.write(packets.NewControlPacket(packets.Pingresp))
-		case *packets.DisconnectPacket:
+		b.handle(c, pkt)
+		b.sig.Notify()
+		if _, ok := pkt.(*packets.DisconnectPacket); ok {
 			return
 		}
 	}
 }
 
-// checkOverlap records, in the background, how many connections are open
-// alongside c: c itself plus each older connection that is still open
-// overlapGrace after c's CONNECT.
-func (b *Broker) checkOverlap(c *conn) {
-	checked := make(chan struct{})
+// handle acts on one packet from connection c.
+func (b *Broker) handle(c *conn, pkt packets.ControlPacket) {
+	switch p := pkt.(type) {
+	case *packets.ConnectPacket:
+		b.recordOverlap(c)
+		ack := packets.NewControlPacket(packets.Connack).(*packets.ConnackPacket)
+		ack.ReturnCode = packets.Accepted
+		c.write(ack)
+	case *packets.SubscribePacket:
+		b.mu.Lock()
+		c.subs = append(c.subs, p.Topics...)
+		b.mu.Unlock()
+		ack := packets.NewControlPacket(packets.Suback).(*packets.SubackPacket)
+		ack.MessageID = p.MessageID
+		for _, q := range p.Qoss {
+			ack.ReturnCodes = append(ack.ReturnCodes, min(q, 1))
+		}
+		c.write(ack)
+	case *packets.PublishPacket:
+		// Record (and answer) the message before the PUBACK, so a
+		// device whose publish has returned finds it in Received.
+		b.onPublish(c, p.TopicName, p.Payload)
+		if p.Qos == 1 {
+			ack := packets.NewControlPacket(packets.Puback).(*packets.PubackPacket)
+			ack.MessageID = p.MessageID
+			c.write(ack)
+		}
+	case *packets.PingreqPacket:
+		c.write(packets.NewControlPacket(packets.Pingresp))
+	}
+}
+
+// recordOverlap notes, at c's CONNECT, every older connection the broker
+// still has open. MaxConcurrentConnections later keeps those the client has
+// not closed.
+func (b *Broker) recordOverlap(c *conn) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	var older []*conn
 	for _, o := range b.conns {
 		if o != c && o.alive {
 			older = append(older, o)
 		}
 	}
-	b.overlapChecks = append(b.overlapChecks, checked)
-	b.mu.Unlock()
-	go func() {
-		defer close(checked)
-		graceOver := make(chan struct{})
-		timer := time.AfterFunc(overlapGrace, func() { close(graceOver) })
-		defer timer.Stop()
-		open := 1
-		for _, o := range older {
-			select {
-			case <-o.done:
-			case <-graceOver:
-				select {
-				case <-o.done:
-				default:
-					open++
-				}
-			}
-		}
-		b.mu.Lock()
-		b.maxLive = max(b.maxLive, open)
-		b.mu.Unlock()
-	}()
+	b.overlaps = append(b.overlaps, older)
+}
+
+// clientHasOpen reports whether the device still holds c open: the broker
+// has not finished with it and the kernel holds neither the device's close
+// nor its DISCONNECT for it.
+func (c *conn) clientHasOpen() bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	return peerOpen(c.nc)
 }
 
 func (b *Broker) onPublish(c *conn, topic string, payload []byte) {
@@ -465,9 +481,13 @@ func (c *conn) respond(b *Broker, reqTopic string, status int, body []byte, vers
 	b.mu.Lock()
 	ok := c.subscribedLocked(topic)
 	b.mu.Unlock()
-	if ok {
-		c.publish(topic, body)
+	if !ok {
+		return
 	}
+	c.publish(topic, body)
+	b.mu.Lock()
+	b.responses = append(b.responses, Response{Conn: c.n, Request: reqTopic, Status: status})
+	b.mu.Unlock()
 }
 
 func (c *conn) subscribedLocked(topic string) bool {
@@ -492,6 +512,5 @@ func (c *conn) publish(topic string, payload []byte) {
 func (c *conn) write(p packets.ControlPacket) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	_ = c.nc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = p.Write(c.nc)
 }
