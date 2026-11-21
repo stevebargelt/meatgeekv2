@@ -2951,6 +2951,19 @@ describe('realSpawn enforces a HARD timeout (RF-2)', () => {
     assert.equal(REAL_TIMERS.clearTimeout, globalThis.clearTimeout);
     assert.ok(Object.isFrozen(REAL_TIMERS));
   });
+
+  it('runs with no options at all, as main calls it in production', async () => {
+    // No `timers`, no `killGraceMs`, no `timeoutMs`: the exact shape of the
+    // production path. The real DEFAULT_SEND_TIMEOUT_MS timer is armed and then
+    // cleared on `close`; the child's own exit is what this waits on, never the
+    // timer. A broken default timer source throws here instead of passing.
+    const result = await realSpawn(process.execPath, ['-e', 'process.exit(3)']);
+    assert.equal(result.code, 3);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.hardKilled, false);
+    assert.equal(result.signal, null);
+    assert.equal(result.enforcedBoundMs, DEFAULT_SEND_TIMEOUT_MS + KILL_GRACE_MS);
+  });
 });
 
 describe('the measured shape is what is used (HR4)', () => {

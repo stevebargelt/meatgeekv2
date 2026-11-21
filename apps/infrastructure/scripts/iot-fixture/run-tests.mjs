@@ -273,12 +273,14 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // SIGTERM-honoring child and the real-timer default. Dependency-free 596
 // (fixture-core 236, container-definition 36, evidence 104, send-fixture 220).
 // The floor is RAISED to 591 (margin five, as above).
+// HAR-112 review added a realSpawn call with no options at all (the production
+// shape). Dependency-free 597 (send-fixture 221); the floor is RAISED to 592.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 591,
+    minTests: 592,
   },
   sdk: {
     label: 'real-SDK',
