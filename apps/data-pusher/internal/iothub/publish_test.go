@@ -102,6 +102,18 @@ func awaitTelemetry(t *testing.T, b *iothubtest.Broker) int {
 	return tel[0].Conn
 }
 
+// awaitOldConnectionClosed waits until the device holds no connection older
+// than its newest open (MaxConcurrentConnections counts only those it still
+// holds). paho's Disconnect(250) returns after its quiesce even when its
+// writer has not yet sent the DISCONNECT and closed the socket, so a loaded
+// machine can see the old connection still open just after the publish
+// returns; it must close, and the broker signals when it does.
+func awaitOldConnectionClosed(t *testing.T, b *iothubtest.Broker) {
+	t.Helper()
+	await.Until(t, "the replaced connection to close", func() bool { return b.MaxConcurrentConnections() == 1 },
+		func() any { return b.MaxConcurrentConnections() }, b)
+}
+
 // HAR-114: a PublishTelemetry blocked inside paho's Publish must not hold up
 // the reconnect. The connection drops while the publish is stuck in paho's
 // hand-off; supervise redials and the twin re-reads on the new connection
@@ -154,9 +166,7 @@ func TestPublishTelemetry_BlockedInPublishDoesNotHoldUpReconnectOrTwin(t *testin
 	if conn := awaitTelemetry(t, b); conn != 2 {
 		t.Errorf("telemetry came in on connection %d, want 2", conn)
 	}
-	if m := b.MaxConcurrentConnections(); m != 1 {
-		t.Errorf("max concurrent connections = %d, want 1", m)
-	}
+	awaitOldConnectionClosed(t, b)
 }
 
 // HAR-114: the retry of a publish whose connection supervise has already
@@ -189,9 +199,7 @@ func TestPublishTelemetry_RetryDoesNotDropTheReplacementConnection(t *testing.T)
 	if n := b.Connections(); n != 2 {
 		t.Errorf("connections = %d, want 2 (the retry must not drop the replacement)", n)
 	}
-	if m := b.MaxConcurrentConnections(); m != 1 {
-		t.Errorf("max concurrent connections = %d, want 1", m)
-	}
+	awaitOldConnectionClosed(t, b)
 }
 
 // HAR-114: PublishTelemetryAsync's hand-off to paho runs outside c.mu too. A
