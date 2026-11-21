@@ -6,11 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock/clocktest"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
@@ -24,6 +28,9 @@ const (
 	timeLayout  = "2006-01-02T15:04:05.000Z07:00"
 	traceparent = "traceparent"
 )
+
+// clockStart is where every fake clock in these tests starts.
+var clockStart = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 
 type runResult struct {
 	code   int
@@ -52,8 +59,86 @@ func runMain(t *testing.T, args []string, env map[string]string, newClient Clien
 		Stderr:    &stderr,
 		NewClient: newClient,
 		Tracer:    otel.Tracer("simdevice-test"),
+		// A clock that never moves: none of these runs waits on time, and
+		// the send timeout can never fire.
+		Clock: clocktest.New(clockStart),
 	})
 	return runResult{code: code, stdout: stdout.String(), stderr: stderr.String(), mock: mock}
+}
+
+// running is a Main started on its own goroutine, for a test that drives its
+// clock or its acknowledgements while it runs. It is an await.Source that
+// signals when Main returns.
+type running struct {
+	sig  await.Signal
+	mu   sync.Mutex
+	done bool
+	res  runResult
+}
+
+func (r *running) Changed() <-chan struct{} { return r.sig.Changed() }
+
+func (r *running) finished() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.done
+}
+
+// wait blocks until Main has returned and gives its result.
+func (r *running) wait(t *testing.T) runResult {
+	t.Helper()
+	await.Until(t, "Main to return", r.finished, func() any { return "still running" }, r)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.res
+}
+
+// startMain runs Main with cli on clk, on its own goroutine.
+func startMain(t *testing.T, clk clock.Clock, cli Client, args ...string) *running {
+	t.Helper()
+	shutdown, err := telemetry.SetupTracing(context.Background())
+	if err != nil {
+		t.Fatalf("SetupTracing: %v", err)
+	}
+	r := &running{}
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), Env{
+			Args:      args,
+			Getenv:    func(k string) string { return map[string]string{EnvConnectionString: validConn}[k] },
+			Stdout:    &stdout,
+			Stderr:    &stderr,
+			NewClient: func(string) (Client, error) { return cli, nil },
+			Tracer:    otel.Tracer("simdevice-test"),
+			Clock:     clk,
+		})
+		r.mu.Lock()
+		r.done = true
+		r.res = runResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		r.mu.Unlock()
+		r.sig.Notify()
+	}()
+	t.Cleanup(func() {
+		r.wait(t)
+		shutdown()
+	})
+	return r
+}
+
+// pendingIs reports whether clk's pending timers are exactly want.
+func pendingIs(clk *clocktest.Fake, want ...time.Duration) func() bool {
+	return func() bool {
+		got := clk.Pending()
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
 }
 
 func TestMain_CountThreeAgainstMockClient(t *testing.T) {
@@ -146,14 +231,33 @@ func TestMain_DefaultCountIsOne(t *testing.T) {
 	}
 }
 
+// --interval spaces the blocking sends: after each send Main waits one
+// interval on its clock before the next, so the sends land 0, 40 and 80ms in.
 func TestMain_IntervalSpacesSends(t *testing.T) {
-	start := time.Now()
-	res := runMain(t, []string{"--count", "3", "--interval", "40ms"}, map[string]string{EnvConnectionString: validConn}, nil)
+	const interval = 40 * time.Millisecond
+	clk := clocktest.New(clockStart)
+	cli := &ackClient{clock: clk}
+	r := startMain(t, clk, cli, "--count", "3", "--interval", "40ms")
+	for sent := 1; sent < 3; sent++ {
+		await.Until(t, fmt.Sprintf("Main to wait one interval after send %d", sent),
+			pendingIs(clk, interval), func() any { return clk.Pending() }, clk)
+		if s := cli.snapshot(); s.blockingCalls != sent {
+			t.Fatalf("waiting after send %d, but %d sends were made", sent, s.blockingCalls)
+		}
+		clk.Advance(interval)
+	}
+	res := r.wait(t)
 	if res.code != ExitOK {
 		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
 	}
-	if el := time.Since(start); el < 80*time.Millisecond {
-		t.Errorf("3 sends with a 40ms interval took %s, want >= 80ms", el)
+	s := cli.snapshot()
+	if s.asyncCalls != 0 || s.blockingCalls != 3 {
+		t.Fatalf("async=%d blocking=%d, want 0 and 3", s.asyncCalls, s.blockingCalls)
+	}
+	for i, at := range s.starts {
+		if want := clockStart.Add(time.Duration(i) * interval); !at.Equal(want) {
+			t.Errorf("send %d at %s, want %s", i, at.Sub(clockStart), want.Sub(clockStart))
+		}
 	}
 }
 
@@ -282,40 +386,55 @@ func TestMain_StrictlyIncreasingTimestampsWithFrozenClock(t *testing.T) {
 	}
 }
 
-// ackClient is a mock IoT Hub client whose acknowledgements take ackDelay.
-// It counts how many publishes are awaiting their acknowledgement at once, and
-// fails the acknowledgement of the async publishes and blocking retries it is
-// told to. Messages are identified by their messageId property.
+// ackClient is a mock IoT Hub client. With hold set, each async publish's
+// acknowledgement waits until the test releases it; otherwise it is
+// acknowledged at once. It counts how many publishes are awaiting their
+// acknowledgement at once, stamps each publish's start on clock (when set),
+// and fails the acknowledgement of the async publishes and blocking retries
+// it is told to. Messages are identified by their messageId property. It is
+// an await.Source: it signals every start, acknowledgement and hold.
 type ackClient struct {
-	ackDelay time.Duration
+	hold  bool
+	clock clock.Clock
 	// failAsync fails the acknowledgement of the n-th async publish (1-based).
 	failAsync map[int]bool
 	// failRetry fails every blocking PublishTelemetry call.
 	failRetry bool
 
+	sig            await.Signal
 	mu             sync.Mutex
 	asyncCalls     int
 	blockingCalls  int
 	outstanding    int
 	maxOutstanding int
 	starts         []time.Time
-	acked          []string // messageIds acknowledged, in ack order
+	acked          []string   // messageIds acknowledged, in ack order
+	held           []*heldAck // async acks awaiting release, in start order
 }
 
-func (c *ackClient) begin() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// heldAck is the acknowledgement of the n-th async publish.
+type heldAck struct {
+	n    int
+	id   string
+	fail bool
+	done chan struct{}
+}
+
+func (c *ackClient) Changed() <-chan struct{} { return c.sig.Changed() }
+
+// beginLocked records a publish start. c.mu must be held.
+func (c *ackClient) beginLocked() {
 	c.outstanding++
 	if c.outstanding > c.maxOutstanding {
 		c.maxOutstanding = c.outstanding
 	}
-	c.starts = append(c.starts, time.Now())
-	return c.outstanding
+	if c.clock != nil {
+		c.starts = append(c.starts, c.clock.Now())
+	}
 }
 
-func (c *ackClient) end(messageID string, ok bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// endLocked records an acknowledgement (ok) or its failure. c.mu must be held.
+func (c *ackClient) endLocked(messageID string, ok bool) {
 	c.outstanding--
 	if ok {
 		c.acked = append(c.acked, messageID)
@@ -326,10 +445,10 @@ func (c *ackClient) PublishTelemetry(_ context.Context, _ []byte, props map[stri
 	c.mu.Lock()
 	c.blockingCalls++
 	fail := c.failRetry
+	c.beginLocked()
+	c.endLocked(props["messageId"], !fail)
 	c.mu.Unlock()
-	c.begin()
-	time.Sleep(c.ackDelay)
-	c.end(props["messageId"], !fail)
+	c.sig.Notify()
 	if fail {
 		return errors.New("ack lost again")
 	}
@@ -339,18 +458,19 @@ func (c *ackClient) PublishTelemetry(_ context.Context, _ []byte, props map[stri
 func (c *ackClient) PublishTelemetryAsync(_ context.Context, _ []byte, props map[string]string) (func() error, error) {
 	c.mu.Lock()
 	c.asyncCalls++
-	fail := c.failAsync[c.asyncCalls]
+	h := &heldAck{n: c.asyncCalls, id: props["messageId"], fail: c.failAsync[c.asyncCalls], done: make(chan struct{})}
+	c.beginLocked()
+	if c.hold {
+		c.held = append(c.held, h)
+	} else {
+		c.endLocked(h.id, !h.fail)
+		close(h.done)
+	}
 	c.mu.Unlock()
-	c.begin()
-	done := make(chan struct{})
-	go func() {
-		time.Sleep(c.ackDelay)
-		c.end(props["messageId"], !fail)
-		close(done)
-	}()
+	c.sig.Notify()
 	return func() error {
-		<-done
-		if fail {
+		<-h.done
+		if h.fail {
 			return errors.New("ack lost")
 		}
 		return nil
@@ -359,12 +479,43 @@ func (c *ackClient) PublishTelemetryAsync(_ context.Context, _ []byte, props map
 
 func (*ackClient) Close() error { return nil }
 
-func (c *ackClient) snapshot() (asyncCalls, blockingCalls, maxOutstanding int, starts []time.Time, acked []string) {
+// release delivers the held acknowledgements of the async publishes n for
+// which which(n) is true.
+func (c *ackClient) release(which func(n int) bool) {
+	c.mu.Lock()
+	var keep []*heldAck
+	for _, h := range c.held {
+		if !which(h.n) {
+			keep = append(keep, h)
+			continue
+		}
+		c.endLocked(h.id, !h.fail)
+		close(h.done)
+	}
+	c.held = keep
+	c.mu.Unlock()
+	c.sig.Notify()
+}
+
+func (c *ackClient) releaseAll() { c.release(func(int) bool { return true }) }
+
+type ackState struct {
+	asyncCalls, blockingCalls, outstanding, maxOutstanding, held int
+	starts                                                       []time.Time
+	acked                                                        []string
+}
+
+func (c *ackClient) snapshot() ackState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.asyncCalls, c.blockingCalls, c.maxOutstanding,
-		append([]time.Time(nil), c.starts...), append([]string(nil), c.acked...)
+	return ackState{
+		asyncCalls: c.asyncCalls, blockingCalls: c.blockingCalls,
+		outstanding: c.outstanding, maxOutstanding: c.maxOutstanding, held: len(c.held),
+		starts: append([]time.Time(nil), c.starts...), acked: append([]string(nil), c.acked...),
+	}
 }
+
+func (c *ackClient) state() any { return c.snapshot() }
 
 // sentLines parses stdout into Sent lines, failing on anything else.
 func sentLines(t *testing.T, stdout string) []Sent {
@@ -391,7 +542,7 @@ func distinctIDs(lines []Sent) map[string]bool {
 	return ids
 }
 
-func runWith(t *testing.T, cli *ackClient, args ...string) runResult {
+func runWith(t *testing.T, cli Client, args ...string) runResult {
 	t.Helper()
 	return runMain(t, args, map[string]string{EnvConnectionString: validConn},
 		func(string) (Client, error) { return cli, nil })
@@ -401,17 +552,17 @@ func runWith(t *testing.T, cli *ackClient, args ...string) runResult {
 // time, never the async one.
 func TestMain_Inflight1SendsOneAtATime(t *testing.T) {
 	for _, args := range [][]string{{"--count", "5"}, {"--count", "5", "--inflight", "1"}} {
-		cli := &ackClient{ackDelay: 10 * time.Millisecond}
+		cli := &ackClient{}
 		res := runWith(t, cli, args...)
 		if res.code != ExitOK {
 			t.Fatalf("%q: exit = %d; stderr=%q", args, res.code, res.stderr)
 		}
-		async, blocking, maxOut, _, _ := cli.snapshot()
-		if async != 0 || blocking != 5 {
-			t.Errorf("%q: async=%d blocking=%d, want 0 and 5", args, async, blocking)
+		s := cli.snapshot()
+		if s.asyncCalls != 0 || s.blockingCalls != 5 {
+			t.Errorf("%q: async=%d blocking=%d, want 0 and 5", args, s.asyncCalls, s.blockingCalls)
 		}
-		if maxOut != 1 {
-			t.Errorf("%q: max outstanding = %d, want 1", args, maxOut)
+		if s.maxOutstanding != 1 {
+			t.Errorf("%q: max outstanding = %d, want 1", args, s.maxOutstanding)
 		}
 		if n := len(distinctIDs(sentLines(t, res.stdout))); n != 5 {
 			t.Errorf("%q: %d distinct lines, want 5", args, n)
@@ -419,22 +570,34 @@ func TestMain_Inflight1SendsOneAtATime(t *testing.T) {
 	}
 }
 
-// (b) --count 100 --inflight 8: never more than 8 outstanding, 100 distinct lines.
+// (b) --count 100 --inflight 8: never more than 8 outstanding, 100 distinct
+// lines. The acks are held until 8 publishes await theirs (or all that are
+// left do), then released together, so every round fills the window.
 func TestMain_InflightCapsOutstandingPublishes(t *testing.T) {
-	cli := &ackClient{ackDelay: 15 * time.Millisecond}
-	res := runWith(t, cli, "--count", "100", "--inflight", "8")
+	const count, inflight = 100, 8
+	cli := &ackClient{hold: true}
+	r := startMain(t, clocktest.New(clockStart), cli, "--count", "100", "--inflight", "8")
+	for {
+		acked := len(cli.snapshot().acked)
+		if acked == count {
+			break
+		}
+		want := min(inflight, count-acked)
+		await.Until(t, fmt.Sprintf("%d publishes awaiting their ack after %d acks", want, acked),
+			func() bool { return cli.snapshot().outstanding >= want }, cli.state, cli)
+		cli.releaseAll()
+	}
+	res := r.wait(t)
 	if res.code != ExitOK {
 		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
 	}
-	async, blocking, maxOut, _, acked := cli.snapshot()
-	if async != 100 || blocking != 0 {
-		t.Errorf("async=%d blocking=%d, want 100 and 0", async, blocking)
+	s := cli.snapshot()
+	acked := s.acked
+	if s.asyncCalls != 100 || s.blockingCalls != 0 {
+		t.Errorf("async=%d blocking=%d, want 100 and 0", s.asyncCalls, s.blockingCalls)
 	}
-	if maxOut > 8 {
-		t.Errorf("max outstanding = %d, want <= 8", maxOut)
-	}
-	if maxOut < 2 {
-		t.Errorf("max outstanding = %d: the sends were not pipelined", maxOut)
+	if s.maxOutstanding != inflight {
+		t.Errorf("max outstanding = %d, want %d: the window is %d", s.maxOutstanding, inflight, inflight)
 	}
 	lines := sentLines(t, res.stdout)
 	if len(lines) != 100 {
@@ -455,49 +618,59 @@ func TestMain_InflightCapsOutstandingPublishes(t *testing.T) {
 	}
 }
 
-// (c) --interval caps the start rate, whatever the ack latency: starts are at
-// least the interval apart, and a slow ack does not add to the gap.
+// (c) --interval caps the start rate, whatever the ack latency: starts are the
+// interval apart, and an ack that has not come back does not add to the gap.
+// Every ack is held until all 10 readings have started.
 func TestMain_IntervalCapsStartRate(t *testing.T) {
 	const interval = 20 * time.Millisecond
-	cli := &ackClient{ackDelay: 100 * time.Millisecond}
-	began := time.Now()
-	res := runWith(t, cli, "--count", "10", "--inflight", "16", "--interval", "20ms")
-	elapsed := time.Since(began)
+	clk := clocktest.New(clockStart)
+	cli := &ackClient{hold: true, clock: clk}
+	r := startMain(t, clk, cli, "--count", "10", "--inflight", "16", "--interval", "20ms")
+	for started := 1; started < 10; started++ {
+		// A whole interval, not less, and not more for the acks still out.
+		await.Until(t, fmt.Sprintf("Main to wait one interval after start %d", started),
+			pendingIs(clk, interval), func() any { return clk.Pending() }, clk)
+		if s := cli.snapshot(); s.asyncCalls != started || s.outstanding != started {
+			t.Fatalf("waiting after start %d: started=%d awaiting ack=%d, want %d and %d",
+				started, s.asyncCalls, s.outstanding, started, started)
+		}
+		clk.Advance(interval)
+	}
+	await.Until(t, "the 10th start", func() bool { return cli.snapshot().asyncCalls == 10 }, cli.state, cli)
+	s := cli.snapshot()
+	if s.outstanding != 10 {
+		t.Errorf("awaiting ack = %d, want all 10: no ack has been released", s.outstanding)
+	}
+	if len(s.starts) != 10 {
+		t.Fatalf("starts = %d, want 10", len(s.starts))
+	}
+	for i, at := range s.starts {
+		if want := clockStart.Add(time.Duration(i) * interval); !at.Equal(want) {
+			t.Errorf("start %d at %s, want %s", i, at.Sub(clockStart), want.Sub(clockStart))
+		}
+	}
+	cli.releaseAll()
+	res := r.wait(t)
 	if res.code != ExitOK {
 		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
 	}
-	_, _, _, starts, _ := cli.snapshot()
-	if len(starts) != 10 {
-		t.Fatalf("starts = %d, want 10", len(starts))
-	}
-	// Timer tolerance: a gap may be a little short of the interval only by
-	// clock granularity, never by a whole interval.
-	const slack = 5 * time.Millisecond
-	for i := 1; i < len(starts); i++ {
-		if gap := starts[i].Sub(starts[i-1]); gap < interval-slack {
-			t.Errorf("start %d came %s after start %d, want >= %s", i, gap, i-1, interval)
-		}
-	}
-	if total := starts[9].Sub(starts[0]); total < 9*(interval-slack) {
-		t.Errorf("10 starts spanned %s, want >= %s", total, 9*interval)
-	}
-	// Sequential sends would take >= 10 × (100 ms ack + 20 ms) = 1.2 s.
-	if elapsed > 900*time.Millisecond {
-		t.Errorf("run took %s: the interval was added to the ack latency", elapsed)
+	if n := len(distinctIDs(sentLines(t, res.stdout))); n != 10 {
+		t.Errorf("distinct lines = %d, want 10", n)
 	}
 }
 
 // (d) One failed ack, retried successfully with the blocking publish: exit 0
 // and every line printed.
 func TestMain_FailedAckRetriedOnce(t *testing.T) {
-	cli := &ackClient{ackDelay: 5 * time.Millisecond, failAsync: map[int]bool{7: true}}
+	cli := &ackClient{failAsync: map[int]bool{7: true}}
 	res := runWith(t, cli, "--count", "20", "--inflight", "4")
 	if res.code != ExitOK {
 		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
 	}
-	async, blocking, _, _, acked := cli.snapshot()
-	if async != 20 || blocking != 1 {
-		t.Errorf("async=%d blocking=%d, want 20 and 1", async, blocking)
+	s := cli.snapshot()
+	acked := s.acked
+	if s.asyncCalls != 20 || s.blockingCalls != 1 {
+		t.Errorf("async=%d blocking=%d, want 20 and 1", s.asyncCalls, s.blockingCalls)
 	}
 	lines := sentLines(t, res.stdout)
 	if len(lines) != 20 || len(distinctIDs(lines)) != 20 {
@@ -509,19 +682,42 @@ func TestMain_FailedAckRetriedOnce(t *testing.T) {
 }
 
 // (e) An ack that fails twice: stop sending, drain what is in flight, exit 1,
-// and print exactly one line per acknowledged message.
+// and print exactly one line per acknowledged message. Readings 1-8 start
+// (one interval apart) and their acks are held; Main then waits an interval
+// before reading 9. Reading 5's ack fails, and so does its retry: Main must
+// stop waiting and start nothing more, while 1-4 and 6-8 are still out.
 func TestMain_AckFailingTwiceExits1(t *testing.T) {
-	cli := &ackClient{ackDelay: 10 * time.Millisecond, failAsync: map[int]bool{5: true}, failRetry: true}
-	res := runWith(t, cli, "--count", "100", "--inflight", "8")
+	const interval = time.Millisecond
+	clk := clocktest.New(clockStart)
+	cli := &ackClient{hold: true, failAsync: map[int]bool{5: true}, failRetry: true}
+	r := startMain(t, clk, cli, "--count", "100", "--inflight", "8", "--interval", "1ms")
+	for started := 1; started <= 8; started++ {
+		await.Until(t, fmt.Sprintf("Main to wait one interval after start %d", started),
+			pendingIs(clk, interval), func() any { return clk.Pending() }, clk)
+		if started < 8 {
+			clk.Advance(interval)
+		}
+	}
+	if s := cli.snapshot(); s.asyncCalls != 8 || s.outstanding != 8 {
+		t.Fatalf("started=%d awaiting ack=%d, want 8 and 8", s.asyncCalls, s.outstanding)
+	}
+	cli.release(func(n int) bool { return n == 5 })
+	// Main stops its interval wait (the timer is no longer pending) once the
+	// retry has failed.
+	await.Until(t, "Main to stop waiting for the next start", pendingIs(clk),
+		func() any { return []any{clk.Pending(), cli.snapshot()} }, clk, cli)
+	cli.releaseAll()
+	res := r.wait(t)
 	if res.code != ExitSendFailed {
 		t.Fatalf("exit = %d, want %d; stderr=%q", res.code, ExitSendFailed, res.stderr)
 	}
-	async, blocking, _, _, acked := cli.snapshot()
+	s := cli.snapshot()
+	async, blocking, acked := s.asyncCalls, s.blockingCalls, s.acked
 	if blocking != 1 {
 		t.Errorf("blocking retries = %d, want 1", blocking)
 	}
-	if async >= 100 {
-		t.Errorf("all %d readings were started: sending did not stop", async)
+	if async != 8 {
+		t.Errorf("%d readings were started, want 8: sending did not stop", async)
 	}
 	lines := sentLines(t, res.stdout)
 	if len(lines) != len(acked) {

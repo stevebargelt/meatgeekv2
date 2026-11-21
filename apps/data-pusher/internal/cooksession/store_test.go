@@ -1,15 +1,14 @@
 package cooksession
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // newTestStore opens a Store at a unique temp path so tests do not
@@ -158,18 +157,22 @@ func TestNewMemory_DoesNotTouchDisk(t *testing.T) {
 
 // Race coverage: many concurrent readers running alongside a writer must not
 // data-race under -race, and every snapshot is internally consistent (both
-// ids from the same applied version).
+// ids from the same applied version). The writer starts once every reader is
+// reading and applies a fixed number of versions; each reader reads until it
+// has seen the last one, so all of them overlap the writes.
 func TestConcurrentReadersAndWriter(t *testing.T) {
 	s, _ := newTestStore(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
+	const readers, versions = 16, 50
 
-	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
+	var ready, wg sync.WaitGroup
+	var stop atomic.Bool // set if the writer fails, so the readers give up
+	ready.Add(readers)
+	for i := 0; i < readers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for ctx.Err() == nil {
+			ready.Done()
+			for !stop.Load() {
 				snap := s.Snapshot()
 				if snap.CookID == nil {
 					continue
@@ -179,20 +182,21 @@ func TestConcurrentReadersAndWriter(t *testing.T) {
 					t.Errorf("torn snapshot: %s / %s / %s", *snap.CookID, deref(snap.CorrelationID), v)
 					return
 				}
+				if snap.AppliedDesiredVersion == versions {
+					return
+				}
 			}
 		}()
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := int64(1); ctx.Err() == nil; i++ {
-			v := strconv.FormatInt(i, 10)
-			if err := s.ApplyDesired(strPtr("cook-"+v), strPtr("corr-"+v), i); err != nil {
-				t.Errorf("ApplyDesired: %v", err)
-				return
-			}
+	ready.Wait()
+	for i := int64(1); i <= versions; i++ {
+		v := strconv.FormatInt(i, 10)
+		if err := s.ApplyDesired(strPtr("cook-"+v), strPtr("corr-"+v), i); err != nil {
+			t.Errorf("ApplyDesired: %v", err)
+			stop.Store(true)
+			break
 		}
-	}()
+	}
 	wg.Wait()
 }
 

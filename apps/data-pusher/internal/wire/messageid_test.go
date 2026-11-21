@@ -56,7 +56,7 @@ func TestMintMessageId_NoForbiddenIoTHubChars(t *testing.T) {
 	// IoT Hub message-id field validates against a charset that
 	// excludes '+' and '/'. Hex output avoids both by construction —
 	// this is an explicit guard against a future refactor to base64.
-	id := MintMessageId("meatgeek3", time.Now().UTC(), 1)
+	id := MintMessageId("meatgeek3", fixedTS, 1)
 	for _, r := range id {
 		ok := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
 		if !ok {
@@ -64,3 +64,6 @@ func TestMintMessageId_NoForbiddenIoTHubChars(t *testing.T) {
 		}
 	}
 }
+
+// fixedTS is the reading time for tests whose result does not depend on it.
+var fixedTS = time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
