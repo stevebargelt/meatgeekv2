@@ -134,6 +134,33 @@ test('parallel copies count their runs separately and fail separately', () => {
   }
 });
 
+test('loadArgs reach every copy under --parallel and never the serial pass', () => {
+  // The fixture fails when it is given --load-only, its suite's loadArgs.
+  const serial = harness(['run', 'fixture-load-args', '--runs', '2']);
+  try {
+    assert.equal(serial.status, 0, serial.stdout + serial.stderr);
+    assert.match(serial.stdout, /^fixture-load-args: 2\/2 passed$/m);
+    assert.doesNotMatch(serial.stdout, /each copy runs with/);
+    assert.deepEqual(serial.json.loadArgs, []);
+  } finally {
+    serial.cleanup();
+  }
+  const load = harness(['run', 'fixture-load-args', '--runs', '1', '--parallel', '2']);
+  try {
+    assert.equal(load.status, 1, load.stdout + load.stderr);
+    assert.match(
+      load.stdout,
+      /^fixture-load-args: each copy runs with --load-only: fixture reason$/m
+    );
+    assert.match(load.stdout, /^fixture-load-args \[copy 1\/2\]: 0\/1 passed, failed on run 1$/m);
+    assert.match(load.stdout, /^fixture-load-args \[copy 2\/2\]: 0\/1 passed, failed on run 1$/m);
+    assert.match(load.stdout, /refused: ran with --load-only/);
+    assert.deepEqual(load.json.loadArgs, ['--load-only']);
+  } finally {
+    load.cleanup();
+  }
+});
+
 test('a shard runs its own block of run numbers', () => {
   // 5 runs over 2 shards: shard 1 is runs 1-3, shard 2 is runs 4-5. The
   // fixture's count restarts per invocation of the harness, so shard 2's

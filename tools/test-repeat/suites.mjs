@@ -19,6 +19,9 @@
 //             terraform, chromium, cosmos-emulator.
 //   shards    split N runs across this many CI jobs (default 1).
 //   maxParallel  cap for --parallel, with maxParallelReason saying why.
+//   loadArgs  argv appended to `command` in each copy when the suite runs as
+//             more than one copy (--parallel K > 1), with loadArgsReason
+//             saying why. Never used by the serial 50-run pass.
 //   env       extra environment for every run.
 //   timeoutSec   hard limit for ONE run; a run that exceeds it is killed and
 //             counted as failed. It is a hang guard for the harness, not a
@@ -46,6 +49,19 @@ const jest = (config, ...extra) => [
   '--ci',
   ...extra,
 ];
+
+// HAR-113: under load every copy is its own Jest, and each Jest starts
+// (cores - 1) workers: 3 on a 4-vCPU ubuntu-latest runner, so 8 copies are 32
+// node processes. One `api` run peaks at 2.5 GB with 3 workers (1019 tests,
+// measured), so 8 copies want ~20 GB of the runner's 16 GB, and the runner was
+// killed ("The runner has received a shutdown signal", exit 143). With one
+// worker a run peaks at 742 MB: ~6 GB for 8 copies. The copies still contend
+// for the CPU (8 on 4 vCPUs), which is what the load pass is for.
+const JEST_LOAD = {
+  loadArgs: ['--maxWorkers=1'],
+  loadArgsReason:
+    "one Jest worker per copy: 8 copies x 3 default workers exhaust the runner's 16 GB",
+};
 
 // The fixture harnesses under apps/infrastructure/scripts/fixtures. Each is a
 // self-contained bash script; ci.yml runs all but run-flex-secret-gate in
@@ -88,6 +104,7 @@ export const suites = [
   // --- Jest ---------------------------------------------------------------
   {
     id: 'api',
+    ...JEST_LOAD,
     command: jest('apps/api/jest.config.ts'),
     // api imports api-interfaces and the api-specs spec, and one test reads
     // the cosmos-db Terraform module.
@@ -109,6 +126,7 @@ export const suites = [
   },
   {
     id: 'web',
+    ...JEST_LOAD,
     command: jest('apps/web/jest.config.ts'),
     // apps/web/project.json test.dependsOn: the generated OpenAPI types.
     prepare: [['npx', 'nx', 'run', 'api-specs:generate-types']],
@@ -118,6 +136,7 @@ export const suites = [
   },
   {
     id: 'web-e2e',
+    ...JEST_LOAD,
     command: jest('apps/web-e2e/jest.config.ts'),
     paths: ['apps/web-e2e/**', 'libs/api-specs/**', ...JS_ROOT],
     needs: ['npm'],
@@ -125,6 +144,7 @@ export const suites = [
   },
   {
     id: 'api-interfaces',
+    ...JEST_LOAD,
     command: jest('libs/api-interfaces/jest.config.ts'),
     // Besides its own source, this suite reads the workflows, the Terraform
     // tree, the bootstrap script and package.json files.
@@ -143,6 +163,7 @@ export const suites = [
   },
   {
     id: 'api-specs',
+    ...JEST_LOAD,
     command: jest('libs/api-specs/jest.config.ts'),
     paths: ['libs/api-specs/**', ...JS_ROOT],
     needs: ['npm'],
@@ -150,6 +171,7 @@ export const suites = [
   },
   {
     id: 'data-models',
+    ...JEST_LOAD,
     command: jest('libs/data-models/jest.config.ts'),
     paths: ['libs/data-models/**', 'libs/api-interfaces/**', 'libs/utils/**', ...JS_ROOT],
     needs: ['npm'],
@@ -157,6 +179,7 @@ export const suites = [
   },
   {
     id: 'utils',
+    ...JEST_LOAD,
     command: jest('libs/utils/jest.config.ts'),
     paths: ['libs/utils/**', ...JS_ROOT],
     needs: ['npm'],

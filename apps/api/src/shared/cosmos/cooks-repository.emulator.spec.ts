@@ -13,8 +13,8 @@
  * excluded from `nx test api`. When the emulator is unreachable the `beforeAll`
  * probe throws and every case FAILS — it never skips.
  *
- * Engine: the classic Linux emulator (`azure-cosmos-emulator:latest`), not the
- * lighter `vnext-preview` image. vnext was tried first and is missing two things
+ * Engine: the classic emulator (in CI its Windows build on windows-2025; see
+ * docs/development/ci-cd.md), not the lighter `vnext-preview` image. vnext was tried first and is missing two things
  * this repository relies on: it ignores the page size on a single-partition
  * `ORDER BY` query (one page, no continuation token), and it reports
  * `requestCharge: 0` for every operation inside a transactional batch. The

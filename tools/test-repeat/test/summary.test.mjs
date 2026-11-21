@@ -9,7 +9,7 @@ const reg = [
   { id: 'gamma', command: ['x'], paths: ['gamma/**'], needs: [] },
 ];
 
-function result(entry, { passed, failedRun = null, perRunMs = 1000, copies } = {}) {
+function result(entry, { passed, failedRun = null, perRunMs = 1000, copies, loadArgs = [] } = {}) {
   const [i, total] = entry.shard.split('/').map(Number);
   const { start, count } = shardRange(entry.runs, i, total);
   const requested = count * entry.parallel;
@@ -25,6 +25,7 @@ function result(entry, { passed, failedRun = null, perRunMs = 1000, copies } = {
     failedRun,
     parallel: entry.parallel,
     parallelNote: null,
+    loadArgs,
     durationMs: perRunMs * (p + (failedRun ? 1 : 0)),
     runDurationsMs: Array.from({ length: p }, () => perRunMs),
     copies: copies ?? [{ copy: 1, failedRun }],
@@ -97,4 +98,19 @@ test('a load pass gets its own row, counted in copies', () => {
   const { markdown, ok } = renderSummary(sel, results);
   assert.equal(ok, false);
   assert.match(rowOf(markdown, 'beta (load x8)'), /\| 8 \| 7\/8 \| copy 5 \|/);
+});
+
+test("a load pass's loadArgs are named in its row, and only in its row", () => {
+  const sel = selectSuites({ suites: reg, changedFiles: ['beta/y'], labels: ['test-repeat:load'] });
+  const results = [
+    result(sel.entries.find(e => e.kind === 'repeat')),
+    result(
+      sel.entries.find(e => e.kind === 'load'),
+      { loadArgs: ['--maxWorkers=1'] }
+    ),
+  ];
+  const { markdown, ok } = renderSummary(sel, results);
+  assert.equal(ok, true);
+  assert.match(rowOf(markdown, 'beta (load x8)'), /\(each copy: `--maxWorkers=1`\)/);
+  assert.doesNotMatch(rowOf(markdown, 'beta'), /each copy/);
 });
