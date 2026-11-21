@@ -1,5 +1,5 @@
 import type { AccountInfo } from '@azure/msal-browser';
-import type { Cook, Device } from '../api/client';
+import type { ApiClient, Cook, Device } from '../api/client';
 import type { AppConfig } from '../config/config';
 import type {
   HubFactory,
@@ -105,6 +105,30 @@ export function makeCook(overrides: Partial<Cook> = {}): Cook {
     status: 'active',
     startTime: '2026-11-20T14:00:00.000Z',
     ...overrides,
+  };
+}
+
+/**
+ * Wraps `client` so the promise of every GET it sends is kept, by the path
+ * template it was called with (`'/devices/{id}'`).
+ *
+ * Awaiting one of those promises inside `act` waits until the component has
+ * applied that answer: the component awaited (or `.then`-ed) the same promise
+ * when it sent the request, before the test did, so its continuation (and the
+ * state it sets) runs first. That is a wait on an event, not on time.
+ */
+export function trackGets(client: ApiClient) {
+  const sent: { path: string; answer: Promise<unknown> }[] = [];
+  const get = client.GET as (path: string, init?: unknown) => Promise<unknown>;
+  const GET = ((path: string, init?: unknown) => {
+    const answer = get(path, init);
+    sent.push({ path, answer });
+    return answer;
+  }) as ApiClient['GET'];
+  return {
+    client: { ...client, GET } as ApiClient,
+    /** The answers to each GET of `path` so far, in the order they were sent. */
+    gets: (path: string) => sent.filter(s => s.path === path).map(s => s.answer),
   };
 }
 

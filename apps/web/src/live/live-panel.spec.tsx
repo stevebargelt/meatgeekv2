@@ -1,20 +1,20 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { ApiProvider } from '../api/api-context';
-import { createApiClient, type Cook, type Device } from '../api/client';
+import type { Cook, Device } from '../api/client';
 import {
   BRISKET_BOX,
   OFFSET,
-  TEST_CONFIG,
   apiPath,
   createFakeHubs,
   installFetch,
   jsonResponse,
   makeCook,
   makeTemperature,
+  trackGets,
   type FakeHubs,
   type RecordedRequest,
 } from '../test/fakes';
-import { renderPages } from '../test/render';
+import { createTestClient, renderPages } from '../test/render';
 import type { components } from '@meatgeekv2/api-specs/types';
 import { HubFactoryProvider } from './hub-context';
 import { LivePanel } from './live-panel';
@@ -22,6 +22,38 @@ import { LivePanel } from './live-panel';
 type TemperatureReading = components['schemas']['TemperatureReading'];
 
 const COOK = makeCook({ id: 'cook-1' });
+const BACKFILL = '/temperatures/current/{deviceId}';
+
+/** Every test runs on a fake clock that starts here; nowIso() reads it. */
+const T0 = new Date('2026-11-20T15:00:00.000Z');
+
+/** Stops Date at T0 and leaves the timers real: for tests that are not about time. */
+function stopTheClock() {
+  jest.useFakeTimers({
+    now: T0,
+    doNotFake: [
+      'hrtime',
+      'nextTick',
+      'performance',
+      'queueMicrotask',
+      'requestAnimationFrame',
+      'cancelAnimationFrame',
+      'requestIdleCallback',
+      'cancelIdleCallback',
+      'setImmediate',
+      'clearImmediate',
+      'setInterval',
+      'clearInterval',
+      'setTimeout',
+      'clearTimeout',
+    ],
+  });
+}
+
+/** Fakes Date and the timers from T0: for tests about time, which advance them. */
+function fakeTimers() {
+  jest.useFakeTimers({ now: T0 });
+}
 const COMPLETED: Cook = { ...COOK, status: 'completed', endTime: '2026-11-20T23:15:00.000Z' };
 
 interface ServerState {
@@ -95,22 +127,28 @@ function device(configuration?: Device['configuration']): Device {
   return { ...BRISKET_BOX, configuration };
 }
 
-/** Renders /cooks/cook-1 and waits until its first hub connection has started. */
+/**
+ * Renders /cooks/cook-1 and waits until its first hub connection has started.
+ * `gets` holds the answer to each GET the page sent (see trackGets).
+ */
 async function openCook(server: ServerState, hubs: FakeHubs = createFakeHubs()) {
   const api = fakeServer(server);
-  const view = renderPages('/cooks/cook-1', { createHub: hubs.createHub });
+  const { client, gets } = trackGets(createTestClient());
+  const view = renderPages('/cooks/cook-1', { createHub: hubs.createHub, client });
   await waitFor(() => expect(hubs.hubs.length).toBeGreaterThan(0));
   await waitFor(() => expect(hubs.latest().start).toHaveBeenCalled());
-  return { api, hubs, view };
+  return { api, hubs, view, gets };
 }
 
 function push(hubs: FakeHubs, reading: Partial<TemperatureReading> = {}) {
   act(() => hubs.latest().emit('temperature', makeTemperature(reading)));
 }
 
+/** The fake clock's now, plus `offsetMs`, as an ISO timestamp. */
 const nowIso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
 
 describe('live cook panel', () => {
+  beforeEach(stopTheClock);
   afterEach(() => jest.useRealTimers());
 
   it('shows waiting until the first reading, then live with the pushed values of the cook device only', async () => {
@@ -158,11 +196,11 @@ describe('live cook panel', () => {
   });
 
   it('shows the reading time and its age, updated every second', async () => {
-    jest.useFakeTimers({ now: new Date('2026-11-20T15:00:00.000Z') });
+    fakeTimers();
     const { hubs } = await openCook({ cook: COOK, device: device({ pollingInterval: 10 }) });
     await waitFor(() => expect(state()).toBe('waiting'));
 
-    const readingAt = new Date(Date.now() - 12_000).toISOString();
+    const readingAt = nowIso(-12_000);
     push(hubs, { timestamp: readingAt });
     act(() => jest.advanceTimersByTime(1000));
     const time = screen.getByTestId('live-reading-time').textContent ?? '';
@@ -174,12 +212,16 @@ describe('live cook panel', () => {
   });
 
   it('goes stale once the reading is older than 3 × the device pollingInterval', async () => {
-    jest.useFakeTimers({ now: new Date('2026-11-20T15:00:00.000Z') });
-    const { hubs } = await openCook({ cook: COOK, device: device({ pollingInterval: 10 }) });
+    fakeTimers();
+    const { hubs, gets } = await openCook({
+      cook: COOK,
+      device: device({ pollingInterval: 10 }),
+    });
     await waitFor(() => expect(state()).toBe('waiting'));
-    // Let GET /devices/{id} land, so the 10 s interval is in effect.
+    // Wait until the panel has applied GET /devices/{id}, so the 10 s interval is in effect.
+    await waitFor(() => expect(gets('/devices/{id}')).not.toHaveLength(0));
     await act(async () => {
-      await jest.advanceTimersByTimeAsync(100);
+      await Promise.all(gets('/devices/{id}'));
     });
 
     push(hubs, { timestamp: nowIso() });
@@ -197,7 +239,7 @@ describe('live cook panel', () => {
   });
 
   it('uses a 30 s polling interval (90 s stale threshold) when the device sets none', async () => {
-    jest.useFakeTimers({ now: new Date('2026-11-20T15:00:00.000Z') });
+    fakeTimers();
     const { hubs } = await openCook({ cook: COOK, device: device() });
     await waitFor(() => expect(state()).toBe('waiting'));
 
@@ -243,7 +285,7 @@ describe('live cook panel', () => {
       grillTemp: 210,
       probe2Temp: 120,
     };
-    const { api, hubs } = await openCook({
+    const { api, hubs, gets } = await openCook({
       cook: COOK,
       device: device(),
       current: () => jsonResponse(200, current),
@@ -255,14 +297,19 @@ describe('live cook panel', () => {
     push(hubs, { timestamp: nowIso(5_000), grillTemp: 215 });
     current = { ...current, grillTemp: 1 };
     act(() => hubs.latest().reconnected());
-    await waitFor(() => expect(api.backfills()).toBe(2));
-    // Give the backfill time to (not) land.
-    await new Promise(resolve => setTimeout(resolve, 20));
+    // The reconnect sent the second backfill. Wait until the panel has applied its answer.
+    expect(gets(BACKFILL)).toHaveLength(2);
+    let answer: unknown;
+    await act(async () => {
+      answer = await gets(BACKFILL)[1];
+    });
+    expect(answer).toMatchObject({ data: { grillTemp: 1 } });
+    expect(api.backfills()).toBe(2);
     expect(channel('grill')).toBe('215 °F');
   });
 
   it('after a close negotiates again and starts a new connection', async () => {
-    jest.useFakeTimers();
+    fakeTimers();
     const { api, hubs } = await openCook({ cook: COOK, device: device() });
     await waitFor(() => expect(state()).toBe('waiting'));
     const first = hubs.latest();
@@ -283,7 +330,7 @@ describe('live cook panel', () => {
   });
 
   it('retries a 503 or 429 from negotiate, and connects when it succeeds', async () => {
-    jest.useFakeTimers();
+    fakeTimers();
     const hubs = createFakeHubs();
     const api = fakeServer({
       cook: COOK,
@@ -316,7 +363,7 @@ describe('live cook panel', () => {
   });
 
   it('shows "Sign in again" on a 401 from negotiate and stops retrying', async () => {
-    jest.useFakeTimers();
+    fakeTimers();
     const hubs = createFakeHubs();
     const api = fakeServer({
       cook: COOK,
@@ -377,12 +424,8 @@ describe('live cook panel', () => {
     fakeServer({ cook: COOK, device: device() });
     const hubs = createFakeHubs();
     const onReading = jest.fn();
-    const client = createApiClient({
-      baseUrl: TEST_CONFIG.apiBaseUrl,
-      getToken: async () => 'test-token',
-    });
     render(
-      <ApiProvider client={client}>
+      <ApiProvider client={createTestClient()}>
         <HubFactoryProvider createHub={hubs.createHub}>
           <LivePanel cook={COOK} onCookStopped={jest.fn()} onReading={onReading} />
         </HubFactoryProvider>
@@ -404,7 +447,7 @@ describe('live cook panel', () => {
   });
 
   it('unmount stops the connection and leaves no timers running', async () => {
-    jest.useFakeTimers();
+    fakeTimers();
     const { hubs, view } = await openCook({ cook: COOK, device: device() });
     await waitFor(() => expect(state()).toBe('waiting'));
     const hub = hubs.latest();
@@ -415,7 +458,7 @@ describe('live cook panel', () => {
   });
 
   it('unmount while waiting to negotiate again cancels the retry', async () => {
-    jest.useFakeTimers();
+    fakeTimers();
     const { api, hubs, view } = await openCook({ cook: COOK, device: device() });
     await waitFor(() => expect(state()).toBe('waiting'));
     act(() => hubs.latest().close());
