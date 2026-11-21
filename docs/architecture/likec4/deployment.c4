@@ -40,11 +40,21 @@ deployment {
     }
 
     runner ci 'GitHub Actions runner' {
-      technology 'Deploy Dev App, acceptance job, environment development'
+      technology 'Deploy Dev App, acceptance and web-acceptance jobs, environment development'
       description 'Logs in under OIDC as the dev app-publish identity, which holds IoT Hub Registry Contributor on the dev hub (dev only).'
       acceptance = instanceOf delivery.acceptance
+      webAcceptance = instanceOf delivery.webAcceptance {
+        description 'Playwright with Chromium against the production web app on Vercel, signed in as the TOTP acceptance user.'
+      }
       simdevice = instanceOf delivery.simdevice {
-        description 'Built per run from apps/data-pusher. SIMDEVICE_CONNECTION_STRING fetched per run, masked, never stored.'
+        description 'Built per run from apps/data-pusher. Sends as one of the three standing devices: <sim> and <sim>-chart (acceptance job), <sim>-web (web-acceptance job). Each connection string is fetched per run, masked, never stored.'
+      }
+    }
+
+    saas vercelHost 'Vercel' {
+      technology 'Hobby, Git integration, production branch main'
+      web = instanceOf meatgeek.web {
+        description 'https://meatgeekv2-web.vercel.app, built by Vercel from every push to main.'
       }
     }
 
@@ -57,7 +67,7 @@ deployment {
 views {
   deployment view devDeployment {
     title 'Deployment: dev'
-    description 'What runs where. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance job.'
+    description 'What runs where. The web app is served by Vercel (production, built from main) and calls the dev API. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance jobs.'
     include dev.**
   }
 }

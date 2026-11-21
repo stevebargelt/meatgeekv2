@@ -47,10 +47,10 @@ type V1Temps struct {
 }
 
 // TemperatureReading mirrors libs/api-specs/spec/components/schemas/
-// temperature.yaml#/TemperatureReading. Nullable probes and cookId use
-// pointer + omitempty so a nil cookId serializes as absent (the spec's
-// nullable behavior — the bare-getCurrent handler returns the object
-// directly without wrapping).
+// temperature.yaml#/TemperatureReading. cookId and the five temperatures are
+// optional: each is a pointer with omitempty, so a nil field is omitted from
+// the JSON (never sent as null). The bare-getCurrent handler returns the
+// object directly without wrapping.
 type TemperatureReading struct {
 	DeviceID   string    `json:"deviceId"`
 	Timestamp  time.Time `json:"timestamp"`

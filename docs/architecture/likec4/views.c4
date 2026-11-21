@@ -22,17 +22,18 @@ views {
 
   view index {
     title 'MeatGeek V2: landscape'
-    description 'Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Click a box to go down a level.'
+    description 'Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. The web app is live on Vercel; sky dashed is the iOS app, decided and not built. Click a box to go down a level.'
     include *
     include meatgeek.edge, meatgeek.cloud, meatgeek.mobile, meatgeek.web
+    include vercel
   }
 
   view system of meatgeek {
     title 'MeatGeek V2: containers'
-    description 'Everything that runs. Sky dashed is decided and not built: the mobile and web apps as SignalR clients. Grey dotted is not built, with no decision.'
+    description 'Everything that runs. Sky dashed is decided and not built: the iOS app. Grey dotted is not built, with no decision.'
     include *
     include edge.*, cloud.*, cloud.ingest.*, cloud.observability.*
-    include pitmaster, smoker, entra
+    include pitmaster, smoker, entra, vercel
     include delivery.simdevice
   }
 
@@ -47,8 +48,9 @@ views {
     title 'MeatGeek cloud (Azure)'
     include *
     include ingest.*, observability.*
-    include api.cooks, api.negotiate, api.broadcast
+    include api.cooks, api.negotiate, api.broadcast, api.rollup, data.temperatureRollups
     include meatgeek.edge, meatgeek.edge.pusher.twin, meatgeek.mobile, meatgeek.web, entra
+    include meatgeek.web.livePanel, meatgeek.web.chart
     include delivery.simdevice, operator
   }
 
@@ -71,15 +73,18 @@ views {
   view data of meatgeek.cloud.data {
     title 'Cosmos DB'
     description '''
-      Five containers in one shared-throughput database, their partition keys, and who touches
-      each: `devices /id`, `temperatures /deviceId`, `cooks /userId`, `users /id`,
-      `recipes /userId`. The ownership check `getDeviceOwnership` is one point read on
-      `devices`. IoT Hub's `cosmos-storage-route` is the only writer of `temperatures`, with
-      the partition value taken from `{deviceid}`; its device-side writers are the Pi
-      data-pusher and the dev simulated device.
+      Seven containers in one shared-throughput database (400 RU/s), their partition keys, and
+      who touches each: `devices /id`, `temperatures /deviceId`, `cooks /userId`, `users /id`,
+      `recipes /userId`, `temperature-rollups /deviceId` and `leases /id`. The ownership check
+      `getDeviceOwnership` is one point read on `devices`. IoT Hub's `cosmos-storage-route` is
+      the only writer of `temperatures`, with the partition value taken from `{deviceid}`; its
+      device-side writers are the Pi data-pusher and the dev simulated device.
+      `rollupTemperatures` reads its change feed (checkpoints in `leases`) and is the only
+      writer of `temperature-rollups`, which the cook chart reads.
     '''
     include *
     include meatgeek.cloud.api.repos, meatgeek.cloud.api.ownership, meatgeek.cloud.ingest.iothub
+    include meatgeek.cloud.api.rollup
     include meatgeek.edge.pusher, delivery.simdevice
   }
 
@@ -108,7 +113,7 @@ views {
     title 'Delivery pipeline'
     include *
     include acceptance.*
-    include team, meatgeek, entra
+    include team, meatgeek, meatgeek.web, entra, vercel
   }
 
   view deviceUpdates {
@@ -128,11 +133,11 @@ views {
     title 'Flow: one temperature reading'
     description '''
       Today. Both paths are live. Storage: IoT Hub's `cosmos-storage-route` writes Cosmos.
-      Push: Event Hub, then `broadcastTemperature`, then SignalR, addressed to the device owner.
-      No app negotiates or connects to SignalR yet, so the flow stops at SignalR; the only live
-      client is the acceptance proofs (`signalr negotiate`, `signalr live temperature`,
-      `signalr isolation`). Measured send-to-client delay: `METRIC signalr-delivery-ms` 18424
-      (run 44673261258), a single dev sample.
+      Push: Event Hub, then `broadcastTemperature`, then SignalR, addressed to the device owner,
+      then the web app's live panel (see `watchCook`). The acceptance proofs are SignalR clients
+      too (`signalr negotiate`, `signalr live temperature`, `signalr isolation`). Measured
+      send-to-browser delay: `METRIC web-push-ms` 510 (run 44837747351); the proofs' earlier
+      `signalr-delivery-ms` 18424 (run 44673261258) was a cold start. Single dev samples.
       Two correlation axes ride on each reading. `correlation.id` is cook-scoped: the device
       twin's desired `correlationId` (see `cookStart`), persisted in `cooksession` and stamped
       on every message for the whole cook. `traceparent` is per message, from the
@@ -175,15 +180,60 @@ views {
     meatgeek.cloud.api.broadcast -> meatgeek.cloud.realtime 'each reading to its owner' {
       notes '''
         **Live.** SignalR output binding, target `temperature`, hub `temperatureHub`, `userId` =
-        the device owner, read once per device per batch (HAR-81). No app connects yet; the
-        acceptance proofs are the only live client (`signalr live temperature` measured
-        `signalr-delivery-ms` 18424, run 44673261258).
+        the device owner, read once per device per batch (HAR-81).
       '''
+    }
+    meatgeek.cloud.realtime -> meatgeek.web.livePanel 'temperature' {
+      notes '**Live.** To the browser of the owner, when a cook detail page is open. `METRIC web-push-ms` 510 (run 44837747351).'
+      navigateTo watchCook
     }
     meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'history or current reading' {
       navigateTo readHistory
     }
     meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatures 'query by deviceId'
+  }
+
+  dynamic view watchCook {
+    title 'Flow: watch a cook'
+    description '''
+      The web app's cook detail page, live in production on Vercel. It loads the cook and its
+      chart from the server-side rollups, then opens one SignalR connection and appends every
+      pushed reading to the live panel and the chart. Proven live by Deploy Dev App's
+      `web-acceptance` job, signed in as the acceptance test user: `METRIC web-push-ms` 510
+      (run 44837747351).
+    '''
+
+    pitmaster -> meatgeek.web.cooks 'open /cooks/:id'
+    meatgeek.web.shell -> entra 'token (silent)' {
+      notes '`acquireTokenSilent` for `access_as_user` (cache, then refresh token); every API call carries it as a bearer token.'
+    }
+    meatgeek.web.cooks -> meatgeek.cloud.api.cooks 'GET /cooks/{cookId}'
+    meatgeek.web.chart -> meatgeek.cloud.api.cooks 'GET /cooks/{cookId}/chart' {
+      notes 'Read from the rollups, never the raw readings: at most 720 points, one avg line per channel with a min/max band. A 12 h cook costs 6.19 RU (`METRIC chart-ru-12h`, budget 40).'
+    }
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatureRollups 'one query' {
+      notes 'Single-partition (partition = deviceId) over the hours the cook covers, about 13 documents for 12 h.'
+    }
+    meatgeek.web.livePanel -> meatgeek.cloud.api.negotiate 'POST /negotiate'
+    meatgeek.web.livePanel -> meatgeek.cloud.realtime 'connect'
+    meatgeek.edge.pusher.iot -> meatgeek.cloud.ingest.iothub 'reading'
+    meatgeek.cloud.ingest.iothub -> meatgeek.cloud.ingest.eventhub 'eventhub-realtime-route'
+    meatgeek.cloud.ingest.eventhub -> meatgeek.cloud.api.broadcast 'Event Hub trigger'
+    meatgeek.cloud.api.broadcast -> meatgeek.cloud.realtime 'to the owner userId'
+    meatgeek.cloud.realtime -> meatgeek.web.livePanel 'temperature' {
+      notes '''
+        `METRIC web-push-ms` 510 (run 44837747351), from the reading timestamp to the browser
+        showing it. The panel goes `stale` after 3 x the device `pollingInterval` with no reading.
+      '''
+    }
+    meatgeek.web.livePanel -> meatgeek.cloud.api.temperatures 'GET current (backfill after reconnect)' {
+      notes 'After every connect and reconnect, so a reading missed while disconnected is shown.'
+    }
+    meatgeek.cloud.ingest.iothub -> meatgeek.cloud.data.temperatures 'cosmos-storage-route'
+    meatgeek.cloud.data.temperatures -> meatgeek.cloud.api.rollup 'change feed'
+    meatgeek.cloud.api.rollup -> meatgeek.cloud.data.temperatureRollups 'merge' {
+      notes 'One etag read-merge-replace per device-hour document; at-least-once. The next chart load includes the reading.'
+    }
   }
 
   dynamic view cookStart {
@@ -194,17 +244,18 @@ views {
       device twin's desired properties to Cosmos, and the Pi applies them and reports them back
       (HAR-58, HAR-66). The twin persists, so a Pi that is offline when the cook starts gets it
       when it next connects. `cook_started` goes to the owning user's SignalR connections, not
-      to the Pi (MG-30); no app receives it yet. Sign-in (Easy Auth, then the principal) and the
-      ownership check run first, as in the `api` view. Stopping a cook follows the same path:
-      the twin's desired cook is cleared and `cook_stopped` goes to the owner.
+      to the Pi (MG-30). Sign-in (Easy Auth, then the principal) and the ownership check run
+      first, as in the `api` view. Stopping a cook follows the same path: the twin's desired
+      cook is cleared and `cook_stopped` goes to the owner, whose web live panel consumes it.
     '''
 
-    meatgeek.mobile -> meatgeek.cloud.api.cooks 'POST /cooks' {
+    meatgeek.web.cooks -> meatgeek.cloud.api.cooks 'POST /cooks' {
       notes '''
         Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The
-        ownership check is one point read on `devices`: a foreign or unregistered device gets
-        403 `DEVICE_NOT_OWNED`, with no write and no event. The mobile app does not call the
-        API yet; the live callers are the acceptance proofs.
+        web app's start form sends a client-generated id, one per intent, so a retried submit
+        starts the cook once. The ownership check is one point read on `devices`: a foreign or
+        unregistered device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live
+        callers are the web app and the acceptance proofs.
       '''
     }
     meatgeek.cloud.api.cooks -> meatgeek.cloud.data.cooks 'cook and device lock' {
@@ -234,7 +285,9 @@ views {
         Sent only after the write succeeds, on hub `temperatureHub`, to the caller's
         `userId` ("<tid>:<oid>"), never to the deviceId (MG-30). The envelope carries
         `correlation: CorrelationContext { id }`, the same id the twin carries. The
-        `signalr isolation` proof receives it as the owner; no app consumes it yet.
+        `signalr isolation` proof receives it as the owner. The web live panel listens for
+        `temperature` and `cook_stopped`: when the cook is stopped, `cook_stopped` reaches it the
+        same way and the page shows the cook as ended.
       '''
     }
   }
@@ -242,9 +295,9 @@ views {
   dynamic view readHistory {
     variant sequence
     title 'Flow: read temperature history'
-    description 'GET /temperatures/history for a device.'
+    description 'GET /temperatures/history for a device. Its live caller is the acceptance suite; the web app reads a cook through its chart (see `watchCook`), not raw history.'
 
-    meatgeek.mobile -> meatgeek.cloud.api.easyauth 'GET /temperatures/history'
+    delivery.acceptance -> meatgeek.cloud.api.easyauth 'GET /temperatures/history'
     meatgeek.cloud.api.easyauth -> meatgeek.cloud.api.principal 'X-MS-CLIENT-PRINCIPAL'
     meatgeek.cloud.api.principal -> meatgeek.cloud.api.temperatures 'userId'
     meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.ownership 'does the caller own this device?'
@@ -252,10 +305,12 @@ views {
       notes '`getDeviceOwnership`. Not owned or not found: 404 `DEVICE_NOT_FOUND`, about 1 RU.'
     }
     meatgeek.cloud.api.temperatures -> meatgeek.cloud.api.repos 'one page of readings'
-    meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatures 'COUNT(1), then one page; partition = deviceId' {
+    meatgeek.cloud.api.repos -> meatgeek.cloud.data.temperatures 'one page by continuation token; partition = deviceId' {
       notes '''
-        Every request pays a `COUNT(1)` over the device partition for `total`, and the page is
-        `OFFSET`/`LIMIT`, whose cost grows with the skip. Measured: see `telemetryProof`.
+        `maxItemCount` = limit (at most 1000) and the continuation token from the previous page.
+        No COUNT and no OFFSET since HAR-75, so a deep page costs what the first does: the volume
+        proof fails unless the last page costs at most 1.5 x the first (measured 47.77 RU first,
+        36.09 RU last). Measured: see `telemetryProof`.
       '''
       navigateTo telemetryProof
     }
@@ -314,10 +369,15 @@ views {
 
   dynamic view mergeToDeploy {
     title 'Flow: a merge reaches dev'
-    description 'What happens after the Reviewer merges a pull request.'
+    description 'What happens after the Reviewer merges a pull request. Vercel builds the web app from the same push, in parallel with the Azure path.'
 
-    team -> delivery.ci 'merge to main' {
-      notes 'The push to `main` starts CI/CD Pipeline.'
+    parallel {
+      team -> delivery.ci 'merge to main' {
+        notes 'The push to `main` starts CI/CD Pipeline.'
+      }
+      vercel -> meatgeek.web 'builds main, serves production' {
+        notes 'The Vercel Git integration, on its own: no workflow and no Vercel token in GitHub. It reports back only through the `Vercel` commit status.'
+      }
     }
     delivery.ci -> delivery.apply 'green on main' {
       notes '''
@@ -325,15 +385,22 @@ views {
         If a newer commit has landed, this run ends green **without applying**.
       '''
     }
-    delivery.apply -> meatgeek 'terraform apply'
+    delivery.apply -> meatgeek.cloud 'terraform apply'
     delivery.apply -> delivery.deploy 'apply succeeded'
-    delivery.deploy -> meatgeek 'publish the API bundle'
+    delivery.deploy -> meatgeek.cloud 'publish the API bundle'
     delivery.deploy -> delivery.acceptance 'deployed = true'
     delivery.acceptance -> entra 'get app-only token'
-    delivery.acceptance -> meatgeek 'live probes against the API'
+    delivery.acceptance -> meatgeek.cloud 'live probes against the API'
     delivery.acceptance -> delivery.simdevice 'spawns simdevice' {
       notes 'Live telemetry round trip and volume proofs through IoT Hub.'
       navigateTo telemetryProof
+    }
+    delivery.deploy -> delivery.webAcceptance 'deployed = true' {
+      notes 'In parallel with `acceptance`.'
+    }
+    delivery.webAcceptance -> meatgeek.web 'Playwright, production' {
+      notes 'Waits for `/version.json` to show this commit or a descendant (`METRIC web-deploy-wait-s`), signs in on the Microsoft pages as the test user, starts a cook on `<sim>-web` and sees a pushed reading (`METRIC web-push-ms`).'
+      navigateTo watchCook
     }
   }
 }

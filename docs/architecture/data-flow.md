@@ -123,11 +123,11 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 
 ### 4. Real-time Path Details
 
-**On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's owner through the SignalR output binding on `temperatureHub`, addressed by `userId` (HAR-81). The client apps that receive it are not built yet. No message goes to a SignalR group.
+**On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's owner through the SignalR output binding on `temperatureHub`, addressed by `userId` (HAR-81). The web app's live panel receives it in production (HAR-71). No message goes to a SignalR group.
 
-The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows this path, up to SignalR.
+The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows this path, and [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/) follows it into the browser.
 
-**Measured live delay** (send to client, one dev sample, `signalr live temperature` proof): `METRIC signalr-delivery-ms 18424` (run 44673261258).
+**Measured live delay** (single dev samples): reading to browser, `METRIC web-push-ms 510` (run 44837747351, the `web-acceptance` job); send to an acceptance-proof client on a cold start, `METRIC signalr-delivery-ms 18424` (run 44673261258).
 
 **What is sent** (`apps/api/src/functions/signalr/broadcast-temperature.ts`):
 - One message per event: target `temperature`, `userId` = the `userId` stored on the device, one argument — the `TemperatureReading` plus `enqueuedTimeUtc` (the Event Hub enqueued time, ISO 8601).
@@ -137,6 +137,14 @@ The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) v
 - An event with no device id, a non-JSON body or no timestamp is skipped and counted, never thrown; each batch logs `broadcastTemperature sent=<n> skipped=<m> unowned=<u> lookupFailed=<f>`.
 - `POST /negotiate` only mints a client token for the caller's `userId`; it reads no devices and manages no groups. Before HAR-81, readings went to `device-{deviceId}` groups that negotiate refilled on every call, one SignalR REST call per owned device, which tripped the Free_F1 service's throttling.
 
+### 5. Chart read model
+
+A cook's chart is never read from the raw readings. The `rollupTemperatures` Function, a Cosmos DB change-feed trigger on `temperatures` (identity-based, `startFromBeginning`, its checkpoints in the Terraform-owned `leases` container), folds each batch in memory into per-device, per-hour documents in `temperature-rollups` (partition `/deviceId`, id `<deviceId>:<yyyy-mm-ddThh>`, up to 60 minute slots of `{n, min, max, sum}` per channel, no TTL so a chart outlives the readings), then does one etag read-merge-replace per document (a 412 re-reads and merges again).
+
+`GET /cooks/{cookId}/chart` point-reads the cook, then runs one single-partition query over the hours the cook covers and returns at most 720 points. The chart of a 12-hour cook costs **6.19 RU** (`METRIC chart-ru-12h`, `volume-cook-chart.proof.ts`, budget 40), against about 400 RU to read its 8,640 raw readings.
+
+The change feed is **at-least-once**: a batch written but not checkpointed (a host crash between the two) is folded again, which double-counts `n` and `sum` for those readings and skews one or a few minutes of one chart; `min` and `max` are unaffected. This is accepted: exact-once would need a write per reading. See `apps/api/src/shared/cosmos/temperature-rollups-repository.ts`.
+
 ## Cook Session Management Flow
 
 ### Starting a Cook
@@ -144,7 +152,7 @@ The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) v
 The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view shows this sequence.
 
 **Sequence**:
-1. A client calls `POST /cooks` with a `deviceId` (the mobile and web apps are scaffolds and do not call the API yet)
+1. A client (the web app's start form, or an acceptance proof) calls `POST /cooks` with a `deviceId`. The web app sends a client-generated cook id, one per intent, so a retried submit starts the cook once
 2. The API resolves the caller from the Easy Auth principal, `"<tid>:<oid>"`
 3. The API point-reads the device in the `devices` container. A device registered to someone else, or not registered at all, gets **403 `DEVICE_NOT_OWNED`**: no write, no SignalR event
 4. For an owned device, the API creates the cook record in the `cooks` container, partitioned on the caller's `userId`:

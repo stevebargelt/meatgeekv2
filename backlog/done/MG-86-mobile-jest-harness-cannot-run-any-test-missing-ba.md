@@ -4,7 +4,7 @@ type: story
 status: done
 title: "mobile jest harness cannot run any test (missing babel/RN deps); nx test mobile passes vacuously"
 closed: 2026-11-20
-closed_commit: 5b8d26e
+closed_commit: e273891
 ---
 
 #### Problem

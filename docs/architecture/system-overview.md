@@ -73,11 +73,11 @@ The existing Go-based device controller provides a solid foundation:
 | **Data Ingestion** | Azure IoT Hub | Device-to-cloud telemetry |
 | **Processing** | Azure Functions | Serverless data processing |
 | **Storage** | CosmosDB | NoSQL document storage |
-| **Real-time** | SignalR (Serverless) | Live temperatures and cook events pushed to clients (on `main` since HAR-60; no app connects yet; see [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/)) |
+| **Real-time** | SignalR (Serverless) | Live temperatures and cook events pushed to clients (on `main` since HAR-60; the web app's live panel receives them; see [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/)) |
 | **Device state** | IoT Hub device twin | The active cook, in desired properties; the Pi reports what it applied (HAR-58, HAR-66; see [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/)) |
 | **API** | Azure Functions | REST API with OpenAPI specs |
-| **Web** | React | User interface |
-| **Mobile** | Swift (native iOS) | Planned, not built; shares only the OpenAPI contract with the web app |
+| **Web** | React 18, Vite, on Vercel | Live at `https://meatgeekv2-web.vercel.app`: devices, cooks, a live panel by push and a chart of the whole cook |
+| **Mobile** | Swift (native iOS) | Decided, not built; shares only the OpenAPI contract with the web app |
 | **Infrastructure** | Terraform | Infrastructure as Code |
 | **Monitoring** | Azure Monitor + OTEL | Observability and tracing |
 
@@ -85,7 +85,7 @@ The existing Go-based device controller provides a solid foundation:
 
 What runs today is the [`system` view](https://stevebargelt.github.io/meatgeekv2/#/view/system/) of the architecture site; the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) follows one reading from the RTD sensors through the data pusher and IoT Hub's `cosmos-storage-route` into Cosmos DB, and on through `broadcastTemperature` to SignalR, and the [`cookStart` view](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) shows how a cook reaches the Pi through the device twin. The same views render on GitHub in [Architecture Diagrams](diagrams.md).
 
-The Event Hub → Functions → SignalR broadcast path is **on `main` up to SignalR** since HAR-60: IoT Hub routes to the Event Hub, and the API's `broadcastTemperature` consumes it and pushes each reading to its device owner's SignalR user (HAR-81). The web app is a scaffold that does not call the REST API or SignalR yet, and the native iOS app is not built; the acceptance proofs are the only live SignalR client, and measured a send-to-client delay of 18.4 s (`METRIC signalr-delivery-ms 18424`, run 44673261258). The Pi holds no SignalR connection: it learns its cook from the device twin. Both decisions are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
+The Event Hub → Functions → SignalR broadcast path is **live end to end**: IoT Hub routes to the Event Hub (HAR-60), the API's `broadcastTemperature` consumes it and pushes each reading to its device owner's SignalR user (HAR-81), and the web app's live panel shows it. The web app calls the REST API and SignalR in production (HAR-71); the [`watchCook` view](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/) follows it. Deploy Dev App's `web-acceptance` job proves it live in a real browser: a pushed reading reached the page in 510 ms (`METRIC web-push-ms 510`, run 44837747351). The acceptance proofs are SignalR clients too; their first measurement, 18.4 s (`METRIC signalr-delivery-ms 18424`, run 44673261258), was a cold start. The native iOS app is decided and not built. The Pi holds no SignalR connection: it learns its cook from the device twin. Both decisions are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
 
 ### Core Components
 
@@ -97,18 +97,18 @@ The Event Hub → Functions → SignalR broadcast path is **on `main` up to Sign
 #### 2. Cloud Infrastructure
 - **IoT Hub**: Device connectivity with **parallel message routing**
   - Direct route → CosmosDB for guaranteed storage
-  - Event Hub route → Functions for real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app reads `temperature-data` and pushes each reading to its device owner's SignalR user; the client apps that receive it are not built)
+  - Event Hub route → Functions for real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app reads `temperature-data` and pushes each reading to its device owner's SignalR user; the web app's live panel receives it)
 - **Azure Functions**: Two distinct roles
   - **Lightweight Functions**: SignalR broadcasting only, no database writes (`broadcastTemperature`, on `main` since HAR-60)
   - **API Functions**: Cook management and queries
 - **CosmosDB**: Document database receiving telemetry directly from IoT Hub
 
-**API persistence on `main`.** The API reads and writes one shared-throughput Cosmos database, `<prefix>-shared-db`, holding five containers: `devices` (`/id`), `temperatures` (`/deviceId`), `cooks` (`/userId`), `users` (`/id`) and `recipes` (`/userId`). It reaches them with the Function App's system-assigned managed identity, never a key, and finds each one by an app setting: `COSMOSDB_DATABASE_NAME` plus `COSMOSDB_{COOKS,DEVICES,TEMPERATURES,USERS,RECIPES}_CONTAINER_NAME`. `temperatures` is read-only for the API; only IoT Hub's Cosmos route writes it. The caller is the Easy Auth principal `"<tid>:<oid>"`. Routes that name a device first do one point read on `devices` to check the caller owns it: `GET` and `PATCH /devices/{id}` and the temperature routes answer 404 for a foreign or unknown device alike, cook start and stop answer 403 `DEVICE_NOT_OWNED`, and `DELETE /devices/{id}` (HAR-100) answers 403 `DEVICE_NOT_OWNED` for a foreign device, with nothing deleted, and 404 `DEVICE_NOT_FOUND` for an unknown one. User profiles and recipes live in the caller's own partition.
+**API persistence on `main`.** The API reads and writes one shared-throughput Cosmos database, `<prefix>-shared-db`, holding seven containers: `devices` (`/id`), `temperatures` (`/deviceId`), `cooks` (`/userId`), `users` (`/id`), `recipes` (`/userId`), `temperature-rollups` (`/deviceId`) and `leases` (`/id`, the change-feed trigger's leases). It reaches them with the Function App's system-assigned managed identity, never a key, and finds each one by an app setting: `COSMOSDB_DATABASE_NAME` plus `COSMOSDB_{COOKS,DEVICES,TEMPERATURES,USERS,RECIPES}_CONTAINER_NAME`. `temperatures` is read-only for the API; only IoT Hub's Cosmos route writes it. The `rollupTemperatures` change-feed trigger folds its readings into per-device, per-hour documents in `temperature-rollups`, which `GET /cooks/{cookId}/chart` reads (HAR-86; see [Data Flow](data-flow.md#5-chart-read-model)). The caller is the Easy Auth principal `"<tid>:<oid>"`. Routes that name a device first do one point read on `devices` to check the caller owns it: `GET` and `PATCH /devices/{id}` and the temperature routes answer 404 for a foreign or unknown device alike, cook start and stop answer 403 `DEVICE_NOT_OWNED`, and `DELETE /devices/{id}` (HAR-100) answers 403 `DEVICE_NOT_OWNED` for a foreign device, with nothing deleted, and 404 `DEVICE_NOT_FOUND` for an unknown one. User profiles and recipes live in the caller's own partition.
 - **SignalR**: Real-time communication hub
 - **Application Insights**: Monitoring and observability
 
 #### 3. Client Applications
-- **Web App (React)**: Interface for real-time monitoring and cook history
+- **Web App (React, live)**: On Vercel production at `https://meatgeekv2-web.vercel.app`, built from `main`. Entra sign-in (MSAL, auth code + PKCE); list, register and rename devices; start and stop a cook; list cooks; a cook's page with a live panel by push and a chart of the whole cook from the rollups
 - **Mobile App (native iOS, Swift)**: Planned and not built. It shares no code with the web app; the two clients share only the OpenAPI contract in `libs/api-specs/spec`
 - **Shared Libraries**: TypeScript libraries the web app and API use for consistent API integration
 
@@ -130,7 +130,7 @@ The Event Hub → Functions → SignalR broadcast path is **on `main` up to Sign
 - **Dual-path telemetry processing** for resilience and performance
 - **Direct IoT Hub routing** to CosmosDB for guaranteed storage
 - **Event Hub triggers** for lightweight real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app)
-- **SignalR broadcasts** for immediate client updates (the API sends cook lifecycle events to the owner and, since HAR-60, `temperature` readings to the device owner; no app receives them yet, only the acceptance proofs)
+- **SignalR broadcasts** for immediate client updates (the API sends cook lifecycle events to the owner and, since HAR-60, `temperature` readings to the device owner; the web app's live panel receives `temperature` and `cook_stopped`)
 - **Cook session events** for business logic coordination
 
 #### Device Cook Session Management
@@ -151,13 +151,13 @@ The Event Hub → Functions → SignalR broadcast path is **on `main` up to Sign
 - **Sub-second latency** from sensor reading to client display
 - **99.9% uptime** for temperature monitoring
 - **10-second recovery** from network outages
-- **Cross-platform compatibility** (iOS, Android, Web)
+- **Clients**: the web app today; native iOS decided, not built
 
-### User Experience KPIs
-- **Real-time updates** with live temperature charts
-- **Historical analytics** for cook comparison and optimization
-- **Mobile-first design** optimized for outdoor BBQ use
-- **Offline capability** with local data caching
+### What the web app does today
+- **Live readings** pushed to the cook's page, with a `stale` state when the device goes quiet
+- **A chart of the whole cook** from server-side rollups: at most 720 points, 6.19 RU for a 12-hour cook
+- **Cook history**: the cooks list, paged by continuation token, and each cook's chart
+- **Devices**: register, rename, and see which has an active cook
 
 ## Next Steps
 
@@ -168,4 +168,4 @@ The Event Hub → Functions → SignalR broadcast path is **on `main` up to Sign
 
 ---
 
-> **Note**: This system architecture builds upon the proven foundation of the existing MeatGeek device controller while modernizing it with cloud-native practices and mobile-first user experiences.
+> **Note**: This system architecture builds upon the proven foundation of the existing MeatGeek device controller while modernizing it with cloud-native practices and a web app in a browser.
