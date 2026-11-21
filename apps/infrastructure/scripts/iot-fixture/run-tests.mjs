@@ -268,12 +268,19 @@ const SDK_SUFFIX = '.sdk.test.mjs';
 // Honest counts, re-measured after the MG-73 identity-proof negatives: dependency-free 592
 // (fixture-core 235, container-definition 36, evidence 107, send-fixture 214);
 // real-SDK 55 across 1 file.
+// HAR-112 made the RF-2 realSpawn tests event-driven (an injected timer source,
+// fired when the real child reports it is ready) and added two of them: the
+// SIGTERM-honoring child and the real-timer default. Dependency-free 596
+// (fixture-core 236, container-definition 36, evidence 104, send-fixture 220).
+// The floor is RAISED to 591 (margin five, as above).
+// HAR-112 review added a realSpawn call with no options at all (the production
+// shape). Dependency-free 597 (send-fixture 221); the floor is RAISED to 592.
 const TIERS = {
   default: {
     label: 'dependency-free',
     match: name => name.endsWith('.test.mjs') && !name.endsWith(SDK_SUFFIX),
     minFiles: 4,
-    minTests: 587,
+    minTests: 592,
   },
   sdk: {
     label: 'real-SDK',
@@ -342,7 +349,9 @@ function main() {
     return 1;
   }
 
-  console.log(`run-tests[${tier.label}]: ${executed} test(s) across ${files.length} file(s) passed`);
+  console.log(
+    `run-tests[${tier.label}]: ${executed} test(s) across ${files.length} file(s) passed`
+  );
   return 0;
 }
 

@@ -230,6 +230,10 @@ export const DEFAULT_SEND_TIMEOUT_MS = 120_000;
 // is timeoutMs + this grace; that is what realSpawn reports.
 export const KILL_GRACE_MS = 5_000;
 
+// realSpawn's default timer source: the global timers, read once at load. A
+// test injects its own (see realSpawn); nothing in the tool does.
+export const REAL_TIMERS = Object.freeze({ setTimeout, clearTimeout });
+
 const USAGE = `${TOOL_NAME} ${TOOL_VERSION} — send ${MESSAGES_PER_RUN} synthetic ${TICKET} messages from the
 durable dev fixture device and PROVE they were read back out of Cosmos.
 
@@ -814,12 +818,18 @@ export function assertArgvIsCredentialFree(argv) {
  * grace later that it CANNOT ignore. The result carries the bound actually
  * enforced (timeoutMs + the grace) and which signal ended it, so the caller can
  * say "az was killed at the bound" rather than infer it.
+ *
+ * `timers` is the source of both stages' timers, `{setTimeout, clearTimeout}`.
+ * It defaults to the real ones and production never passes it. It exists so the
+ * tests that drive a REAL child can fire each stage when the child is ready for
+ * it, instead of racing a few milliseconds of wall clock against Node's startup.
  */
 export function realSpawn(
   command,
   argv,
-  { timeoutMs = DEFAULT_SEND_TIMEOUT_MS, killGraceMs = KILL_GRACE_MS } = {}
+  { timeoutMs = DEFAULT_SEND_TIMEOUT_MS, killGraceMs = KILL_GRACE_MS, timers = REAL_TIMERS } = {}
 ) {
+  const { setTimeout, clearTimeout } = timers;
   return new Promise((resolve, reject) => {
     const child = spawn(command, argv, {
       shell: false,
