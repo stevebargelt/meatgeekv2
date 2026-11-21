@@ -584,7 +584,8 @@ model {
         descendant), signs in on Microsoft's real pages as `ACCEPTANCE_USER_UPN` (password +
         TOTP), registers `<sim>-web`, starts a cook, sees a reading pushed by `simdevice` in the
         live panel, and stops the cook. Prints `METRIC web-deploy-wait-s` and `web-push-ms` (510
-        in run 44837747351), then runs a leak check on its log and screenshots.
+        in run 44837747351), then runs a leak check on its raw log (before masking). Playwright's
+        own screenshots are off; the proof takes a failure screenshot only after sign-in.
       '''
     }
 
