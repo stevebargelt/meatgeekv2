@@ -2,20 +2,17 @@ name: Deploy Prod App
 
 # Prod is API-only — this workflow deploys the Function App and nothing else.
 #
-# There is no web/Static-Web-Apps deploy here, and no WORKFLOW anywhere in this
-# repo deploys the web frontend. That is a statement about automation, not about
-# capability: apps/web/project.json defines a working `deploy` target, and
-# `nx deploy web --args="--env=<env>"` (an operator-run `az staticwebapp deploy`
-# against a locally built dist/apps/web) is how the frontend ships today.
+# The web frontend is not deployed by any workflow in this repo. Vercel's Git
+# integration builds apps/web from the repo-root vercel.json on every push to
+# main and serves it at dev's production address,
+# https://meatgeekv2-web.vercel.app. No Vercel token is stored in GitHub; the
+# build runs on Vercel's side, from the repo, with no CI artifact involved
+# (HAR-76, goal HAR-71). There is no prod web app.
 #
-# An earlier revision of this note claimed the web frontend had NO deploy path
-# at all. That was wrong, and it is corrected here rather than quietly dropped.
-# What MG-23 removed was the plan-only dev deploy job in ci.yml and the CI upload
-# of the web bundle; nothing in this repo downloads a CI artifact, so that upload
-# had no consumer and the `nx deploy web` command never depended on it.
-# Automating a web deploy is out of MG-23's scope (a security ticket); the
-# matching note is on the build step in .github/workflows/ci.yml, and the two
-# files must stay consistent.
+# Before HAR-76 the web project had an operator-run `deploy` target that
+# published to an Azure Static Web App; HAR-76 removed it and there is no
+# Static Web App. The matching note is on the build step in
+# .github/workflows/ci.yml, and the two files must stay consistent.
 #
 # Trigger model (MG-21, Option A): this workflow runs ONLY after the "CI/CD
 # Pipeline" workflow completes. There is no push trigger and no workflow_dispatch
