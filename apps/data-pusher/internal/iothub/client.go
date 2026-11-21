@@ -13,6 +13,8 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/sirupsen/logrus"
+
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
 )
 
 // CorrelationIDPropertyName is the IoT Hub message-property key used
@@ -88,6 +90,7 @@ type AzureClient struct {
 	reconnectMin   time.Duration
 	reconnectMax   time.Duration
 	twinState      CookState
+	clock          clock.Clock
 
 	mu         sync.Mutex
 	mqttClient mqtt.Client
@@ -161,6 +164,18 @@ func WithTwinTimeout(d time.Duration) Option {
 	}
 }
 
+// WithClock replaces the clock behind every wait the client times itself:
+// reconnect backoff, SAS-token minting and refresh, and the connect, publish
+// and twin timeouts. Tests pass a clocktest.Fake; production never sets it.
+// paho's own internal timers (its dial and keepalive) stay on real time.
+func WithClock(clk clock.Clock) Option {
+	return func(c *AzureClient) {
+		if clk != nil {
+			c.clock = clk
+		}
+	}
+}
+
 // withReconnectBackoff overrides the reconnect backoff bounds (tests).
 func withReconnectBackoff(lo, hi time.Duration) Option {
 	return func(c *AzureClient) {
@@ -187,6 +202,7 @@ func NewAzureClient(connectionString string, opts ...Option) (*AzureClient, erro
 		reconnectMin:   defaultReconnectMin,
 		reconnectMax:   defaultReconnectMax,
 		markLost:       func() {},
+		clock:          clock.Real(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -197,7 +213,7 @@ func NewAzureClient(connectionString string, opts ...Option) (*AzureClient, erro
 		c.refreshMargin = c.sasTokenTTL / 2
 	}
 	if c.twinState != nil {
-		c.twin = newTwin(c.twinState, c.twinTimeout)
+		c.twin = newTwin(c.twinState, c.twinTimeout, c.clock)
 	}
 	return c, nil
 }
@@ -241,12 +257,12 @@ func (c *AzureClient) Start(ctx context.Context) {
 func (c *AzureClient) supervise(ctx context.Context) {
 	backoff := c.reconnectMin
 	sleep := func(d time.Duration) bool {
-		timer := time.NewTimer(d)
+		timer := c.clock.NewTimer(d)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			return false
-		case <-timer.C:
+		case <-timer.C():
 			return true
 		}
 	}
@@ -267,13 +283,13 @@ func (c *AzureClient) supervise(ctx context.Context) {
 			continue
 		}
 
-		connectedAt := time.Now()
-		timer := time.NewTimer(time.Until(refreshAt))
+		connectedAt := c.clock.Now()
+		timer := c.clock.NewTimer(refreshAt.Sub(c.clock.Now()))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-timer.C:
+		case <-timer.C():
 			// SAS token near expiry: the next ensureConnectedLocked reconnects.
 			continue
 		case <-lost:
@@ -281,7 +297,7 @@ func (c *AzureClient) supervise(ctx context.Context) {
 		}
 		// The connection dropped. Back off before redialling, unless it had
 		// been up long enough to count as healthy.
-		if time.Since(connectedAt) >= c.reconnectMax {
+		if c.clock.Now().Sub(connectedAt) >= c.reconnectMax {
 			backoff = c.reconnectMin
 		}
 		if !sleep(backoff) {
@@ -295,12 +311,12 @@ func (c *AzureClient) supervise(ctx context.Context) {
 // token is not within the refresh margin (5 minutes) of expiry. Each new
 // connection is handed to the twin. Caller must hold c.mu.
 func (c *AzureClient) ensureConnectedLocked() error {
-	if c.mqttClient != nil && c.mqttClient.IsConnectionOpen() && time.Now().Before(c.sasExpiry.Add(-c.refreshMargin)) {
+	if c.mqttClient != nil && c.mqttClient.IsConnectionOpen() && c.clock.Now().Before(c.sasExpiry.Add(-c.refreshMargin)) {
 		return nil
 	}
 	c.dropLocked()
 
-	sas, expiry, err := GenerateSASToken(c.conn.HostName, c.conn.DeviceID, c.conn.SharedAccessKey, c.sasTokenTTL)
+	sas, expiry, err := generateSASTokenFrom(c.clock.Now(), c.conn.HostName, c.conn.DeviceID, c.conn.SharedAccessKey, c.sasTokenTTL)
 	if err != nil {
 		return fmt.Errorf("iothub: mint SAS token: %w", err)
 	}
@@ -329,7 +345,7 @@ func (c *AzureClient) ensureConnectedLocked() error {
 
 	client := mqtt.NewClient(opts)
 	token := client.Connect()
-	if !token.WaitTimeout(c.connectTimeout) {
+	if !c.waitTimeout(token, c.connectTimeout) {
 		return fmt.Errorf("iothub: connect to %s timed out after %s", c.brokerURL, c.connectTimeout)
 	}
 	if err := token.Error(); err != nil {
@@ -345,6 +361,19 @@ func (c *AzureClient) ensureConnectedLocked() error {
 		c.twin.connected(twinConn{client: client, lost: lost})
 	}
 	return nil
+}
+
+// waitTimeout is token.WaitTimeout on c.clock: it reports whether the token
+// completed within d.
+func (c *AzureClient) waitTimeout(token mqtt.Token, d time.Duration) bool {
+	timer := c.clock.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-token.Done():
+		return true
+	case <-timer.C():
+		return false
+	}
 }
 
 // dropLocked closes the current connection, if any. Caller must hold c.mu.
@@ -377,7 +406,7 @@ func (c *AzureClient) PublishTelemetry(ctx context.Context, payload []byte, prop
 			return err
 		}
 		token := c.mqttClient.Publish(topic, 1, false, payload)
-		if !token.WaitTimeout(c.publishTimeout) {
+		if !c.waitTimeout(token, c.publishTimeout) {
 			return fmt.Errorf("iothub: publish to %s timed out after %s", topic, c.publishTimeout)
 		}
 		return token.Error()
@@ -421,14 +450,14 @@ func (c *AzureClient) PublishTelemetryAsync(ctx context.Context, payload []byte,
 	token := c.mqttClient.Publish(topic, 1, false, payload)
 	c.mu.Unlock()
 
-	deadline := time.Now().Add(c.publishTimeout)
+	deadline := c.clock.Now().Add(c.publishTimeout)
 	return func() error {
-		timer := time.NewTimer(time.Until(deadline))
+		timer := c.clock.NewTimer(deadline.Sub(c.clock.Now()))
 		defer timer.Stop()
 		select {
 		case <-token.Done():
 			return token.Error()
-		case <-timer.C:
+		case <-timer.C():
 			return fmt.Errorf("iothub: publish to %s timed out after %s", topic, c.publishTimeout)
 		case <-ctx.Done():
 			return ctx.Err()

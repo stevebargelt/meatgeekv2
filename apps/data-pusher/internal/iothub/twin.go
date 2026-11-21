@@ -14,6 +14,8 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/sirupsen/logrus"
+
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
 )
 
 // Device twin over the telemetry MQTT connection (HAR-58).
@@ -111,6 +113,7 @@ type twinPatch struct {
 type twin struct {
 	state   CookState
 	timeout time.Duration
+	clock   clock.Clock
 
 	conns    chan twinConn  // latest connection wins; capacity 1
 	patches  chan twinPatch // capacity twinPatchBuffer
@@ -125,12 +128,35 @@ type twin struct {
 
 	syncedOnce sync.Once
 	synced     chan struct{} // closed after the first GET applied and reported
+
+	// observe, when a test sets it before Start, is told each twinEvent so the
+	// test can wait for the worker instead of guessing. Production leaves it
+	// nil.
+	observe func(twinEvent)
 }
 
-func newTwin(state CookState, timeout time.Duration) *twin {
+// twinEvent is a step of the twin worker a test may wait for.
+type twinEvent int
+
+const (
+	// twinAwaitingResponse: a request is published and the worker now waits
+	// for IoT Hub's response, under its response timer.
+	twinAwaitingResponse twinEvent = iota + 1
+	// twinFailed: a sync step failed and lastErr holds why.
+	twinFailed
+)
+
+func (t *twin) notify(e twinEvent) {
+	if t.observe != nil {
+		t.observe(e)
+	}
+}
+
+func newTwin(state CookState, timeout time.Duration, clk clock.Clock) *twin {
 	return &twin{
 		state:   state,
 		timeout: timeout,
+		clock:   clk,
 		conns:   make(chan twinConn, 1),
 		patches: make(chan twinPatch, twinPatchBuffer),
 		pending: make(map[string]chan twinResponse),
@@ -185,11 +211,13 @@ func (t *twin) conn() twinConn {
 // onConnect re-establishes the twin subscriptions (CleanSession=true, so none
 // survive a reconnect) and then reads the whole twin.
 func (t *twin) onConnect(ctx context.Context, c twinConn) {
-	tok := c.client.SubscribeMultiple(map[string]byte{
-		twinResponseFilter:     0,
-		twinDesiredPatchFilter: 0,
-	}, t.onMessage)
-	if err := waitToken(ctx, tok, t.timeout, c.lost); err != nil {
+	err := t.send(ctx, c.lost, func() mqtt.Token {
+		return c.client.SubscribeMultiple(map[string]byte{
+			twinResponseFilter:     0,
+			twinDesiredPatchFilter: 0,
+		}, t.onMessage)
+	})
+	if err != nil {
 		t.fail(fmt.Errorf("subscribe to twin topics: %w", err))
 		return
 	}
@@ -307,16 +335,17 @@ func (t *twin) request(ctx context.Context, c twinConn, topicPrefix string, body
 	if body == nil {
 		body = []byte{}
 	}
-	if err := waitToken(ctx, c.client.Publish(topicPrefix+rid, 0, false, body), t.timeout, c.lost); err != nil {
+	if err := t.send(ctx, c.lost, func() mqtt.Token { return c.client.Publish(topicPrefix+rid, 0, false, body) }); err != nil {
 		return twinResponse{}, fmt.Errorf("publish: %w", err)
 	}
 
-	timer := time.NewTimer(t.timeout)
+	timer := t.clock.NewTimer(t.timeout)
 	defer timer.Stop()
+	t.notify(twinAwaitingResponse)
 	select {
 	case r := <-ch:
 		return r, nil
-	case <-timer.C:
+	case <-timer.C():
 		return twinResponse{}, fmt.Errorf("no response within %s", t.timeout)
 	case <-c.lost:
 		return twinResponse{}, errors.New("connection lost while waiting for the response")
@@ -378,6 +407,7 @@ func (t *twin) fail(err error) {
 	t.lastErr = err
 	t.mu.Unlock()
 	logrus.WithError(err).Warn("iothub twin: sync failed; it is retried on the next connect")
+	t.notify(twinFailed)
 }
 
 // noteErr records err as the last failure without logging it (the caller
@@ -471,15 +501,32 @@ func topicQuery(s string) url.Values {
 	return v
 }
 
-// waitToken waits for a paho token, the timeout, a lost connection or ctx.
-func waitToken(ctx context.Context, tok mqtt.Token, timeout time.Duration, lost <-chan struct{}) error {
-	timer := time.NewTimer(timeout)
+// send makes a paho call (Publish or Subscribe) and waits for its token, the
+// twin timeout, a lost connection or ctx. The call runs on its own goroutine:
+// paho blocks in it for up to its WriteTimeout (30s) when the connection drops
+// between its connected check and the hand-off to its writer, and the worker
+// must not wait that out while a new connection is ready. An abandoned call
+// returns on paho's own timeout.
+func (t *twin) send(ctx context.Context, lost <-chan struct{}, call func() mqtt.Token) error {
+	timer := t.clock.NewTimer(t.timeout)
 	defer timer.Stop()
+	called := make(chan mqtt.Token, 1)
+	go func() { called <- call() }()
+	var tok mqtt.Token
+	select {
+	case tok = <-called:
+	case <-timer.C():
+		return fmt.Errorf("timed out after %s", t.timeout)
+	case <-lost:
+		return errors.New("connection lost")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	select {
 	case <-tok.Done():
 		return tok.Error()
-	case <-timer.C:
-		return fmt.Errorf("timed out after %s", timeout)
+	case <-timer.C():
+		return fmt.Errorf("timed out after %s", t.timeout)
 	case <-lost:
 		return errors.New("connection lost")
 	case <-ctx.Done():

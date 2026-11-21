@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
@@ -48,6 +49,19 @@ func drainOnePublish(t *testing.T, tracer oteltrace.Tracer, rec queueRecord, dev
 	return enqueueAndPublish(t, tracer, q, rec, deviceID).Properties
 }
 
+// signalingClient is a MockClient that signals after each publish, so a test
+// waits for the publisher's call instead of polling for it.
+type signalingClient struct {
+	*iothub.MockClient
+	await.Signal
+}
+
+func (c *signalingClient) PublishTelemetry(ctx context.Context, payload []byte, properties map[string]string) error {
+	err := c.MockClient.PublishTelemetry(ctx, payload, properties)
+	c.Notify()
+	return err
+}
+
 // enqueueAndPublish writes rec to q as-is, runs the real publisher loop until it
 // publishes exactly one record against a MockClient, and returns that call.
 func enqueueAndPublish(t *testing.T, tracer oteltrace.Tracer, q *queue.Queue, rec queueRecord, deviceID string) iothub.MockPublishCall {
@@ -60,24 +74,20 @@ func enqueueAndPublish(t *testing.T, tracer oteltrace.Tracer, q *queue.Queue, re
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	client := iothub.NewMockClient()
+	client := &signalingClient{MockClient: iothub.NewMockClient()}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		runPublisher(ctx, q, client, deviceID, tracer)
 		close(done)
 	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
 
-	deadline := time.After(5 * time.Second)
-	for len(client.Calls()) < 1 {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatal("publisher did not publish the record within 5s")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
+	await.Until(t, "the publisher to publish the record", func() bool { return len(client.Calls()) >= 1 },
+		func() any { return client.Calls() }, client)
 	cancel()
 	<-done
 
@@ -128,46 +138,9 @@ func TestRunPublisher_InjectsTraceparentAsMessageProperty(t *testing.T) {
 		Correlation: "corr-xyz",
 		Payload:     mustReading(t, "cook-99"),
 	}
-	recBytes, err := json.Marshal(rec)
-	if err != nil {
-		t.Fatalf("marshal record: %v", err)
-	}
-	if err := q.Enqueue(recBytes); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
 
-	client := iothub.NewMockClient()
-
-	// Run the publisher until it drains the single record, then cancel.
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		runPublisher(ctx, q, client, "meatgeek3", tracer)
-		close(done)
-	}()
-
-	// Wait for the record to be published (Ack'd -> queue empty + 1 call).
-	deadline := time.After(5 * time.Second)
-	for {
-		if len(client.Calls()) >= 1 {
-			break
-		}
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatal("publisher did not publish the record within 5s")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	cancel()
-	<-done
-
-	calls := client.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("expected exactly 1 publish call, got %d", len(calls))
-	}
-	props := calls[0].Properties
+	// Run the publisher until it drains the single record (exactly one call).
+	props := enqueueAndPublish(t, tracer, q, rec, "meatgeek3").Properties
 
 	if props[telemetry.TraceParentKey] == "" {
 		t.Errorf("expected injected %q message property, got none (props=%v)", telemetry.TraceParentKey, props)

@@ -3,9 +3,10 @@ package iothubtest
 import (
 	"net"
 	"testing"
-	"time"
 
 	"github.com/eclipse/paho.mqtt.golang/packets"
+
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
 )
 
 // dialConnect opens a raw MQTT connection to b and waits for its CONNACK.
@@ -21,7 +22,9 @@ func dialConnect(t *testing.T, b *Broker) net.Conn {
 	if err := cp.Write(nc); err != nil {
 		t.Fatalf("write CONNECT: %v", err)
 	}
-	_ = nc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if at, ok := await.Guard(t); ok {
+		_ = nc.SetReadDeadline(at) // hang guard only: the CONNACK is written at once
+	}
 	if _, err := packets.ReadPacket(nc); err != nil {
 		t.Fatalf("read CONNACK: %v", err)
 	}

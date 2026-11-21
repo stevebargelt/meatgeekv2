@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/collector"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
@@ -72,9 +73,10 @@ func TestTraceContinuity_EndToEnd_OneTracePerReading(t *testing.T) {
 		var sample collector.Sample
 		select {
 		case sample = <-c.Samples():
-		case <-time.After(5 * time.Second):
+		case <-await.Context(t).Done(): // hang guard: the test binary's deadline
 			cancel()
-			t.Fatal("collector did not emit a sample within 5s")
+			<-startErr
+			t.Fatal("collector emitted no sample before the test binary's deadline")
 		}
 		cancel()
 		<-startErr

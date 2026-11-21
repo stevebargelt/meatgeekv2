@@ -257,6 +257,24 @@ make test                 # full suite
 go test -race ./...       # with race detector
 ```
 
+Tests wait on events, never on the wall clock: no `time.Sleep`, no
+`time.After` deadline, no `context.WithTimeout` around a wait.
+
+- `internal/await` — `await.Until(t, what, cond, state, sources...)`
+  re-checks `cond` each time a source signals a change. A source is anything
+  with `Changed() <-chan struct{}`; embed `await.Signal` to make one. The only
+  bound is the test binary's `-timeout`: just before `t.Deadline()` the wait
+  fails, naming what it waited for and the last state it saw.
+  `await.Context(t)` is a context for product calls that block until their
+  context is done.
+- `internal/clock` and `internal/clock/clocktest` — code that times itself
+  (backoff, refresh, timeouts) takes a `clock.Clock`, `clock.Real()` in
+  production. Tests pass `clocktest.New(start)`, whose timers fire only on
+  `Advance`. The fake is an `await.Source`, so a test can wait until the code
+  has reached a timer (`Pending()`) before advancing past it.
+- `internal/iothub/iothubtest` — the fake IoT Hub is an `await.Source` that
+  signals every connection, packet and twin change.
+
 ## Deployment
 
 ### Service unit
