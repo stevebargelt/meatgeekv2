@@ -2429,8 +2429,13 @@ describe('HAR-15: azapi is the sole owner of the Function App site', () => {
     const guard = path.join(INFRA, 'scripts', 'tf-plan-destroy-guard.sh');
     const fx = (f: string) => path.join(INFRA, 'scripts', 'fixtures', f);
     const run = (f: string, authorized?: string) => {
+      // The guard reads three TF_DESTROY_GUARD_* variables from its
+      // environment, and the two retired ones fail it outright when set. Drop
+      // every one the caller's shell exports, so only `authorized` decides.
       const env = { ...process.env };
-      delete env['TF_DESTROY_GUARD_AUTHORIZED_CHANGES'];
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('TF_DESTROY_GUARD_')) delete env[key];
+      }
       if (authorized) env['TF_DESTROY_GUARD_AUTHORIZED_CHANGES'] = authorized;
       const r = spawnSync('bash', [guard, fx(f)], { encoding: 'utf8', env });
       return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };

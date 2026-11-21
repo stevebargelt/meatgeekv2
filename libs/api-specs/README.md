@@ -45,9 +45,8 @@ runs on every pull request. It fails when:
 `apps/api`'s `test` target lists `libs/api-specs/spec/**` as an input, so a
 spec-only change re-runs it rather than hitting the Nx cache.
 
-`nx test api-specs` is **not** in the CI matrix. It runs the spec-only checks
-in `contract-tests/` (see that README); run it locally when you change the
-spec.
+`nx test api-specs` runs the spec-only checks in `contract-tests/` (see that
+README). CI's `lint-and-test` matrix runs it on every pull request (HAR-107).
 
 ## NX targets
 
@@ -55,7 +54,7 @@ spec.
 |---|---|
 | `nx build api-specs` | `tsc` library compile + copy `spec/` assets into `dist/libs/api-specs/spec` |
 | `nx lint api-specs` | ESLint over `src/**` (excludes `src/generated/**`) |
-| `nx test api-specs` | Jest: `contract-tests/*.spec.ts` (spec validation, TS round-trip). Not run in CI. |
+| `nx test api-specs` | Jest: `contract-tests/*.spec.ts` (spec validation, TS round-trip). Run in CI. |
 | `nx validate-spec api-specs` | Validates `spec/openapi.yaml` with `@apidevtools/swagger-parser` |
 | `nx generate-types api-specs` | Emits `src/generated/types.d.ts` from the spec via `openapi-typescript` |
 
