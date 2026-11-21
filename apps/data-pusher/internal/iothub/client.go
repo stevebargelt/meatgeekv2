@@ -91,9 +91,11 @@ type AzureClient struct {
 	reconnectMax   time.Duration
 	twinState      CookState
 	clock          clock.Clock
+	newMQTT        func(*mqtt.ClientOptions) mqtt.Client
 
 	mu         sync.Mutex
 	mqttClient mqtt.Client
+	gen        uint64 // counts connections; a publish names the one it used by it
 	sasExpiry  time.Time
 	lost       chan struct{} // closed when the current connection drops or is replaced
 	markLost   func()
@@ -183,6 +185,14 @@ func withReconnectBackoff(lo, hi time.Duration) Option {
 	}
 }
 
+// withMQTTClient replaces paho's mqtt.NewClient, so a test can wrap the client
+// each connect makes (tests).
+func withMQTTClient(f func(*mqtt.ClientOptions) mqtt.Client) Option {
+	return func(c *AzureClient) {
+		c.newMQTT = f
+	}
+}
+
 // NewAzureClient parses the per-device IoT Hub connection string and
 // returns a client ready to publish. Nothing connects until Start (which
 // connects at once and stays connected) or, without Start, the first publish.
@@ -203,6 +213,7 @@ func NewAzureClient(connectionString string, opts ...Option) (*AzureClient, erro
 		reconnectMax:   defaultReconnectMax,
 		markLost:       func() {},
 		clock:          clock.Real(),
+		newMQTT:        mqtt.NewClient,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -343,7 +354,7 @@ func (c *AzureClient) ensureConnectedLocked() error {
 			MinVersion: tls.VersionTLS12,
 		})
 
-	client := mqtt.NewClient(opts)
+	client := c.newMQTT(opts)
 	token := client.Connect()
 	if !c.waitTimeout(token, c.connectTimeout) {
 		return fmt.Errorf("iothub: connect to %s timed out after %s", c.brokerURL, c.connectTimeout)
@@ -353,6 +364,7 @@ func (c *AzureClient) ensureConnectedLocked() error {
 	}
 
 	c.mqttClient = client
+	c.gen++
 	c.sasExpiry = expiry
 	c.lost = lost
 	c.markLost = markLost
@@ -385,6 +397,53 @@ func (c *AzureClient) dropLocked() {
 	c.markLost()
 }
 
+// publishConn is the connection a publish uses: taken under c.mu, used
+// without it.
+type publishConn struct {
+	client mqtt.Client
+	lost   <-chan struct{}
+	gen    uint64
+}
+
+// connectForPublish connects if needed and returns the connection to publish
+// on. gen is the current generation even on error, so the caller's retry can
+// tell whether a newer connection has replaced the one that failed.
+func (c *AzureClient) connectForPublish() (publishConn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.ensureConnectedLocked()
+	return publishConn{client: c.mqttClient, lost: c.lost, gen: c.gen}, err
+}
+
+// handOff calls paho's Publish on its own goroutine and returns its token, or
+// an error when timer, the connection's lost signal or ctx comes first. paho
+// blocks in Publish for up to its WriteTimeout (30s) when the connection drops
+// between its connected check and the hand-off to its writer; no caller waits
+// that out, and none holds c.mu while it runs, so supervise and the twin can
+// redial meanwhile. An abandoned call returns on paho's own timeout.
+func (c *AzureClient) handOff(ctx context.Context, timer clock.Timer, pc publishConn, topic string, payload []byte) (mqtt.Token, error) {
+	called := make(chan mqtt.Token, 1)
+	go func() { called <- pc.client.Publish(topic, 1, false, payload) }()
+	select {
+	case tok := <-called:
+		return tok, nil
+	case <-timer.C():
+		return nil, c.publishTimedOut(topic)
+	case <-pc.lost:
+		return nil, publishConnLost(topic)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (c *AzureClient) publishTimedOut(topic string) error {
+	return fmt.Errorf("iothub: publish to %s timed out after %s", topic, c.publishTimeout)
+}
+
+func publishConnLost(topic string) error {
+	return fmt.Errorf("iothub: publish to %s: connection lost", topic)
+}
+
 // PublishTelemetry publishes payload to `devices/<deviceId>/messages/events/`
 // at QoS 1, attaching `properties` as IoT Hub message properties
 // (encoded into the topic per the IoT Hub MQTT convention).
@@ -392,6 +451,12 @@ func (c *AzureClient) dropLocked() {
 // Per-call timeout + a single retry. Durable retry is the queue
 // runner's job — we surface failure quickly so the runner can re-Peek
 // the same message.
+//
+// c.mu is held only to connect and to take the connection; the paho call and
+// the PUBACK wait run without it, bounded together by the publish timeout,
+// the connection's lost signal and ctx. A failed attempt drops the
+// connection it used, and only that one: when supervise has already replaced
+// it, the retry goes out on the new connection and leaves it up.
 func (c *AzureClient) PublishTelemetry(ctx context.Context, payload []byte, properties map[string]string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -399,27 +464,45 @@ func (c *AzureClient) PublishTelemetry(ctx context.Context, payload []byte, prop
 
 	topic := buildPublishTopic(c.conn.DeviceID, properties)
 
-	publish := func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if err := c.ensureConnectedLocked(); err != nil {
-			return err
+	publish := func() (gen uint64, err error) {
+		pc, err := c.connectForPublish()
+		if err != nil {
+			return pc.gen, err
 		}
-		token := c.mqttClient.Publish(topic, 1, false, payload)
-		if !c.waitTimeout(token, c.publishTimeout) {
-			return fmt.Errorf("iothub: publish to %s timed out after %s", topic, c.publishTimeout)
+		timer := c.clock.NewTimer(c.publishTimeout)
+		defer timer.Stop()
+		token, err := c.handOff(ctx, timer, pc, topic, payload)
+		if err != nil {
+			return pc.gen, err
 		}
-		return token.Error()
+		select {
+		case <-token.Done():
+			return pc.gen, token.Error()
+		case <-timer.C():
+			return pc.gen, c.publishTimedOut(topic)
+		case <-pc.lost:
+			return pc.gen, publishConnLost(topic)
+		case <-ctx.Done():
+			return pc.gen, ctx.Err()
+		}
 	}
 
-	if err := publish(); err != nil {
-		logrus.WithError(err).Warn("iothub: publish failed, retrying once")
-		c.mu.Lock()
+	gen, err := publish()
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		// The caller gave up; the connection is not at fault.
+		return err
+	}
+	logrus.WithError(err).Warn("iothub: publish failed, retrying once")
+	c.mu.Lock()
+	if c.gen == gen {
 		c.dropLocked()
-		c.mu.Unlock()
-		if err2 := publish(); err2 != nil {
-			return fmt.Errorf("iothub: publish failed after retry: %w", err2)
-		}
+	}
+	c.mu.Unlock()
+	if _, err2 := publish(); err2 != nil {
+		return fmt.Errorf("iothub: publish failed after retry: %w", err2)
 	}
 	return nil
 }
@@ -428,7 +511,10 @@ func (c *AzureClient) PublishTelemetry(ctx context.Context, payload []byte, prop
 // (same topic, same connection handling) but returns as soon as the message
 // is handed to the MQTT client, without waiting for IoT Hub's PUBACK. The
 // returned wait blocks until that acknowledgement arrives, the publish timeout
-// (counted from the start) passes, or ctx is done, and returns the outcome.
+// (counted from the start of the hand-off) passes, or ctx is done, and returns
+// the outcome. Like PublishTelemetry it does not hold c.mu across the paho
+// call; the hand-off itself is bounded by the publish timeout, the
+// connection's lost signal and ctx.
 //
 // There is no retry here: the caller decides what to do with a failed
 // acknowledgement (simdevice retries once through PublishTelemetry). Several
@@ -442,15 +528,18 @@ func (c *AzureClient) PublishTelemetryAsync(ctx context.Context, payload []byte,
 
 	topic := buildPublishTopic(c.conn.DeviceID, properties)
 
-	c.mu.Lock()
-	if err := c.ensureConnectedLocked(); err != nil {
-		c.mu.Unlock()
+	pc, err := c.connectForPublish()
+	if err != nil {
 		return nil, err
 	}
-	token := c.mqttClient.Publish(topic, 1, false, payload)
-	c.mu.Unlock()
-
 	deadline := c.clock.Now().Add(c.publishTimeout)
+	handOffTimer := c.clock.NewTimer(c.publishTimeout)
+	token, err := c.handOff(ctx, handOffTimer, pc, topic, payload)
+	handOffTimer.Stop()
+	if err != nil {
+		return nil, err
+	}
+
 	return func() error {
 		timer := c.clock.NewTimer(deadline.Sub(c.clock.Now()))
 		defer timer.Stop()
@@ -458,7 +547,7 @@ func (c *AzureClient) PublishTelemetryAsync(ctx context.Context, payload []byte,
 		case <-token.Done():
 			return token.Error()
 		case <-timer.C():
-			return fmt.Errorf("iothub: publish to %s timed out after %s", topic, c.publishTimeout)
+			return c.publishTimedOut(topic)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
