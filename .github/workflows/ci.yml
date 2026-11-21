@@ -177,24 +177,41 @@ jobs:
         # Readiness = the emulator logged its final `Started` line (every
         # partition is up) AND its certificate is downloadable. Bounded at 5
         # minutes; on timeout the job fails with the emulator's own log tail.
+        # Reports the start-up time with the partition count (HAR-113).
         env:
           COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
         run: |
           cert="$RUNNER_TEMP/cosmos-emulator.pem"
-          if ! timeout 300 bash -c '
-            until docker logs "$COSMOS_CONTAINER_ID" 2>&1 | tr -d "\r" | grep -qx "Started"; do sleep 5; done
-            until curl -skf https://localhost:8081/_explorer/emulator.pem -o "$0"; do sleep 5; done
-          ' "$cert"; then
-            echo "::error::Cosmos emulator not ready within 300s"
-            docker logs --tail 50 "$COSMOS_CONTAINER_ID" || true
-            exit 1
-          fi
+          bash .github/scripts/cosmos-emulator.sh wait "$COSMOS_CONTAINER_ID" "$cert"
           echo "NODE_EXTRA_CA_CERTS=$cert" >> "$GITHUB_ENV"
 
       - name: API Cosmos emulator tier
         env:
           COSMOS_EMULATOR_ENDPOINT: https://localhost:8081
-        run: npx nx run api:test-emulator
+          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
+        run: |
+          bash .github/scripts/cosmos-emulator.sh sample "$COSMOS_CONTAINER_ID" "$RUNNER_TEMP/cosmos-emulator/stats.log" &
+          sampler=$!
+          trap 'kill "$sampler"' EXIT
+          npx nx run api:test-emulator
+
+      - name: Cosmos emulator diagnostics
+        # HAR-113: what the emulator itself says when the tier fails, before
+        # the service container is removed: its state (exit code, OOMKilled),
+        # full log, crash reports and the resource samples taken during the run.
+        if: failure()
+        env:
+          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
+        run: bash .github/scripts/cosmos-emulator.sh diagnose "$COSMOS_CONTAINER_ID" "$RUNNER_TEMP/cosmos-emulator"
+
+      - name: Upload Cosmos emulator diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosmos-emulator-diagnostics
+          path: ${{ runner.temp }}/cosmos-emulator/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # HAR-98 — the web app's browser test of the main path (HAR-97). `nx e2e
   # web-e2e` builds web, serves dist/apps/web with `vite preview` on port 4300,

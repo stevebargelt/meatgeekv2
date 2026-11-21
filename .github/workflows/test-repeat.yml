@@ -215,21 +215,13 @@ jobs:
         run: npm ci
 
       - name: Wait for the Cosmos emulator (bounded)
-        # Readiness = the emulator logged its final `Started` line (every
-        # partition is up) AND its certificate is downloadable. Bounded at 5
-        # minutes; on timeout the job fails with the emulator's own log tail.
+        # Same helper as ci.yml's api-cosmos-emulator: bounded wait, start-up
+        # time reported with the partition count (HAR-113).
         env:
           COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
         run: |
           cert="$RUNNER_TEMP/cosmos-emulator.pem"
-          if ! timeout 300 bash -c '
-            until docker logs "$COSMOS_CONTAINER_ID" 2>&1 | tr -d "\r" | grep -qx "Started"; do sleep 5; done
-            until curl -skf https://localhost:8081/_explorer/emulator.pem -o "$0"; do sleep 5; done
-          ' "$cert"; then
-            echo "::error::Cosmos emulator not ready within 300s"
-            docker logs --tail 50 "$COSMOS_CONTAINER_ID" || true
-            exit 1
-          fi
+          bash .github/scripts/cosmos-emulator.sh wait "$COSMOS_CONTAINER_ID" "$cert"
           echo "NODE_EXTRA_CA_CERTS=$cert" >> "$GITHUB_ENV"
 
       - name: Run ${{ matrix.name }}
@@ -240,11 +232,23 @@ jobs:
           PARALLEL: ${{ matrix.parallel }}
           KIND: ${{ matrix.kind }}
           KEY: ${{ matrix.key }}
-        run: >-
-          node tools/test-repeat/test-repeat.mjs run "$SUITE"
-          --runs "$RUNS" --shard "$SHARD" --parallel "$PARALLEL" --kind "$KIND"
-          --result "$RUNNER_TEMP/test-repeat/results/$KEY.json"
-          --log-dir "$RUNNER_TEMP/test-repeat/logs/$KEY"
+          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
+        run: |
+          bash .github/scripts/cosmos-emulator.sh sample "$COSMOS_CONTAINER_ID" "$RUNNER_TEMP/cosmos-emulator/stats.log" &
+          sampler=$!
+          trap 'kill "$sampler"' EXIT
+          node tools/test-repeat/test-repeat.mjs run "$SUITE" \
+            --runs "$RUNS" --shard "$SHARD" --parallel "$PARALLEL" --kind "$KIND" \
+            --result "$RUNNER_TEMP/test-repeat/results/$KEY.json" \
+            --log-dir "$RUNNER_TEMP/test-repeat/logs/$KEY"
+
+      - name: Cosmos emulator diagnostics
+        # HAR-113: the emulator's own account of a failed pass, taken before
+        # the service container is removed. See ci.yml's api-cosmos-emulator.
+        if: failure()
+        env:
+          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
+        run: bash .github/scripts/cosmos-emulator.sh diagnose "$COSMOS_CONTAINER_ID" "$RUNNER_TEMP/cosmos-emulator"
 
       - name: Upload result and failing-run log
         if: always()
@@ -252,6 +256,16 @@ jobs:
         with:
           name: test-repeat-${{ matrix.key }}
           path: ${{ runner.temp }}/test-repeat/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload Cosmos emulator diagnostics
+        # Its own artifact: the summary job merges every test-repeat-* artifact.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosmos-emulator-${{ matrix.key }}
+          path: ${{ runner.temp }}/cosmos-emulator/
           if-no-files-found: ignore
           retention-days: 7
 

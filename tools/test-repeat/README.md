@@ -58,6 +58,13 @@ copy is reported on its own line. The working tree is shared. A suite whose
 `maxParallel` is lower is capped and the summary says why:
 `playwright-web-e2e` serves on the fixed port 4300, so it cannot run two copies.
 
+A suite's `loadArgs` are appended to its command in every copy when it runs as
+more than one copy, never in the serial pass; the log and the summary row name
+them. Every Jest suite runs its load copies with `--maxWorkers=1`: a Jest
+starts (cores - 1) workers, one `api` run with 3 workers peaks at 2.5 GB, and 8
+such copies exhausted the 16 GB runner, which GitHub then shut down (exit 143).
+With one worker a run peaks at 742 MB (HAR-113).
+
 ### `--shard i/S`
 
 Shard i of S gets a contiguous block of the N run numbers, so a failure is

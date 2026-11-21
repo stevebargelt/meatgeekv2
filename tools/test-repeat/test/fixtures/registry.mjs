@@ -13,6 +13,11 @@ export const suites = [
   suite('fixture-fail-on-3', 'fail-on', '3'),
   suite('fixture-barrier', 'barrier'),
   {
+    ...suite('fixture-load-args', 'refuse', '--load-only'),
+    loadArgs: ['--load-only'],
+    loadArgsReason: 'fixture reason',
+  },
+  {
     ...suite('fixture-prepare-fails', 'pass'),
     prepare: [['node', '-e', 'process.exit(4)']],
   },

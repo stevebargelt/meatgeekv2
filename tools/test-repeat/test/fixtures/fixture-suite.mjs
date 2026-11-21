@@ -2,6 +2,8 @@
 //
 //   node fixture-suite.mjs pass            exit 0
 //   node fixture-suite.mjs fail-on <k>     exit 1 on this copy's k-th run
+//   node fixture-suite.mjs refuse <flag> [args...]
+//                                          exit 1 when <flag> is among args
 //   node fixture-suite.mjs barrier         write a marker to $BARRIER_DIR, then
 //                                          wait until $BARRIER_COUNT markers
 //                                          exist; record pid and tmpdir
@@ -12,7 +14,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const [mode, arg] = process.argv.slice(2);
+const [mode, arg, ...rest] = process.argv.slice(2);
 const counter = path.join(os.tmpdir(), 'fixture-suite-count');
 const n = (existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0) + 1;
 writeFileSync(counter, String(n));
@@ -28,6 +30,11 @@ if (mode === 'pass') {
     // On stdout, so it is the last line of the tail whatever the interleaving
     // with stderr.
     console.log(`boom on invocation ${n}`);
+    process.exitCode = 1;
+  }
+} else if (mode === 'refuse') {
+  if (rest.includes(arg)) {
+    console.log(`refused: ran with ${rest.join(' ')}`);
     process.exitCode = 1;
   }
 } else if (mode === 'barrier') {
