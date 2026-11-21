@@ -1619,7 +1619,6 @@ describe('the confirmation read-back', () => {
   });
 
   it('exits TIMEOUT when the bound elapses with nothing found anywhere', async () => {
-    const startedWall = Date.now();
     const { result, reader, clock } = await confirm({ fallback: { docs: [] } });
 
     assertFailed(result, EXIT.TIMEOUT, 'nothing within the bound');
@@ -1633,7 +1632,19 @@ describe('the confirmation read-back', () => {
     assert.equal(clock.elapsed(), BOUND);
     // The bound elapsed on the injected clock, not on the wall clock: no test
     // sleeps, which is what keeps a 180s production default testable at all.
-    assert.ok(Date.now() - startedWall < 1_000, 'the test actually waited');
+    // The fake clock only moves inside its own sleep, so every millisecond of
+    // the bound having passed through that sleep is the proof that none of it
+    // was spent waiting for real — and, unlike timing the test, it does not
+    // depend on how busy the machine is.
+    assert.equal(
+      clock.sleeps.reduce((sum, ms) => sum + ms, 0),
+      BOUND,
+      'the whole bound was waited on the injected sleep'
+    );
+    assert.ok(
+      clock.sleeps.length > 0 && clock.sleeps.every(ms => ms > 0 && ms <= INTERVAL),
+      `each wait is one poll interval at most: ${clock.sleeps}`
+    );
   });
 
   it('exits AUTH immediately on a 403, with no further poll and no timeout code', async () => {

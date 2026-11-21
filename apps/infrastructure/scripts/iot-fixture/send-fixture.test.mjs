@@ -35,6 +35,8 @@ import {
   stat as realStat,
   writeFile,
 } from 'node:fs/promises';
+import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -76,6 +78,7 @@ import {
   AZ_COMMAND,
   DEFAULT_SEND_TIMEOUT_MS,
   KILL_GRACE_MS,
+  REAL_TIMERS,
   assertArgvIsCredentialFree,
   buildSendArgv,
   cosmosReader,
@@ -1254,16 +1257,51 @@ describe('HR1: a credential-shaped evidence path never reaches operator output',
   );
   const credSegment = `AccountKey=${PLANTED_PATH_KEY}`;
 
+  // The tool is shown a SHORT, FIXED virtual root instead of the real temp dir.
+  // Every operator line caps a path at a fixed length AFTER scrubbing it
+  // (send-fixture's `safe`), so under the real temp dir WHERE the planted
+  // segment falls in the line depended on how long the machine's TMPDIR is: on a
+  // long one the cap cut the failure line before `AccountKey=`, and the guard
+  // that the scrubber fired failed (HAR-112). The scrubber was right; the test
+  // was measuring TMPDIR. Each of the four fs calls the evidence code makes is
+  // mapped onto the real temp dir, so the real filesystem still does the work —
+  // the O_EXCL claim, the rename, the device+inode fingerprint — while the path
+  // the tool sees, and logs, is the same on every machine.
+  const VIRTUAL_ROOT = '/mg67-hr1';
+  const virtualFs = (base, { rename: renameOverride } = {}) => {
+    const real = p =>
+      typeof p === 'string' && (p === VIRTUAL_ROOT || p.startsWith(`${VIRTUAL_ROOT}/`))
+        ? base + p.slice(VIRTUAL_ROOT.length)
+        : p;
+    const rename = (from, to) => realRename(real(from), real(to));
+    return {
+      writeFile: (target, ...rest) => writeFile(real(target), ...rest),
+      rename: renameOverride ? (from, to) => renameOverride(from, to, rename) : rename,
+      rm: (target, ...rest) => rm(real(target), ...rest),
+      stat: target => realStat(real(target)),
+    };
+  };
+
+  // Makes `relative` (under the virtual root) a real directory under a fresh
+  // temp dir, and runs the tool against it.
+  const runUnderVirtualRoot = async (relative, { rename } = {}) =>
+    withTempDir(async base => {
+      await mkdir(path.join(base, relative), { recursive: true });
+      return runMain({
+        evidenceOut: path.posix.join(VIRTUAL_ROOT, relative),
+        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
+        fs: virtualFs(base, { rename }),
+      });
+    });
+
   // A publication that fails AFTER the send (the reservation's write+rename probe
   // and exclusive create still use the real fs and succeed; only the record's
   // partial→target rename fails), so the failure line that names the path is
   // emitted with live documents already in the container.
-  const publicationFailsFs = () => ({
-    rename: async (from, to) => {
-      if (from.endsWith('.probe-src') || to.endsWith('.probe-dst')) return realRename(from, to);
-      throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
-    },
-  });
+  const publicationFails = (from, to, rename) => {
+    if (from.endsWith('.probe-src') || to.endsWith('.probe-dst')) return rename(from, to);
+    throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+  };
 
   const assertPathSecretAbsent = log => {
     const output = log.all();
@@ -1275,57 +1313,41 @@ describe('HR1: a credential-shaped evidence path never reaches operator output',
     // Guard against a false pass: the destination WAS named (so the assertion
     // above is meaningful) and the scrubber DID fire on it.
     assert.match(output, /evidence destination reserved for run/);
-    assert.match(output, /AccountKey=\[redacted\]/);
+    assert.ok(
+      output.includes(`${VIRTUAL_ROOT}/AccountKey=[redacted]`),
+      'the destination was named, scrubbed'
+    );
   };
 
   it('scrubs a credential-shaped DIRECTORY component on the success path', async () => {
-    await withTempDir(async base => {
-      const evidenceOut = path.join(base, credSegment, 'evidence');
-      await mkdir(evidenceOut, { recursive: true });
-      const { exitCode, log } = await runMain({
-        evidenceOut,
-        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-      });
-      assert.equal(exitCode, EXIT.OK);
-      // The CONFIRMED-evidence line is a success line that names the path.
-      assert.match(log.all(), /CONFIRMED/);
-      assertPathSecretAbsent(log);
-    });
+    const { exitCode, log } = await runUnderVirtualRoot(path.posix.join(credSegment, 'evidence'));
+    assert.equal(exitCode, EXIT.OK);
+    // The CONFIRMED-evidence line is a success line that names the path.
+    assert.match(log.all(), /CONFIRMED/);
+    assertPathSecretAbsent(log);
   });
 
   it('scrubs a credential-shaped FINAL (filename-position) path component on the success path', async () => {
-    await withTempDir(async base => {
-      const evidenceOut = path.join(base, credSegment);
-      await mkdir(evidenceOut, { recursive: true });
-      const { exitCode, log } = await runMain({
-        evidenceOut,
-        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-      });
-      assert.equal(exitCode, EXIT.OK);
-      assert.match(log.all(), /CONFIRMED/);
-      assertPathSecretAbsent(log);
-    });
+    const { exitCode, log } = await runUnderVirtualRoot(credSegment);
+    assert.equal(exitCode, EXIT.OK);
+    assert.match(log.all(), /CONFIRMED/);
+    assertPathSecretAbsent(log);
   });
 
   it('scrubs the credential-shaped path on the FAILURE line too (write fails after the send)', async () => {
-    await withTempDir(async base => {
-      const evidenceOut = path.join(base, credSegment);
-      await mkdir(evidenceOut, { recursive: true });
-      const { exitCode, log } = await runMain({
-        evidenceOut,
-        readerSpec: { script: [{ docs: [] }, { docs: deliveredDocuments() }] },
-        fs: publicationFailsFs(),
-      });
-      assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
-      const output = log.all();
-      assert.equal(
-        output.includes(PLANTED_PATH_KEY),
-        false,
-        'the credential-shaped path reached the failure line'
-      );
-      // The failure line DID name where the record could not be written — scrubbed.
-      assert.match(output, /could not be written to .*AccountKey=\[redacted\]/);
-    });
+    const { exitCode, log } = await runUnderVirtualRoot(credSegment, { rename: publicationFails });
+    assert.equal(exitCode, EXIT.EVIDENCE_UNRECORDED);
+    const output = log.all();
+    assert.equal(
+      output.includes(PLANTED_PATH_KEY),
+      false,
+      'the credential-shaped path reached the failure line'
+    );
+    // The failure line DID name where the record could not be written — scrubbed.
+    assert.ok(
+      output.includes(`could not be written to ${VIRTUAL_ROOT}/AccountKey=[redacted] — `),
+      `the failure line names the scrubbed destination:\n${output}`
+    );
   });
 });
 
@@ -2723,48 +2745,211 @@ describe('source posture (HR1)', () => {
 // must not be able to hang. realSpawn escalates to SIGKILL after a stated grace
 // and reports the bound it actually enforced. These drive the REAL primitive with
 // a real child; realSpawn is injected as a fake everywhere else in the suite.
+//
+// The child is real; the TIMERS are not. A real 60 ms bound raced Node's own
+// startup: on a busy machine SIGTERM arrived before the child had installed its
+// trap, the child died of it, and the test failed (HAR-112). So realSpawn is
+// handed a manual timer source, and each stage is fired only once the child has
+// said it is ready for it. The child talks back over a loopback socket on an
+// ephemeral port (realSpawn owns its stdio): "ready" once its handlers are in
+// place, "term" when its SIGTERM handler has run. No test here waits on a clock;
+// a child that never answers hangs until the runner's hang guard, which is the
+// honest failure for "never returns".
 describe('realSpawn enforces a HARD timeout (RF-2)', () => {
-  // A child that traps SIGTERM and keeps running. Only SIGKILL — which it cannot
-  // trap — ends it, so it hangs forever unless realSpawn escalates.
-  const IGNORES_SIGTERM = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+  // The bound and grace realSpawn is TOLD. Only their values matter now — they
+  // are what the timers are scheduled with and what enforcedBoundMs reports —
+  // because nothing waits for them to elapse.
+  const TIMEOUT_MS = 60;
+  const GRACE_MS = 120;
+
+  // A child that connects back, optionally traps SIGTERM, and then idles until
+  // a signal ends it. With the trap, only SIGKILL — which it cannot trap — ends
+  // it, so it hangs forever unless realSpawn escalates. The trap is installed
+  // BEFORE "ready" is written, which is what makes "ready" mean "a SIGTERM now
+  // is ignored".
+  const childScript = ({ trapsSigterm }) =>
+    [
+      "const socket = require('node:net').connect(Number(process.argv[1]), '127.0.0.1');",
+      "socket.on('error', () => {});",
+      trapsSigterm ? "process.on('SIGTERM', () => { socket.write('term\\n'); });" : '',
+      "socket.on('connect', () => { socket.write('ready\\n'); });",
+      'setInterval(() => {}, 1 << 30);',
+    ].join('\n');
+
+  // A timer source realSpawn schedules on and the test fires by hand.
+  const manualTimers = () => {
+    const scheduled = [];
+    return {
+      scheduled,
+      setTimeout: (fn, ms) => {
+        const timer = { fn, ms, fired: false, cleared: false };
+        scheduled.push(timer);
+        return timer;
+      },
+      clearTimeout: timer => {
+        if (timer) timer.cleared = true;
+      },
+      fire: timer => {
+        assert.equal(timer.cleared, false, 'firing a timer realSpawn already cleared');
+        assert.equal(timer.fired, false, 'firing a timer twice');
+        timer.fired = true;
+        timer.fn();
+      },
+    };
+  };
+
+  // A loopback listener the child reports to. `line(text)` resolves when the
+  // child has written that line, or REJECTS if realSpawn settles first — a child
+  // that died before saying it is a failure with a reason, not a hang.
+  const withChannel = async body => {
+    const server = createServer();
+    const lines = [];
+    const waiters = [];
+    const deliver = () => {
+      for (const waiter of [...waiters]) {
+        const at = lines.indexOf(waiter.text);
+        if (at === -1) continue;
+        lines.splice(at, 1);
+        waiters.splice(waiters.indexOf(waiter), 1);
+        waiter.resolve();
+      }
+    };
+    server.on('connection', socket => {
+      let buffer = '';
+      socket.setEncoding('utf8');
+      socket.on('error', () => {});
+      socket.on('data', chunk => {
+        buffer += chunk;
+        let newline;
+        while ((newline = buffer.indexOf('\n')) !== -1) {
+          lines.push(buffer.slice(0, newline));
+          buffer = buffer.slice(newline + 1);
+        }
+        deliver();
+      });
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const { port } = server.address();
+    const line = (text, settled) =>
+      Promise.race([
+        new Promise(resolve => {
+          waiters.push({ text, resolve });
+          deliver();
+        }),
+        settled.then(result => {
+          throw new Error(
+            `realSpawn returned before the child said "${text}": ${JSON.stringify(result)}`
+          );
+        }),
+      ]);
+    try {
+      return await body({ port, line });
+    } finally {
+      server.close();
+    }
+  };
 
   it('escalates to SIGKILL when the child ignores SIGTERM, at the stated bound', async () => {
-    const startedNs = process.hrtime.bigint();
-    const result = await realSpawn(process.execPath, ['-e', IGNORES_SIGTERM], {
-      timeoutMs: 60,
-      killGraceMs: 120,
-    });
-    const elapsedMs = Number(process.hrtime.bigint() - startedNs) / 1e6;
+    await withChannel(async ({ port, line }) => {
+      const timers = manualTimers();
+      const settled = realSpawn(
+        process.execPath,
+        ['-e', childScript({ trapsSigterm: true }), String(port)],
+        { timeoutMs: TIMEOUT_MS, killGraceMs: GRACE_MS, timers }
+      );
 
-    // The bound HELD: a SIGTERM-ignoring child did not outlive it.
-    assert.equal(result.timedOut, true, 'the bound must be reported as reached');
-    assert.equal(result.hardKilled, true, 'a SIGTERM-ignoring child must be SIGKILLed');
-    assert.equal(result.signal, 'SIGKILL');
-    // A killed child has a null exit code, reported as a distinct nonzero so it
-    // never reads as success.
-    assert.equal(result.code, 124);
-    assert.equal(result.enforcedBoundMs, 180, 'reports the bound it actually enforces');
-    // It returned near the hard bound, NOT never; generous ceiling for a slow CI.
-    assert.ok(elapsedMs < 5000, `realSpawn returned in ${elapsedMs}ms; the bound did not hold`);
+      // Stage one is armed at the stated bound, and nothing else is.
+      assert.deepEqual(
+        timers.scheduled.map(t => t.ms),
+        [TIMEOUT_MS]
+      );
+      await line('ready', settled);
+      const [soft] = timers.scheduled;
+      timers.fire(soft);
+
+      // The child received SIGTERM and SURVIVED it — it said so from its
+      // handler — so whatever ends it next is the escalation, not the SIGTERM.
+      await line('term', settled);
+      assert.deepEqual(
+        timers.scheduled.map(t => t.ms),
+        [TIMEOUT_MS, GRACE_MS],
+        'stage two is armed with the stated grace once stage one fires'
+      );
+      const [, hard] = timers.scheduled;
+      timers.fire(hard);
+
+      const result = await settled;
+      // The bound HELD: a SIGTERM-ignoring child did not outlive it.
+      assert.equal(result.timedOut, true, 'the bound must be reported as reached');
+      assert.equal(result.hardKilled, true, 'a SIGTERM-ignoring child must be SIGKILLed');
+      assert.equal(result.signal, 'SIGKILL');
+      // A killed child has a null exit code, reported as a distinct nonzero so it
+      // never reads as success.
+      assert.equal(result.code, 124);
+      assert.equal(result.enforcedBoundMs, 180, 'reports the bound it actually enforces');
+    });
+  });
+
+  it('a child that honors SIGTERM is not SIGKILLed, and the grace is cancelled', async () => {
+    await withChannel(async ({ port, line }) => {
+      const timers = manualTimers();
+      const settled = realSpawn(
+        process.execPath,
+        ['-e', childScript({ trapsSigterm: false }), String(port)],
+        { timeoutMs: TIMEOUT_MS, killGraceMs: GRACE_MS, timers }
+      );
+      await line('ready', settled);
+      timers.fire(timers.scheduled[0]);
+
+      const result = await settled;
+      assert.equal(result.timedOut, true, 'the bound was reached');
+      assert.equal(result.hardKilled, false, 'SIGTERM was enough');
+      assert.equal(result.signal, 'SIGTERM');
+      assert.equal(result.code, 124);
+      assert.equal(result.enforcedBoundMs, TIMEOUT_MS + GRACE_MS);
+      const [, hard] = timers.scheduled;
+      assert.equal(hard.ms, GRACE_MS);
+      assert.equal(hard.fired, false);
+      assert.equal(hard.cleared, true, 'close cancels the pending SIGKILL');
+    });
   });
 
   it('lets a well-behaved child exit on its own without timing out', async () => {
+    // The bound is never fired, so the child's own exit is the only way this
+    // returns — however long the machine takes to start it.
+    const timers = manualTimers();
     const result = await realSpawn(process.execPath, ['-e', 'process.exit(0)'], {
       timeoutMs: 5000,
       killGraceMs: 5000,
+      timers,
     });
     assert.equal(result.code, 0);
     assert.equal(result.timedOut, false, 'a child that exits in time is not timed out');
     assert.equal(result.hardKilled, false);
     assert.equal(result.signal, null);
+    assert.equal(timers.scheduled.length, 1, 'only stage one was ever armed');
+    assert.equal(timers.scheduled[0].ms, 5000);
+    assert.equal(timers.scheduled[0].cleared, true, 'close cancels the bound');
   });
 
-  it('wires the default kill grace to KILL_GRACE_MS', async () => {
+  it('wires the default bound to DEFAULT_SEND_TIMEOUT_MS and the default grace to KILL_GRACE_MS', async () => {
     assert.ok(Number.isInteger(KILL_GRACE_MS) && KILL_GRACE_MS > 0, 'a positive default grace');
-    const result = await realSpawn(process.execPath, ['-e', 'process.exit(3)']);
+    const timers = manualTimers();
+    const result = await realSpawn(process.execPath, ['-e', 'process.exit(3)'], { timers });
     assert.equal(result.code, 3);
     assert.equal(result.timedOut, false);
     assert.equal(result.enforcedBoundMs, DEFAULT_SEND_TIMEOUT_MS + KILL_GRACE_MS);
+    assert.deepEqual(
+      timers.scheduled.map(t => t.ms),
+      [DEFAULT_SEND_TIMEOUT_MS]
+    );
+  });
+
+  it('defaults to the real timers, so production behaviour is unchanged', () => {
+    assert.equal(REAL_TIMERS.setTimeout, globalThis.setTimeout);
+    assert.equal(REAL_TIMERS.clearTimeout, globalThis.clearTimeout);
+    assert.ok(Object.isFrozen(REAL_TIMERS));
   });
 });
 
