@@ -220,6 +220,13 @@ else
   exit 2
 fi
 
+# Every case sets exactly the guard variables it is about. One inherited from
+# the caller's environment would change the result of every case that does not
+# set it (a retired name makes each "pass" case fail), so the outcome would
+# depend on the machine, not on the fixtures. Start from none (HAR-112).
+unset TF_DESTROY_GUARD_AUTHORIZED_CHANGES TF_DESTROY_GUARD_EXPECTED_DESTROYS \
+  TF_DESTROY_GUARD_AUTHORIZED_DESTROYS
+
 CASEFILE="$(mktemp)"
 OUTFILE="$(mktemp)"
 # shellcheck disable=SC2064
