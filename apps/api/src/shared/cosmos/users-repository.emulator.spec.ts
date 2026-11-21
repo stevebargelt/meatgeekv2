@@ -25,9 +25,8 @@ import type { TokenCredential } from '@azure/core-auth';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
-  deleteEmulatorContainers,
+  createEmulatorContainer,
   EMULATOR_TIER_DATABASE,
-  emulatorContainerId,
   emulatorTierDatabase,
 } from './emulator-tier.testing';
 import { DevicesRepository } from './devices-repository';
@@ -127,8 +126,8 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
 
     const database = await emulatorTierDatabase(client);
     for (const tf of [tfUsers, tfDevices]) {
-      await database.containers.createIfNotExists({
-        id: emulatorContainerId(tf.name),
+      await createEmulatorContainer(database, {
+        id: tf.name,
         partitionKey: { paths: [tf.partitionKeyPath] },
         uniqueKeyPolicy: { uniqueKeys: [{ paths: tf.uniqueKeyPaths }] },
       });
@@ -140,9 +139,9 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
         accountEndpoint: EMULATOR_ENDPOINT,
         databaseName,
         cooksContainerName: 'unused-by-this-tier',
-        devicesContainerName: emulatorContainerId(tfDevices.name),
+        devicesContainerName: tfDevices.name,
         temperaturesContainerName: 'unused-by-this-tier',
-        usersContainerName: emulatorContainerId(tfUsers.name),
+        usersContainerName: tfUsers.name,
         recipesContainerName: 'unused-by-this-tier',
         temperatureRollupsContainerName: 'unused-by-this-tier',
       },
@@ -161,7 +160,6 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await deleteEmulatorContainers(client, [tfUsers.name, tfDevices.name]);
       client.dispose();
     }
   });

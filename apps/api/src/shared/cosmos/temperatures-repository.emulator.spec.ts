@@ -34,9 +34,8 @@ import type { TokenCredential } from '@azure/core-auth';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
-  deleteEmulatorContainers,
+  createEmulatorContainer,
   EMULATOR_TIER_DATABASE,
-  emulatorContainerId,
   emulatorTierDatabase,
 } from './emulator-tier.testing';
 import { InvalidContinuationTokenError, TemperaturesRepository } from './temperatures-repository';
@@ -162,8 +161,8 @@ describe('HAR-28 temperatures repository against the Cosmos emulator', () => {
     await probeEmulator(client);
 
     const database = await emulatorTierDatabase(client);
-    await database.containers.createIfNotExists({
-      id: emulatorContainerId(tfContainer.name),
+    await createEmulatorContainer(database, {
+      id: tfContainer.name,
       partitionKey: { paths: [tfContainer.partitionKeyPath] },
     });
 
@@ -174,7 +173,7 @@ describe('HAR-28 temperatures repository against the Cosmos emulator', () => {
         databaseName,
         cooksContainerName: 'unused-by-this-tier',
         devicesContainerName: 'unused-by-this-tier',
-        temperaturesContainerName: emulatorContainerId(tfContainer.name),
+        temperaturesContainerName: tfContainer.name,
         usersContainerName: 'unused-by-this-tier',
         recipesContainerName: 'unused-by-this-tier',
         temperatureRollupsContainerName: 'unused-by-this-tier',
@@ -193,7 +192,6 @@ describe('HAR-28 temperatures repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await deleteEmulatorContainers(client, [tfContainer.name]);
       client.dispose();
     }
   });

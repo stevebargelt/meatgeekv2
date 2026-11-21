@@ -27,9 +27,8 @@ import type { Recipe } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
-  deleteEmulatorContainers,
+  createEmulatorContainer,
   EMULATOR_TIER_DATABASE,
-  emulatorContainerId,
   emulatorTierDatabase,
 } from './emulator-tier.testing';
 import { RecipesRepository } from './recipes-repository';
@@ -150,8 +149,8 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
     await probeEmulator(client);
 
     const database = await emulatorTierDatabase(client);
-    await database.containers.createIfNotExists({
-      id: emulatorContainerId(tfRecipes.name),
+    await createEmulatorContainer(database, {
+      id: tfRecipes.name,
       partitionKey: { paths: [tfRecipes.partitionKeyPath] },
       indexingPolicy: {
         indexingMode: 'consistent',
@@ -169,7 +168,7 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
         devicesContainerName: 'unused-by-this-tier',
         temperaturesContainerName: 'unused-by-this-tier',
         usersContainerName: 'unused-by-this-tier',
-        recipesContainerName: emulatorContainerId(tfRecipes.name),
+        recipesContainerName: tfRecipes.name,
         temperatureRollupsContainerName: 'unused-by-this-tier',
       },
       {
@@ -186,7 +185,6 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
 
   afterAll(async () => {
     if (client) {
-      await deleteEmulatorContainers(client, [tfRecipes.name]);
       client.dispose();
     }
   });
