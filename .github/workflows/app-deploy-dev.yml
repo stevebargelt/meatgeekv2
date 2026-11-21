@@ -440,6 +440,10 @@ jobs:
           # own throwaway AZURE_CONFIG_DIR, so the app-publish login above is
           # never touched. The JWT payload is decoded only to compare its
           # appid/azp claim; no claim value is printed.
+          # HAR-118: telemetry is off for the peer's az calls. With it on,
+          # each az command forks a detached uploader that keeps writing
+          # under $PEER_AZ/telemetry/ after az returns, and the rm -rf below
+          # raced it ("Directory not empty", run 44960958060).
           echo "acceptance peer token: minting"
           if [ -z "$PEER_CLIENT_ID" ]; then
             echo "vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID is empty on the development environment (bootstrap sets it, HAR-61)." >&2
@@ -462,13 +466,13 @@ jobs:
           echo "::add-mask::${PEER_OIDC}"
           PEER_AZ="$(mktemp -d)"
           trap 'rm -rf "$PEER_AZ"' EXIT
-          AZURE_CONFIG_DIR="$PEER_AZ" az login --service-principal \
+          AZURE_CORE_COLLECT_TELEMETRY=no AZURE_CONFIG_DIR="$PEER_AZ" az login --service-principal \
             -u "$PEER_CLIENT_ID" --tenant "$TENANT_ID" \
             --federated-token "$PEER_OIDC" --allow-no-subscriptions -o none || {
             echo "az login as the acceptance peer ($PEER_CLIENT_ID) failed." >&2
             exit 1
           }
-          ACCEPTANCE_PEER_BEARER_TOKEN="$(AZURE_CONFIG_DIR="$PEER_AZ" az account get-access-token \
+          ACCEPTANCE_PEER_BEARER_TOKEN="$(AZURE_CORE_COLLECT_TELEMETRY=no AZURE_CONFIG_DIR="$PEER_AZ" az account get-access-token \
             --scope "${AUDIENCE}/.default" --query accessToken -o tsv)" || {
             echo "az account get-access-token as the acceptance peer failed for ${AUDIENCE}/.default." >&2
             exit 1
