@@ -20,4 +20,8 @@ export default {
   },
   moduleFileExtensions: ['ts', 'js', 'html'],
   testMatch: ['<rootDir>/src/**/*.emulator.spec.ts'],
+  // HAR-111: the tier's one hang guard, for every test and hook (the readiness
+  // probe in each file's beforeAll included). It never decides a healthy run:
+  // tests and the probe wait on the emulator's own answers, not on a deadline.
+  testTimeout: 60_000,
 };

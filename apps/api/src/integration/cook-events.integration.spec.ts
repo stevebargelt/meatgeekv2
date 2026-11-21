@@ -525,7 +525,7 @@ describe('cook envelope wire shape', () => {
       deviceId: 'device-1',
       name: 'Test Cook',
       status: 'active',
-      startTime: new Date().toISOString(),
+      startTime: '2026-08-24T06:00:00.000Z',
       meatType: 'brisket',
     };
 

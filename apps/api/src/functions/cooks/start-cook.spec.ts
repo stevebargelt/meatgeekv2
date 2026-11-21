@@ -97,6 +97,11 @@ function fakeRepository(opts: { echoResource?: boolean } = {}) {
   return {
     writes,
     stored,
+    /** Seed an active cook that holds its device, synchronously. */
+    seedActive(cook: Cook) {
+      stored.set(cook.id, { ...cook });
+      deviceHolder.set(cook.deviceId, cook.id);
+    },
     /** Model a stop: the cook completes and its device is released. */
     complete(id: string) {
       const cook = stored.get(id)!;
@@ -1205,7 +1210,7 @@ describe('startCookHandler', () => {
 
     const busyRepo = () => {
       const repo = fakeRepository();
-      void repo.startCook({ ...validBody, id: OTHER_COOK_ID, userId: PRINCIPAL_USER_ID } as Cook);
+      repo.seedActive({ ...validBody, id: OTHER_COOK_ID, userId: PRINCIPAL_USER_ID } as Cook);
       return repo;
     };
 

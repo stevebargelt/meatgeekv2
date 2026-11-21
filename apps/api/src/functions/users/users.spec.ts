@@ -33,6 +33,8 @@ const USER_ID = `${TID}:${OID}`;
 const OTHER_USER_ID = `${TID}:${OTHER_OID}`;
 const EMAIL = 'pitmaster@example.com';
 const CREATED_AT = '2026-01-02T03:04:05.000Z';
+/** The repository's injected clock: what a newly created profile's createdAt is. */
+const NOW = '2026-03-04T05:06:07.890Z';
 
 function encodedPrincipal(oid: string, tid = TID): string {
   const payload = {
@@ -90,7 +92,9 @@ function setup() {
   const devices = new FakeDevicesContainer();
   const devicesRepository = new DevicesRepository(devices.asContainer());
   const listDevicesByOwner = jest.spyOn(devicesRepository, 'listDevicesByOwner');
-  const getRepository = jest.fn(() => new UsersRepository(users.asContainer(), devicesRepository));
+  const getRepository = jest.fn(
+    () => new UsersRepository(users.asContainer(), devicesRepository, () => new Date(NOW))
+  );
   const deps: UsersHandlerDeps = { resolvePrincipal: principalFromRequest, getRepository };
   return { users, devices, deps, getRepository, listDevicesByOwner };
 }
@@ -339,7 +343,6 @@ describe('PUT /users/me', () => {
     const { users, devices, deps } = setup();
     devices.seed(device());
     const { ctx } = context();
-    const before = Date.now();
 
     const response = await putUserProfileHandler(
       request({
@@ -364,11 +367,10 @@ describe('PUT /users/me', () => {
         temperatureUnit: 'celsius',
         display: { ...DEFAULT_USER_PREFERENCES.display, theme: 'dark' },
       },
-      createdAt: expect.any(String),
+      createdAt: NOW,
       devices: ['grill-1'],
     });
-    expect(Date.parse(user.createdAt)).toBeGreaterThanOrEqual(before);
-    expect(Date.parse(user.createdAt)).toBeLessThanOrEqual(Date.now());
+    expect(users.stored(USER_ID)!['createdAt']).toBe(NOW);
     expect(users.calls.map(c => c.operation)).toEqual(['read', 'create']);
     expect(users.calls[1]).toMatchObject({ id: USER_ID, partitionKey: USER_ID });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(
