@@ -40,6 +40,7 @@ env:
 
 jobs:
   select:
+    name: test-repeat select
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -78,7 +79,9 @@ jobs:
   repeat:
     needs: select
     if: needs.select.outputs.has_matrix == 'true'
-    name: ${{ matrix.name }}
+    # Prefixed: the bare suite ids (api, web-e2e, ...) are also ci.yml job
+    # names, and a required check is matched by name.
+    name: test-repeat ${{ matrix.name }}
     runs-on: ubuntu-latest
     # Shards keep a job near 25 minutes; this is the hang backstop.
     timeout-minutes: 45
@@ -177,7 +180,9 @@ jobs:
   repeat-emulator:
     needs: select
     if: needs.select.outputs.has_emulator == 'true'
-    name: ${{ matrix.name }}
+    # Prefixed: the bare suite ids (api, web-e2e, ...) are also ci.yml job
+    # names, and a required check is matched by name.
+    name: test-repeat ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -253,6 +258,7 @@ jobs:
   # One table for the whole run. Fails when any selected pass failed or never
   # reported, so this is the one check to require.
   summary:
+    name: test-repeat summary
     needs: [select, repeat, repeat-emulator]
     if: always() && needs.select.result == 'success'
     runs-on: ubuntu-latest

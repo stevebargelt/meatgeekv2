@@ -61,9 +61,10 @@ copy is reported on its own line. The working tree is shared. A suite whose
 ### `--shard i/S`
 
 Shard i of S gets a contiguous block of the N run numbers, so a failure is
-reported by its global run number. `api` (about 80 s a run, 1019 tests) uses 4
-shards and `api-interfaces` (about 56 s) uses 3, to keep a CI job near 25
-minutes at N = 50.
+reported by its global run number. Shard counts come from the first CI run's
+per-run times, to keep a job near 20 minutes at N = 50: `api` 3 (68.4 s a run,
+1019 tests), `api-interfaces` 2 (44.4 s), `terraform-tests` 3 (70.7 s).
+Re-measure and adjust `shards` in `suites.mjs` if a job grows past 25 minutes.
 
 ## In CI: `.github/workflows/test-repeat.yml`
 

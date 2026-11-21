@@ -93,9 +93,10 @@ export const suites = [
     // the cosmos-db Terraform module.
     paths: ['apps/api/**', 'libs/**', 'apps/infrastructure/modules/cosmos-db/**', ...JS_ROOT],
     needs: ['npm'],
-    // About 80 s a run locally (1019 tests); 50 serial runs would take over
-    // an hour, so the 50 runs are split across CI jobs.
-    shards: 4,
+    // 68.4 s a run on the first CI run (1019 tests; about 80 s locally), so
+    // 50 serial runs would take about an hour. 3 shards: 17 runs, about 19
+    // minutes a job.
+    shards: 3,
     timeoutSec: 1200,
   },
   {
@@ -135,8 +136,9 @@ export const suites = [
       ...JS_ROOT,
     ],
     needs: ['npm'],
-    // About 56 s a run locally; split like api.
-    shards: 3,
+    // 44.4 s a run on the first CI run (about 56 s locally). 2 shards: 25
+    // runs, about 19 minutes a job.
+    shards: 2,
     timeoutSec: 1200,
   },
   {
@@ -234,6 +236,9 @@ export const suites = [
     prepare: [['bash', 'tools/test-repeat/terraform-tests.sh', 'init']],
     paths: ['apps/infrastructure/**'],
     needs: ['terraform'],
+    // 70.7 s on the first CI run (that run included the providers' first
+    // start). 3 shards: 17 runs, about 20 minutes a job at that rate.
+    shards: 3,
     // Same disarming of ambient Azure auth as validate-infrastructure.
     env: {
       ARM_USE_OIDC: 'false',
