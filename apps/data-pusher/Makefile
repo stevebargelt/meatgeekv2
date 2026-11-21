@@ -28,7 +28,7 @@ build-arm:
 # Run tests
 test:
 	@echo "Running Go tests..."
-	go test -v ./...
+	go test -race -v ./...
 	@echo "✅ Tests complete"
 
 # Lint code

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/cooksession"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/publish"
@@ -73,7 +74,7 @@ type TwinClient interface {
 }
 
 // TwinClientFactory builds a twin-enabled client. Main passes
-// iothub.WithCookTwin and iothub.WithTwinTimeout in opts.
+// iothub.WithCookTwin, iothub.WithTwinTimeout and iothub.WithClock in opts.
 type TwinClientFactory func(connectionString string, opts ...iothub.Option) (TwinClient, error)
 
 // AzureTwinClientFactory is the production twin factory: the Pi's MQTT client
@@ -107,7 +108,12 @@ type Env struct {
 	// NewTwinClient builds the client for --twin.
 	NewTwinClient TwinClientFactory
 	Tracer        trace.Tracer
-	Now           func() time.Time
+	// Now stamps readings and sentAt; nil is Clock's Now.
+	Now func() time.Time
+	// Clock times every wait Main makes: the --interval gap, the --twin
+	// --timeout, the 30s bound on a blocking send, and the twin client's own
+	// timers. nil is clock.Real().
+	Clock clock.Clock
 }
 
 // Main runs the command and returns its exit code. Nothing but one JSON line
@@ -215,19 +221,23 @@ func Main(ctx context.Context, env Env) int {
 	if tracer == nil {
 		tracer = otel.Tracer("meatgeek-simdevice")
 	}
-	sender := Sender{DeviceID: parsed.DeviceID, Tracer: tracer}
+	clk := env.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	sender := Sender{DeviceID: parsed.DeviceID, Tracer: tracer, Clock: clk}
 
 	if *twinMode {
 		if env.NewTwinClient == nil {
 			return fail(ExitUsage, "--twin is not available in this build (no twin client)")
 		}
 		session := cooksession.NewMemory()
-		tc, err := env.NewTwinClient(connStr, iothub.WithCookTwin(session), iothub.WithTwinTimeout(*timeout))
+		tc, err := env.NewTwinClient(connStr, iothub.WithCookTwin(session), iothub.WithTwinTimeout(*timeout), iothub.WithClock(clk))
 		if err != nil {
 			return fail(ExitUsage, "create IoT Hub client: %v", err)
 		}
 		defer tc.Close()
-		if code := readTwin(ctx, tc, *timeout, enc, fail); code != ExitOK {
+		if code := readTwin(ctx, tc, clk, *timeout, enc, fail); code != ExitOK {
 			return code
 		}
 		snap := session.Snapshot()
@@ -250,7 +260,7 @@ func Main(ctx context.Context, env Env) int {
 
 	now := env.Now
 	if now == nil {
-		now = time.Now
+		now = clk.Now
 	}
 	// Millisecond timestamps, strictly increasing within the run, so the
 	// stdout `timestamp` equals the payload's and every reading is distinct.
@@ -280,6 +290,7 @@ func Main(ctx context.Context, env Env) int {
 			count:    *count,
 			interval: *interval,
 			inflight: *inflight,
+			clock:    clk,
 			next:     nextTimestamp,
 			status:   status,
 			now:      now,
@@ -290,10 +301,12 @@ func Main(ctx context.Context, env Env) int {
 
 	for i := 0; i < *count; i++ {
 		if i > 0 && *interval > 0 {
+			timer := clk.NewTimer(*interval)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return fail(ExitSendFailed, "interrupted after %d of %d readings", i, *count)
-			case <-time.After(*interval):
+			case <-timer.C():
 			}
 		}
 		ts := nextTimestamp()
@@ -313,8 +326,8 @@ func Main(ctx context.Context, env Env) int {
 // readTwin is --twin's twin phase: connect, let the twin code GET the twin,
 // apply its desired cook to the client's CookState and report it, then GET
 // the twin again and print it as one TwinLine. All of it must finish within timeout.
-func readTwin(ctx context.Context, tc TwinClient, timeout time.Duration, enc *json.Encoder, fail func(code int, format string, a ...any) int) int {
-	tctx, cancel := context.WithTimeout(ctx, timeout)
+func readTwin(ctx context.Context, tc TwinClient, clk clock.Clock, timeout time.Duration, enc *json.Encoder, fail func(code int, format string, a ...any) int) int {
+	tctx, cancel := clock.WithTimeout(ctx, clk, timeout)
 	defer cancel()
 	tc.Start(ctx)
 	if err := tc.WaitTwinSynced(tctx); err != nil {
@@ -336,6 +349,7 @@ type pipeline struct {
 	count    int
 	interval time.Duration
 	inflight int
+	clock    clock.Clock      // times the interval
 	next     func() time.Time // the next reading's timestamp
 	status   func(deviceID string, i int) wire.V1Status
 	now      func() time.Time
@@ -374,8 +388,8 @@ func runPipelined(ctx context.Context, p pipeline) int {
 loop:
 	for i := 0; i < p.count; i++ {
 		if i > 0 && p.interval > 0 {
-			if d := p.interval - time.Since(lastStart); d > 0 {
-				timer := time.NewTimer(d)
+			if d := p.interval - p.clock.Now().Sub(lastStart); d > 0 {
+				timer := p.clock.NewTimer(d)
 				select {
 				case <-ctx.Done():
 					timer.Stop()
@@ -383,7 +397,7 @@ loop:
 				case <-stopped:
 					timer.Stop()
 					break loop
-				case <-timer.C:
+				case <-timer.C():
 				}
 			}
 		}
@@ -394,7 +408,7 @@ loop:
 			break loop
 		case slots <- struct{}{}:
 		}
-		lastStart = time.Now()
+		lastStart = p.clock.Now()
 		started++
 
 		msg, err := p.sender.Prepare(ctx, p.status(p.sender.DeviceID, i), p.next(), uint64(i+1))
@@ -416,7 +430,7 @@ loop:
 			}
 			if err != nil {
 				// One retry, the blocking way the Pi sends.
-				retryCtx, cancel := context.WithTimeout(msg.ctx, 30*time.Second)
+				retryCtx, cancel := clock.WithTimeout(msg.ctx, p.sender.clock(), sendTimeout)
 				err = p.sender.Client.PublishTelemetry(retryCtx, msg.payload, msg.props)
 				cancel()
 			}
@@ -447,6 +461,9 @@ loop:
 	return ExitOK
 }
 
+// sendTimeout bounds one blocking send.
+const sendTimeout = 30 * time.Second
+
 // Sender publishes readings as one device. CookID and CorrelationID, when
 // set, ride on every reading as the Pi's do: the payload's cookId and the
 // correlation.id message property.
@@ -456,6 +473,15 @@ type Sender struct {
 	Tracer        trace.Tracer
 	CookID        *string
 	CorrelationID string
+	// Clock times the 30s bound on a blocking send; nil is clock.Real().
+	Clock clock.Clock
+}
+
+func (s Sender) clock() clock.Clock {
+	if s.Clock == nil {
+		return clock.Real()
+	}
+	return s.Clock
 }
 
 // prepared is one reading ready to publish: its payload and properties, the
@@ -499,7 +525,7 @@ func (s Sender) Send(ctx context.Context, status wire.V1Status, ts time.Time, se
 	}
 	defer msg.span.End()
 
-	pubCtx, cancel := context.WithTimeout(msg.ctx, 30*time.Second)
+	pubCtx, cancel := clock.WithTimeout(msg.ctx, s.clock(), sendTimeout)
 	defer cancel()
 	if err := s.Client.PublishTelemetry(pubCtx, msg.payload, msg.props); err != nil {
 		return Sent{}, err

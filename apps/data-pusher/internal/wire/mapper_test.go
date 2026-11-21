@@ -45,7 +45,7 @@ func TestMapV1ToTemperatureReading_ZeroGrillUnpluggedMapsToNil(t *testing.T) {
 			GrillTemp: float64Ptr(0.0),
 		},
 	}
-	got := MapV1ToTemperatureReading(v1, time.Now().UTC(), nil)
+	got := MapV1ToTemperatureReading(v1, fixedTS, nil)
 	if got.GrillTemp != nil {
 		t.Fatalf("0.0 grill (V1 unplugged sentinel) should map to nil, got %v", *got.GrillTemp)
 	}
@@ -60,7 +60,7 @@ func TestMapV1ToTemperatureReading_ZeroProbePreserved(t *testing.T) {
 			Probe2Temp: float64Ptr(0.0),
 		},
 	}
-	got := MapV1ToTemperatureReading(v1, time.Now().UTC(), nil)
+	got := MapV1ToTemperatureReading(v1, fixedTS, nil)
 	if got.Probe2Temp == nil || *got.Probe2Temp != 0.0 {
 		t.Fatalf("Probe 0.0 should round-trip, got %v", got.Probe2Temp)
 	}
@@ -74,7 +74,7 @@ func TestMapV1ToTemperatureReading_NilTempsAreNil(t *testing.T) {
 		SmokerID: "meatgeek3",
 		Temps:    V1Temps{},
 	}
-	got := MapV1ToTemperatureReading(v1, time.Now().UTC(), nil)
+	got := MapV1ToTemperatureReading(v1, fixedTS, nil)
 	if got.GrillTemp != nil || got.Probe1Temp != nil || got.Probe2Temp != nil ||
 		got.Probe3Temp != nil || got.Probe4Temp != nil {
 		t.Fatalf("nil V1 temps should produce nil V2 pointers, got %+v", got)
@@ -84,12 +84,12 @@ func TestMapV1ToTemperatureReading_NilTempsAreNil(t *testing.T) {
 func TestMapV1ToTemperatureReading_ThreadsCookID(t *testing.T) {
 	v1 := V1Status{SmokerID: "meatgeek3"}
 	cookID := "cook-abc-123"
-	got := MapV1ToTemperatureReading(v1, time.Now().UTC(), &cookID)
+	got := MapV1ToTemperatureReading(v1, fixedTS, &cookID)
 	if got.CookID == nil || *got.CookID != cookID {
 		t.Fatalf("CookID should be threaded through, got %v", got.CookID)
 	}
 
-	got2 := MapV1ToTemperatureReading(v1, time.Now().UTC(), nil)
+	got2 := MapV1ToTemperatureReading(v1, fixedTS, nil)
 	if got2.CookID != nil {
 		t.Fatalf("nil cookID should remain nil, got %v", *got2.CookID)
 	}
@@ -146,7 +146,7 @@ func TestMapV1ToDeviceStatus_NaNGrillCollapsesToZero(t *testing.T) {
 		SmokerID: "meatgeek3",
 		Temps:    V1Temps{GrillTemp: &nan},
 	}
-	got := MapV1ToDeviceStatus(v1, time.Now().UTC())
+	got := MapV1ToDeviceStatus(v1, fixedTS)
 	if got.CurrentTemps.Grill != 0.0 {
 		t.Fatalf("NaN grill in V2DeviceStatus should collapse to 0.0, got %v", got.CurrentTemps.Grill)
 	}
