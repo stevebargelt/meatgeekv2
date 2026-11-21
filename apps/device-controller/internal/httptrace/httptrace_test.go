@@ -1,6 +1,7 @@
 package httptrace
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 
@@ -10,6 +11,17 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// setPropagator installs p as the global TextMapPropagator for the rest of
+// the test and restores the previous one when the test ends, so no test
+// leaves a global behind for the next one. The tests that call it must not
+// be parallel: the global is process-wide.
+func setPropagator(t *testing.T, p propagation.TextMapPropagator) {
+	t.Helper()
+	prev := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(prev) })
+	otel.SetTextMapPropagator(p)
+}
+
 // TestStartSpanFromRequest_ContinuesInboundTrace verifies the server side of the
 // device-controller <- data-pusher hop: given an inbound request carrying a
 // `traceparent`, the handler must extract it and open a span in the SAME trace
@@ -17,10 +29,10 @@ import (
 // No live network — the request is constructed in-test.
 func TestStartSpanFromRequest_ContinuesInboundTrace(t *testing.T) {
 	// Match production wiring (telemetry.Setup installs the W3C propagator).
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	setPropagator(t, propagation.TraceContext{})
 
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	t.Cleanup(func() { _ = tp.Shutdown(nil) })
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	tracer := tp.Tracer("httptrace-test")
 
 	const wantTraceID = "0af7651916cd43dd8448eb211c80319c"
@@ -50,10 +62,10 @@ func TestStartSpanFromRequest_ContinuesInboundTrace(t *testing.T) {
 // no inbound trace context still yields a valid span (a new root), so the
 // middleware is safe on un-instrumented callers.
 func TestStartSpanFromRequest_NoTraceparentStartsRoot(t *testing.T) {
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	setPropagator(t, propagation.TraceContext{})
 
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	t.Cleanup(func() { _ = tp.Shutdown(nil) })
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	tracer := tp.Tracer("httptrace-test")
 
 	req := httptest.NewRequest("GET", "/api/robots/MeatGeekBot/commands/get_status", nil)
