@@ -12,9 +12,17 @@ func TestGoqueue(t *testing.T) {
 	RunSpecs(t, "Goqueue Suite")
 }
 
-// Declarations for Ginkgo DSL
-type Done ginkgo.Done
-type Benchmarker ginkgo.Benchmarker
+// Declarations for Ginkgo DSL.
+//
+// Deliberately NOT re-exported (HAR-117): anything that waits on or measures
+// the wall clock. A test in this package may wait only on an event (channel,
+// callback, WaitGroup), never on a per-wait deadline, so these are left out
+// to keep a future spec from picking one up from here:
+//   - ginkgo Done / Benchmarker / Measure*: async specs with a timeout, and
+//     benchmarks that assert on elapsed time;
+//   - gomega's async polling assertions and their default-timeout setters:
+//     they poll until a wall-clock deadline that decides pass or fail;
+//   - gomega BeTemporally: comparisons against time.Time values.
 
 var GinkgoWriter = ginkgo.GinkgoWriter
 var GinkgoParallelNode = ginkgo.GinkgoParallelNode
@@ -37,10 +45,6 @@ var It = ginkgo.It
 var FIt = ginkgo.FIt
 var PIt = ginkgo.PIt
 var XIt = ginkgo.XIt
-var Measure = ginkgo.Measure
-var FMeasure = ginkgo.FMeasure
-var PMeasure = ginkgo.PMeasure
-var XMeasure = ginkgo.XMeasure
 var BeforeSuite = ginkgo.BeforeSuite
 var AfterSuite = ginkgo.AfterSuite
 var SynchronizedBeforeSuite = ginkgo.SynchronizedBeforeSuite
@@ -56,14 +60,6 @@ var InterceptGomegaFailures = gomega.InterceptGomegaFailures
 var Ω = gomega.Ω
 var Expect = gomega.Expect
 var ExpectWithOffset = gomega.ExpectWithOffset
-var Eventually = gomega.Eventually
-var EventuallyWithOffset = gomega.EventuallyWithOffset
-var Consistently = gomega.Consistently
-var ConsistentlyWithOffset = gomega.ConsistentlyWithOffset
-var SetDefaultEventuallyTimeout = gomega.SetDefaultEventuallyTimeout
-var SetDefaultEventuallyPollingInterval = gomega.SetDefaultEventuallyPollingInterval
-var SetDefaultConsistentlyDuration = gomega.SetDefaultConsistentlyDuration
-var SetDefaultConsistentlyPollingInterval = gomega.SetDefaultConsistentlyPollingInterval
 
 // Declarations for Gomega Matchers
 var Equal = gomega.Equal
@@ -87,6 +83,5 @@ var ConsistOf = gomega.ConsistOf
 var HaveKey = gomega.HaveKey
 var HaveKeyWithValue = gomega.HaveKeyWithValue
 var BeNumerically = gomega.BeNumerically
-var BeTemporally = gomega.BeTemporally
 var BeAssignableToTypeOf = gomega.BeAssignableToTypeOf
 var Panic = gomega.Panic

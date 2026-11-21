@@ -3,25 +3,38 @@ package telemetry
 import (
 	"context"
 	"testing"
-	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// shutdownCtx returns a short-lived context for exercising ShutdownFunc.
-func shutdownCtx(t *testing.T) context.Context {
+// Shutdown in these tests runs under context.Background(), with no deadline
+// of its own: a shutdown that hangs is caught by `go test -timeout`, not by a
+// per-call deadline racing the machine's speed. None of these shutdowns can
+// block on anything external. The no-op exporter does nothing, and the OTLP
+// test never starts a span (see
+// TestSetup_OTLPEndpointSet_ConstructsWithoutLiveBackend).
+
+// restoreGlobals puts back the global TracerProvider and TextMapPropagator
+// that Setup replaces, when the test ends, so no test leaves a global behind
+// for the next one. Tests that call Setup must not be parallel: the globals
+// are process-wide.
+func restoreGlobals(t *testing.T) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
-	return ctx
+	prevTP := otel.GetTracerProvider()
+	prevProp := otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevProp)
+	})
 }
 
 func TestSetup_NoOTLPEndpoint_NoopNoPanic(t *testing.T) {
 	// Offline / unconfigured: no OTEL_EXPORTER_OTLP_ENDPOINT must not panic and
 	// must produce a working provider + shutdown.
 	t.Setenv(EnvOTLPEndpoint, "")
+	restoreGlobals(t)
 	cfg := Config{DeviceID: "meatgeek3", Environment: "test"}
 
 	shutdown, err := Setup(context.Background(), cfg)
@@ -41,7 +54,7 @@ func TestSetup_NoOTLPEndpoint_NoopNoPanic(t *testing.T) {
 		t.Fatalf("no OTLP endpoint: expected noopExporter, got %T", exp)
 	}
 
-	if err := shutdown(shutdownCtx(t)); err != nil {
+	if err := shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown (no endpoint): unexpected error: %v", err)
 	}
 }
@@ -61,6 +74,17 @@ func TestSetup_OTLPEndpointSet_ConstructsWithoutLiveBackend(t *testing.T) {
 	// A configured OTLP endpoint must build the exporter + TracerProvider with
 	// no error and no live backend, and shut down cleanly. The OTLP exporter
 	// connects lazily, so construction succeeds offline.
+	//
+	// This test must never start a span on tp, so that shutdown does no
+	// network I/O and its result cannot depend on the machine's resolver or
+	// speed (otel sdk / otlptracehttp v1.44.0):
+	//   - construction: otlptracehttp.New only parses the endpoint URL and
+	//     builds an http.Client; client.Start makes no connection.
+	//   - tp.Shutdown: the batch span processor drains an empty queue and
+	//     skips the final export when the batch is empty, so ExportSpans (the
+	//     only call that dials, and so the only DNS lookup of
+	//     collector.invalid) is never made. It then calls the exporter's
+	//     Shutdown, which for the HTTP client only closes a channel.
 	t.Setenv(EnvOTLPEndpoint, "http://collector.invalid:4318")
 	cfg := Config{DeviceID: "meatgeek3", Environment: "prod"}
 
@@ -80,8 +104,12 @@ func TestSetup_OTLPEndpointSet_ConstructsWithoutLiveBackend(t *testing.T) {
 	if _, ok := exp.(noopExporter); ok {
 		t.Fatal("OTLP endpoint set: expected the real OTLP exporter, got noopExporter")
 	}
+	// exp has exported nothing; its Shutdown only stops the HTTP client.
+	if err := exp.Shutdown(context.Background()); err != nil {
+		t.Fatalf("exporter shutdown (configured): unexpected error: %v", err)
+	}
 
-	if err := tp.Shutdown(shutdownCtx(t)); err != nil {
+	if err := tp.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown (configured): unexpected error: %v", err)
 	}
 }
@@ -143,6 +171,7 @@ func TestNewResource_CarriesSixStandardDimensions(t *testing.T) {
 
 func TestSetup_SetsW3CPropagatorGlobally(t *testing.T) {
 	t.Setenv(EnvOTLPEndpoint, "")
+	restoreGlobals(t)
 	// Reset to a non-W3C propagator first so we prove Setup installs it.
 	otel.SetTextMapPropagator(propagation.Baggage{})
 
@@ -150,7 +179,7 @@ func TestSetup_SetsW3CPropagatorGlobally(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup returned error: %v", err)
 	}
-	defer func() { _ = shutdown(shutdownCtx(t)) }()
+	defer func() { _ = shutdown(context.Background()) }()
 
 	got := otel.GetTextMapPropagator()
 	if _, ok := got.(propagation.TraceContext); !ok {
