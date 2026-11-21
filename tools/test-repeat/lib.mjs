@@ -25,6 +25,8 @@ import path from 'node:path';
  * @property {number} [shards]
  * @property {number} [maxParallel]
  * @property {string} [maxParallelReason]
+ * @property {string[]} [loadArgs]
+ * @property {string} [loadArgsReason]
  * @property {Record<string,string>} [env]
  * @property {number} [timeoutSec]
  * @property {string} [goModFile]
@@ -321,12 +323,19 @@ export async function repeatSuite(suite, opts) {
       `${suite.id}: --parallel ${parallel} capped at ${effectiveParallel}: ${suite.maxParallelReason ?? 'maxParallel'}`
     );
   }
+  const loadArgs = effectiveParallel > 1 ? (suite.loadArgs ?? []) : [];
+  if (loadArgs.length) {
+    log(
+      `${suite.id}: each copy runs with ${loadArgs.join(' ')}: ${suite.loadArgsReason ?? 'loadArgs'}`
+    );
+  }
 
   const startedAt = Date.now();
   const copies = await Promise.all(
     Array.from({ length: effectiveParallel }, (_, i) =>
       runCopy({
         suite,
+        argv: [...suite.command, ...loadArgs],
         copy: i + 1,
         copies: effectiveParallel,
         start,
@@ -354,6 +363,7 @@ export async function repeatSuite(suite, opts) {
     parallelRequested: parallel,
     parallel: effectiveParallel,
     parallelNote: effectiveParallel < parallel ? (suite.maxParallelReason ?? 'maxParallel') : null,
+    loadArgs,
     durationMs,
     runDurationsMs: copies.flatMap(c => c.runDurationsMs),
     copies: copies.map(({ tail, ...c }) => c),
@@ -390,6 +400,7 @@ function reportLine(c) {
 
 async function runCopy({
   suite,
+  argv,
   copy,
   copies,
   start,
@@ -421,7 +432,7 @@ async function runCopy({
   try {
     for (let n = start; n < start + count; n++) {
       const logFile = path.join(logDir, `${suite.id}-copy${copy}-run${n}.log`);
-      const r = await runOnce({ argv: suite.command, cwd, env, logFile, timeoutSec });
+      const r = await runOnce({ argv, cwd, env, logFile, timeoutSec });
       state.runDurationsMs.push(Math.round(r.durationMs));
       const secs = (r.durationMs / 1000).toFixed(1);
       if (r.code === 0 && !r.timedOut) {
@@ -531,7 +542,11 @@ export function renderSummary(selection, results) {
         problems.push(`${label}: ${missing.length} job(s) reported no result`);
       }
       const note = have.find(r => r.parallelNote)?.parallelNote;
-      const affected = affectedCell(sel) + (note ? ` (parallel capped: ${note})` : '');
+      const loadArgs = have.find(r => r.loadArgs?.length)?.loadArgs;
+      const affected =
+        affectedCell(sel) +
+        (note ? ` (parallel capped: ${note})` : '') +
+        (loadArgs ? ` (each copy: \`${loadArgs.join(' ')}\`)` : '');
       if (failedRuns.length || missing.length) ok = false;
       if (failedRuns.length)
         problems.push(`${label}: ${passed}/${requested} passed, first failure ${firstFail}`);
