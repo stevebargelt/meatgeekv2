@@ -8,7 +8,7 @@
 //
 // Runs are counted in os.tmpdir(), which the harness gives each parallel copy
 // to itself, so the count is per copy.
-import { existsSync, readdirSync, readFileSync, watch, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -19,17 +19,18 @@ writeFileSync(counter, String(n));
 console.log(`fixture invocation ${n} in ${os.tmpdir()}`);
 for (let i = 1; i <= 200; i++) console.log(`fixture filler line ${i}`);
 
-if (mode === 'pass') process.exit(0);
-
-if (mode === 'fail-on') {
+// Exit by process.exitCode, never process.exit(): stdout is a pipe to the
+// harness, and process.exit() can drop output still queued for it.
+if (mode === 'pass') {
+  process.exitCode = 0;
+} else if (mode === 'fail-on') {
   if (n === Number(arg)) {
-    console.error(`boom on invocation ${n}`);
-    process.exit(1);
+    // On stdout, so it is the last line of the tail whatever the interleaving
+    // with stderr.
+    console.log(`boom on invocation ${n}`);
+    process.exitCode = 1;
   }
-  process.exit(0);
-}
-
-if (mode === 'barrier') {
+} else if (mode === 'barrier') {
   const dir = process.env.BARRIER_DIR;
   const want = Number(process.env.BARRIER_COUNT);
   writeFileSync(
@@ -38,16 +39,15 @@ if (mode === 'barrier') {
   );
   // Done once every copy has started: only possible if they run at once.
   const ready = () => readdirSync(dir).filter(f => f.endsWith('.json')).length >= want;
-  if (ready()) process.exit(0);
-  const watcher = watch(dir, () => {
-    if (ready()) {
-      watcher.close();
-      process.exit(0);
-    }
-  });
-  // A marker written between the first check and the watch starting.
-  if (ready()) process.exit(0);
+  // Re-check the directory until the condition holds. (fs.watch was tried
+  // first: on macOS it can drop the event for the last marker, and the copy
+  // then waits forever.)
+  if (!ready()) {
+    const timer = setInterval(() => {
+      if (ready()) clearInterval(timer);
+    }, 10);
+  }
 } else {
   console.error(`unknown mode ${mode}`);
-  process.exit(2);
+  process.exitCode = 2;
 }
