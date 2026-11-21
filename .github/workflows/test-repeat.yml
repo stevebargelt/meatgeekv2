@@ -175,30 +175,28 @@ jobs:
           retention-days: 7
 
   # The api Cosmos emulator suite, in its own job because it needs the
-  # emulator service. Same pinned image, settings and readiness step as ci.yml's
-  # api-cosmos-emulator job; keep the two in step.
+  # emulator: the Windows-native one on windows-2025, started and measured by
+  # .github/scripts/cosmos-emulator.ps1, exactly as ci.yml's
+  # api-cosmos-emulator job does; keep the two in step. The classic Linux
+  # emulator image crashed natively under this suite (HAR-113).
   repeat-emulator:
     needs: select
     if: needs.select.outputs.has_emulator == 'true'
     # Prefixed: the bare suite ids (api, web-e2e, ...) are also ci.yml job
     # names, and a required check is matched by name.
     name: test-repeat ${{ matrix.name }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: windows-2025
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.select.outputs.emulator_matrix) }}
-    services:
-      cosmos:
-        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:9a4f69121f20c1d6502db84625c71ebb441ab61b01880a7b2d3d8031c6dac429
-        ports:
-          - 8081:8081
-        env:
-          AZURE_COSMOS_EMULATOR_PARTITION_COUNT: '3'
-          AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE: 'false'
     steps:
+      - name: Keep LF line endings
+        # The specs parse Terraform and JSON fixtures from the working tree.
+        run: git config --global core.autocrlf false
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -214,17 +212,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Wait for the Cosmos emulator (bounded)
-        # Same helper as ci.yml's api-cosmos-emulator: bounded wait, start-up
-        # time reported with the partition count (HAR-113).
-        env:
-          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
+      - name: Start the Cosmos emulator (bounded)
+        shell: pwsh
         run: |
-          cert="$RUNNER_TEMP/cosmos-emulator.pem"
-          bash .github/scripts/cosmos-emulator.sh wait "$COSMOS_CONTAINER_ID" "$cert"
-          echo "NODE_EXTRA_CA_CERTS=$cert" >> "$GITHUB_ENV"
+          $cert = Join-Path $env:RUNNER_TEMP 'cosmos-emulator.pem'
+          ./.github/scripts/cosmos-emulator.ps1 start $cert
+          "NODE_EXTRA_CA_CERTS=$cert" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run ${{ matrix.name }}
+        shell: pwsh
         env:
           SUITE: ${{ matrix.suite }}
           RUNS: ${{ matrix.runs }}
@@ -232,23 +228,27 @@ jobs:
           PARALLEL: ${{ matrix.parallel }}
           KIND: ${{ matrix.kind }}
           KEY: ${{ matrix.key }}
-          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
         run: |
-          bash .github/scripts/cosmos-emulator.sh sample "$COSMOS_CONTAINER_ID" "$RUNNER_TEMP/cosmos-emulator/stats.log" &
-          sampler=$!
-          trap 'kill "$sampler"' EXIT
-          node tools/test-repeat/test-repeat.mjs run "$SUITE" \
-            --runs "$RUNS" --shard "$SHARD" --parallel "$PARALLEL" --kind "$KIND" \
-            --result "$RUNNER_TEMP/test-repeat/results/$KEY.json" \
-            --log-dir "$RUNNER_TEMP/test-repeat/logs/$KEY"
+          $sampler = Start-Process pwsh -PassThru -NoNewWindow -ArgumentList @(
+            '-NoProfile', '-File', './.github/scripts/cosmos-emulator.ps1',
+            'sample', (Join-Path $env:RUNNER_TEMP 'cosmos-emulator/stats.log'))
+          try {
+            node tools/test-repeat/test-repeat.mjs run $env:SUITE `
+              --runs $env:RUNS --shard $env:SHARD --parallel $env:PARALLEL --kind $env:KIND `
+              --result "$env:RUNNER_TEMP/test-repeat/results/$env:KEY.json" `
+              --log-dir "$env:RUNNER_TEMP/test-repeat/logs/$env:KEY"
+            $code = $LASTEXITCODE
+          } finally {
+            Stop-Process -Id $sampler.Id -ErrorAction SilentlyContinue
+          }
+          exit $code
 
       - name: Cosmos emulator diagnostics
-        # HAR-113: the emulator's own account of a failed pass, taken before
-        # the service container is removed. See ci.yml's api-cosmos-emulator.
+        # HAR-113: the emulator's own account of a failed pass. See ci.yml's
+        # api-cosmos-emulator.
         if: failure()
-        env:
-          COSMOS_CONTAINER_ID: ${{ job.services.cosmos.id }}
-        run: bash .github/scripts/cosmos-emulator.sh diagnose "$COSMOS_CONTAINER_ID" "$RUNNER_TEMP/cosmos-emulator"
+        shell: pwsh
+        run: ./.github/scripts/cosmos-emulator.ps1 diagnose (Join-Path $env:RUNNER_TEMP 'cosmos-emulator')
 
       - name: Upload result and failing-run log
         if: always()
@@ -261,7 +261,7 @@ jobs:
 
       - name: Upload Cosmos emulator diagnostics
         # Its own artifact: the summary job merges every test-repeat-* artifact.
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cosmos-emulator-${{ matrix.key }}
