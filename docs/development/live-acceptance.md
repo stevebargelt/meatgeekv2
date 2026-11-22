@@ -740,11 +740,11 @@ code (HAR-134). The runner never logs a claim code: its redactor masks anything
 shaped like one (`XXXX-XXXX-XXXX`), and so does the browser proof's. Each
 harness has a `readClaimCode(bin, stateDir)` helper
 (`apps/api/acceptance/lib/claim-code.ts`, `apps/web-e2e/live/simdevice.ts`) for
-the claim proofs that come next: it runs `simdevice claim-code --state-dir
-
-<dir>` and returns `{ deviceId, state, claimCode?, expiresAt? }`, a "no claim
-yet" result on exit 3, and on any other failure an error with the exit code and
-stderr, never stdout.
+the claim proofs that come next. It runs
+`simdevice claim-code --state-dir <dir>` and returns
+`{ deviceId, state, claimCode?, expiresAt? }`, a "no claim yet" result on exit
+3, and on any other failure an error with the exit code and stderr, never
+stdout.
 
 ### The chart device (HAR-84)
 
