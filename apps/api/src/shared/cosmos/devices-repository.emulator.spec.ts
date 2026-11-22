@@ -27,6 +27,7 @@ import type { Device } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
+  closeEmulatorTier,
   createEmulatorContainer,
   EMULATOR_TIER_DATABASE,
   emulatorTierDatabase,
@@ -161,10 +162,8 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
     repository = new DevicesRepository(container);
   });
 
-  afterAll(async () => {
-    if (client) {
-      client.dispose();
-    }
+  afterAll(() => {
+    closeEmulatorTier(client);
   });
 
   it('creates the container with the Terraform partition key and unique key', async () => {

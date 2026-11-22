@@ -37,6 +37,7 @@ import type { Cook } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
+  closeEmulatorTier,
   createEmulatorContainer,
   EMULATOR_TIER_DATABASE,
   emulatorTierDatabase,
@@ -205,10 +206,8 @@ describe('HAR-12 cooks repository against the Cosmos emulator', () => {
     repository = new CooksRepository(container);
   });
 
-  afterAll(async () => {
-    if (client) {
-      client.dispose();
-    }
+  afterAll(() => {
+    closeEmulatorTier(client);
   });
 
   it('creates the throwaway container with the Terraform-declared partition key', async () => {

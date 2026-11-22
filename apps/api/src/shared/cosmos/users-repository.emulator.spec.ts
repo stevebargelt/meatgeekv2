@@ -25,6 +25,7 @@ import type { TokenCredential } from '@azure/core-auth';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
+  closeEmulatorTier,
   createEmulatorContainer,
   EMULATOR_TIER_DATABASE,
   emulatorTierDatabase,
@@ -158,10 +159,8 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
     repository = new UsersRepository(container, devicesRepository);
   });
 
-  afterAll(async () => {
-    if (client) {
-      client.dispose();
-    }
+  afterAll(() => {
+    closeEmulatorTier(client);
   });
 
   it('creates the container with the Terraform partition key and unique key', async () => {
