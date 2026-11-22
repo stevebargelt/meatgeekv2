@@ -745,82 +745,50 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # The proof's own failure screenshot, taken only after sign-in (the
-      # sign-in pages show the UPN and what was typed). Trace, video and
-      # Playwright's failure screenshot and page snapshot are off
-      # (playwright.live.config.ts); the glob keeps this to screenshots even so.
-      - name: Upload the proof's failure screenshots
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: web-acceptance-screenshots
-          path: dist/.playwright/web-e2e-live/test-results/**/*.png
-          if-no-files-found: ignore
-          retention-days: 7
-
-      # The HAR-44-style leak check, over this job's raw proof output (the
-      # file tee wrote, before GitHub's masking, so a masked secret is still
-      # caught): no connection-string key field, no password, no TOTP secret,
-      # and no TOTP code from any 30 s window the job can have run in (the
-      # 30 min timeout, plus a margin). Line numbers only; nothing found is
-      # printed. The patterns are built so this script, echoed into the log,
-      # holds none of them literally.
-      - name: Check the proof's output for leaked secrets
+      # The HAR-44-style leak check (.github/scripts/web-acceptance-leak-check.cjs),
+      # over this job's raw proof output (the file tee wrote, before GitHub's
+      # masking, so a masked secret is still caught) and every sign-in
+      # diagnostic the proof wrote (HAR-121): no connection-string key field,
+      # no password, no TOTP secret, and no TOTP code from any 30 s window the
+      # job can have run in (the 30 min timeout, plus a margin). Line numbers
+      # only; nothing found is printed. HAR-126: it runs BEFORE the upload
+      # below and deletes every diagnostic with a finding, so the upload
+      # cannot include one. Exit 0 is clean, 1 is a finding (handled), 2 is a
+      # check that could not finish or delete; `checked` is set only on 0 or
+      # 1, and the upload needs it.
+      - name: Check the proof's output and sign-in diagnostics for leaked secrets
+        id: leak-check
         if: always()
         env:
           ACCEPTANCE_USER_PASSWORD: ${{ secrets.ACCEPTANCE_USER_PASSWORD }}
           ACCEPTANCE_USER_TOTP_SECRET: ${{ secrets.ACCEPTANCE_USER_TOTP_SECRET }}
         run: |
           set -euo pipefail
-          LOG="$RUNNER_TEMP/web-acceptance.log"
-          if [ ! -f "$LOG" ]; then
-            echo "leak check: the proof did not run (no $LOG), so it wrote nothing to check."
-            exit 0
+          rc=0
+          node .github/scripts/web-acceptance-leak-check.cjs \
+            "$RUNNER_TEMP/web-acceptance.log" \
+            'dist/.playwright/web-e2e-live/test-results/**/sign-in-diagnostic.txt' || rc=$?
+          if [ "$rc" -le 1 ]; then
+            echo "checked=true" >> "$GITHUB_OUTPUT"
           fi
-          node - "$LOG" <<'NODE'
-          const { readFileSync } = require('node:fs');
-          const lines = readFileSync(process.argv[2], 'utf8').split('\n');
-          const findings = [];
-          const scan = (what, test) => {
-            const hits = lines.flatMap((line, i) => (test(line) ? [i + 1] : []));
-            if (hits.length) findings.push(`${what} on line(s) ${hits.join(', ')}`);
-            console.log(`leak check: ${what}: ${hits.length ? 'FOUND' : 'none'}`);
-          };
-          scan('connection-string key field', line => /SharedAccess[K]ey=/i.test(line));
-          const password = process.env.ACCEPTANCE_USER_PASSWORD ?? '';
-          if (password) scan('password', line => line.includes(password));
-          else console.log('leak check: password: not set, nothing to look for');
-          const rawSecret = (process.env.ACCEPTANCE_USER_TOTP_SECRET ?? '').trim();
-          const secret = rawSecret.replace(/[\s-]/g, '').replace(/=+$/, '').toUpperCase();
-          if (secret) {
-            scan('TOTP secret', line => {
-              const upper = line.toUpperCase();
-              return upper.includes(secret) || upper.includes(rawSecret.toUpperCase());
-            });
-            let codes;
-            try {
-              // Same guardrails as the proof's totpCode(): Entra's secret is
-              // 10 bytes, under otplib's default 16-byte minimum.
-              const { createGuardrails, generateSync } = require('otplib');
-              const guardrails = createGuardrails({ MIN_SECRET_BYTES: 1 });
-              const now = Math.floor(Date.now() / 1000);
-              codes = new Set();
-              for (let t = now - 35 * 60; t <= now + 60; t += 30) {
-                codes.add(generateSync({ secret, epoch: t, digits: 6, guardrails }));
-              }
-            } catch (error) {
-              console.log(`leak check: could not compute TOTP codes (${error.name})`);
-              process.exit(1);
-            }
-            scan(`TOTP code (${codes.size} windows)`, line =>
-              (line.match(/(?<!\d)\d{6}(?!\d)/g) ?? []).some(code => codes.has(code))
-            );
-          } else {
-            console.log('leak check: TOTP secret and codes: not set, nothing to look for');
-          }
-          if (findings.length) {
-            console.log(`leak check: FAILED: ${findings.join('; ')}`);
-            process.exit(1);
-          }
-          console.log(`leak check: passed (${lines.length} lines)`);
-          NODE
+          exit "$rc"
+
+      # On failure: the proof's own failure screenshot, taken only after
+      # sign-in (the sign-in pages show the UPN and what was typed), and the
+      # sign-in diagnostic, which names which of Microsoft's selectors were on
+      # the page and holds no typed value, cookie or query string. Trace,
+      # video and Playwright's failure screenshot and page snapshot are off
+      # (playwright.live.config.ts); the globs keep this to those two even
+      # so. Only after the leak check above finished: a diagnostic it found
+      # anything in is already deleted, and if it could not finish nothing is
+      # uploaded.
+      - name: Upload the proof's failure screenshots and sign-in diagnostics
+        if: failure() && steps.leak-check.outputs.checked == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-acceptance-diagnostics
+          path: |
+            dist/.playwright/web-e2e-live/test-results/**/*.png
+            dist/.playwright/web-e2e-live/test-results/**/sign-in-diagnostic.txt
+          if-no-files-found: ignore
+          retention-days: 7

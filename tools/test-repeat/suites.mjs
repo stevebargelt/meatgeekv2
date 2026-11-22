@@ -167,10 +167,12 @@ export const suites = [
     ...JEST_LOAD,
     command: jest('libs/api-interfaces/jest.config.ts'),
     // Besides its own source, this suite reads the workflows, the Terraform
-    // tree, the bootstrap script and package.json files.
+    // tree, the bootstrap script and package.json files, and runs the
+    // web-acceptance leak check (HAR-126).
     paths: [
       'libs/api-interfaces/**',
       '.github/workflows/**',
+      '.github/scripts/web-acceptance-leak-check.cjs',
       'apps/infrastructure/**',
       'apps/api/package.json',
       ...JS_ROOT,
