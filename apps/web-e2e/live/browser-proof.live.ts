@@ -248,7 +248,7 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
       const expected = grillText(grillF, unit);
       log(`Sending 10 readings as ${env.deviceId} with grill ${grillF} °F`);
 
-      const run = startSimDevice(env.simdeviceBin, env.simdeviceConnectionString, [
+      const run = startSimDevice(env.simdeviceBin, env.simdevice, [
         '--count',
         '10',
         '--interval',

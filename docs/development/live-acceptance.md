@@ -588,7 +588,11 @@ and deletes one it finds anything in before the upload step runs (see
 ## Running it locally against dev
 
 The suite takes six inputs, all from the environment. If any is missing it
-fails at once and names the variable; it never skips silently.
+fails at once and names the variable; it never skips silently. The simulated
+device can be given to it in one of two ways: by connection string (the old
+mode, below, which CI still uses and the next HAR-130 issues remove), or in
+[DPS mode](#dps-mode-har-138), as the device's own certificate, the way a real
+Pi enrols.
 
 | Variable                       | Value                                                                                                  |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
@@ -598,6 +602,8 @@ fails at once and names the variable; it never skips silently.
 | `SIMDEVICE_CONNECTION_STRING`  | The simulated device's IoT Hub connection string. Only the runner reads it; simdevice inherits it      |
 | `ACCEPTANCE_SIM_DEVICE_ID`     | The simulated device's id, `meatgeek-dev-simulated-smoker` in dev                                      |
 | `ACCEPTANCE_SIMDEVICE_BIN`     | Path to the built `simdevice` binary, e.g. `$PWD/apps/data-pusher/dist/simdevice` (absolute is safest) |
+
+Connection-string mode (old; the next HAR-130 issues remove it):
 
 ```bash
 az login   # once, as a user the dev tenant knows
@@ -671,6 +677,74 @@ simulated device exists and hands the suite its masked connection string (see
 [CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)). The proof results and the RU-per-route table
 also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
 calls the live system.
+
+### DPS mode (HAR-138)
+
+In DPS mode simdevice is the device, with its own X.509 identity in a state
+dir, enrolled in the dev Device Provisioning Service (HAR-131); there is no
+device key to fetch. Each device gets its own state dir. The runner chooses the
+mode per device:
+
+| Variable                     | Value                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| `ACCEPTANCE_DPS_ID_SCOPE`    | The dev DPS's ID scope. Needed for any device in DPS mode                                        |
+| `ACCEPTANCE_DPS_ENDPOINT`    | Optional. The DPS global endpoint; simdevice defaults to `global.azure-devices-provisioning.net` |
+| `ACCEPTANCE_SIM_STATE_DIR`   | The simulated device's state dir. In place of `SIMDEVICE_CONNECTION_STRING`                      |
+| `ACCEPTANCE_CHART_STATE_DIR` | Optional: the chart device's state dir, in place of `SIMDEVICE_CHART_CONNECTION_STRING`          |
+| `ACCEPTANCE_WEB_STATE_DIR`   | The [browser proof](#inputs)'s device's, in place of `SIMDEVICE_WEB_CONNECTION_STRING`           |
+
+- A device whose state dir is set, with `ACCEPTANCE_DPS_ID_SCOPE`, runs in DPS
+  mode: simdevice gets `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID` (the
+  device's id variable), `MEATGEEK_STATE_DIR` and, if set,
+  `MEATGEEK_DPS_ENDPOINT`, and no `SIMDEVICE_CONNECTION_STRING`.
+- A device with a connection string and no state dir runs as before.
+- A device given both, or a state dir without `ACCEPTANCE_DPS_ID_SCOPE`, stops
+  the run before any proof, naming the variables (never their values).
+- One device can be in DPS mode and another not.
+
+Create each device's identity once, enrol its certificate with your own
+`az login`, then export the variables. `enrol-device.sh` uses `--auth-type key`
+by default: `az` fetches the DPS and hub keys with your ARM rights, which the
+owner has (see [`apps/data-pusher/deploy/README.md`](../../apps/data-pusher/deploy/README.md)).
+
+```bash
+make -C apps/data-pusher build
+export ACCEPTANCE_SIMDEVICE_BIN="$PWD/apps/data-pusher/dist/simdevice"
+export ACCEPTANCE_SIM_DEVICE_ID=meatgeek-dev-simulated-smoker
+export ACCEPTANCE_SIM_STATE_DIR="$HOME/.meatgeek-acceptance/$ACCEPTANCE_SIM_DEVICE_ID"
+
+# Once per device: the device makes its own key and prints only its certificate.
+mkdir -p "$HOME/.meatgeek-acceptance"
+"$ACCEPTANCE_SIMDEVICE_BIN" identity init --device-id "$ACCEPTANCE_SIM_DEVICE_ID" \
+  --state-dir "$ACCEPTANCE_SIM_STATE_DIR" > "$ACCEPTANCE_SIM_STATE_DIR.pem"
+apps/data-pusher/deploy/enrol-device.sh --device-id "$ACCEPTANCE_SIM_DEVICE_ID" \
+  --certificate "$ACCEPTANCE_SIM_STATE_DIR.pem"
+
+export ACCEPTANCE_DPS_ID_SCOPE=$(az iot dps list -g meatgeek-v2-dev-rg \
+  --query '[0].properties.idScope' -o tsv)
+unset SIMDEVICE_CONNECTION_STRING   # one mode per device
+
+# Optional: the chart device, the same way.
+export ACCEPTANCE_CHART_DEVICE_ID="${ACCEPTANCE_SIM_DEVICE_ID}-chart"
+export ACCEPTANCE_CHART_STATE_DIR="$HOME/.meatgeek-acceptance/$ACCEPTANCE_CHART_DEVICE_ID"
+# ... identity init and enrol-device.sh for it, as above ...
+unset SIMDEVICE_CHART_CONNECTION_STRING
+
+npx nx run api:acceptance   # with the base URL and the two tokens, as above
+```
+
+The certificate is public; the key never leaves the state dir. Keep the state
+dir out of the repository and never paste anything from it into a ticket or a
+log: it holds the device key and, once the device has read its twin, its claim
+code (HAR-134). The runner never logs a claim code: its redactor masks anything
+shaped like one (`XXXX-XXXX-XXXX`), and so does the browser proof's. Each
+harness has a `readClaimCode(bin, stateDir)` helper
+(`apps/api/acceptance/lib/claim-code.ts`, `apps/web-e2e/live/simdevice.ts`) for
+the claim proofs that come next. It runs
+`simdevice claim-code --state-dir <dir>` and returns
+`{ deviceId, state, claimCode?, expiresAt? }`, a "no claim yet" result on exit
+3, and on any other failure an error with the exit code and stderr, never
+stdout.
 
 ### The chart device (HAR-84)
 
@@ -778,6 +852,12 @@ value.
 | `SIMDEVICE_WEB_CONNECTION_STRING` | That device's connection string. Only simdevice's own environment gets it, as `SIMDEVICE_CONNECTION_STRING` |
 | `ACCEPTANCE_SIMDEVICE_BIN`        | Path to the built `simdevice`, the same binary the API suite uses                                           |
 
+HAR-138: in [DPS mode](#dps-mode-har-138) set `ACCEPTANCE_WEB_STATE_DIR` and
+`ACCEPTANCE_DPS_ID_SCOPE` (and optionally `ACCEPTANCE_DPS_ENDPOINT`) instead of
+`SIMDEVICE_WEB_CONNECTION_STRING`, which is then not required. Setting the
+connection string and the state dir together stops the proof before a browser
+starts, naming both.
+
 The proof writes none of the password, the TOTP secret or code, the connection
 string or any token anywhere. Playwright's trace, video, HTML report, failure
 page snapshot (`error-context.md`) and automatic screenshot are all off for it
@@ -803,6 +883,10 @@ fails the job if one holds:
 - any 6-digit TOTP code for any 30 s window from 35 min before the check to
   1 min after it, which covers the job's 30 min timeout. A code is matched
   only as a whole 6-digit number.
+- anything shaped like a device claim code (HAR-134, `XXXX-XXXX-XXXX` in
+  Crockford base32, not inside a longer dashed id such as a UUID). Nobody knows
+  a claim code before the device mints it, so its shape is what is matched
+  (HAR-138).
 
 It prints one line per file and check (`leak check: proof log: password:
 none`, and so on) and, on a hit, line numbers only, never the text it found.

@@ -4,6 +4,7 @@ import { readdirSync } from 'fs';
 import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../../src/shared/cosmos/request-charge';
+import { maskClaimCodes } from './claim-code';
 import { clock } from './clock';
 import { Contract, SPEC_PATH } from './contract';
 import {
@@ -18,6 +19,14 @@ import {
   SimDeviceOptions,
   SimDeviceRun,
 } from './proof';
+import {
+  CHART_DEVICE_INPUTS,
+  DeviceCredential,
+  DPS_ID_SCOPE_ENV,
+  deviceMode,
+  SIM_DEVICE_INPUTS,
+  simDeviceEnv,
+} from './simdevice-env';
 
 /**
  * HAR-11 — the live acceptance runner. Runs every proof group found in
@@ -57,6 +66,15 @@ import {
  * kill, are on the injected clock (./clock), and each failure says what it was
  * waiting for: `the response did not finish in <ms> ms …` for a request, and
  * `killedAfterMs` on a {@link SimDeviceRun} the runner killed.
+ *
+ * HAR-138: each device can instead run in DPS mode (./simdevice-env), from a
+ * state dir `simdevice identity init` made and an enrolled certificate:
+ * ACCEPTANCE_DPS_ID_SCOPE (and optionally ACCEPTANCE_DPS_ENDPOINT) plus the
+ * device's state dir, ACCEPTANCE_SIM_STATE_DIR or ACCEPTANCE_CHART_STATE_DIR,
+ * in place of its connection string. The child then gets the MEATGEEK_* DPS
+ * variables and no SIMDEVICE_CONNECTION_STRING. A device given both, or a state
+ * dir without the ID scope, stops the run before anything is sent. The
+ * redactor also masks anything shaped like a claim code (HAR-134).
  */
 
 export const REQUIRED_ENV = [
@@ -69,7 +87,8 @@ export const REQUIRED_ENV = [
 ] as const;
 
 /** HAR-84: the chart device's id and credential. Optional, but set both or
- *  neither: one without the other stops the run before anything is sent. */
+ *  neither: one without the other stops the run before anything is sent.
+ *  HAR-138: in DPS mode its credential is ACCEPTANCE_CHART_STATE_DIR instead. */
 export const CHART_DEVICE_ENV = [
   'ACCEPTANCE_CHART_DEVICE_ID',
   'SIMDEVICE_CHART_CONNECTION_STRING',
@@ -164,7 +183,8 @@ function errorCodeOf(body: unknown): string | undefined {
  * the peer's), each device connection string (the standing device's and, when
  * set, the chart device's), and each one's SharedAccessKey value (with and
  * without the `SharedAccessKey=` prefix). Longest first, so a whole connection
- * string is one mask rather than a mangled partial.
+ * string is one mask rather than a mangled partial. HAR-138: then anything
+ * shaped like a claim code, which is known to no one before simdevice mints it.
  */
 export function makeRedactor(
   tokens: readonly string[],
@@ -181,7 +201,8 @@ export function makeRedactor(
   const secrets = [...tokens, ...keyed]
     .filter(secret => secret.length > 0)
     .sort((a, b) => b.length - a.length);
-  return line => secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line);
+  return line =>
+    maskClaimCodes(secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line));
 }
 
 /** Run `bin` with `args`, reducing its output to a {@link SimDeviceRun}. A run
@@ -244,7 +265,17 @@ function runChild(
 
 export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   const env = options.env;
-  const missing = REQUIRED_ENV.filter(name => !env[name] || env[name]?.trim() === '');
+  const isSet = (name: string) => (env[name]?.trim() ?? '') !== '';
+  // HAR-138: a simulated device given a state dir runs in DPS mode and needs no
+  // connection string; deviceMode() below checks the rest of that mode.
+  const required = REQUIRED_ENV.filter(
+    name =>
+      !(
+        name === SIM_DEVICE_INPUTS.connectionStringVariable &&
+        isSet(SIM_DEVICE_INPUTS.stateDirVariable)
+      )
+  );
+  const missing = required.filter(name => !isSet(name));
   if (missing.length > 0) {
     const failures = missing.map(
       name => `acceptance: ${name} is not set; the live acceptance run needs it`
@@ -253,12 +284,37 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     return { exitCode: 2, failures };
   }
 
-  const isSet = (name: string) => (env[name]?.trim() ?? '') !== '';
-  const chartSet = CHART_DEVICE_ENV.filter(isSet);
-  if (chartSet.length === 1) {
-    const [given] = chartSet;
-    const absent = CHART_DEVICE_ENV.find(name => name !== given) as string;
-    const line = `acceptance: ${given} is set but ${absent} is not; the chart device needs both or neither`;
+  const simMode = deviceMode(env, SIM_DEVICE_INPUTS);
+  const chartMode = deviceMode(env, CHART_DEVICE_INPUTS);
+  const modeErrors = [simMode, chartMode].flatMap(mode =>
+    mode.kind === 'error' ? [`acceptance: ${mode.message}`] : []
+  );
+  if (modeErrors.length > 0) {
+    modeErrors.forEach(line => options.write(line));
+    return { exitCode: 2, failures: modeErrors };
+  }
+  if (simMode.kind !== 'configured') {
+    // Unreachable: the required-input check above guarantees one of the two.
+    const line = `acceptance: ${SIM_DEVICE_INPUTS.connectionStringVariable} is not set; the live acceptance run needs it`;
+    options.write(line);
+    return { exitCode: 2, failures: [line] };
+  }
+
+  const chartIdSet = isSet(CHART_DEVICE_INPUTS.idVariable);
+  if (chartIdSet !== (chartMode.kind === 'configured')) {
+    const credentialVariable =
+      chartMode.kind === 'configured' && chartMode.credential.mode === 'dps'
+        ? CHART_DEVICE_INPUTS.stateDirVariable
+        : CHART_DEVICE_INPUTS.connectionStringVariable;
+    const line = chartIdSet
+      ? isSet(DPS_ID_SCOPE_ENV)
+        ? `acceptance: ${CHART_DEVICE_INPUTS.idVariable} is set but neither ` +
+          `${CHART_DEVICE_INPUTS.connectionStringVariable} nor ${CHART_DEVICE_INPUTS.stateDirVariable} ` +
+          'is; the chart device needs both or neither'
+        : `acceptance: ${CHART_DEVICE_INPUTS.idVariable} is set but ${credentialVariable} is not; ` +
+          'the chart device needs both or neither'
+      : `acceptance: ${credentialVariable} is set but ${CHART_DEVICE_INPUTS.idVariable} is not; ` +
+        'the chart device needs both or neither';
     options.write(line);
     return { exitCode: 2, failures: [line] };
   }
@@ -266,17 +322,18 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   const token = (env['ACCEPTANCE_BEARER_TOKEN'] as string).trim();
   const peerToken = (env['ACCEPTANCE_PEER_BEARER_TOKEN'] as string).trim();
   const rawBaseUrl = (env['ACCEPTANCE_BASE_URL'] as string).trim();
-  const connectionString = (env['SIMDEVICE_CONNECTION_STRING'] as string).trim();
   const simulatedDeviceId = (env['ACCEPTANCE_SIM_DEVICE_ID'] as string).trim();
   const simdeviceBin = (env['ACCEPTANCE_SIMDEVICE_BIN'] as string).trim();
-  const chartDeviceId =
-    chartSet.length > 0 ? (env['ACCEPTANCE_CHART_DEVICE_ID'] as string).trim() : undefined;
-  const chartConnectionString =
-    chartSet.length > 0 ? (env['SIMDEVICE_CHART_CONNECTION_STRING'] as string).trim() : undefined;
-  const redact = makeRedactor(
-    [token, peerToken],
-    [connectionString, ...(chartConnectionString ? [chartConnectionString] : [])]
+  const simCredential: DeviceCredential = simMode.credential;
+  const chartCredential: DeviceCredential | undefined =
+    chartMode.kind === 'configured' ? chartMode.credential : undefined;
+  const chartDeviceId = chartCredential
+    ? (env['ACCEPTANCE_CHART_DEVICE_ID'] as string).trim()
+    : undefined;
+  const connectionStrings = [simCredential, chartCredential].flatMap(credential =>
+    credential?.mode === 'connection-string' ? [credential.connectionString] : []
   );
+  const redact = makeRedactor([token, peerToken], connectionStrings);
   const write = (line: string) => options.write(redact(line));
 
   let baseUrl: string;
@@ -327,15 +384,13 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
 
   // The child gets the runner's own environment for PATH and tracing, plus the
   // credential of the device it sends as; never a bearer token, which it has
-  // no use for, nor the other device's credential.
+  // no use for, nor the other device's credential. simDeviceEnv() drops any
+  // SIMDEVICE_CONNECTION_STRING and MEATGEEK_* DPS variable it inherited and
+  // sets only those of the device's mode (HAR-138).
   const baseChildEnv: NodeJS.ProcessEnv = { ...process.env };
   delete baseChildEnv['ACCEPTANCE_BEARER_TOKEN'];
   delete baseChildEnv['ACCEPTANCE_PEER_BEARER_TOKEN'];
   delete baseChildEnv['SIMDEVICE_CHART_CONNECTION_STRING'];
-  const childEnvFor = (credential: string): NodeJS.ProcessEnv => ({
-    ...baseChildEnv,
-    SIMDEVICE_CONNECTION_STRING: credential,
-  });
 
   const api: AcceptanceApi = {
     runId,
@@ -351,7 +406,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       const chart = simOptions?.device === 'chart';
       const label = chart ? 'simdevice (chart)' : 'simdevice';
       lastExec = { label };
-      if (chart && chartConnectionString === undefined) {
+      if (chart && chartCredential === undefined) {
         throw new Error(
           'the chart device is not configured: ACCEPTANCE_CHART_DEVICE_ID and ' +
             'SIMDEVICE_CHART_CONNECTION_STRING are not set'
@@ -360,7 +415,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       const { run, durationMs } = await runChild(
         simdeviceBin,
         args,
-        childEnvFor(chart ? (chartConnectionString as string) : connectionString),
+        simDeviceEnv(baseChildEnv, chart ? (chartCredential as DeviceCredential) : simCredential),
         redact,
         simOptions?.timeoutMs ?? SIMDEVICE_TIMEOUT_MS
       );

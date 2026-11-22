@@ -7,8 +7,9 @@
 // so a masked secret is still caught) and every file the glob matches (the
 // sign-in diagnostic, HAR-121) for: the connection-string key field, the
 // acceptance user's password (ACCEPTANCE_USER_PASSWORD), its TOTP secret
-// (ACCEPTANCE_USER_TOTP_SECRET) and every TOTP code from a 30 s window the job
-// can have run in (its 30 min timeout, plus a margin). Line numbers only;
+// (ACCEPTANCE_USER_TOTP_SECRET), every TOTP code from a 30 s window the job
+// can have run in (its 30 min timeout, plus a margin) and, since HAR-138,
+// anything shaped like a device claim code (HAR-134). Line numbers only;
 // nothing found is printed. The patterns are built so this file holds none of
 // them literally.
 //
@@ -40,9 +41,19 @@ const STEP_S = 30;
  * those of every 30 s window around it. `notes` says which inputs were not
  * set, so had nothing to look for.
  */
+/**
+ * A device claim code as simdevice prints it: XXXX-XXXX-XXXX in Crockford
+ * base32 (no I, L, O or U), not inside a longer dashed or alphanumeric run, so
+ * the middle of a UUID is not one. Nobody knows a code before the device mints
+ * it, so its shape is all there is to look for.
+ */
+const CLAIM_CODE =
+  /(?<![0-9A-Za-z-])[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?![0-9A-Za-z-])/;
+
 function buildScans({ password, totpSecret, now }) {
   const scans = [
     { what: 'connection-string key field', test: line => /SharedAccess[K]ey=/i.test(line) },
+    { what: 'claim code', test: line => CLAIM_CODE.test(line) },
   ];
   const notes = [];
   if (password) scans.push({ what: 'password', test: line => line.includes(password) });

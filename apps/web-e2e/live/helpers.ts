@@ -12,7 +12,8 @@ import { createGuardrails, generateSync } from 'otplib';
 
 export const DEFAULT_WEB_BASE_URL = 'https://meatgeekv2-web.vercel.app';
 
-/** Every input the proof cannot run without, in the order the docs list them. */
+/** Every input the proof cannot run without, in the order the docs list them,
+ *  when simdevice runs with a connection string (the old mode). */
 export const REQUIRED_VARIABLES = [
   'EXPECTED_WEB_SHA',
   'ACCEPTANCE_USER_UPN',
@@ -23,6 +24,55 @@ export const REQUIRED_VARIABLES = [
   'ACCEPTANCE_SIMDEVICE_BIN',
 ] as const;
 
+/**
+ * HAR-138: the same, in DPS mode (ACCEPTANCE_WEB_STATE_DIR is set). The device
+ * is its own X.509 identity in that state dir, so no connection string; the
+ * DPS ID scope instead. ACCEPTANCE_DPS_ENDPOINT is optional.
+ */
+export const DPS_REQUIRED_VARIABLES = [
+  'EXPECTED_WEB_SHA',
+  'ACCEPTANCE_USER_UPN',
+  'ACCEPTANCE_USER_PASSWORD',
+  'ACCEPTANCE_USER_TOTP_SECRET',
+  'ACCEPTANCE_WEB_DEVICE_ID',
+  'ACCEPTANCE_WEB_STATE_DIR',
+  'ACCEPTANCE_DPS_ID_SCOPE',
+  'ACCEPTANCE_SIMDEVICE_BIN',
+] as const;
+
+/** How simdevice gets the web device: a connection string, or DPS mode. */
+export type SimDeviceCredential =
+  | { readonly mode: 'connection-string'; readonly connectionString: string }
+  | {
+      readonly mode: 'dps';
+      readonly idScope: string;
+      readonly endpoint: string | undefined;
+      readonly deviceId: string;
+      readonly stateDir: string;
+    };
+
+/**
+ * The whole environment simdevice runs with: PATH and HOME from `base`, plus
+ * the credential. A connection string goes in as SIMDEVICE_CONNECTION_STRING;
+ * DPS mode sets MEATGEEK_DPS_ID_SCOPE, MEATGEEK_DEVICE_ID, MEATGEEK_STATE_DIR
+ * and, when given, MEATGEEK_DPS_ENDPOINT, and no connection string at all.
+ */
+export function simDeviceEnv(
+  credential: SimDeviceCredential,
+  base: Readonly<Record<string, string | undefined>>
+): Record<string, string> {
+  const env: Record<string, string> = { PATH: base['PATH'] ?? '', HOME: base['HOME'] ?? '' };
+  if (credential.mode === 'connection-string') {
+    env['SIMDEVICE_CONNECTION_STRING'] = credential.connectionString;
+    return env;
+  }
+  env['MEATGEEK_DPS_ID_SCOPE'] = credential.idScope;
+  env['MEATGEEK_DEVICE_ID'] = credential.deviceId;
+  env['MEATGEEK_STATE_DIR'] = credential.stateDir;
+  if (credential.endpoint !== undefined) env['MEATGEEK_DPS_ENDPOINT'] = credential.endpoint;
+  return env;
+}
+
 export interface LiveEnv {
   /** The web app's origin, no trailing slash. */
   readonly webBaseUrl: string;
@@ -31,7 +81,8 @@ export interface LiveEnv {
   readonly password: string;
   readonly totpSecret: string;
   readonly deviceId: string;
-  readonly simdeviceConnectionString: string;
+  /** HAR-138: the web device's connection string, or its DPS identity. */
+  readonly simdevice: SimDeviceCredential;
   readonly simdeviceBin: string;
   /** Names this run's cook: the GitHub Actions run id, or a timestamp locally. */
   readonly runId: string;
@@ -50,17 +101,32 @@ export const isCommitSha = (value: string): boolean => SHA.test(value);
  * Read and check the proof's inputs. Throws one LiveEnvError naming every
  * variable that is unset or blank, then (once all are set) every one that is
  * malformed.
+ *
+ * HAR-138: ACCEPTANCE_WEB_STATE_DIR set means DPS mode, which needs
+ * {@link DPS_REQUIRED_VARIABLES}; otherwise {@link REQUIRED_VARIABLES}. Both it
+ * and SIMDEVICE_WEB_CONNECTION_STRING set is refused before anything else.
  */
 export function readLiveEnv(
   env: Readonly<Record<string, string | undefined>>,
   now: Date = new Date()
 ): LiveEnv {
   const value = (name: string) => env[name]?.trim() ?? '';
-  const missing = REQUIRED_VARIABLES.filter(name => value(name) === '');
+  const dps = value('ACCEPTANCE_WEB_STATE_DIR') !== '';
+  if (dps && value('SIMDEVICE_WEB_CONNECTION_STRING') !== '') {
+    throw new LiveEnvError(
+      'The live browser proof was given SIMDEVICE_WEB_CONNECTION_STRING and ' +
+        'ACCEPTANCE_WEB_STATE_DIR. simdevice runs in one mode: set the connection string, ' +
+        'or the state dir for DPS mode. ' +
+        'See "Live browser proof" in docs/development/live-acceptance.md.'
+    );
+  }
+  const required: readonly string[] = dps ? DPS_REQUIRED_VARIABLES : REQUIRED_VARIABLES;
+  const missing = required.filter(name => value(name) === '');
   if (missing.length > 0) {
     throw new LiveEnvError(
       `The live browser proof is missing ${missing.length === 1 ? 'an input' : 'inputs'}. ` +
         `Set ${missing.join(', ')}. ` +
+        (dps ? '(ACCEPTANCE_WEB_STATE_DIR is set, so simdevice runs in DPS mode.) ' : '') +
         'See "Live browser proof" in docs/development/live-acceptance.md.'
     );
   }
@@ -91,7 +157,15 @@ export function readLiveEnv(
     password: env['ACCEPTANCE_USER_PASSWORD'] ?? '',
     totpSecret: value('ACCEPTANCE_USER_TOTP_SECRET'),
     deviceId: value('ACCEPTANCE_WEB_DEVICE_ID'),
-    simdeviceConnectionString: value('SIMDEVICE_WEB_CONNECTION_STRING'),
+    simdevice: dps
+      ? {
+          mode: 'dps',
+          idScope: value('ACCEPTANCE_DPS_ID_SCOPE'),
+          endpoint: value('ACCEPTANCE_DPS_ENDPOINT') || undefined,
+          deviceId: value('ACCEPTANCE_WEB_DEVICE_ID'),
+          stateDir: value('ACCEPTANCE_WEB_STATE_DIR'),
+        }
+      : { mode: 'connection-string', connectionString: value('SIMDEVICE_WEB_CONNECTION_STRING') },
     simdeviceBin: value('ACCEPTANCE_SIMDEVICE_BIN'),
     runId: value('GITHUB_RUN_ID') || now.toISOString().replace(/[-:]/g, '').replace(/\..*$/, 'Z'),
   };
@@ -295,11 +369,114 @@ export function grillText(fahrenheit: number, unit: 'fahrenheit' | 'celsius' | u
   return `${Object.is(rounded, -0) ? 0 : rounded} ${celsius ? '°C' : '°F'}`;
 }
 
-/** `text` with every secret replaced, for anything a child process wrote. */
+/**
+ * A claim code as simdevice prints it (HAR-134): `XXXX-XXXX-XXXX` in Crockford
+ * base32 (no I, L, O or U), not inside a longer dashed or alphanumeric run, so
+ * the middle of a UUID is not one.
+ */
+const CLAIM_CODE =
+  /(?<![0-9A-Za-z-])[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?![0-9A-Za-z-])/g;
+
+/** `text` with everything shaped like a claim code replaced. Whoever holds a
+ *  device's unused claim code can claim it, and nobody knows it in advance. */
+export function maskClaimCodes(text: string): string {
+  return text.replace(CLAIM_CODE, '[redacted]');
+}
+
+/** `text` with every secret replaced, for anything a child process wrote.
+ *  HAR-138: then anything shaped like a claim code too. */
 export function redact(text: string, secrets: readonly string[]): string {
-  return secrets
-    .filter(secret => secret.length >= 4)
-    .reduce((out, secret) => out.split(secret).join('[redacted]'), text);
+  return maskClaimCodes(
+    secrets
+      .filter(secret => secret.length >= 4)
+      .reduce((out, secret) => out.split(secret).join('[redacted]'), text)
+  );
+}
+
+/** simdevice's exit code when the device has not minted a claim code yet. */
+export const EXIT_NO_CLAIM = 3;
+
+export type ClaimState = 'unclaimed' | 'claimed' | 'expired';
+
+/** The line `simdevice claim-code` prints. `claimCode` and `expiresAt` only
+ *  while the code is `unclaimed`. */
+export interface ClaimCodeLine {
+  readonly deviceId: string;
+  readonly state: ClaimState;
+  readonly claimCode?: string;
+  readonly expiresAt?: string;
+}
+
+/** Exit {@link EXIT_NO_CLAIM}: no claim file in the state dir yet. */
+export interface NoClaimYet {
+  readonly state: 'no-claim-yet';
+}
+
+/** A `simdevice claim-code` run that failed. Carries the exit code and stderr
+ *  (claim codes masked), never stdout. */
+export class ClaimCodeError extends Error {
+  override name = 'ClaimCodeError';
+  constructor(
+    message: string,
+    readonly exitCode: number | null,
+    readonly stderr: string
+  ) {
+    super(message);
+  }
+}
+
+const CLAIM_STATES: readonly string[] = ['unclaimed', 'claimed', 'expired'];
+
+/**
+ * What a finished `simdevice claim-code` run means: exit 0 with one
+ * claim-code JSON line is that line; exit 3 is {@link NoClaimYet}; anything
+ * else throws a {@link ClaimCodeError} whose message holds the exit code and
+ * stderr's first 500 characters, never stdout.
+ */
+export function claimCodeResult(
+  exitCode: number | null,
+  stdout: string,
+  stderr: string
+): ClaimCodeLine | NoClaimYet {
+  const err = maskClaimCodes(stderr.trim()).slice(0, 500);
+  const said = err === '' ? '' : `: ${err}`;
+  if (exitCode === EXIT_NO_CLAIM) return { state: 'no-claim-yet' };
+  if (exitCode !== 0) {
+    throw new ClaimCodeError(
+      `simdevice claim-code exited ${exitCode ?? '(killed)'}${said}`,
+      exitCode,
+      err
+    );
+  }
+  const lines = stdout.split('\n').filter(line => line.trim() !== '');
+  let line: Record<string, unknown> | null = null;
+  try {
+    line = lines.length === 1 ? (JSON.parse(lines[0]) as Record<string, unknown> | null) : null;
+  } catch {
+    line = null;
+  }
+  if (
+    !line ||
+    typeof line !== 'object' ||
+    typeof line['deviceId'] !== 'string' ||
+    typeof line['state'] !== 'string' ||
+    !CLAIM_STATES.includes(line['state']) ||
+    (line['claimCode'] !== undefined && typeof line['claimCode'] !== 'string') ||
+    (line['expiresAt'] !== undefined && typeof line['expiresAt'] !== 'string')
+  ) {
+    throw new ClaimCodeError(
+      'simdevice claim-code exited 0 but did not print one claim-code JSON line ' +
+        '(stdout not shown: it can hold the claim code)',
+      exitCode,
+      err
+    );
+  }
+  return {
+    deviceId: line['deviceId'],
+    state: line['state'] as ClaimState,
+    ...(line['claimCode'] !== undefined ? { claimCode: line['claimCode'] as string } : {}),
+    ...(line['expiresAt'] !== undefined ? { expiresAt: line['expiresAt'] as string } : {}),
+  };
 }
 
 /**

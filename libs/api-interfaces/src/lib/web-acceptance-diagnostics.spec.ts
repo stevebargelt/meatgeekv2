@@ -284,7 +284,13 @@ describe('web-acceptance-leak-check.cjs on a fixture directory (HAR-126)', () =>
     const rel = path.join(results, 'proof-chromium', 'sign-in-diagnostic.txt');
     // The window count is left out: it is the number of distinct codes, which
     // depends on the real clock this CLI run reads.
-    for (const what of ['connection-string key field', 'password', 'TOTP secret', 'TOTP code']) {
+    for (const what of [
+      'connection-string key field',
+      'claim code',
+      'password',
+      'TOTP secret',
+      'TOTP code',
+    ]) {
       for (const label of [rel, 'proof log']) {
         expect(r.stdout).toMatch(
           new RegExp(
@@ -309,6 +315,30 @@ describe('web-acceptance-leak-check.cjs on a fixture directory (HAR-126)', () =>
     expect(fs.existsSync(good)).toBe(true);
     expect(r.stdout).toContain('leak check: sign-in diagnostics: 2 matching');
     expect(r.stdout).toContain('connection-string key field: FOUND');
+  });
+
+  // HAR-138: a DPS-mode device's claim code (HAR-134), which nobody knows in
+  // advance, is found by its shape; a UUID's dashed middle is not one.
+  it('finds a claim code in the log and in a diagnostic, deleting that diagnostic', () => {
+    const claimCode = ['7K3M', '9QXR', '2HTV'].join('-');
+    const log = path.join(root, 'web-acceptance.log');
+    fs.writeFileSync(log, `PASS 1\nclaimCode ${claimCode}\n`);
+    const bad = diag('a-chromium', `${CLEAN}\n{"claimCode":"${claimCode}"}`);
+    const good = diag('b-chromium', `${CLEAN}\ncook 6f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b`);
+
+    const r = cli(env);
+
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('leak check: proof log: FAILED: claim code on line(s) 2');
+    expect(fs.existsSync(bad)).toBe(false);
+    expect(fs.existsSync(good)).toBe(true);
+    expect(r.stdout).toContain(
+      `leak check: ${path.join(results, 'a-chromium', 'sign-in-diagnostic.txt')}: claim code: FOUND`
+    );
+    expect(r.stdout).toContain(
+      `leak check: ${path.join(results, 'b-chromium', 'sign-in-diagnostic.txt')}: claim code: none`
+    );
+    expect(r.stdout + r.stderr).not.toContain(claimCode);
   });
 
   it('fails on a leak in the log, and leaves a clean diagnostic (the log is not uploaded)', () => {
