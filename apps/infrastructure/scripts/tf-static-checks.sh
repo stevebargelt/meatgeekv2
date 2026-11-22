@@ -295,6 +295,20 @@
 #      fails this check by name rather than silently voiding it, which is what
 #      makes that maintenance burden visible instead of invisible.
 #      Finding neither resource is a failure, not a vacuous pass.
+#  21. THE DPS LINK TO THE IOT HUB CARRIES A KEY (HAR-131). The IoT Hub Device
+#      Provisioning Service links to the hub with its OWN system-assigned
+#      identity (ARM iotHubs[].authenticationType = "SystemAssigned"), never with
+#      a hub connection string. A keyed link would put a live hub shared-access
+#      key into Terraform state. So modules/dps must declare the identity-based
+#      link and carry NO connection string / shared access key / primary or
+#      secondary key token, no "KeyBased" authentication, no sensitive_body (the
+#      write-only path a key would take), no listKeys action, and no
+#      azurerm_iothub_dps* or azurerm_iothub_shared_access_policy resource (the
+#      azurerm DPS's linked_hub REQUIRES connection_string). The keyed azurerm DPS
+#      resource is refused anywhere in the tree, not only in the module. Lexical
+#      by design, comments stripped; modules/dps/tests/dps.tftest.hcl asserts the
+#      same property on the planned body. Finding no DPS resource is a failure,
+#      not a vacuous pass.
 #
 # OPERATOR-ACCEPTED RESIDUAL (MG-24 — operator decision, steve@bargelt.com):
 #   The azurerm_application_insights.main resource STAYS Terraform-managed. Every
@@ -1778,6 +1792,41 @@ if [[ -n "${container_partition_property}" && "${endpoint_partition_name}" != "-
 fi
 echo "  check 20: endpoint resolved via root wiring to container ${resolved_container_label:-<unresolved>} (database ${resolved_db_label:-<unresolved>}); saw ${partition_endpoint_seen}/1 endpoint and ${partition_container_seen}/1 resolved target container; endpoint partition key=${endpoint_partition_name:-<missing>}, template=${endpoint_partition_template:-<missing>}, resolved container key=/${container_partition_property:-<missing>}"
 check "IoT Hub Cosmos routing materializes exactly the authenticated device id into the container partition key" "${partition_hits%$'\n'}"
+
+# --- CHECK 21. The DPS links to the IoT Hub by identity, never by key (HAR-131) ----
+# See item 21 in the header. Comments are stripped first (the module header
+# explains WHY there is no connection_string, and prose must not trip the
+# guard); the stripping matches check 15's, which over-strips a `#` inside a
+# string literal — safe here, it can only hide a token in prose.
+DPS_DIR="${INFRA_DIR}/modules/dps"
+dps_hits=""
+dps_code=""
+if [[ -d "${DPS_DIR}" ]]; then
+  for dps_tf in "${DPS_DIR}"/*.tf; do
+    [[ -f "${dps_tf}" ]] || continue
+    dps_code+="$(sed -e 's|^[[:space:]]*#.*$||' -e 's|[[:space:]]#.*$||' \
+                     -e 's|^[[:space:]]*//.*$||' -e 's|[[:space:]]//.*$||' "${dps_tf}" \
+                 | awk -v f="${dps_tf}" '{ printf "%s:%d:%s\n", f, NR, $0 }')"$'\n'
+  done
+fi
+if [[ -z "${dps_code//$'\n'/}" ]]; then
+  dps_hits+="no Terraform sources found in ${DPS_DIR} — this check must never pass by finding nothing"$'\n'
+else
+  if ! grep -qE 'type[[:space:]]*=[[:space:]]*"Microsoft\.Devices/provisioningServices@' <<< "${dps_code}" \
+     && ! grep -qE 'dps_type[[:space:]]*=[[:space:]]*"Microsoft\.Devices/provisioningServices@' <<< "${dps_code}"; then
+    dps_hits+="no Microsoft.Devices/provisioningServices azapi resource found in ${DPS_DIR} — this check must never pass by finding no DPS"$'\n'
+  fi
+  if ! grep -qE 'authenticationType[[:space:]]*=[[:space:]]*"SystemAssigned"' <<< "${dps_code}"; then
+    dps_hits+="the DPS linked hub is not identity-based (authenticationType = \"SystemAssigned\" absent in ${DPS_DIR})"$'\n'
+  fi
+  dps_keyed="$(grep -iE 'connection_?string|shared_?access_?key|shared_?access_?polic|(primary|secondary)_?key|"KeyBased"|sensitive_body|listkeys|azurerm_iothub_dps|azurerm_iothub_shared_access_policy' <<< "${dps_code}" || true)"
+  [[ -n "${dps_keyed}" ]] && dps_hits+="a key-bearing token in the DPS module — the DPS must link to the hub by its managed identity, never by a hub key or connection string:"$'\n'"${dps_keyed}"$'\n'
+fi
+dps_azurerm_anywhere="$(grep -rnE '^[[:space:]]*resource[[:space:]]+"azurerm_iothub_dps' \
+    --include='*.tf' --exclude-dir='.terraform' --exclude-dir='node_modules' --exclude-dir='.nx' \
+    "${INFRA_DIR}" 2>/dev/null || true)"
+[[ -n "${dps_azurerm_anywhere}" ]] && dps_hits+="an azurerm_iothub_dps* resource — its linked_hub REQUIRES connection_string, a hub key in state; use modules/dps (identity-based azapi):"$'\n'"${dps_azurerm_anywhere}"$'\n'
+check "DPS links to the IoT Hub by managed identity, never by key or connection string" "${dps_hits%$'\n'}"
 
 echo
 if [[ "${fail}" -ne 0 ]]; then

@@ -225,3 +225,10 @@ simulated_device_id = "meatgeek-dev-simulated-smoker"
 # bootstrap.sh on 2026-11-20 for HAR-55, which taught the infra-apply identity's
 # ABAC condition the role (allowlist GUID 494bdba2-168f-4f31-a0a1-191d2f7c028c).
 api_device_twin_writer_enabled = true
+
+# HAR-131 IoT Hub Device Provisioning Service, linked to the hub with the DPS's
+# own managed identity. Its one role (IoT Hub Registry Contributor on the hub)
+# is already allowlisted and in the live ABAC condition. The CI enroller grant
+# (dps_ci_enroller_enabled) stays OFF here until the owner re-runs bootstrap.sh
+# with Device Provisioning Service Data Contributor in the allowlist.
+dps_enabled = true

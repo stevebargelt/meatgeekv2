@@ -1448,17 +1448,21 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
     return out;
   }
 
-  it('finds every role assignment in the graph (11 blocks over 10 distinct roles)', () => {
+  it('finds every role assignment in the graph (13 blocks over 11 distinct roles)', () => {
     // Premise guard: if this scan silently matched nothing, the two assertions
     // below would be vacuously green. Pin the shape the MG-23 allowlist is derived
-    // from — 11 azurerm_role_assignment blocks over 10 DISTINCT role definition
+    // from — 13 azurerm_role_assignment blocks over 11 DISTINCT role definition
     // names (Monitoring Metrics Publisher is granted twice, at different scopes:
-    // App Insights for the Function App, the DCR for the OTLP collector). HAR-41
-    // added IoT Hub Registry Contributor, count-disabled until simulated_device_id
-    // is set. HAR-56 added IoT Hub Twin Contributor, count-disabled until
-    // api_device_twin_writer_enabled is set.
+    // App Insights for the Function App, the DCR for the OTLP collector; IoT Hub
+    // Registry Contributor is granted twice too, to the app-deploy identity and
+    // to the DPS identity). HAR-41 added IoT Hub Registry Contributor,
+    // count-disabled until simulated_device_id is set. HAR-56 added IoT Hub Twin
+    // Contributor, count-disabled until api_device_twin_writer_enabled is set.
+    // HAR-131 added the DPS identity's IoT Hub Registry Contributor grant (on
+    // with dps_enabled) and Device Provisioning Service Data Contributor for the
+    // CI enroller, count-disabled until dps_ci_enroller_enabled is set.
     const found = roleAssignments();
-    expect(found.length).toBe(11);
+    expect(found.length).toBe(13);
 
     const roles = found.map(r => r.body.match(/role_definition_name\s*=\s*"([^"]+)"/)?.[1] ?? '');
     expect(roles).not.toContain('');
@@ -1466,6 +1470,7 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
       [
         'Azure Event Hubs Data Receiver',
         'Azure Event Hubs Data Sender',
+        'Device Provisioning Service Data Contributor',
         'IoT Hub Registry Contributor',
         'IoT Hub Twin Contributor',
         'Monitoring Metrics Publisher',
