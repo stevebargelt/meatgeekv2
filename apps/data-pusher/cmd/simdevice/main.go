@@ -1,8 +1,11 @@
 // Command simdevice sends synthetic temperature readings to Azure IoT Hub as
 // one device, through the same payload/property builders and MQTT client the
 // data-pusher uses on the Pi. With --twin it first reads the device twin
-// through the Pi's twin code and stamps the applied cook on its readings. The device credential is read only from
-// $SIMDEVICE_CONNECTION_STRING. See apps/data-pusher/README.md.
+// through the Pi's twin code and stamps the applied cook on its readings. The
+// device credential is read only from $SIMDEVICE_CONNECTION_STRING, or, in DPS
+// mode ($MEATGEEK_DPS_ID_SCOPE, $MEATGEEK_DEVICE_ID), is the device's own X.509
+// identity under $MEATGEEK_STATE_DIR. `simdevice identity init` prints that
+// identity's certificate. See apps/data-pusher/README.md.
 package main
 
 import (
@@ -49,6 +52,7 @@ func run() int {
 		Stderr:        os.Stderr,
 		NewClient:     simdevice.AzureClientFactory,
 		NewTwinClient: simdevice.AzureTwinClientFactory,
+		NewDPSClient:  simdevice.AzureDPSClientFactory,
 		Tracer:        otel.Tracer("meatgeek-simdevice"),
 	})
 }

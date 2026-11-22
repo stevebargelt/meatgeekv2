@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"os"
 	"os/exec"
@@ -25,13 +27,20 @@ func TestMain(m *testing.M) {
 
 func runBinary(t *testing.T, connStr *string, args string) (code int, stdout, stderr string) {
 	t.Helper()
+	return runBinaryEnv(t, connStr, nil, args)
+}
+
+// runBinaryEnv is runBinary with extra environment entries.
+func runBinaryEnv(t *testing.T, connStr *string, extra []string, args string) (code int, stdout, stderr string) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0])
 	env := []string{"SIMDEVICE_TEST_AS_BINARY=1", "SIMDEVICE_TEST_ARGS=" + args}
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "SIMDEVICE_CONNECTION_STRING=") && !strings.HasPrefix(kv, "OTEL_EXPORTER_OTLP_ENDPOINT=") {
+		if !strings.HasPrefix(kv, "SIMDEVICE_CONNECTION_STRING=") && !strings.HasPrefix(kv, "OTEL_EXPORTER_OTLP_ENDPOINT=") && !strings.HasPrefix(kv, "MEATGEEK_") {
 			env = append(env, kv)
 		}
 	}
+	env = append(env, extra...)
 	if connStr != nil {
 		env = append(env, "SIMDEVICE_CONNECTION_STRING="+*connStr)
 	}
@@ -97,5 +106,63 @@ func TestBinary_TwinTimeoutExitsNonZero(t *testing.T) {
 	}
 	if strings.Contains(stdout+stderr, fakeKey) {
 		t.Errorf("key leaked: %q", stderr)
+	}
+}
+
+func TestBinary_IdentityInitPrintsOnlyTheCertificateAndTheSameOnEveryRun(t *testing.T) {
+	args := "identity init --device-id sim-device-1 --state-dir " + t.TempDir()
+	code, first, stderr := runBinary(t, nil, args)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, stderr)
+	}
+	if strings.Contains(first, "PRIVATE KEY") {
+		t.Fatal("stdout carries a private key")
+	}
+	block, rest := pem.Decode([]byte(first))
+	if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 {
+		t.Fatalf("stdout is not exactly one PEM certificate: %q", first)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil || cert.Subject.CommonName != "sim-device-1" {
+		t.Fatalf("certificate: %v, CN %q", err, cert.Subject.CommonName)
+	}
+	code, second, stderr := runBinary(t, nil, args)
+	if code != 0 {
+		t.Fatalf("second run: exit %d; stderr=%q", code, stderr)
+	}
+	if first != second {
+		t.Error("the second run printed different bytes")
+	}
+}
+
+// The device id and state dir can come from the DPS-mode environment.
+func TestBinary_IdentityInitReadsTheEnvironment(t *testing.T) {
+	state := t.TempDir()
+	extra := []string{"MEATGEEK_DEVICE_ID=sim-env-1", "MEATGEEK_STATE_DIR=" + state}
+	code, stdout, stderr := runBinaryEnv(t, nil, extra, "identity init")
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, stderr)
+	}
+	if _, err := os.Stat(state + "/identity/device.key"); err != nil {
+		t.Errorf("no key under MEATGEEK_STATE_DIR: %v", err)
+	}
+	if !strings.HasPrefix(stdout, "-----BEGIN CERTIFICATE-----") {
+		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+func TestBinary_RefusesBothModes(t *testing.T) {
+	// Never parsed: the refusal comes first.
+	conn := "not-a-connection-string-x9"
+	extra := []string{"MEATGEEK_DPS_ID_SCOPE=0ne00ABCDEF", "MEATGEEK_DEVICE_ID=sim-device-1", "MEATGEEK_STATE_DIR=" + t.TempDir()}
+	code, stdout, stderr := runBinaryEnv(t, &conn, extra, "--count 1")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "set only one") {
+		t.Errorf("stderr = %q, want the refusal", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
 	}
 }
