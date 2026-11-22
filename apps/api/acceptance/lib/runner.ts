@@ -4,6 +4,7 @@ import { readdirSync } from 'fs';
 import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../../src/shared/cosmos/request-charge';
+import { clock } from './clock';
 import { Contract, SPEC_PATH } from './contract';
 import {
   AcceptanceApi,
@@ -51,6 +52,11 @@ import {
  * credential as its SIMDEVICE_CONNECTION_STRING. The redactor masks it as it
  * masks the first device's, and no simdevice child is handed the credential of
  * the device it is not sending as.
+ *
+ * HAR-120: both of its own time limits, the per-request one and the simdevice
+ * kill, are on the injected clock (./clock), and each failure says what it was
+ * waiting for: `the response did not finish in <ms> ms …` for a request, and
+ * `killedAfterMs` on a {@link SimDeviceRun} the runner killed.
  */
 
 export const REQUIRED_ENV = [
@@ -71,6 +77,9 @@ export const CHART_DEVICE_ENV = [
 
 export const PROOFS_DIR = join(__dirname, '..', 'proofs');
 
+/** How long one request may take, response body included, before it fails.
+ *  A cold start of the dev Function App answers its first request in ~9.5 s
+ *  (docs/development/live-acceptance.md, "Real-time waits"). */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 /** A `simdevice` run longer than this is killed, unless the proof passes its
@@ -121,7 +130,7 @@ export function loadProofGroups(dir: string = PROOFS_DIR): ProofGroup[] {
 }
 
 function newRunId(): string {
-  const stamp = new Date()
+  const stamp = new Date(clock().now())
     .toISOString()
     .replace(/[-:TZ]/g, '')
     .slice(0, 14);
@@ -175,7 +184,9 @@ export function makeRedactor(
   return line => secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line);
 }
 
-/** Run `bin` with `args`, reducing its output to a {@link SimDeviceRun}. */
+/** Run `bin` with `args`, reducing its output to a {@link SimDeviceRun}. A run
+ *  still going after `timeoutMs` (on the {@link clock}) is killed with SIGKILL
+ *  and reports `killedAfterMs`. */
 function runChild(
   bin: string,
   args: readonly string[],
@@ -184,21 +195,25 @@ function runChild(
   timeoutMs: number
 ): Promise<{ readonly run: SimDeviceRun; readonly durationMs: number }> {
   return new Promise((resolve, reject) => {
-    const started = performance.now();
+    const started = clock().monotonic();
     // stdio is piped, never inherited: nothing the child prints reaches the log raw.
     const child = spawn(bin, [...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let killed = false;
+    const cancelKill = clock().after(timeoutMs, () => {
+      killed = true;
+      child.kill('SIGKILL');
+    });
     child.on('error', error => {
-      clearTimeout(timer);
+      cancelKill();
       const code = (error as NodeJS.ErrnoException).code;
       reject(new Error(`simdevice could not be started${code ? ` (${code})` : ''}`));
     });
     child.on('close', exitCode => {
-      clearTimeout(timer);
+      cancelKill();
       const messages: unknown[] = [];
       let unparsedLines = 0;
       for (const line of Buffer.concat(stdout).toString('utf8').split('\n')) {
@@ -219,8 +234,9 @@ function runChild(
           messages,
           unparsedLines,
           stderrFirstLine: first === undefined ? undefined : redact(first.trim()),
+          ...(killed && exitCode === null ? { killedAfterMs: timeoutMs } : {}),
         },
-        durationMs: Math.round(performance.now() - started),
+        durationMs: Math.round(clock().monotonic() - started),
       });
     });
   });
@@ -391,15 +407,36 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
         headers.set('Content-Type', 'application/json');
       }
 
-      const started = performance.now();
-      const response = await fetch(`${baseUrl}${request.path}`, {
-        method: request.method,
-        headers,
-        body: request.body === undefined ? undefined : JSON.stringify(request.body),
-        signal: AbortSignal.timeout(timeoutMs),
+      const started = clock().monotonic();
+      // The limit covers the response body too. On the injected clock, and
+      // cancelled once the body is in, so it never fires for a finished request.
+      const abort = new AbortController();
+      let timedOut = false;
+      const cancelTimeout = clock().after(timeoutMs, () => {
+        timedOut = true;
+        abort.abort();
       });
-      const text = await response.text();
-      const latencyMs = Math.round(performance.now() - started);
+      let response: Response;
+      let text: string;
+      try {
+        response = await fetch(`${baseUrl}${request.path}`, {
+          method: request.method,
+          headers,
+          body: request.body === undefined ? undefined : JSON.stringify(request.body),
+          signal: abort.signal,
+        });
+        text = await response.text();
+      } catch (error) {
+        if (timedOut) {
+          throw new ProofFailure(
+            `the response did not finish in ${timeoutMs} ms (the runner's per-request limit)`
+          );
+        }
+        throw error;
+      } finally {
+        cancelTimeout();
+      }
+      const latencyMs = Math.round(clock().monotonic() - started);
       lastRequest.status = response.status;
 
       let body: unknown = text;

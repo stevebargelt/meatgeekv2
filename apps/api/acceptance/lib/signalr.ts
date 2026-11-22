@@ -1,3 +1,4 @@
+import { clock } from './clock';
 import type { AcceptanceApi } from './proof';
 import { ProofFailure } from './proof';
 
@@ -40,16 +41,19 @@ export function negotiateFailureMessage(status: number, body: unknown): string {
   return `expected 200, got ${status}${code ? ` (${code})` : ''}; ${why}`;
 }
 
-/** Rejects with a fixed message if `promise` has not settled in `ms`. */
+/** Rejects with `<what> did not finish in <ms> ms` if `promise` has not
+ *  settled in `ms` (on the {@link clock}). */
 export async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
+  let cancel: (() => void) | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new ProofFailure(`${what} did not finish in ${ms} ms`)), ms);
+    cancel = clock().after(ms, () =>
+      reject(new ProofFailure(`${what} did not finish in ${ms} ms`))
+    );
   });
   try {
     return await Promise.race([promise, timeout]);
   } finally {
-    clearTimeout(timer);
+    cancel?.();
   }
 }
 
@@ -86,9 +90,11 @@ export function expectHubMessage(
 /**
  * How long to wait before each retry of a SignalR client `start()` the service
  * throttled. Live: 1, 2, 4 and 8 s, so five attempts and at most 15 s of
- * waiting. The spec shortens it.
+ * waiting, on the {@link clock}.
  */
-export const START_RETRY = { delaysMs: [1_000, 2_000, 4_000, 8_000] as readonly number[] };
+export const START_RETRY: { readonly delaysMs: readonly number[] } = {
+  delaysMs: [1_000, 2_000, 4_000, 8_000],
+};
 
 /** The client's error for a negotiate the SignalR service answered with 429. */
 const THROTTLED = /Status code '429'/;
@@ -128,7 +134,7 @@ export async function startConnection(
       }
       const throttled = error instanceof Error && THROTTLED.test(error.message);
       if (throttled && attempt < delays.length) {
-        await new Promise<void>(resolve => setTimeout(resolve, delays[attempt]));
+        await clock().sleep(delays[attempt]);
         continue;
       }
       const tries = throttled ? ` (throttled on all ${attempt + 1} attempts)` : '';

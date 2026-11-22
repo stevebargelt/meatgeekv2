@@ -2,6 +2,7 @@ import type { TemperatureHistoryResponse, TemperatureReading } from '@meatgeekv2
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { expectErrorCode, expectNoSystemProperties } from '../lib/checks';
+import { clock } from '../lib/clock';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { SentReading } from '../lib/telemetry';
 import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/telemetry';
@@ -27,16 +28,14 @@ import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/tel
  * Readings are not cleaned up: they expire on the temperatures container TTL.
  */
 
-/** Poll pacing for step 3. The self-test shortens these; nothing else should. */
-export const ROUNDTRIP_POLL = {
+/** Poll pacing for step 3, on the injected clock (../lib/clock). */
+export const ROUNDTRIP_POLL: { readonly intervalMs: number; readonly capMs: number } = {
   intervalMs: 1_000,
   capMs: 120_000,
 };
 
 /** How far before `sentAt` the history window opens. */
 const HISTORY_LOOKBACK_MS = 5 * 60 * 1000;
-
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /** Fail unless `value` is the sent reading in its contract shape. */
 function expectSentReading(
@@ -92,7 +91,7 @@ export default defineProofs('telemetry round-trip', () => {
       async run(api: AcceptanceApi) {
         const { timestamp, sentAt } = sentReading();
         const deviceId = api.simulatedDeviceId;
-        const deadline = Date.now() + ROUNDTRIP_POLL.capMs;
+        const deadline = clock().now() + ROUNDTRIP_POLL.capMs;
         let last: AcceptanceResponse<Partial<TemperatureReading>> | undefined;
 
         for (;;) {
@@ -101,7 +100,7 @@ export default defineProofs('telemetry round-trip', () => {
             path: `/temperatures/current/${encodeURIComponent(deviceId)}`,
             route: '/temperatures/current/{deviceId}',
           });
-          const arrivedAt = Date.now();
+          const arrivedAt = clock().now();
           last = response;
           if (response.status === 200 && sameInstant(response.body?.timestamp, timestamp)) {
             expectSentReading(api, response, response.body, deviceId);
@@ -118,7 +117,7 @@ export default defineProofs('telemetry round-trip', () => {
           if (arrivedAt + ROUNDTRIP_POLL.intervalMs > deadline) {
             break;
           }
-          await sleep(ROUNDTRIP_POLL.intervalMs);
+          await clock().sleep(ROUNDTRIP_POLL.intervalMs);
         }
 
         const seen = last.status === 200 ? last.body?.timestamp : undefined;

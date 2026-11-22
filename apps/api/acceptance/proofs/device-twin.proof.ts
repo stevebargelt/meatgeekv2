@@ -8,6 +8,7 @@ import type {
 } from '@meatgeekv2/api-interfaces';
 
 import { expectErrorCode } from '../lib/checks';
+import { clock } from '../lib/clock';
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { SentReading } from '../lib/telemetry';
@@ -45,8 +46,8 @@ import {
  *   8. always, whatever failed before: no cook is left active on the device.
  */
 
-/** Poll pacing for step 5. The self-test shortens these; nothing else should. */
-export const TWIN_POLL = {
+/** Poll pacing for step 5, on the injected clock (../lib/clock). */
+export const TWIN_POLL: { readonly intervalMs: number; readonly capMs: number } = {
   intervalMs: 2_000,
   capMs: 90_000,
 };
@@ -55,8 +56,6 @@ export const TWIN_POLL = {
  *  after it, which leaves room for the connect and a reading. */
 const TWIN_TIMEOUT = '60s';
 const SIMDEVICE_KILL_MS = 120_000;
-
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /** A fixed error code from a 503 body: lower-case words and digits only, so a
  *  server that echoes request data cannot put it in the output. */
@@ -219,7 +218,7 @@ export default defineProofs('device twin', () => {
           );
         }
         api.expectStatus(response, 201);
-        startedAt = Date.now();
+        startedAt = clock().now();
         api.check(response, response.body?.id === body.id, 'cook.id is not the id sent');
         api.check(
           response,
@@ -235,7 +234,7 @@ export default defineProofs('device twin', () => {
         const id = startedCook();
         const correlationId = `acceptance-twin-${api.runId}`;
         const { twin, reading } = await reconnect(api, 1);
-        const exitedAt = Date.now();
+        const exitedAt = clock().now();
         expectTwin(
           twin.desired.activeCookId === id,
           `desired.activeCookId is ${show(twin.desired.activeCookId)}, not the new cook ${id}`
@@ -268,7 +267,7 @@ export default defineProofs('device twin', () => {
         }
         const { timestamp } = sent;
         const deviceId = api.simulatedDeviceId;
-        const deadline = Date.now() + TWIN_POLL.capMs;
+        const deadline = clock().now() + TWIN_POLL.capMs;
         let last: AcceptanceResponse<Partial<TemperatureReading>> | undefined;
 
         for (;;) {
@@ -292,10 +291,10 @@ export default defineProofs('device twin', () => {
           } else {
             api.expectStatus(response, 200);
           }
-          if (Date.now() + TWIN_POLL.intervalMs > deadline) {
+          if (clock().now() + TWIN_POLL.intervalMs > deadline) {
             break;
           }
-          await sleep(TWIN_POLL.intervalMs);
+          await clock().sleep(TWIN_POLL.intervalMs);
         }
 
         const seen = last.status === 200 ? last.body?.timestamp : undefined;

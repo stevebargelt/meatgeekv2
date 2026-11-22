@@ -20,6 +20,20 @@
  * cook (a first run) or an uncovered one. A fake chart top-up (`--start …
  * --step 5s`) is reported to the stub, which covers that cook's chart after a
  * few chart reads.
+ *
+ * HAR-120: nothing here waits on real time. Every wait in the proofs and the
+ * runner goes through ../lib/clock, and each test runs on a {@link FakeClock}:
+ * a proof's `sleep` (a poll interval, a retry delay, the grace window, the
+ * rest of a cap) ends once the stub has answered everything it was sent and
+ * every SignalR client has taken what was pushed to it (`stub.settled()`), and
+ * then moves the fake time on by exactly that long. A deadline racing a real
+ * event (`within`, the per-request limit, the simdevice kill) fires only when
+ * the fake time reaches it, which a test does on purpose with `advance`. So
+ * the live intervals, caps and messages are exercised as they are, and the
+ * result does not depend on how fast the machine is. The stub has no timers of
+ * its own: a held SignalR poll is answered by the next message, the next poll
+ * or the stub closing, and a sent reading is pushed when the fake simdevice
+ * reports it.
  */
 import { randomUUID } from 'crypto';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
@@ -30,22 +44,147 @@ import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
 import { DEFAULT_USER_PREFERENCES } from '../src/shared/cosmos/users-repository';
+import type { Clock } from './lib/clock';
+import { setClock } from './lib/clock';
 import { Contract } from './lib/contract';
 import type { AcceptanceApi, ProofGroup, SimDeviceOptions } from './lib/proof';
 import { ProofFailure } from './lib/proof';
 import { runAcceptance, RunResult } from './lib/runner';
-import { expectHubMessage, START_RETRY, startConnection } from './lib/signalr';
+import {
+  CONNECT_TIMEOUT_MS,
+  expectHubMessage,
+  START_RETRY,
+  startConnection,
+  within,
+} from './lib/signalr';
 import sweepGroup from './proofs/acceptance-device-sweep.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
-import { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
+import liveGroup, { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
 import volumeGroup, { topupDrainedAt, VOLUME } from './proofs/telemetry-volume.proof';
+import usersGroup from './proofs/users.proof';
 import chartGroup, {
   CHART,
   CHART_RU_BUDGET,
   chartCoverage,
 } from './proofs/volume-cook-chart.proof';
+
+/**
+ * HAR-120: the clock every test runs on. Time stands still unless a proof
+ * sleeps or a test calls {@link FakeClock.advance}.
+ *
+ * - `sleep(ms)` first waits for {@link FakeClock.settle} (the stub's
+ *   `settled()`: no request unanswered, nothing pushed that a SignalR client
+ *   has not taken), then moves the time to its end, firing every timer due by
+ *   then in order. An aborted sleep never moves the time.
+ * - `after(ms, fire)` fires only when the time reaches it: through a sleep, or
+ *   a test's `advance`.
+ *
+ * `slept` lists each sleep that ran to its end, so a test can check the exact
+ * intervals a proof waited.
+ */
+class FakeClock implements Clock {
+  /** When every test's fake time starts: a fixed instant, never the wall clock. */
+  static readonly EPOCH = Date.UTC(2026, 10, 19, 17, 0, 0);
+  private time = FakeClock.EPOCH;
+  private sequence = 0;
+  private readonly timers: Array<{
+    readonly due: number;
+    readonly ms: number;
+    readonly seq: number;
+    readonly fire: () => void;
+    readonly deadline: boolean;
+  }> = [];
+  private readonly armedWaiters: Array<{ ms: number; resolve: () => void }> = [];
+  /** What a sleep waits for before the time moves. */
+  settle: () => Promise<void> = () => Promise.resolve();
+  readonly slept: number[] = [];
+
+  now(): number {
+    return this.time;
+  }
+
+  monotonic(): number {
+    return this.time - FakeClock.EPOCH;
+  }
+
+  after(ms: number, fire: () => void): () => void {
+    const cancel = this.add(ms, fire, true);
+    for (const waiter of this.armedWaiters.filter(w => w.ms === ms)) {
+      this.armedWaiters.splice(this.armedWaiters.indexOf(waiter), 1);
+      waiter.resolve();
+    }
+    return cancel;
+  }
+
+  async sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
+    const due = this.time + ms;
+    await new Promise<void>(resolve => {
+      const cancel = this.add(
+        ms,
+        () => {
+          this.slept.push(ms);
+          resolve();
+        },
+        false
+      );
+      signal?.addEventListener(
+        'abort',
+        () => {
+          cancel();
+          resolve();
+        },
+        { once: true }
+      );
+      void this.settle().then(() => {
+        if (!signal?.aborted) this.advanceTo(due);
+      });
+    });
+  }
+
+  /** Move the time on by `ms`, firing every timer due by then, in order. */
+  advance(ms: number): void {
+    this.advanceTo(this.time + ms);
+  }
+
+  /** The time left on each pending deadline (`after`), soonest first. */
+  deadlines(): number[] {
+    return this.timers.filter(t => t.deadline).map(t => t.due - this.time);
+  }
+
+  /** Resolves once a deadline of exactly `ms` is pending (now or later). */
+  armed(ms: number): Promise<void> {
+    if (this.timers.some(t => t.deadline && t.ms === ms)) return Promise.resolve();
+    return new Promise(resolve => this.armedWaiters.push({ ms, resolve }));
+  }
+
+  private add(ms: number, fire: () => void, deadline: boolean): () => void {
+    const timer = { due: this.time + ms, ms, seq: this.sequence++, fire, deadline };
+    this.timers.push(timer);
+    this.timers.sort((a, b) => a.due - b.due || a.seq - b.seq);
+    return () => {
+      const at = this.timers.indexOf(timer);
+      if (at >= 0) this.timers.splice(at, 1);
+    };
+  }
+
+  private advanceTo(target: number): void {
+    while (this.timers.length > 0 && this.timers[0].due <= target) {
+      const timer = this.timers.shift()!;
+      this.time = Math.max(this.time, timer.due);
+      timer.fire();
+    }
+    this.time = Math.max(this.time, target);
+  }
+}
+
+let fakeClock: FakeClock;
+let restoreClock: (() => void) | undefined;
+
+/** Let every callback already queued run (no time passes on any clock). */
+const drainEvents = () => new Promise<void>(resolve => setImmediate(resolve));
 
 const TOKEN = 'eyJ0eXAi.SECRET-acceptance-token.value-9f3c';
 /** HAR-67: the acceptance peer's token, a second caller who owns nothing. */
@@ -225,6 +364,12 @@ interface StubOptions {
    *  delete the owner's device (204); `keeps` answers the owner 204 but keeps
    *  the device. */
   readonly deviceDeleteFault?: 'peer-deletes' | 'keeps';
+  /** HAR-120: the reading a `simdevice --twin --count 1` sends never reaches
+   *  the simulated device's current reading. */
+  readonly twinReadingNeverRouted?: boolean;
+  /** HAR-120: never answer this route (until the stub closes), so the runner's
+   *  per-request limit is what ends the request. */
+  readonly holdRoute?: StubRoute;
 }
 
 interface StubCook {
@@ -281,6 +426,17 @@ interface Stub {
   readonly chartRegistered: () => boolean;
   /** HAR-85: the ids of the devices registered now, sorted. */
   readonly deviceIds: () => string[];
+  /** HAR-120: the fake time at each `simdevice --count 1` report, which the
+   *  fake prints as that reading's `sentAt`. */
+  readonly sendTimes: number[];
+  /** HAR-120: resolves once the stub has nothing outstanding: every API
+   *  request it was sent is answered (a `holdRoute` request aside), and every
+   *  open SignalR connection has taken all that was pushed to it and is
+   *  polling again, so its client has dispatched those messages. Wired to the
+   *  fake clock's `settle`. */
+  settled(): Promise<void>;
+  /** HAR-120: resolves once a request to `holdRoute` has arrived. */
+  whenHeld(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -444,8 +600,32 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       held?: ServerResponse;
       started: boolean;
       closed: boolean;
+      /** The client dropped its held poll without the stub answering it (it
+       *  is stopping); a new poll clears it. */
+      gone?: boolean;
     }
   >();
+  /** HAR-120: API requests received and not yet answered. */
+  let apiInFlight = 0;
+  const heldApi: ServerResponse[] = [];
+  const heldWaiters: Array<() => void> = [];
+  const sendTimes: number[] = [];
+  const settleWaiters: Array<() => void> = [];
+  const isSettled = () =>
+    apiInFlight === 0 &&
+    [...signalRConnections.values()].every(
+      c => c.closed || c.gone || (c.outbox.length === 0 && (c.held !== undefined || !c.started))
+    );
+  /** Wake every `settled()` waiter if the stub is settled now. Called after
+   *  each change to a connection or a request. */
+  const checkSettled = () => {
+    if (isSettled()) settleWaiters.splice(0).forEach(resolve => resolve());
+  };
+  const settled = () =>
+    new Promise<void>(resolve => {
+      settleWaiters.push(resolve);
+      checkSettled();
+    });
   const livePushes: number[] = [];
   const cookPushes: Stub['cookPushes'] = [];
   /** HAR-67: the open connections a message on `target` reaches: the owner's,
@@ -459,7 +639,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     const { id, ...rest } = cook;
     const envelope = {
       type: target,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(fakeClock.now()).toISOString(),
       messageId: randomUUID(),
       deviceId: cook.deviceId,
       userId: cook.userId,
@@ -481,7 +661,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     const push = options.livePush ?? 'deliver';
     const invocation = (payload: unknown) =>
       `${JSON.stringify({ type: 1, target: 'temperature', arguments: [payload] })}${RS}`;
-    const enqueuedTimeUtc = new Date().toISOString();
+    const enqueuedTimeUtc = new Date(fakeClock.now()).toISOString();
     const sent: Record<string, unknown> = { ...simReading(simServed), enqueuedTimeUtc };
     if (push === 'extra-field') sent['iothub_name'] = 'stub-hub';
     if (push === 'no-enqueued') delete sent['enqueuedTimeUtc'];
@@ -500,16 +680,18 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   };
   const flushPoll = (connection: { outbox: string[]; held?: ServerResponse; closed: boolean }) => {
     const held = connection.held;
-    if (!held) return;
-    if (connection.outbox.length > 0) {
-      connection.held = undefined;
-      held.writeHead(200, { 'Content-Type': 'text/plain' });
-      held.end(connection.outbox.splice(0).join(''));
-    } else if (connection.closed) {
-      connection.held = undefined;
-      held.writeHead(204);
-      held.end();
+    if (held) {
+      if (connection.outbox.length > 0) {
+        connection.held = undefined;
+        held.writeHead(200, { 'Content-Type': 'text/plain' });
+        held.end(connection.outbox.splice(0).join(''));
+      } else if (connection.closed) {
+        connection.held = undefined;
+        held.writeHead(204);
+        held.end();
+      }
     }
+    checkSettled();
   };
 
   let throttled = 0;
@@ -574,16 +756,20 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
             response.end();
             return;
           }
+          // A poll is held until there is something to send, the connection
+          // closes, the client polls again (the older poll gets an empty 200,
+          // which makes a client re-poll) or the stub closes. No timer.
           connection.held?.writeHead(200).end();
           connection.held = response;
-          flushPoll(connection);
-          // Never hold a poll for long: an empty 200 makes the client re-poll.
-          setTimeout(() => {
-            if (connection.held === response) {
+          connection.gone = false;
+          request.on('close', () => {
+            if (connection.held === response && !response.writableEnded) {
               connection.held = undefined;
-              response.writeHead(200).end();
+              connection.gone = true;
+              checkSettled();
             }
-          }, 500);
+          });
+          flushPoll(connection);
           return;
         }
         if (request.method === 'POST') {
@@ -610,17 +796,21 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/__simdevice/sent') {
-        // HAR-45: the fake simdevice reporting a top-up. Not an API route.
+        // HAR-45: the fake simdevice reporting a top-up. Not an API route. It
+        // answers with the fake time, which the fake prints as `sentAt`.
         const { args } = (await readJson(request)) as { args: string[] };
+        const now = fakeClock.now();
         if (args.includes('--start')) {
           // HAR-87: a chart top-up, rolled up after a few chart reads.
           chartTopups.push(args);
           chartPendingFrom = Date.parse(args[args.indexOf('--start') + 1]);
           chartReadsToCover = options.chartCoveredFromRead ?? 2;
         } else if (args.join(' ') === '--count 1') {
-          // HAR-63: the one reading; broadcastTemperature pushes it live.
+          // HAR-63: the one reading; broadcastTemperature pushes it live, as
+          // soon as the send is reported (before simdevice prints it).
           twinReading = undefined;
-          setTimeout(pushLiveReading, 20);
+          sendTimes.push(now);
+          pushLiveReading();
         } else {
           topups.push(args);
           const count = Number(args[args.indexOf('--count') + 1]);
@@ -628,8 +818,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           // The fake simdevice stamps its top-up readings from TOPUP_EPOCH, 50 ms apart.
           topupLast = new Date(TOPUP_EPOCH + (count - 1) * 50).toISOString();
         }
-        response.writeHead(204);
-        response.end();
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ now: new Date(now).toISOString() }));
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/__simdevice/twin') {
@@ -651,11 +841,13 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           appliedDesiredVersion:
             options.twinFault === 'reported-version' ? twin.version - 1 : twin.version,
         };
-        if (args.join(' ').includes('--count 1')) {
+        if (args.join(' ').includes('--count 1') && !options.twinReadingNeverRouted) {
           twinReading = { timestamp: TWIN_TIMESTAMP, cookId: reported.activeCookId };
         }
         response.writeHead(200, { 'Content-Type': 'application/json' });
-        response.end(JSON.stringify({ desired, reported }));
+        response.end(
+          JSON.stringify({ desired, reported, now: new Date(fakeClock.now()).toISOString() })
+        );
         return;
       }
       const authorization = request.headers['authorization'];
@@ -667,6 +859,15 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         authorization,
         ...(requestId === undefined ? {} : { requestId }),
       });
+      apiInFlight += 1;
+      let answered = false;
+      const doneWith = () => {
+        if (answered) return;
+        answered = true;
+        apiInFlight -= 1;
+        checkSettled();
+      };
+      response.on('close', doneWith);
 
       // HAR-77: every API response carries X-Request-ID, as the handlers'
       // do: the caller's when it sent one, else the invocation id.
@@ -775,6 +976,14 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         return;
       }
 
+      if (options.holdRoute === route) {
+        // HAR-120: never answered; the stub's close ends it.
+        heldApi.push(response);
+        doneWith();
+        heldWaiters.splice(0).forEach(resolve => resolve());
+        return;
+      }
+
       if (options.failRoute?.route === route) {
         send(
           options.failRoute.status,
@@ -820,7 +1029,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         const created = profile === undefined;
         profile = {
           id: 'stub-tenant:stub-user',
-          createdAt: (profile?.['createdAt'] as string) ?? new Date().toISOString(),
+          createdAt: (profile?.['createdAt'] as string) ?? new Date(fakeClock.now()).toISOString(),
           // As the API does on create: the defaults, deep-merged with nothing.
           preferences: structuredClone(DEFAULT_USER_PREFERENCES),
           devices: [...devices.keys()],
@@ -849,7 +1058,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           send(400, errorBody('VALIDATION_ERROR'));
           return;
         }
-        const now = new Date().toISOString();
+        const now = new Date(fakeClock.now()).toISOString();
         const recipe = {
           ...body,
           id: randomUUID(),
@@ -878,7 +1087,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         }
         if (route === 'PATCH /recipes/{id}') {
           const body = (await readJson(request)) as Record<string, unknown>;
-          Object.assign(recipe, body, { updatedAt: new Date().toISOString() });
+          Object.assign(recipe, body, { updatedAt: new Date(fakeClock.now()).toISOString() });
         }
         send(200, recipe, route);
         return;
@@ -1139,7 +1348,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           deviceId: body.deviceId,
           name: body.name,
           status: 'active',
-          startTime: new Date().toISOString(),
+          startTime: new Date(fakeClock.now()).toISOString(),
           meatType: body.meatType,
           notes: body.notes,
         };
@@ -1172,7 +1381,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           return;
         }
         cook.status = 'completed';
-        cook.endTime = new Date().toISOString();
+        cook.endTime = new Date(fakeClock.now()).toISOString();
         pushCookEvent('cook_stopped', cook);
         if (cook.deviceId === SIM_DEVICE) {
           syncTwin(requestId ?? 'stub-invocation');
@@ -1187,6 +1396,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
 
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
+  fakeClock.settle = settled;
   return {
     baseUrl: `http://127.0.0.1:${port}/api`,
     requests,
@@ -1205,7 +1415,31 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         .map(({ id, status, startTime }) => ({ id, status, startTime })),
     chartRegistered: () => devices.has(CHART_DEVICE),
     deviceIds: () => [...devices.keys()].sort(),
-    close: () => new Promise<void>(resolve => server.close(() => resolve())),
+    sendTimes,
+    settled,
+    whenHeld: () =>
+      new Promise<void>(resolve => {
+        if (heldApi.length > 0) resolve();
+        else heldWaiters.push(resolve);
+      }),
+    close: () =>
+      new Promise<void>(resolve => {
+        // End what is still open, so close() waits on nothing: held polls get
+        // the 204 that tells a client the connection is over, and a held API
+        // request an empty 503.
+        for (const connection of signalRConnections.values()) {
+          connection.closed = true;
+          flushPoll(connection);
+        }
+        for (const held of heldApi.splice(0)) {
+          if (!held.writableEnded) held.writeHead(503).end();
+        }
+        // Every proof is over by now, so no socket is still wanted: a stopping
+        // SignalR client can leave one open with no request on it, which
+        // close() alone would wait on until the client drops it.
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
   };
 }
 
@@ -1222,7 +1456,6 @@ async function run(
   const result = await runAcceptance({
     env,
     write: line => lines.push(line),
-    timeoutMs: 5_000,
     groups,
   });
   return { ...result, lines, output: lines.join('\n') };
@@ -1249,7 +1482,9 @@ const mode = ${JSON.stringify(mode)};
 const conn = process.env.SIMDEVICE_CONNECTION_STRING || '';
 const key = (conn.split(';').find(p => p.startsWith('SharedAccessKey=')) || '').slice(16);
 const line = o => process.stdout.write(JSON.stringify(o) + '\\n');
-const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stringify(SIM_DEVICE)}, timestamp, sentAt: new Date().toISOString() });
+// HAR-120: sentAt is the stub's fake time when the send was reported, never this process's clock.
+let sentAt = ${JSON.stringify(new Date(FakeClock.EPOCH).toISOString())};
+const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stringify(SIM_DEVICE)}, timestamp, sentAt });
 const args = process.argv.slice(2).join(' ');
 const handedOver = conn === ${JSON.stringify(SIM_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.argv.some(a => a.includes(key));
 const chartHandedOver = conn === ${JSON.stringify(CHART_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.env.SIMDEVICE_CHART_CONNECTION_STRING && !process.argv.some(a => a.includes(key));
@@ -1262,7 +1497,8 @@ if (mode === 'ok' && chartTopup && chartHandedOver) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ args: process.argv.slice(2) }),
-  }).then(() => {
+  }).then(r => r.json()).then(body => {
+    sentAt = body.now;
     const start = Date.parse(chartTopup[2]);
     for (let i = 0; i < Number(chartTopup[1]); i++) {
       line({ ...reading(new Date(start + i * Number(chartTopup[3]) * 1000).toISOString()), deviceId: ${JSON.stringify(CHART_DEVICE)} });
@@ -1280,7 +1516,8 @@ if (mode === 'ok' && chartTopup && chartHandedOver) {
     body: JSON.stringify({ args: process.argv.slice(2) }),
   })
     .then(r => r.json())
-    .then(({ desired, reported }) => {
+    .then(({ desired, reported, now }) => {
+      sentAt = now;
       line({ event: 'twin', desired, reported });
       if (twin[1] === '1') line(reading(${JSON.stringify(TWIN_TIMESTAMP)}));
     }, () => {
@@ -1301,7 +1538,7 @@ if (mode === 'ok' && chartTopup && chartHandedOver) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ args: process.argv.slice(2) }),
-      }).then(print, print);
+      }).then(r => r.json()).then(body => { sentAt = body.now; print(); }, print);
     } else {
       print();
     }
@@ -1313,7 +1550,8 @@ if (mode === 'ok' && chartTopup && chartHandedOver) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ args: process.argv.slice(2) }),
-    }).then(() => {
+    }).then(r => r.json()).then(body => {
+      sentAt = body.now;
       for (let i = 0; i < Number(topup[1]); i++) line(reading(new Date(${TOPUP_EPOCH} + i * 50).toISOString()));
     }, () => {
       process.stderr.write('fake simdevice: could not report the top-up\\n');
@@ -1369,59 +1607,39 @@ async function runAgainstStub(
   );
 }
 
-const realPoll = { ...ROUNDTRIP_POLL };
-const realLiveWait = { ...LIVE_WAIT };
-const realIsolationWait = { ...ISOLATION_WAIT };
-const realTwinPoll = { ...TWIN_POLL };
 const realVolume = { ...VOLUME };
-const realStartRetry = { ...START_RETRY };
 const realChart = { ...CHART };
 
 beforeAll(() => {
   fakeDir = mkdtempSync(join(tmpdir(), 'acceptance-simdevice-'));
-  // The round-trip proof polls every 1 s for up to 120 s live; here, far less.
-  ROUNDTRIP_POLL.intervalMs = 5;
-  ROUNDTRIP_POLL.capMs = 300;
-  // HAR-63: the live push is waited for up to 90 s live; here, 300 ms.
-  LIVE_WAIT.capMs = 300;
-  // HAR-67: 90 s for the owner's message and a 15 s grace for the peer live.
-  ISOLATION_WAIT.capMs = 300;
-  ISOLATION_WAIT.graceMs = 100;
-  // HAR-68: the twin reading is polled every 2 s for up to 90 s live.
-  TWIN_POLL.intervalMs = 5;
-  TWIN_POLL.capMs = 300;
-  // HAR-45: a long cook is 8,640 readings, walked 1,000 a page, and the
-  // current reading re-read every 10 s for up to 15 min live. Here a few
-  // hundred walked 100 a page (so a walk is several pages), and polls in
-  // milliseconds. The send interval is left as it is live.
+  // HAR-120: every wait keeps its live value (ROUNDTRIP_POLL, LIVE_WAIT,
+  // ISOLATION_WAIT, TWIN_POLL, START_RETRY, the polls in VOLUME and CHART):
+  // they run on the fake clock. Only the volumes shrink.
+  // HAR-45: a long cook is 8,640 readings, walked 1,000 a page. Here a few
+  // hundred walked 100 a page, so a walk is several pages.
   VOLUME.target = 240;
   VOLUME.margin = 6;
   VOLUME.pageLimit = 100;
-  VOLUME.pollIntervalMs = 5;
-  VOLUME.pollCapMs = 300;
-  // HAR-77: a throttled SignalR start() is retried after 1, 2, 4, 8 s live.
-  START_RETRY.delaysMs = [1, 1, 1, 1];
-  // HAR-87: 12 h of readings 5 s apart, the chart re-read every 10 s for up to
-  // 15 min live. Here 10 min of them (120), and polls in milliseconds.
+  // HAR-87: 12 h of readings 5 s apart; here 10 min of them (120).
   CHART.readings = 120;
-  CHART.pollIntervalMs = 5;
-  CHART.pollCapMs = 300;
 });
 
 afterAll(() => {
-  Object.assign(ROUNDTRIP_POLL, realPoll);
-  Object.assign(LIVE_WAIT, realLiveWait);
-  Object.assign(ISOLATION_WAIT, realIsolationWait);
-  Object.assign(TWIN_POLL, realTwinPoll);
   Object.assign(VOLUME, realVolume);
-  Object.assign(START_RETRY, realStartRetry);
   Object.assign(CHART, realChart);
   rmSync(fakeDir, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  fakeClock = new FakeClock();
+  restoreClock = setClock(fakeClock);
 });
 
 afterEach(async () => {
   await stub?.close();
   stub = undefined;
+  restoreClock?.();
+  restoreClock = undefined;
 });
 
 /** The RU summary row for a route, e.g. `  POST /cooks   1   11.43   11.43`. */
@@ -2430,9 +2648,11 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     ]) {
       expect(result.lines).toContain(`PASS ${GROUP} ${step}`);
     }
-    const metrics = result.lines.filter(line => line.startsWith('METRIC roundtrip-ms '));
-    expect(metrics).toHaveLength(1);
-    expect(metrics[0]).toMatch(/^METRIC roundtrip-ms \d+$/);
+    // HAR-120: on the fake clock the round trip is exactly the three poll
+    // intervals slept between the send and the fourth poll.
+    expect(result.lines.filter(line => line.startsWith('METRIC roundtrip-ms '))).toEqual([
+      `METRIC roundtrip-ms ${3 * ROUNDTRIP_POLL.intervalMs}`,
+    ]);
     expect(result.lines.some(line => /^\s+EXEC\s+simdevice --count 1\s+exit 0\s/.test(line))).toBe(
       true
     );
@@ -2455,9 +2675,14 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
       .filter(params => params.has('startTime'));
     expect(history.map(params => params.get('continuationToken'))).toEqual([null, 'w-2']);
     expect(history.every(params => !params.has('offset'))).toBe(true);
-    const opened = Date.parse(history[0].get('startTime') ?? '');
-    expect(Date.now() - opened).toBeGreaterThanOrEqual(5 * 60 * 1000);
-    expect(Date.now() - opened).toBeLessThan(6 * 60 * 1000);
+    // HAR-120: exactly five minutes before the send's sentAt, which is the fake
+    // time when the send was reported (the last of the run's `--count 1` sends).
+    const sentAt = stub!.sendTimes[stub!.sendTimes.length - 1];
+    expect(sentAt).toBeDefined();
+    expect(history.map(params => params.get('startTime'))).toEqual([
+      new Date(sentAt - 5 * 60 * 1000).toISOString(),
+      new Date(sentAt - 5 * 60 * 1000).toISOString(),
+    ]);
     // Polls go through api.request, so they are in the RU table.
     expect(summaryRow(result.output, 'GET /temperatures/current/{deviceId}')).toBeDefined();
   });
@@ -2487,9 +2712,21 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     const failures = telemetryFailures(result);
     expect(failures).toHaveLength(1);
     expect(failures[0]).toContain('GET /temperatures/current/{deviceId} returns the sent reading');
-    expect(failures[0]).toContain(`within the ${ROUNDTRIP_POLL.capMs / 1000} s cap`);
-    expect(failures[0]).toContain('last status 200');
-    expect(failures[0]).toContain(`last timestamp seen "${OLDER_READINGS[2]}"`);
+    expect(failures[0]).toContain(
+      `GET /temperatures/current/{deviceId} → 200: the reading sent at ` +
+        `${new Date(stub!.sendTimes[stub!.sendTimes.length - 1]).toISOString()} ` +
+        `(timestamp ${SIM_TIMESTAMP}) was not readable within the 120 s cap; last status 200, ` +
+        `last timestamp seen "${OLDER_READINGS[2]}"`
+    );
+    // HAR-120: the live pacing, on the fake clock: a poll at 0 s, then one
+    // every 1 s up to the 120 s cap, 121 in all, 120 intervals slept.
+    const polls = stub!.requests.filter(
+      r =>
+        r.path === `/api/temperatures/current/${SIM_DEVICE}` &&
+        r.authorization === `Bearer ${TOKEN}`
+    );
+    expect(polls).toHaveLength(1 + 121);
+    expect(fakeClock.slept.filter(ms => ms === ROUNDTRIP_POLL.intervalMs)).toHaveLength(120);
     expect(result.output).toContain(
       `SKIP ${GROUP} GET /temperatures/history holds the sent reading`
     );
@@ -2785,6 +3022,23 @@ describe('device twin (HAR-68, against the stub and a fake simdevice)', () => {
       'simdevice → exit 1: simdevice exited 1, expected 0: send failed: connection refused'
     );
   });
+
+  it('(d) HAR-120: fails naming the 90 s cap when the reading never reaches the current reading, and still stops the cook', async () => {
+    const result = await runTwin({ twinReadingNeverRouted: true });
+
+    expectFailedAt(
+      result,
+      4,
+      `GET /temperatures/current/{deviceId} → 200: the reading with timestamp ${TWIN_TIMESTAMP} ` +
+        `was not readable within the 90 s cap; last status 200, last timestamp seen ` +
+        `"${SIM_TIMESTAMP}"`
+    );
+    // The live pacing on the fake clock: a poll at 0 s, then one every 2 s up
+    // to the 90 s cap.
+    const polls = stub!.requests.filter(r => r.path === `/api/temperatures/current/${SIM_DEVICE}`);
+    expect(polls).toHaveLength(1 + 90 / 2);
+    expect(fakeClock.slept).toEqual(Array.from({ length: 90 / 2 }, () => TWIN_POLL.intervalMs));
+  });
 });
 
 describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', () => {
@@ -2827,6 +3081,8 @@ describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', ()
     expect(result.exitCode).toBe(0);
     STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
     expect(metric(result, 'isolation-peer-messages')).toEqual(['METRIC isolation-peer-messages 0']);
+    // HAR-120: both grace windows ran their live 15 s on the fake clock.
+    expect(fakeClock.slept.filter(ms => ms === 15_000)).toHaveLength(2);
     const cookMetric = metric(result, 'signalr-cook-event-ms');
     expect(cookMetric).toHaveLength(1);
     expect(cookMetric[0]).toMatch(/^METRIC signalr-cook-event-ms \d+$/);
@@ -3046,8 +3302,10 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
     expect(failures[0]).toContain(
       `the current reading is "${SIM_TIMESTAMP}", before the top-up's end`
     );
-    expect(failures[0]).toContain(`after the ${VOLUME.pollCapMs / 1000} s cap`);
-    expect(stub!.drainTotals.length).toBeGreaterThan(2);
+    expect(failures[0]).toContain('after the 900 s cap');
+    // HAR-120: the live pacing on the fake clock: a read at 0 s, then one every
+    // 10 s up to the 15 min cap.
+    expect(stub!.drainTotals).toHaveLength(1 + 900 / 10);
     expect(result.output).toContain(`SKIP ${GROUP} ${STEPS[3]}`);
     expect(result.output).not.toMatch(/^METRIC history-(readings|pages|ru-[a-z-]+) /m);
     // Only this group failed.
@@ -3162,7 +3420,8 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
     stub = await startStub();
     const lines: string[] = [];
     let exitCode: number | null | undefined;
-    const result = await runAcceptance({
+    let killedAfterMs: number | undefined;
+    const running = runAcceptance({
       env: {
         ACCEPTANCE_BASE_URL: stub.baseUrl,
         ACCEPTANCE_BEARER_TOKEN: TOKEN,
@@ -3177,16 +3436,26 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
             {
               name: 'a hung simdevice is killed at the limit',
               run: async api => {
-                ({ exitCode } = await api.runSimDevice(['--count', '1'], { timeoutMs: 200 }));
+                ({ exitCode, killedAfterMs } = await api.runSimDevice(['--count', '1'], {
+                  timeoutMs: 200,
+                }));
               },
             },
           ],
         },
       ],
     });
+    // HAR-120: the hung child is killed when the fake time reaches the limit,
+    // and not before: one tick short, the deadline is still pending.
+    await fakeClock.armed(200);
+    fakeClock.advance(199);
+    expect(fakeClock.deadlines()).toEqual([1]);
+    fakeClock.advance(1);
+    const result = await running;
 
     expect(result.exitCode).toBe(0);
     expect(exitCode).toBeNull();
+    expect(killedAfterMs).toBe(200);
     expect(lines.some(line => /^\s+EXEC\s+simdevice --count 1\s+exit killed\s/.test(line))).toBe(
       true
     );
@@ -3498,8 +3767,12 @@ describe('cook chart (HAR-87, against the stub and a fake simdevice)', () => {
       `FAIL ${GROUP} ${STEPS[5]} — GET /cooks/{cookId}/chart → 200`
     );
     expect(result.failures[0]).toContain(
-      `the chart is not covered after the ${CHART.pollCapMs / 1000} s cap: the chart has no points`
+      'the chart is not covered after the 900 s cap: the chart has no points'
     );
+    // HAR-120: the coverage load, then the live pacing on the fake clock: a
+    // load at 0 s and one every 10 s up to the 15 min cap.
+    expect(chartRequests('GET', /\/chart$/)).toHaveLength(1 + 1 + 900 / 10);
+    expect(fakeClock.slept).toEqual(Array.from({ length: 900 / 10 }, () => CHART.pollIntervalMs));
     expect(result.lines).toContain(
       `SKIP ${GROUP} ${STEPS[6]} (an earlier proof in this group failed)`
     );
@@ -3857,6 +4130,120 @@ describe('OpenAPI contract (HAR-77, against the stub)', () => {
   });
 });
 
+describe('real-time waits, on the fake clock (HAR-120)', () => {
+  it('within() rejects with "<what> did not finish in <ms> ms" when the fake time reaches the bound, not before', async () => {
+    let outcome: unknown;
+    const waiting = within(new Promise<never>(() => undefined), CONNECT_TIMEOUT_MS, 'start()').then(
+      () => (outcome = 'resolved'),
+      error => (outcome = error)
+    );
+    expect(fakeClock.deadlines()).toEqual([30_000]);
+
+    fakeClock.advance(CONNECT_TIMEOUT_MS - 1);
+    await drainEvents();
+    expect(outcome).toBeUndefined();
+
+    fakeClock.advance(1);
+    await waiting;
+    expect(outcome).toBeInstanceOf(ProofFailure);
+    expect((outcome as Error).message).toBe('start() did not finish in 30000 ms');
+  });
+
+  it('within() cancels its deadline when the promise settles first', async () => {
+    await expect(within(Promise.resolve('done'), CONNECT_TIMEOUT_MS, 'stop()')).resolves.toBe(
+      'done'
+    );
+    expect(fakeClock.deadlines()).toEqual([]);
+  });
+
+  it('a request still unanswered at the 60 s per-request limit fails, naming the limit and the route', async () => {
+    stub = await startStub({ holdRoute: 'GET /users/me' });
+    const lines: string[] = [];
+    const running = runAcceptance({
+      env: {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+      },
+      write: line => lines.push(line),
+      groups: [
+        {
+          name: 'held',
+          create: () => [
+            {
+              name: 'GET /users/me never answers',
+              run: async api => {
+                await api.request({ method: 'GET', path: '/users/me' });
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await stub.whenHeld();
+    expect(fakeClock.deadlines()).toEqual([60_000]);
+    fakeClock.advance(60_000);
+    const result = await running;
+
+    expect(result.failures).toEqual([
+      'FAIL held › GET /users/me never answers — GET /users/me → no response: ' +
+        "the response did not finish in 60000 ms (the runner's per-request limit)",
+    ]);
+    expect(fakeClock.deadlines()).toEqual([]);
+  });
+
+  it('a finished request leaves no deadline behind', async () => {
+    stub = await startStub();
+    const result = await run(
+      {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+      },
+      [usersGroup]
+    );
+
+    expect(result.failures).toEqual([]);
+    expect(fakeClock.deadlines()).toEqual([]);
+  });
+
+  it('a simdevice send still running at the 120 s limit is killed and fails naming the limit', async () => {
+    const running = runAgainstStub({}, 'hang', [roundtripGroup]);
+    await fakeClock.armed(120_000);
+    fakeClock.advance(120_000);
+    const result = await running;
+
+    expect(result.failures).toEqual([
+      'FAIL telemetry round-trip › simdevice --count 1 sends one reading through IoT Hub — ' +
+        'simdevice → exit killed: simdevice did not exit within its 120000 ms limit and was ' +
+        'killed, expected exit 0',
+    ]);
+  });
+
+  it('the live-temperature wait gives up at exactly its 90 s cap', async () => {
+    const result = await runAgainstStub({ livePush: 'never' }, 'ok', [liveGroup]);
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(
+      'nothing within the 90 s cap; the connection is Connected'
+    );
+    expect(fakeClock.slept).toEqual([LIVE_WAIT.capMs]);
+    expect(fakeClock.now()).toBe(FakeClock.EPOCH + 90_000);
+  });
+
+  it('the isolation owner wait gives up at exactly its 90 s cap, before any grace', async () => {
+    const result = await runAgainstStub({ livePush: 'never' }, 'ok', [isolationGroup]);
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(
+      'nothing within the 90 s cap; the owner connection is Connected'
+    );
+    expect(fakeClock.slept).toEqual([ISOLATION_WAIT.capMs]);
+  });
+});
+
 describe('SignalR start() retries a throttled service (HAR-77, against the stub)', () => {
   const SIGNALR_GROUPS = [
     'signalr isolation ›',
@@ -3876,6 +4263,9 @@ describe('SignalR start() retries a throttled service (HAR-77, against the stub)
     const calls = stub!.signalRRequests.map(r => `${r.method} ${r.path.split('?')[0]}`);
     expect(calls.filter(call => call === 'DELETE /client/')).toHaveLength(negotiates() - 3);
     expect(result.output).not.toContain('/client/');
+    // HAR-120: the first start() (the isolation owner's) slept the live 1, 2
+    // and 4 s between its throttled attempts, on the fake clock.
+    expect(fakeClock.slept.slice(0, 3)).toEqual([1_000, 2_000, 4_000]);
   });
 
   it('fails each SignalR proof naming the 429 and the attempts when the service never stops throttling', async () => {
@@ -3889,6 +4279,14 @@ describe('SignalR start() retries a throttled service (HAR-77, against the stub)
       expect(failures[0]).toContain("Status code '429' (throttled on all 5 attempts)");
     }
     expect(negotiates()).toBe(3 * 5);
+    // HAR-120: each of the three slept the live 1, 2, 4 and 8 s between its
+    // five attempts, on the fake clock.
+    expect(fakeClock.slept.slice(0, 12)).toEqual([
+      ...START_RETRY.delaysMs,
+      ...START_RETRY.delaysMs,
+      ...START_RETRY.delaysMs,
+    ]);
+    expect(START_RETRY.delaysMs).toEqual([1_000, 2_000, 4_000, 8_000]);
     expect(result.output).not.toContain(SIGNALR_CLIENT_TOKEN);
     expect(result.output).not.toContain('/client/');
   });
