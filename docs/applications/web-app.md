@@ -241,10 +241,21 @@ npx nx run-many -t lint typecheck -p web-e2e
 
 The `e2e` target runs `nx build web` first, then Playwright's `webServer` serves
 `dist/apps/web` with `vite preview` on port 4300 (it never reuses a server
-already on that port). Run it through Nx: `playwright test` on its own serves
-whatever is in `dist/apps/web`, which may be a stale build. On failure the trace
-and screenshot are kept under `dist/.playwright/web-e2e/test-results`, and the
-HTML report under `dist/.playwright/web-e2e/report`.
+already on that port, and a port already taken fails the run). Run it through
+Nx: `playwright test` on its own serves whatever is in `dist/apps/web`, which
+may be a stale build. On failure the trace and screenshot are kept under
+`dist/.playwright/web-e2e/test-results`, and the HTML report under
+`dist/.playwright/web-e2e/report`.
+
+`WEB_E2E_PORT` serves on another port instead, with results and report under
+`dist/.playwright/web-e2e/port-<port>/`; that is how test-repeat runs 8 copies
+at once, on 4301 to 4308 (HAR-121). Unset, it is 4300.
+
+No wait in the test has a deadline of its own (HAR-121). The browser's clock
+and the fakes' are frozen on one instant (`src/fakes/clock.ts`), so a reading
+the test seeds or pushes is exactly as old as it says however slow the run;
+every `expect` waits for its event, bounded only by the 60 s test timeout
+(`expect.timeout: 0` in `playwright.config.ts`).
 
 It needs no network and no secret. Everything outside the app is faked at the
 network edge, in `src/fakes/`; nothing in `apps/web/src` knows it is under test.

@@ -127,6 +127,9 @@ test('--parallel 3 runs three concurrent copies, each in its own temp dir, repor
     assert.equal(markers.length, 3);
     assert.equal(new Set(markers.map(m => m.pid)).size, 3);
     assert.equal(new Set(markers.map(m => m.tmpdir)).size, 3, 'each copy gets its own temp dir');
+    // HAR-121: each copy knows its number, and its copyEnv is its own.
+    assert.deepEqual(markers.map(m => m.copy).sort(), ['1', '2', '3']);
+    assert.deepEqual(markers.map(m => m.port).sort(), ['4301', '4302', '4303']);
     assert.equal(r.json.parallel, 3);
     assert.equal(r.json.copies.length, 3);
     assert.equal(new Set(r.json.copies.map(c => c.tmpdir)).size, 3);

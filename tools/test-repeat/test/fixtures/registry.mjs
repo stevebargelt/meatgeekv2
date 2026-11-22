@@ -20,7 +20,12 @@ export const suites = [
   suite('fixture-pass', 'pass'),
   suite('fixture-fail-on-3', 'fail-on', '3'),
   suite('fixture-fail-first', 'fail-on', '1'),
-  { ...suite('fixture-barrier', 'barrier'), passEnv: ['BARRIER_DIR', 'BARRIER_COUNT'] },
+  {
+    ...suite('fixture-barrier', 'barrier'),
+    passEnv: ['BARRIER_DIR', 'BARRIER_COUNT'],
+    // HAR-121: each copy's own value, recorded in its marker.
+    copyEnv: copy => ({ FIXTURE_PORT: String(4300 + copy) }),
+  },
   {
     ...suite('fixture-load-args', 'refuse', '--load-only'),
     loadArgs: ['--load-only'],

@@ -26,7 +26,14 @@ import { startSimDevice, type SimDeviceRun } from './simdevice';
  */
 
 const DEVICE_NAME = 'Web acceptance smoker';
+/**
+ * Every bound below is a row of "Real-time waits" in
+ * docs/development/live-acceptance.md, with the runs it was measured on.
+ */
 const PUSH_TIMEOUT_MS = 60_000;
+/** The app-side waits after sign-in: the header, GET /devices, GET /cooks, a register. */
+const APP_TIMEOUT_MS = 30_000;
+const APP_TIMEOUT_S = APP_TIMEOUT_MS / 1000;
 
 /** One line of the run's log. Only METRIC lines and plain notes, never a value from env. */
 const log = (line: string) => console.log(line);
@@ -94,7 +101,9 @@ class ApiWatch {
   }
 }
 
-test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', async ({ page }) => {
+test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', async ({
+  page,
+}, testInfo) => {
   const appOrigin = env.webBaseUrl;
   let cookId: string | undefined;
   let cookStopped = false;
@@ -140,16 +149,18 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
         totpSecret: env.totpSecret,
         appOrigin,
         note: log,
+        // HAR-121: next to failure.png, which CI uploads. Text only, scrubbed.
+        diagnosticPath: testInfo.outputPath('sign-in-diagnostic.txt'),
       });
       await expect(
         page.getByRole('banner').locator('.user-name'),
-        'the app header does not show the signed-in user'
-      ).toHaveText(/\S/, { timeout: 30_000 });
+        `the app header did not show the signed-in user within ${APP_TIMEOUT_S} s`
+      ).toHaveText(/\S/, { timeout: APP_TIMEOUT_MS });
       signedIn = true;
       await expect
         .poll(() => watch.devices?.status(), {
-          message: 'GET /devices did not answer 200 after sign-in',
-          timeout: 30_000,
+          message: `GET /devices did not answer 200 within ${APP_TIMEOUT_S} s of sign-in`,
+          timeout: APP_TIMEOUT_MS,
         })
         .toBe(200);
     });
@@ -168,9 +179,16 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
         await form.getByLabel('Device ID').fill(env.deviceId);
         await form.getByLabel('Name', { exact: true }).fill(DEVICE_NAME);
         await form.getByLabel('Model').fill('simdevice');
-        const registered = page.waitForResponse(
-          r => r.request().method() === 'POST' && r.url() === `${apiBaseUrl}/devices`
-        );
+        const registered = page
+          .waitForResponse(
+            r => r.request().method() === 'POST' && r.url() === `${apiBaseUrl}/devices`,
+            { timeout: APP_TIMEOUT_MS }
+          )
+          .catch(() => {
+            throw new Error(
+              `POST /devices (registering ${env.deviceId}) did not answer within ${APP_TIMEOUT_S} s`
+            );
+          });
         await form.getByRole('button', { name: 'Register' }).click();
         const status = (await registered).status();
         expect(status, `registering ${env.deviceId} answered ${status}, expected 201`).toBe(201);
@@ -185,8 +203,8 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
     await test.step('4. clean slate: stop a cook left running on the device', async () => {
       await expect
         .poll(() => watch.activeCooks?.status(), {
-          message: 'GET /cooks?status=active did not answer 200',
-          timeout: 30_000,
+          message: `GET /cooks?status=active did not answer 200 within ${APP_TIMEOUT_S} s`,
+          timeout: APP_TIMEOUT_MS,
         })
         .toBe(200);
       const active = ((await watch.activeCooks?.json()) as { cooks: CookSummary[] }).cooks;
@@ -221,7 +239,7 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
       await expect(page.getByRole('heading', { name: cookName })).toBeVisible();
       // A standing device keeps the last run's reading, so a connected panel
       // can open stale. Step 6 proves a fresh reading arrives.
-      await expectLivePanelConnected(panel, 30_000);
+      await expectLivePanelConnected(panel, APP_TIMEOUT_MS);
     });
 
     await test.step('6. a pushed reading reaches the screen', async () => {

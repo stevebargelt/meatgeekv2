@@ -7,6 +7,7 @@ import {
   grillText,
   isAncestorCommit,
   livePanelConnection,
+  livePanelGaveUp,
   msLeftInTotpWindow,
   normalizeTotpSecret,
   parseVersionJson,
@@ -254,9 +255,12 @@ describe('isAncestorCommit', () => {
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
     const parent = spawnSync('git', ['rev-parse', 'HEAD~1'], { encoding: 'utf8' }).stdout.trim();
     if (!/^[0-9a-f]{40}$/.test(head) || !/^[0-9a-f]{40}$/.test(parent)) return;
-    expect(isAncestorCommit(parent, head)).toBe(true);
-    expect(isAncestorCommit(head, parent)).toBe(false);
-    expect(isAncestorCommit(head, head)).toBe(true);
+    // HAR-121: real git, but not runGit: its 120 s kill is a live bound, and a
+    // killed git would turn this answer into a fetch. Here git runs to its end.
+    const git: Git = args => spawnSync('git', args, { stdio: 'ignore' }).status;
+    expect(isAncestorCommit(parent, head, git)).toBe(true);
+    expect(isAncestorCommit(head, parent, git)).toBe(false);
+    expect(isAncestorCommit(head, head, git)).toBe(true);
   });
 });
 
@@ -363,6 +367,15 @@ describe('livePanelConnection (step 5)', () => {
     expect(livePanelConnection('stale', 'Sign in again')).toBe(
       'not connected (data-state stale, badge "Sign in again")'
     );
+  });
+
+  it('has given up only on "Sign in again", after which the app tries nothing more', () => {
+    expect(livePanelGaveUp('stale', 'Sign in again')).toBe(true);
+    expect(livePanelGaveUp('stale', ' Sign in again ')).toBe(true);
+    expect(livePanelGaveUp('stale', 'Reconnecting…')).toBe(false);
+    expect(livePanelGaveUp('connecting', 'Connecting…')).toBe(false);
+    expect(livePanelGaveUp('stale', 'No reading for 24 min 0 s')).toBe(false);
+    expect(livePanelGaveUp(null, null)).toBe(false);
   });
 
   it('is not connected for a missing panel or badge copy it does not know', () => {

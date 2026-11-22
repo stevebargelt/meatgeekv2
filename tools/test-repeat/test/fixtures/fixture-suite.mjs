@@ -6,7 +6,8 @@
 //                                          exit 1 when <flag> is among args
 //   node fixture-suite.mjs barrier         write a marker to $BARRIER_DIR, then
 //                                          wait until $BARRIER_COUNT markers
-//                                          exist; record pid and tmpdir
+//                                          exist; record pid, tmpdir, and
+//                                          $TEST_REPEAT_COPY and $FIXTURE_PORT
 //   node fixture-suite.mjs expect-env <spec>...
 //                                          exit 1 unless the environment
 //                                          matches every spec: NAME=value
@@ -46,7 +47,12 @@ if (mode === 'pass') {
   const want = Number(process.env.BARRIER_COUNT);
   writeFileSync(
     path.join(dir, `${process.pid}.json`),
-    JSON.stringify({ pid: process.pid, tmpdir: os.tmpdir() })
+    JSON.stringify({
+      pid: process.pid,
+      tmpdir: os.tmpdir(),
+      copy: process.env.TEST_REPEAT_COPY ?? null,
+      port: process.env.FIXTURE_PORT ?? null,
+    })
   );
   // Done once every copy has started: only possible if they run at once.
   const ready = () => readdirSync(dir).filter(f => f.endsWith('.json')).length >= want;

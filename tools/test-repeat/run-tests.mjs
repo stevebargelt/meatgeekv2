@@ -10,10 +10,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'test');
-// Honest counts at the time of writing: 5 files, 46 tests (HAR-119). Raise them when
+// Honest counts at the time of writing: 5 files, 49 tests (HAR-121). Raise them when
 // the suite grows; never lower them to get a rename through.
 const MIN_FILES = 5;
-const MIN_TESTS = 46;
+const MIN_TESTS = 49;
 
 const files = readdirSync(DIR)
   .filter(f => f.endsWith('.test.mjs'))

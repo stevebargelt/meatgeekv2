@@ -74,12 +74,17 @@ A run does not inherit the caller's environment. It gets exactly:
    set (`api-emulator` passes `NODE_EXTRA_CA_CERTS`, the emulator's
    certificate, which the workflow writes to `GITHUB_ENV`);
 3. the suite's `env`, which wins over both;
-4. its own `TMPDIR`, `TMP` and `TEMP` (each parallel copy its own).
+4. the suite's `copyEnv(copy)`, for a resource each concurrent copy needs its
+   own: `playwright-web-e2e` sets `WEB_E2E_PORT` to 4300 + the copy number;
+5. its own `TMPDIR`, `TMP` and `TEMP` (each parallel copy its own), and
+   `TEST_REPEAT_COPY`, its copy number: 1 to K under `--parallel K`, 1 in the
+   serial pass (HAR-121).
 
 Anything else the caller has set is dropped: a `TF_DESTROY_GUARD_*` exported in
 a shell, an `AZURE_*` credential, a `TZ`, the workflow step's own `SUITE` and
-`RUNS`. A suite's prepare steps get the same, except that they keep the
-caller's temp dir variables. Every suite that runs Terraform sets
+`RUNS`, a `TEST_REPEAT_COPY`. A suite's prepare steps get the same, except
+that they keep the caller's temp dir variables and get no `copyEnv` and no
+`TEST_REPEAT_COPY`. Every suite that runs Terraform sets
 `CHECKPOINT_DISABLE=1`, so no run calls HashiCorp's version check;
 `terraform-tests.sh` sets it itself too, and shortens a `TMPDIR` over 60
 characters to a fresh `mktemp -d /tmp/tf.XXXXXX` (removed on exit), by the same
@@ -113,8 +118,10 @@ change's CI run, which runs every suite at least once in CI's own environment.
 K copies of the suite run at once, each with its own temp dir (`TMPDIR`, `TMP`,
 `TEMP`), each doing its own runs and stopping at its own first failure; each
 copy is reported on its own line. The working tree is shared. A suite whose
-`maxParallel` is lower is capped and the summary says why:
-`playwright-web-e2e` serves on the fixed port 4300, so it cannot run two copies.
+`maxParallel` is lower is capped and the summary says why; no suite has one
+today. `playwright-web-e2e` used to (it served on the fixed port 4300); each
+copy now serves on its own port, 4300 + its copy number, through `copyEnv`, so
+its load pass is 8 real concurrent browsers on 4301 to 4308 (HAR-121).
 
 A suite's `loadArgs` are appended to its command in every copy when it runs as
 more than one copy, never in the serial pass; the log and the summary row name
@@ -153,16 +160,19 @@ What is selected:
 | changes files a suite's `paths` match          | those suites                                         | 50         |
 | changes `tools/test-repeat/**` or the workflow | every suite                                          | 1          |
 |                                                | except `test-repeat-harness` (the harness's tests)   | 50         |
+|                                                | and except the suites whose `paths` it also changes  | 50         |
 | has label `test-repeat:all`                    | every suite                                          | 50         |
 | has label `test-repeat:load`                   | adds one pass per selected suite with `--parallel 8` | 1 per copy |
 
-A harness change wins over an app change: such a pull request runs every suite
-once, proving each command still works without putting suites that are not
-fixed yet through 50 runs. Keep harness changes out of fix pull requests, or add
-`test-repeat:all`. The exception is the harness's own tests, the
-`test-repeat-harness` suite (`selfTest: true`): a harness change is exactly
-what they test, so it runs them the full 50 times (and, with
-`test-repeat:load`, 8 copies at once).
+A harness change runs every suite once, proving each command still works
+without putting suites that are not fixed yet through 50 runs. Two exceptions
+run the full 50 (and, with `test-repeat:load`, 8 copies at once): the
+harness's own tests, the `test-repeat-harness` suite (`selfTest: true`), since
+a harness change is exactly what they test; and a suite whose `paths` a
+non-harness file in the same pull request matches, since that is the suite it
+fixes (HAR-121: a fix that
+needs a harness change, such as `playwright-web-e2e`'s port per copy, still
+gets its 50 runs).
 
 The workflow holds no secret, no environment and no OIDC permission, so it runs
 on fork pull requests.

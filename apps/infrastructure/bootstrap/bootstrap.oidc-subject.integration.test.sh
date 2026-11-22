@@ -53,6 +53,13 @@
 #      `use_default=false` + unreadable-prefix branch, now fail-closed.
 set -uo pipefail
 
+# HAR-121: a text check that reads ALL of its input. `producer | grep -q X`
+# under pipefail fails at random: grep -q exits at its first match, a producer
+# still writing gets SIGPIPE, and the pipeline returns 141 (no match). It did,
+# 1 copy in 8, under test-repeat's load pass. `matches` takes grep's arguments,
+# reads to the end, discards the output and returns grep's status.
+matches() { grep "$@" >/dev/null; }
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOT="$DIR/bootstrap.sh"
 
@@ -250,7 +257,7 @@ for mg42_row in $MG42_IDENTITIES; do
   [ "$(printf '%s\n' "$MG42_MUTATIONS" | grep -c '^CREATE' || true)" -eq 1 ] \
     && t_ok "${mg42_fn}: mints exactly ONE federated credential" \
     || t_bad "${mg42_fn}: must mint exactly one federated credential (did: ${MG42_MUTATIONS})"
-  printf '%s\n' "$MG42_MUTATIONS" | grep -q "\"name\": \"${mg42_cred}\"" \
+  printf '%s\n' "$MG42_MUTATIONS" | matches "\"name\": \"${mg42_cred}\"" \
     && t_ok "${mg42_fn}: the credential is named ${mg42_cred}" \
     || t_bad "${mg42_fn}: expected the credential to be named '${mg42_cred}' (did: ${MG42_MUTATIONS})"
 
@@ -301,7 +308,7 @@ for mg42_row in $MG42_IDENTITIES; do
   # that died before it ever reached the reconciler, so the run must ALSO have
   # completed AND logged the reconciler's no-op branch naming this subject.
   if [ "$MG42_STATUS" -eq 0 ] && [ -z "$MG42_MUTATIONS" ] \
-     && printf '%s' "$MG42_LOG" | grep -qF "subject matches): ${mg42_cred} (${mg42_live})"; then
+     && printf '%s' "$MG42_LOG" | matches -F "subject matches): ${mg42_cred} (${mg42_live})"; then
     t_ok "${mg42_fn}: a RE-RUN over a credential already on the derived subject issues ZERO az mutations"
   else
     t_bad "${mg42_fn}: a re-run must leave the correct credential alone and say so (exit ${MG42_STATUS}, mutations: '${MG42_MUTATIONS}')"
@@ -316,13 +323,13 @@ for mg42_row in $MG42_IDENTITIES; do
   MG42_EXISTING_NAMES="$mg42_cred"
   mg42_run "$mg42_fn"
   if [ "$MG42_STATUS" -eq 0 ] \
-     && printf '%s\n' "$MG42_MUTATIONS" | grep -q '^DELETE' \
+     && printf '%s\n' "$MG42_MUTATIONS" | matches '^DELETE' \
      && [ "$(mg42_created_subjects)" = "$mg42_live" ]; then
     t_ok "${mg42_fn}: a credential stuck on the old hardcoded subject is reconciled FORWARD to ${mg42_live}"
   else
     t_bad "${mg42_fn}: a stale hardcoded subject must be deleted and recreated on the derived subject (did: ${MG42_MUTATIONS})"
   fi
-  printf '%s\n' "$MG42_MUTATIONS" | grep -qF "\"subject\": \"${mg42_legacy}\"" \
+  printf '%s\n' "$MG42_MUTATIONS" | matches -F "\"subject\": \"${mg42_legacy}\"" \
     && t_bad "${mg42_fn}: recreated the credential on the HARDCODED subject — this is the reversion MG-42 removes" \
     || t_ok "${mg42_fn}: never writes the hardcoded subject back"
 done
@@ -361,7 +368,7 @@ for mg42_row in $MG42_IDENTITIES; do
   MG42_POSE_PREFIX=""          # the prefix was never resolved
   mg42_run "$mg42_fn"
   if [ "$MG42_STATUS" -ne 0 ] \
-     && printf '%s' "$MG42_LOG" | grep -q 'before resolve_oidc_subject_prefix' \
+     && printf '%s' "$MG42_LOG" | matches 'before resolve_oidc_subject_prefix' \
      && [ -z "$MG42_MUTATIONS" ]; then
     t_ok "${mg42_fn}: an UNRESOLVED prefix aborts the caller and federates nothing (the subshell die propagates)"
   else
@@ -569,7 +576,7 @@ else
 fi
 # The specific regression, stated as its own assertion so the failure message
 # names it: the default prefix must NEVER reach az for this body.
-if printf '%s\n' "$MG42_MUTATIONS" | grep -q "${DEFAULT_PREFIX}:environment:"; then
+if printf '%s\n' "$MG42_MUTATIONS" | matches "${DEFAULT_PREFIX}:environment:"; then
   t_bad "the live response resolved to the DEFAULT prefix — this is the MG-42 outage re-caused by the MG-42 fix (mutations: ${MG42_MUTATIONS})"
 else
   t_ok "the live response never federates the default prefix '${DEFAULT_PREFIX}' (the hand-corrected dev apply credential survives a re-run)"
@@ -581,7 +588,7 @@ MG42_GH_BODY="$MG42_LIVE_BODY"
 MG42_EXISTING="${MG42_LIVE_PREFIX}:environment:${INFRA_APPLY_ENVIRONMENT}"
 MG42_EXISTING_NAMES="github-infra-apply-${INFRA_APPLY_ENVIRONMENT}"
 mg42_run bootstrap_infra_apply_identity
-if [ "$MG42_STATUS" -eq 0 ] && ! printf '%s\n' "$MG42_MUTATIONS" | grep -qE '^(CREATE|DELETE) '; then
+if [ "$MG42_STATUS" -eq 0 ] && ! printf '%s\n' "$MG42_MUTATIONS" | matches -E '^(CREATE|DELETE) '; then
   t_ok "a re-run under the LIVE response leaves the hand-corrected credential untouched (no CREATE, no DELETE)"
 else
   t_bad "a re-run under the live response must not touch the credential (exit ${MG42_STATUS}, mutations: '${MG42_MUTATIONS}')"
@@ -630,9 +637,9 @@ fi
 mg42_reset
 MG42_GH_BODY='{"use_default": false, "include_claim_keys": ["repo","context"]}'
 mg42_run bootstrap_infra_apply_identity
-if printf '%s' "$MG42_LOG" | grep -q 'use_default=false' \
-   && printf '%s' "$MG42_LOG" | grep -qi 'NO readable sub_claim_prefix' \
-   && ! printf '%s' "$MG42_LOG" | grep -q "uses GitHub's DEFAULT OIDC sub claim"; then
+if printf '%s' "$MG42_LOG" | matches 'use_default=false' \
+   && printf '%s' "$MG42_LOG" | matches -i 'NO readable sub_claim_prefix' \
+   && ! printf '%s' "$MG42_LOG" | matches "uses GitHub's DEFAULT OIDC sub claim"; then
   t_ok "the ambiguous case dies naming what was read (use_default=false, no readable prefix) and no longer claims the repo uses the default sub claim"
 else
   t_bad "the ambiguous-case message must name use_default=false and the unreadable prefix, and must not announce the default sub claim (log: $(printf '%s' "$MG42_LOG" | tail -3))"
@@ -642,7 +649,7 @@ fi
 mg42_reset
 MG42_GH_BODY='{"use_default": true}'
 mg42_run bootstrap_infra_apply_identity
-if printf '%s' "$MG42_LOG" | grep -q 'no OIDC sub_claim_prefix'; then
+if printf '%s' "$MG42_LOG" | matches 'no OIDC sub_claim_prefix'; then
   t_ok "the genuine-default log line reports BOTH halves of the fact (use_default=true AND no prefix returned)"
 else
   t_bad "the genuine-default log line must state that no sub_claim_prefix was returned (log: $(printf '%s' "$MG42_LOG" | head -3))"

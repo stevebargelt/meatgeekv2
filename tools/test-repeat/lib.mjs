@@ -31,6 +31,7 @@ import path from 'node:path';
  * @property {string} [loadArgsReason]
  * @property {Record<string,string>} [env]
  * @property {string[]} [passEnv]
+ * @property {(copy: number) => Record<string,string>} [copyEnv]
  * @property {boolean} [selfTest]
  * @property {number} [timeoutSec]
  * @property {string} [goModFile]
@@ -95,6 +96,14 @@ export const ENV_ALLOWLIST = [
 /** Set by the harness itself on every run: each copy's own temp dir. */
 export const HARNESS_ENV = ['TMPDIR', 'TMP', 'TEMP'];
 
+/**
+ * HAR-121: set by the harness on every run to the run's copy number, 1 to K
+ * under --parallel K and 1 in the serial pass, so a suite can give each
+ * concurrent copy its own resource (a port). Never taken from the caller, and
+ * never set for a prepare step.
+ */
+export const COPY_ENV = 'TEST_REPEAT_COPY';
+
 /** Does `name` match one of `patterns` (exact, or a prefix ending in `*`)? */
 export function envNameMatches(name, patterns, platform = process.platform) {
   const fold = platform === 'win32' ? v => v.toUpperCase() : v => v;
@@ -108,12 +117,13 @@ export function envNameMatches(name, patterns, platform = process.platform) {
 /**
  * The environment for one of `suite`'s runs (or, with `tmp` unset, its
  * prepare steps): the allowlisted and `passEnv` variables from `parentEnv`,
- * then `suite.env`, then the temp dir. Prepare steps keep the caller's own
- * temp dir variables, since they run once and outside any copy.
+ * then `suite.env`, then, for a run, `suite.copyEnv(copy)`, the temp dir and
+ * TEST_REPEAT_COPY. Prepare steps keep the caller's own temp dir variables,
+ * since they run once and outside any copy.
  */
 export function suiteEnv(
   suite,
-  { parentEnv = process.env, platform = process.platform, tmp } = {}
+  { parentEnv = process.env, platform = process.platform, tmp, copy = 1 } = {}
 ) {
   const keep = [...ENV_ALLOWLIST, ...(suite.passEnv ?? []), ...(tmp ? [] : HARNESS_ENV)];
   const env = {};
@@ -121,7 +131,10 @@ export function suiteEnv(
     if (value !== undefined && envNameMatches(name, keep, platform)) env[name] = value;
   }
   Object.assign(env, suite.env ?? {});
-  if (tmp) Object.assign(env, { TMPDIR: tmp, TMP: tmp, TEMP: tmp });
+  if (tmp) {
+    Object.assign(env, suite.copyEnv?.(copy) ?? {});
+    Object.assign(env, { TMPDIR: tmp, TMP: tmp, TEMP: tmp, [COPY_ENV]: String(copy) });
+  }
   return env;
 }
 
@@ -171,7 +184,11 @@ export function matchesAny(file, globs) {
  *                                in CI without putting not-yet-fixed suites
  *                                through 50 runs), except a `selfTest` suite
  *                                (the harness's own tests), which runs `runs`
- *                                times: a harness change is what it tests
+ *                                times: a harness change is what it tests;
+ *                                and except a suite whose `paths` a
+ *                                non-harness file in the change matches, which
+ *                                runs `runs` times: it is the suite the pull
+ *                                request fixes (HAR-121)
  *  - otherwise                   each suite whose `paths` match a changed
  *                                file, `runs` times
  *  - label test-repeat:load      adds one pass of every selected suite with
@@ -194,12 +211,22 @@ export function selectSuites({
   const selection = suites.map(s => {
     const hits = changedFiles.filter(f => matchesAny(f, s.paths));
     if (all) return { id: s.id, selected: true, reason: `label ${LABEL_ALL}`, runs, matched: hits };
-    if (harnessChanged)
+    if (harnessChanged && s.selfTest)
       return {
         id: s.id,
         selected: true,
-        reason: s.selfTest ? 'harness changed (self-test)' : 'harness changed',
-        runs: s.selfTest ? runs : harnessRuns,
+        reason: 'harness changed (self-test)',
+        runs,
+        matched: hits,
+      };
+    // Only a non-harness file makes a suite affected here: a suite that reads
+    // the workflows matches test-repeat.yml, which is a harness change.
+    if (harnessChanged && !hits.some(f => !matchesAny(f, HARNESS_PATHS)))
+      return {
+        id: s.id,
+        selected: true,
+        reason: 'harness changed',
+        runs: harnessRuns,
         matched: hits,
       };
     if (hits.length > 0)
@@ -528,7 +555,7 @@ async function runCopy({
   // already-long TMPDIR (some sandboxes nest it deeply) falls back to /tmp.
   const base = os.tmpdir().length <= 60 || process.platform === 'win32' ? os.tmpdir() : '/tmp';
   const tmp = mkdtempSync(path.join(base, `tr${copy}-`));
-  const env = suiteEnv(suite, { tmp });
+  const env = suiteEnv(suite, { tmp, copy });
   const tag = copies > 1 ? ` [copy ${copy}/${copies}]` : '';
   const state = {
     copy,
@@ -704,9 +731,16 @@ function selfTestNote(selection) {
   const self = selection.suites.filter(
     s => s.selected && s.reason === 'harness changed (self-test)'
   );
-  return self.length
-    ? `, except the harness's own tests (${self.map(s => s.id).join(', ')}), which run ${self[0].runs} times`
-    : '';
+  const affected = selection.suites.filter(s => s.selected && s.reason === 'affected');
+  const notes = [
+    self.length
+      ? `the harness's own tests (${self.map(s => s.id).join(', ')}), which run ${self[0].runs} times`
+      : '',
+    affected.length
+      ? `the suites this pull request affects (${affected.map(s => s.id).join(', ')}), which run ${affected[0].runs} times`
+      : '',
+  ].filter(Boolean);
+  return notes.length ? `, except ${notes.join(', and ')}` : '';
 }
 
 export function writeJson(file, value) {

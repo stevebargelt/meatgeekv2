@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Page, Route } from '@playwright/test';
+import { FROZEN_NOW_MS } from './clock';
 import { base64Url, corsHeaders, fulfillJson, fulfillPreflight } from './http';
 import type { TestConfig, TestUser } from './test-config';
 
@@ -24,7 +25,8 @@ interface IssuedCode {
  *   `authorize` received, and returns an unsigned id token (with the
  *   authorize request's `nonce` and `aud` = the client id), an access token
  *   for the API scope and a refresh token. MSAL checks the nonce; it does not
- *   verify id token signatures in the browser.
+ *   verify id token signatures in the browser. Tokens are issued at
+ *   FROZEN_NOW_MS (clock.ts), so the page's clock must be frozen there too.
  *
  * Anything else on the host is answered 404 and listed in `unexpected`.
  */
@@ -189,7 +191,7 @@ export class FakeEntra {
 
   /** An unsigned JWT: `alg: none`. Only the claims matter to MSAL. */
   private idToken(nonce: string | undefined): string {
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(FROZEN_NOW_MS / 1000);
     const header = base64Url(JSON.stringify({ alg: 'none', typ: 'JWT' }));
     const claims = base64Url(
       JSON.stringify({

@@ -2,7 +2,7 @@
 // temp dir, and nothing else from the caller.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { envNameMatches, ENV_ALLOWLIST, suiteEnv } from '../lib.mjs';
+import { COPY_ENV, envNameMatches, ENV_ALLOWLIST, suiteEnv } from '../lib.mjs';
 
 const caller = {
   PATH: '/usr/bin',
@@ -18,6 +18,7 @@ const caller = {
   AZURE_CLIENT_ID: 'leak',
   NODE_EXTRA_CA_CERTS: '/cert.pem',
   OVERRIDDEN: 'caller',
+  TEST_REPEAT_COPY: '99',
 };
 
 test('a run gets the allowlisted variables, its passEnv, its env and its temp dir, nothing else', () => {
@@ -40,7 +41,22 @@ test('a run gets the allowlisted variables, its passEnv, its env and its temp di
     TMPDIR: '/t/tr1-x',
     TMP: '/t/tr1-x',
     TEMP: '/t/tr1-x',
+    TEST_REPEAT_COPY: '1',
   });
+});
+
+test('a run gets its copy number and its copyEnv; a prepare step gets neither, whatever the caller set', () => {
+  // HAR-121: what lets 8 concurrent playwright-web-e2e copies serve on 8 ports.
+  const suite = { copyEnv: copy => ({ PORT_FOR_COPY: String(4300 + copy) }) };
+  for (const copy of [1, 3, 8]) {
+    const env = suiteEnv(suite, { parentEnv: caller, platform: 'linux', tmp: '/t', copy });
+    assert.equal(env[COPY_ENV], String(copy));
+    assert.equal(env.PORT_FOR_COPY, String(4300 + copy));
+  }
+  assert.equal(suiteEnv({}, { parentEnv: caller, platform: 'linux', tmp: '/t' })[COPY_ENV], '1');
+  const prepare = suiteEnv(suite, { parentEnv: caller, platform: 'linux' });
+  assert.equal(Object.hasOwn(prepare, COPY_ENV), false);
+  assert.equal(Object.hasOwn(prepare, 'PORT_FOR_COPY'), false);
 });
 
 test('without passEnv a caller variable is dropped, whatever its name looks like', () => {
@@ -79,6 +95,7 @@ test('names match exactly or by a trailing-* prefix, case-insensitively only on 
     'Path',
     'SystemRoot',
     'TEMP',
+    'TEST_REPEAT_COPY',
     'TMP',
     'TMPDIR',
   ]);

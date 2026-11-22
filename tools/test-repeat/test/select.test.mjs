@@ -65,7 +65,9 @@ test('a change to the workflow counts as a harness change', () => {
   );
 });
 
-test('a harness change wins over an app change: every suite once', () => {
+test('a harness change with an app change: every suite once, the affected ones the full count', () => {
+  // HAR-121: the suite the pull request fixes still gets its 50; the rest, not
+  // fixed yet, run once.
   const sel = selectSuites({
     suites,
     changedFiles: ['tools/test-repeat/suites.mjs', 'apps/data-pusher/main.go'],
@@ -73,8 +75,11 @@ test('a harness change wins over an app change: every suite once', () => {
   assert.ok(sel.suites.every(s => s.selected));
   assert.deepEqual(
     sel.suites.map(s => [s.id, s.runs]),
-    onHarnessChange()
+    onHarnessChange().map(([id, runs]) => [id, id === 'go-data-pusher' ? 50 : runs])
   );
+  const pusher = sel.suites.find(s => s.id === 'go-data-pusher');
+  assert.equal(pusher.reason, 'affected');
+  assert.deepEqual(pusher.matched, ['apps/data-pusher/main.go']);
 });
 
 test('label test-repeat:all selects every suite at 50 runs, sharded', () => {
@@ -115,13 +120,30 @@ test('label test-repeat:load adds one --parallel 8 pass per selected suite', () 
 });
 
 test('the load pass respects a suite maxParallel', () => {
+  const capped = [
+    { id: 'capped', paths: ['capped/**'], needs: [], command: ['true'], maxParallel: 2 },
+  ];
+  const sel = selectSuites({
+    suites: capped,
+    changedFiles: ['capped/x'],
+    labels: ['test-repeat:load'],
+  });
+  const load = sel.entries.find(e => e.key === 'capped--load');
+  assert.equal(load.parallel, 2);
+});
+
+test('playwright-web-e2e runs its load pass as 8 copies, each on its own port (HAR-121)', () => {
   const sel = selectSuites({
     suites,
     changedFiles: ['apps/web-e2e/src/main-path.spec.ts'],
     labels: ['test-repeat:load'],
   });
   const load = sel.entries.find(e => e.key === 'playwright-web-e2e--load');
-  assert.equal(load.parallel, 1);
+  assert.equal(load.parallel, 8);
+  const pw = suites.find(s => s.id === 'playwright-web-e2e');
+  assert.equal(pw.maxParallel, undefined);
+  const ports = Array.from({ length: 8 }, (_, i) => pw.copyEnv(i + 1).WEB_E2E_PORT);
+  assert.deepEqual(ports, ['4301', '4302', '4303', '4304', '4305', '4306', '4307', '4308']);
 });
 
 test('nothing changed that any suite cares about: nothing selected, every suite still listed', () => {

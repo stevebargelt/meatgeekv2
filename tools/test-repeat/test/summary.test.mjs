@@ -84,6 +84,24 @@ test('harness change: every suite 1/1, and the header says why', () => {
     assert.match(rowOf(markdown, id), /\| harness changed \| 1 \| 1\/1 \| — \|/);
 });
 
+test('harness change with an app change: the affected suite runs the full count, and the header names it', () => {
+  const sel = selectSuites({
+    suites: reg,
+    changedFiles: ['tools/test-repeat/lib.mjs', 'beta/y'],
+  });
+  const { markdown, ok } = renderSummary(
+    sel,
+    sel.entries.map(e => result(e))
+  );
+  assert.equal(ok, true);
+  assert.match(
+    markdown,
+    /so every suite runs once, except the suites this pull request affects \(beta\), which run 50 times\./
+  );
+  assert.match(rowOf(markdown, 'beta'), /\| yes \(1 file\) \| 50 \| 50\/50 \| — \|/);
+  assert.match(rowOf(markdown, 'alpha'), /\| harness changed \| 1 \| 1\/1 \| — \|/);
+});
+
 test('a load pass gets its own row, counted in copies', () => {
   const sel = selectSuites({ suites: reg, changedFiles: ['beta/y'], labels: ['test-repeat:load'] });
   const load = sel.entries.find(e => e.kind === 'load');

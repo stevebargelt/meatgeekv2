@@ -319,3 +319,12 @@ export function livePanelConnection(state: string | null, badge: string | null):
   if (state === 'stale' && /^No reading for \S/.test(text)) return 'connected';
   return `not connected (data-state ${state ?? 'none'}, badge "${text}")`;
 }
+
+/**
+ * Whether the panel has stopped trying: "Sign in again" means negotiate
+ * answered 401, after which the app tries nothing more
+ * (apps/web/src/live/live-connection.ts). Waiting longer cannot connect it.
+ */
+export function livePanelGaveUp(state: string | null, badge: string | null): boolean {
+  return state === 'stale' && (badge ?? '').trim() === 'Sign in again';
+}

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Page, Route } from '@playwright/test';
 import type { components, operations } from '@meatgeekv2/api-specs/types';
+import { FROZEN_NOW_MS, frozenIso } from './clock';
 import { corsHeaders, fulfillPreflight } from './http';
 
 type Schemas = components['schemas'];
@@ -55,7 +56,8 @@ export interface FakeApiOptions {
 
 /**
  * An in-memory API on `page.route`, implementing only the routes the main
- * path uses. Anything else is answered 404 and listed in `unexpected`.
+ * path uses. Anything else is answered 404 and listed in `unexpected`. Its
+ * times are FROZEN_NOW_MS (clock.ts), never the real clock.
  */
 export class FakeApi {
   readonly requests: RecordedRequest[] = [];
@@ -159,7 +161,7 @@ export class FakeApi {
   }
 
   private startCook(body: StartCookRequest): Json<'startCook', 201> {
-    const start = new Date(Date.now() - CHART_BUCKETS * BUCKET_SECONDS * 1000);
+    const start = new Date(FROZEN_NOW_MS - CHART_BUCKETS * BUCKET_SECONDS * 1000);
     start.setUTCSeconds(0, 0);
     const cook: Cook = {
       id: body.id,
@@ -183,7 +185,7 @@ export class FakeApi {
   private stopCook(cook: Cook): Json<'stopCook', 200> {
     if (cook.status === 'active') {
       cook.status = 'completed';
-      cook.endTime = new Date().toISOString();
+      cook.endTime = frozenIso();
     }
     return cook;
   }
