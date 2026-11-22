@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { droppedEnv, suites } from '../suites.mjs';
-import { ENV_ALLOWLIST, envNameMatches, HARNESS_ENV, KNOWN_NEEDS } from '../lib.mjs';
+import { COPY_ENV, ENV_ALLOWLIST, envNameMatches, HARNESS_ENV, KNOWN_NEEDS } from '../lib.mjs';
 import { scanEnv, sourceFiles, suiteSourceRoots, workflowRunEnv } from './env-scan.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -110,8 +110,13 @@ test('no suite reaches the live cloud or goes through Nx', () => {
 // --- HAR-119: the environment a run gets --------------------------------------
 
 const allowed = (s, name) =>
-  envNameMatches(name, [...ENV_ALLOWLIST, ...HARNESS_ENV, ...(s.passEnv ?? [])], 'linux') ||
-  Object.hasOwn(s.env ?? {}, name);
+  envNameMatches(
+    name,
+    [...ENV_ALLOWLIST, ...HARNESS_ENV, COPY_ENV, ...(s.passEnv ?? [])],
+    'linux'
+  ) ||
+  Object.hasOwn(s.env ?? {}, name) ||
+  Object.hasOwn(s.copyEnv?.(1) ?? {}, name);
 
 test('every suite that runs Terraform turns off its checkpoint call, and so does terraform-tests.sh', () => {
   const tf = suites.filter(s => s.needs.includes('terraform'));

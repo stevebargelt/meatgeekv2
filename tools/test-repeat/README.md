@@ -74,12 +74,17 @@ A run does not inherit the caller's environment. It gets exactly:
    set (`api-emulator` passes `NODE_EXTRA_CA_CERTS`, the emulator's
    certificate, which the workflow writes to `GITHUB_ENV`);
 3. the suite's `env`, which wins over both;
-4. its own `TMPDIR`, `TMP` and `TEMP` (each parallel copy its own).
+4. the suite's `copyEnv(copy)`, for a resource each concurrent copy needs its
+   own: `playwright-web-e2e` sets `WEB_E2E_PORT` to 4300 + the copy number;
+5. its own `TMPDIR`, `TMP` and `TEMP` (each parallel copy its own), and
+   `TEST_REPEAT_COPY`, its copy number: 1 to K under `--parallel K`, 1 in the
+   serial pass (HAR-121).
 
 Anything else the caller has set is dropped: a `TF_DESTROY_GUARD_*` exported in
 a shell, an `AZURE_*` credential, a `TZ`, the workflow step's own `SUITE` and
-`RUNS`. A suite's prepare steps get the same, except that they keep the
-caller's temp dir variables. Every suite that runs Terraform sets
+`RUNS`, a `TEST_REPEAT_COPY`. A suite's prepare steps get the same, except
+that they keep the caller's temp dir variables and get no `copyEnv` and no
+`TEST_REPEAT_COPY`. Every suite that runs Terraform sets
 `CHECKPOINT_DISABLE=1`, so no run calls HashiCorp's version check;
 `terraform-tests.sh` sets it itself too, and shortens a `TMPDIR` over 60
 characters to a fresh `mktemp -d /tmp/tf.XXXXXX` (removed on exit), by the same
@@ -113,8 +118,10 @@ change's CI run, which runs every suite at least once in CI's own environment.
 K copies of the suite run at once, each with its own temp dir (`TMPDIR`, `TMP`,
 `TEMP`), each doing its own runs and stopping at its own first failure; each
 copy is reported on its own line. The working tree is shared. A suite whose
-`maxParallel` is lower is capped and the summary says why:
-`playwright-web-e2e` serves on the fixed port 4300, so it cannot run two copies.
+`maxParallel` is lower is capped and the summary says why; no suite has one
+today. `playwright-web-e2e` used to (it served on the fixed port 4300); each
+copy now serves on its own port, 4300 + its copy number, through `copyEnv`, so
+its load pass is 8 real concurrent browsers on 4301 to 4308 (HAR-121).
 
 A suite's `loadArgs` are appended to its command in every copy when it runs as
 more than one copy, never in the serial pass; the log and the summary row name

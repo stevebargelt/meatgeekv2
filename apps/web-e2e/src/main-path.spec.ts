@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { CHART_BUCKETS, FakeApi, type Device } from './fakes/api';
+import { freezeClock, frozenIso } from './fakes/clock';
 import { FakeEntra } from './fakes/entra';
 import { FakeSignalRHub } from './fakes/signalr-hub';
 import { TEST_CONFIG, TEST_USER } from './fakes/test-config';
@@ -48,6 +49,9 @@ test('sign in, start a cook, see a pushed reading and the chart, stop the cook',
 
   await blockTheInternet(page, appOrigin, escaped);
   await page.route(`${appOrigin}/config.json`, route => route.fulfill({ json: TEST_CONFIG }));
+  // HAR-121: the browser and the fakes share one frozen instant, so the pushed
+  // reading is 0 s old (live, never stale) however long the run takes.
+  await freezeClock(page);
   await entra.install(page);
   await api.install(page);
   await hub.install(page);
@@ -85,8 +89,8 @@ test('sign in, start a cook, see a pushed reading and the chart, stop the cook',
   hub.push('temperature', {
     deviceId: DEVICE.id,
     cookId,
-    timestamp: new Date().toISOString(),
-    enqueuedTimeUtc: new Date().toISOString(),
+    timestamp: frozenIso(),
+    enqueuedTimeUtc: frozenIso(),
     grillTemp: 231.4,
     probe1Temp: 141.2,
   });

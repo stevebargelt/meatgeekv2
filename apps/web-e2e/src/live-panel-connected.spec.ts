@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { expectLivePanelConnected } from '../live/live-panel';
 import { FakeApi, type Device, type FakeApiOptions } from './fakes/api';
+import { freezeClock, frozenIso } from './fakes/clock';
 import { FakeEntra } from './fakes/entra';
 import { FakeSignalRHub } from './fakes/signalr-hub';
 import { TEST_CONFIG, TEST_USER } from './fakes/test-config';
@@ -10,6 +11,10 @@ import { TEST_CONFIG, TEST_USER } from './fakes/test-config';
  * on a standing device the panel backfills the last run's reading and opens
  * stale while connected; the check must pass that and still fail when the
  * panel is not connected.
+ *
+ * HAR-121: the page's clock is frozen (fakes/clock.ts), so the seeded reading
+ * is exactly 24 min old however long the run takes, and neither check has a
+ * deadline of its own.
  */
 
 const DEVICE: Device = {
@@ -43,6 +48,7 @@ async function openCookPage(
       : route.abort('blockedbyclient')
   );
   await page.route(`${appOrigin}/config.json`, route => route.fulfill({ json: TEST_CONFIG }));
+  await freezeClock(page);
   await new FakeEntra(TEST_CONFIG, TEST_USER).install(page);
   await api.install(page);
   await hub.install(page);
@@ -64,7 +70,7 @@ test('passes a connected panel whose backfilled reading is an old one', async ({
   page,
   baseURL,
 }) => {
-  const old = new Date(Date.now() - 24 * 60_000).toISOString();
+  const old = frozenIso(-24 * 60_000);
   const hub = await openCookPage(page, baseURL, {
     currentReading: { deviceId: DEVICE.id, timestamp: old, grillTemp: 312.3 },
   });
@@ -72,8 +78,8 @@ test('passes a connected panel whose backfilled reading is an old one', async ({
 
   // What run 44833909340 saw: connected, but stale with the last run's reading.
   await expect(panel).toHaveAttribute('data-state', 'stale');
-  await expect(panel.getByTestId('live-badge')).toHaveText(/^No reading for 2\d min/);
-  await expectLivePanelConnected(panel, 10_000);
+  await expect(panel.getByTestId('live-badge')).toHaveText('No reading for 24 min 0 s');
+  await expectLivePanelConnected(panel);
   expect(hub.connectedCount).toBe(1);
 });
 
@@ -82,7 +88,9 @@ test('fails a panel that cannot connect ("Sign in again")', async ({ page, baseU
   const panel = page.getByTestId('cook-live-panel');
 
   await expect(panel.getByTestId('live-badge')).toHaveText('Sign in again');
-  await expect(expectLivePanelConnected(panel, 2_000)).rejects.toThrow(
-    /the live panel is not connected[\s\S]*data-state stale, badge \\?"Sign in again/
+  // Rejects on what the panel shows, not after a wait: "Sign in again" is final.
+  await expect(expectLivePanelConnected(panel)).rejects.toThrow(
+    'the live panel is not connected, and has stopped trying: ' +
+      'not connected (data-state stale, badge "Sign in again")'
   );
 });

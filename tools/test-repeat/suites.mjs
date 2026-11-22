@@ -23,6 +23,10 @@
 //             more than one copy (--parallel K > 1), with loadArgsReason
 //             saying why. Never used by the serial 50-run pass.
 //   env       extra environment for every run (and prepare step).
+//   copyEnv   copy => extra environment for every run of that copy (never a
+//             prepare step). Every run also gets TEST_REPEAT_COPY, its copy
+//             number: 1 to K under --parallel K, 1 in the serial pass
+//             (HAR-121). For a resource each concurrent copy needs its own.
 //   passEnv   variables passed through from the caller's environment on top of
 //             lib.mjs's ENV_ALLOWLIST. A run sees ONLY the allowlist, passEnv,
 //             env and its own TMPDIR/TMP/TEMP; everything else the caller has
@@ -312,10 +316,10 @@ export const suites = [
       ...JS_ROOT,
     ],
     needs: ['npm', 'chromium'],
-    // playwright.config.ts serves the build on a fixed port (4300,
-    // --strictPort), so a second concurrent copy cannot start its server.
-    maxParallel: 1,
-    maxParallelReason: 'apps/web-e2e/playwright.config.ts serves on fixed port 4300',
+    // HAR-121: playwright.config.ts serves the build on WEB_E2E_PORT, with
+    // --strictPort. Each copy gets its own, 4300 + its copy number, so 8
+    // copies serve on 4301-4308 at once; `nx e2e web-e2e` keeps 4300.
+    copyEnv: copy => ({ WEB_E2E_PORT: String(4300 + copy) }),
     timeoutSec: 900,
   },
 
