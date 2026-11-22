@@ -9,6 +9,7 @@ import type {
   StartCookRequest,
 } from '@meatgeekv2/api-interfaces';
 
+import { clock } from '../lib/clock';
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import { topupTimeLimitMs, VOLUME } from './telemetry-volume.proof';
@@ -61,8 +62,9 @@ export const CHART_RU_BUDGET = 40;
 
 /**
  * The standing cook's readings and the coverage polling. The self-test shrinks
- * `readings` and the polling; nothing else should, and there is deliberately no
- * environment variable for them. Pacing (interval, in flight) is the volume
+ * `readings`; nothing else should, and there is deliberately no environment
+ * variable for them. The polling runs on the injected clock (../lib/clock), so
+ * the self-test keeps its live values. Pacing (interval, in flight) is the volume
  * top-up's, {@link VOLUME}: at most 200 RU/s of the shared 400 RU/s offer.
  */
 export const CHART = {
@@ -75,8 +77,6 @@ export const CHART = {
   /** ...and for how long after the send ends. */
   pollCapMs: 15 * 60_000,
 };
-
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /** What {@link chartCoverage} found. */
 export interface Coverage {
@@ -338,7 +338,7 @@ export default defineProofs('cook chart', () => {
         if (!toppedUp) {
           throw new Error('the chart was not topped up by an earlier proof');
         }
-        const deadline = Date.now() + CHART.pollCapMs;
+        const deadline = clock().now() + CHART.pollCapMs;
         let last: { response: AcceptanceResponse<CookChart>; coverage: Coverage };
         for (;;) {
           last = await loadChart(api);
@@ -346,10 +346,10 @@ export default defineProofs('cook chart', () => {
             covered = true;
             return;
           }
-          if (Date.now() + CHART.pollIntervalMs > deadline) {
+          if (clock().now() + CHART.pollIntervalMs > deadline) {
             break;
           }
-          await sleep(CHART.pollIntervalMs);
+          await clock().sleep(CHART.pollIntervalMs);
         }
         throw new ProofFailure(
           `the chart is not covered after the ${CHART.pollCapMs / 1000} s cap: ${last.coverage.reason}`,

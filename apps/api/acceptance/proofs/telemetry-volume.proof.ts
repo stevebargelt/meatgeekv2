@@ -1,6 +1,7 @@
 import type { TemperatureHistoryResponse, TemperatureReading } from '@meatgeekv2/api-interfaces';
 
 import { expectErrorCode } from '../lib/checks';
+import { clock } from '../lib/clock';
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 
@@ -36,8 +37,10 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  */
 
 /**
- * The volume and pacing. The self-test shrinks these; nothing else should, and
- * there is deliberately no environment variable for them.
+ * The volume and pacing. The self-test shrinks the volume (`target`, `margin`,
+ * `pageLimit`); nothing else should, and there is deliberately no environment
+ * variable for them. The polls run on the injected clock (../lib/clock), so
+ * the self-test keeps their live values.
  *
  * `intervalMs` — the gap simdevice leaves between send starts. The `temperatures`
  * container has no throughput of its own: it shares ONE 400 RU/s
@@ -101,8 +104,6 @@ export function topupDrainedAt(timestamps: readonly number[], inflight: number):
   const sorted = [...timestamps].sort((a, b) => a - b);
   return sorted[Math.max(0, sorted.length - inflight)];
 }
-
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 const historyPath = (deviceId: string, query = '') =>
   `/temperatures/history?deviceId=${encodeURIComponent(deviceId)}${query}`;
@@ -211,7 +212,7 @@ export default defineProofs('telemetry volume', () => {
         }
         const count = VOLUME.target - readingsBefore + VOLUME.margin;
         const timeoutMs = topupTimeLimitMs(count);
-        const started = Date.now();
+        const started = clock().now();
         const run = await api.runSimDevice(
           [
             '--count',
@@ -223,7 +224,7 @@ export default defineProofs('telemetry volume', () => {
           ],
           { timeoutMs }
         );
-        const elapsed = Date.now() - started;
+        const elapsed = clock().now() - started;
         if (run.exitCode !== 0) {
           throw new ProofFailure(
             (run.exitCode === null
@@ -255,7 +256,7 @@ export default defineProofs('telemetry volume', () => {
           ready = true;
           return;
         }
-        const deadline = Date.now() + VOLUME.pollCapMs;
+        const deadline = clock().now() + VOLUME.pollCapMs;
         let last: AcceptanceResponse<TemperatureReading>;
         for (;;) {
           last = await api.request<TemperatureReading>({
@@ -275,10 +276,10 @@ export default defineProofs('telemetry volume', () => {
             ready = true;
             return;
           }
-          if (Date.now() + VOLUME.pollIntervalMs > deadline) {
+          if (clock().now() + VOLUME.pollIntervalMs > deadline) {
             break;
           }
-          await sleep(VOLUME.pollIntervalMs);
+          await clock().sleep(VOLUME.pollIntervalMs);
         }
         throw new ProofFailure(
           `the current reading is ${last.status === 200 ? JSON.stringify(last.body?.timestamp) : 'none'}, ` +

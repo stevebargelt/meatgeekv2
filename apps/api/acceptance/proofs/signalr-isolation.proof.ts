@@ -13,6 +13,7 @@ import {
 import type { Cook, CookListResponse, StartCookRequest } from '@meatgeekv2/api-interfaces';
 
 import { expectErrorCode } from '../lib/checks';
+import { clock, sleepUntilWoken } from '../lib/clock';
 import type { AcceptanceApi, Caller } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { NegotiateBody } from '../lib/signalr';
@@ -66,8 +67,11 @@ import { registerSimulatedDevice, sameInstant, sendOneReading } from '../lib/tel
  */
 
 /** How long the owner's messages are waited for, and the grace after them in
- *  which the peer must stay silent. The self-test shortens both. */
-export const ISOLATION_WAIT = { capMs: 90_000, graceMs: 15_000 };
+ *  which the peer must stay silent. Both on the injected clock (../lib/clock). */
+export const ISOLATION_WAIT: { readonly capMs: number; readonly graceMs: number } = {
+  capMs: 90_000,
+  graceMs: 15_000,
+};
 
 const TARGETS = ['temperature', 'cook_started', 'cook_stopped'] as const;
 
@@ -176,7 +180,7 @@ export default defineProofs('signalr isolation', () => {
     side.secrets = [url, accessToken];
 
     const record = (target: string, payload: unknown) => {
-      side.received.push({ target, payload, receivedAt: Date.now() });
+      side.received.push({ target, payload, receivedAt: clock().now() });
       if (side === owner) wake?.();
     };
     const builder = new HubConnectionBuilder()
@@ -219,17 +223,12 @@ export default defineProofs('signalr isolation', () => {
     isWanted: (message: Received) => boolean
   ) => {
     const capMs = ISOLATION_WAIT.capMs;
-    const deadline = Date.now() + capMs;
+    const deadline = clock().now() + capMs;
     let match = owner.received.find(isWanted);
-    while (!match && owner.closedBy === undefined && Date.now() < deadline) {
-      await new Promise<void>(resolve => {
-        const timer = setTimeout(resolve, deadline - Date.now());
-        wake = () => {
-          clearTimeout(timer);
-          resolve();
-        };
+    while (!match && owner.closedBy === undefined && clock().now() < deadline) {
+      await sleepUntilWoken(deadline - clock().now(), next => {
+        wake = next;
       });
-      wake = undefined;
       match = owner.received.find(isWanted);
     }
     if (!match) {
@@ -255,7 +254,7 @@ export default defineProofs('signalr isolation', () => {
   /** Wait the grace window, then fail if the peer has received anything.
    *  `final` also prints METRIC isolation-peer-messages; so does any failure. */
   const expectPeerSilent = async (api: AcceptanceApi, after: string, final: boolean) => {
-    await new Promise(resolve => setTimeout(resolve, ISOLATION_WAIT.graceMs));
+    await clock().sleep(ISOLATION_WAIT.graceMs);
     if (peer.closedBy !== undefined) {
       throw new ProofFailure(
         `the peer connection closed (${peer.closedBy}), so its silence proves nothing`
@@ -399,7 +398,7 @@ export default defineProofs('signalr isolation', () => {
             meatType: 'acceptance',
             notes: 'Synthetic cook written by the live acceptance suite (signalr isolation).',
           };
-          const startedAt = Date.now();
+          const startedAt = clock().now();
           const response = await api.request<Cook>({ method: 'POST', path: '/cooks', body });
           api.expectStatus(response, 201);
           api.check(response, response.body?.id === body.id, 'cook.id is not the id sent');

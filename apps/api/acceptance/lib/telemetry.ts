@@ -81,11 +81,14 @@ export function parseSentReading(api: AcceptanceApi, message: unknown): SentRead
   return { timestamp, sentAt };
 }
 
-/** Fail unless a simdevice run exited 0, naming its exit and first stderr line. */
+/** Fail unless a simdevice run exited 0, naming its exit (or the time limit
+ *  it was killed at) and its first stderr line. */
 export function expectSimDeviceExit0(run: SimDeviceRun): void {
   if (run.exitCode !== 0) {
     throw new ProofFailure(
-      `simdevice exited ${run.exitCode ?? '(killed)'}, expected 0` +
+      (run.killedAfterMs !== undefined
+        ? `simdevice did not exit within its ${run.killedAfterMs} ms limit and was killed, expected exit 0`
+        : `simdevice exited ${run.exitCode ?? '(killed)'}, expected 0`) +
         (run.stderrFirstLine ? `: ${run.stderrFirstLine}` : '')
     );
   }

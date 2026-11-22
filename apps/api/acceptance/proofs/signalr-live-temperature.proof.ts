@@ -5,6 +5,7 @@ import {
   LogLevel,
 } from '@microsoft/signalr';
 
+import { clock, sleepUntilWoken } from '../lib/clock';
 import type { AcceptanceApi } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import type { NegotiateBody } from '../lib/signalr';
@@ -51,8 +52,8 @@ import { isDate, registerSimulatedDevice, sameInstant, sendOneReading } from '..
  * neither the url nor the token reaches the output.
  */
 
-/** How long step 4 waits for the reading. The self-test shortens it. */
-export const LIVE_WAIT = { capMs: 90_000 };
+/** How long step 4 waits for the reading, on the injected clock (../lib/clock). */
+export const LIVE_WAIT: { readonly capMs: number } = { capMs: 90_000 };
 
 /** Every field `toTemperatureReading` can produce, plus the enqueued time
  *  `broadcastTemperature` adds. */
@@ -152,7 +153,7 @@ export default defineProofs('signalr live temperature', () => {
           .configureLogging(LogLevel.None)
           .build();
         connection.on('temperature', (payload: unknown) => {
-          received.push({ payload, receivedAt: Date.now() });
+          received.push({ payload, receivedAt: clock().now() });
           wake?.();
         });
         connection.onclose(error => {
@@ -176,7 +177,7 @@ export default defineProofs('signalr live temperature', () => {
       async run(api: AcceptanceApi) {
         connected();
         await stopOnFailure(async () => {
-          const sendStartedAt = Date.now();
+          const sendStartedAt = clock().now();
           const reading = await sendOneReading(api);
           sent = { ...reading, sendStartedAt };
         });
@@ -193,21 +194,16 @@ export default defineProofs('signalr live temperature', () => {
           const { timestamp, sendStartedAt } = sent;
           const deviceId = api.simulatedDeviceId;
           const capMs = LIVE_WAIT.capMs;
-          const deadline = Date.now() + capMs;
+          const deadline = clock().now() + capMs;
           const isSent = (message: Received) =>
             field(message.payload, 'deviceId') === deviceId &&
             sameInstant(field(message.payload, 'timestamp'), timestamp);
 
           let match = received.find(isSent);
-          while (!match && closedBy === undefined && Date.now() < deadline) {
-            await new Promise<void>(resolve => {
-              const timer = setTimeout(resolve, deadline - Date.now());
-              wake = () => {
-                clearTimeout(timer);
-                resolve();
-              };
+          while (!match && closedBy === undefined && clock().now() < deadline) {
+            await sleepUntilWoken(deadline - clock().now(), next => {
+              wake = next;
             });
-            wake = undefined;
             match = received.find(isSent);
           }
 

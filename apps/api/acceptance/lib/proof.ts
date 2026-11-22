@@ -71,6 +71,9 @@ export interface SimDeviceRun {
   readonly unparsedLines: number;
   /** The first non-empty stderr line, with the device credential masked. */
   readonly stderrFirstLine: string | undefined;
+  /** HAR-120: set when the runner killed the run for outlasting its time
+   *  limit (`exitCode` is then `null`): the limit, in ms. */
+  readonly killedAfterMs?: number;
 }
 
 export interface SimDeviceOptions {
@@ -100,7 +103,8 @@ export interface AcceptanceApi {
    *  runner hands it the device credential through its environment; a proof
    *  never sees the credential. Resolves on exit whatever the exit code;
    *  rejects only if the binary cannot be started. A run longer than
-   *  `options.timeoutMs` (default 120 s) is killed: `exitCode` is `null`. */
+   *  `options.timeoutMs` (default 120 s, on the injected clock) is killed:
+   *  `exitCode` is `null` and `killedAfterMs` is the limit. */
   runSimDevice(args: readonly string[], options?: SimDeviceOptions): Promise<SimDeviceRun>;
   /** Print `METRIC <name> <value>`. The CI job copies these lines to the run
    *  summary. `name` is lower-case kebab-case; `value` a finite number. */

@@ -465,6 +465,57 @@ The run ends with `CONTRACT validated <n> responses, <m> hub messages,
 <k> mismatches` and `METRIC contract-validated-responses <n>`. A green run
 shows `0 mismatches`.
 
+## Real-time waits
+
+The live suite waits on a real cloud, so some of its waits are on real time.
+This table is every one of them in `live.acceptance.ts`, `proofs/*.proof.ts`
+and `lib/*`, with its bound and why the bound is that long. The browser proof
+(`apps/web-e2e`) adds its own rows below these, with the same columns.
+
+The rules (HAR-106, HAR-120):
+
+- Every wait in `proofs/` and `lib/` goes through the one clock in
+  `lib/clock.ts`. Live it is the real one (`Date.now`, `performance.now`,
+  `setTimeout`). The self-test (`acceptance-runner.spec.ts`) installs a fake
+  one, so each wait below runs there with its **live** value: a `sleep` ends
+  once the stub has answered and every SignalR client has taken what was
+  pushed to it, then moves the fake time on by exactly that long; a deadline
+  fires only when the fake time reaches it. Each failure message below is
+  asserted exactly there.
+- A timeout's message names what it was waiting for.
+- A bound changes only with a reason in this table: a measured run, an Azure
+  limit or a ticket. Never to make something pass.
+
+"Measured" below is the six green `Deploy Dev App` runs on `main` from
+2026-11-20 to 2026-11-22 (runs 44826747406, 44829527186, 44837747351, 44843327090, 44936508031 and 44964201190),
+none of which needed a volume or chart top-up.
+
+| Where (file:symbol)                                                             | What it waits for                                                                       | Bound                                                   | Why that long                                                                                                                                                                                                                                        | Failure message                                                                                                                                                                               |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `live.acceptance.ts:SUITE_TIMEOUT_MS`                                           | the whole run: jest's limit on the suite's one test. Jest's own timer, not the clock    | 35 min                                                  | Under the `acceptance` job's 40 min timeout (`app-deploy-dev.yml`), so jest reports an overrun, not the job kill (HAR-46). Room for a full volume top-up (~8,700 readings, ~7–8 min) plus its drain (up to 15 min). Measured: 1–2 min with no top-up | jest: `Exceeded timeout of 2100000 ms for a test` on `live acceptance proofs pass against ACCEPTANCE_BASE_URL`                                                                                |
+| `lib/runner.ts:DEFAULT_TIMEOUT_MS` (`api.request`)                              | one API response, body included                                                         | 60 s                                                    | A dev Function App cold start: the slowest first request measured was 9,469 ms (run 44964201190) and 9,365 ms (run 44843327090); every other request was under 0.9 s (HAR-11)                                                                        | `FAIL <proof> — <METHOD> <route> → no response: the response did not finish in 60000 ms (the runner's per-request limit)`                                                                     |
+| `lib/runner.ts:SIMDEVICE_TIMEOUT_MS` (`runSimDevice`, `runChild`'s kill)        | a `simdevice` run to exit, unless the proof passes its own limit; killed with `SIGKILL` | 120 s                                                   | One reading takes seconds (HAR-44). Measured: `simdevice --count 1` ≤ 487 ms                                                                                                                                                                         | `simdevice → exit killed: simdevice did not exit within its 120000 ms limit and was killed, expected exit 0` (its `EXEC` line says `exit killed`)                                             |
+| `proofs/device-twin.proof.ts:SIMDEVICE_KILL_MS`                                 | `simdevice --twin` to exit; killed with `SIGKILL`                                       | 120 s                                                   | Twice simdevice's own 60 s twin wait (next row), leaving room for the connect and a reading (HAR-68). Measured: a reconnect ≤ 869 ms (`twin-apply-ms` ≤ 870)                                                                                         | as the row above, with `120000 ms`                                                                                                                                                            |
+| `proofs/device-twin.proof.ts:TWIN_TIMEOUT` (`--timeout 60s`)                    | simdevice's own wait for each twin GET, inside the child (Go)                           | 60 s                                                    | Set with the proof (HAR-68), twice simdevice's own 30 s default (HAR-58); no measurement then. Measured: the whole reconnect, both GETs included, ≤ 869 ms                                                                                           | `simdevice exited 1, expected 0: … no twin response from IoT Hub within 60s: …`                                                                                                               |
+| `proofs/telemetry-volume.proof.ts:topupTimeLimitMs`                             | the volume top-up's `simdevice` run; killed with `SIGKILL`                              | `count × 50 ms × 1.5 + 120 s` (8,700 readings: 772.5 s) | The paced send time with half again for slack, plus 120 s to connect and drain the last acknowledgements (HAR-45, HAR-46). A full top-up took ~7–8 min                                                                                               | `simdevice was killed after the <n> s limit (<k> of <count> message(s) sent)`                                                                                                                 |
+| `proofs/volume-cook-chart.proof.ts` (`topupTimeLimitMs`)                        | the chart top-up's `simdevice` run; killed with `SIGKILL`                               | the same formula (8,640 readings: 768 s)                | The same pacing as the volume top-up (HAR-87)                                                                                                                                                                                                        | as the row above                                                                                                                                                                              |
+| `proofs/device-twin.proof.ts:TWIN_POLL`                                         | the twin run's reading in `GET /temperatures/current/{deviceId}`                        | a poll every 2 s, cap 90 s                              | IoT Hub → Cosmos routing (HAR-68). Measured round trip (`roundtrip-ms`) ≤ 1,225 ms                                                                                                                                                                   | `the reading with timestamp <ts> was not readable within the 90 s cap; last status <status>, last timestamp seen <ts or none>`                                                                |
+| `proofs/telemetry-roundtrip.proof.ts:ROUNDTRIP_POLL`                            | the sent reading in `GET /temperatures/current/{deviceId}`                              | a poll every 1 s, cap 120 s                             | IoT Hub → Cosmos routing (HAR-44). Measured `roundtrip-ms` 104–1,225 ms                                                                                                                                                                              | `the reading sent at <sentAt> (timestamp <ts>) was not readable within the 120 s cap; last status <status>, last timestamp seen <ts or none>`                                                 |
+| `proofs/telemetry-volume.proof.ts:VOLUME.pollIntervalMs`, `pollCapMs`           | the top-up's tail in the current reading: its routing backlog has drained               | a poll every 10 s, cap 15 min                           | The routed writes share the one 400 RU/s offer, so ~8,700 of them drain behind it (HAR-45, HAR-46)                                                                                                                                                   | `the current reading is <ts or none>, before the top-up's end (<iso>), after the 900 s cap`                                                                                                   |
+| `proofs/volume-cook-chart.proof.ts:CHART.pollIntervalMs`, `pollCapMs`           | the chart to cover 12 h after a top-up (rolled up)                                      | a poll every 10 s, cap 15 min                           | The same backlog as the volume top-up, plus the hourly rollup (HAR-87)                                                                                                                                                                               | `the chart is not covered after the 900 s cap: <why>`                                                                                                                                         |
+| `proofs/signalr-live-temperature.proof.ts:LIVE_WAIT.capMs`                      | the sent reading pushed on target `temperature`                                         | 90 s                                                    | simdevice → IoT Hub → Event Hub → `broadcastTemperature` → SignalR (HAR-63). Measured `signalr-delivery-ms` 436–628 ms                                                                                                                               | `connected and sent (…), but no temperature message for <device> with that timestamp arrived: nothing within the 90 s cap; the connection is <state>. Received <n> temperature message(s), …` |
+| `proofs/signalr-isolation.proof.ts:ISOLATION_WAIT.capMs` (`waitForOwner`)       | the owner's reading, `cook_started` and `cook_stopped`, each                            | 90 s each                                               | As the row above (HAR-67). Measured `signalr-cook-event-ms` 230–366 ms                                                                                                                                                                               | `no <what> reached the owner: nothing within the 90 s cap; the owner connection is <state>. The owner received <n> message(s) (…)`                                                            |
+| `proofs/signalr-isolation.proof.ts:ISOLATION_WAIT.graceMs` (`expectPeerSilent`) | a fixed window after the owner got an event, in which the peer must receive nothing     | 15 s                                                    | A leak would travel the same path as the owner's message, so it gets about 24 × the slowest owner delivery measured (628 ms) to show up (HAR-67)                                                                                                     | `LEAK: the peer, who does not own <device>, received <n> message(s) by <event> + 15 s: <target ×n>`                                                                                           |
+| `lib/signalr.ts:CONNECT_TIMEOUT_MS` (`within`)                                  | one SignalR client `start()` attempt, or a `stop()`                                     | 30 s                                                    | Set with the first SignalR proof (HAR-57) for the Free_F1 service's client negotiate and transport start; no measurement then. Measured, from the log's timestamps: `start()` 170–580 ms                                                             | `<what> did not finish in 30000 ms`, `<what>` being `start()`, `owner start()`, `peer start()` or `stop()`                                                                                    |
+| `lib/signalr.ts:START_RETRY.delaysMs` (`startConnection`)                       | before retrying a `start()` the service answered with `429`                             | 1, 2, 4 and 8 s: five attempts, 15 s of waiting         | HAR-77's first live run: two proofs got `429`, and the next one, 2 s later, connected                                                                                                                                                                | `<what> failed: <masked error> (throttled on all 5 attempts)`                                                                                                                                 |
+
+A `grep -nE 'capMs|intervalMs|graceMs|TIMEOUT_MS|timeoutMs|delaysMs' -r
+apps/api/acceptance` also finds names that are not waits in this suite:
+`VOLUME.intervalMs` is the pace simdevice sends a top-up at (`--interval
+50ms`, set by the 200 RU/s write budget; it is simdevice's, not a wait here);
+`timeoutMs` in `RunOptions` and `SimDeviceOptions` carries the limits above;
+the local `capMs` constants are the caps above; and the self-test's own uses.
+
 ## Running it locally against dev
 
 The suite takes six inputs, all from the environment. If any is missing it
@@ -748,6 +799,7 @@ apps/api/acceptance/
 ├── live.acceptance.ts          # entry point for `nx run api:acceptance`
 ├── lib/
 │   ├── checks.ts               # shared response checks (system properties, error code)
+│   ├── clock.ts                # HAR-120: the one clock every wait goes through (fake in the self-test)
 │   ├── devices.ts              # HAR-85: DELETE /devices/{id} and the always-run cleanup step
 │   ├── contract.ts             # HAR-77: openapi.yaml loaded and compiled; response and hub message checks
 │   ├── proof.ts                # the proof contract: defineProofs, AcceptanceApi
@@ -779,15 +831,17 @@ apps/api/acceptance/
   to a temp dir: it prints one JSON line, exits 1, or prints the connection
   string to stdout and stderr; the stub makes the reading readable after a few
   polls, never, or registers the simulated device to someone else. The poll
-  interval and cap are `ROUNDTRIP_POLL` in the proof file, which the self-test
-  shortens; there is no environment variable for them. For the volume proof the
-  stub keeps a reading count for the simulated device; the fake reports a
+  interval and cap are `ROUNDTRIP_POLL` in the proof file; there is no
+  environment variable for them. The self-test runs every wait with its live
+  value on a fake clock (see [Real-time waits](#real-time-waits)). For the
+  volume proof the stub keeps a reading count for the simulated device; the
+  fake reports a
   top-up to the stub, which makes it readable a batch per poll, or never, and
   the fake can fail a top-up with exit 1. The self-test also checks that the
   top-up passes `--inflight 32 --interval 50ms` and a kill limit of
   `count × 50 ms × 1.5 + 120 s`. Its target, margin, interval, inflight and poll
   pacing are `VOLUME` in the proof file; the self-test shrinks the target to a
-  few hundred readings and the polls to milliseconds. For the twin proof the
+  few hundred readings and keeps the poll pacing. For the twin proof the
   stub keeps a device twin for the simulated device that start and stop sync
   as the API does; the fake `simdevice --twin` reads it from the stub, which
   applies desired to reported, and prints the twin line. The stub can print a
@@ -802,7 +856,7 @@ apps/api/acceptance/
   few reads, or never. The self-test proves a first run starts a cook and tops
   it up once, a covered chart sends nothing, 41 RU fails naming the budget (40
   passes), and a missing variable fails clearly. `CHART` in the proof file
-  holds the reading count and poll pacing; the self-test shrinks them.
+  holds the reading count and poll pacing; the self-test shrinks the count.
   Every stub response conforms to openapi.yaml (HAR-77): it sends
   `X-Request-ID`, the error envelope `{error, message, requestId}`, and Easy
   Auth's empty `401`. The self-test also proves the contract checks fail on an
