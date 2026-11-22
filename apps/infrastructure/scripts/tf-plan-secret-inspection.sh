@@ -654,7 +654,16 @@ inspect_rows() {
     # or mixed-case `accountkey=` / `AcCountKey=` / `accountendpoint=…;accountkey=`
     # is just as live a secret as the canonical form. A case-SENSITIVE match here
     # was a gate bypass — the exact hole this closes.
-    if ! printf '%s\n' "${value}" | grep -qiE "${CRED_MARKER_RE}"; then
+    #
+    # The value reaches grep through a here-document, not `printf | grep -q`
+    # (HAR-125). grep -q exits at its first match; under pipefail a printf still
+    # writing a large value then takes SIGPIPE, the pipe returns 141, and this
+    # `if !` would wave a credential through as "no marker". A here-document is
+    # POSIX (a here-string is not; see PORTABILITY) and its status is grep's.
+    if ! grep -qiE "${CRED_MARKER_RE}" <<EOF
+${value}
+EOF
+    then
       continue   # non-secret value (endpoint / URI / plain string) — fine
     fi
 
@@ -670,8 +679,11 @@ inspect_rows() {
     # enabled=false" safety basis applies. An OUTPUT (or any OTHER kind) is an
     # export surface and is NEVER accepted. Case-insensitive here too so a
     # mixed-case AI conn string still routes to the managed-ikey binding below
-    # rather than the generic-credential reject.
-    if printf '%s\n' "${value}" | grep -qiE "${AI_CONNSTR_RE}"; then
+    # rather than the generic-credential reject. Here-document, as above.
+    if grep -qiE "${AI_CONNSTR_RE}" <<EOF
+${value}
+EOF
+    then
       if { [ "${kind}" = "app_setting" ] || [ "${kind}" = "site_config" ]; } && [ "${ai_local_auth_disabled}" = "true" ]; then
         # The exception is bound to the MANAGED resource: the embedded
         # InstrumentationKey MUST be one of this plan/state's own App Insights

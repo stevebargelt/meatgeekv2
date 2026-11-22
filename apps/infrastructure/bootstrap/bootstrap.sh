@@ -544,8 +544,11 @@ resource_absent_or_die() {
   # Not-found signal: az CLI exit code 3, OR an explicit not-found marker in the
   # captured output. Everything else non-zero is a REAL error (auth / throttling /
   # network) and must NOT be mistaken for absence.
-  if [ "$status" -eq 3 ] \
-     || printf '%s' "$out" | grep -qiE 'ResourceNotFound|ContainerNotFound|not[[:space:]_-]?found|does not exist|could not be found|was not found'; then
+  # Here-string, not `printf | grep -q` (HAR-125): grep -q exits at its first
+  # match, and under pipefail a writer still holding output takes SIGPIPE and
+  # turns that match into a failure. az's captured output can be large.
+  if [ "$status" -eq 3 ] ||
+     grep -qiE 'ResourceNotFound|ContainerNotFound|not[[:space:]_-]?found|does not exist|could not be found|was not found' <<<"$out"; then
     return 0   # genuinely absent → caller creates
   fi
   die "existence check for ${what} failed (az exited ${status}) — this is a REAL Azure error (auth / throttling / network), NOT resource-absent. Refusing to attempt a create that could collide with an existing resource. Command: $*  |  az: ${out}"
@@ -1393,8 +1396,12 @@ ensure_deployment_environment() {
     || die "failed to create/update the GitHub Environment '${env}'. Do NOT set DEV_TF_BACKEND_READY=true."
 
   # Pin deployments to main. Idempotent: POSTing an existing policy name errors,
-  # so only create it when a `main` policy is not already present.
-  if ! environment_branch_policies "$env" | grep -qx 'main'; then
+  # so only create it when a `main` policy is not already present. The list is
+  # captured first and searched with a here-string (HAR-125): piping it into
+  # grep -q let an early match SIGPIPE the writer and read as "no policy". A
+  # failed read still counts as "no main policy", as the pipe did under pipefail.
+  policies="$(environment_branch_policies "$env")" || policies=""
+  if ! grep -qx 'main' <<<"$policies"; then
     log "Restricting '${env}' deployments to main"
     gh api --method POST \
       "repos/${GITHUB_REPO}/environments/${env}/deployment-branch-policies" \
@@ -1405,7 +1412,7 @@ ensure_deployment_environment() {
   # --- VERIFY by read-back. A PUT that returned 200 proves nothing. ----------
   policies="$(environment_branch_policies "$env")"
   policy_count="$(printf '%s\n' "$policies" | grep -c '[^[:space:]]' || true)"
-  if [ "$policy_count" != "1" ] || ! printf '%s\n' "$policies" | grep -qx 'main'; then
+  if [ "$policy_count" != "1" ] || ! grep -qx 'main' <<<"$policies"; then
     eval "${status_var}=UNPROTECTED"
     die "'${env}' does NOT have EXACTLY ONE deployment branch policy named 'main' (found ${policy_count}: $(printf '%s' "$policies" | tr '\n' ' ')). Do NOT set DEV_TF_BACKEND_READY=true until it does:
 $(deployment_environment_manual_procedure "$env" "$want_reviewer")"
@@ -3047,7 +3054,7 @@ acceptance_totp_interactive() { [ -t 0 ]; }
 # One-time TOTP enrolment. Sets ACCEPTANCE_TOTP_STATUS for the summary.
 enrol_acceptance_user_totp() {
   local env="$WEB_ACCEPTANCE_ENVIRONMENT" upn="$ACCEPTANCE_USER_UPN"
-  local secrets reason="" key attempt b32_re='^[A-Z2-7]{16,}=*$'
+  local secrets secret_names reason="" key attempt b32_re='^[A-Z2-7]{16,}=*$'
 
   secrets="$(gh secret list --env "$env" --repo "$GITHUB_REPO")" \
     || die "could not list the secrets of the GitHub '${env}' environment."
@@ -3057,7 +3064,11 @@ enrol_acceptance_user_totp() {
     # A brand-new user has no authenticator registered, so any key already in
     # the secret belongs to a deleted predecessor and is useless.
     reason="the user was just created"
-  elif ! printf '%s\n' "$secrets" | cut -f1 | grep -qx 'ACCEPTANCE_USER_TOTP_SECRET'; then
+  # Names are cut out first and searched with a here-string (HAR-125): in a
+  # `cut | grep -q` pipe an early match SIGPIPEs cut, and pipefail reads that as
+  # "no secret". A failed cut still counts as "no secret", as it did in the pipe.
+  elif ! secret_names="$(cut -f1 <<<"$secrets")" \
+       || ! grep -qx 'ACCEPTANCE_USER_TOTP_SECRET' <<<"$secret_names"; then
     reason="the '${env}' environment has no ACCEPTANCE_USER_TOTP_SECRET"
   fi
   if [ -z "$reason" ]; then

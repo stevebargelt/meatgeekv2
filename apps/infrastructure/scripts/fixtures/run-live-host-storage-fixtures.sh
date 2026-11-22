@@ -495,7 +495,7 @@ for shell_bin in ${SHELL_BINS}; do
   code=$?
   leak_markers=''
   for marker in 'AccountKey=' 'EndpointSuffix=' 'InstrumentationKey=' 'IngestionEndpoint='; do
-    if grep -qF "${marker}" "${OUT}" 2>/dev/null || grep -qF "${marker}" "${ERR}" 2>/dev/null; then
+    if grep -qF "${marker}" "${OUT}" "${ERR}" 2>/dev/null; then
       leak_markers="${leak_markers} ${marker}"
     fi
   done

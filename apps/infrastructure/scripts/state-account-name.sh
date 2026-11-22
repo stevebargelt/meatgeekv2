@@ -62,8 +62,10 @@ state_account_name() {
 
   # Defence in depth: never emit a name that would violate the storage-account
   # contract (<=24 lowercase alnum). This fails CLOSED rather than emitting a
-  # name Azure would reject at create time.
-  if ! printf '%s' "$name" | grep -Eq '^[a-z0-9]{3,24}$'; then
+  # name Azure would reject at create time. Here-string, not a pipe into
+  # grep -q (HAR-125): an early match there can SIGPIPE the writer, and under a
+  # caller's pipefail a valid name would then read as invalid.
+  if ! grep -Eq '^[a-z0-9]{3,24}$' <<<"$name"; then
     echo "state-account-name: derived name '${name}' is not a valid storage-account name (<=24 lowercase alnum)." >&2
     return 1
   fi
