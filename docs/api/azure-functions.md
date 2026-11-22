@@ -28,7 +28,7 @@ yet wired.
 | `claimDevice`            | HTTP `POST`   | `devices/claim`                   | HAR-130 — claim a device with the code it shows (403 else)    |
 | `getDevice`              | HTTP `GET`    | `devices/{id}`                    | One of the caller's devices (404 otherwise)                   |
 | `updateDevice`           | HTTP `PATCH`  | `devices/{id}`                    | Change name / location / configuration                        |
-| `deleteDevice`           | HTTP `DELETE` | `devices/{id}`                    | HAR-85 — delete one of the caller's devices                   |
+| `deleteDevice`           | HTTP `DELETE` | `devices/{id}`                    | HAR-136 — release one of the caller's devices                 |
 | `getUserProfile`         | HTTP `GET`    | `users/me`                        | The caller's profile (404 until the first PUT)                |
 | `putUserProfile`         | HTTP `PUT`    | `users/me`                        | Create or replace the caller's profile                        |
 | `listRecipes`            | HTTP `GET`    | `recipes`                         | List the caller's recipes, newest first                       |
@@ -140,25 +140,44 @@ instead.
   smallest of 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400 and 21600 s
   buckets that keeps the chart at 720 points or fewer. Each channel of a point is
   `{min, max, avg}` with `avg = Σsum / Σn`; empty buckets and channels are left
-  out. `x-meatgeek-request-charge` is the point read plus every query page.
+  out. `x-meatgeek-request-charge` is the cook and device point reads plus every
+  query page. HAR-136: for a device the caller claimed, the window starts no
+  earlier than the first whole minute at or after its `claimedAt`.
 
-`deleteDevice` (HAR-85) reads the device (a point read, partition key = device
-id), then point-deletes it:
+`deleteDevice` releases a device (HAR-85, made a release by HAR-136; see
+[the HAR-130 decision](../../learnings/decisions/har-130-device-provisioning-and-claim.md)).
+In order:
 
-- `204`, no body: deleted.
-- `403 DEVICE_NOT_OWNED`: someone else owns it; nothing is deleted.
-- `404 DEVICE_NOT_FOUND`: no device has that id, a second delete included.
+- `403 DEVICE_NOT_OWNED`: someone else owns it; `404 DEVICE_NOT_FOUND`: no
+  device has that id, a second release included. One point read decides both.
+- `409 COOK_ACTIVE`: the caller has an active cook on it (the MG-84
+  `active-device:<deviceId>` lock in the caller's partition, a point read, and
+  the cook it names when there is one, so a stale lock does not block). Stop the
+  cook first; nothing changes.
+- The device twin: desired `claimGeneration` + 1 (absent counts as `"0"`) and
+  `claimClaimantHash: null` under `If-Match`, keeping `claimConsumedCodeHash`;
+  a 412 re-reads once. The device mints a fresh code for the new generation, and
+  the old code can never claim again. A device with no IoT Hub identity (IoT
+  Hub 404, registered through `registerDevice`) skips this step. Any other twin
+  failure is `503 DEVICE_TWIN_UPDATE_FAILED`, and the document is kept, so a
+  retry is safe.
+- `204`, no body: the document is deleted.
 
-Unlike `getDevice` and `updateDevice`, which answer `404` for both, a delete
+Unlike `getDevice` and `updateDevice`, which answer `404` for both, a release
 tells a foreign device from an unknown one, as the cook routes' `403` does.
 Every answer after the principal check carries `x-meatgeek-request-charge`.
 Only the device document goes. Its cooks stay in the owner's history (`getCooks`
 and `getCook` still return them), and its readings expire on the `temperatures`
-container's TTL (`temperature_data_ttl_days`: 7 in dev, 90 in prod). A cook
-still active on the device stays active, and `stopCook` refuses it with `403
-DEVICE_NOT_OWNED` (it checks the cook's device) until the owner registers the
-same id again, which creates a fresh device and makes the stop work. Stop a
-device's cook before deleting the device.
+container's TTL (`temperature_data_ttl_days`: 7 in dev, 90 in prod).
+
+**Readings from the claim onward (HAR-136).** A device with `claimedAt` (claimed
+through `claimDevice`) bounds every route that returns its readings below by
+`claimedAt`, inside the query: `getCurrentTemperatures` counts only a reading
+enqueued at or after it (none is `404 NO_READINGS`), `getTemperatureHistory`
+uses the later of `startTime` and `claimedAt`, and `getCookChart` starts at the
+first whole minute at or after it. Readings from before the claim, while the
+device was unclaimed or another owner's, never reach the new owner. A device
+without `claimedAt` (registered through `registerDevice`) is not bounded.
 
 `storageHeartbeat` exists because, when it was added, it was the **only**
 registration that needed `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and

@@ -57,6 +57,26 @@ export const LATEST_READING_QUERY =
   `ORDER BY c.SystemProperties["${ENQUEUED_TIME}"] DESC`;
 
 /**
+ * HAR-136 — {@link LATEST_READING_QUERY} bounded below by `@notBefore`
+ * (inclusive) on the hub-stamped `iothub-enqueuedtime`, the field the history
+ * window uses. The bound is inside the query, so `TOP` counts only documents
+ * at or after it.
+ */
+export const LATEST_READING_NOT_BEFORE_QUERY =
+  `SELECT TOP ${LATEST_READING_CANDIDATES} * FROM c WHERE c.deviceId = @deviceId ` +
+  `AND c.SystemProperties["${ENQUEUED_TIME}"] >= @notBefore ` +
+  `ORDER BY c.SystemProperties["${ENQUEUED_TIME}"] DESC`;
+
+/** HAR-136 — how the current-reading query is bounded. */
+export interface LatestReadingOptions {
+  /**
+   * Inclusive lower bound on `iothub-enqueuedtime`, normalised with
+   * `new Date(x).toISOString()`: the owner's `claimedAt`. Absent: no bound.
+   */
+  readonly notBefore?: string;
+}
+
+/**
  * HAR-35 (MG-79 part 2) — what a history page is filtered on. `startTime` and
  * `endTime` must already be normalised with `new Date(x).toISOString()` (UTC,
  * millisecond precision), the form IoT Hub stamps `iothub-enqueuedtime` in, so
@@ -265,14 +285,27 @@ export class TemperaturesRepository {
    * single-partition query ({@link LATEST_READING_QUERY}, `partitionKey:
    * deviceId`), newest `iothub-enqueuedtime` first; never cross-partition.
    *
+   * HAR-136: with `notBefore`, only documents enqueued at or after it count
+   * ({@link LATEST_READING_NOT_BEFORE_QUERY}); none there is `none`.
+   *
    * Callers must have checked that the caller owns `deviceId` first.
    */
-  async getLatestReading(deviceId: string): Promise<LatestReading> {
+  async getLatestReading(
+    deviceId: string,
+    options: LatestReadingOptions = {}
+  ): Promise<LatestReading> {
+    const parameters: SqlParameter[] = [{ name: '@deviceId', value: deviceId }];
+    if (options.notBefore !== undefined) {
+      parameters.push({ name: '@notBefore', value: options.notBefore });
+    }
     const response = await this.container.items
       .query<JsonObject>(
         {
-          query: LATEST_READING_QUERY,
-          parameters: [{ name: '@deviceId', value: deviceId }],
+          query:
+            options.notBefore === undefined
+              ? LATEST_READING_QUERY
+              : LATEST_READING_NOT_BEFORE_QUERY,
+          parameters,
         },
         { partitionKey: deviceId, maxItemCount: LATEST_READING_CANDIDATES }
       )

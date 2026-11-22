@@ -5,10 +5,15 @@
  * container, as get-cook.spec.ts does) and the REAL TemperatureRollupsRepository
  * (on fake-temperature-rollups-container.testing.ts), and reads real base64
  * X-MS-CLIENT-PRINCIPAL headers through the real principal.ts.
+ *
+ * HAR-136: the device is read too (the REAL DevicesRepository on
+ * fake-devices-container.testing.ts), so a claimed device's chart starts no
+ * earlier than its `claimedAt`. By default the device is the caller's, with no
+ * `claimedAt`, so the HAR-86 cases are unbounded by a claim.
  */
 import type { Container } from '@azure/cosmos';
 import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import type { Cook, CookChart } from '@meatgeekv2/api-interfaces';
+import type { Cook, CookChart, Device } from '@meatgeekv2/api-interfaces';
 
 import { principalFromRequest } from '../../shared/auth/principal';
 import {
@@ -16,6 +21,11 @@ import {
   CooksRepository,
   activeDeviceLockId,
 } from '../../shared/cosmos/cooks-repository';
+import { DevicesRepository } from '../../shared/cosmos/devices-repository';
+import {
+  FakeDevicesContainer,
+  READ_CHARGE as DEVICE_READ_CHARGE,
+} from '../../shared/cosmos/fake-devices-container.testing';
 import {
   fakeRollupsContainer,
   ROLLUP_PAGE_CHARGE,
@@ -86,6 +96,19 @@ function cook(overrides: Partial<Cook> = {}): Cook {
   };
 }
 
+/** The caller's device, as the devices container stores it. */
+function ownDevice(overrides: Partial<Device> = {}): Device {
+  return {
+    id: DEVICE,
+    userId: USER_ID,
+    name: 'Backyard Smoker',
+    model: 'MeatGeek V1',
+    isActive: true,
+    connectionStatus: 'unknown',
+    ...overrides,
+  };
+}
+
 function setup(nowIso = '2026-11-20T08:00:00.000Z') {
   const cooks = new Map<string, Record<string, unknown>>();
   const cookReads: Array<{ id: string; partitionKey: unknown }> = [];
@@ -105,9 +128,12 @@ function setup(nowIso = '2026-11-20T08:00:00.000Z') {
   } as unknown as Container;
   const rollups = fakeRollupsContainer();
   const getRollupsRepository = jest.fn(() => new TemperatureRollupsRepository(rollups.container));
+  const devices = new FakeDevicesContainer();
+  devices.seed(ownDevice());
   const deps: GetCookChartDeps = {
     resolvePrincipal: principalFromRequest,
     getCooksRepository: () => new CooksRepository(cooksContainer),
+    getDevicesRepository: () => new DevicesRepository(devices.asContainer()),
     getRollupsRepository,
     now: () => Date.parse(nowIso),
   };
@@ -115,7 +141,12 @@ function setup(nowIso = '2026-11-20T08:00:00.000Z') {
     deps,
     rollups,
     cookReads,
+    devices,
     getRollupsRepository,
+    /** HAR-136: the caller's device, claimed at `claimedAt`. */
+    claimDevice(claimedAt: string) {
+      devices.seed(ownDevice({ claimedAt }));
+    },
     seedCook(document: Record<string, unknown>) {
       cooks.set(`${document['userId']}/${document['id']}`, { ...document, _rid: 'r', _etag: 'e' });
     },
@@ -295,6 +326,87 @@ describe('GET /cooks/{cookId}/chart: the window', () => {
   });
 });
 
+describe('GET /cooks/{cookId}/chart: the claim bound (HAR-136)', () => {
+  it('a device claimed after the cook started shows only slots from its claim on', async () => {
+    const fixture = setup('2026-11-21T00:00:00.000Z');
+    fixture.claimDevice('2026-11-20T07:10:00.000Z');
+    fixture.seedCook({
+      ...cook({ status: 'completed', endTime: '2026-11-20T07:30:00.000Z' }),
+    });
+    fixture.seedHour('2026-11-20T06', { '20': grill(1, 999, 999, 999) }); // before the claim
+    fixture.seedHour('2026-11-20T07', {
+      '9': grill(1, 999, 999, 999), // the minute before the claim
+      '10': grill(1, 230, 230, 230), // the claim's minute starts at claimedAt: kept
+      '20': grill(1, 231, 231, 231),
+    });
+
+    const chart = await chartOf(fixture);
+
+    // The bound is in the query: the hour containing claimedAt, not the cook's.
+    const query = fixture.rollups.calls.find(c => c.op === 'query');
+    expect(query).toMatchObject({
+      partitionKey: DEVICE,
+      parameters: [
+        { name: '@deviceId', value: DEVICE },
+        { name: '@from', value: '2026-11-20T07:00:00.000Z' },
+        { name: '@to', value: '2026-11-20T07:30:00.000Z' },
+      ],
+    });
+    expect(chart.startTime).toBe('2026-11-20T06:15:30.000Z');
+    expect(chart.points).toEqual([
+      { t: '2026-11-20T07:10:00.000Z', grill: { min: 230, max: 230, avg: 230 } },
+      { t: '2026-11-20T07:20:00.000Z', grill: { min: 231, max: 231, avg: 231 } },
+    ]);
+  });
+
+  it('drops the minute a mid-minute claim falls in, which may hold earlier readings', async () => {
+    const fixture = setup('2026-11-20T08:00:00.000Z');
+    fixture.claimDevice('2026-11-20T06:40:20.000Z');
+    fixture.seedCook({ ...cook() });
+    fixture.seedHour('2026-11-20T06', {
+      '20': grill(1, 999, 999, 999),
+      '40': grill(1, 999, 999, 999), // 06:40:00-06:41:00 straddles the claim
+      '41': grill(1, 241, 241, 241),
+    });
+
+    const chart = await chartOf(fixture);
+
+    expect(chart.points.map(p => p.t)).toEqual(['2026-11-20T06:41:00.000Z']);
+  });
+
+  it('a claim before the cook started leaves the window as the cook has it', async () => {
+    const fixture = setup('2026-11-20T08:00:00.000Z');
+    fixture.claimDevice('2026-11-19T12:00:00.000Z');
+    fixture.seedCook({ ...cook() });
+    fixture.seedHour('2026-11-20T06', {
+      '14': grill(1, 999, 999, 999),
+      '15': grill(1, 225, 225, 225),
+    });
+
+    const chart = await chartOf(fixture);
+
+    const query = fixture.rollups.calls.find(c => c.op === 'query');
+    expect(query).toMatchObject({
+      parameters: [
+        { name: '@deviceId', value: DEVICE },
+        { name: '@from', value: '2026-11-20T06:00:00.000Z' },
+      ],
+    });
+    expect(chart.points.map(p => p.t)).toEqual(['2026-11-20T06:15:00.000Z']);
+  });
+
+  it('a device without claimedAt (POST /devices) is not bounded', async () => {
+    const fixture = setup('2026-11-20T08:00:00.000Z');
+    fixture.seedCook({ ...cook() });
+    fixture.seedHour('2026-11-20T06', { '15': grill(1, 225, 225, 225) });
+
+    const chart = await chartOf(fixture);
+
+    expect(fixture.devices.stored(DEVICE)?.['claimedAt']).toBeUndefined();
+    expect(chart.points.map(p => p.t)).toEqual(['2026-11-20T06:15:00.000Z']);
+  });
+});
+
 describe('GET /cooks/{cookId}/chart: buckets', () => {
   it('a 13-hour span gives bucketSeconds 120 and at most 720 points', async () => {
     const fixture = setup('2026-11-20T19:00:00.000Z');
@@ -364,7 +476,7 @@ describe('GET /cooks/{cookId}/chart: buckets', () => {
 });
 
 describe('GET /cooks/{cookId}/chart: headers', () => {
-  it('x-meatgeek-request-charge sums the point read and every query page', async () => {
+  it('x-meatgeek-request-charge sums the point reads and every query page', async () => {
     const fixture = setup();
     fixture.seedCook({ ...cook() });
     fixture.seedHour('2026-11-20T06', { '20': grill(1, 225, 225, 225) });
@@ -378,8 +490,9 @@ describe('GET /cooks/{cookId}/chart: headers', () => {
 
     expect(response.status).toBe(200);
     expect(fixture.rollups.calls.filter(c => c.op === 'query')).toHaveLength(1);
+    // The cook read, the device read (HAR-136) and both pages.
     expect(Number(header(response, REQUEST_CHARGE_HEADER))).toBeCloseTo(
-      READ_CHARGE + 2 * ROLLUP_PAGE_CHARGE
+      READ_CHARGE + DEVICE_READ_CHARGE + 2 * ROLLUP_PAGE_CHARGE
     );
     expect(header(response, 'X-Request-ID')).toBe('req-9');
   });
@@ -404,7 +517,9 @@ describe('GET /cooks/{cookId}/chart: headers', () => {
       message: 'Failed to retrieve cook chart',
       requestId: 'inv-86',
     });
-    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE));
+    expect(Number(header(response, REQUEST_CHARGE_HEADER))).toBeCloseTo(
+      READ_CHARGE + DEVICE_READ_CHARGE
+    );
     expect(errors.join('\n')).toContain('getCookChart failed: cosmos_status_503');
     expect(errors.join('\n')).not.toContain('secret-account');
   });

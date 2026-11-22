@@ -9,6 +9,7 @@ import {
 } from './fake-temperatures-container.testing';
 import {
   InvalidContinuationTokenError,
+  LATEST_READING_NOT_BEFORE_QUERY,
   LATEST_READING_QUERY,
   TemperaturesRepository,
   historyPageQuery,
@@ -253,6 +254,37 @@ describe('TemperaturesRepository.getLatestReading', () => {
     await expect(
       new TemperaturesRepository(fake.asContainer()).getLatestReading(DEVICE)
     ).rejects.toMatchObject({ statusCode: 503 });
+  });
+
+  it('HAR-136: notBefore bounds the query itself, so TOP counts only documents at or after it', async () => {
+    const fake = new FakeTemperaturesContainer();
+    // One reading before the bound and one exactly at it (inclusive).
+    fake.seed(routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T15:59:00.000Z' }));
+    fake.seed(routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T16:00:00.000Z' }));
+
+    const latest = await new TemperaturesRepository(fake.asContainer()).getLatestReading(DEVICE, {
+      notBefore: '2026-08-14T16:00:00.000Z',
+    });
+    const before = await new TemperaturesRepository(fake.asContainer()).getLatestReading(DEVICE, {
+      notBefore: '2026-08-14T16:00:00.001Z',
+    });
+
+    expect(latest).toMatchObject({
+      status: 'found',
+      reading: { timestamp: '2026-08-14T16:00:00.000Z' },
+    });
+    expect(before).toEqual({ status: 'none', requestCharge: TEMPERATURES_QUERY_CHARGE });
+    expect(fake.queries[0].query).toBe(LATEST_READING_NOT_BEFORE_QUERY);
+    expect(LATEST_READING_NOT_BEFORE_QUERY).toBe(
+      'SELECT TOP 10 * FROM c WHERE c.deviceId = @deviceId ' +
+        'AND c.SystemProperties["iothub-enqueuedtime"] >= @notBefore ' +
+        'ORDER BY c.SystemProperties["iothub-enqueuedtime"] DESC'
+    );
+    expect(fake.queries[0].parameters).toEqual([
+      { name: '@deviceId', value: DEVICE },
+      { name: '@notBefore', value: '2026-08-14T16:00:00.000Z' },
+    ]);
+    expect(fake.queries[0].options['partitionKey']).toBe(DEVICE);
   });
 });
 

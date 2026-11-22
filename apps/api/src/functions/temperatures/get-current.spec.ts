@@ -301,3 +301,98 @@ describe('GET /temperatures/current/{deviceId}', () => {
     expect(temperatures.queries).toEqual([]);
   });
 });
+
+describe('GET /temperatures/current/{deviceId}: the claim bound (HAR-136)', () => {
+  const CLAIMED_AT = '2026-08-14T16:00:00.000Z';
+
+  it('ignores a reading enqueued before claimedAt and returns one at or after it', async () => {
+    const { devices, temperatures, deps } = setup();
+    devices.seed(device({ claimedAt: CLAIMED_AT }));
+    temperatures.seed(
+      routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T15:59:59.999Z' })
+    );
+    temperatures.seed(routedDocument({ deviceId: DEVICE, enqueuedTime: CLAIMED_AT }));
+
+    const response = await getCurrentTemperaturesHandler(request(DEVICE), context().ctx, deps);
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toMatchObject({ timestamp: CLAIMED_AT });
+    // The bound is inside the query, so TOP counts only readings after it.
+    const [query] = temperatures.queries;
+    expect(query.query).toContain('c.SystemProperties["iothub-enqueuedtime"] >= @notBefore');
+    expect(query.parameters).toEqual([
+      { name: '@deviceId', value: DEVICE },
+      { name: '@notBefore', value: CLAIMED_AT },
+    ]);
+  });
+
+  it('a newer reading from before the claim does not hide one after it', async () => {
+    // Body.timestamp is device-supplied; the bound is on the hub's enqueued time.
+    const { devices, temperatures, deps } = setup();
+    devices.seed(device({ claimedAt: CLAIMED_AT }));
+    temperatures.seed(
+      routedDocument({
+        deviceId: DEVICE,
+        enqueuedTime: '2026-08-14T15:00:00.000Z',
+        body: { deviceId: DEVICE, timestamp: '2026-08-14T17:00:00.000Z', grillTemp: 999 },
+      })
+    );
+    temperatures.seed(
+      routedDocument({
+        deviceId: DEVICE,
+        enqueuedTime: '2026-08-14T16:30:00.000Z',
+        body: { deviceId: DEVICE, timestamp: '2026-08-14T16:30:00.000Z', grillTemp: 225 },
+      })
+    );
+
+    const response = await getCurrentTemperaturesHandler(request(DEVICE), context().ctx, deps);
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toMatchObject({ grillTemp: 225 });
+  });
+
+  it('404 NO_READINGS when every reading is from before claimedAt, as with no reading', async () => {
+    const { devices, temperatures, deps } = setup();
+    devices.seed(device({ claimedAt: CLAIMED_AT }));
+    temperatures.seed(
+      routedDocument({ deviceId: DEVICE, enqueuedTime: '2026-08-14T15:00:00.000Z' })
+    );
+
+    const response = await getCurrentTemperaturesHandler(request(DEVICE), context().ctx, deps);
+
+    expect(response.status).toBe(404);
+    expect(response.jsonBody).toEqual({
+      error: 'NO_READINGS',
+      message: 'The device has no temperature readings',
+      requestId: 'inv-9',
+    });
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(BOTH_CHARGES);
+  });
+
+  it('a device without claimedAt (POST /devices) is not bounded', async () => {
+    const { devices, temperatures, deps } = setup();
+    devices.seed(device());
+    temperatures.seed(
+      routedDocument({ deviceId: DEVICE, enqueuedTime: '2020-01-01T00:00:00.000Z' })
+    );
+
+    const response = await getCurrentTemperaturesHandler(request(DEVICE), context().ctx, deps);
+
+    expect(response.status).toBe(200);
+    expect(temperatures.queries[0].query).not.toContain('@notBefore');
+    expect(temperatures.queries[0].parameters).toEqual([{ name: '@deviceId', value: DEVICE }]);
+  });
+
+  it('500, not an unbounded answer, when the stored claimedAt does not parse', async () => {
+    const { devices, temperatures, deps } = setup();
+    devices.seed(device({ claimedAt: 'not a date' }));
+    temperatures.seed(routedDocument({ deviceId: DEVICE, enqueuedTime: CLAIMED_AT }));
+    const { ctx, errors } = context();
+
+    const response = await getCurrentTemperaturesHandler(request(DEVICE), ctx, deps);
+
+    expect(response.status).toBe(500);
+    expect(temperatures.queries).toEqual([]);
+    expect(errors.join('\n')).toContain('getCurrentTemperatures failed: cosmos_failure');
+  });
+});

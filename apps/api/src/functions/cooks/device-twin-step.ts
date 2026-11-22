@@ -61,6 +61,9 @@ export function deviceTwinFailureReason(error: unknown): string {
  * `reason` codes as {@link deviceTwinUpdateFailedBody}, but there is no cook:
  * the claim failed before anything was stored, so a retry with the same code
  * is safe.
+ *
+ * HAR-136: DELETE /devices/{id} (release) answers the same body when its twin
+ * step fails. The device document is not deleted then, so a retry is safe too.
  */
 export function deviceClaimTwinFailedBody(reason: string, requestId: string) {
   return {

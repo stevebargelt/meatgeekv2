@@ -311,6 +311,51 @@ describe('HAR-28 temperatures repository against the Cosmos emulator', () => {
     expectPositiveCharge(junk.requestCharge);
   });
 
+  it('HAR-136: notBefore bounds the current-reading query on enqueued time, inside the query', async () => {
+    const deviceId = `emu-temp-${randomUUID()}`;
+    const claimedAt = '2026-08-14T16:00:05.000Z';
+    // A valid reading just before the bound, one at it, and nine junk documents
+    // after it. With the bound in the query, the ten TOP candidates are the
+    // nine junk documents and the reading at the bound; the one before it is
+    // never a candidate.
+    const documents: RoutedDocument[] = [
+      routed({
+        partitionDeviceId: deviceId,
+        enqueuedTime: '2026-08-14T16:00:04.999Z',
+        body: { deviceId, timestamp: '2026-08-14T16:00:04.999Z', grillTemp: 999 },
+      }),
+      routed({
+        partitionDeviceId: deviceId,
+        enqueuedTime: claimedAt,
+        body: { deviceId, timestamp: claimedAt, grillTemp: 225 },
+      }),
+      ...Array.from({ length: 9 }, (_, i) =>
+        routed({
+          partitionDeviceId: deviceId,
+          enqueuedTime: new Date(Date.UTC(2026, 7, 14, 16, 0, 10 + i)).toISOString(),
+          body: 'not-json',
+        })
+      ),
+    ];
+    for (const document of documents) {
+      await container.items.create(document);
+    }
+
+    const bounded = await repository.getLatestReading(deviceId, { notBefore: claimedAt });
+    expect(bounded.status === 'found' && bounded.reading).toEqual({
+      deviceId,
+      timestamp: claimedAt,
+      grillTemp: 225,
+    });
+    expectPositiveCharge(bounded.requestCharge);
+
+    const after = await repository.getLatestReading(deviceId, {
+      notBefore: '2026-08-14T16:00:05.001Z',
+    });
+    expect(after.status).toBe('none');
+    expectPositiveCharge(after.requestCharge);
+  });
+
   describe('HAR-35 history (count and page)', () => {
     const deviceId = `emu-hist-${randomUUID()}`;
     const neighbour = `emu-hist-${randomUUID()}`;

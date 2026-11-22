@@ -21,6 +21,7 @@ ErrorCode:
     - CLAIM_REFUSED
     - CONCURRENT_UPDATE
     - COOK_ALREADY_ACTIVE
+    - COOK_ACTIVE
     - COOK_ID_REUSED
     - NO_READINGS
     - USER_NOT_FOUND
@@ -150,7 +151,10 @@ DeviceClaimTwinFailedError:
   description: |
     503 body for POST /devices/claim when the device twin could not be read
     or its desired properties could not be patched (HAR-130). Nothing was
-    stored, so retrying the same request with the same code is safe. `reason`
+    stored, so retrying the same request with the same code is safe.
+    DELETE /devices/{id} (release, HAR-136) answers the same body when its
+    twin step fails; the device document is not deleted then, so retrying
+    the release is safe too. `reason`
     is a fixed code: `iothub_<operation>_status_<n>` or
     `iothub_<operation>_failed` (operations `configuration`, `credential`,
     `get_twin`, `patch_twin`; `iothub_patch_twin_status_412` when the patch

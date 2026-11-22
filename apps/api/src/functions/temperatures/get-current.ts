@@ -15,6 +15,7 @@ import {
   getTemperaturesRepository,
   type TemperaturesRepository,
 } from '../../shared/cosmos/temperatures-repository';
+import { boundedStartTime, claimedAtBound } from '../../shared/devices/readings-bound';
 import {
   correlationIdOf,
   errorBody,
@@ -38,6 +39,12 @@ import {
  * Ownership is one point read on the devices container; the reading is one
  * single-partition query on the temperatures container. Every response that
  * reached Cosmos carries `x-meatgeek-request-charge` = the sum of both.
+ *
+ * HAR-136: a device with `claimedAt` (claimed through POST /devices/claim)
+ * shows only a reading enqueued at or after it; none there is the same 404
+ * NO_READINGS as no reading at all. The bound is in the query
+ * (shared/devices/readings-bound.ts). A device without `claimedAt` is not
+ * bounded.
  *
  * The reading's device id is the hub-authenticated
  * `SystemProperties["iothub-connection-device-id"]`, never the device-supplied
@@ -99,7 +106,12 @@ export async function getCurrentTemperaturesHandler(
       );
     }
 
-    const latest = await temperatures.getLatestReading(deviceId);
+    // HAR-136: only readings from the caller's claim onward.
+    const notBefore = boundedStartTime(undefined, claimedAtBound(ownership.device));
+    const latest = await temperatures.getLatestReading(
+      deviceId,
+      notBefore !== undefined ? { notBefore } : {}
+    );
     spent += latest.requestCharge;
     context.log(`getCurrentTemperatures ${latest.status} (requestCharge=${spent} RU)`);
     if (latest.status === 'none') {

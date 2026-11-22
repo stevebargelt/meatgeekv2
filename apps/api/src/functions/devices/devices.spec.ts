@@ -1,6 +1,8 @@
 /**
  * HAR-20 (MG-80) — the devices handlers, with NO Azure and NO credentials.
- * HAR-85 adds DELETE /devices/{id}.
+ * HAR-85 adds DELETE /devices/{id}; HAR-136 makes it a release (its own cases
+ * are in delete-device.spec.ts). Here DELETE runs with no cook lock and a hub
+ * with no twin for the device, so the HAR-85 cases keep their meaning.
  *
  * Each handler runs over the REAL DevicesRepository on an in-memory container
  * that stamps Cosmos system properties on every document, so the
@@ -15,7 +17,12 @@ import type { Device } from '@meatgeekv2/api-interfaces';
 
 import { principalFromRequest } from '../../shared/auth/principal';
 import { CosmosConfigError } from '../../shared/cosmos/cosmos-adapter';
+import { CooksRepository } from '../../shared/cosmos/cooks-repository';
 import { DevicesRepository } from '../../shared/cosmos/devices-repository';
+import {
+  COOKS_READ_CHARGE,
+  FakeCooksContainer,
+} from '../../shared/cosmos/fake-cooks-container.testing';
 import {
   DELETE_CHARGE,
   FAKE_ACCOUNT_ENDPOINT,
@@ -25,8 +32,9 @@ import {
   WRITE_CHARGE,
 } from '../../shared/cosmos/fake-devices-container.testing';
 import { REQUEST_CHARGE_HEADER } from '../../shared/cosmos/request-charge';
-import { deleteDeviceHandler } from './delete-device';
-import type { DevicesHandlerDeps } from './devices-http';
+import { FakeTwinHub } from '../../shared/iothub/fake-device-twin.testing';
+import { deleteDeviceHandler, type DeleteDeviceDeps } from './delete-device';
+import { defaultDevicesDeps } from './devices-http';
 import { getDeviceHandler } from './get-device';
 import { getDevicesHandler } from './get-devices';
 import { registerDeviceHandler } from './register-device';
@@ -95,11 +103,17 @@ function context() {
 function setup() {
   const fake = new FakeDevicesContainer();
   const getRepository = jest.fn(() => new DevicesRepository(fake.asContainer()));
-  const deps: DevicesHandlerDeps = {
+  const cooks = new FakeCooksContainer();
+  const twins = new FakeTwinHub();
+  // DeleteDeviceDeps is the DevicesHandlerDeps every other route takes, plus
+  // the cook lock and the twin hub DELETE uses.
+  const deps: DeleteDeviceDeps = {
     resolvePrincipal: principalFromRequest,
     getRepository,
+    getCooksRepository: () => new CooksRepository(cooks.asContainer()),
+    getDeviceTwin: () => twins,
   };
-  return { fake, deps, getRepository };
+  return { fake, deps, getRepository, cooks, twins };
 }
 
 function device(overrides: Partial<Device> = {}): Device {
@@ -135,7 +149,7 @@ function header(response: HttpResponseInit, name: string): string | undefined {
 type Handler = (
   request: HttpRequest,
   context: InvocationContext,
-  deps: DevicesHandlerDeps
+  deps: DeleteDeviceDeps
 ) => Promise<HttpResponseInit>;
 
 /** One valid, successful-path request per route, for the shared cases below. */
@@ -334,7 +348,10 @@ describe('POST /devices', () => {
 
     expect(response.status).toBe(201);
     expect(fake.stored('grill-9')).toBeDefined();
-    expect(Object.keys(deps).sort()).toEqual(['getRepository', 'resolvePrincipal']);
+    // The production register seam (HAR-136: the test seam also carries
+    // DELETE's cook lock and twin hub, neither of which is SignalR).
+    expect(Object.keys(defaultDevicesDeps).sort()).toEqual(['getRepository', 'resolvePrincipal']);
+    expect(Object.keys(deps).filter(key => /signalr/i.test(key))).toEqual([]);
     expect(warnings).toEqual([]);
   });
 
@@ -668,7 +685,7 @@ describe('PATCH /devices/{id}', () => {
 });
 
 describe('DELETE /devices/{id} (HAR-85)', () => {
-  it('answers 204 with no body, deletes the device, and carries the read and delete RU', async () => {
+  it('answers 204 with no body, deletes the device, and carries every read and the delete RU', async () => {
     const { fake, deps } = setup();
     fake.seed(device());
     const { ctx, logs } = context();
@@ -679,7 +696,11 @@ describe('DELETE /devices/{id} (HAR-85)', () => {
     expect(response.jsonBody).toBeUndefined();
     expect(response.body).toBeUndefined();
     expect(header(response, 'X-Request-ID')).toBe('inv-7');
-    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE + DELETE_CHARGE));
+    // HAR-136: the ownership read, the cook-lock read, then the delete's own
+    // read and the delete.
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(
+      String(READ_CHARGE + COOKS_READ_CHARGE + READ_CHARGE + DELETE_CHARGE)
+    );
     expect(fake.stored('grill-1')).toBeUndefined();
     expect(logs.join('\n')).toContain('deleteDevice deleted');
   });
@@ -777,7 +798,7 @@ describe('DELETE /devices/{id} (HAR-85)', () => {
     expect(fake.stored('grill-1')).toBeDefined();
   });
 
-  it('answers a sanitized 500 carrying the read RU plus the failed delete’s', async () => {
+  it('answers a sanitized 500 carrying every read’s RU plus the failed delete’s', async () => {
     const { fake, deps } = setup();
     fake.seed(device());
     fake.failNext('delete', 503);
@@ -791,7 +812,9 @@ describe('DELETE /devices/{id} (HAR-85)', () => {
       message: 'Failed to delete device',
       requestId: 'inv-7',
     });
-    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE + DELETE_CHARGE));
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(
+      String(READ_CHARGE + COOKS_READ_CHARGE + READ_CHARGE + DELETE_CHARGE)
+    );
     expect(errors.join('\n')).toContain('deleteDevice failed: cosmos_status_503');
     expect(errors.join('\n')).not.toContain(FAKE_ACCOUNT_ENDPOINT);
   });

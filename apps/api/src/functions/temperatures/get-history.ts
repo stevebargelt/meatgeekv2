@@ -9,6 +9,7 @@ import {
   type TemperatureHistoryFilter,
   type TemperaturesRepository,
 } from '../../shared/cosmos/temperatures-repository';
+import { boundedStartTime, claimedAtBound } from '../../shared/devices/readings-bound';
 import {
   correlationIdOf,
   errorBody,
@@ -42,7 +43,12 @@ import type { TemperaturesHandlerDeps } from './get-current';
  * (`startTime` inclusive, `endTime` exclusive) and the ascending order are on
  * the hub-stamped `iothub-enqueuedtime`, never the device-supplied
  * `Body.timestamp`; each reading's `timestamp` still follows
- * toTemperatureReading. Every response that reached Cosmos carries
+ * toTemperatureReading.
+ *
+ * HAR-136: for a device with `claimedAt`, the effective `startTime` is the
+ * later of the requested one and `claimedAt`, inside the query, so the caller
+ * never sees a reading from before their claim and paging stays right. A
+ * device without `claimedAt` is not bounded. Every response that reached Cosmos carries
  * `x-meatgeek-request-charge` = the sum of the calls it made.
  */
 
@@ -205,7 +211,14 @@ export async function getTemperatureHistoryHandler(
       );
     }
 
-    const page = await temperatures.getReadingsPage(filter, { limit, continuationToken });
+    // HAR-136: only readings from the caller's claim onward. The effective
+    // startTime is the later of the requested one and `claimedAt`.
+    const startTime = boundedStartTime(filter.startTime, claimedAtBound(ownership.device));
+    const bounded: TemperatureHistoryFilter = {
+      ...filter,
+      ...(startTime !== undefined ? { startTime } : {}),
+    };
+    const page = await temperatures.getReadingsPage(bounded, { limit, continuationToken });
     spent += page.requestCharge;
 
     const body: TemperatureHistoryResponse = {

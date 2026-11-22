@@ -9,6 +9,10 @@ import {
 } from '../../shared/auth/principal';
 import { getCooksRepository, type CooksRepository } from '../../shared/cosmos/cooks-repository';
 import {
+  getDevicesRepository,
+  type DevicesRepository,
+} from '../../shared/cosmos/devices-repository';
+import {
   getTemperatureRollupsRepository,
   hourStartOf,
   ROLLUP_CHANNELS,
@@ -16,6 +20,7 @@ import {
   type HourSlots,
   type TemperatureRollupsRepository,
 } from '../../shared/cosmos/temperature-rollups-repository';
+import { claimedAtBound } from '../../shared/devices/readings-bound';
 import {
   correlationIdOf,
   errorBody,
@@ -39,6 +44,12 @@ import { COOK_ID_MAX_LENGTH } from './get-cook';
  *    NO upper bound: that is what "active" means, and the standing-cook RU
  *    proof (HAR-87) relies on it. It is a time window on the device, not a
  *    `cookId` tag match.
+ *    HAR-136: when the caller owns the device and it has `claimedAt`, the
+ *    window starts no earlier than the first whole minute at or after
+ *    `claimedAt` ({@link clampWindowToClaim}), so readings from before the
+ *    claim never reach the chart. That costs one point read of the device. A
+ *    device without `claimedAt`, or one the caller no longer owns, is not
+ *    bounded this way (the cook's own window still applies).
  * 3. The rollups: ONE single-partition query on `temperature-rollups` for the
  *    device's hour documents with `hourStart` ≥ the hour containing
  *    `startTime` (and < `endTime` when there is one). Minute slots outside the
@@ -56,7 +67,7 @@ import { COOK_ID_MAX_LENGTH } from './get-cook';
  *    channel are left out.
  *
  * Every response carries `X-Request-ID`; every response that reached Cosmos
- * carries `x-meatgeek-request-charge`, the SUM of the point read and every
+ * carries `x-meatgeek-request-charge`, the SUM of the point reads and every
  * query page.
  */
 
@@ -73,6 +84,7 @@ const MINUTE_MS = 60_000;
 export interface GetCookChartDeps {
   resolvePrincipal(request: HeaderReader): PrincipalResult;
   getCooksRepository(): Pick<CooksRepository, 'getCook'>;
+  getDevicesRepository(): Pick<DevicesRepository, 'getDeviceOwnership'>;
   getRollupsRepository(): Pick<TemperatureRollupsRepository, 'queryHours'>;
   now(): number;
 }
@@ -80,6 +92,7 @@ export interface GetCookChartDeps {
 const defaultDeps: GetCookChartDeps = {
   resolvePrincipal: principalFromRequest,
   getCooksRepository,
+  getDevicesRepository,
   getRollupsRepository: getTemperatureRollupsRepository,
   now: () => Date.now(),
 };
@@ -104,6 +117,26 @@ export function chartWindowOf(cook: Pick<Cook, 'startTime' | 'endTime'>): ChartW
   }
   const endMs = Date.parse(cook.endTime);
   return Number.isFinite(endMs) ? { startMinuteMs, endMs } : undefined;
+}
+
+/**
+ * HAR-136 — the window narrowed to readings from the caller's claim onward:
+ * its first slot is the first whole minute at or after `claimedAtMs`, so a
+ * minute slot that may hold a reading from before the claim is never shown.
+ * `undefined` (no claim bound) leaves the window as it is.
+ */
+export function clampWindowToClaim(
+  window: ChartWindow,
+  claimedAtMs: number | undefined
+): ChartWindow {
+  if (claimedAtMs === undefined) {
+    return window;
+  }
+  const firstWholeMinuteMs = Math.ceil(claimedAtMs / MINUTE_MS) * MINUTE_MS;
+  if (firstWholeMinuteMs <= window.startMinuteMs) {
+    return window;
+  }
+  return { ...window, startMinuteMs: firstWholeMinuteMs };
 }
 
 /** The smallest bucket width that keeps `spanMs` at {@link MAX_CHART_POINTS}
@@ -283,11 +316,22 @@ export async function getCookChartHandler(
       );
     }
 
-    const window = chartWindowOf(cook);
-    if (!window) {
+    const cookWindow = chartWindowOf(cook);
+    if (!cookWindow) {
       // A stored cook whose times do not parse: data the API never writes.
       throw new Error('cook_time_unparseable');
     }
+
+    // HAR-136: when the caller owns the device and claimed it, only readings
+    // from the claim onward. One point read on the devices container.
+    const ownership = await deps
+      .getDevicesRepository()
+      .getDeviceOwnership(principal.principal.userId, cook.deviceId);
+    spent += ownership.requestCharge;
+    const window =
+      ownership.status === 'owned'
+        ? clampWindowToClaim(cookWindow, claimedAtBound(ownership.device))
+        : cookWindow;
     const fromHourStart = new Date(hourStartOf(window.startMinuteMs)).toISOString();
     const toHourStart =
       window.endMs === undefined ? undefined : new Date(window.endMs).toISOString();

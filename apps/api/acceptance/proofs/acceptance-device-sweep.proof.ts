@@ -1,6 +1,6 @@
 import type { Device } from '@meatgeekv2/api-interfaces';
 
-import { deleteDevice } from '../lib/devices';
+import { deleteDevice, stopActiveCooks } from '../lib/devices';
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { defineProofs } from '../lib/proof';
 
@@ -22,6 +22,10 @@ import { defineProofs } from '../lib/proof';
  * device are re-registered (or confirmed) by later proofs and carry IoT Hub
  * identities and history the suite relies on. Their ids do not start with
  * `acceptance-`, and they are excluded by id as well.
+ *
+ * HAR-136: `DELETE /devices/{id}` is a release and is refused (409
+ * COOK_ACTIVE) while a cook is active on the device, so the sweep stops any
+ * cook still active on a device before it deletes it.
  *
  * Metrics: `acceptance-devices-before` (the owner's device count before),
  * `acceptance-devices-swept`, and `acceptance-devices-after`.
@@ -56,6 +60,9 @@ export default defineProofs('device sweep', () => {
         const swept = stale(api, before.devices);
         api.metric('acceptance-devices-before', before.devices.length);
         for (const device of swept) {
+          // HAR-136: a run killed mid-cook leaves its cook active, and the
+          // release would be 409 COOK_ACTIVE. Stop it first.
+          await stopActiveCooks(api, device.id);
           const response = await deleteDevice(api, device.id);
           api.expectStatus(response, 204);
         }

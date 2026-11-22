@@ -203,7 +203,9 @@ app.http('updateDevice', {
   handler: updateDeviceHandler,
 });
 
-// HAR-85: delete one of the caller's devices. Its cooks and readings stay.
+// HAR-85, HAR-136: release one of the caller's devices (409 while a cook is
+// active; bumps the twin's claimGeneration so the next claim needs a fresh
+// code). Its cooks and readings stay.
 app.http('deleteDevice', {
   methods: ['DELETE'],
   authLevel: 'anonymous',

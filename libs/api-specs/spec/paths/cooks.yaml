@@ -324,9 +324,18 @@ cook-chart:
       upper bound. It is a time window, not a `cookId` tag match. Readings are
       kept per minute, so the minute containing `startTime` is included whole.
 
+      Bounded by `claimedAt` (HAR-136): when the caller owns the device and
+      claimed it through POST /devices/claim, the window starts no earlier
+      than the first whole minute at or after the device's `claimedAt`, so
+      readings from before the claim never reach the chart (a minute that
+      straddles `claimedAt` is left out). This costs one point read of the
+      device. A device without `claimedAt` (registered through POST
+      /devices), or one the caller no longer owns, keeps the cook's window.
+
       Buckets: `bucketSeconds` is the smallest of 60, 120, 300, 600, 900,
       1800, 3600, 7200, 14400 and 21600 that keeps the window at 720 buckets
-      or fewer. The span runs from the start of `startTime`'s minute to
+      or fewer. The span runs from the window's first minute (the start of
+      `startTime`'s minute, or the claim bound's first minute) to
       `endTime`, or, for an active cook, to the later of now and the end of
       the last minute with data. Bucket `k` starts at that first minute plus
       `k × bucketSeconds`. A window longer than 180 days overflows even 6 h
@@ -339,8 +348,8 @@ cook-chart:
       `max` are exact. The chart can lag the newest reading by about 30 s.
 
       Every response carries X-Request-ID. Every response that reached
-      Cosmos carries x-meatgeek-request-charge: the sum of the cook point read
-      and every page of the rollup query.
+      Cosmos carries x-meatgeek-request-charge: the sum of the cook point
+      read, the device point read and every page of the rollup query.
     tags: [cooks]
     parameters:
       - name: cookId
