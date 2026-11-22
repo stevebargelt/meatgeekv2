@@ -166,3 +166,6 @@ func publishRecord(t *testing.T, tracer oteltrace.Tracer, rec queueRecord, devic
 	defer q.Close()
 	return enqueueAndPublish(t, tracer, q, rec, deviceID)
 }
+
+// HAR-128 throwaway: proves the no-real-time-guard job goes red. Reverted next commit.
+func TestGuardProbe(t *testing.T) { time.Sleep(time.Millisecond) }
