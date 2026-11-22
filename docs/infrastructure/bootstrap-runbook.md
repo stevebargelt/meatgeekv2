@@ -645,6 +645,32 @@ fail with `AuthorizationFailed` on the role assignment create.
 and `dev.tfvars` sets `api_device_twin_writer_enabled = true`, so the dev grant
 is on. Prod still does not set it.
 
+### DPS CI enroller grant — re-run bootstrap BEFORE setting `dps_ci_enroller_enabled` (HAR-131)
+
+`main.tf` declares `azurerm_role_assignment.dps_ci_enroller`: `Device
+Provisioning Service Data Contributor` for the app-deploy identity, scoped to
+the IoT Hub Device Provisioning Service alone, so CI can manage enrollments. The
+grant is `count`-guarded on `dps_ci_enroller_enabled` (default `false`) **and**
+`dps_enabled` **and** a non-empty `app_deploy_principal_object_id`. It shipped
+**off** in HAR-131, in every tfvars.
+
+`Device Provisioning Service Data Contributor` is in
+[`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)
+with GUID `dfce44e4-17b7-4bd1-a6d1-04996ec95633` (Microsoft's built-in roles
+list; bootstrap still resolves it live and refuses a mismatch). In this order:
+
+1. Re-run `./bootstrap.sh` as the operator, so the live ABAC condition learns
+   the role.
+2. Only then set `dps_ci_enroller_enabled = true` in `environments/dev.tfvars`.
+
+Setting it before step 1 makes every `Apply Dev Infrastructure` run on `main`
+fail with `AuthorizationFailed` on the role assignment create.
+
+The DPS's own grant, `IoT Hub Registry Contributor` for the DPS identity on the
+hub (`azurerm_role_assignment.dps_hub_registry_contributor`, on with
+`dps_enabled`), needs no re-run: that role is already in the live condition
+(HAR-42).
+
 ### Dev acceptance peer identity — zero roles, second caller for HAR-55 (HAR-61)
 
 **What it is.** A dedicated Entra app registration and service principal,
@@ -1342,7 +1368,7 @@ gated activation.
   `terraform init -backend=false -input=false -lockfile=readonly` →
   `terraform validate` → `terraform test` (root) → `scripts/tf-static-checks.sh`
   → `bootstrap/bootstrap.test.sh` → the destroy-guard fixtures → per-module
-  `terraform test` (`modules/functions`, `modules/iot-hub`, `modules/monitoring`)
+  `terraform test` (`modules/cosmos-db`, `modules/dps`, `modules/functions`, `modules/iot-hub`, `modules/monitoring`)
   → the pinned OTel collector config validate. It takes **no** `terraform plan`,
   binds **no** backend, and never touches `meatgeek-v2/dev.tfstate`. PR jobs
   **never** apply, and now never authenticate either.

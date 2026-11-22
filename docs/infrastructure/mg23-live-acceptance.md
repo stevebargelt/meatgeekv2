@@ -1032,7 +1032,7 @@ The allowlist holds bare GUIDs; the provider may send
 
 Run **T1**.
 
-- **Branch A — T1 permits all 10 roles:** `GuidEquals` extracts the GUID from the
+- **Branch A — T1 permits all 11 roles:** `GuidEquals` extracts the GUID from the
   path. Done.
 - **Branch B — T1 is denied with `AuthorizationFailed`/condition-not-satisfied
   on every role:** the condition **fails shut**, which is the correct direction
@@ -1772,7 +1772,7 @@ t_ready && echo "preflight OK: sub=$SUB sp=$APPLY_SP_OBJECT_ID"
 
 | ID  | Proves                                                       | Expected                                    |
 | --- | ------------------------------------------------------------ | ------------------------------------------- |
-| T1  | All 10 allowlisted roles can be granted **via Terraform**    | PERMIT                                      |
+| T1  | All 11 allowlisted roles can be granted **via Terraform**    | PERMIT                                      |
 | T2  | Privileged roles cannot be granted at the dev RG             | REJECT                                      |
 | T3  | A declared-`ServicePrincipal` grant to a real **user** (B2)  | REJECT (or documented residual)             |
 | T4  | Delete is constrained by the same allowlist                  | REJECT non-allowlisted / PERMIT allowlisted |
@@ -1780,7 +1780,7 @@ t_ready && echo "preflight OK: sub=$SUB sp=$APPLY_SP_OBJECT_ID"
 | T6  | Allowlist changes actually reconcile the live condition      | Condition CHANGES                           |
 | T7  | Scope reality check — an allowlisted role at RG scope        | PERMIT (accepted, documented)               |
 
-### T1 — PERMIT all 10 allowlisted roles, via Terraform
+### T1 — PERMIT all 11 allowlisted roles, via Terraform
 
 ```hcl
 # /tmp/mg23-acceptance/main.tf
@@ -1804,6 +1804,7 @@ locals {
     "Azure Event Hubs Data Sender",
     "IoT Hub Registry Contributor",
     "IoT Hub Twin Contributor",
+    "Device Provisioning Service Data Contributor",
   ]
 }
 
@@ -1826,7 +1827,7 @@ if t_ready; then
 fi
 ```
 
-- **Expected:** all 10 assignments created.
+- **Expected:** all 11 assignments created.
 - **False green to watch for:** running this with `az role assignment create`
   instead of Terraform. `az` always sends `principalType`; the provider may not
   (B1). An `az`-based pass tells you nothing about whether the real apply works.
@@ -2015,7 +2016,7 @@ fi
 
 Then run T1's Terraform again to restore the `Azure Event Hubs Data Sender`
 assignment deleted in T4b, and finally `terraform destroy` the scratch config to
-clean up all 10.
+clean up all 11.
 
 ### T6 — Allowlist reconcile regression (the frozen-condition bug)
 

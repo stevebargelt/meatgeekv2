@@ -198,6 +198,8 @@ Activation of the dev loop is operator-gated: see
 - V2-owned Cosmos DB, autoscale 400→1000 RU, 7-day telemetry TTL
 - Azure Functions **Flex Consumption** (`FC1` plan), **scale-to-zero** (`always_ready = 0`)
 - SignalR Free (F1) tier
+- IoT Hub Device Provisioning Service (`dps_enabled = true`), see
+  [Device Provisioning Service](#device-provisioning-service-har-131)
 - Permissive IP ranges, backups off, low budget — cost-optimized
 
 ### Production (`environments/prod.tfvars`)
@@ -218,6 +220,7 @@ Activation of the dev loop is operator-gated: see
 | `modules/functions/`  | Flex Consumption Function App (azapi `Microsoft.Web/sites` + `authsettingsV2`, HAR-15) on an `FC1` `azurerm_service_plan` + its own storage account (MI blob deployment container, length-safe names) |
 | `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs)                                                                                                                             |
 | `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                                                                                                                                                  |
+| `modules/dps/`        | IoT Hub Device Provisioning Service (azapi `Microsoft.Devices/provisioningServices`, HAR-131), linked to the IoT Hub by managed identity; behind `dps_enabled`                          |
 
 The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it does
 **not** read a shared V1 account via a data source. There is no adoption of a pre-existing shared Cosmos account
@@ -244,6 +247,54 @@ caveat), and the scale profile is tuned per-env via `instance_memory_in_mb` /
 prod `always_ready >= 1`). The former `functions_app_service_plan_sku` var is
 **removed**. See
 [ADR: Flex Consumption hosting model](../../learnings/decisions/mg-24-flex-consumption-hosting-model.md).
+
+## Device Provisioning Service (HAR-131)
+
+**What it is for.** Goal HAR-130 onboards a real Raspberry Pi without anyone
+copying a device key. The device generates an X.509 certificate, presents it to
+the IoT Hub Device Provisioning Service (DPS), and the DPS creates the device's
+IoT Hub identity. `modules/dps` creates that DPS: SKU `S1`, capacity 1,
+allocation policy `Hashed`, public network access on (the Pi is on a home
+network), a system-assigned managed identity, in the hub's resource group and
+region. Nothing uses it yet: there are no enrollments.
+
+**The link to the hub is identity-based.** The DPS authenticates to the IoT Hub
+with its own managed identity (`iotHubs[].authenticationType = "SystemAssigned"`,
+the hub named by host name). No connection string, shared access policy key or
+hub key is given to the DPS, so none reaches Terraform state. The DPS identity
+holds `IoT Hub Registry Contributor` scoped to the hub alone
+(`azurerm_role_assignment.dps_hub_registry_contributor`), which is what lets it
+create device identities. The link is written after that grant exists
+(`azapi_update_resource.linked_hub`, ordered by `terraform_data.hub_registry_role_ready`).
+
+Two consequences of how it is built:
+
+- It is an azapi resource, not `azurerm_iothub_dps`, because the azurerm
+  resource's `linked_hub` requires a connection string. Static check 21 fails
+  the build if a connection string or key appears in the module.
+- Identity-based linking needs api-version `2026-11-01`, which the pinned azapi
+  (2.11.0) predates, so the two DPS resources set
+  `schema_validation_enabled = false`. ARM still validates the body. Remove the
+  flag when azapi is next bumped.
+
+**The two flags.**
+
+| Variable                  | Default | dev    | What it does                                                                                                                                                            |
+| ------------------------- | ------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dps_enabled`             | `false` | `true` | Creates the DPS, its identity-based link to the hub, and the DPS identity's `IoT Hub Registry Contributor` grant on the hub. Prod does not set it.                       |
+| `dps_ci_enroller_enabled` | `false` | off    | Grants the app-deploy identity `Device Provisioning Service Data Contributor` on the DPS, so CI can manage enrollments. Needs `dps_enabled` and `app_deploy_principal_object_id` too. |
+
+**Switching on `dps_ci_enroller_enabled` needs a `bootstrap.sh` re-run first.**
+The role is in `bootstrap/tf-managed-role-allowlist.tsv`, but the infra-apply
+identity's live ABAC condition only learns a role when the owner re-runs
+`bootstrap.sh`. Setting the flag before that re-run fails every dev apply with
+`AuthorizationFailed`. See the
+[bootstrap runbook](../../docs/infrastructure/bootstrap-runbook.md#dps-ci-enroller-grant--re-run-bootstrap-before-setting-dps_ci_enroller_enabled-har-131).
+
+The dev DPS is applied by the **Apply Dev Infrastructure** workflow
+(`.github/workflows/infra-apply-dev.yml`) on merge to `main`. Outputs:
+`dps_name`, `dps_id_scope`, `dps_global_endpoint` (all identifiers, empty when
+`dps_enabled` is false).
 
 ## Provider pinning & lock files
 
@@ -395,6 +446,8 @@ terraform output -raw cosmos_db_endpoint         # non-secret; access is identit
 terraform output -raw eventhub_namespace_fqdn    # non-secret IoT telemetry (Event Hubs) namespace
 terraform output -raw signalr_service_uri        # non-secret; access is identity-based
 terraform output development_urls                # non-secret endpoint URLs
+terraform output -raw dps_id_scope               # non-secret DPS id scope (empty when dps_enabled is false)
+terraform output -raw dps_global_endpoint        # global.azure-devices-provisioning.net
 ```
 
 ### How the app gets access (no secrets)

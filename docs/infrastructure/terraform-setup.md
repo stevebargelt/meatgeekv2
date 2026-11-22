@@ -366,8 +366,8 @@ CI reconciles **dev** infrastructure and plans **prod**. The authoritative model
   6. `scripts/tf-static-checks.sh`;
   7. `bootstrap/bootstrap.test.sh`;
   8. the destroy-guard fixture harness (bash **and** dash);
-  9. `terraform test` per test-bearing module — `modules/functions`,
-     `modules/iot-hub`, `modules/monitoring`;
+  9. `terraform test` per test-bearing module — `modules/cosmos-db`,
+     `modules/dps`, `modules/functions`, `modules/iot-hub`, `modules/monitoring`;
   10. the pinned OTel collector config validate.
 
   > **`-backend=false` is an `init` flag, not a `validate` or `test` flag.**

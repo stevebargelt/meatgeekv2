@@ -386,3 +386,30 @@ variable "api_device_twin_writer_enabled" {
   type        = bool
   default     = false
 }
+
+# IoT Hub Device Provisioning Service (HAR-131, goal HAR-130). When true, this
+# apply creates the DPS (modules/dps), links it to the IoT Hub identity-based,
+# and grants the DPS identity IoT Hub Registry Contributor on the hub (see
+# module.dps and azurerm_role_assignment.dps_hub_registry_contributor in
+# main.tf). dev.tfvars sets it; prod does not.
+variable "dps_enabled" {
+  description = "When true, creates the IoT Hub Device Provisioning Service, links it to the IoT Hub with its system-assigned identity, and grants that identity IoT Hub Registry Contributor on the hub. Default false creates nothing."
+  type        = bool
+  default     = false
+}
+
+# CI enroller grant on the DPS (HAR-131). When true (and dps_enabled, and
+# app_deploy_principal_object_id set), this apply grants the app-deploy identity
+# `Device Provisioning Service Data Contributor` on the DPS (see
+# azurerm_role_assignment.dps_ci_enroller in main.tf).
+#
+# Leave FALSE until bootstrap.sh has been re-run with `Device Provisioning
+# Service Data Contributor` in bootstrap/tf-managed-role-allowlist.tsv: the
+# infra-apply identity's ABAC condition only permits allowlisted roles, so
+# setting this before that re-run fails every dev apply with AuthorizationFailed.
+# See docs/infrastructure/bootstrap-runbook.md.
+variable "dps_ci_enroller_enabled" {
+  description = "When true AND dps_enabled AND app_deploy_principal_object_id is non-empty, grants the app-deploy identity Device Provisioning Service Data Contributor on the DPS so CI can manage enrollments. Default false skips the grant. Requires a bootstrap.sh re-run first (role allowlist)."
+  type        = bool
+  default     = false
+}

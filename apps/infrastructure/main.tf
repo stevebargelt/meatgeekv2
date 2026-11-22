@@ -243,6 +243,35 @@ module "iot_hub" {
   tags = local.common_tags
 }
 
+# IoT Hub Device Provisioning Service (HAR-131, goal HAR-130). Devices get their
+# IoT Hub identity from it with an X.509 certificate generated on the device, so
+# nobody copies a device key. Nothing uses it yet.
+#
+# Behind var.dps_enabled (default false): dev.tfvars switches it on, prod does
+# not, so a prod plan shows no DPS. The DPS links to the hub IDENTITY-BASED, with
+# its own system-assigned identity; no hub key or connection string is passed to
+# it (see the module header in modules/dps/main.tf).
+module "dps" {
+  count  = var.dps_enabled ? 1 : 0
+  source = "./modules/dps"
+
+  resource_prefix   = local.resource_prefix
+  global_suffix     = local.global_name_suffix
+  resource_group_id = azurerm_resource_group.main.id
+  location          = azurerm_resource_group.main.location
+
+  iot_hub_hostname = module.iot_hub.hostname
+
+  # Dependency handle, the same shape as cosmos_role_assignment_id on
+  # module.iot_hub: the linked hub authenticates with the DPS identity, so it is
+  # created only after that identity holds IoT Hub Registry Contributor. Only
+  # the linked hub consumes this, never the DPS, so the graph stays acyclic even
+  # though the role assignment reads this module's identity_principal_id.
+  hub_registry_role_assignment_id = one(azurerm_role_assignment.dps_hub_registry_contributor[*].id)
+
+  tags = local.common_tags
+}
+
 # Grant the IoT Hub's system-assigned identity Cosmos DB Built-in Data Contributor
 # on the V2-OWNED Cosmos account, so the direct route can use AAD auth instead of keys.
 # Role definition ID 00000000-0000-0000-0000-000000000002 = "Cosmos DB Built-in Data Contributor"
@@ -547,6 +576,38 @@ resource "azurerm_role_assignment" "functions_iothub_twin_contributor" {
   scope                = module.iot_hub.iot_hub_id
   role_definition_name = "IoT Hub Twin Contributor"
   principal_id         = module.azure_functions.identity_principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# DPS identity → IoT Hub device registry (HAR-131). `IoT Hub Registry
+# Contributor` scoped to the IoT Hub ALONE, not the RG: the DPS creates the
+# device identities of the devices it provisions. Exists exactly when the DPS
+# does. The role was already in bootstrap/tf-managed-role-allowlist.tsv (HAR-41),
+# so the live ABAC condition on the infra-apply identity already permits it.
+resource "azurerm_role_assignment" "dps_hub_registry_contributor" {
+  count                = var.dps_enabled ? 1 : 0
+  scope                = module.iot_hub.iot_hub_id
+  role_definition_name = "IoT Hub Registry Contributor"
+  principal_id         = module.dps[0].identity_principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# App-deployment identity → DPS enrollments (HAR-131, goal HAR-130). `Device
+# Provisioning Service Data Contributor` scoped to the DPS ALONE, so CI can
+# manage enrollments as the app-deploy identity under OIDC. Nothing is stored:
+# no DPS shared access policy, no Key Vault, no repo secret.
+# Guarded by count on THREE conditions: var.dps_ci_enroller_enabled, the DPS
+# existing (var.dps_enabled), and the app-deploy principal being known. Switched
+# off by default and in every tfvars. The role is in
+# bootstrap/tf-managed-role-allowlist.tsv, but the live ABAC condition on the
+# infra-apply identity only learns it when bootstrap.sh is re-run; setting
+# dps_ci_enroller_enabled in a tfvars before that re-run fails every dev apply
+# with AuthorizationFailed. Covered by tests/dps.tftest.hcl.
+resource "azurerm_role_assignment" "dps_ci_enroller" {
+  count                = var.dps_ci_enroller_enabled && var.dps_enabled && var.app_deploy_principal_object_id != "" ? 1 : 0
+  scope                = module.dps[0].dps_id
+  role_definition_name = "Device Provisioning Service Data Contributor"
+  principal_id         = var.app_deploy_principal_object_id
   principal_type       = "ServicePrincipal"
 }
 

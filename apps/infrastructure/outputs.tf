@@ -136,3 +136,20 @@ output "simulated_device_id" {
   description = "IoT Hub device id of the standing simulated device (empty when unset)"
   value       = var.simulated_device_id
 }
+
+# IoT Hub Device Provisioning Service (HAR-131). All three are identifiers, not
+# credentials. Empty when var.dps_enabled is false.
+output "dps_name" {
+  description = "Name of the IoT Hub Device Provisioning Service (empty when dps_enabled is false)"
+  value       = var.dps_enabled ? module.dps[0].dps_name : ""
+}
+
+output "dps_id_scope" {
+  description = "ID scope of the DPS, which devices present when they provision (non-secret; empty when dps_enabled is false)"
+  value       = var.dps_enabled ? module.dps[0].dps_id_scope : ""
+}
+
+output "dps_global_endpoint" {
+  description = "Device provisioning host name devices connect to, global.azure-devices-provisioning.net (empty when dps_enabled is false)"
+  value       = var.dps_enabled ? module.dps[0].dps_global_endpoint : ""
+}
