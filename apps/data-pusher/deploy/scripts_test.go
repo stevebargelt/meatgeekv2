@@ -636,6 +636,141 @@ func TestAuthTypeLoginOnEveryAzIotCall(t *testing.T) {
 	}
 }
 
+// --- host names (HAR-139) ----------------------------------------------------
+//
+// CI's identity holds only data-plane roles, so it cannot list or show
+// resources in ARM. With --dps and --hub given as host names and
+// --auth-type login, the scripts make no ARM call and pass no
+// --resource-group to az iot (azure-iot 1.0.0 looks a hub up in ARM by name
+// when it gets one, even with a host name).
+
+const dpsHost = dpsName + ".azure-devices-provisioning.net"
+
+var hostArgs = []string{"--dps", dpsHost, "--hub", hubHost, "--auth-type", "login"}
+
+func TestHostNamesEnrolNewDeviceWithoutARM(t *testing.T) {
+	e := newEnv(t)
+	cert, _ := e.writeCert("cert.pem", deviceID)
+	e.notFound("iot_dps_enrollment_show")
+	r := e.run(enrol, nil, append([]string{"--device-id", deviceID, "--certificate", cert}, hostArgs...)...)
+	assertResult(t, r, 0, "enrolled "+deviceID+"\n")
+	assertCalls(t, r.calls, [][]string{
+		callExtension,
+		append(split("iot dps enrollment show --dps-name "+dpsHost+
+			" --enrollment-id "+deviceID+" --auth-type login --query"),
+			"[provisioningStatus, attestation.x509.clientCertificates.primary.info.sha1Thumbprint]",
+			"--output", "tsv"),
+		split("iot dps enrollment create --dps-name " + dpsHost +
+			" --enrollment-id " + deviceID + " --auth-type login" +
+			" --attestation-type x509 --certificate-path " + cert +
+			" --device-id " + deviceID + " --provisioning-status enabled" +
+			" --allocation-policy static --iot-hubs " + hubHost + " --output none"),
+	})
+}
+
+func TestHostNamesEnrolReplacedCertificateWithoutARM(t *testing.T) {
+	e := newEnv(t)
+	cert, _ := e.writeCert("cert.pem", deviceID)
+	_, oldThumb := e.writeCert("old.pem", deviceID)
+	e.reply("iot_dps_enrollment_show", "enabled\t"+oldThumb+"\n", 0, "")
+	r := e.run(enrol, nil, append([]string{"--device-id", deviceID, "--certificate", cert}, hostArgs...)...)
+	assertResult(t, r, 0, "certificate replaced "+deviceID+"\n")
+	assertNoARM(t, r.calls)
+	assertCalls(t, writes(r.calls), [][]string{
+		split("iot dps enrollment update --dps-name " + dpsHost +
+			" --enrollment-id " + deviceID + " --auth-type login --certificate-path " + cert + " --output none"),
+	})
+}
+
+func TestHostNamesEnrolReinstateWithoutARM(t *testing.T) {
+	e := newEnv(t)
+	cert, _ := e.writeCert("cert.pem", deviceID)
+	e.reply("iot_dps_enrollment_show", "disabled\tX\n", 0, "")
+	e.reply("iot_hub_device-identity_show", "disabled\n", 0, "")
+	r := e.run(enrol, []string{"REINSTATE=1"}, append([]string{"--device-id", deviceID, "--certificate", cert}, hostArgs...)...)
+	assertResult(t, r, 0, "reinstated "+deviceID+"\n")
+	assertNoARM(t, r.calls)
+	assertCalls(t, writes(r.calls), [][]string{
+		split("iot dps enrollment update --dps-name " + dpsHost +
+			" --enrollment-id " + deviceID + " --auth-type login --certificate-path " + cert +
+			" --provisioning-status enabled --output none"),
+		split("iot hub device-identity update --hub-name " + hubHost +
+			" --device-id " + deviceID + " --auth-type login --status enabled --status-reason reinstated --output none"),
+	})
+}
+
+func TestHostNamesRevokeWithoutARM(t *testing.T) {
+	e := newEnv(t)
+	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+	r := e.run(revoke, nil, append([]string{"--device-id", deviceID}, hostArgs...)...)
+	assertResult(t, r, 0, "revoked "+deviceID+"\n")
+	assertCalls(t, r.calls, [][]string{
+		callExtension,
+		append(split("iot dps enrollment show --dps-name "+dpsHost+
+			" --enrollment-id "+deviceID+" --auth-type login --query"),
+			"[provisioningStatus, attestation.x509.clientCertificates.primary.info.sha1Thumbprint]",
+			"--output", "tsv"),
+		split("iot hub device-identity show --hub-name " + hubHost +
+			" --device-id " + deviceID + " --auth-type login --query status --output tsv"),
+		split("iot dps enrollment update --dps-name " + dpsHost +
+			" --enrollment-id " + deviceID + " --auth-type login --provisioning-status disabled --output none"),
+		split("iot hub device-identity update --hub-name " + hubHost +
+			" --device-id " + deviceID + " --auth-type login --status disabled --status-reason revoked --output none"),
+	})
+}
+
+// One host name, one resource name: only the named one is looked up in ARM.
+func TestHostNameForTheHubOnly(t *testing.T) {
+	e := newEnv(t)
+	cert, _ := e.writeCert("cert.pem", deviceID)
+	e.notFound("iot_dps_enrollment_show")
+	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert, "--hub", hubHost, "--auth-type", "login")
+	assertResult(t, r, 0, "enrolled "+deviceID+"\n")
+	assertCalls(t, r.calls, [][]string{
+		callExtension, callListDPS, callEnrollmentShow("login"), callCreate("login", cert),
+	})
+}
+
+func TestHostNameNeedsLogin(t *testing.T) {
+	for _, flag := range []string{"--dps", "--hub"} {
+		for _, script := range []string{enrol, revoke} {
+			t.Run(script+" "+flag, func(t *testing.T) {
+				e := newEnv(t)
+				cert, _ := e.writeCert("cert.pem", deviceID)
+				host := dpsHost
+				if flag == "--hub" {
+					host = hubHost
+				}
+				args := []string{"--device-id", deviceID, flag, host}
+				if script == enrol {
+					args = append(args, "--certificate", cert)
+				}
+				r := e.run(script, nil, args...)
+				assertResult(t, r, 2, "")
+				if !strings.Contains(r.stderr, flag+" "+host+" is a host name, which needs --auth-type login") {
+					t.Errorf("stderr:\n%s", r.stderr)
+				}
+				assertCalls(t, r.calls, nil)
+			})
+		}
+	}
+}
+
+func assertNoARM(t *testing.T, cs [][]string) {
+	t.Helper()
+	for _, c := range cs {
+		if c[0] == "resource" {
+			t.Errorf("ARM call in host-name mode: az %s", strings.Join(c, " "))
+		}
+		for _, a := range c {
+			if a == "--resource-group" {
+				t.Errorf("--resource-group in host-name mode: az %s", strings.Join(c, " "))
+			}
+		}
+	}
+}
+
 func TestEnrolRejectsBadAuthType(t *testing.T) {
 	e := newEnv(t)
 	cert, _ := e.writeCert("cert.pem", deviceID)

@@ -37,12 +37,13 @@ pusher. It is not used by these scripts.
 | ------------------------- | ----------------------------------------------- |
 | `--device-id <id>`        | required. 1 to 128 letters, digits, `-`, `.`, `_` or `:` |
 | `--resource-group <name>` | `meatgeek-v2-dev-rg`                            |
-| `--dps <name>`            | the only `Microsoft.Devices/provisioningServices` in the resource group |
-| `--hub <name>`            | the only `Microsoft.Devices/IotHubs` in the resource group |
+| `--dps <name\|host>`      | the only `Microsoft.Devices/provisioningServices` in the resource group |
+| `--hub <name\|host>`      | the only `Microsoft.Devices/IotHubs` in the resource group |
 | `--auth-type key\|login`  | `key`. Passed to every `az iot dps …` and `az iot hub …` call |
 
 The scripts list the resource group's DPSs and hubs (`az resource list`)
-whether or not you pass the names. If `--dps` or `--hub` is left out and the
+whether or not you pass the names, unless you pass a
+[host name](#host-names-no-arm). If `--dps` or `--hub` is left out and the
 resource group has none or more than one of that resource, the script stops
 with exit 1 and lists what it found; pass the name to choose one. If a name
 you pass is not in the resource group, the script stops with exit 1 before it
@@ -54,6 +55,21 @@ device".
 `--auth-type key` lets `az` fetch the DPS and hub access keys with your ARM
 rights. It suits the owner, who is subscription Owner. `--auth-type login`
 uses your Azure AD sign-in and its data-plane RBAC roles. It suits CI.
+
+### Host names (no ARM)
+
+A `--dps` or `--hub` value with a dot in it is the service's host name
+(`<dps>.azure-devices-provisioning.net`, `<hub>.azure-devices.net`). It is
+used as given: the script does not list or show it in ARM, and passes no
+`--resource-group` to `az iot` for it. That is how an identity with only
+data-plane roles runs the scripts. CI's identity holds IoT Hub Registry
+Contributor and Device Provisioning Service Data Contributor, and no Reader,
+so it cannot list the resource group (HAR-139). A host name needs
+`--auth-type login`; with `key`, `az` would look the service up in ARM to read
+its keys, so the script refuses it with exit 2. azure-iot 1.0.0 looks a hub up
+in ARM by name whenever it gets a `--resource-group`, even with a host name,
+which is why none is passed. A wrong host name fails at the first `az iot`
+call, with exit 1, not as "no such device".
 
 Stdout carries one result line and nothing else. Diagnostics go to stderr.
 The certificate PEM is never printed. From each `az … show` call, the scripts
@@ -95,11 +111,15 @@ REINSTATE=1 apps/data-pusher/deploy/enrol-device.sh --device-id meatgeek-pi-7 --
 # reinstated meatgeek-pi-7
 ```
 
-### CI (login auth)
+### CI (login auth, host names)
+
+As `.github/workflows/app-deploy-dev.yml` does for each simulated device
+(HAR-139):
 
 ```sh
 simdevice identity init --device-id ci-sim-1 --state-dir "$RUNNER_TEMP/sim" > "$RUNNER_TEMP/ci-sim-1.pem"
 apps/data-pusher/deploy/enrol-device.sh --auth-type login \
+  --dps "$DPS_NAME.azure-devices-provisioning.net" --hub "$HUB_HOSTNAME" \
   --device-id ci-sim-1 --certificate "$RUNNER_TEMP/ci-sim-1.pem"
 ```
 
@@ -138,7 +158,8 @@ the device in the web app.
 # owner
 apps/data-pusher/deploy/revoke-device.sh --device-id meatgeek-pi-7
 # CI
-apps/data-pusher/deploy/revoke-device.sh --auth-type login --device-id ci-sim-1
+apps/data-pusher/deploy/revoke-device.sh --auth-type login \
+  --dps "$DPS_NAME.azure-devices-provisioning.net" --hub "$HUB_HOSTNAME" --device-id ci-sim-1
 ```
 
 ## Exit codes

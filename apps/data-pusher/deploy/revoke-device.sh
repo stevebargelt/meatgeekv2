@@ -25,8 +25,11 @@ Disables the device's DPS enrollment and its IoT Hub device identity
 
   --device-id <id>         the device id (= DPS enrollment id)
   --resource-group <name>  default meatgeek-v2-dev-rg
-  --dps <name>             default: the only DPS in the resource group
-  --hub <name>             default: the only IoT hub in the resource group
+  --dps <name|host>        default: the only DPS in the resource group
+  --hub <name|host>        default: the only IoT hub in the resource group.
+                           A host name (with a dot) for --dps or --hub is
+                           used as given, with no ARM lookup and no
+                           --resource-group; it needs --auth-type login
   --auth-type key|login    passed to az iot; default key
 
 Result (stdout, one line): "revoked <id>" or "already revoked <id>", with
@@ -68,7 +71,7 @@ changed=0
 # even if the hub update below fails.
 if [[ "$ENROLLMENT_STATE" == "enabled" ]]; then
   az_write "iot dps enrollment update" iot dps enrollment update \
-    --dps-name "$DPS_NAME" --resource-group "$RESOURCE_GROUP" \
+    "${DPS_ARGS[@]}" \
     --enrollment-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
     --provisioning-status disabled --output none
   log "disabled the DPS enrollment $DEVICE_ID in $DPS_NAME"
