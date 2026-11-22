@@ -7,7 +7,8 @@ time; this guard keeps it that way (HAR-127). The rule it enforces, and how to
 wait without a clock in each language, is in
 [docs/development/deterministic-tests.md](../../docs/development/deterministic-tests.md).
 
-Node built-ins only. Nothing to install.
+Node built-ins only. Nothing to install. CI runs it on every pull request and
+push to `main` as the `no-real-time-guard` job in `.github/workflows/ci.yml`.
 
 ```sh
 node tools/no-real-time/check.mjs             # the whole tracked tree

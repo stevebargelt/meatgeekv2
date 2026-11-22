@@ -192,6 +192,10 @@ sleep or real-time wait that no exception covers, and exits non-zero. The rules,
 their ids and the exact scope are in
 [tools/no-real-time/README.md](../../tools/no-real-time/README.md).
 
+CI runs it on every pull request and every push to `main`, as the
+`no-real-time-guard` job in `.github/workflows/ci.yml` (HAR-128); a failure
+lists each hit in the run summary. See [CI/CD](ci-cd.md#quality-jobs).
+
 **Adding an exception.** Fix the test first if you can. If a wait truly cannot
 be an event, a fake clock or a no-deadline poll, add an entry to
 `tools/no-real-time/exceptions.json`, `{ path, rule, line | pattern, reason }`,

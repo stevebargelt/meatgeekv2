@@ -832,3 +832,56 @@ jobs:
 
       - name: Validate architecture model
         run: npm --prefix docs/architecture/likec4 run check
+
+  # HAR-128 (goal HAR-106). The no-real-time guard (HAR-127): fails the pull
+  # request when any tracked test file or test-only helper sleeps or waits on
+  # real time with no reviewed exception — the rule is
+  # docs/development/deterministic-tests.md. It scans the whole tracked tree,
+  # not a diff, so a stale exception fails here too.
+  #
+  # check.mjs uses Node built-ins only, so there is no `npm ci` (and so no
+  # corepack step and no npm cache). No secret, no environment, `contents: read`
+  # only, so it runs on fork pull requests. Independent of `setup` and
+  # deliberately without a path filter: it takes seconds, and a skipped job
+  # would look green.
+  no-real-time-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: No real time in tests
+        # Each hit is one `file:line: rule: message` line and the last line is
+        # the summary. All of it goes to the log and to the run summary, so a
+        # failure names file, line and rule without opening the log. The
+        # guard's exit code is the step's.
+        env:
+          RULE_DOC: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/docs/development/deterministic-tests.md#the-guard
+        run: |
+          set +e
+          node tools/no-real-time/check.mjs > "$RUNNER_TEMP/no-real-time.txt" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/no-real-time.txt"
+          {
+            if [ "$code" -eq 0 ]; then
+              echo '### no-real-time guard: pass'
+            else
+              echo "### no-real-time guard: FAIL (exit $code)"
+              echo
+              echo "Fix each hit, or add a reviewed exception: see [deterministic-tests.md]($RULE_DOC)."
+            fi
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/no-real-time.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"
