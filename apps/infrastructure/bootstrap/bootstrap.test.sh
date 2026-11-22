@@ -6,6 +6,13 @@
 # invariants of both scripts. Run: bash bootstrap.test.sh
 set -uo pipefail
 
+# HAR-121: a text check that reads ALL of its input. `producer | grep -q X`
+# under pipefail fails at random: grep -q exits at its first match, a producer
+# still writing gets SIGPIPE, and the pipeline returns 141 (no match). It did,
+# 1 copy in 8, under test-repeat's load pass. `matches` takes grep's arguments,
+# reads to the end, discards the output and returns grep's status.
+matches() { grep "$@" >/dev/null; }
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOT="$DIR/bootstrap.sh"
 SETUP="$DIR/../terraform-setup.sh"
@@ -133,18 +140,18 @@ apply_grant_count="$(printf '%s\n' "$apply_grants" | grep -c '[^[:space:]]' || t
 if [ "$apply_grant_count" -eq 3 ]; then
   ok "D1: the apply identity has EXACTLY 3 role grants (no fourth grant crept in)"
 else bad "D1: the apply identity must have exactly 3 role grants, found ${apply_grant_count}: $(printf '%s' "$apply_grants" | tr '\n' '|')"; fi
-if printf '%s\n' "$apply_grants" | grep -q 'ensure_role_assignment "\$sp_id" ServicePrincipal "\$INFRA_APPLY_ROLE" "\$rg_scope"'; then
+if printf '%s\n' "$apply_grants" | matches 'ensure_role_assignment "\$sp_id" ServicePrincipal "\$INFRA_APPLY_ROLE" "\$rg_scope"'; then
   ok "D1: Contributor is granted at the dev-RG scope"
 else bad "D1: the apply identity must hold \$INFRA_APPLY_ROLE at \$rg_scope"; fi
-if printf '%s\n' "$apply_grants" | grep -q 'ensure_conditioned_role_assignment'; then
+if printf '%s\n' "$apply_grants" | matches 'ensure_conditioned_role_assignment'; then
   ok "D1: RBAC-Admin is granted through the CONDITIONED helper"
 else bad "D1: the apply identity's RBAC-Admin grant must go through ensure_conditioned_role_assignment"; fi
-if printf '%s\n' "$apply_grants" | grep -q 'ensure_role_assignment "\$sp_id" ServicePrincipal "Storage Blob Data Contributor" "\$container_scope"'; then
+if printf '%s\n' "$apply_grants" | matches 'ensure_role_assignment "\$sp_id" ServicePrincipal "Storage Blob Data Contributor" "\$container_scope"'; then
   ok "D1: Storage Blob Data Contributor is granted at the CONTAINER scope only"
 else bad "D1: the apply identity's state role must be container-scoped"; fi
 # No subscription-scoped grant anywhere in the apply path (F18: no subscription
 # scope is a load-bearing precondition of the whole threat model).
-if printf '%s\n' "$apply_grants" | grep -q '"/subscriptions/\${sub_id}"'; then
+if printf '%s\n' "$apply_grants" | matches '"/subscriptions/\${sub_id}"'; then
   bad "D1: the apply identity must hold NO subscription-scoped grant (F18 closed escalation path)"
 else ok "D1: the apply identity holds no subscription-scoped grant (F18)"; fi
 
@@ -160,16 +167,16 @@ else bad "D2: the apply identity must create exactly one federated credential (f
 # The subject is built from a local `env` that is bound to INFRA_APPLY_ENVIRONMENT,
 # so assert BOTH halves — the binding and the subject shape. Asserting only the
 # subject string would pass if `env` were rebound to something else.
-if printf '%s\n' "$apply_fn" | grep -q 'local env="\$INFRA_APPLY_ENVIRONMENT"'; then
+if printf '%s\n' "$apply_fn" | matches 'local env="\$INFRA_APPLY_ENVIRONMENT"'; then
   ok "D2: the apply identity's environment is bound to \$INFRA_APPLY_ENVIRONMENT"
 else bad "D2: bootstrap_infra_apply_identity must bind env to \$INFRA_APPLY_ENVIRONMENT"; fi
 # MG-42: the subject is composed from the repo's LIVE sub-claim prefix, never
 # from a `repo:${GITHUB_REPO}` literal. The literal is what reverted this exact
 # credential on every re-run and broke the dev auto-apply loop.
-if printf '%s\n' "$apply_fn" | grep -q 'subject="\$(federated_environment_subject "\$env")"'; then
+if printf '%s\n' "$apply_fn" | matches 'subject="\$(federated_environment_subject "\$env")"'; then
   ok "D2: the apply credential's subject is composed from the DERIVED prefix for ${INFRA_APPLY_ENVIRONMENT}"
 else bad "D2: the apply credential subject must be \$(federated_environment_subject \"\$env\") — MG-42"; fi
-if printf '%s\n' "$apply_fn" | grep -q 'prune_unexpected_federated_credentials'; then
+if printf '%s\n' "$apply_fn" | matches 'prune_unexpected_federated_credentials'; then
   ok "D2: the apply identity prunes every credential outside its expected set"
 else bad "D2: the apply identity must prune unexpected federated credentials"; fi
 case " $GITHUB_ENVIRONMENTS " in
@@ -266,7 +273,7 @@ if grep -q 'az ad sp create --id "\$app_id" --query id -o tsv' "$BOOT"; then
   ok "D8: SP creation uses the object id the CREATE returned"
 else bad "D8: SP creation must use the id returned by az ad sp create"; fi
 # No create is immediately followed by a display-name re-lookup of the same thing.
-if grep -A3 'az ad app create --display-name' "$BOOT" | grep -q 'az ad app list --display-name'; then
+if grep -A3 'az ad app create --display-name' "$BOOT" | matches 'az ad app list --display-name'; then
   bad "D8: a create must not be followed by a display-name re-lookup (replication lag + duplicate names)"
 else ok "D8: no create path re-lists by display name afterwards"; fi
 
@@ -291,33 +298,33 @@ env_fn="$(awk '/^ensure_deployment_environment\(\)/{f=1} f{print} f&&/^}/{exit}'
   | grep -v '^[[:space:]]*#')"
 # It must CREATE (PUT is create-or-update, so it also repairs an environment
 # GitHub already auto-created without protection) ...
-if printf '%s' "$env_fn" | grep -q -- '--method PUT'; then
+if printf '%s' "$env_fn" | matches -- '--method PUT'; then
   ok "D5: the environment is created/repaired via an explicit PUT"
 else bad "D5: ensure_deployment_environment must PUT the environment (create-or-update)"; fi
 # ...pin deployments to main ONLY, for BOTH environments...
-if printf '%s' "$env_fn" | grep -q 'deployment-branch-policies' \
-   && printf '%s' "$env_fn" | grep -q 'name=main'; then
+if printf '%s' "$env_fn" | matches 'deployment-branch-policies' \
+   && printf '%s' "$env_fn" | matches 'name=main'; then
   ok "D5: a main-only custom deployment branch policy is applied"
 else bad "D5: ensure_deployment_environment must add a main-only deployment branch policy"; fi
 # ...verified by READ-BACK as EXACTLY ONE policy named main (a PUT that returned
 # 200 is not evidence, and two policies is not "main only").
-if printf '%s' "$env_fn" | grep -q 'EXACTLY ONE deployment branch policy'; then
+if printf '%s' "$env_fn" | matches 'EXACTLY ONE deployment branch policy'; then
   ok "D5: the branch policy is read back and required to be exactly one named 'main'"
 else bad "D5: ensure_deployment_environment must verify exactly one 'main' branch policy by read-back"; fi
 # ...with a REQUIRED REVIEWER on the recovery path only...
-if printf '%s' "$env_fn" | grep -q 'reviewers'; then
+if printf '%s' "$env_fn" | matches 'reviewers'; then
   ok "D5: a required reviewer is configured when requested"
 else bad "D5: ensure_deployment_environment must configure a required reviewer for want_reviewer=yes"; fi
 # ...and — the check the design implies but nothing used to assert — the APPLY
 # environment must have NO reviewer. A stray reviewer there silently converts
 # automatic reconciliation into a manual one while the YAML still reads
 # automatic, so reconciliation just stops.
-if printf '%s' "$env_fn" | grep -q 'must have NONE'; then
+if printf '%s' "$env_fn" | matches 'must have NONE'; then
   ok "D5: the AUTOMATIC apply environment is verified to have NO required reviewer"
 else bad "D5: ensure_deployment_environment must FAIL when the automatic apply environment carries a required reviewer"; fi
 # An empty reviewer id must FAIL rather than produce an approval gate that
 # approves everything.
-if printf '%s' "$env_fn" | grep -q 'EMPTY GitHub reviewer id'; then
+if printf '%s' "$env_fn" | matches 'EMPTY GitHub reviewer id'; then
   ok "D5: an empty/unresolvable reviewer id fails loud (no reviewer-less approval gate)"
 else bad "D5: ensure_deployment_environment must refuse to create an approval environment with no reviewer"; fi
 # A verification that cannot run is NOT a pass.
@@ -335,7 +342,7 @@ else bad "D6: bootstrap must record APPLY_ENV_STATUS and RECOVERY_ENV_STATUS and
 if grep -qE 'if \[ "\$APPLY_ENV_STATUS" != "PROTECTED" \] \|\| \[ "\$RECOVERY_ENV_STATUS" != "PROTECTED" \]' "$BOOT"; then
   ok "D6: the activation banner requires BOTH statuses to be PROTECTED"
 else bad "D6: the DEV_TF_BACKEND_READY banner must require BOTH APPLY_ENV_STATUS and RECOVERY_ENV_STATUS to be PROTECTED"; fi
-if printf '%s' "$env_fn" | grep -q 'DEV_TF_BACKEND_READY'; then
+if printf '%s' "$env_fn" | matches 'DEV_TF_BACKEND_READY'; then
   ok "D6: the failure path names DEV_TF_BACKEND_READY as the thing that must not be set"
 else bad "D6: the environment failure path must state that DEV_TF_BACKEND_READY must not be set true"; fi
 
@@ -353,7 +360,7 @@ if grep -Eq 'ensure_conditioned_role_assignment[[:space:]]+"\$sp_id"[[:space:]]+
 else bad "the RBAC-admin grant must go through ensure_conditioned_role_assignment with a condition argument"; fi
 # It must NEVER be granted through the UNCONDITIONED helper.
 if sed -e ':a' -e '/\\$/N; s/\\\n/ /; ta' "$BOOT" \
-   | grep -E '^[[:space:]]*ensure_role_assignment[[:space:]]' | grep -q 'INFRA_APPLY_RBAC_ROLE'; then
+   | grep -E '^[[:space:]]*ensure_role_assignment[[:space:]]' | matches 'INFRA_APPLY_RBAC_ROLE'; then
   bad "the RBAC-admin role must never be granted via the UNCONDITIONED ensure_role_assignment"
 else ok "RBAC-admin never flows through the unconditioned role-assignment helper"; fi
 
@@ -565,7 +572,7 @@ else ok "MG-42: OIDC_SUBJECT_PREFIX is not env-overridable (F16 applies to it to
 # line), so counting the raw source would measure prose, not call sites.
 boot_code="$(grep -vE '^[[:space:]]*#' "$BOOT")"
 # No call site may still interpolate the hardcoded literal — that IS the bug.
-if printf '%s\n' "$boot_code" | grep -q 'subject="repo:${GITHUB_REPO}:environment:'; then
+if printf '%s\n' "$boot_code" | matches 'subject="repo:${GITHUB_REPO}:environment:'; then
   bad "MG-42: no federated subject may be built from a hardcoded 'repo:\${GITHUB_REPO}' literal"
 else ok "MG-42: no hardcoded 'repo:\${GITHUB_REPO}:environment:' subject literal remains"; fi
 # ALL FOUR identities compose through the helper — plan/read, app-deploy,
@@ -1032,7 +1039,7 @@ if [ -f "$HELPER" ]; then
   # EXERCISE the helper: a sample uuid must yield a <=24-char lowercase-alnum
   # storage-account name that also passes the V1-safety guard.
   san="$(bash "$HELPER" "12345678-1234-1234-1234-123456789abc" 2>/dev/null || true)"
-  if [ -n "$san" ] && [ "${#san}" -le 24 ] && printf '%s' "$san" | grep -Eq '^[a-z0-9]{3,24}$'; then
+  if [ -n "$san" ] && [ "${#san}" -le 24 ] && printf '%s' "$san" | matches -E '^[a-z0-9]{3,24}$'; then
     ok "state-account-name.sh emits a <=24-char lowercase-alnum name ($san)"
   else
     bad "state-account-name.sh must emit a <=24-char lowercase-alnum name (got '$san')"
@@ -1059,7 +1066,7 @@ if [ -f "$HELPER" ]; then
     bad "state-account-name.sh prefix must be fixed, not env-overridable (env-set derived '$san_env' != '$san')"
   fi
   # The fixed prefix must be exactly the committed literal.
-  if printf '%s' "$san" | grep -q '^meatgeekv2tf'; then
+  if printf '%s' "$san" | matches '^meatgeekv2tf'; then
     ok "derived state-account name uses the fixed 'meatgeekv2tf' prefix"
   else
     bad "derived state-account name must start with the fixed 'meatgeekv2tf' prefix (got '$san')"
@@ -1121,22 +1128,22 @@ else bad "deploy identity role must default to Website Contributor"; fi
 # The Terraform publish role assignment targets the Function App id with the
 # Website Contributor role.
 if grep -q 'functions_app_deploy_publisher' "$ROOT_MAIN" \
-   && grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q 'role_definition_name = "Website Contributor"' \
-   && grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q 'scope *= module.azure_functions.function_app_id'; then
+   && grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | matches 'role_definition_name = "Website Contributor"' \
+   && grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | matches 'scope *= module.azure_functions.function_app_id'; then
   ok "Terraform grants Website Contributor scoped to the Function App id ONLY"
 else bad "Terraform must grant Website Contributor scoped to module.azure_functions.function_app_id"; fi
 # The Terraform publish assignment is GUARDED by the object-id var so an empty
 # value still validates/plans (count → 0).
-if grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q 'count .*app_deploy_principal_object_id != ""'; then
+if grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | matches 'count .*app_deploy_principal_object_id != ""'; then
   ok "Terraform publish assignment guarded by app_deploy_principal_object_id (empty → skipped)"
 else bad "Terraform publish assignment must be guarded (count) on app_deploy_principal_object_id being non-empty"; fi
 # The publish role must NOT be granted at a /subscriptions/ scope anywhere.
-if grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | grep -q '/subscriptions/'; then
+if grep -A6 'functions_app_deploy_publisher' "$ROOT_MAIN" | matches '/subscriptions/'; then
   bad "publish role must not be scoped to a subscription"
 else ok "no subscription-scoped grant for the deploy publish role"; fi
 # The object-id variable exists and defaults to empty (so a bare plan validates).
 if grep -q 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" \
-   && grep -A5 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" | grep -q 'default *= ""'; then
+   && grep -A5 'variable "app_deploy_principal_object_id"' "$ROOT_VARS" | matches 'default *= ""'; then
   ok "app_deploy_principal_object_id variable exists and defaults to empty"
 else bad "app_deploy_principal_object_id variable must exist with an empty default"; fi
 # Deploy identity's state access is READ-ONLY (Reader, not Contributor). The
@@ -1175,7 +1182,7 @@ if [ "${DEV_API_APP_NAME:-}" != "${AAD_APP_NAME:-}" ] && [ "${DEV_API_APP_NAME:-
   ok "dev API registration is a separate app from the OIDC/deployment apps"
 else bad "dev API registration must be separate from the OIDC/deployment apps"; fi
 # NO client secret / password on ANY az ad app create (OIDC + Easy Auth only).
-if grep -E 'az ad app create' "$BOOT" | grep -q -- '--password'; then
+if grep -E 'az ad app create' "$BOOT" | matches -- '--password'; then
   bad "no az ad app create may mint a client secret (--password)"
 else ok "no --password on any az ad app create (no client secret minted)"; fi
 # Single-tenant API (not multi-tenant).
@@ -1239,7 +1246,7 @@ else
   list_rhs="$(printf '%s\n' "$gen_block" | grep 'functions_auth_allowed_client_app_ids')"
   list_rhs="${list_rhs#*=}"
   residue="$(printf '%s' "$list_rhs" | sed 's/"[^"]*"//g')"
-  if printf '%s' "$residue" | grep -Eq '[0-9A-Za-z_-]'; then
+  if printf '%s' "$residue" | matches -E '[0-9A-Za-z_-]'; then
     bad "emitted client-app-ids list contains an UNQUOTED token (invalid HCL): residue='$residue'"
   else
     ok "emitted client-app-ids list has every element quoted (portable HCL check; terraform not installed)"
@@ -1374,11 +1381,11 @@ else ok "resource_absent_or_die dies on an unrecognized non-zero exit (real erro
 # WIRING: the storage-account + state-container create-deciders route through the
 # helper, and NO bare `if az storage … show` create-decider remains.
 if grep -Eq 'resource_absent_or_die "storage account' "$BOOT" \
-   && grep -A2 'resource_absent_or_die "storage account' "$BOOT" | grep -q 'az storage account show'; then
+   && grep -A2 'resource_absent_or_die "storage account' "$BOOT" | matches 'az storage account show'; then
   ok "storage-account existence check routes through resource_absent_or_die"
 else bad "storage-account create-vs-skip must route through resource_absent_or_die"; fi
 if grep -Eq 'resource_absent_or_die "state container' "$BOOT" \
-   && grep -A3 'resource_absent_or_die "state container' "$BOOT" | grep -q 'az storage container show'; then
+   && grep -A3 'resource_absent_or_die "state container' "$BOOT" | matches 'az storage container show'; then
   ok "state-container existence check routes through resource_absent_or_die"
 else bad "state-container create-vs-skip must route through resource_absent_or_die"; fi
 # No bare `if az storage … show` create-decider (treats every non-zero as absent).
@@ -1571,7 +1578,7 @@ mg42_unresolved_err="$(
 # `|| exit 1` terminates the subshell outright — that is the point of it, and an
 # inner `|| true` would never run — so the capture must absorb the non-zero here
 # or errexit (inherited from sourcing bootstrap.sh) would end this suite.
-if printf '%s' "$mg42_unresolved_err" | grep -q 'before resolve_oidc_subject_prefix'; then
+if printf '%s' "$mg42_unresolved_err" | matches 'before resolve_oidc_subject_prefix'; then
   ok "MG-42: an identity aborts AT the subject step when the prefix is unresolved (no bogus subject federated)"
 else bad "MG-42: bootstrap_deploy_identity must abort naming the unresolved subject prefix (got: ${mg42_unresolved_err})"; fi
 
@@ -1619,21 +1626,21 @@ else bad "MG-42: a re-run must not touch a credential already on the derived sub
 # a LATER line than the CREATE marker — grep the whole capture for it, never just
 # the marker line.
 mg42_calls="$(mg42_fc_calls "$mg42_legacy_subject" "$mg42_custom_subject")"
-if printf '%s\n' "$mg42_calls" | grep -q '^DELETE' \
-   && printf '%s\n' "$mg42_calls" | grep -q '^CREATE' \
-   && printf '%s\n' "$mg42_calls" | grep -qF "\"subject\": \"${mg42_custom_subject}\""; then
+if printf '%s\n' "$mg42_calls" | matches '^DELETE' \
+   && printf '%s\n' "$mg42_calls" | matches '^CREATE' \
+   && printf '%s\n' "$mg42_calls" | matches -F "\"subject\": \"${mg42_custom_subject}\""; then
   ok "MG-42: a credential stuck on the old hardcoded subject is reconciled to the DERIVED subject"
 else bad "MG-42: a stale hardcoded subject must be deleted and recreated on the derived subject (did: ${mg42_calls})"; fi
 # ...and it must NEVER recreate on the hardcoded subject — that is the reversion.
-if printf '%s\n' "$mg42_calls" | grep -qF "\"subject\": \"${mg42_legacy_subject}\""; then
+if printf '%s\n' "$mg42_calls" | matches -F "\"subject\": \"${mg42_legacy_subject}\""; then
   bad "MG-42: the reconciler must never write the hardcoded subject back (that is the reversion this ticket removes)"
 else ok "MG-42: the reconciler never writes the hardcoded subject back"; fi
 
 # 3. An ABSENT credential is created directly on the derived subject.
 mg42_calls="$(mg42_fc_calls "" "$mg42_custom_subject")"
-if printf '%s\n' "$mg42_calls" | grep -q '^CREATE' \
-   && printf '%s\n' "$mg42_calls" | grep -qF "\"subject\": \"${mg42_custom_subject}\"" \
-   && ! printf '%s\n' "$mg42_calls" | grep -q '^DELETE'; then
+if printf '%s\n' "$mg42_calls" | matches '^CREATE' \
+   && printf '%s\n' "$mg42_calls" | matches -F "\"subject\": \"${mg42_custom_subject}\"" \
+   && ! printf '%s\n' "$mg42_calls" | matches '^DELETE'; then
   ok "MG-42: an absent credential is created directly on the derived subject"
 else bad "MG-42: an absent credential must be created on the derived subject with no delete (did: ${mg42_calls})"; fi
 unset -f az func
@@ -1798,7 +1805,7 @@ if grep -q 'az role definition list --name' "$BOOT"; then
 else bad "bootstrap must resolve role-definition GUIDs live (az role definition list --name)"; fi
 # ...and the condition builder itself contains NO literal GUID.
 cond_fn="$(awk '/^build_rbac_admin_condition\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT")"
-if printf '%s' "$cond_fn" | grep -Eq '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'; then
+if printf '%s' "$cond_fn" | matches -E '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'; then
   bad "build_rbac_admin_condition contains a HARDCODED role-definition GUID (remembered GUIDs are a classic silent-authz-bug source)"
 else ok "build_rbac_admin_condition contains no hardcoded GUID"; fi
 # A committed GUID that disagrees with the live one must FAIL CLOSED, not be
@@ -1839,36 +1846,36 @@ sample_resolved="$(printf 'Role A\t11111111-1111-1111-1111-111111111111\nRole B\
 emitted_condition="$(build_rbac_admin_condition "$sample_resolved")"
 
 # WRITE clause: allowlisted role definitions via @Request...
-if printf '%s' "$emitted_condition" | grep -q "roleAssignments/write" \
-   && printf '%s' "$emitted_condition" | grep -q "@Request\[Microsoft.Authorization/roleAssignments:RoleDefinitionId\]"; then
+if printf '%s' "$emitted_condition" | matches "roleAssignments/write" \
+   && printf '%s' "$emitted_condition" | matches "@Request\[Microsoft.Authorization/roleAssignments:RoleDefinitionId\]"; then
   ok "condition constrains roleAssignments/WRITE on @Request RoleDefinitionId"
 else bad "condition must constrain roleAssignments/write via @Request RoleDefinitionId"; fi
 # ...and PrincipalType ServicePrincipal on the write clause.
-if printf '%s' "$emitted_condition" | grep -q "PrincipalType\] ForAnyOfAnyValues:StringEqualsIgnoreCase{'ServicePrincipal'}"; then
+if printf '%s' "$emitted_condition" | matches "PrincipalType\] ForAnyOfAnyValues:StringEqualsIgnoreCase{'ServicePrincipal'}"; then
   ok "write clause requires PrincipalType ServicePrincipal"
 else bad "the write clause must require PrincipalType ServicePrincipal"; fi
 # DELETE clause via @Resource. WITHOUT this the identity could revoke ANY role
 # assignment in the RG — including the Function App MI's — an outage primitive
 # that needs no escalation at all.
-if printf '%s' "$emitted_condition" | grep -q "roleAssignments/delete" \
-   && printf '%s' "$emitted_condition" | grep -q "@Resource\[Microsoft.Authorization/roleAssignments:RoleDefinitionId\]"; then
+if printf '%s' "$emitted_condition" | matches "roleAssignments/delete" \
+   && printf '%s' "$emitted_condition" | matches "@Resource\[Microsoft.Authorization/roleAssignments:RoleDefinitionId\]"; then
   ok "condition ALSO constrains roleAssignments/DELETE on @Resource RoleDefinitionId (not write-only)"
 else bad "condition must constrain DELETE too — a write-only condition leaves delete unconstrained at RG scope (outage primitive)"; fi
 # Both sample GUIDs appear in the allowlist braces.
-if printf '%s' "$emitted_condition" | grep -q '11111111-1111-1111-1111-111111111111' \
-   && printf '%s' "$emitted_condition" | grep -q '22222222-2222-2222-2222-222222222222'; then
+if printf '%s' "$emitted_condition" | matches '11111111-1111-1111-1111-111111111111' \
+   && printf '%s' "$emitted_condition" | matches '22222222-2222-2222-2222-222222222222'; then
   ok "the emitted condition allowlists the resolved role-definition GUIDs"
 else bad "the emitted condition must carry the resolved role-definition GUIDs"; fi
 # NO `!(Exists ...)` tolerance anywhere — that shape is a ONE-FIELD BYPASS: any
 # caller that simply omits the attribute satisfies the clause unconditionally.
-if printf '%s' "$emitted_condition" | grep -q '!(Exists'; then
+if printf '%s' "$emitted_condition" | matches '!(Exists'; then
   bad "the condition contains an '!(Exists …)' tolerance — a one-field bypass (omit the attribute, satisfy the clause)"
 else ok "no '!(Exists …)' tolerance in the emitted condition"; fi
 # Comment lines are stripped: the prose that EXPLAINS why this tolerance is
 # forbidden legitimately contains the string, and must not trip the guard that
 # forbids it. Live code is what matters, and the emitted-condition assertion just
 # above is the authoritative check either way.
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -q '!(Exists'; then
+if grep -vE '^[[:space:]]*#' "$BOOT" | matches '!(Exists'; then
   bad "bootstrap.sh contains an '!(Exists …)' condition tolerance in live code"
 else ok "no '!(Exists …)' tolerance in bootstrap.sh live code"; fi
 # The condition is authored at condition-version 2.0 (v1.0 lacks these operators).
@@ -2004,7 +2011,7 @@ else bad "conditioned grant must create with the condition (log: $(cat "$COND_LO
 create_status=0
 create_out="$(ensure_conditioned_role_assignment oid ServicePrincipal "RBAC Admin" /scope "COND-NEW" 2>&1)" \
   || create_status=$?
-if [ "$create_status" -eq 0 ] && printf '%s' "$create_out" | grep -qi 'read-back'; then
+if [ "$create_status" -eq 0 ] && printf '%s' "$create_out" | matches -i 'read-back'; then
   ok "conditioned grant: a create that reads back correctly VERIFIES and succeeds"
 else bad "a durable create must verify by read-back and succeed (exit=${create_status}, out: ${create_out})"; fi
 
@@ -2058,8 +2065,8 @@ else ok "conditioned grant: an unreadable create fails after a BOUNDED retry (ab
 #      (Extracted locally — cond_fn_body is not built until further down.)
 create_branch="$(awk '/^ensure_conditioned_role_assignment\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT" \
   | sed -n '/Creating CONDITIONED role assignment/,/^    return 0$/p')"
-if printf '%s\n' "$create_branch" | grep -vE '^[[:space:]]*#' | grep -q 'az_discover_unique' \
-   && printf '%s\n' "$create_branch" | grep -vE '^[[:space:]]*#' | grep -q '\[0\].condition'; then
+if printf '%s\n' "$create_branch" | grep -vE '^[[:space:]]*#' | matches 'az_discover_unique' \
+   && printf '%s\n' "$create_branch" | grep -vE '^[[:space:]]*#' | matches '\[0\].condition'; then
   ok "conditioned grant: the create path re-reads [].id via az_discover_unique and [0].condition via az_discover"
 else bad "the create path must re-establish uniqueness with an az_discover_unique [].id read and verify with a single-value [0].condition read"; fi
 
@@ -2125,7 +2132,7 @@ else bad "a drifted multi-line condition must reconcile in place, not die AMBIGU
 # under a mock that happens to return a single-line condition.
 cond_fn_body="$(awk '/^ensure_conditioned_role_assignment\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT")"
 if printf '%s\n' "$cond_fn_body" | grep -vE '^[[:space:]]*#' \
-     | grep -q 'az_discover_unique.*condition'; then
+     | matches 'az_discover_unique.*condition'; then
   bad "the CONDITION read-back must not go through az_discover_unique (it counts lines; a condition is a multi-line VALUE)"
 else ok "the condition read-back bypasses the line-counting uniqueness guard (reads a single value)"; fi
 
@@ -2165,7 +2172,7 @@ else bad "the in-place update must carry the existing principalId and roleDefini
 #      no role-assignment DELETE at all, so delete+recreate cannot creep back in
 #      under a mock that happens not to exercise it.
 if printf '%s\n' "$cond_fn_body" | grep -vE '^[[:space:]]*#' \
-     | grep -q 'az role assignment delete'; then
+     | matches 'az role assignment delete'; then
   bad "ensure_conditioned_role_assignment must not delete a role assignment — reconcile IN PLACE (delete+create opens a no-grant window)"
 else ok "ensure_conditioned_role_assignment contains no role-assignment delete (in-place reconcile only)"; fi
 
@@ -2281,7 +2288,7 @@ else bad "expected exactly TWO az_discover_unique calls (both [].id reads) and a
 #      ...and pin the invariant DIRECTLY, not just by count: no az_discover_unique
 #      call in this function may be a condition read.
 if printf '%s\n' "$cond_fn_body" | grep -vE '^[[:space:]]*#' \
-     | grep -A6 'az_discover_unique' | grep -q '\[0\].condition'; then
+     | grep -A6 'az_discover_unique' | matches '\[0\].condition'; then
   bad "no condition read may be routed through az_discover_unique — its line-counting uniqueness guard reads a multi-line condition as N matching objects"
 else ok "conditioned grant: no az_discover_unique call reads a condition (only [].id)"; fi
 
@@ -2440,7 +2447,7 @@ if grep -q 'State storage account not found for blob-role scope' "$BOOT"; then
   bad "the UNREACHABLE state-account fallback branch is back — az_discover dies on an absent account (az … show returns non-zero for not-found), so this warn can never be reached and its 'run state bootstrap first' guidance is wrong"
 else ok "no unreachable state-account fallback branch (the absent-account case cannot occur: bootstrap_state_backend runs first and the lookup fails loud)"; fi
 
-if printf '%s\n' "$(grep -A3 'az_discover ' "$BOOT")" | grep -q 'az storage account show'; then
+if printf '%s\n' "$(grep -A3 'az_discover ' "$BOOT")" | matches 'az storage account show'; then
   bad "az_discover must not be used with 'az storage account show' — az_discover is for LIST-style queries whose empty result means ABSENT, and 'show' returns non-zero for not-found, so absence and error become indistinguishable"
 else ok "no az_discover invocation wraps 'az storage account show' (single-value show reads go through state_account_id, which fails loud)"; fi
 
@@ -2477,7 +2484,7 @@ done
 # The sha1 tool is satisfied by EITHER implementation, so it is checked by name
 # in the preflight body rather than listed as a plain tool name.
 req_fn="$(awk '/^require_tools\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT")"
-printf '%s\n' "$req_fn" | grep -q 'resolve_sha1_cmd' \
+printf '%s\n' "$req_fn" | matches 'resolve_sha1_cmd' \
   || req_missing="${req_missing:+${req_missing} }sha1"
 if [ -z "$req_missing" ]; then
   ok "T1: the tool preflight enumerates every external binary bootstrap.sh needs (incl. gh, jq and a sha1 tool)"
@@ -2503,14 +2510,14 @@ if [ -e "$sha1_farm/shasum" ]; then
   guid_without="FAILED"
   guid_without="$( PATH="$sha1_farm" SHA1_CMD="" stable_guid seed )" || guid_without="FAILED"
   if [ "$guid_without" = "$guid_with" ] \
-     && printf '%s' "$guid_without" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+     && printf '%s' "$guid_without" | matches -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
     ok "T1: stable_guid works with sha1sum OFF PATH and derives the IDENTICAL GUID (idempotence preserved)"
   else bad "T1: stable_guid must fall back to shasum and derive the same GUID (with=${guid_with}, without=${guid_without})"; fi
 else
   # No shasum on this machine — assert the fallback exists in source instead, so
   # the assertion count stays stable across platforms.
   if printf '%s\n' "$(awk '/^resolve_sha1_cmd\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT")" \
-       | grep -q 'shasum'; then
+       | matches 'shasum'; then
     ok "T1: stable_guid resolves a sha1 tool with a shasum fallback (shasum absent here; source-asserted)"
   else bad "T1: resolve_sha1_cmd must fall back to 'shasum -a 1' when sha1sum is absent"; fi
 fi
@@ -2653,7 +2660,7 @@ for t4_fn_name in ensure_role_assignment ensure_conditioned_role_assignment; do
   # `ensure_role_assignment` does not also match the conditioned helper's own
   # call sites and double-report them.
   t4_calls="$(grep -vE '^[[:space:]]*#' "$BOOT" | grep -A1 -E "(^|[^_])${t4_fn_name} \"" || true)"
-  if printf '%s\n' "$t4_calls" | grep -qE '\|\||^[[:space:]]*if ! ' ; then
+  if printf '%s\n' "$t4_calls" | matches -E '\|\||^[[:space:]]*if ! ' ; then
     bad "T4: no ${t4_fn_name} call site may sit in a '|| …' or 'if ! …' context — that suppresses errexit inside the function and lets a failed discovery fall through to a create"
   else ok "T4: every ${t4_fn_name} call site is BARE (errexit and the guards stay in force)"; fi
 done
@@ -2667,7 +2674,7 @@ done
 if grep -q 'State storage account not found for blob-role scope' "$BOOT"; then
   bad "T5: the unreachable state-account fallback branches (and their wrong guidance) must be gone"
 else ok "T5: no unreachable 'state storage account not found' fallback remains"; fi
-if grep -vE '^[[:space:]]*#' "$BOOT" | grep -A2 'az_discover "' | grep -q 'az storage account show'; then
+if grep -vE '^[[:space:]]*#' "$BOOT" | grep -A2 'az_discover "' | matches 'az storage account show'; then
   bad "T5: az_discover must not be used with 'az storage account show' — it is a LIST-style helper and show exits non-zero for not-found"
 else ok "T5: no az_discover invocation wraps 'az storage account show' (the lookup asserts non-empty directly)"; fi
 
@@ -2692,8 +2699,8 @@ else bad "HAR-61: ACCEPTANCE_PEER_ENVIRONMENT must be the literal constant \"\$A
 har61_map_rc=0
 har61_map_out="$( ( assert_federated_environment_map ) 2>&1 )" || har61_map_rc=$?
 if [ "$har61_map_rc" -eq 0 ] \
-   && printf '%s' "$har61_map_out" | grep -qF "except '${APP_DEPLOY_ENVIRONMENT}'" \
-   && printf '%s' "$har61_map_out" | grep -qF "$AAD_ACCEPTANCE_PEER_APP_NAME"; then
+   && printf '%s' "$har61_map_out" | matches -F "except '${APP_DEPLOY_ENVIRONMENT}'" \
+   && printf '%s' "$har61_map_out" | matches -F "$AAD_ACCEPTANCE_PEER_APP_NAME"; then
   ok "HAR-61: the map ACCEPTS exactly the peer and app-deploy sharing '${APP_DEPLOY_ENVIRONMENT}', and its log line names both"
 else bad "HAR-61: the shipped map must pass and name the shared environment and the peer (rc=${har61_map_rc}, out: ${har61_map_out})"; fi
 
@@ -2702,7 +2709,7 @@ else bad "HAR-61: the shipped map must pass and name the shared environment and 
 for har61_env in "$PLAN_IDENTITY_ENVIRONMENTS" "$INFRA_APPLY_ENVIRONMENT" "development-acceptance" "$RECOVERY_APPROVAL_ENVIRONMENT" ""; do
   har61_rc=0
   har61_err="$( ( ACCEPTANCE_PEER_ENVIRONMENT="$har61_env"; assert_federated_environment_map ) 2>&1 )" || har61_rc=$?
-  if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | grep -q 'acceptance peer'; then
+  if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | matches 'acceptance peer'; then
     ok "HAR-61: a peer configured for '${har61_env}' (not the app-deploy environment) fails the map check"
   else bad "HAR-61: a peer on '${har61_env}' must die naming the acceptance peer (rc=${har61_rc}, out: ${har61_err})"; fi
 done
@@ -2712,14 +2719,14 @@ done
 # on the F8 collision itself — not merely on the peer check.
 har61_rc=0
 har61_err="$( ( APP_DEPLOY_ENVIRONMENT="$INFRA_APPLY_ENVIRONMENT"; ACCEPTANCE_PEER_ENVIRONMENT="$INFRA_APPLY_ENVIRONMENT"; assert_federated_environment_map ) 2>&1 )" || har61_rc=$?
-if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | grep -q 'more than one identity federates'; then
+if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | matches 'more than one identity federates'; then
   ok "HAR-61: app-deploy + infra-apply sharing an environment still dies, even with the peer alongside"
 else bad "HAR-61: the peer exception must not admit an app-deploy/infra-apply collision (rc=${har61_rc}, out: ${har61_err})"; fi
 # ...and a PLAN identity joining `development` (a third sharer of the subject)
 # dies too: the exception is for the peer, not for the environment.
 har61_rc=0
 har61_err="$( ( PLAN_IDENTITY_ENVIRONMENTS="production ${APP_DEPLOY_ENVIRONMENT}"; assert_federated_environment_map ) 2>&1 )" || har61_rc=$?
-if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | grep -q 'more than one identity federates'; then
+if [ "$har61_rc" -ne 0 ] && printf '%s' "$har61_err" | matches 'more than one identity federates'; then
   ok "HAR-61: a plan identity sharing '${APP_DEPLOY_ENVIRONMENT}' still dies (the exception names the peer, not the environment)"
 else bad "HAR-61: a plan identity on '${APP_DEPLOY_ENVIRONMENT}' must still be a collision (rc=${har61_rc}, out: ${har61_err})"; fi
 
@@ -2729,7 +2736,7 @@ if [ -n "$har61_fn" ] \
    && ! printf '%s\n' "$har61_fn" | grep -nE 'role assignment create|ensure_role_assignment|ensure_conditioned_role_assignment'; then
   ok "HAR-61: bootstrap_acceptance_peer_identity contains NO role grant (no 'role assignment create' / ensure_*role_assignment)"
 else bad "HAR-61: bootstrap_acceptance_peer_identity must exist and never grant a role"; fi
-if printf '%s\n' "$har61_fn" | grep -qE 'credential reset|--password|--years|client-secret|add-password'; then
+if printf '%s\n' "$har61_fn" | matches -E 'credential reset|--password|--years|client-secret|add-password'; then
   bad "HAR-61: the acceptance peer must never mint a password or client secret"
 else ok "HAR-61: the acceptance peer mints no password or client secret"; fi
 har61_main="$(awk '/^main\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT" | grep -vE '^[[:space:]]*#')"
@@ -2787,17 +2794,17 @@ grep -q "^ROLE-LIST role assignment list --assignee ${HAR61_NEW_SP} --all " "$HA
   && ok "HAR-61: the peer's role assignments are listed across the subscription (--assignee <sp object id> --all)" \
   || bad "HAR-61: the zero-role check must list assignments with --assignee <sp object id> --all (log: $(cat "$HAR61_LOG"))"
 if [ "$(grep -c '^FC-CREATE' "$HAR61_LOG" || true)" -eq 1 ] \
-   && grep -A20 '^FC-CREATE' "$HAR61_LOG" | grep -qF '"name": "github-acceptance-peer-development"' \
-   && grep -A20 '^FC-CREATE' "$HAR61_LOG" | grep -qF "\"subject\": \"${HAR61_SUBJECT}\""; then
+   && grep -A20 '^FC-CREATE' "$HAR61_LOG" | matches -F '"name": "github-acceptance-peer-development"' \
+   && grep -A20 '^FC-CREATE' "$HAR61_LOG" | matches -F "\"subject\": \"${HAR61_SUBJECT}\""; then
   ok "HAR-61: exactly ONE federated credential, github-acceptance-peer-development -> ${HAR61_SUBJECT}"
 else bad "HAR-61: expected one credential github-acceptance-peer-development on ${HAR61_SUBJECT} (log: $(cat "$HAR61_LOG"))"; fi
 if grep -qE '^(ROLE-MUTATE|OTHER)' "$HAR61_LOG"; then
   bad "HAR-61: the peer run issued an unexpected az call (a grant, a secret, or something unmodelled): $(grep -E '^(ROLE-MUTATE|OTHER)' "$HAR61_LOG")"
 else ok "HAR-61: the peer run grants no role and makes no other az call (no secret, no assignment)"; fi
-printf '%s' "$HAR61_OUT" | grep -qF "AZURE_ACCEPTANCE_PEER_CLIENT_ID = ${HAR61_NEW_APP}" \
+printf '%s' "$HAR61_OUT" | matches -F "AZURE_ACCEPTANCE_PEER_CLIENT_ID = ${HAR61_NEW_APP}" \
   && ok "HAR-61: the paste-ready AZURE_ACCEPTANCE_PEER_CLIENT_ID coordinate is emitted with the appId" \
   || bad "HAR-61: the summary must emit 'AZURE_ACCEPTANCE_PEER_CLIENT_ID = <appId>' (out: ${HAR61_OUT})"
-printf '%s' "$HAR61_OUT" | grep -qF "functions_auth_allowed_client_app_ids gains \"${HAR61_NEW_APP}\"" \
+printf '%s' "$HAR61_OUT" | matches -F "functions_auth_allowed_client_app_ids gains \"${HAR61_NEW_APP}\"" \
   && ok "HAR-61: the summary says the dev functions_auth_allowed_client_app_ids gains the same id" \
   || bad "HAR-61: the summary must name the functions_auth_allowed_client_app_ids change (out: ${HAR61_OUT})"
 
@@ -2808,7 +2815,7 @@ HAR61_FC_NAMES="github-acceptance-peer-development"; HAR61_FC_SUBJECT="$HAR61_SU
 har61_run
 if [ "$HAR61_RC" -eq 0 ] && ! grep -qE '^(APP-CREATE|SP-CREATE|FC-CREATE|FC-DELETE|ROLE-MUTATE|OTHER)' "$HAR61_LOG" \
    && grep -q "^ROLE-LIST role assignment list --assignee ${HAR61_SP} --all " "$HAR61_LOG" \
-   && printf '%s' "$HAR61_OUT" | grep -qF "AZURE_ACCEPTANCE_PEER_CLIENT_ID = ${HAR61_APP}"; then
+   && printf '%s' "$HAR61_OUT" | matches -F "AZURE_ACCEPTANCE_PEER_CLIENT_ID = ${HAR61_APP}"; then
   ok "HAR-61: a PRESENT peer is reused (no create, no credential churn) and its roles are still re-checked"
 else bad "HAR-61: a present peer must be reused and re-verified (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"), out: ${HAR61_OUT})"; fi
 
@@ -2828,10 +2835,10 @@ har61_reset
 HAR61_APP="77777777-7777-7777-7777-777777777777"; HAR61_SP="88888888-8888-8888-8888-888888888888"
 HAR61_ROLES="$(printf 'Reader\t/subscriptions/11111111-1111-1111-1111-111111111111')"
 har61_run
-if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | grep -q 'must hold NONE' \
-   && printf '%s' "$HAR61_OUT" | grep -q 'Reader' \
+if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | matches 'must hold NONE' \
+   && printf '%s' "$HAR61_OUT" | matches 'Reader' \
    && ! grep -qE '^(FC-CREATE|FC-DELETE|ROLE-MUTATE)' "$HAR61_LOG" \
-   && ! printf '%s' "$HAR61_OUT" | grep -q 'AZURE_ACCEPTANCE_PEER_CLIENT_ID'; then
+   && ! printf '%s' "$HAR61_OUT" | matches 'AZURE_ACCEPTANCE_PEER_CLIENT_ID'; then
   ok "HAR-61: a peer holding ANY role assignment makes bootstrap DIE (names the role, federates nothing, emits nothing)"
 else bad "HAR-61: a peer with a role must die before federating (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"), out: ${HAR61_OUT})"; fi
 
@@ -2840,7 +2847,7 @@ har61_reset
 HAR61_APP="77777777-7777-7777-7777-777777777777"; HAR61_SP="88888888-8888-8888-8888-888888888888"
 HAR61_ROLES_FAIL=1
 har61_run
-if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | grep -q 'discovery failed' \
+if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | matches 'discovery failed' \
    && ! grep -qE '^(FC-CREATE|FC-DELETE)' "$HAR61_LOG"; then
   ok "HAR-61: a FAILED role listing is not read as zero roles (dies, federates nothing)"
 else bad "HAR-61: a failed role listing must die before federating (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"), out: ${HAR61_OUT})"; fi
@@ -2849,7 +2856,7 @@ else bad "HAR-61: a failed role listing must die before federating (rc=${HAR61_R
 har61_reset
 HAR61_APP="$(printf '77777777-7777-7777-7777-777777777777\n99999999-9999-9999-9999-999999999999')"
 har61_run
-if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | grep -q 'AMBIGUOUS' && [ ! -s "$HAR61_LOG" ]; then
+if [ "$HAR61_RC" -ne 0 ] && printf '%s' "$HAR61_OUT" | matches 'AMBIGUOUS' && [ ! -s "$HAR61_LOG" ]; then
   ok "HAR-61: an AMBIGUOUS peer display name dies before anything is created or federated"
 else bad "HAR-61: duplicate peer apps must die with nothing done (rc=${HAR61_RC}, log: $(cat "$HAR61_LOG"))"; fi
 
@@ -2989,7 +2996,7 @@ if [ -n "$h82_api_line" ] && [ -n "$h82_web_line" ] && [ "$h82_web_line" -eq $((
   ok "HAR-82: main() calls bootstrap_dev_web_registration right after bootstrap_dev_api_registration"
 else bad "HAR-82: main() must call bootstrap_dev_web_registration right after bootstrap_dev_api_registration (api@${h82_api_line:-none}, web@${h82_web_line:-none})"; fi
 h82_enrol_fn="$(awk '/^enrol_acceptance_user_totp\(\)/{f=1} f{print} f&&/^}/{exit}' "$BOOT")"
-if printf '%s\n' "$h82_enrol_fn" | grep -q 'read -rs'; then
+if printf '%s\n' "$h82_enrol_fn" | matches 'read -rs'; then
   ok "HAR-82: the TOTP key is read with 'read -rs' (no echo)"
 else bad "HAR-82: enrol_acceptance_user_totp must read the key with 'read -rs'"; fi
 [ "$DEV_WEB_APP_NAME" = "meatgeek-v2-dev-web" ] \
