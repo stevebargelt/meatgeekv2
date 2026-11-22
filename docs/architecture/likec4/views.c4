@@ -111,6 +111,16 @@ views {
 
   view pipeline of delivery {
     title 'Delivery pipeline'
+    description '''
+      Pull requests feed two workflows. CI/CD Pipeline runs on every pull request and push to
+      main: lint and test, the Cosmos emulator tests on `windows-2025`, builds, Terraform
+      validation, the security scan, the `no-real-time` guard and `web-e2e`. Test repeat
+      (`test-repeat.yml`) runs on pull requests only: each affected non-live suite 50 times in a
+      row, its emulator suite on `windows-2025`; it starts nothing and is not a required check.
+      A green CI run on main starts the apply, then the deploy and its two acceptance jobs. When
+      a web-acceptance sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`,
+      the leak check runs over it, and the run uploads the `web-acceptance-diagnostics` artifact.
+    '''
     include *
     include acceptance.*
     include team, meatgeek, meatgeek.web, entra, vercel

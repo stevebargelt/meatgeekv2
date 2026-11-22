@@ -21,6 +21,9 @@ meatgeekv2/
 │   ├── data-models/              # Domain models and business logic
 │   └── utils/                    # Common utilities
 ├── docs/architecture/likec4/      # The LikeC4 architecture model
+├── tools/                         # Repository tooling
+│   ├── test-repeat/              # Runs each test suite N times in a row and with K parallel copies
+│   └── no-real-time/             # The guard against real-time waits in tests
 ├── .github/workflows/             # CI/CD pipeline definitions
 └── configuration files            # NX, TypeScript, ESLint, Jest configs
 ```
