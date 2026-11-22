@@ -18,6 +18,7 @@ ErrorCode:
     - DEVICE_NOT_FOUND
     - DEVICE_NOT_OWNED
     - DEVICE_CONFLICT
+    - CLAIM_REFUSED
     - CONCURRENT_UPDATE
     - COOK_ALREADY_ACTIVE
     - COOK_ID_REUSED
@@ -141,6 +142,38 @@ DeviceTwinUpdateFailedError:
       type: string
       pattern: '^(iothub_(failure|[a-z_]+_(failed|status_[0-9]{3}))|cosmos_active_cook_read_failed|device_twin_sync_(contended|unconfigured|failed))$'
       example: iothub_patch_twin_status_412
+    requestId:
+      type: string
+
+DeviceClaimTwinFailedError:
+  type: object
+  description: |
+    503 body for POST /devices/claim when the device twin could not be read
+    or its desired properties could not be patched (HAR-130). Nothing was
+    stored, so retrying the same request with the same code is safe. `reason`
+    is a fixed code: `iothub_<operation>_status_<n>` or
+    `iothub_<operation>_failed` (operations `configuration`, `credential`,
+    `get_twin`, `patch_twin`; `iothub_patch_twin_status_412` when the patch
+    lost the etag race twice), or `iothub_failure`. It never carries the hub
+    host, a device id, the claim code, a hash, a token or the underlying
+    error text.
+  required:
+    - error
+    - message
+    - reason
+    - requestId
+  additionalProperties: false
+  properties:
+    error:
+      type: string
+      enum:
+        - DEVICE_TWIN_UPDATE_FAILED
+    message:
+      type: string
+    reason:
+      type: string
+      pattern: '^iothub_(failure|[a-z_]+_(failed|status_[0-9]{3}))$'
+      example: iothub_get_twin_status_503
     requestId:
       type: string
 

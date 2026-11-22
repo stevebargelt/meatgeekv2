@@ -28,6 +28,7 @@ import {
 import { getDevicesHandler } from './functions/devices/get-devices';
 import { getDeviceHandler } from './functions/devices/get-device';
 import { registerDeviceHandler } from './functions/devices/register-device';
+import { claimDeviceHandler } from './functions/devices/claim-device';
 import { updateDeviceHandler } from './functions/devices/update-device';
 import { deleteDeviceHandler } from './functions/devices/delete-device';
 import { getUserProfileHandler } from './functions/users/get-user-profile';
@@ -174,6 +175,18 @@ app.http('registerDevice', {
   authLevel: 'anonymous',
   route: 'devices',
   handler: registerDeviceHandler,
+});
+
+// HAR-130: claim a device with the claim code the device itself published in
+// its twin's reported properties. The literal `devices/claim` cannot be taken
+// by `devices/{id}`: no `devices/{id}` registration accepts POST, and the
+// Functions host's ASP.NET routing ranks a literal segment above a parameter in
+// any case. A GET of `devices/claim` is getDevice with id "claim" (a 404).
+app.http('claimDevice', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'devices/claim',
+  handler: claimDeviceHandler,
 });
 
 app.http('getDevice', {

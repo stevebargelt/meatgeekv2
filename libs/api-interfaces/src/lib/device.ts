@@ -15,6 +15,11 @@ export interface Device {
     version: string;
     updateAvailable: boolean;
   };
+  /**
+   * HAR-130: when the owner claimed the device with its claim code (ISO-8601
+   * UTC). Absent on a device registered through `POST /devices`.
+   */
+  claimedAt?: string;
 }
 
 /**
@@ -43,6 +48,20 @@ export interface RegisterDeviceRequest {
   deviceId: string;
   name: string;
   model: string;
+  location?: string;
+  configuration?: Partial<DeviceConfiguration>;
+}
+
+/**
+ * HAR-130: the body of `POST /devices/claim`. `claimCode` is the code the
+ * device shows (`XXXX-XXXX-XXXX`); case, hyphens and spaces do not matter.
+ * `model` defaults to `"MeatGeek"`.
+ */
+export interface ClaimDeviceRequest {
+  deviceId: string;
+  claimCode: string;
+  name: string;
+  model?: string;
   location?: string;
   configuration?: Partial<DeviceConfiguration>;
 }

@@ -272,6 +272,119 @@ describe('DevicesRepository.registerDevice', () => {
   });
 });
 
+describe('DevicesRepository.claimDevice (HAR-130)', () => {
+  const claimed = (overrides: Partial<Device> = {}) =>
+    device({ claimedAt: '2026-11-22T12:00:00.000Z', ...overrides });
+
+  it('lists the owner’s devices, then creates the document (never upsert) with claimedAt', async () => {
+    const { fake, repository } = setup();
+
+    const result = await repository.claimDevice(claimed());
+
+    expect(result).toEqual({
+      outcome: 'created',
+      device: claimed(),
+      requestCharge: QUERY_CHARGE + WRITE_CHARGE,
+    });
+    expect(fake.calls.map(call => call.operation)).toEqual(['query', 'create']);
+    expect(fake.stored('grill-1')?.['claimedAt']).toBe('2026-11-22T12:00:00.000Z');
+  });
+
+  it('is ownedByCaller, with the stored device and no create, when the owner already has the id', async () => {
+    const { fake, repository } = setup();
+    fake.seed(claimed({ name: 'Stored name', claimedAt: '2026-11-01T00:00:00.000Z' }));
+
+    const result = await repository.claimDevice(claimed({ name: 'Another name' }));
+
+    expect(result).toEqual({
+      outcome: 'ownedByCaller',
+      device: claimed({ name: 'Stored name', claimedAt: '2026-11-01T00:00:00.000Z' }),
+      requestCharge: QUERY_CHARGE,
+    });
+    expect(fake.calls.map(call => call.operation)).toEqual(['query']);
+  });
+
+  it('is nameConflict when another of the owner’s devices has the name, without a create', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device({ id: 'grill-2' }));
+
+    const result = await repository.claimDevice(claimed());
+
+    expect(result).toEqual({ outcome: 'nameConflict', requestCharge: QUERY_CHARGE });
+    expect(fake.calls.map(call => call.operation)).toEqual(['query']);
+  });
+
+  it('is foreign when the id is someone else’s: a 409 settled by a point read', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device({ userId: STRANGER, name: 'Theirs' }));
+
+    const result = await repository.claimDevice(claimed());
+
+    expect(result).toEqual({
+      outcome: 'foreign',
+      requestCharge: QUERY_CHARGE + WRITE_CHARGE + READ_CHARGE,
+    });
+    expect(fake.calls.map(call => call.operation)).toEqual(['query', 'create', 'read']);
+    expect(fake.stored('grill-1')?.['userId']).toBe(STRANGER);
+  });
+
+  it('is ownedByCaller when the caller’s own concurrent claim created it between the list and the create', async () => {
+    const { fake, repository } = setup();
+    fake.beforeCreate = () => {
+      fake.beforeCreate = undefined;
+      fake.seed(claimed({ claimedAt: '2026-11-22T11:59:59.000Z' }));
+    };
+
+    const result = await repository.claimDevice(claimed());
+
+    expect(result).toEqual({
+      outcome: 'ownedByCaller',
+      device: claimed({ claimedAt: '2026-11-22T11:59:59.000Z' }),
+      requestCharge: QUERY_CHARGE + WRITE_CHARGE + READ_CHARGE,
+    });
+  });
+
+  it('is foreign when the document is gone again by the point read after the 409', async () => {
+    const { fake, repository } = setup();
+    fake.beforeCreate = () => {
+      fake.beforeCreate = undefined;
+      fake.seed(device({ userId: STRANGER }));
+    };
+    const read = fake.item.bind(fake);
+    fake.item = (id: string, partitionKey: unknown) => {
+      fake.remove(id);
+      return read(id, partitionKey);
+    };
+
+    expect(await repository.claimDevice(claimed())).toMatchObject({ outcome: 'foreign' });
+  });
+
+  it('re-throws a failed create as a DevicesStoreError with the total charge and no Cosmos text', async () => {
+    const { fake, repository } = setup();
+    fake.failNext('create', 503);
+
+    const error = await repository.claimDevice(claimed()).catch(caught => caught);
+
+    expect(error).toBeInstanceOf(DevicesStoreError);
+    expect(error).toMatchObject({ statusCode: 503, requestCharge: QUERY_CHARGE + WRITE_CHARGE });
+    expect(String(error.message)).not.toContain('documents.azure.com');
+  });
+
+  it('re-throws a failed point read after a 409 as a DevicesStoreError with the total charge', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device({ userId: STRANGER, name: 'Theirs' }));
+    fake.failNext('read', 503);
+
+    const error = await repository.claimDevice(claimed()).catch(caught => caught);
+
+    expect(error).toBeInstanceOf(DevicesStoreError);
+    expect(error).toMatchObject({
+      statusCode: 503,
+      requestCharge: QUERY_CHARGE + WRITE_CHARGE + READ_CHARGE,
+    });
+  });
+});
+
 describe('DevicesRepository.updateDevice', () => {
   it('merges the change, writes with If-Match on the read ETag, and keeps unmodelled fields', async () => {
     const { fake, repository } = setup();

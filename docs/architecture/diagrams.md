@@ -186,7 +186,7 @@ token (access_as_user)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Edge.Pusher -. "`[...]`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Edge.Updater -. "`installed version, result`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Cloud.Deviceupdate -. "`deployment to a device group`" .-> Meatgeek.Cloud.Ingest.Iothub
-  Meatgeek.Cloud.Api -. "`set twin desired properties`" .-> Meatgeek.Cloud.Ingest.Iothub
+  Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Cloud.Ingest.Iothub -. "`desired properties`" .-> Meatgeek.Edge.Pusher
   Meatgeek.Cloud.Ingest.Iothub -. "`update available`" .-> Meatgeek.Edge.Updater
   Meatgeek.Cloud.Ingest.Iothub -. "`cosmos-storage-route`" .-> Meatgeek.Cloud.Data
@@ -516,6 +516,8 @@ update, delete`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Otel -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloudObservability.Appinsights
   Delivery -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudApi.Cooks -. "`set twin desired properties`" .-> MeatgeekCloudIngest.Iothub
+  MeatgeekCloudApi.Devices -. "`read twin claim hash; set
+desired claim properties`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudIngest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngest.Eventhub
   MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Broadcast
@@ -531,9 +533,9 @@ update, delete`" .-> MeatgeekCloudData.Devices
   class MeatgeekCloudObservability.Appinsights,MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.TemperatureRollups,MeatgeekCloudData.Leases,MeatgeekCloudData.Devices,MeatgeekCloudData.Temperatures,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,2,3,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,29,30,31,32,33,34,35,36,37,39,40,42,43,44,45,47,51,52 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,29,30,31,32,33,34,35,36,37,39,40,42,43,44,45,47,48,52,53 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 4,41 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 26,38,46,48,49,50 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 26,38,46,49,50,51 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Cosmos DB
@@ -723,7 +725,7 @@ graph TB
   Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Pusher -. "`GET get_status, every 5 s`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Controller -. "`OTLP/HTTP`" .-> MeatgeekCloudObservability.Collector
-  MeatgeekCloudApi -. "`set twin desired properties`" .-> MeatgeekCloudIngest.Iothub
+  MeatgeekCloudApi -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekEdge.Pusher -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`diagnostic settings`" .-> MeatgeekCloudObservability.Logs
   MeatgeekCloudIngest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloudData
@@ -851,7 +853,7 @@ graph TB
   DevRg.Iothub -. "`eventhub-realtime-route`" .-> DevRg.Eventhub
   DevRg.Iothub -. "`cosmos-storage-route`" .-> DevRg.Cosmos
   DevRg.Iothub -. "`diagnostic settings`" .-> DevRg.Logs
-  DevRg.Api -. "`set twin desired properties`" .-> DevRg.Iothub
+  DevRg.Api -. "`[...]`" .-> DevRg.Iothub
   DevRg.Eventhub -. "`Event Hub trigger`" .-> DevRg.Api
   DevRg.Api -. "`[...]`" .-> DevRg.Cosmos
   DevRg.Api -. "`[...]`" .-> DevRg.Signalr

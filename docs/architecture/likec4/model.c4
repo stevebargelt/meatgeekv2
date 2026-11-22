@@ -171,7 +171,8 @@ model {
           rollupTemperatures reads the `temperatures` change feed with its leases in `leases`
           (`COSMOSDB_LEASES_CONTAINER_NAME`);
           startCook and stopCook read `IOTHUB_SERVICE_HOSTNAME` to write the device twin's
-          desired active cook (HAR-66), and the
+          desired active cook (HAR-66), and claimDevice reads it to check the claim-code hash
+          the device reported in its twin and to mark the code consumed (HAR-133), and the
           identity's IoT Hub Twin Contributor grant is on in dev only. The one exception is the Application
           Insights connection string (`APPLICATIONINSIGHTS_CONNECTION_STRING`), with ingestion
           itself authenticated by Entra (`Authorization=AAD`) and sampled at
@@ -193,7 +194,7 @@ model {
           description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart, POST /cooks/{cookId}/stop'
         }
         devices = component 'devices' {
-          description 'GET and POST /devices, GET, PATCH and DELETE /devices/{id}'
+          description 'GET and POST /devices, POST /devices/claim, GET, PATCH and DELETE /devices/{id}'
         }
         temperatures = component 'temperatures' {
           description 'GET /temperatures/current/{deviceId}, GET /temperatures/history'
@@ -450,6 +451,11 @@ model {
     cloud.api.cooks -> cloud.ingest.iothub 'set twin desired properties' {
       technology 'IoT Hub service REST, managed identity (IoT Hub Twin Contributor)'
       description 'Desired activeCookId and correlationId, synced after the Cosmos write to the device lock under the twin etag (If-Match), so the twin follows Cosmos. A failed sync answers 503 DEVICE_TWIN_UPDATE_FAILED; the cook stays written and a retry of the same request heals the twin.'
+    }
+    // Claiming a device proves possession through the twin (HAR-130, HAR-133).
+    cloud.api.devices -> cloud.ingest.iothub 'read twin claim hash; set desired claim properties' {
+      technology 'IoT Hub service REST, managed identity (IoT Hub Twin Contributor)'
+      description 'POST /devices/claim reads the twin and compares the reported claimCodeHash (written only by the device, with its own credential) to the hash of the submitted code, in constant time, and checks reported claimGeneration against desired and claimExpiresAt against the clock. It then patches desired claimConsumedCodeHash and claimClaimantHash under the read etag (If-Match), before the Cosmos create, so a code is single-use under concurrency; a 412 re-reads once. A twin read or write failure answers 503 DEVICE_TWIN_UPDATE_FAILED; every refusal is the same 403 CLAIM_REFUSED.'
     }
     cloud.ingest.iothub -> edge.pusher.twin 'desired properties' {
       description 'Read in full on every connect and patched on every change, so a Pi that was offline when the cook started gets it on reconnect.'

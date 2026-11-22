@@ -1,11 +1,12 @@
 # Device path items (HAR-20 / MG-80).
 #
-# Implementation status — all five operations are implemented:
+# Implementation status — all six operations are implemented:
 #   - devices-collection GET  : apps/api/src/functions/devices/get-devices.ts
 #   - devices-collection POST : apps/api/src/functions/devices/register-device.ts
 #   - device-item GET         : apps/api/src/functions/devices/get-device.ts
 #   - device-item PATCH       : apps/api/src/functions/devices/update-device.ts
 #   - device-item DELETE      : apps/api/src/functions/devices/delete-device.ts (HAR-85)
+#   - device-claim POST       : apps/api/src/functions/devices/claim-device.ts (HAR-130)
 #
 # Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
 # There is no userId query parameter or x-user-id header: a device's owner is
@@ -88,6 +89,108 @@ devices-collection:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
         $ref: '../components/responses.yaml#/ServerError'
+
+device-claim:
+  post:
+    operationId: claimDevice
+    summary: Claim a device with the claim code it shows
+    description: |
+      HAR-130. Claims the device for the caller, who proves they hold it with
+      the claim code the device itself generated and shows. The device keeps
+      the code and reports only its hash in its IoT Hub twin's reported
+      properties, which only the device can write; the API never stores the
+      code. See learnings/decisions/har-130-device-provisioning-and-claim.md.
+
+      The API reads the twin and refuses unless the reported hash matches the
+      code sent, the code has not expired, and the reported claim generation
+      equals the desired one. It then records the code as consumed by the
+      caller in the twin's desired properties with a conditional (If-Match)
+      patch, which makes a code single-use when two claimants race, and only
+      then creates the device document (never upsert), stamped with
+      `claimedAt`.
+
+      A retry by the same caller is safe: after a partial failure it
+      completes the claim (201), and after a full one it returns the stored
+      device (200).
+
+      Every refusal is the same 403 body, whatever the reason (no such
+      device, wrong code, expired, already claimed by someone else, owned by
+      someone else), and carries no request-charge header, so the answer
+      gives no hint which check failed.
+    tags: [devices]
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/device.yaml#/ClaimDeviceRequest'
+    responses:
+      '201':
+        description: The claimed device, now the caller's.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/device.yaml#/Device'
+      '200':
+        description: |
+          A retry: the caller had already claimed this device. The stored
+          device is returned unchanged (its stored name, not the one sent).
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/device.yaml#/Device'
+      '400':
+        $ref: '../components/responses.yaml#/DeviceValidationError'
+      '401':
+        $ref: '../components/responses.yaml#/Unauthenticated'
+      '403':
+        description: |
+          CLAIM_REFUSED with the fixed message "Device could not be claimed
+          with that code", for every refusal. No request-charge header.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '409':
+        description: |
+          DEVICE_CONFLICT: the caller already has another device with this
+          name. The claim code stays consumed by the caller, so the same
+          request with another name succeeds.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '500':
+        $ref: '../components/responses.yaml#/ServerError'
+      '503':
+        description: |
+          DEVICE_TWIN_UPDATE_FAILED: the device twin could not be read or
+          patched. Nothing was stored; retry the same request.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/DeviceClaimTwinFailedError'
 
 device-item:
   get:

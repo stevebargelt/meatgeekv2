@@ -59,6 +59,12 @@ Device:
           type: string
         updateAvailable:
           type: boolean
+    claimedAt:
+      type: string
+      format: date-time
+      description: |
+        HAR-130: when the owner claimed the device with its claim code
+        (ISO-8601 UTC). Absent on a device registered through POST /devices.
 
 DeviceConfiguration:
   type: object
@@ -195,6 +201,47 @@ RegisterDeviceRequest:
       type: string
       minLength: 1
       maxLength: 100
+    location:
+      type: string
+      minLength: 1
+      maxLength: 200
+    configuration:
+      $ref: '#/DeviceConfigurationPatch'
+
+ClaimDeviceRequest:
+  type: object
+  description: |
+    Body for POST /devices/claim (HAR-130). The owner is the authenticated
+    caller; any unlisted field is rejected with 400. `deviceId`, `name`,
+    `location` and `configuration` follow the RegisterDeviceRequest rules.
+    `model` may be left out; the device is then stored with "MeatGeek".
+  required:
+    - deviceId
+    - claimCode
+    - name
+  additionalProperties: false
+  properties:
+    deviceId:
+      type: string
+      pattern: '^[A-Za-z0-9._:-]{1,128}$'
+    claimCode:
+      type: string
+      description: |
+        The code the device shows, `XXXX-XXXX-XXXX`: 12 Crockford base32
+        symbols (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`). Case, hyphens and ASCII
+        whitespace do not matter, and `O` reads as `0`, `I` and `L` as `1`.
+        Anything that is not then exactly 12 such symbols is a 400.
+      example: 7K3M-9QXR-2HTV
+    name:
+      type: string
+      minLength: 1
+      maxLength: 100
+      description: Trimmed; must not be blank.
+    model:
+      type: string
+      minLength: 1
+      maxLength: 100
+      default: MeatGeek
     location:
       type: string
       minLength: 1

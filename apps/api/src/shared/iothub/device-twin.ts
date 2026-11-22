@@ -38,11 +38,17 @@ const REQUEST_TIMEOUT_MS = 10_000;
 /** A hostname: labels of letters, digits and hyphens. No scheme, port or path. */
 const HOSTNAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
 
-/** The twin as this API reads it: its etag and its desired properties. */
+/** The twin as this API reads it: its etag, desired and reported properties. */
 export interface DeviceTwin {
   readonly etag: string;
   /** `properties.desired`, including IoT Hub's own `$metadata` and `$version`. */
   readonly desired: Readonly<Record<string, unknown>>;
+  /**
+   * HAR-130: `properties.reported`, which only the device itself can write
+   * (with its own credential). The claim route reads the claim-code hash here.
+   * Empty when the twin has none.
+   */
+  readonly reported: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -124,10 +130,10 @@ export class DeviceTwinClient implements DeviceTwinPort {
     private readonly seams: DeviceTwinSeams
   ) {}
 
-  /** `GET /twins/{id}` — the twin's etag and desired properties. */
+  /** `GET /twins/{id}` — the twin's etag, desired and reported properties. */
   async getTwin(deviceId: string): Promise<DeviceTwin> {
     const response = await this.call('get_twin', 'GET', deviceId);
-    let body: { etag?: unknown; properties?: { desired?: unknown } } | null;
+    let body: { etag?: unknown; properties?: { desired?: unknown; reported?: unknown } } | null;
     try {
       body = (await response.json()) as typeof body;
     } catch {
@@ -135,15 +141,22 @@ export class DeviceTwinClient implements DeviceTwinPort {
     }
     const etag = body?.etag;
     const desired = body?.properties?.desired ?? {};
+    const reported = body?.properties?.reported ?? {};
     if (
       typeof etag !== 'string' ||
       etag.length === 0 ||
       typeof desired !== 'object' ||
-      desired === null
+      desired === null ||
+      typeof reported !== 'object' ||
+      reported === null
     ) {
       throw new DeviceTwinError('get_twin', response.status);
     }
-    return { etag, desired: desired as Record<string, unknown> };
+    return {
+      etag,
+      desired: desired as Record<string, unknown>,
+      reported: reported as Record<string, unknown>,
+    };
   }
 
   /**
