@@ -325,6 +325,17 @@ export const suites = [
     timeoutSec: 900,
   },
 
+  // --- The no-real-time guard (HAR-127) ----------------------------------------
+  {
+    id: 'no-real-time-guard',
+    command: ['node', 'tools/no-real-time/run-tests.mjs'],
+    // One of its tests runs the guard over the whole tracked tree, but the
+    // suite only proves the guard itself; CI runs the guard on every change.
+    paths: ['tools/no-real-time/**'],
+    needs: [],
+    timeoutSec: 600,
+  },
+
   // --- The harness itself -----------------------------------------------------
   {
     id: 'test-repeat-harness',

@@ -48,6 +48,7 @@ A comprehensive BBQ temperature monitoring and cook management system built with
 ### Development & Operations
 - **[NX Commands](development/nx-commands.md)** - Development workflow and build commands
 - **[CI/CD Pipeline](development/ci-cd.md)** - GitHub Actions workflows and deployment automation
+- **[Deterministic Tests](development/deterministic-tests.md)** - The no-real-time rule for every non-live test, how to wait without a clock in each language, and the guard that enforces it
 - **[Local Setup](development/local-setup.md)** - Environment configuration and getting started guide
 
 ### Planning & Strategy

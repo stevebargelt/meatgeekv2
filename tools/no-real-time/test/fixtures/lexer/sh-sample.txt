@@ -1,0 +1,4 @@
+# sleep 1
+echo "a # b" # sleep 2
+echo 'c # d'
+n=${#arr[@]} # sleep 3

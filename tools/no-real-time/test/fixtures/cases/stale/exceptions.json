@@ -1,0 +1,16 @@
+{
+  "outOfScope": [
+    {
+      "path": "apps/gone/**",
+      "reason": "A directory that no longer exists."
+    }
+  ],
+  "exceptions": [
+    {
+      "path": "apps/web/src/clean.spec.ts",
+      "rule": "js-timer",
+      "line": "await new Promise(r => setTimeout(r, 100));",
+      "reason": "The hit this covered was fixed; the entry was left behind."
+    }
+  ]
+}

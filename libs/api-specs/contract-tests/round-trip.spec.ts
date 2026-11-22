@@ -60,8 +60,9 @@ const OPENAPI_TYPESCRIPT_CLI = path.join(
  * sidesteps the issue entirely.
  *
  * It waits for the CLI to exit and sets no deadline of its own: the only bound
- * is the Jest timeout on the `beforeAll` that awaits it. `signal` lets that
- * hook's `afterAll` stop the process if Jest gives up on it first.
+ * is Jest's testTimeout (jest.config.ts) on the `beforeAll` that awaits it.
+ * `signal` lets that hook's `afterAll` stop the process if Jest gives up on it
+ * first.
  */
 async function generateTypes(specPath: string, signal: AbortSignal): Promise<string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'api-specs-roundtrip-'));
@@ -139,8 +140,6 @@ function formatDiagnostics(diagnostics: readonly ts.Diagnostic[]): string {
 }
 
 describe('round-trip — spec → openapi-typescript → fixture conformance', () => {
-  jest.setTimeout(90_000);
-
   let generatedTypes = '';
   const generation = new AbortController();
 

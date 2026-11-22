@@ -1,5 +1,10 @@
 # Live Acceptance Suite
 
+> The live suites are the one place a test may wait on real time. Every other
+> test follows [Deterministic tests](deterministic-tests.md): it waits on the
+> event, a fake clock or a no-deadline poll, and `tools/no-real-time` fails one
+> that does not. Each live wait has a row in [Real-time waits](#real-time-waits).
+
 The live acceptance suite proves the **deployed** API works: it calls the real
 Function App over HTTPS, as a real Entra-authenticated caller, writes data
 through it, and reads it back. It replaces hand-run "live dev proofs" in
