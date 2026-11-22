@@ -79,6 +79,7 @@ type Broker struct {
 	nextReportFail  int
 	connects        []Connect
 	refuseNext      []byte
+	onReport        func(patch map[string]any)
 }
 
 type conn struct {
@@ -191,6 +192,15 @@ func (b *Broker) FailNextReport(status int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.nextReportFail = status
+}
+
+// OnReport makes the broker call f with each reported-properties patch it
+// accepts, before it stores the patch or answers the device: f sees the
+// device's state at the moment the patch arrived.
+func (b *Broker) OnReport(f func(patch map[string]any)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onReport = f
 }
 
 // RefuseNextConnect makes the broker answer the next CONNECT with return
@@ -484,6 +494,12 @@ func (b *Broker) onPublish(c *conn, topic string, payload []byte) {
 		if err := json.Unmarshal(payload, &patch); err != nil {
 			c.respond(b, topic, 400, []byte(`{"message":"bad json"}`), 0)
 			return
+		}
+		b.mu.Lock()
+		onReport := b.onReport
+		b.mu.Unlock()
+		if onReport != nil {
+			onReport(patch)
 		}
 		b.mu.Lock()
 		for k, v := range patch {

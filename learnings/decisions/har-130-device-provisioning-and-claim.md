@@ -69,7 +69,7 @@ $0.01 a month.
 | CI simulated-device keys | The runner's temp dir                                                                                                                                                       | One run; enrollments and hub identities deleted by an always-run cleanup step          | That job             |
 | DPS ↔ hub link          | DPS managed identity plus RBAC                                                                                                                                              | Standing; no key                                                                       | —                    |
 | Enrol and revoke rights  | Owner: their own `az` login. CI: the app-deploy identity with `Device Provisioning Service Data Contributor` on the DPS (Terraform, flag-guarded until bootstrap is re-run) | Standing                                                                               | —                    |
-| Claim code (plaintext)   | Pi only: `/var/lib/meatgeek-pusher/claim/code`, 0600; printed once by the onboarding command                                                                                | 24 h, single use                                                                       | Whoever holds the Pi |
+| Claim code (plaintext)   | Pi only: `/var/lib/meatgeek-pusher/claim/claim.json`, 0600; printed once by the onboarding command                                                                          | 24 h, single use                                                                       | Whoever holds the Pi |
 | Claim code hash          | The twin's reported properties (device-written)                                                                                                                             | Until the device rotates it                                                            | The API              |
 | Device SAS keys          | Nowhere, once the pusher's connection-string mode is removed                                                                                                                | —                                                                                      | —                    |
 
@@ -109,9 +109,11 @@ Existing cook properties are untouched.
 
 **The device mints a code** (writes the file, then reports the hash) when it
 starts unclaimed with no unexpired code, or when desired `claimGeneration` is
-greater than its reported one (a release). It never mints while its current
-hash equals desired `claimConsumedCodeHash` and the generations match
-(claimed). _Device side built in a later issue of HAR-130._
+not its stored one: greater after a release, lower only when the twin was
+re-created, and a code under any generation but the desired one could never
+be claimed. It never mints while its current hash equals desired
+`claimConsumedCodeHash` and the generations match (claimed). _Device side
+built in HAR-134 (`apps/data-pusher/internal/claim`)._
 
 ### `POST /devices/claim`
 

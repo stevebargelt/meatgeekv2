@@ -15,6 +15,7 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/sirupsen/logrus"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/claim"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
 )
 
@@ -28,6 +29,15 @@ import (
 //
 //	desired  (API writes):    activeCookId, correlationId (string, or absent/null = none), $version
 //	reported (device writes): activeCookId, correlationId (string or null), appliedDesiredVersion
+//
+// With WithClaim (DPS mode, goal HAR-130) the twin also carries the claim:
+//
+//	desired  (API writes):    claimGeneration (decimal string, absent = "0"), claimConsumedCodeHash, claimClaimantHash
+//	reported (device writes): claimCodeHash, claimExpiresAt (RFC 3339 UTC), claimGeneration (decimal string)
+//
+// The claim properties ride in the same reported patch as the cook ones, so
+// neither kind of patch ever drops the other's. The device never reads
+// claimClaimantHash, so it can never log it.
 //
 // IoT Hub allows one MQTT connection per device id, so the twin shares the
 // AzureClient's connection; it never dials its own.
@@ -60,6 +70,13 @@ type CookState interface {
 	ApplyDesired(activeCookID, correlationID *string, version int64) error
 }
 
+// ClaimState is the device's claim code. *claim.Device implements it. Sync
+// applies the claim rule and returns the claim properties to report (ok false:
+// none); it stores a new code before it returns its hash.
+type ClaimState interface {
+	Sync(desired claim.Desired, start bool) (rep claim.Reported, ok bool, err error)
+}
+
 // TwinDesired is the desired section of a twin as the device reads it.
 type TwinDesired struct {
 	ActiveCookID  *string `json:"activeCookId"`
@@ -83,10 +100,17 @@ type Twin struct {
 
 // reportedPatch is the body the device publishes after applying desired state.
 // All three fields are always sent; nil ids go out as null.
+//
+// The claim fields are sent only with WithClaim; connection-string mode never
+// sends them.
 type reportedPatch struct {
 	ActiveCookID          *string `json:"activeCookId"`
 	CorrelationID         *string `json:"correlationId"`
 	AppliedDesiredVersion int64   `json:"appliedDesiredVersion"`
+
+	ClaimCodeHash   string `json:"claimCodeHash,omitempty"`
+	ClaimExpiresAt  string `json:"claimExpiresAt,omitempty"`
+	ClaimGeneration string `json:"claimGeneration,omitempty"`
 }
 
 // twinConn is one MQTT connection as the twin worker sees it. lost closes when
@@ -125,6 +149,16 @@ type twin struct {
 	pending map[string]chan twinResponse
 	current twinConn
 	lastErr error
+
+	// claims is the claim code (nil without WithClaim). claimDesired is the
+	// last desired claim properties the worker read, valid once claimKnown;
+	// claimStarted is set once the process's first claim report succeeded
+	// (Decide's start rule applies until then). The worker goroutine alone
+	// touches these three.
+	claims       ClaimState
+	claimDesired claim.Desired
+	claimKnown   bool
+	claimStarted bool
 
 	syncedOnce sync.Once
 	synced     chan struct{} // closed after the first GET applied and reported
@@ -254,6 +288,11 @@ func (t *twin) fullSync(ctx context.Context, c twinConn) {
 	}
 	cook := desiredString(doc.Desired, TwinDesiredActiveCookID, nil)
 	corr := desiredString(doc.Desired, TwinDesiredCorrelationID, nil)
+	if t.claims != nil {
+		// The GET is authoritative: absent claim properties are the defaults.
+		t.claimDesired = desiredClaim(doc.Desired, claim.Desired{})
+		t.claimKnown = true
+	}
 	if t.apply(ctx, c, cook, corr, version, "get") {
 		t.syncedOnce.Do(func() { close(t.synced) })
 	}
@@ -281,6 +320,16 @@ func (t *twin) onPatch(ctx context.Context, p twinPatch) {
 		t.fullSync(ctx, t.conn())
 		return
 	}
+	if t.claims != nil {
+		if !t.claimKnown {
+			// No GET has succeeded yet, so there is no base to merge the
+			// patch's claim properties onto.
+			log.Info("iothub twin: desired patch before the first twin read, re-reading the twin")
+			t.fullSync(ctx, t.conn())
+			return
+		}
+		t.claimDesired = desiredClaim(patch, t.claimDesired)
+	}
 	cook = desiredString(patch, TwinDesiredActiveCookID, cook)
 	corr = desiredString(patch, TwinDesiredCorrelationID, corr)
 	t.apply(ctx, t.conn(), cook, corr, p.version, "patch")
@@ -288,12 +337,29 @@ func (t *twin) onPatch(ctx context.Context, p twinPatch) {
 
 // apply stores the desired values and reports them. It returns true when both
 // succeeded. A failed report is retried by the GET on the next connect.
+//
+// With a claim, it first applies the claim rule to t.claimDesired (which may
+// mint and store a new code) and puts the claim properties in the same
+// report. A claim failure is logged and the report goes out with what the
+// claim file still holds, so the cook is never held up by the claim.
 func (t *twin) apply(ctx context.Context, c twinConn, cook, corr *string, version int64, source string) bool {
 	if err := t.state.ApplyDesired(cook, corr, version); err != nil {
 		t.fail(fmt.Errorf("apply desired version %d: %w", version, err))
 		return false
 	}
-	body, err := json.Marshal(reportedPatch{ActiveCookID: cook, CorrelationID: corr, AppliedDesiredVersion: version})
+	patch := reportedPatch{ActiveCookID: cook, CorrelationID: corr, AppliedDesiredVersion: version}
+	hasClaim := false
+	if t.claims != nil {
+		rep, ok, err := t.claims.Sync(t.claimDesired, !t.claimStarted)
+		if err != nil {
+			logrus.WithError(err).Warn("iothub twin: claim code sync failed; it is retried on the next twin sync")
+		}
+		if ok {
+			patch.ClaimCodeHash, patch.ClaimExpiresAt, patch.ClaimGeneration = rep.CodeHash, rep.ExpiresAt, rep.Generation
+			hasClaim = err == nil
+		}
+	}
+	body, err := json.Marshal(patch)
 	if err != nil {
 		t.fail(fmt.Errorf("encode reported patch: %w", err))
 		return false
@@ -307,11 +373,18 @@ func (t *twin) apply(ctx context.Context, c twinConn, cook, corr *string, versio
 		t.fail(fmt.Errorf("report applied version %d: status %d: %s", version, resp.status, truncate(resp.payload)))
 		return false
 	}
-	logrus.WithFields(logrus.Fields{
+	if hasClaim {
+		t.claimStarted = true
+	}
+	fields := logrus.Fields{
 		"source":                source,
 		"appliedDesiredVersion": version,
 		"cookId":                derefOr(cook, ""),
-	}).Info("iothub twin: applied and reported desired properties")
+	}
+	if patch.ClaimGeneration != "" {
+		fields["claimGeneration"] = patch.ClaimGeneration
+	}
+	logrus.WithFields(fields).Info("iothub twin: applied and reported desired properties")
 	return true
 }
 
@@ -481,6 +554,34 @@ func desiredString(props map[string]json.RawMessage, key string, prev *string) *
 		return nil
 	}
 	return &s
+}
+
+// desiredClaim reads the desired claim properties from a desired section or
+// patch onto prev: an absent property keeps prev's value, null clears it. A
+// claimGeneration that is not a decimal string is logged (by name only) and
+// keeps prev's. claimClaimantHash is never read.
+func desiredClaim(props map[string]json.RawMessage, prev claim.Desired) claim.Desired {
+	out := prev
+	consumed := prev.ConsumedCodeHash
+	out.ConsumedCodeHash = derefOr(desiredString(props, claim.DesiredConsumedCodeHash, &consumed), "")
+	raw, ok := props[claim.Generation]
+	switch {
+	case !ok:
+	case string(raw) == "null":
+		out.Generation = 0
+	default:
+		var s string
+		g, err := int64(0), json.Unmarshal(raw, &s)
+		if err == nil {
+			g, err = strconv.ParseInt(s, 10, 64)
+		}
+		if err != nil || g < 0 {
+			logrus.WithField("property", claim.Generation).Warn("iothub twin: desired property is not a non-negative decimal string, keeping the previous value")
+			break
+		}
+		out.Generation = g
+	}
+	return out
 }
 
 func desiredVersion(desired map[string]json.RawMessage) (int64, error) {

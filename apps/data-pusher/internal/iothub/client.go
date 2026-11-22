@@ -111,6 +111,7 @@ type AzureClient struct {
 	reconnectMin   time.Duration
 	reconnectMax   time.Duration
 	twinState      CookState
+	claimState     ClaimState
 	clock          clock.Clock
 	newMQTT        func(*mqtt.ClientOptions) mqtt.Client
 
@@ -166,6 +167,17 @@ func WithPublishTimeout(d time.Duration) Option {
 func WithCookTwin(state CookState) Option {
 	return func(c *AzureClient) {
 		c.twinState = state
+	}
+}
+
+// WithClaim adds the device's claim code to the twin (goal HAR-130): every
+// full twin sync and desired patch applies the claim rule to the desired claim
+// properties, and every reported patch carries the claim properties next to
+// the cook ones. It does nothing without WithCookTwin. dpsmode.NewClient sets
+// it; connection-string mode never does.
+func WithClaim(state ClaimState) Option {
+	return func(c *AzureClient) {
+		c.claimState = state
 	}
 }
 
@@ -291,6 +303,7 @@ func newAzureClient(hostName, deviceID string, opts []Option) *AzureClient {
 	}
 	if c.twinState != nil {
 		c.twin = newTwin(c.twinState, c.twinTimeout, c.clock)
+		c.twin.claims = c.claimState
 	}
 	if !c.brokerFixed && hostName != "" {
 		c.brokerURL = hubBrokerURL(hostName)
