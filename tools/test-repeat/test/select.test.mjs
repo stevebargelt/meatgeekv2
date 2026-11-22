@@ -65,7 +65,9 @@ test('a change to the workflow counts as a harness change', () => {
   );
 });
 
-test('a harness change wins over an app change: every suite once', () => {
+test('a harness change with an app change: every suite once, the affected ones the full count', () => {
+  // HAR-121: the suite the pull request fixes still gets its 50; the rest, not
+  // fixed yet, run once.
   const sel = selectSuites({
     suites,
     changedFiles: ['tools/test-repeat/suites.mjs', 'apps/data-pusher/main.go'],
@@ -73,8 +75,11 @@ test('a harness change wins over an app change: every suite once', () => {
   assert.ok(sel.suites.every(s => s.selected));
   assert.deepEqual(
     sel.suites.map(s => [s.id, s.runs]),
-    onHarnessChange()
+    onHarnessChange().map(([id, runs]) => [id, id === 'go-data-pusher' ? 50 : runs])
   );
+  const pusher = sel.suites.find(s => s.id === 'go-data-pusher');
+  assert.equal(pusher.reason, 'affected');
+  assert.deepEqual(pusher.matched, ['apps/data-pusher/main.go']);
 });
 
 test('label test-repeat:all selects every suite at 50 runs, sharded', () => {

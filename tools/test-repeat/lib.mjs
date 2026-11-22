@@ -184,7 +184,11 @@ export function matchesAny(file, globs) {
  *                                in CI without putting not-yet-fixed suites
  *                                through 50 runs), except a `selfTest` suite
  *                                (the harness's own tests), which runs `runs`
- *                                times: a harness change is what it tests
+ *                                times: a harness change is what it tests;
+ *                                and except a suite whose `paths` a
+ *                                non-harness file in the change matches, which
+ *                                runs `runs` times: it is the suite the pull
+ *                                request fixes (HAR-121)
  *  - otherwise                   each suite whose `paths` match a changed
  *                                file, `runs` times
  *  - label test-repeat:load      adds one pass of every selected suite with
@@ -207,12 +211,22 @@ export function selectSuites({
   const selection = suites.map(s => {
     const hits = changedFiles.filter(f => matchesAny(f, s.paths));
     if (all) return { id: s.id, selected: true, reason: `label ${LABEL_ALL}`, runs, matched: hits };
-    if (harnessChanged)
+    if (harnessChanged && s.selfTest)
       return {
         id: s.id,
         selected: true,
-        reason: s.selfTest ? 'harness changed (self-test)' : 'harness changed',
-        runs: s.selfTest ? runs : harnessRuns,
+        reason: 'harness changed (self-test)',
+        runs,
+        matched: hits,
+      };
+    // Only a non-harness file makes a suite affected here: a suite that reads
+    // the workflows matches test-repeat.yml, which is a harness change.
+    if (harnessChanged && !hits.some(f => !matchesAny(f, HARNESS_PATHS)))
+      return {
+        id: s.id,
+        selected: true,
+        reason: 'harness changed',
+        runs: harnessRuns,
         matched: hits,
       };
     if (hits.length > 0)
@@ -717,9 +731,16 @@ function selfTestNote(selection) {
   const self = selection.suites.filter(
     s => s.selected && s.reason === 'harness changed (self-test)'
   );
-  return self.length
-    ? `, except the harness's own tests (${self.map(s => s.id).join(', ')}), which run ${self[0].runs} times`
-    : '';
+  const affected = selection.suites.filter(s => s.selected && s.reason === 'affected');
+  const notes = [
+    self.length
+      ? `the harness's own tests (${self.map(s => s.id).join(', ')}), which run ${self[0].runs} times`
+      : '',
+    affected.length
+      ? `the suites this pull request affects (${affected.map(s => s.id).join(', ')}), which run ${affected[0].runs} times`
+      : '',
+  ].filter(Boolean);
+  return notes.length ? `, except ${notes.join(', and ')}` : '';
 }
 
 export function writeJson(file, value) {

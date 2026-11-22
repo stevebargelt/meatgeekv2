@@ -160,16 +160,19 @@ What is selected:
 | changes files a suite's `paths` match          | those suites                                         | 50         |
 | changes `tools/test-repeat/**` or the workflow | every suite                                          | 1          |
 |                                                | except `test-repeat-harness` (the harness's tests)   | 50         |
+|                                                | and except the suites whose `paths` it also changes  | 50         |
 | has label `test-repeat:all`                    | every suite                                          | 50         |
 | has label `test-repeat:load`                   | adds one pass per selected suite with `--parallel 8` | 1 per copy |
 
-A harness change wins over an app change: such a pull request runs every suite
-once, proving each command still works without putting suites that are not
-fixed yet through 50 runs. Keep harness changes out of fix pull requests, or add
-`test-repeat:all`. The exception is the harness's own tests, the
-`test-repeat-harness` suite (`selfTest: true`): a harness change is exactly
-what they test, so it runs them the full 50 times (and, with
-`test-repeat:load`, 8 copies at once).
+A harness change runs every suite once, proving each command still works
+without putting suites that are not fixed yet through 50 runs. Two exceptions
+run the full 50 (and, with `test-repeat:load`, 8 copies at once): the
+harness's own tests, the `test-repeat-harness` suite (`selfTest: true`), since
+a harness change is exactly what they test; and a suite whose `paths` a
+non-harness file in the same pull request matches, since that is the suite it
+fixes (HAR-121: a fix that
+needs a harness change, such as `playwright-web-e2e`'s port per copy, still
+gets its 50 runs).
 
 The workflow holds no secret, no environment and no OIDC permission, so it runs
 on fork pull requests.
