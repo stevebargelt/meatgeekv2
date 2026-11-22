@@ -54,6 +54,15 @@ parse_common_option() {
   esac
 }
 
+# A --dps or --hub value with a dot in it is the service's host name, not its
+# resource name (HAR-139). With --auth-type login, azure-iot then talks to the
+# service's data plane directly and makes no ARM call, so an identity that
+# holds only the data-plane roles (CI's: IoT Hub Registry Contributor and
+# Device Provisioning Service Data Contributor, no Reader) can run these
+# scripts. No --resource-group is passed with a host name: with one, the hub
+# commands look the hub up in ARM by name anyway.
+is_host_name() { [[ "$1" == *.* ]]; }
+
 validate_common_options() {
   [[ -n "$DEVICE_ID" ]] || usage_error "--device-id is required"
   # The same rule as the device's own identity (internal/identity).
@@ -63,6 +72,13 @@ validate_common_options() {
     key | login) ;;
     *) usage_error "--auth-type must be 'key' or 'login', not '$AUTH_TYPE'" ;;
   esac
+  local flag value
+  for flag in --dps --hub; do
+    if [[ $flag == --dps ]]; then value=$DPS_NAME; else value=$HUB_NAME; fi
+    if is_host_name "$value" && [[ "$AUTH_TYPE" != login ]]; then
+      usage_error "$flag $value is a host name, which needs --auth-type login (with key auth, az finds the service in ARM by name to read its keys)"
+    fi
+  done
 }
 
 require_az() {
@@ -156,13 +172,26 @@ find_one() {
   esac
 }
 
-# Both run even when the name was given, to confirm the resource exists.
+# Both run even when the name was given, to confirm the resource exists. A
+# host name is used as given: confirming it would need ARM, and a wrong one
+# fails at the first az iot call (it does not resolve), not as "not found".
+# DPS_ARGS and HUB_ARGS are the options that name the service on az iot calls.
 resolve_dps() {
+  if is_host_name "$DPS_NAME"; then
+    DPS_ARGS=(--dps-name "$DPS_NAME")
+    return
+  fi
   DPS_NAME=$(find_one Microsoft.Devices/provisioningServices DPS --dps "$DPS_NAME")
+  DPS_ARGS=(--dps-name "$DPS_NAME" --resource-group "$RESOURCE_GROUP")
 }
 
 resolve_hub() {
+  if is_host_name "$HUB_NAME"; then
+    HUB_ARGS=(--hub-name "$HUB_NAME")
+    return
+  fi
   HUB_NAME=$(find_one Microsoft.Devices/IotHubs "IoT hub" --hub "$HUB_NAME")
+  HUB_ARGS=(--hub-name "$HUB_NAME" --resource-group "$RESOURCE_GROUP")
 }
 
 # Sets ENROLLMENT_STATE to missing|enabled|disabled and ENROLLMENT_THUMBPRINT
@@ -170,7 +199,7 @@ resolve_hub() {
 # Only those two fields are read, so nothing else in the record is printed.
 read_enrollment() {
   az_call "iot dps enrollment show" iot dps enrollment show \
-    --dps-name "$DPS_NAME" --resource-group "$RESOURCE_GROUP" \
+    "${DPS_ARGS[@]}" \
     --enrollment-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
     --query "[provisioningStatus, attestation.x509.clientCertificates.primary.info.sha1Thumbprint]" \
     --output tsv
@@ -195,7 +224,7 @@ read_enrollment() {
 # Sets IDENTITY_STATE to missing|enabled|disabled for the hub device identity.
 read_identity() {
   az_call "iot hub device-identity show" iot hub device-identity show \
-    --hub-name "$HUB_NAME" --resource-group "$RESOURCE_GROUP" \
+    "${HUB_ARGS[@]}" \
     --device-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
     --query status --output tsv
   if [[ $AZ_RC -ne 0 ]]; then
@@ -215,7 +244,7 @@ read_identity() {
 # set_identity_status <enabled|disabled> <reason>
 set_identity_status() {
   az_write "iot hub device-identity update" iot hub device-identity update \
-    --hub-name "$HUB_NAME" --resource-group "$RESOURCE_GROUP" \
+    "${HUB_ARGS[@]}" \
     --device-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
     --status "$1" --status-reason "$2" --output none
 }

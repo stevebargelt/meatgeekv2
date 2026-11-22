@@ -287,6 +287,8 @@ describe('web-acceptance-leak-check.cjs on a fixture directory (HAR-126)', () =>
     for (const what of [
       'connection-string key field',
       'claim code',
+      'PEM private key block',
+      'JSON claimCode value',
       'password',
       'TOTP secret',
       'TOTP code',
@@ -339,6 +341,49 @@ describe('web-acceptance-leak-check.cjs on a fixture directory (HAR-126)', () =>
       `leak check: ${path.join(results, 'b-chromium', 'sign-in-diagnostic.txt')}: claim code: none`
     );
     expect(r.stdout + r.stderr).not.toContain(claimCode);
+  });
+
+  // HAR-139: each simulated device holds its own private key, and its claim
+  // code may be printed in a shape the claim-code scan does not know.
+  it('finds a PEM private key block of any kind, in the log and in a diagnostic', () => {
+    const begin = (kind: string) => `-----BEGIN ${kind}PRIVATE ${'K'}EY-----`;
+    const log = path.join(root, 'web-acceptance.log');
+    fs.writeFileSync(log, `PASS 1\n${begin('')}\nMIGHAgEAMBMG\n${begin('EC ')}\n`);
+    const bad = diag('a-chromium', `${CLEAN}\n${begin('ENCRYPTED ')}`);
+    const good = diag('b-chromium', `${CLEAN}\n-----BEGIN CERTIFICATE-----`);
+
+    const r = cli(env);
+
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(
+      'leak check: proof log: FAILED: PEM private key block on line(s) 2, 4'
+    );
+    expect(fs.existsSync(bad)).toBe(false);
+    expect(fs.existsSync(good)).toBe(true);
+    expect(r.stdout).toContain(
+      `leak check: ${path.join(results, 'a-chromium', 'sign-in-diagnostic.txt')}: PEM private key block: FOUND`
+    );
+    expect(r.stdout).toContain(
+      `leak check: ${path.join(results, 'b-chromium', 'sign-in-diagnostic.txt')}: PEM private key block: none`
+    );
+    expect(r.stdout + r.stderr).not.toContain('MIGHAgEAMBMG');
+  });
+
+  it('finds a JSON claimCode string value of any shape, but not a null one', () => {
+    const member = `"claim${'C'}ode"`;
+    const log = path.join(root, 'web-acceptance.log');
+    fs.writeFileSync(
+      log,
+      `PASS 1\n{${member}:"abc123"}\n{${member}: null}\n{"event":"claim", ${member} : "x"}\n`
+    );
+
+    const r = cli(env);
+
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(
+      'leak check: proof log: FAILED: JSON claimCode value on line(s) 2, 4'
+    );
+    expect(r.stdout + r.stderr).not.toContain('abc123');
   });
 
   it('fails on a leak in the log, and leaves a clean diagnostic (the log is not uploaded)', () => {

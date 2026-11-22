@@ -8,8 +8,10 @@
 // sign-in diagnostic, HAR-121) for: the connection-string key field, the
 // acceptance user's password (ACCEPTANCE_USER_PASSWORD), its TOTP secret
 // (ACCEPTANCE_USER_TOTP_SECRET), every TOTP code from a 30 s window the job
-// can have run in (its 30 min timeout, plus a margin) and, since HAR-138,
-// anything shaped like a device claim code (HAR-134). Line numbers only;
+// can have run in (its 30 min timeout, plus a margin), since HAR-138,
+// anything shaped like a device claim code (HAR-134) and, since HAR-139, a
+// PEM private key block (each simulated device now holds its own key) and a
+// JSON claimCode value whatever its shape. Line numbers only;
 // nothing found is printed. The patterns are built so this file holds none of
 // them literally.
 //
@@ -50,10 +52,25 @@ const STEP_S = 30;
 const CLAIM_CODE =
   /(?<![0-9A-Za-z-])[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?![0-9A-Za-z-])/;
 
+/**
+ * HAR-139: the opening line of a PEM private key, of any kind (PKCS#8
+ * `PRIVATE KEY`, `EC PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`, ...). simdevice
+ * keeps each device's key in its state dir and never prints it.
+ */
+const PEM_PRIVATE_KEY = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE [K]EY-----/;
+
+/**
+ * HAR-139: a JSON `claimCode` member with a string value, as in simdevice's
+ * own output, whatever the value looks like. A null value is not a code.
+ */
+const JSON_CLAIM_CODE = /"claim[C]ode"\s*:\s*"/;
+
 function buildScans({ password, totpSecret, now }) {
   const scans = [
     { what: 'connection-string key field', test: line => /SharedAccess[K]ey=/i.test(line) },
     { what: 'claim code', test: line => CLAIM_CODE.test(line) },
+    { what: 'PEM private key block', test: line => PEM_PRIVATE_KEY.test(line) },
+    { what: 'JSON claimCode value', test: line => JSON_CLAIM_CODE.test(line) },
   ];
   const notes = [];
   if (password) scans.push({ what: 'password', test: line => line.includes(password) });

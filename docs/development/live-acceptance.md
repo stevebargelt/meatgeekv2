@@ -518,6 +518,7 @@ none of which needed a volume or chart top-up.
 | `proofs/signalr-isolation.proof.ts:ISOLATION_WAIT.graceMs` (`expectPeerSilent`) | a fixed window after the owner got an event, in which the peer must receive nothing     | 15 s                                                    | A leak would travel the same path as the owner's message, so it gets about 24 × the slowest owner delivery measured (628 ms) to show up (HAR-67)                                                                                                     | `LEAK: the peer, who does not own <device>, received <n> message(s) by <event> + 15 s: <target ×n>`                                                                                           |
 | `lib/signalr.ts:CONNECT_TIMEOUT_MS` (`within`)                                  | one SignalR client `start()` attempt, or a `stop()`                                     | 30 s                                                    | Set with the first SignalR proof (HAR-57) for the Free_F1 service's client negotiate and transport start; no measurement then. Measured, from the log's timestamps: `start()` 170–580 ms                                                             | `<what> did not finish in 30000 ms`, `<what>` being `start()`, `owner start()`, `peer start()` or `stop()`                                                                                    |
 | `lib/signalr.ts:START_RETRY.delaysMs` (`startConnection`)                       | before retrying a `start()` the service answered with `429`                             | 1, 2, 4 and 8 s: five attempts, 15 s of waiting         | HAR-77's first live run: two proofs got `429`, and the next one, 2 s later, connected                                                                                                                                                                | `<what> failed: <masked error> (throttled on all 5 attempts)`                                                                                                                                 |
+| simdevice `internal/provision/provision.go:Register` (DPS mode)                 | simdevice's DPS registration, in the child (Go): `PUT`, then polls to `assigned`        | 30 polls, each after `Retry-After` (default 2 s)        | Set with the DPS client (HAR-132; `defaultMaxAttempts`, `defaultRetryAfter`, 30 s per request); no measurement then. Only a device's first simdevice run in a job registers: later runs reuse the assignment cached in its state dir                 | `provision: registration of <id> still "<status>" after 30 status checks`                                                                                                                     |
 
 A `grep -nE 'capMs|intervalMs|graceMs|TIMEOUT_MS|timeoutMs|delaysMs' -r
 apps/api/acceptance` also finds names that are not waits in this suite:
@@ -590,9 +591,12 @@ and deletes one it finds anything in before the upload step runs (see
 The suite takes six inputs, all from the environment. If any is missing it
 fails at once and names the variable; it never skips silently. The simulated
 device can be given to it in one of two ways: by connection string (the old
-mode, below, which CI still uses and the next HAR-130 issues remove), or in
+mode, below, which the next HAR-130 issues remove), or in
 [DPS mode](#dps-mode-har-138), as the device's own certificate, the way a real
-Pi enrols.
+Pi enrols. CI uses DPS mode since HAR-139, and its three standing devices
+(`meatgeek-dev-simulated-smoker`, `-chart` and `-web`) now have X.509 hub
+identities with no key, so the connection-string commands below work only for
+a SAS device of your own.
 
 | Variable                       | Value                                                                                                  |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
@@ -672,8 +676,9 @@ service principal's partition. The same step also signs in, from a separate
 the `development` environment, set by bootstrap, HAR-61) and hands the suite a
 second masked app-only token as `ACCEPTANCE_PEER_BEARER_TOKEN`, after checking
 that its `appid`/`azp` claim is the peer's and not app-publish's (HAR-65). The
-isolation proof (HAR-67) sends as it. The same job builds simdevice, ensures the
-simulated device exists and hands the suite its masked connection string (see
+isolation proof (HAR-67) sends as it. The same job builds simdevice, gives each
+simulated device its own X.509 identity enrolled in DPS, and runs the suite in
+DPS mode (see [In CI](#in-ci-har-139) and
 [CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)). The proof results and the RU-per-route table
 also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
 calls the live system.
@@ -746,6 +751,47 @@ the claim proofs that come next. It runs
 3, and on any other failure an error with the exit code and stderr, never
 stdout.
 
+### In CI (HAR-139)
+
+CI's simulated devices get their identity the way the owner's Pi does. No hub
+identity is created for them and no connection string is read. The
+`acceptance` job's "Enrol the simulated devices through DPS" step does this
+for `<simulated_device_id>` and `<simulated_device_id>-chart`. The
+`web-acceptance` job's "Enrol the web device through DPS" step does the same
+for `<simulated_device_id>-web`. For each device:
+
+1. **Migration, once.** The step reads only the authentication type of the
+   device's hub identity (`az iot hub device-identity show` with
+   `--query authentication.type`). If the identity still uses SAS (symmetric key)
+   authentication from before HAR-139, the step deletes it, so DPS creates an
+   X.509 identity when the device registers, and logs `migrated <id>`.
+   Otherwise, or if there is no identity, it logs `ok <id>`. Any error other
+   than "device not found" fails the step.
+2. **A new key every run.** `simdevice identity init` makes the device's key
+   and certificate in a fresh state dir, `$RUNNER_TEMP/devices/<id>`, and
+   prints only the certificate, to `$RUNNER_TEMP/devices/<id>.pem`. The key is deleted with the runner.
+3. **Enrolment.** `apps/data-pusher/deploy/enrol-device.sh` enrols that
+   certificate (`--auth-type login`, with the DPS and hub host names) and
+   prints its one result line. The first run prints `enrolled <id>`. Every
+   later run prints `certificate replaced <id>`, because the key is new, so
+   every run exercises the re-imaged-Pi path: DPS registration with a new
+   certificate must update the hub identity. Any non-zero exit fails the
+   step. The ids are stable, so there are no enrollments to clean up.
+
+The DPS and the hub are passed by host name
+(`<dps_name>.azure-devices-provisioning.net` and `iot_hub_hostname`). CI's
+identity holds only data-plane roles (IoT Hub Registry Contributor and Device
+Provisioning Service Data Contributor), with no ARM read, and with a host name
+the script makes no ARM call (see
+[its README](../../apps/data-pusher/deploy/README.md#host-names-no-arm)).
+
+The suite step then sets `ACCEPTANCE_DPS_ID_SCOPE` (Terraform output
+`dps_id_scope`), `ACCEPTANCE_SIM_STATE_DIR` and `ACCEPTANCE_CHART_STATE_DIR`
+to those state dirs. The browser proof's step sets `ACCEPTANCE_WEB_STATE_DIR`
+the same way. No `SIMDEVICE_*CONNECTION_STRING` variable is set. Each
+simdevice run registers with DPS from its state dir; the registration is a
+real-time wait ([its row](#real-time-waits)).
+
 ### The chart device (HAR-84)
 
 A second standing IoT Hub device, `<simulated device id>-chart`
@@ -754,9 +800,10 @@ of goal HAR-71. That proof keeps one active cook running on its device across
 runs, with 12 hours of readings in it. It cannot use the first device:
 `device-twin.proof.ts` starts and stops a cook there on every run, and a
 standing active cook would make that proof's `POST /cooks` fail with `409`.
-The CI job's "Ensure the simulated device exists" step creates the chart device
-if it is missing, the same way as the first (log line `device <id>: created`
-or `device <id>: exists`); its id is derived in the workflow, not in Terraform.
+The CI job's "Enrol the simulated devices through DPS" step gives the chart
+device its identity the same way as the first ([In CI](#in-ci-har-139)), and
+the suite runs it in DPS mode with `ACCEPTANCE_CHART_STATE_DIR`; its id is
+derived in the workflow, not in Terraform.
 
 Two more variables name it. The runner treats them as optional, but set both or
 neither: one without the other stops the run at once, naming both. The cook-chart
@@ -821,9 +868,10 @@ It runs after every dev deploy, as the `web-acceptance` job in
 `.github/workflows/app-deploy-dev.yml` (HAR-101; see
 [CI/CD → Dev app deploy and live acceptance](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)),
 in parallel with the API suite's `acceptance` job, with `EXPECTED_WEB_SHA` set
-to the deployed commit. The job makes sure the IoT Hub device
-`<simulated_device_id>-web` exists, fetches and masks its connection string
-inside the run step, and takes the acceptance user's UPN from the
+to the deployed commit. The job enrols the device `<simulated_device_id>-web`
+through DPS and runs the proof's simdevice in DPS mode with
+`ACCEPTANCE_WEB_STATE_DIR` ([In CI](#in-ci-har-139)), and takes the acceptance
+user's UPN from the
 `development` environment's `ACCEPTANCE_USER_UPN` variable and the password and
 TOTP secret from its `ACCEPTANCE_USER_PASSWORD` and
 `ACCEPTANCE_USER_TOTP_SECRET` secrets. The run summary gets one `PASS` or
@@ -868,9 +916,10 @@ only once sign-in has finished and the browser is back on the app; it is
 
 ### Secrets in the CI log
 
-GitHub masks the password and TOTP secret (repository secrets) and the
-connection string and its key (`::add-mask::`) in the job log, so the masked
-log cannot show whether the proof printed one. The `web-acceptance` job's leak
+GitHub masks the password and TOTP secret (repository secrets) in the job
+log, so the masked log cannot show whether the proof printed one. (Since
+HAR-139 the job holds no device connection string; the device's key stays in
+its state dir.) The `web-acceptance` job's leak
 check (`.github/scripts/web-acceptance-leak-check.cjs`), which runs whether the
 proof passed or not, checks the proof's **raw** output instead (the file `tee`
 wrote, before masking), and every
@@ -887,6 +936,10 @@ fails the job if one holds:
   Crockford base32, not inside a longer dashed id such as a UUID). Nobody knows
   a claim code before the device mints it, so its shape is what is matched
   (HAR-138).
+- a PEM private key block: a `-----BEGIN … PRIVATE KEY-----` line of any key
+  type (HAR-139). Each simulated device now holds its own key.
+- a JSON `claimCode` member with a string value, whatever the value's shape
+  (HAR-139).
 
 It prints one line per file and check (`leak check: proof log: password:
 none`, and so on) and, on a hit, line numbers only, never the text it found.

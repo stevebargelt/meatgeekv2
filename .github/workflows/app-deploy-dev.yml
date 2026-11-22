@@ -76,6 +76,8 @@ jobs:
       iot_hub_name: ${{ steps.tfout.outputs.iot_hub_name }}
       iot_hub_hostname: ${{ steps.tfout.outputs.iot_hub_hostname }}
       simulated_device_id: ${{ steps.tfout.outputs.simulated_device_id }}
+      dps_name: ${{ steps.tfout.outputs.dps_name }}
+      dps_id_scope: ${{ steps.tfout.outputs.dps_id_scope }}
     env:
       # Terraform reads dev state as the app-publish identity over OIDC. Without
       # ARM_USE_OIDC the azurerm backend falls back to the az CLI session, which
@@ -221,9 +223,10 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       # Never hard-code the Function App or the hub: read the app's name, host,
-      # the API audience, the IoT Hub name and hostname, and the standing
-      # simulated device id from the dev Terraform state.
-      - name: Resolve Function App, API audience, IoT Hub and simulated device (Terraform outputs)
+      # the API audience, the IoT Hub name and hostname, the standing
+      # simulated device id, and (HAR-139) the DPS name and ID scope the
+      # simulated devices enrol and register with, from the dev Terraform state.
+      - name: Resolve Function App, API audience, IoT Hub, DPS and simulated device (Terraform outputs)
         id: tfout
         if: steps.freshness.outputs.fresh == 'true'
         working-directory: apps/infrastructure
@@ -233,7 +236,7 @@ jobs:
           terraform init -input=false -reconfigure -lockfile=readonly \
             -backend-config=environments/backend-dev.hcl \
             -backend-config="storage_account_name=$STATE_ACCOUNT"
-          for OUT in function_app_name function_app_hostname functions_auth_audience iot_hub_name iot_hub_hostname simulated_device_id; do
+          for OUT in function_app_name function_app_hostname functions_auth_audience iot_hub_name iot_hub_hostname simulated_device_id dps_name dps_id_scope; do
             VALUE="$(terraform output -raw "$OUT")"
             if [ -z "$VALUE" ]; then
               echo "Terraform output $OUT is empty — aborting deploy." >&2
@@ -328,103 +331,96 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Pinned, never latest. Gives `az iot hub device-identity`.
+      # Pinned, never latest. Gives `az iot hub device-identity` and
+      # `az iot dps enrollment`, which enrol-device.sh calls.
       - name: Install the azure-iot CLI extension
         run: az extension add --name azure-iot --version 1.0.0 --yes
 
-      # The standing simulated device (HAR-39). `--auth-type login` makes az use
-      # this identity's Entra role (IoT Hub Registry Contributor, HAR-42), not
-      # hub keys it cannot list. --hub-name gets the hub's HOSTNAME: with a
-      # hostname, azure-iot goes straight to the hub's data plane; with a bare
-      # name it first looks the hub up through ARM, which that data-plane-only
-      # role cannot read. Only "device not found" (ResourceNotFoundError, az
-      # exit 3) leads to a create; any other error (not authorised, hub
-      # unreachable) fails the step. stdout is discarded: device JSON carries
-      # the device's symmetric keys.
-      # HAR-84: a second standing device, <simulated_device_id>-chart, for the
-      # cook-chart RU proof (HAR-71), which keeps one active cook on it across
-      # runs; on the first device that cook would 409 the device-twin proof's
-      # POST /cooks. Same logic, same role; its id is derived here, not in
-      # Terraform.
-      - name: Ensure the simulated device exists
+      # HAR-139: each simulated device gets its identity the way the owner's Pi
+      # does. The standing simulated device (HAR-39) and, HAR-84, the chart
+      # device <simulated_device_id>-chart, for the cook-chart RU proof
+      # (HAR-71), which keeps one active cook on it across runs.
+      #
+      # 1. Migration, once: a hub identity left from the SAS era is deleted so
+      #    DPS creates an X.509 one when the device registers. One with any
+      #    other authentication type, or none at all, is left alone. Only
+      #    `--query authentication.type` is read, so no key is printed. Only
+      #    "device not found" (ResourceNotFoundError, az exit 3) counts as no
+      #    identity; any other error fails the step.
+      # 2. The device makes its own key in a fresh state dir under
+      #    $RUNNER_TEMP (`simdevice identity init`, which prints only the
+      #    certificate), so every run has a new key and, from the second run
+      #    on, enrol-device.sh replaces the enrollment's certificate: the
+      #    re-imaged-Pi path. The key goes with the runner.
+      # 3. enrol-device.sh enrols that certificate in DPS and prints its one
+      #    result line. Any non-zero exit fails the step.
+      #
+      # `--auth-type login` makes az use this identity's Entra roles (IoT Hub
+      # Registry Contributor, HAR-42; Device Provisioning Service Data
+      # Contributor, HAR-137), not keys it cannot list. Both are data-plane
+      # roles, with no ARM read, so the hub and the DPS are named by HOST
+      # NAME: azure-iot then goes straight to the data plane, and
+      # enrol-device.sh makes no ARM call (its host-name mode).
+      - name: Enrol the simulated devices through DPS
         env:
           HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          DPS_HOST: ${{ needs.deploy.outputs.dps_name }}.azure-devices-provisioning.net
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
         run: |
           set -euo pipefail
-          ensure_device() {
-            local id="$1" err="$RUNNER_TEMP/device-show.err" rc=0
-            az iot hub device-identity show --hub-name "$HUB" --device-id "$id" \
-              --auth-type login -o none >/dev/null 2>"$err" || rc=$?
-            if [ "$rc" -eq 0 ]; then
-              echo "device $id: exists"
-            elif [ "$rc" -eq 3 ] || grep -q 'DeviceNotFound' "$err"; then
-              az iot hub device-identity create --hub-name "$HUB" --device-id "$id" \
+          migrate_sas_identity() {
+            local id="$1" err="$RUNNER_TEMP/device-auth.err" rc=0 auth
+            auth="$(az iot hub device-identity show --hub-name "$HUB" --device-id "$id" \
+              --auth-type login --query authentication.type -o tsv 2>"$err")" || rc=$?
+            if [ "$rc" -eq 0 ] && [ "$auth" = "sas" ]; then
+              az iot hub device-identity delete --hub-name "$HUB" --device-id "$id" \
                 --auth-type login -o none >/dev/null
-              echo "device $id: created"
+              echo "migrated $id"
+            elif [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || grep -q 'DeviceNotFound' "$err"; then
+              echo "ok $id"
             else
               echo "az iot hub device-identity show for device $id failed (exit $rc), and not because the device is missing:" >&2
               cat "$err" >&2
               exit 1
             fi
           }
-          ensure_device "$DEVICE"
-          ensure_device "${DEVICE}-chart"
+          enrol() {
+            local id="$1" dir="$RUNNER_TEMP/devices/$1"
+            mkdir -p "$RUNNER_TEMP/devices"
+            apps/data-pusher/dist/simdevice identity init --device-id "$id" \
+              --state-dir "$dir" > "$dir.pem"
+            apps/data-pusher/deploy/enrol-device.sh --device-id "$id" \
+              --certificate "$dir.pem" --auth-type login \
+              --dps "$DPS_HOST" --hub "$HUB"
+          }
+          for id in "$DEVICE" "${DEVICE}-chart"; do
+            migrate_sas_identity "$id"
+            enrol "$id"
+          done
 
-      # The two bearer tokens (app-publish, and the acceptance peer's) and the
-      # two standing devices' connection strings (the simulated device's and,
-      # HAR-84, the chart device's) are each fetched, masked and used inside
-      # this one step, so none ever reaches $GITHUB_ENV, a step output, or
-      # another step's process.
-      # For each device, both the full connection string and its
-      # SharedAccessKey value are masked before the suite starts. The sed
-      # pattern spells the field name with a [K] class so this script, which
-      # GitHub echoes into the log, never carries the literal field-and-equals
-      # text the HAR-44 log check greps for (a match there would hide a real
-      # leak). The masks go to stderr, which the runner reads workflow
-      # commands from as well, so the function's stdout is only the string.
+      # The two bearer tokens (app-publish, and the acceptance peer's) are
+      # each fetched, masked and used inside this one step, so neither ever
+      # reaches $GITHUB_ENV, a step output, or another step's process.
+      # HAR-139: the devices hold no credential the runner hands over. Each
+      # simdevice run is in DPS mode, with the state dir the step above made
+      # (its own key and certificate) and the DPS ID scope, which is not a
+      # secret.
       - name: Run the live acceptance suite
         env:
           ACCEPTANCE_BASE_URL: https://${{ needs.deploy.outputs.hostname }}/api
           AUDIENCE: ${{ needs.deploy.outputs.audience }}
-          HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
+          ACCEPTANCE_DPS_ID_SCOPE: ${{ needs.deploy.outputs.dps_id_scope }}
           TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           APP_DEPLOY_CLIENT_ID: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
           PEER_CLIENT_ID: ${{ vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID }}
         run: |
           set -euo pipefail
-          # Prints the device's connection string, after masking it and its
-          # key. Run as VAR="$(device_connection_string id)": `exit` leaves only
-          # the subshell, so the caller's `set -e` fails the step.
-          device_connection_string() {
-            local id="$1" conn key
-            conn="$(az iot hub device-identity connection-string show \
-              --hub-name "$HUB" --device-id "$id" --auth-type login \
-              --query connectionString -o tsv)" || {
-              echo "az iot hub device-identity connection-string show failed for device $id." >&2
-              exit 1
-            }
-            if [ -z "$conn" ]; then
-              echo "az returned no connection string for device $id." >&2
-              exit 1
-            fi
-            echo "::add-mask::${conn}" >&2
-            key="$(printf '%s' "$conn" | tr ';' '\n' | sed -n 's/^SharedAccess[K]ey=//p')"
-            if [ -z "$key" ]; then
-              echo "The connection string for device $id has no SharedAccessKey." >&2
-              exit 1
-            fi
-            echo "::add-mask::${key}" >&2
-            printf '%s' "$conn"
-          }
-          SIMDEVICE_CONNECTION_STRING="$(device_connection_string "$DEVICE")"
-          export SIMDEVICE_CONNECTION_STRING
           export ACCEPTANCE_SIM_DEVICE_ID="$DEVICE"
-          # HAR-84: the chart device, ensured by the step above.
-          SIMDEVICE_CHART_CONNECTION_STRING="$(device_connection_string "${DEVICE}-chart")"
-          export SIMDEVICE_CHART_CONNECTION_STRING
+          export ACCEPTANCE_SIM_STATE_DIR="$RUNNER_TEMP/devices/$DEVICE"
+          # HAR-84: the chart device, enrolled by the step above.
           export ACCEPTANCE_CHART_DEVICE_ID="${DEVICE}-chart"
+          export ACCEPTANCE_CHART_STATE_DIR="$RUNNER_TEMP/devices/${DEVICE}-chart"
           export ACCEPTANCE_SIMDEVICE_BIN="$GITHUB_WORKSPACE/apps/data-pusher/dist/simdevice"
           ACCEPTANCE_BEARER_TOKEN="$(az account get-access-token --scope "${AUDIENCE}/.default" --query accessToken -o tsv)"
           echo "::add-mask::${ACCEPTANCE_BEARER_TOKEN}"
@@ -645,75 +641,60 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Pinned, never latest. Gives `az iot hub device-identity`.
+      # Pinned, never latest. Gives `az iot hub device-identity` and
+      # `az iot dps enrollment`, which enrol-device.sh calls.
       - name: Install the azure-iot CLI extension
         run: az extension add --name azure-iot --version 1.0.0 --yes
 
       # The third standing device, <simulated_device_id>-web, the proof's own:
-      # the same show / create-on-not-found logic, flags and reasons as the
-      # `acceptance` job's step for its two devices. The proof registers it
-      # with the API as the acceptance user; this only makes it exist in the
-      # hub. stdout is discarded: device JSON carries the device's keys.
-      - name: Ensure the web device exists
+      # the same migration, `identity init` and enrol-device.sh, with the same
+      # flags and reasons, as the `acceptance` job's step for its two devices
+      # (HAR-139). The proof registers it with the API as the acceptance user;
+      # this only gives it its identity.
+      - name: Enrol the web device through DPS
         env:
           HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          DPS_HOST: ${{ needs.deploy.outputs.dps_name }}.azure-devices-provisioning.net
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}-web
         run: |
           set -euo pipefail
-          err="$RUNNER_TEMP/web-device-show.err" rc=0
-          az iot hub device-identity show --hub-name "$HUB" --device-id "$DEVICE" \
-            --auth-type login -o none >/dev/null 2>"$err" || rc=$?
-          if [ "$rc" -eq 0 ]; then
-            echo "device $DEVICE: exists"
-          elif [ "$rc" -eq 3 ] || grep -q 'DeviceNotFound' "$err"; then
-            az iot hub device-identity create --hub-name "$HUB" --device-id "$DEVICE" \
+          err="$RUNNER_TEMP/web-device-auth.err" rc=0
+          auth="$(az iot hub device-identity show --hub-name "$HUB" --device-id "$DEVICE" \
+            --auth-type login --query authentication.type -o tsv 2>"$err")" || rc=$?
+          if [ "$rc" -eq 0 ] && [ "$auth" = "sas" ]; then
+            az iot hub device-identity delete --hub-name "$HUB" --device-id "$DEVICE" \
               --auth-type login -o none >/dev/null
-            echo "device $DEVICE: created"
+            echo "migrated $DEVICE"
+          elif [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || grep -q 'DeviceNotFound' "$err"; then
+            echo "ok $DEVICE"
           else
             echo "az iot hub device-identity show for device $DEVICE failed (exit $rc), and not because the device is missing:" >&2
             cat "$err" >&2
             exit 1
           fi
+          dir="$RUNNER_TEMP/devices/$DEVICE"
+          mkdir -p "$RUNNER_TEMP/devices"
+          apps/data-pusher/dist/simdevice identity init --device-id "$DEVICE" \
+            --state-dir "$dir" > "$dir.pem"
+          apps/data-pusher/deploy/enrol-device.sh --device-id "$DEVICE" \
+            --certificate "$dir.pem" --auth-type login \
+            --dps "$DPS_HOST" --hub "$HUB"
 
-      # The web device's connection string is fetched, masked (whole, and its
-      # SharedAccessKey value) and exported inside this one step, as the
-      # `acceptance` job does, so it never reaches $GITHUB_ENV, a step output
-      # or another step. The sed pattern spells the field with a [K] class so
-      # this script, which GitHub echoes into the log, never carries the
-      # literal field-and-equals text the leak check below greps for. The
+      # HAR-139: simdevice runs in DPS mode as the web device, with the state
+      # dir the step above made; the runner hands it no credential. The
       # password and TOTP secret are repository secrets, which GitHub masks.
       - name: Run the live browser proof
         env:
-          HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
           WEB_BASE_URL: https://meatgeekv2-web.vercel.app
           EXPECTED_WEB_SHA: ${{ needs.deploy.outputs.sha }}
           ACCEPTANCE_USER_UPN: ${{ vars.ACCEPTANCE_USER_UPN }}
           ACCEPTANCE_USER_PASSWORD: ${{ secrets.ACCEPTANCE_USER_PASSWORD }}
           ACCEPTANCE_USER_TOTP_SECRET: ${{ secrets.ACCEPTANCE_USER_TOTP_SECRET }}
           ACCEPTANCE_WEB_DEVICE_ID: ${{ needs.deploy.outputs.simulated_device_id }}-web
+          ACCEPTANCE_DPS_ID_SCOPE: ${{ needs.deploy.outputs.dps_id_scope }}
         run: |
           set -euo pipefail
-          conn="$(az iot hub device-identity connection-string show \
-            --hub-name "$HUB" --device-id "$ACCEPTANCE_WEB_DEVICE_ID" --auth-type login \
-            --query connectionString -o tsv)" || {
-            echo "az iot hub device-identity connection-string show failed for device $ACCEPTANCE_WEB_DEVICE_ID." >&2
-            exit 1
-          }
-          if [ -z "$conn" ]; then
-            echo "az returned no connection string for device $ACCEPTANCE_WEB_DEVICE_ID." >&2
-            exit 1
-          fi
-          echo "::add-mask::${conn}"
-          key="$(printf '%s' "$conn" | tr ';' '\n' | sed -n 's/^SharedAccess[K]ey=//p')"
-          if [ -z "$key" ]; then
-            echo "The connection string for device $ACCEPTANCE_WEB_DEVICE_ID has no SharedAccessKey." >&2
-            exit 1
-          fi
-          echo "::add-mask::${key}"
-          unset key
-          SIMDEVICE_WEB_CONNECTION_STRING="$conn"
-          unset conn
-          export SIMDEVICE_WEB_CONNECTION_STRING
+          export ACCEPTANCE_WEB_STATE_DIR="$RUNNER_TEMP/devices/$ACCEPTANCE_WEB_DEVICE_ID"
           export ACCEPTANCE_SIMDEVICE_BIN="$GITHUB_WORKSPACE/apps/data-pusher/dist/simdevice"
 
           npx nx e2e-live web-e2e 2>&1 | tee "$RUNNER_TEMP/web-acceptance.log"
@@ -749,8 +730,10 @@ jobs:
       # over this job's raw proof output (the file tee wrote, before GitHub's
       # masking, so a masked secret is still caught) and every sign-in
       # diagnostic the proof wrote (HAR-121): no connection-string key field,
-      # no password, no TOTP secret, and no TOTP code from any 30 s window the
-      # job can have run in (the 30 min timeout, plus a margin). Line numbers
+      # no password, no TOTP secret, no TOTP code from any 30 s window the
+      # job can have run in (the 30 min timeout, plus a margin), no claim
+      # code (HAR-138), and no PEM private key block or JSON claim-code value
+      # (HAR-139). Line numbers
       # only; nothing found is printed. HAR-126: it runs BEFORE the upload
       # below and deletes every diagnostic with a finding, so the upload
       # cannot include one. Exit 0 is clean, 1 is a finding (handled), 2 is a

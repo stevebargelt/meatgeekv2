@@ -26,8 +26,11 @@ Enrols the device's certificate in DPS as an individual enrollment
   --device-id <id>         the device id; must equal the certificate's subject CN
   --certificate <path>     the device's certificate PEM (from `identity init`)
   --resource-group <name>  default meatgeek-v2-dev-rg
-  --dps <name>             default: the only DPS in the resource group
-  --hub <name>             default: the only IoT hub in the resource group
+  --dps <name|host>        default: the only DPS in the resource group
+  --hub <name|host>        default: the only IoT hub in the resource group.
+                           A host name (with a dot) for --dps or --hub is
+                           used as given, with no ARM lookup and no
+                           --resource-group; it needs --auth-type login
   --auth-type key|login    passed to az iot; default key
 
 Result (stdout, one line): enrolled | unchanged | certificate replaced |
@@ -105,6 +108,10 @@ resolve_hub
 read_enrollment
 
 hub_host_name() {
+  if is_host_name "$HUB_NAME"; then
+    printf '%s\n' "$HUB_NAME"
+    return
+  fi
   az_call "resource show (IoT hub host name)" resource show \
     --resource-group "$RESOURCE_GROUP" --name "$HUB_NAME" \
     --resource-type Microsoft.Devices/IotHubs \
@@ -120,7 +127,7 @@ case "$ENROLLMENT_STATE" in
   missing)
     host=$(hub_host_name)
     az_write "iot dps enrollment create" iot dps enrollment create \
-      --dps-name "$DPS_NAME" --resource-group "$RESOURCE_GROUP" \
+      "${DPS_ARGS[@]}" \
       --enrollment-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
       --attestation-type x509 --certificate-path "$CERT_PATH" \
       --device-id "$DEVICE_ID" --provisioning-status enabled \
@@ -136,7 +143,7 @@ case "$ENROLLMENT_STATE" in
     # A re-imaged device: same id, new key.
     log "the enrollment for $DEVICE_ID has a different certificate; replacing it"
     az_write "iot dps enrollment update" iot dps enrollment update \
-      --dps-name "$DPS_NAME" --resource-group "$RESOURCE_GROUP" \
+      "${DPS_ARGS[@]}" \
       --enrollment-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
       --certificate-path "$CERT_PATH" --output none
     echo "certificate replaced $DEVICE_ID"
@@ -147,7 +154,7 @@ case "$ENROLLMENT_STATE" in
       die "$EXIT_REVOKED" "device $DEVICE_ID is revoked (its DPS enrollment is disabled); refusing to enrol it. Set REINSTATE=1 to enable it again with this certificate."
     fi
     az_write "iot dps enrollment update" iot dps enrollment update \
-      --dps-name "$DPS_NAME" --resource-group "$RESOURCE_GROUP" \
+      "${DPS_ARGS[@]}" \
       --enrollment-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
       --certificate-path "$CERT_PATH" --provisioning-status enabled --output none
     read_identity
