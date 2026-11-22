@@ -43,6 +43,15 @@ type Telemetry struct {
 	Properties url.Values
 }
 
+// Connect is one MQTT CONNECT the broker received.
+type Connect struct {
+	Conn        int // 1-based connection number
+	ClientID    string
+	Username    string
+	HasPassword bool // the CONNECT carried a password (SAS mode does; X.509 mode must not)
+	ReturnCode  byte // the CONNACK return code sent (0 accepted)
+}
+
 // Response is one twin response the broker sent.
 type Response struct {
 	Conn    int    // 1-based connection number
@@ -68,6 +77,8 @@ type Broker struct {
 	reportedPatches []map[string]any
 	unresponsive    bool
 	nextReportFail  int
+	connects        []Connect
+	refuseNext      []byte
 }
 
 type conn struct {
@@ -180,6 +191,23 @@ func (b *Broker) FailNextReport(status int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.nextReportFail = status
+}
+
+// RefuseNextConnect makes the broker answer the next CONNECT with return
+// code rc (4 bad user name or password, 5 not authorised, as IoT Hub does for
+// a device it does not accept) and close that connection. Calls queue: each
+// refuses one more CONNECT.
+func (b *Broker) RefuseNextConnect(rc byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refuseNext = append(b.refuseNext, rc)
+}
+
+// Connects is every CONNECT received, in order.
+func (b *Broker) Connects() []Connect {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]Connect(nil), b.connects...)
 }
 
 // DropConnections closes every live connection without an MQTT DISCONNECT,
@@ -355,7 +383,25 @@ func (b *Broker) handle(c *conn, pkt packets.ControlPacket) {
 		b.recordOverlap(c)
 		ack := packets.NewControlPacket(packets.Connack).(*packets.ConnackPacket)
 		ack.ReturnCode = packets.Accepted
+		b.mu.Lock()
+		if len(b.refuseNext) > 0 {
+			ack.ReturnCode = b.refuseNext[0]
+			b.refuseNext = b.refuseNext[1:]
+		}
+		b.connects = append(b.connects, Connect{
+			Conn:        c.n,
+			ClientID:    p.ClientIdentifier,
+			Username:    p.Username,
+			HasPassword: p.PasswordFlag || len(p.Password) > 0,
+			ReturnCode:  ack.ReturnCode,
+		})
+		b.mu.Unlock()
 		c.write(ack)
+		if ack.ReturnCode != packets.Accepted {
+			// Like IoT Hub, close the connection after a refusal; serve's
+			// next read fails and ends it.
+			_ = c.nc.Close()
+		}
 	case *packets.SubscribePacket:
 		b.mu.Lock()
 		c.subs = append(c.subs, p.Topics...)

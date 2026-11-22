@@ -365,7 +365,7 @@ func TestMain_StrictlyIncreasingTimestampsWithFrozenClock(t *testing.T) {
 	var stdout bytes.Buffer
 	code := Main(context.Background(), Env{
 		Args:      []string{"--count", "3"},
-		Getenv:    func(string) string { return validConn },
+		Getenv:    func(k string) string { return map[string]string{EnvConnectionString: validConn}[k] },
 		Stdout:    &stdout,
 		Stderr:    &bytes.Buffer{},
 		NewClient: func(string) (Client, error) { return mock, nil },
@@ -770,7 +770,7 @@ func TestMain_StartStepStampsSyntheticTimestamps(t *testing.T) {
 			code := Main(context.Background(), Env{
 				Args: []string{"--count", "6", "--inflight", inflight,
 					"--start", "2026-11-01T06:00:00.000Z", "--step", "5s"},
-				Getenv:    func(string) string { return validConn },
+				Getenv:    func(k string) string { return map[string]string{EnvConnectionString: validConn}[k] },
 				Stdout:    &stdout,
 				Stderr:    &stderr,
 				NewClient: func(string) (Client, error) { return mock, nil },

@@ -106,7 +106,7 @@ func TestPusherAndSimdeviceMessagesMatchForEveryInflight(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := simdevice.Main(context.Background(), simdevice.Env{
 				Args:      []string{"--count", "8", "--inflight", fmt.Sprint(inflight)},
-				Getenv:    func(string) string { return conn },
+				Getenv:    func(k string) string { return map[string]string{simdevice.EnvConnectionString: conn}[k] },
 				Stdout:    &stdout,
 				Stderr:    &stderr,
 				NewClient: func(string) (simdevice.Client, error) { return mock, nil },

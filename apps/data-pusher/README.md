@@ -80,6 +80,83 @@ Treat the output as a secret — it carries the device SAS-signing key. Do not
 capture it into Terraform state, an output, a log, or version control: read it at
 provisioning time and write it straight into the pusher's env file (below).
 
+### DPS mode (the device's own X.509 identity)
+
+In DPS mode the device needs no connection string and no person copies a key:
+it creates its own key, which never leaves it, and a self-signed certificate,
+an operator enrols that certificate as an X.509 individual enrollment in the
+Azure IoT Hub Device Provisioning Service (DPS), and the device registers with
+DPS and connects to the hub DPS assigns, authenticating with the certificate.
+Set `MEATGEEK_DPS_ID_SCOPE` to turn it on. The connection-string mode above
+stays until it is removed later in goal HAR-130.
+
+| Variable                | Purpose                                                                 | Default |
+| ----------------------- | ----------------------------------------------------------------------- | ------- |
+| `MEATGEEK_DPS_ID_SCOPE` | The DPS ID scope. Set → DPS mode.                                       | (none)  |
+| `MEATGEEK_DEVICE_ID`    | The device id: the certificate's CN, the DPS registration id and the IoT Hub device id (letters, digits, `-` `.` `_` `:`, at most 128). Required in DPS mode. | (none) |
+| `MEATGEEK_DPS_ENDPOINT` | The DPS device endpoint                                                 | `global.azure-devices-provisioning.net` |
+| `MEATGEEK_STATE_DIR`    | Where the identity and the cached assignment live                      | `/var/lib/meatgeek-pusher` (the unit's `WorkingDirectory`) |
+
+Set **only one** of `MEATGEEK_DPS_ID_SCOPE` and `IOTHUB_CONNECTION_STRING`: with
+both the pusher refuses to start and says so; with neither (and no
+`--mock-iot`) it refuses as before.
+
+**Files** under `<state dir>/identity/` (the directory is mode `0700`):
+
+| File              | Mode   | What it is |
+| ----------------- | ------ | ---------- |
+| `device.key`      | `0600` | ECDSA P-256 private key, PKCS#8 PEM. Generated on the device; never logged, printed or sent anywhere. A key file with wider permissions is an error. |
+| `device.crt`      | `0644` | Self-signed certificate: CN = device id, `ClientAuth`, valid from 5 minutes before creation for 5 years. This is what is enrolled. |
+| `assignment.json` | `0644` | The cached DPS assignment, `{"assignedHub","deviceId","registeredAt"}`. |
+
+Each file is written to a temporary file in the same directory and renamed (the
+key and certificate are linked, so they are never replaced), so a crash never
+leaves half a file. The key and certificate are created once; later runs load
+them. If the stored certificate's CN is not `MEATGEEK_DEVICE_ID` the pusher
+refuses to start, naming both ids: the device id must not change under an
+existing key.
+
+**`identity init`** creates the identity if there is none and prints **only**
+the certificate PEM on stdout (no key, no logs), the same bytes on every run.
+It is what the onboarding command reads over ssh. Run it as the service user
+(`pi`) so the files belong to the pusher:
+
+```bash
+meatgeek-pusher identity init --device-id meatgeek-pi-7 [--state-dir /var/lib/meatgeek-pusher]
+```
+
+`--device-id` and `--state-dir` default to `MEATGEEK_DEVICE_ID` and
+`MEATGEEK_STATE_DIR`. Exit `0` printed, `1` the identity could not be created
+or loaded (for example a `0644` key or a certificate for another id), `2` usage.
+
+**At startup** the pusher loads the identity and, before connecting, uses the
+cached assignment if there is one, otherwise registers with DPS over HTTPS with
+the certificate as its TLS client certificate (`PUT
+/<idScope>/registrations/<id>/register`, then polling the operation, honouring
+DPS's `Retry-After`, default 2 s, at most 30 polls) and caches the result. It
+connects over MQTT with user name `<hub>/<deviceId>/?api-version=2021-04-12`,
+no password, and the certificate in the TLS handshake; no SAS token is
+generated or refreshed. The collector and the queue run meanwhile, so readings
+taken before the first connection are queued, not lost.
+
+**On refusal:**
+
+- **The hub refuses the connection as not authorised** (MQTT CONNACK 4 or 5,
+  for example the device was moved to another hub): the pusher deletes
+  `assignment.json`, registers with DPS once more, and reconnects to the hub DPS
+  now assigns after the usual reconnect backoff.
+- **DPS refuses the registration** (the enrollment is disabled, or DPS answers
+  401/403 because it has no enrollment for this certificate): the pusher logs
+  an error saying to enrol the certificate `identity init` prints, and keeps
+  trying with the reconnect backoff (1 s doubling to 60 s), so an enrollment
+  made later is picked up without a restart.
+- **Anything else** (DPS unreachable, 5xx, still assigning after 30 polls) is
+  logged and retried with the same backoff.
+
+Errors name HTTP status codes and DPS `errorCode`s, never response bodies.
+`simdevice` has the same DPS mode, with the same variables and the same
+`simdevice identity init` (see below).
+
 ### Environment variables
 
 | Variable                       | Purpose                                                          | Default                |
@@ -201,7 +278,8 @@ dist/simdevice --twin --count 3      # read the twin first; readings carry its c
 
 | Input | Meaning | Default |
 | ----- | ------- | ------- |
-| `SIMDEVICE_CONNECTION_STRING` (env) | Device-scoped IoT Hub connection string. The **only** source of the credential; there is no flag for it. | (required) |
+| `SIMDEVICE_CONNECTION_STRING` (env) | Device-scoped IoT Hub connection string. The **only** source of the credential; there is no flag for it. | (required, unless DPS mode) |
+| `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_DPS_ENDPOINT`, `MEATGEEK_STATE_DIR` (env) | [DPS mode](#dps-mode-the-devices-own-x509-identity), exactly as the pusher: the device's own identity under the state dir, registered with DPS. Set these **or** `SIMDEVICE_CONNECTION_STRING`, not both (both exits `2`). CI should set `MEATGEEK_STATE_DIR` to a writable directory. | (off) |
 | `--count N` | Readings to send | `1` |
 | `--interval D` | Go duration between sends (`500ms`, `2s`). With `--inflight` above 1, between send **starts**, so it caps the rate at one send per `D` whatever the acknowledgement latency. | `0s` |
 | `--inflight N` | How many sends may await IoT Hub's QoS 1 acknowledgement at once. `1` is the pusher's own send: publish, wait for the ack, wait `--interval`, repeat. Above 1, sends are pipelined over the one MQTT connection. | `1` |
@@ -211,6 +289,10 @@ dist/simdevice --twin --count 3      # read the twin first; readings carry its c
 | `--step D` | With `--start`: the gap between consecutive readings' timestamps, at least `1ms` (`5s`). | (none) |
 | `--grill F` | Send grill temperature `F` (°F) on every reading in place of the synthetic curve, so a reader can tell this run's readings from older ones (the live browser proof, HAR-99). Must be a finite number; otherwise exits `2`. | (synthetic, near 225) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` (env) | Export spans, as for the pusher | (no-op) |
+
+`simdevice identity init --device-id <id> [--state-dir <dir>]` is the
+pusher's `identity init`: it prints only the certificate PEM, the same bytes on
+every run.
 
 **Stdout** carries nothing but one JSON line per message IoT Hub accepted:
 
