@@ -22,7 +22,13 @@
 //   loadArgs  argv appended to `command` in each copy when the suite runs as
 //             more than one copy (--parallel K > 1), with loadArgsReason
 //             saying why. Never used by the serial 50-run pass.
-//   env       extra environment for every run.
+//   env       extra environment for every run (and prepare step).
+//   passEnv   variables passed through from the caller's environment on top of
+//             lib.mjs's ENV_ALLOWLIST. A run sees ONLY the allowlist, passEnv,
+//             env and its own TMPDIR/TMP/TEMP; everything else the caller has
+//             set is dropped (HAR-119). A trailing `*` is a prefix.
+//   selfTest  the harness's own tests: a change to the harness runs this suite
+//             the full N times instead of once.
 //   timeoutSec   hard limit for ONE run; a run that exceeds it is killed and
 //             counted as failed. It is a hang guard for the harness, not a
 //             test timeout: it is set far above a normal run.
@@ -77,6 +83,11 @@ const FIXTURE_RUNNERS = [
   'run-live-host-storage-fixtures.sh',
 ];
 
+// HAR-119: Terraform's checkpoint call asks HashiCorp for the latest version
+// on every command (terraform fmt included). A run reaches no network for that.
+// terraform-tests.sh sets the same itself, for a direct run.
+const TERRAFORM_OFFLINE = { CHECKPOINT_DISABLE: '1' };
+
 const fixtureId = file => 'fixtures-' + file.replace(/^run-/, '').replace(/-fixtures\.sh$/, '');
 
 /** @type {import('./lib.mjs').Suite[]} */
@@ -122,6 +133,11 @@ export const suites = [
     paths: ['apps/api/**', 'libs/**', ...JS_ROOT],
     needs: ['npm', 'cosmos-emulator'],
     env: { COSMOS_EMULATOR_ENDPOINT: 'https://localhost:8081' },
+    // The emulator's self-signed certificate, which test-repeat.yml's
+    // repeat-emulator job writes to GITHUB_ENV after starting the emulator.
+    // Without it no TLS connection to the emulator verifies. (The emulator's
+    // key is the published well-known one, which the specs carry themselves.)
+    passEnv: ['NODE_EXTRA_CA_CERTS'],
     timeoutSec: 1200,
   },
   {
@@ -229,6 +245,7 @@ export const suites = [
     ],
     paths: ['apps/infrastructure/**', '.github/workflows/**'],
     needs: ['terraform'],
+    env: TERRAFORM_OFFLINE,
     timeoutSec: 600,
   },
   {
@@ -240,6 +257,7 @@ export const suites = [
     ],
     paths: ['apps/infrastructure/**', '.github/workflows/**'],
     needs: ['terraform'],
+    env: TERRAFORM_OFFLINE,
     timeoutSec: 600,
   },
   ...FIXTURE_RUNNERS.map(file => ({
@@ -264,6 +282,7 @@ export const suites = [
     shards: 3,
     // Same disarming of ambient Azure auth as validate-infrastructure.
     env: {
+      ...TERRAFORM_OFFLINE,
       ARM_USE_OIDC: 'false',
       ARM_USE_CLI: 'false',
       ARM_USE_MSI: 'false',
@@ -299,6 +318,28 @@ export const suites = [
     maxParallelReason: 'apps/web-e2e/playwright.config.ts serves on fixed port 4300',
     timeoutSec: 900,
   },
+
+  // --- The harness itself -----------------------------------------------------
+  {
+    id: 'test-repeat-harness',
+    command: ['node', 'tools/test-repeat/run-tests.mjs'],
+    paths: ['tools/test-repeat/**', '.github/workflows/test-repeat.yml'],
+    needs: [],
+    // Its paths ARE the harness paths, so every change that selects it is a
+    // harness change; without this it would only ever run once.
+    selfTest: true,
+    timeoutSec: 600,
+  },
 ];
 
-export default suites;
+/**
+ * HAR-119: variables some suite's code reads by name, with no fallback, that
+ * the harness deliberately does NOT pass through (they are neither in
+ * ENV_ALLOWLIST nor in any passEnv). registry.test.mjs scans each suite's
+ * source for such reads and fails on one that is in none of the three; add it
+ * to a suite's passEnv if a run needs it, or here, with the reason, if not.
+ */
+export const droppedEnv = {
+  // None today. An entry looks like
+  //   NAME: 'why no run needs it, e.g. "a deployed app setting; the specs set their own"',
+};

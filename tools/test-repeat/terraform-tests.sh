@@ -22,6 +22,22 @@ case "$mode" in
     ;;
 esac
 
+# HAR-119: the same environment whether the harness runs this or a person does.
+#
+# No checkpoint call: Terraform otherwise asks HashiCorp for the latest version
+# on every command, so a run would reach the network.
+export CHECKPOINT_DISABLE=1
+# A short TMPDIR: Terraform's provider plugins listen on unix sockets in TMPDIR,
+# and a socket path is limited to ~104 bytes, so an already-long TMPDIR (some
+# sandboxes nest it deeply) breaks provider start-up. Same rule as the
+# harness's (lib.mjs runCopy): over 60 characters, use a fresh dir under /tmp.
+tmp_base="${TMPDIR:-/tmp}"
+if [ "${#tmp_base}" -gt 60 ]; then
+  short_tmp="$(mktemp -d /tmp/tf.XXXXXX)"
+  trap 'rm -rf "$short_tmp"' EXIT
+  export TMPDIR="$short_tmp"
+fi
+
 modules="$(
   find apps/infrastructure -name '*.tftest.hcl' \
     -not -path '*/.terraform/*' -not -path '*/.nx/*' -print |

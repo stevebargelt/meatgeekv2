@@ -19,20 +19,50 @@ test('a change under apps/data-pusher/ selects go-data-pusher at 50 runs and not
   assert.equal(sel.harnessChanged, false);
 });
 
-test('a change under tools/test-repeat/ selects every suite at 1 run', () => {
+// Every suite runs once on a harness change, except the harness's own tests,
+// which run the full 50: [id, runs] for the whole registry.
+const onHarnessChange = () => suites.map(s => [s.id, s.id === 'test-repeat-harness' ? 50 : 1]);
+
+test('a change under tools/test-repeat/ selects every suite at 1 run, its own tests at 50', () => {
   const sel = selectSuites({ suites, changedFiles: ['tools/test-repeat/lib.mjs'] });
   assert.equal(sel.harnessChanged, true);
   assert.equal(selected(sel).length, suites.length);
+  assert.deepEqual(
+    sel.suites.map(s => [s.id, s.runs]),
+    onHarnessChange()
+  );
   for (const s of sel.suites)
-    assert.deepEqual([s.id, s.runs, s.reason], [s.id, 1, 'harness changed']);
-  // One run cannot be sharded: one job per suite.
+    assert.equal(
+      s.reason,
+      s.id === 'test-repeat-harness' ? 'harness changed (self-test)' : 'harness changed'
+    );
+  // One run cannot be sharded: one job per suite (the self-test suite has no
+  // shards either).
   assert.equal(sel.entries.length, suites.length);
+  assert.deepEqual(
+    sel.entries.filter(e => e.runs === 50).map(e => e.key),
+    ['test-repeat-harness']
+  );
+});
+
+test('the self-test suite is selected by a harness change and by nothing else', () => {
+  const self = suites.filter(s => s.selfTest);
+  assert.deepEqual(
+    self.map(s => s.id),
+    ['test-repeat-harness']
+  );
+  const sel = selectSuites({ suites, changedFiles: ['apps/data-pusher/main.go'] });
+  assert.equal(sel.suites.find(s => s.id === 'test-repeat-harness').selected, false);
 });
 
 test('a change to the workflow counts as a harness change', () => {
   const sel = selectSuites({ suites, changedFiles: ['.github/workflows/test-repeat.yml'] });
   assert.equal(sel.harnessChanged, true);
-  assert.ok(sel.suites.every(s => s.selected && s.runs === 1));
+  assert.ok(sel.suites.every(s => s.selected));
+  assert.deepEqual(
+    sel.suites.map(s => [s.id, s.runs]),
+    onHarnessChange()
+  );
 });
 
 test('a harness change wins over an app change: every suite once', () => {
@@ -40,7 +70,11 @@ test('a harness change wins over an app change: every suite once', () => {
     suites,
     changedFiles: ['tools/test-repeat/suites.mjs', 'apps/data-pusher/main.go'],
   });
-  assert.ok(sel.suites.every(s => s.selected && s.runs === 1));
+  assert.ok(sel.suites.every(s => s.selected));
+  assert.deepEqual(
+    sel.suites.map(s => [s.id, s.runs]),
+    onHarnessChange()
+  );
 });
 
 test('label test-repeat:all selects every suite at 50 runs, sharded', () => {
