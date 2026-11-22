@@ -81,7 +81,14 @@ model {
             so an offline Pi catches up on reconnect. It applies desired patches in `$version`
             order (an older version is ignored; a skipped version triggers a fresh GET),
             persists each to `cooksession`, then reports `activeCookId`, `correlationId` and
-            `appliedDesiredVersion`.
+            `appliedDesiredVersion`. In DPS mode only (HAR-134) it also carries the claim code
+            (internal/claim): on every full twin sync and desired patch it applies the claim rule
+            to desired `claimGeneration` and `claimConsumedCodeHash` (it never reads
+            `claimClaimantHash`), keeps the code in `<stateDir>/claim/claim.json` (0600, written
+            before its hash is reported), and reports `claimCodeHash`, `claimExpiresAt` and
+            `claimGeneration` in the same patch as the cook properties, so neither drops the
+            other. The code itself is never reported or logged; only the local `claim-code`
+            subcommand prints it. Connection-string mode reports nothing about claims.
           '''
         }
         session = component 'cooksession' {
@@ -461,7 +468,7 @@ model {
       description 'Read in full on every connect and patched on every change, so a Pi that was offline when the cook started gets it on reconnect.'
     }
     edge.pusher.twin -> cloud.ingest.iothub 'reported properties' {
-      description 'activeCookId, correlationId and appliedDesiredVersion: what the Pi applied, so the cloud can see it took effect.'
+      description 'activeCookId, correlationId and appliedDesiredVersion: what the Pi applied, so the cloud can see it took effect. In DPS mode, the same patch also carries claimCodeHash, claimExpiresAt and claimGeneration (HAR-134): the hash of the claim code the device minted, never the code, which POST /devices/claim checks a submitted code against.'
     }
 
     // Cook lifecycle.
