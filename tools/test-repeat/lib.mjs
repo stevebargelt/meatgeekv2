@@ -3,12 +3,14 @@
 // Node built-ins only, so it runs on a bare runner before `npm ci`.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   mkdtempSync,
   rmSync,
   writeFileSync,
   createWriteStream,
   readFileSync,
+  readdirSync,
   mkdirSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -28,6 +30,8 @@ import path from 'node:path';
  * @property {string[]} [loadArgs]
  * @property {string} [loadArgsReason]
  * @property {Record<string,string>} [env]
+ * @property {string[]} [passEnv]
+ * @property {boolean} [selfTest]
  * @property {number} [timeoutSec]
  * @property {string} [goModFile]
  */
@@ -39,6 +43,87 @@ export const HARNESS_PATHS = ['tools/test-repeat/**', '.github/workflows/test-re
 
 export const LABEL_ALL = 'test-repeat:all';
 export const LABEL_LOAD = 'test-repeat:load';
+
+// --- environment -------------------------------------------------------------
+
+/**
+ * HAR-119: what a run inherits from the caller's environment. Everything else
+ * the caller has set is dropped, so a variable exported in a developer's shell
+ * or set by an unrelated CI step cannot change a run (HAR-112 found
+ * TF_DESTROY_GUARD_* doing exactly that). These are what the toolchains need
+ * to run at all: the shell, locale, user and home, CI's own identity, and the
+ * Go, Node, npm, corepack and Nx settings. A trailing `*` is a prefix. On
+ * Windows names match case-insensitively (`Path` is `PATH` there).
+ *
+ * A suite that needs more lists it in `passEnv`; `env` sets values outright.
+ */
+export const ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LANG',
+  'LC_*',
+  'TERM',
+  'SHELL',
+  'CI',
+  'GITHUB_*',
+  'RUNNER_*',
+  'GO*',
+  'NODE_OPTIONS',
+  'npm_config_*',
+  'COREPACK_*',
+  'NX_*',
+  // Windows: Node cannot start sockets or child processes without SystemRoot
+  // and ComSpec; npm needs APPDATA; os.homedir() reads USERPROFILE.
+  'SystemRoot',
+  'SystemDrive',
+  'windir',
+  'ComSpec',
+  'PATHEXT',
+  'USERPROFILE',
+  'USERNAME',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'ProgramData',
+  'ProgramFiles*',
+  'NUMBER_OF_PROCESSORS',
+  'PROCESSOR_ARCHITECTURE',
+];
+
+/** Set by the harness itself on every run: each copy's own temp dir. */
+export const HARNESS_ENV = ['TMPDIR', 'TMP', 'TEMP'];
+
+/** Does `name` match one of `patterns` (exact, or a prefix ending in `*`)? */
+export function envNameMatches(name, patterns, platform = process.platform) {
+  const fold = platform === 'win32' ? v => v.toUpperCase() : v => v;
+  const n = fold(name);
+  return patterns.some(p => {
+    const q = fold(p);
+    return q.endsWith('*') ? n.startsWith(q.slice(0, -1)) : n === q;
+  });
+}
+
+/**
+ * The environment for one of `suite`'s runs (or, with `tmp` unset, its
+ * prepare steps): the allowlisted and `passEnv` variables from `parentEnv`,
+ * then `suite.env`, then the temp dir. Prepare steps keep the caller's own
+ * temp dir variables, since they run once and outside any copy.
+ */
+export function suiteEnv(
+  suite,
+  { parentEnv = process.env, platform = process.platform, tmp } = {}
+) {
+  const keep = [...ENV_ALLOWLIST, ...(suite.passEnv ?? []), ...(tmp ? [] : HARNESS_ENV)];
+  const env = {};
+  for (const [name, value] of Object.entries(parentEnv)) {
+    if (value !== undefined && envNameMatches(name, keep, platform)) env[name] = value;
+  }
+  Object.assign(env, suite.env ?? {});
+  if (tmp) Object.assign(env, { TMPDIR: tmp, TMP: tmp, TEMP: tmp });
+  return env;
+}
 
 export const DEFAULT_RUNS = 50;
 export const HARNESS_RUNS = 1;
@@ -84,7 +169,9 @@ export function matchesAny(file, globs) {
  *  - label test-repeat:all       every suite, `runs` times
  *  - a change to the harness     every suite, once (proves each command works
  *                                in CI without putting not-yet-fixed suites
- *                                through 50 runs)
+ *                                through 50 runs), except a `selfTest` suite
+ *                                (the harness's own tests), which runs `runs`
+ *                                times: a harness change is what it tests
  *  - otherwise                   each suite whose `paths` match a changed
  *                                file, `runs` times
  *  - label test-repeat:load      adds one pass of every selected suite with
@@ -111,8 +198,8 @@ export function selectSuites({
       return {
         id: s.id,
         selected: true,
-        reason: 'harness changed',
-        runs: harnessRuns,
+        reason: s.selfTest ? 'harness changed (self-test)' : 'harness changed',
+        runs: s.selfTest ? runs : harnessRuns,
         matched: hits,
       };
     if (hits.length > 0)
@@ -330,6 +417,12 @@ export async function repeatSuite(suite, opts) {
     );
   }
 
+  // HAR-119: log names carry the pass and an id unique to this invocation, so a
+  // later invocation into the same --log-dir (the load pass after the serial
+  // pass, a re-run) never reuses, and so never deletes or overwrites, the log
+  // of an earlier failure.
+  const logPrefix = uniqueLogPrefix(logDir, `${suite.id}-${kind}`);
+
   const startedAt = Date.now();
   const copies = await Promise.all(
     Array.from({ length: effectiveParallel }, (_, i) =>
@@ -343,6 +436,7 @@ export async function repeatSuite(suite, opts) {
         cwd,
         timeoutSec,
         logDir,
+        logPrefix,
         tailLines,
         log,
       })
@@ -391,6 +485,23 @@ export async function repeatSuite(suite, opts) {
   return result;
 }
 
+/**
+ * `<base>-<id>`, with a random id no file in `logDir` already starts with. No
+ * clock: two invocations in the same instant still differ.
+ */
+export function uniqueLogPrefix(logDir, base) {
+  let existing = [];
+  try {
+    existing = readdirSync(logDir);
+  } catch {
+    // No directory yet: nothing to collide with.
+  }
+  for (;;) {
+    const prefix = `${base}-${randomBytes(4).toString('hex')}`;
+    if (!existing.some(f => f.startsWith(`${prefix}-`))) return prefix;
+  }
+}
+
 function reportLine(c) {
   const head = `${c.passed}/${c.requested} passed`;
   return c.failedRun === null
@@ -408,6 +519,7 @@ async function runCopy({
   cwd,
   timeoutSec,
   logDir,
+  logPrefix,
   tailLines,
   log,
 }) {
@@ -416,7 +528,7 @@ async function runCopy({
   // already-long TMPDIR (some sandboxes nest it deeply) falls back to /tmp.
   const base = os.tmpdir().length <= 60 || process.platform === 'win32' ? os.tmpdir() : '/tmp';
   const tmp = mkdtempSync(path.join(base, `tr${copy}-`));
-  const env = { ...process.env, ...(suite.env ?? {}), TMPDIR: tmp, TMP: tmp, TEMP: tmp };
+  const env = suiteEnv(suite, { tmp });
   const tag = copies > 1 ? ` [copy ${copy}/${copies}]` : '';
   const state = {
     copy,
@@ -431,7 +543,7 @@ async function runCopy({
   };
   try {
     for (let n = start; n < start + count; n++) {
-      const logFile = path.join(logDir, `${suite.id}-copy${copy}-run${n}.log`);
+      const logFile = path.join(logDir, `${logPrefix}-copy${copy}-run${n}.log`);
       const r = await runOnce({ argv, cwd, env, logFile, timeoutSec });
       state.runDurationsMs.push(Math.round(r.durationMs));
       const secs = (r.durationMs / 1000).toFixed(1);
@@ -466,7 +578,7 @@ export async function prepareSuite(suite, { repoRoot, log = l => process.stdout.
     const code = await new Promise(resolve => {
       const child = spawn(argv[0], argv.slice(1), {
         cwd: path.resolve(repoRoot, suite.cwd ?? '.'),
-        env: { ...process.env, ...(suite.env ?? {}) },
+        env: suiteEnv(suite),
         stdio: ['ignore', 'inherit', 'inherit'],
       });
       child.on('error', () => resolve(127));
@@ -567,7 +679,7 @@ export function renderSummary(selection, results) {
     '## test-repeat',
     '',
     selection.harnessChanged
-      ? `The harness itself changed (${selection.harnessFiles.join(', ')}), so every suite runs once.`
+      ? `The harness itself changed (${selection.harnessFiles.join(', ')}), so every suite runs once${selfTestNote(selection)}.`
       : selection.labels.all
         ? `Label \`${LABEL_ALL}\`: every suite runs ${selection.suites[0]?.runs ?? DEFAULT_RUNS} times.`
         : `Suites affected by this pull request's ${selection.changedFiles.length} changed file(s) run ${DEFAULT_RUNS} times.`,
@@ -586,6 +698,15 @@ export function renderSummary(selection, results) {
     ok,
     problems,
   };
+}
+
+function selfTestNote(selection) {
+  const self = selection.suites.filter(
+    s => s.selected && s.reason === 'harness changed (self-test)'
+  );
+  return self.length
+    ? `, except the harness's own tests (${self.map(s => s.id).join(', ')}), which run ${self[0].runs} times`
+    : '';
 }
 
 export function writeJson(file, value) {

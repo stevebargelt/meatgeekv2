@@ -7,6 +7,10 @@
 //   node fixture-suite.mjs barrier         write a marker to $BARRIER_DIR, then
 //                                          wait until $BARRIER_COUNT markers
 //                                          exist; record pid and tmpdir
+//   node fixture-suite.mjs expect-env <spec>...
+//                                          exit 1 unless the environment
+//                                          matches every spec: NAME=value
+//                                          (equal), NAME (set), -NAME (unset)
 //
 // Runs are counted in os.tmpdir(), which the harness gives each parallel copy
 // to itself, so the count is per copy.
@@ -54,6 +58,18 @@ if (mode === 'pass') {
       if (ready()) clearInterval(timer);
     }, 10);
   }
+} else if (mode === 'expect-env') {
+  const wrong = [arg, ...rest].filter(spec => {
+    if (spec.startsWith('-')) return process.env[spec.slice(1)] !== undefined;
+    const eq = spec.indexOf('=');
+    if (eq === -1) return process.env[spec] === undefined;
+    return process.env[spec.slice(0, eq)] !== spec.slice(eq + 1);
+  });
+  for (const spec of wrong) {
+    const name = spec.replace(/^-/, '').replace(/=.*$/, '');
+    console.log(`env mismatch: wanted ${spec}, got ${name}=${process.env[name] ?? '(unset)'}`);
+  }
+  process.exitCode = wrong.length ? 1 : 0;
 } else {
   console.error(`unknown mode ${mode}`);
   process.exitCode = 2;

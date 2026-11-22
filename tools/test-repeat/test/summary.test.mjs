@@ -114,3 +114,25 @@ test("a load pass's loadArgs are named in its row, and only in its row", () => {
   assert.match(rowOf(markdown, 'beta (load x8)'), /\(each copy: `--maxWorkers=1`\)/);
   assert.doesNotMatch(rowOf(markdown, 'beta'), /each copy/);
 });
+
+test("harness change: the harness's own tests run the full count, and the header says so", () => {
+  const withSelf = [
+    ...reg,
+    { id: 'self', command: ['x'], paths: ['self/**'], needs: [], selfTest: true },
+  ];
+  const sel = selectSuites({ suites: withSelf, changedFiles: ['tools/test-repeat/lib.mjs'] });
+  const { markdown, ok } = renderSummary(
+    sel,
+    sel.entries.map(e => result(e))
+  );
+  assert.equal(ok, true);
+  assert.match(
+    markdown,
+    /so every suite runs once, except the harness's own tests \(self\), which run 50 times\./
+  );
+  assert.equal(
+    rowOf(markdown, 'self'),
+    '| self | harness changed (self-test) | 50 | 50/50 | — | 50s (1.0s/run) |'
+  );
+  assert.match(rowOf(markdown, 'beta'), /\| harness changed \| 1 \| 1\/1 \| — \|/);
+});

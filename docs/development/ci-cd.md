@@ -35,7 +35,7 @@ These jobs run on every push and pull request and gate merges into `main` (see [
 
 ### test-repeat (HAR-107)
 
-`.github/workflows/test-repeat.yml` runs on pull requests to `main`. It maps the pull request's changed files onto the suite registry in `tools/test-repeat/suites.mjs` and runs each affected suite **50 times in a row** (Go with `-race`), sharding the slow `api` and `api-interfaces` suites across jobs, then writes one table to the job summary. A change to the harness itself runs every suite once; label `test-repeat:all` runs every suite 50 times; label `test-repeat:load` adds one pass per selected suite with 8 copies at once. `contents: read` only, no secrets, no environment, so it runs on fork pull requests. It is not a required check. See [tools/test-repeat/README.md](../../tools/test-repeat/README.md).
+`.github/workflows/test-repeat.yml` runs on pull requests to `main`. It maps the pull request's changed files onto the suite registry in `tools/test-repeat/suites.mjs` and runs each affected suite **50 times in a row** (Go with `-race`), sharding the slow `api` and `api-interfaces` suites across jobs, then writes one table to the job summary. A change to the harness itself runs every suite once, except the harness's own tests (`test-repeat-harness`), which run 50 times; label `test-repeat:all` runs every suite 50 times; label `test-repeat:load` adds one pass per selected suite with 8 copies at once. `contents: read` only, no secrets, no environment, so it runs on fork pull requests. It is not a required check. See [tools/test-repeat/README.md](../../tools/test-repeat/README.md).
 
 ### Why the TypeScript build matrix is `api` + `web` only
 
