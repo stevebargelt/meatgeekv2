@@ -518,7 +518,7 @@ none of which needed a volume or chart top-up.
 | `proofs/signalr-isolation.proof.ts:ISOLATION_WAIT.graceMs` (`expectPeerSilent`) | a fixed window after the owner got an event, in which the peer must receive nothing     | 15 s                                                    | A leak would travel the same path as the owner's message, so it gets about 24 × the slowest owner delivery measured (628 ms) to show up (HAR-67)                                                                                                     | `LEAK: the peer, who does not own <device>, received <n> message(s) by <event> + 15 s: <target ×n>`                                                                                           |
 | `lib/signalr.ts:CONNECT_TIMEOUT_MS` (`within`)                                  | one SignalR client `start()` attempt, or a `stop()`                                     | 30 s                                                    | Set with the first SignalR proof (HAR-57) for the Free_F1 service's client negotiate and transport start; no measurement then. Measured, from the log's timestamps: `start()` 170–580 ms                                                             | `<what> did not finish in 30000 ms`, `<what>` being `start()`, `owner start()`, `peer start()` or `stop()`                                                                                    |
 | `lib/signalr.ts:START_RETRY.delaysMs` (`startConnection`)                       | before retrying a `start()` the service answered with `429`                             | 1, 2, 4 and 8 s: five attempts, 15 s of waiting         | HAR-77's first live run: two proofs got `429`, and the next one, 2 s later, connected                                                                                                                                                                | `<what> failed: <masked error> (throttled on all 5 attempts)`                                                                                                                                 |
-| simdevice `internal/provision/provision.go:Register` (DPS mode)                 | simdevice's DPS registration, in the child (Go): `PUT`, then polls to `assigned`        | 30 polls, each after `Retry-After` (default 2 s)        | Set with the DPS client (HAR-132; `defaultMaxAttempts`, `defaultRetryAfter`, 30 s per request); no measurement then. Only a device's first simdevice run in a job registers: later runs reuse the assignment cached in its state dir                 | `provision: registration of <id> still "<status>" after 30 status checks`                                                                                                                     |
+| simdevice `internal/provision/provision.go:Register` (DPS mode)                 | simdevice's DPS registration, in the child (Go): `PUT`, then polls to `assigned`        | 30 polls, each after `Retry-After` (default 2 s)        | Set with the DPS client (HAR-132; `defaultMaxAttempts`, `defaultRetryAfter`, 30 s per request); no measurement then. Only a device's first simdevice run in a job registers, and in CI that is the enrol step's `--twin --count 0` run (HAR-139), before the suite starts: later runs reuse the assignment cached in its state dir                 | `provision: registration of <id> still "<status>" after 30 status checks`                                                                                                                     |
 
 A `grep -nE 'capMs|intervalMs|graceMs|TIMEOUT_MS|timeoutMs|delaysMs' -r
 apps/api/acceptance` also finds names that are not waits in this suite:
@@ -777,6 +777,15 @@ for `<simulated_device_id>-web`. For each device:
    every run exercises the re-imaged-Pi path: DPS registration with a new
    certificate must update the hub identity. Any non-zero exit fails the
    step. The ids are stable, so there are no enrollments to clean up.
+4. **Registration.** `simdevice --twin --count 0 --timeout 2m`, in DPS mode from that state
+   dir, registers the device with DPS, reads and reports its twin, sends no
+   reading, and logs `registered <id>`. This makes sure the device's hub
+   identity exists before the suite's first `POST /cooks` writes
+   `desired.activeCookId` to its twin. Without it, after a migration (or for
+   a new device id) that write found no device, and the device's first
+   registration then created a new identity with an empty twin
+   (`desired.activeCookId is null`, run 45080482155). If it fails, the step
+   prints simdevice's stderr and fails.
 
 The DPS and the hub are passed by host name
 (`<dps_name>.azure-devices-provisioning.net` and `iot_hub_hostname`). CI's
@@ -788,9 +797,9 @@ the script makes no ARM call (see
 The suite step then sets `ACCEPTANCE_DPS_ID_SCOPE` (Terraform output
 `dps_id_scope`), `ACCEPTANCE_SIM_STATE_DIR` and `ACCEPTANCE_CHART_STATE_DIR`
 to those state dirs. The browser proof's step sets `ACCEPTANCE_WEB_STATE_DIR`
-the same way. No `SIMDEVICE_*CONNECTION_STRING` variable is set. Each
-simdevice run registers with DPS from its state dir; the registration is a
-real-time wait ([its row](#real-time-waits)).
+the same way. No `SIMDEVICE_*CONNECTION_STRING` variable is set. The
+registration in step 4 is a real-time wait ([its row](#real-time-waits)); the
+suite's simdevice runs reuse the assignment it cached in the state dir.
 
 ### The chart device (HAR-84)
 
