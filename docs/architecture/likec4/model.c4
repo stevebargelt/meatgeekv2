@@ -532,12 +532,31 @@ model {
 
     ci = workflow 'CI/CD Pipeline' {
       description '''
-        On every pull request and push to main: lint and test, Cosmos emulator tests, builds,
-        Terraform validation, security scan, and `web-e2e`: Playwright drives the web app's main
-        path against the built app, with Entra, the API and SignalR faked at the network edge, so
-        it needs no secret and no environment (`contents: read` only). Never receives a device
-        credential.
+        On every pull request and push to main: lint and test; the Cosmos emulator tests on the
+        Windows-native emulator (`api-cosmos-emulator` on `windows-2025`, emulator 2.14.28,
+        `PartitionCount=10`; the Linux emulator image crashes natively under load, HAR-113);
+        builds, Terraform validation and the security scan; `no-real-time-guard`:
+        `node tools/no-real-time/check.mjs`, which fails when a test file adds a real sleep, a
+        wall-clock read, a per-wait deadline, a fixed port, or a `| grep -q` under pipefail, with
+        a reviewed exception list (HAR-127, HAR-128); and `web-e2e`: Playwright drives the web
+        app's main path against the built app, with Entra, the API and SignalR faked at the
+        network edge, so it needs no secret and no environment (`contents: read` only). Never
+        receives a device credential.
       '''
+    }
+    testRepeat = workflow 'Test repeat' {
+      #live
+      technology '.github/workflows/test-repeat.yml, tools/test-repeat'
+      description '''
+        Runs on pull requests only (opened, synchronize, reopened, labeled), never on `main`,
+        with `contents: read` and no secrets. It runs every non-live suite the pull request
+        affects 50 times in a row, with Go under `-race`; there are 27 suites, listed in
+        `tools/test-repeat/suites.mjs`. Label `test-repeat:all` selects every suite. Label
+        `test-repeat:load` adds one pass of 8 concurrent copies. A change to the harness itself
+        runs every suite once. Its emulator suite runs on `windows-2025`. It is not a required
+        check.
+      '''
+      link https://github.com/stevebargelt/meatgeekv2/tree/main/tools/test-repeat 'Source'
     }
     apply = workflow 'Apply Dev Infrastructure' {
       description 'Started by a green CI run on main. A run for a superseded commit succeeds without applying.'
@@ -556,7 +575,10 @@ model {
         only through an env var (`SIMDEVICE_CONNECTION_STRING`, `SIMDEVICE_CHART_CONNECTION_STRING`).
         It copies every `METRIC` line into the run summary. The proofs live in
         `apps/api/acceptance/proofs/` and run in file-name order: the two telemetry proofs round
-        trip first, and the chart proof after both.
+        trip first, and the chart proof after both. Every real-time wait in the live suite goes
+        through one injectable clock (`apps/api/acceptance/lib/clock.ts`), so the non-live
+        self-test runs every wait at its live value on a fake clock. Each wait's bound and reason
+        are in the "Real-time waits" table in `docs/development/live-acceptance.md` (HAR-120).
       '''
 
       roundtrip = component 'telemetry-roundtrip.proof.ts' {
@@ -584,8 +606,14 @@ model {
         descendant), signs in on Microsoft's real pages as `ACCEPTANCE_USER_UPN` (password +
         TOTP), registers `<sim>-web`, starts a cook, sees a reading pushed by `simdevice` in the
         live panel, and stops the cook. Prints `METRIC web-deploy-wait-s` and `web-push-ms` (510
-        in run 44837747351), then runs a leak check on its raw log (before masking). Playwright's
-        own screenshots are off; the proof takes a failure screenshot only after sign-in.
+        in run 44837747351). When a sign-in step fails, the proof writes a scrubbed
+        `sign-in-diagnostic.txt`: URL origin and path, title, which selectors are present, and
+        Microsoft's error text. It never contains an input value, the UPN, a password or TOTP, a
+        cookie, or a URL query (HAR-121). The leak check runs over the raw log (before masking)
+        and that file before the failure upload, and deletes any diagnostic in which it finds
+        something (HAR-126). On failure it uploads the `web-acceptance-diagnostics` artifact
+        (screenshots taken after sign-in, plus the diagnostic) for 7 days. Playwright's own trace,
+        video and screenshots stay off.
       '''
     }
 
@@ -674,6 +702,7 @@ model {
   smoker -> meatgeek.edge.controller 'RTD sensor readings'
   meatgeek.cloud.api.easyauth -> entra 'validates access tokens'
   team -> delivery.ci 'pull requests'
+  team -> delivery.testRepeat 'pull requests'
   delivery.apply -> meatgeek 'terraform apply (dev)'
   delivery.deploy -> meatgeek.cloud.api 'publishes the bundle'
   delivery.acceptance -> meatgeek.cloud.api 'live acceptance probes'

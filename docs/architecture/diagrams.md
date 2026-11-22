@@ -743,6 +743,15 @@ graph TB
 
 ## Delivery pipeline
 
+Pull requests feed two workflows. CI/CD Pipeline runs on every pull request and push to
+main: lint and test, the Cosmos emulator tests on `windows-2025`, builds, Terraform
+validation, the security scan, the `no-real-time` guard and `web-e2e`. Test repeat
+(`test-repeat.yml`) runs on pull requests only: each affected non-live suite 50 times in a
+row, its emulator suite on `windows-2025`; it starts nothing and is not a required check.
+A green CI run on main starts the apply, then the deploy and its two acceptance jobs. When
+a web-acceptance sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`,
+the leak check runs over it, and the run uploads the `web-acceptance-diagnostics` artifact.
+
 View `pipeline` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/pipeline/
 
 ```mermaid
@@ -758,6 +767,7 @@ graph TB
       Delivery.Acceptance.Chart@{ shape: rectangle, label: "volume-cook-chart.proof.ts" }
     end
     Delivery.Ci@{ shape: rectangle, label: "CI/CD Pipeline" }
+    Delivery.TestRepeat@{ shape: rectangle, label: "Test repeat" }
     Delivery.Apply@{ shape: rectangle, label: "Apply Dev Infrastructure" }
     Delivery.Deploy@{ shape: rectangle, label: "Deploy Dev App" }
     Delivery.WebAcceptance@{ shape: rectangle, label: "Web acceptance" }
@@ -769,6 +779,7 @@ graph TB
   end
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   Team -. "`pull requests`" .-> Delivery.Ci
+  Team -. "`pull requests`" .-> Delivery.TestRepeat
   Delivery.Ci -. "`workflow_run, main only`" .-> Delivery.Apply
   Delivery.Apply -. "`workflow_run`" .-> Delivery.Deploy
   Delivery.Deploy -. "`needs: deploy`" .-> Delivery.WebAcceptance
@@ -791,9 +802,9 @@ to main, serves production`" .-> Meatgeek.Web
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery.Acceptance.Roundtrip,Delivery.Acceptance.Volume,Delivery.Acceptance.Chart,Delivery.Simdevice,Meatgeek.Web primary
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
-  class Delivery.Ci,Delivery.Apply,Delivery.Deploy,Delivery.WebAcceptance slate
-  linkStyle 0,3,4,5,6,7,8,9,10,11,12,13,14 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,2 stroke:#b45309,stroke-dasharray:8 4
+  class Delivery.Ci,Delivery.TestRepeat,Delivery.Apply,Delivery.Deploy,Delivery.WebAcceptance slate
+  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,3 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
