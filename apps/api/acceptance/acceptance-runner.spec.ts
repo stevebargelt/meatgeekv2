@@ -34,6 +34,10 @@
  * its own: a held SignalR poll is answered by the next message, the next poll
  * or the stub closing, and a sent reading is pushed when the fake simdevice
  * reports it.
+ *
+ * HAR-138: DPS mode. The env a simdevice child gets is read off the `spawn`
+ * call itself (a pass-through spy); `readClaimCode` runs fake claim-code
+ * scripts, and its 30 s kill fires only on the fake clock.
  */
 import { randomUUID } from 'crypto';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
@@ -44,12 +48,13 @@ import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
 import { DEFAULT_USER_PREFERENCES } from '../src/shared/cosmos/users-repository';
+import { ClaimCodeError, readClaimCode } from './lib/claim-code';
 import type { Clock } from './lib/clock';
 import { setClock } from './lib/clock';
 import { Contract } from './lib/contract';
 import type { AcceptanceApi, ProofGroup, SimDeviceOptions } from './lib/proof';
 import { ProofFailure } from './lib/proof';
-import { runAcceptance, RunResult } from './lib/runner';
+import { makeRedactor, runAcceptance, RunResult } from './lib/runner';
 import {
   CONNECT_TIMEOUT_MS,
   expectHubMessage,
@@ -4388,5 +4393,456 @@ describe('SignalR start() retries a throttled service (HAR-77, against the stub)
     await expect(failure).rejects.toThrow(
       "owner start() failed: Error: *** at <url> Status code '429' (throttled on all 5 attempts)"
     );
+  });
+});
+
+describe('DPS mode (HAR-138)', () => {
+  const ID_SCOPE = '0ne00SCOPE-VALUE';
+  const ENDPOINT = 'dps-endpoint.example.test';
+  const SIM_STATE_DIR = '/state/SIM-STATE-DIR-VALUE';
+  const CHART_STATE_DIR = '/state/CHART-STATE-DIR-VALUE';
+  /** A claim code, as simdevice prints it. */
+  const CLAIM_CODE = '7K3M-9QXR-2HTV';
+
+  const childProcess = jest.requireActual<typeof import('child_process')>('child_process');
+  let spawnSpy: jest.SpyInstance;
+  beforeEach(() => {
+    spawnSpy = jest.spyOn(childProcess, 'spawn');
+  });
+  afterEach(() => {
+    spawnSpy.mockRestore();
+  });
+  /** The env of each `spawn` call, in order. */
+  const spawnedEnvs = (): NodeJS.ProcessEnv[] =>
+    spawnSpy.mock.calls.map(call => (call[2] as { env: NodeJS.ProcessEnv }).env);
+
+  const baseEnv = () => ({
+    ACCEPTANCE_BASE_URL: stub!.baseUrl,
+    ACCEPTANCE_BEARER_TOKEN: TOKEN,
+    ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+    ACCEPTANCE_SIM_DEVICE_ID: SIM_DEVICE,
+  });
+
+  /** A script that prints `stdout`, writes `stderr` and exits `code`. */
+  function script(name: string, body: string): string {
+    const path = join(fakeDir, name);
+    writeFileSync(path, `#!${process.execPath}\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  }
+  const quietBin = () => script('simdevice-quiet', "process.stdout.write('{}\\n');");
+
+  /** A one-proof group sending once as the simulated device, then as the chart device. */
+  const sendAsBoth: ProofGroup = {
+    name: 'dps',
+    create: () => [
+      {
+        name: 'sends as each device',
+        run: async api => {
+          await api.runSimDevice(['--count', '1']);
+          if (api.chartDeviceId !== undefined) {
+            await api.runSimDevice(['--count', '1'], { device: 'chart' });
+          }
+        },
+      },
+    ],
+  };
+
+  const pick = (env: NodeJS.ProcessEnv, names: readonly string[]) =>
+    Object.fromEntries(names.filter(n => env[n] !== undefined).map(n => [n, env[n]]));
+  const DEVICE_VARIABLES = [
+    'SIMDEVICE_CONNECTION_STRING',
+    'SIMDEVICE_CHART_CONNECTION_STRING',
+    'MEATGEEK_DPS_ID_SCOPE',
+    'MEATGEEK_DPS_ENDPOINT',
+    'MEATGEEK_DEVICE_ID',
+    'MEATGEEK_STATE_DIR',
+    'ACCEPTANCE_BEARER_TOKEN',
+    'ACCEPTANCE_PEER_BEARER_TOKEN',
+  ];
+
+  describe('the env handed to spawn', () => {
+    it('(a) DPS mode: the four MEATGEEK_* variables for each device, and no connection string', async () => {
+      stub = await startStub();
+      // In CI the runner's own environment may still carry the old inputs.
+      process.env['SIMDEVICE_CONNECTION_STRING'] = SIM_CONNECTION_STRING;
+      process.env['SIMDEVICE_CHART_CONNECTION_STRING'] = CHART_CONNECTION_STRING;
+      try {
+        const result = await run(
+          {
+            ...baseEnv(),
+            ACCEPTANCE_SIMDEVICE_BIN: quietBin(),
+            ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+            ACCEPTANCE_DPS_ENDPOINT: ` ${ENDPOINT} `,
+            ACCEPTANCE_SIM_STATE_DIR: SIM_STATE_DIR,
+            ACCEPTANCE_CHART_DEVICE_ID: CHART_DEVICE,
+            ACCEPTANCE_CHART_STATE_DIR: CHART_STATE_DIR,
+          },
+          [sendAsBoth]
+        );
+        expect(result.failures).toEqual([]);
+      } finally {
+        delete process.env['SIMDEVICE_CONNECTION_STRING'];
+        delete process.env['SIMDEVICE_CHART_CONNECTION_STRING'];
+      }
+
+      const [sim, chart] = spawnedEnvs();
+      expect(spawnSpy).toHaveBeenCalledTimes(2);
+      expect(pick(sim, DEVICE_VARIABLES)).toEqual({
+        MEATGEEK_DPS_ID_SCOPE: ID_SCOPE,
+        MEATGEEK_DPS_ENDPOINT: ENDPOINT,
+        MEATGEEK_DEVICE_ID: SIM_DEVICE,
+        MEATGEEK_STATE_DIR: SIM_STATE_DIR,
+      });
+      expect(pick(chart, DEVICE_VARIABLES)).toEqual({
+        MEATGEEK_DPS_ID_SCOPE: ID_SCOPE,
+        MEATGEEK_DPS_ENDPOINT: ENDPOINT,
+        MEATGEEK_DEVICE_ID: CHART_DEVICE,
+        MEATGEEK_STATE_DIR: CHART_STATE_DIR,
+      });
+    });
+
+    it('(b) DPS mode without ACCEPTANCE_DPS_ENDPOINT: three MEATGEEK_* variables', async () => {
+      stub = await startStub();
+      const result = await run(
+        {
+          ...baseEnv(),
+          ACCEPTANCE_SIMDEVICE_BIN: quietBin(),
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+          ACCEPTANCE_SIM_STATE_DIR: SIM_STATE_DIR,
+        },
+        [sendAsBoth]
+      );
+      expect(result.failures).toEqual([]);
+
+      expect(spawnedEnvs().map(env => pick(env, DEVICE_VARIABLES))).toEqual([
+        {
+          MEATGEEK_DPS_ID_SCOPE: ID_SCOPE,
+          MEATGEEK_DEVICE_ID: SIM_DEVICE,
+          MEATGEEK_STATE_DIR: SIM_STATE_DIR,
+        },
+      ]);
+    });
+
+    it("(c) connection-string mode: today's env, the runner's own minus the tokens and the other device's credential", async () => {
+      stub = await startStub();
+      const bin = quietBin();
+      const result = await run(
+        {
+          ...baseEnv(),
+          ...simEnv(),
+          ACCEPTANCE_SIMDEVICE_BIN: bin,
+          ...chartEnv,
+          // An ID scope alone changes nothing: no device has a state dir.
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+        },
+        [sendAsBoth]
+      );
+      expect(result.failures).toEqual([]);
+
+      const today = (credential: string) => {
+        const env: NodeJS.ProcessEnv = { ...process.env, SIMDEVICE_CONNECTION_STRING: credential };
+        delete env['ACCEPTANCE_BEARER_TOKEN'];
+        delete env['ACCEPTANCE_PEER_BEARER_TOKEN'];
+        delete env['SIMDEVICE_CHART_CONNECTION_STRING'];
+        return env;
+      };
+      expect(spawnedEnvs()).toEqual([today(SIM_CONNECTION_STRING), today(CHART_CONNECTION_STRING)]);
+      expect(spawnSpy.mock.calls.map(call => call[0])).toEqual([bin, bin]);
+    });
+
+    it('(d) each device has its own mode: the simulated device in DPS, the chart device by connection string', async () => {
+      stub = await startStub();
+      const result = await run(
+        {
+          ...baseEnv(),
+          ACCEPTANCE_SIMDEVICE_BIN: quietBin(),
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+          ACCEPTANCE_SIM_STATE_DIR: SIM_STATE_DIR,
+          ...chartEnv,
+        },
+        [sendAsBoth]
+      );
+      expect(result.failures).toEqual([]);
+
+      expect(spawnedEnvs().map(env => pick(env, DEVICE_VARIABLES))).toEqual([
+        {
+          MEATGEEK_DPS_ID_SCOPE: ID_SCOPE,
+          MEATGEEK_DEVICE_ID: SIM_DEVICE,
+          MEATGEEK_STATE_DIR: SIM_STATE_DIR,
+        },
+        { SIMDEVICE_CONNECTION_STRING: CHART_CONNECTION_STRING },
+      ]);
+      expect(result.output).not.toContain(CHART_KEY);
+    });
+  });
+
+  describe('configuration errors stop the run before any proof, naming variables, never values', () => {
+    const VALUES = [
+      ID_SCOPE,
+      SIM_STATE_DIR,
+      CHART_STATE_DIR,
+      SIM_CONNECTION_STRING,
+      SIM_KEY,
+      CHART_CONNECTION_STRING,
+      CHART_KEY,
+    ];
+
+    // The inputs are thunks: simEnv() writes the fake simdevice, which needs
+    // the temp dir beforeAll makes.
+    it.each<[string, () => Record<string, string>, string]>([
+      [
+        'the simulated device has a connection string and a state dir',
+        () => ({
+          ...simEnv(),
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+          ACCEPTANCE_SIM_STATE_DIR: SIM_STATE_DIR,
+        }),
+        'acceptance: SIMDEVICE_CONNECTION_STRING and ACCEPTANCE_SIM_STATE_DIR are both set; the ' +
+          'simulated device runs in one mode: set the connection string, or the state dir for DPS mode',
+      ],
+      [
+        'the chart device has a connection string and a state dir',
+        () => ({
+          ...simEnv(),
+          ...chartEnv,
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+          ACCEPTANCE_CHART_STATE_DIR: CHART_STATE_DIR,
+        }),
+        'acceptance: SIMDEVICE_CHART_CONNECTION_STRING and ACCEPTANCE_CHART_STATE_DIR are both ' +
+          'set; the chart device runs in one mode: set the connection string, or the state dir for DPS mode',
+      ],
+      [
+        'the simulated device has a state dir but there is no ID scope',
+        () => ({
+          ...simEnv(),
+          SIMDEVICE_CONNECTION_STRING: '',
+          ACCEPTANCE_SIM_STATE_DIR: SIM_STATE_DIR,
+        }),
+        'acceptance: ACCEPTANCE_SIM_STATE_DIR is set but ACCEPTANCE_DPS_ID_SCOPE is not; DPS mode ' +
+          'for the simulated device needs both',
+      ],
+      [
+        'the chart device has a state dir but there is no ID scope',
+        () => ({
+          ...simEnv(),
+          ACCEPTANCE_CHART_DEVICE_ID: CHART_DEVICE,
+          ACCEPTANCE_CHART_STATE_DIR: CHART_STATE_DIR,
+        }),
+        'acceptance: ACCEPTANCE_CHART_STATE_DIR is set but ACCEPTANCE_DPS_ID_SCOPE is not; DPS ' +
+          'mode for the chart device needs both',
+      ],
+      [
+        'the chart device has a state dir but no id',
+        () => ({
+          ...simEnv(),
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+          ACCEPTANCE_CHART_STATE_DIR: CHART_STATE_DIR,
+        }),
+        'acceptance: ACCEPTANCE_CHART_STATE_DIR is set but ACCEPTANCE_CHART_DEVICE_ID is not; the ' +
+          'chart device needs both or neither',
+      ],
+      [
+        'the chart device has an id but neither credential, with an ID scope set',
+        () => ({
+          ...simEnv(),
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+          ACCEPTANCE_CHART_DEVICE_ID: CHART_DEVICE,
+        }),
+        'acceptance: ACCEPTANCE_CHART_DEVICE_ID is set but neither SIMDEVICE_CHART_CONNECTION_STRING ' +
+          'nor ACCEPTANCE_CHART_STATE_DIR is; the chart device needs both or neither',
+      ],
+    ])('(e) %s', async (_what, given, message) => {
+      stub = await startStub();
+      const result = await run({ ...baseEnv(), ...given() });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.failures).toEqual([message]);
+      for (const text of [result.output, ...result.failures]) {
+        for (const value of VALUES) expect(text).not.toContain(value);
+      }
+      expect(stub.requests).toHaveLength(0);
+      expect(spawnSpy).not.toHaveBeenCalled();
+    });
+
+    it('(f) neither input for the simulated device is the old missing-input failure', async () => {
+      stub = await startStub();
+      const result = await run({
+        ...baseEnv(),
+        ...simEnv(),
+        SIMDEVICE_CONNECTION_STRING: undefined,
+        ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+      });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.failures).toEqual([
+        'acceptance: SIMDEVICE_CONNECTION_STRING is not set; the live acceptance run needs it',
+      ]);
+      expect(stub.requests).toHaveLength(0);
+    });
+  });
+
+  describe('readClaimCode', () => {
+    const STATE = '/state/claim-dir';
+    /** A fake simdevice that checks its arguments, then prints `out`, writes
+     *  `err` and exits `code`. */
+    const claimBin = (name: string, out: string, err: string, code: number) =>
+      script(
+        `simdevice-claim-${name}`,
+        `const args = process.argv.slice(2);
+if (JSON.stringify(args) !== ${JSON.stringify(JSON.stringify(['claim-code', '--state-dir', STATE]))}) {
+  process.stderr.write('unexpected arguments ' + JSON.stringify(args) + '\\n');
+  process.exit(2);
+}
+process.stdout.write(${JSON.stringify(out)});
+process.stderr.write(${JSON.stringify(err)});
+process.exitCode = ${code};`
+      );
+
+    it.each([
+      [
+        'unclaimed',
+        {
+          deviceId: 'sim-1',
+          state: 'unclaimed',
+          claimCode: CLAIM_CODE,
+          expiresAt: '2026-11-19T18:00:00Z',
+        },
+      ],
+      ['claimed', { deviceId: 'sim-1', state: 'claimed' }],
+      ['expired', { deviceId: 'sim-1', state: 'expired' }],
+    ])('parses the %s line', async (state, line) => {
+      const bin = claimBin(state, `${JSON.stringify(line)}\n`, '', 0);
+      await expect(readClaimCode(bin, STATE)).resolves.toEqual(line);
+    });
+
+    it('gives the child only PATH and HOME', async () => {
+      const bin = claimBin(
+        'env',
+        `${JSON.stringify({ deviceId: 'sim-1', state: 'claimed' })}\n`,
+        '',
+        0
+      );
+      await readClaimCode(bin, STATE);
+      expect(Object.keys(spawnedEnvs()[0]).sort()).toEqual(['HOME', 'PATH']);
+    });
+
+    it('is "no claim yet" on exit 3', async () => {
+      const bin = claimBin('none', '', 'simdevice claim-code: open claim.json: no such file\n', 3);
+      await expect(readClaimCode(bin, STATE)).resolves.toEqual({ state: 'no-claim-yet' });
+    });
+
+    it('throws on another exit with the code and stderr, and never stdout', async () => {
+      const stdout = `{"deviceId":"sim-1","state":"unclaimed","claimCode":"${CLAIM_CODE}"} STDOUT-MARKER\n`;
+      const bin = claimBin('fail', stdout, `boom: read ${CLAIM_CODE} failed\n`, 1);
+
+      const error = await readClaimCode(bin, STATE).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ClaimCodeError);
+      const failure = error as ClaimCodeError;
+      expect(failure.exitCode).toBe(1);
+      expect(failure.message).toBe('simdevice claim-code exited 1: boom: read [redacted] failed');
+      expect(failure.stderr).toBe('boom: read [redacted] failed');
+      for (const text of [failure.message, failure.stderr, String(failure.stack)]) {
+        expect(text).not.toContain(CLAIM_CODE);
+        expect(text).not.toContain('STDOUT-MARKER');
+      }
+    });
+
+    it('throws, without stdout, when exit 0 prints no claim-code line', async () => {
+      const bin = claimBin('garbled', `claim code ${CLAIM_CODE} STDOUT-MARKER\n`, '', 0);
+      const error = (await readClaimCode(bin, STATE).catch((e: unknown) => e)) as ClaimCodeError;
+      expect(error).toBeInstanceOf(ClaimCodeError);
+      expect(error.exitCode).toBe(0);
+      expect(error.message).toContain('did not print one claim-code JSON line');
+      expect(error.message).not.toContain(CLAIM_CODE);
+      expect(error.message).not.toContain('STDOUT-MARKER');
+    });
+
+    it('throws when the binary cannot be started', async () => {
+      await expect(readClaimCode(join(fakeDir, 'no-such-simdevice'), STATE)).rejects.toThrow(
+        'simdevice claim-code could not be started (ENOENT)'
+      );
+    });
+
+    it('kills a run still going when the fake time reaches 30 s, not before', async () => {
+      const bin = script(
+        'simdevice-claim-hang',
+        "process.stdout.write('" + CLAIM_CODE + "'); setInterval(() => undefined, 1 << 30);"
+      );
+      let outcome: unknown;
+      const reading = readClaimCode(bin, STATE).then(
+        () => (outcome = 'resolved'),
+        (error: unknown) => (outcome = error)
+      );
+      await fakeClock.armed(30_000);
+      fakeClock.advance(29_999);
+      await drainEvents();
+      expect(outcome).toBeUndefined();
+
+      fakeClock.advance(1);
+      await reading;
+      expect(outcome).toBeInstanceOf(ClaimCodeError);
+      expect((outcome as Error).message).toBe('simdevice claim-code did not finish in 30000 ms');
+    });
+  });
+
+  describe('the claim code never reaches the output', () => {
+    it('the redactor masks a claim code, but not a UUID or other dashed ids', () => {
+      const redact = makeRedactor([], []);
+      expect(redact(`code ${CLAIM_CODE}, again (${CLAIM_CODE.toLowerCase()})`)).toBe(
+        `code [redacted], again (${CLAIM_CODE.toLowerCase()})`
+      );
+      for (const text of [
+        STANDING_CHART_COOK_ID,
+        STANDING_CHART_COOK_ID.toUpperCase(),
+        'meatgeek-dev-simulated-smoker-chart',
+        '20261119170000-abc123',
+      ]) {
+        expect(redact(text)).toBe(text);
+      }
+    });
+
+    it('a claim code simdevice prints on stdout or stderr is masked in the failure and the output', async () => {
+      stub = await startStub();
+      const bin = script(
+        'simdevice-claim-leak',
+        `process.stderr.write('minted claim code ${CLAIM_CODE}\\n');
+process.stdout.write(JSON.stringify({ event: 'twin', claimCode: '${CLAIM_CODE}' }) + '\\n');
+process.exitCode = 1;`
+      );
+      const result = await run(
+        {
+          ...baseEnv(),
+          ACCEPTANCE_SIMDEVICE_BIN: bin,
+          ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
+          ACCEPTANCE_SIM_STATE_DIR: SIM_STATE_DIR,
+        },
+        [
+          {
+            name: 'claim leak',
+            create: () => [
+              {
+                name: 'echoes what simdevice printed',
+                run: async api => {
+                  const sent = await api.runSimDevice(['--twin', '--count', '0']);
+                  throw new Error(
+                    `simdevice said ${sent.stderrFirstLine} and ${JSON.stringify(sent.messages)}`
+                  );
+                },
+              },
+            ],
+          },
+        ]
+      );
+
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain('simdevice → exit 1');
+      expect(result.failures[0]).toContain('minted claim code [redacted]');
+      expect(result.failures[0]).toContain('"claimCode":"[redacted]"');
+      for (const text of [result.output, ...result.failures]) {
+        expect(text).not.toContain(CLAIM_CODE);
+        expect(text).not.toContain(SIM_STATE_DIR);
+      }
+    });
   });
 });
