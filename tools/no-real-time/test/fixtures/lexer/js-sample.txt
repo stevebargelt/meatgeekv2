@@ -1,0 +1,5 @@
+const a = 'x // y'; // setTimeout(1)
+const b = `t ${f(`n`)} u`; /* Date.now() */
+const r = /\/\/ sleep\(/g;
+const jsx = <p>Don't sleep(1)</p>;
+next();

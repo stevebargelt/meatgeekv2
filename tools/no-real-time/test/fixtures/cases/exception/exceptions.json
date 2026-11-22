@@ -1,0 +1,11 @@
+{
+  "outOfScope": [],
+  "exceptions": [
+    {
+      "path": "apps/web/src/excepted.spec.ts",
+      "rule": "js-timer",
+      "line": "const id = setInterval(check, 10);",
+      "reason": "A condition poll with no deadline of its own."
+    }
+  ]
+}

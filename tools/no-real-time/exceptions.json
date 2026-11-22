@@ -1,0 +1,57 @@
+{
+  "outOfScope": [
+    {
+      "path": "apps/api/acceptance/live.acceptance.ts",
+      "reason": "The live API acceptance suite: it waits on a real cloud by design. Each of its waits has a row in docs/development/live-acceptance.md, 'Real-time waits'."
+    },
+    {
+      "path": "apps/api/acceptance/proofs/**",
+      "reason": "The live API proofs: they wait on a real cloud by design (docs/development/live-acceptance.md, 'Real-time waits')."
+    },
+    {
+      "path": "apps/api/acceptance/lib/**",
+      "reason": "The live API suite's library; lib/clock.ts is the real clock that the acceptance self-test (acceptance-runner.spec.ts, in scope) replaces with FakeClock."
+    },
+    {
+      "path": "apps/web-e2e/live/**",
+      "except": ["apps/web-e2e/live/*.test.ts"],
+      "reason": "The live browser proof: it waits on a real cloud and a real sign-in by design. Its *.test.ts files are non-live Jest tests and stay in scope."
+    },
+    {
+      "path": "tools/no-real-time/test/fixtures/**",
+      "reason": "The guard's own fixtures: each violating fixture breaks a rule on purpose, so the guard's tests can see it fail."
+    }
+  ],
+  "exceptions": [
+    {
+      "path": "apps/data-pusher/internal/await/await.go",
+      "rule": "go-wall-clock",
+      "line": "if left := time.Until(deadline); left < 2*margin {",
+      "reason": "internal/await is the hang guard itself: Guard(t) reads how long is left before t.Deadline() (go test -timeout) to give up shortly before it, so a stuck wait fails naming its condition. No test's verdict depends on it."
+    },
+    {
+      "path": "apps/data-pusher/internal/await/await.go",
+      "rule": "go-wall-clock",
+      "line": "timer := time.AfterFunc(time.Until(at), func() { close(ch) })",
+      "reason": "internal/await's guard channel: it closes at Guard(t), just before the test binary's own deadline. It is the hang guard, not a per-wait deadline."
+    },
+    {
+      "path": "apps/data-pusher/internal/await/await.go",
+      "rule": "go-after",
+      "line": "timer := time.AfterFunc(time.Until(at), func() { close(ch) })",
+      "reason": "Same line as above: the real timer that fires the hang guard. Only a wait that would otherwise hang past go test -timeout ever sees it."
+    },
+    {
+      "path": "apps/infrastructure/bootstrap/bootstrap.test.sh",
+      "rule": "sh-grep-q-pipefail",
+      "pattern": "\\| grep -qx 'main'; h125_ps=",
+      "reason": "HAR-125's test runs the OLD `writer | grep -q` form on purpose, on a 2 MiB input that makes it fail every time, to prove the failure is real; it asserts on PIPESTATUS, under `|| true`. The new here-string form is tested right after it."
+    },
+    {
+      "path": "tools/test-repeat/test/fixtures/fixture-suite.mjs",
+      "rule": "js-timer",
+      "line": "const timer = setInterval(() => {",
+      "reason": "A condition poll with no deadline of its own (the rule's third way to wait): the 'parallel' fixture re-checks every 10 ms until all copies have written their marker, bounded only by the test-repeat-harness suite's hang guard. fs.watch was tried first and drops the last event on macOS."
+    }
+  ]
+}
