@@ -5,7 +5,7 @@
 #   - devices-collection POST : apps/api/src/functions/devices/register-device.ts
 #   - device-item GET         : apps/api/src/functions/devices/get-device.ts
 #   - device-item PATCH       : apps/api/src/functions/devices/update-device.ts
-#   - device-item DELETE      : apps/api/src/functions/devices/delete-device.ts (HAR-85)
+#   - device-item DELETE      : apps/api/src/functions/devices/delete-device.ts (HAR-85; release, HAR-136)
 #   - device-claim POST       : apps/api/src/functions/devices/claim-device.ts (HAR-130)
 #
 # Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
@@ -277,17 +277,35 @@ device-item:
 
   delete:
     operationId: deleteDevice
-    summary: Delete one of the caller's devices
+    summary: Release one of the caller's devices
     description: |
-      Deletes the device document: one point read for ownership, then one
-      point delete. No body on success.
+      Releases the device (HAR-136, goal HAR-130;
+      learnings/decisions/har-130-device-provisioning-and-claim.md). Once
+      released it can be claimed again (POST /devices/claim), but only with a
+      fresh claim code: the code it was claimed with is refused for ever.
+
+      In order:
+
+      1. Ownership: one point read. 404 DEVICE_NOT_FOUND for an id nobody
+         registered, 403 DEVICE_NOT_OWNED for someone else's device.
+      2. 409 COOK_ACTIVE while the caller has an active cook on the device
+         (the MG-84 lock, a point read). Stop the cook first; nothing is
+         changed.
+      3. The device twin: desired `claimGeneration` becomes its value + 1
+         (absent counts as "0", so the first release writes "1") and
+         `claimClaimantHash` is removed, under `If-Match`; a 412 re-reads once
+         and retries. `claimConsumedCodeHash` is kept, so the old code stays
+         consumed. The device sees the new generation and mints a new code. A
+         device with no IoT Hub identity (registered through POST /devices)
+         has no twin, and this step is skipped. Any other twin failure is 503
+         DEVICE_TWIN_UPDATE_FAILED and the device is not released, so a retry
+         is safe.
+      4. The device document is deleted. No body on success.
 
       Only the device goes. Its cooks stay in the caller's history (GET
       /cooks still lists them), and its readings expire on the temperatures
-      container's TTL (7 days in dev, 90 in prod). A cook still active on
-      the device stays active, and POST /cooks/{cookId}/stop answers 403
-      DEVICE_NOT_OWNED for it until the caller registers the same id again.
-      Stop a device's cook before deleting the device.
+      container's TTL (7 days in dev, 90 in prod). A later owner sees only
+      readings from their own `claimedAt` on.
 
       Unlike GET and PATCH, which answer 404 for both, DELETE tells a device
       someone else owns (403 DEVICE_NOT_OWNED) from one nobody registered
@@ -297,7 +315,7 @@ device-item:
       - $ref: '../components/parameters.yaml#/DeviceIdPath'
     responses:
       '204':
-        description: Deleted.
+        description: Released. The device document is deleted.
         headers:
           X-Request-ID:
             $ref: '../components/headers.yaml#/X-Request-ID'
@@ -330,5 +348,33 @@ device-item:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/ErrorResponse'
+      '409':
+        description: |
+          COOK_ACTIVE: the caller has an active cook on this device. The
+          message is fixed: "Stop the active cook before releasing this
+          device". Nothing was changed.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
         $ref: '../components/responses.yaml#/ServerError'
+      '503':
+        description: |
+          DEVICE_TWIN_UPDATE_FAILED: the device twin could not be read or
+          patched. The device was not released (its document is kept); retry
+          the same request.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+          x-meatgeek-request-charge:
+            $ref: '../components/headers.yaml#/RequestCharge'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/DeviceClaimTwinFailedError'

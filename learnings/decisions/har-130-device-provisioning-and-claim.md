@@ -10,9 +10,11 @@
   `apps/api/src/shared/iothub/device-twin.ts` (reported properties),
   `libs/api-interfaces` (`Device.claimedAt`, `ClaimDeviceRequest`,
   `CLAIM_REFUSED`), `libs/api-interfaces/test-vectors/claim-code.json`, and the
-  OpenAPI spec. Provisioning, release, revoke and the readings clamp are built
-  in later issues of HAR-130; this record states their design so those issues
-  build to it.
+  OpenAPI spec. HAR-136 adds release
+  (`apps/api/src/functions/devices/delete-device.ts`) and the readings clamp
+  (`apps/api/src/shared/devices/readings-bound.ts` and the temperature and
+  cook-chart routes). Provisioning and revoke are built in other issues of
+  HAR-130; this record states their design so those issues build to it.
 
 ## Context
 
@@ -172,7 +174,7 @@ ever get shorter.
 still use it. It is removed (route, contract) in a later issue of HAR-130 once
 both claim instead.
 
-## Decision 3 — release (built in a later issue of HAR-130)
+## Decision 3 — release (built in HAR-136)
 
 `DELETE /devices/{id}` becomes release, owner only. **409 `COOK_ACTIVE`** while
 a cook is active on the device (stop it first). Otherwise patch desired
@@ -180,6 +182,14 @@ a cook is active on the device (stop it first). Otherwise patch desired
 `claimConsumedCodeHash`, with `If-Match`; then delete the document → 204. The
 device sees the generation bump and mints a fresh code; the old one stays
 consumed, so it can never claim again. 403 `DEVICE_NOT_OWNED` and 404 as today.
+
+As built (HAR-136): the cook check reads the MG-84 lock
+`active-device:<deviceId>` in the caller's partition, and the cook it names
+only when there is a lock, so a stale lock (its cook completed) does not block
+a release; there is no query. Absent `claimGeneration` counts as `"0"`, so the
+first release writes `"1"`. A device with no twin (IoT Hub 404: registered
+through `POST /devices`) skips the twin step. Any other twin failure is 503
+`DEVICE_TWIN_UPDATE_FAILED` with the device document kept, so a retry is safe.
 
 ## Decision 4 — revoke (built in a later issue of HAR-130)
 
@@ -189,7 +199,7 @@ hub drops and refuses its connections). The ownership record is untouched: the
 owner sees the device disconnected and can release it. Re-onboarding a revoked
 Pi needs `REINSTATE=1` on the enrol step.
 
-## Decision 5 — readings of unclaimed and re-claimed devices (built in a later issue of HAR-130)
+## Decision 5 — readings of unclaimed and re-claimed devices (the clamp built in HAR-136)
 
 - A device sends readings whether or not it is claimed. An unclaimed device's
   readings are stored (Cosmos TTL) but pushed to nobody: the broadcaster finds
@@ -201,6 +211,17 @@ Pi needs `REINSTATE=1` on the enrol step.
   reach the new owner.
 - After a release, the next reading's owner lookup finds no document, so the
   old owner gets nothing from then on.
+
+As built (HAR-136), the bound is on the hub-stamped `iothub-enqueuedtime`, the
+field the routes already filter on, and it is inside each query, never a filter
+on its results. `GET /temperatures/current/{deviceId}` counts only a reading at
+or after `claimedAt` (none is the same 404 `NO_READINGS` as no reading);
+`GET /temperatures/history` uses the later of the requested `startTime` and
+`claimedAt`; `GET /cooks/{cookId}/chart`, which reads per-minute rollups, starts
+at the first whole minute at or after `claimedAt`, so a minute that straddles
+the claim is left out. One consequence: an owner who releases a device and
+claims it again sees only readings from the new claim, their own earlier cooks'
+charts included.
 
 `claimedAt` is optional on `Device` because devices registered through
 `POST /devices` have none.

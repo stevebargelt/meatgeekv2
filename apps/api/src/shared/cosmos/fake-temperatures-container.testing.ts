@@ -11,7 +11,8 @@ import { LATEST_READING_CANDIDATES } from './temperatures-repository';
  * requested partition (`/deviceId`) and the `@deviceId` it names:
  *
  *   - the current-reading query: newest `SystemProperties["iothub-enqueuedtime"]`
- *     first, at most {@link LATEST_READING_CANDIDATES};
+ *     first, at most {@link LATEST_READING_CANDIDATES}; HAR-136: bounded below
+ *     by `@notBefore` when the query text carries it;
  *   - HAR-35's history query: the clauses of the history predicate that the
  *     query TEXT carries (hub identity, `IS_OBJECT(c.Body)`, `@cookId`, the
  *     `@startTime`/`@endTime` window), oldest first. HAR-75: read with
@@ -79,6 +80,12 @@ function matchesHistoryClauses(
   if (
     query.includes('["iothub-enqueuedtime"] >= @startTime') &&
     !(typeof enqueued === 'string' && enqueued >= String(parameter('@startTime')))
+  ) {
+    return false;
+  }
+  if (
+    query.includes('["iothub-enqueuedtime"] >= @notBefore') &&
+    !(typeof enqueued === 'string' && enqueued >= String(parameter('@notBefore')))
   ) {
     return false;
   }

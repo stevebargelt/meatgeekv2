@@ -29,6 +29,14 @@ temperatures-current:
       container (partitioned on /deviceId). The newest is chosen by the hub's
       `iothub-enqueuedtime`, with one single-partition query.
 
+      Bounded by `claimedAt` (HAR-136): for a device claimed through POST
+      /devices/claim, only a reading enqueued at or after the device's
+      `claimedAt` counts, so readings from before the caller's claim (the
+      device unclaimed, or another owner's) never reach the caller. The bound
+      is in the query. No reading at or after `claimedAt` is the same 404
+      NO_READINGS as no reading at all. A device without `claimedAt`
+      (registered through POST /devices) is not bounded.
+
       Trust rule (MG-73): the reading's `deviceId` is the hub-authenticated
       `SystemProperties["iothub-connection-device-id"]`, never the
       device-supplied `Body.deviceId`. A stored document whose hub identity is
@@ -81,7 +89,7 @@ temperatures-current:
           DEVICE_NOT_FOUND: no such device, or it belongs to someone else (the
           two are indistinguishable on purpose).
           NO_READINGS: the caller owns the device, but no reading for it has
-          been stored.
+          been stored (for a claimed device: none at or after `claimedAt`).
         headers:
           X-Request-ID:
             $ref: '../components/headers.yaml#/X-Request-ID'
@@ -121,6 +129,14 @@ temperatures-history:
       `timestamp` is still the device's `Body.timestamp` when it parses as a
       date, else the enqueued time, so a reading near a bound can carry a
       `timestamp` just outside the window.
+
+      Bounded by `claimedAt` (HAR-136): for a device claimed through POST
+      /devices/claim, the effective `startTime` is the later of the requested
+      one (or none) and the device's `claimedAt`, inside the query, so
+      readings from before the caller's claim never reach the caller and
+      paging stays right. A window that ends before `claimedAt` is an empty
+      page. A device without `claimedAt` (registered through POST /devices)
+      is not bounded.
 
       Trust rule (MG-73): a reading's `deviceId` is the hub-authenticated
       `SystemProperties["iothub-connection-device-id"]`, never
@@ -181,7 +197,8 @@ temperatures-history:
         required: false
         description: |
           ISO-8601 lower bound (inclusive) on the hub's enqueued time. Must be
-          before `endTime` when both are given. The handler accepts any value
+          before `endTime` when both are given. Raised to the device's
+          `claimedAt` when it is earlier (HAR-136). The handler accepts any value
           JavaScript's `Date` parses and normalises it to UTC; anything else
           is 400.
         schema:

@@ -581,3 +581,124 @@ describe('GET /temperatures/history', () => {
     expect(everything).not.toContain(FAKE_ACCOUNT_ENDPOINT);
   });
 });
+
+describe('GET /temperatures/history: the claim bound (HAR-136)', () => {
+  /** Readings at 16:00:00 … 16:00:09; the device was claimed at 16:00:05. */
+  function claimedMidway() {
+    const fixture = ownedWithReadings(10);
+    fixture.devices.seed(device({ claimedAt: '2026-08-14T16:00:05.000Z' }));
+    return fixture;
+  }
+  const times = (response: HttpResponseInit) => page(response).readings.map(r => r.timestamp);
+
+  it('a startTime before claimedAt returns only readings from claimedAt on', async () => {
+    const { deps, temperatures } = claimedMidway();
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE, startTime: '2026-08-14T15:00:00.000Z' }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(200);
+    expect(times(response)).toEqual([
+      '2026-08-14T16:00:05.000Z',
+      '2026-08-14T16:00:06.000Z',
+      '2026-08-14T16:00:07.000Z',
+      '2026-08-14T16:00:08.000Z',
+      '2026-08-14T16:00:09.000Z',
+    ]);
+    // The effective startTime is claimedAt, inside the query.
+    expect(temperatures.queries[0].parameters).toContainEqual({
+      name: '@startTime',
+      value: '2026-08-14T16:00:05.000Z',
+    });
+  });
+
+  it('no startTime at all is bounded the same way', async () => {
+    const { deps } = claimedMidway();
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE }),
+      context().ctx,
+      deps
+    );
+
+    expect(times(response)[0]).toBe('2026-08-14T16:00:05.000Z');
+    expect(times(response)).toHaveLength(5);
+  });
+
+  it('a startTime after claimedAt is unchanged', async () => {
+    const { deps, temperatures } = claimedMidway();
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE, startTime: '2026-08-14T16:00:08.000Z' }),
+      context().ctx,
+      deps
+    );
+
+    expect(times(response)).toEqual(['2026-08-14T16:00:08.000Z', '2026-08-14T16:00:09.000Z']);
+    expect(temperatures.queries[0].parameters).toContainEqual({
+      name: '@startTime',
+      value: '2026-08-14T16:00:08.000Z',
+    });
+  });
+
+  it('pages stay right: the bound is in the query, so limit counts only bounded readings', async () => {
+    const { deps } = claimedMidway();
+
+    const first = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE, limit: '3' }),
+      context().ctx,
+      deps
+    );
+    const second = await getTemperatureHistoryHandler(
+      request({
+        deviceId: DEVICE,
+        limit: '3',
+        continuationToken: page(first).continuationToken ?? '',
+      }),
+      context().ctx,
+      deps
+    );
+
+    expect(times(first)).toEqual([
+      '2026-08-14T16:00:05.000Z',
+      '2026-08-14T16:00:06.000Z',
+      '2026-08-14T16:00:07.000Z',
+    ]);
+    expect(page(first).hasMore).toBe(true);
+    expect(times(second)).toEqual(['2026-08-14T16:00:08.000Z', '2026-08-14T16:00:09.000Z']);
+    expect(page(second).hasMore).toBe(false);
+  });
+
+  it('a window that ends before claimedAt is an empty page', async () => {
+    const { deps } = claimedMidway();
+
+    const response = await getTemperatureHistoryHandler(
+      request({
+        deviceId: DEVICE,
+        startTime: '2026-08-14T16:00:00.000Z',
+        endTime: '2026-08-14T16:00:03.000Z',
+      }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(200);
+    expect(page(response).readings).toEqual([]);
+  });
+
+  it('a device without claimedAt (POST /devices) is not bounded', async () => {
+    const { deps, temperatures } = ownedWithReadings(3);
+
+    const response = await getTemperatureHistoryHandler(
+      request({ deviceId: DEVICE }),
+      context().ctx,
+      deps
+    );
+
+    expect(times(response)).toHaveLength(3);
+    expect(temperatures.queries[0].parameters).toEqual([{ name: '@deviceId', value: DEVICE }]);
+  });
+});

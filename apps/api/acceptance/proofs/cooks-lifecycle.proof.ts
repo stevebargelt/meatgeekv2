@@ -429,9 +429,12 @@ export default defineProofs('cooks lifecycle', () => {
         );
       },
     },
-    deleteRegisteredDevice('always: DELETE /devices/{id} removes acceptance-cook-<runId>', () => ({
-      deviceId: device?.deviceId,
-      created: deviceCreated,
-    })),
+    // HAR-136: a release is refused while a cook is active, so the cleanup
+    // stops any cook a failed step left active before its DELETE.
+    deleteRegisteredDevice(
+      'always: DELETE /devices/{id} removes acceptance-cook-<runId>',
+      () => ({ deviceId: device?.deviceId, created: deviceCreated }),
+      { stopCooksFirst: true }
+    ),
   ];
 });

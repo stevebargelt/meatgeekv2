@@ -201,7 +201,7 @@ model {
           description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart, POST /cooks/{cookId}/stop'
         }
         devices = component 'devices' {
-          description 'GET and POST /devices, POST /devices/claim, GET, PATCH and DELETE /devices/{id}'
+          description 'GET and POST /devices, POST /devices/claim, GET and PATCH /devices/{id}, and DELETE /devices/{id}, which is release (HAR-136: 409 COOK_ACTIVE while a cook is active; the next claim needs a fresh code)'
         }
         temperatures = component 'temperatures' {
           description 'GET /temperatures/current/{deviceId}, GET /temperatures/history'
@@ -462,7 +462,7 @@ model {
     // Claiming a device proves possession through the twin (HAR-130, HAR-133).
     cloud.api.devices -> cloud.ingest.iothub 'read twin claim hash; set desired claim properties' {
       technology 'IoT Hub service REST, managed identity (IoT Hub Twin Contributor)'
-      description 'POST /devices/claim reads the twin and compares the reported claimCodeHash (written only by the device, with its own credential) to the hash of the submitted code, in constant time, and checks reported claimGeneration against desired and claimExpiresAt against the clock. It then patches desired claimConsumedCodeHash and claimClaimantHash under the read etag (If-Match), before the Cosmos create, so a code is single-use under concurrency; a 412 re-reads once. A twin read or write failure answers 503 DEVICE_TWIN_UPDATE_FAILED; every refusal is the same 403 CLAIM_REFUSED.'
+      description 'POST /devices/claim reads the twin and compares the reported claimCodeHash (written only by the device, with its own credential) to the hash of the submitted code, in constant time, and checks reported claimGeneration against desired and claimExpiresAt against the clock. It then patches desired claimConsumedCodeHash and claimClaimantHash under the read etag (If-Match), before the Cosmos create, so a code is single-use under concurrency; a 412 re-reads once. A twin read or write failure answers 503 DEVICE_TWIN_UPDATE_FAILED; every refusal is the same 403 CLAIM_REFUSED. Release (DELETE /devices/{id}, HAR-136) reads the twin and patches desired claimGeneration to its value + 1 and claimClaimantHash to null under If-Match (a 412 re-reads once), keeping claimConsumedCodeHash, before the document is deleted, so the device mints a fresh code and the old one can never claim again; a device with no twin (IoT Hub 404) skips it, and any other twin failure answers 503 DEVICE_TWIN_UPDATE_FAILED with the document kept.'
     }
     cloud.ingest.iothub -> edge.pusher.twin 'desired properties' {
       description 'Read in full on every connect and patched on every change, so a Pi that was offline when the cook started gets it on reconnect.'

@@ -360,6 +360,9 @@ interface StubOptions {
   /** HAR-85: device ids already registered to the owner when the run starts,
    *  as earlier runs left them. */
   readonly devicesAtStart?: readonly string[];
+  /** HAR-136: device ids (of `devicesAtStart`) with an owner's cook still
+   *  active on them, as a run killed mid-cook leaves them. */
+  readonly activeCookAtStartOn?: readonly string[];
   /** HAR-85: DELETE /devices/{id} misbehaves: `peer-deletes` lets the peer
    *  delete the owner's device (204); `keeps` answers the owner 204 but keeps
    *  the device. */
@@ -498,6 +501,17 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       model: 'Acceptance Rig',
       isActive: true,
       connectionStatus: 'unknown',
+    });
+  }
+  for (const deviceId of options.activeCookAtStartOn ?? []) {
+    cooks.push({
+      id: randomUUID(),
+      userId: 'stub-tenant:stub-user',
+      deviceId,
+      name: `Left active by an earlier run on ${deviceId}`,
+      status: 'active',
+      startTime: '2026-11-18T09:00:00.000Z',
+      meatType: 'acceptance',
     });
   }
   const recipes = new Map<string, Record<string, unknown>>();
@@ -1219,6 +1233,17 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           send(403, errorBody('DEVICE_NOT_OWNED'), route);
           return;
         }
+        // HAR-136: a release is refused while the caller has an active cook on
+        // the device, as the deployed route refuses it.
+        const userId = caller === 'peer' ? 'stub-tenant:stub-peer' : 'stub-tenant:stub-user';
+        if (
+          cooks.some(
+            cook => cook.deviceId === id && cook.userId === userId && cook.status === 'active'
+          )
+        ) {
+          send(409, errorBody('COOK_ACTIVE'), route);
+          return;
+        }
         if (options.deviceDeleteFault !== 'keeps') {
           devices.delete(id);
         }
@@ -1727,11 +1752,13 @@ describe('live acceptance runner (against an in-process stub)', () => {
       )
     ).toHaveLength(1);
     // MG-87: the reconcile query ran once while the cook was active, once after.
+    // HAR-136: the cleanup lists the device's active cooks once more, to stop
+    // any before it releases the device.
     const filtered = stub!.requests.filter(
       r =>
         r.method === 'GET' && /^\/api\/cooks\?deviceId=acceptance-[^&]+&status=active$/.test(r.path)
     );
-    expect(filtered).toHaveLength(2);
+    expect(filtered).toHaveLength(3);
     // The unauthenticated proof sent no Authorization header; all others did.
     const anonymous = stub!.requests.filter(r => r.authorization === undefined);
     expect(anonymous).toHaveLength(1);
@@ -1744,6 +1771,12 @@ describe('live acceptance runner (against an in-process stub)', () => {
   const twinFailures = (route: CookRoute, refused: boolean): number =>
     route === 'GET /cooks' || (refused && route === 'POST /cooks/{cookId}/stop') ? 2 : 1;
 
+  /** HAR-136: the cooks lifecycle group fails the same way. Its always-run
+   *  cleanup lists the device's active cooks and stops any before it releases
+   *  the device, so it fails too when it lists (GET /cooks) or must stop (a stop
+   *  refused, so the cook is still active). */
+  const lifecycleFailures = twinFailures;
+
   it.each(ROUTES)('(b) exits non-zero and names %s when it returns a wrong status', async route => {
     const result = await runAgainstStub({ failRoute: { route, status: 503 } });
 
@@ -1755,7 +1788,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // starts or stops none while its standing cook is there.
     const chart = result.failures.filter(line => line.startsWith('FAIL cook chart ›'));
     expect(chart).toHaveLength(route === 'GET /cooks' ? 1 : 0);
-    expect(result.failures).toHaveLength(2 + twin.length + chart.length);
+    const lifecycle = result.failures.filter(line => line.startsWith('FAIL cooks lifecycle ›'));
+    expect(lifecycle).toHaveLength(lifecycleFailures(route, true));
+    expect(result.failures).toHaveLength(lifecycle.length + 1 + twin.length + chart.length);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
     expect(result.failures[result.failures.length - 1 - chart.length]).toContain(
       'signalr isolation ›'
@@ -2195,6 +2230,41 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(stub!.deviceIds()).toEqual(['backyard-smoker', SIM_DEVICE, CHART_DEVICE].sort());
   });
 
+  it('(a) HAR-136: the sweep stops a cook an earlier run left active before it releases the device', async () => {
+    const left = 'acceptance-cook-20261119101500-aa11bb';
+    const result = await runAgainstStub({ devicesAtStart: [left], activeCookAtStartOn: [left] });
+
+    expect(result.failures).toEqual([]);
+    expect(deviceDeletes()[0]).toEqual({ id: left, as: 'owner' });
+    const sweepCalls = stub!.requests
+      .filter(r => r.path.includes(encodeURIComponent(left)) || r.path.endsWith('/stop'))
+      .map(
+        r => `${r.method} ${r.path.replace(/\/api\/cooks\/[^/]+\/stop$/, '/api/cooks/{id}/stop')}`
+      )
+      .slice(0, 3);
+    // List the device's active cooks, stop the one found, then release.
+    expect(sweepCalls).toEqual([
+      `GET /api/cooks?deviceId=${left}&status=active`,
+      'POST /api/cooks/{id}/stop',
+      `DELETE /api/devices/${left}`,
+    ]);
+    expect(stub!.deviceIds()).not.toContain(left);
+  });
+
+  it('(b) HAR-136: a release with a cook still active is 409 COOK_ACTIVE, so the lifecycle cleanup stops it first', async () => {
+    // The chart step fails, so the lifecycle's own stop is skipped and its
+    // cook is still active when the always-run cleanup releases the device.
+    const result = await runAgainstStub({ chartFault: 'bad-body' });
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.lines).toContain(
+      'PASS cooks lifecycle › always: DELETE /devices/{id} removes acceptance-cook-<runId>'
+    );
+    const cleanup = deviceDeletes().find(d => d.id.startsWith('acceptance-cook-'));
+    expect(cleanup).toEqual({ id: expect.stringMatching(/^acceptance-cook-/), as: 'owner' });
+    expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
+  });
+
   it('HAR-85: the sweep never deletes the standing simulated or chart device, whatever its id', async () => {
     const standing = ['acceptance-standing-sim', 'acceptance-standing-chart'];
     // The stub's own chart device is replaced by `standing[1]`.
@@ -2515,7 +2585,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // HAR-87: the cook-chart group lists the chart device's active cooks.
     const chart = result.failures.filter(line => line.startsWith('FAIL cook chart ›'));
     expect(chart).toHaveLength(route === 'GET /cooks' ? 1 : 0);
-    expect(result.failures).toHaveLength(2 + twin.length + chart.length);
+    const lifecycle = result.failures.filter(line => line.startsWith('FAIL cooks lifecycle ›'));
+    expect(lifecycle).toHaveLength(lifecycleFailures(route, false));
+    expect(result.failures).toHaveLength(lifecycle.length + 1 + twin.length + chart.length);
     expect(result.failures[0]).toContain('cooks lifecycle ›');
     expect(result.failures[result.failures.length - 1 - chart.length]).toContain(
       'signalr isolation ›'
