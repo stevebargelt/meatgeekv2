@@ -53,6 +53,8 @@ export class FakeDevicesContainer {
   beforeReplace?: (id: string) => void;
   /** Runs after a read and before the next delete (to simulate a concurrent delete). */
   beforeDelete?: (id: string) => void;
+  /** HAR-130: runs before each create (to simulate a concurrent writer of the same id). */
+  beforeCreate?: (id: string) => void;
 
   /** Seeds a document as if it had been written earlier. */
   seed(document: { id: string } & object): void {
@@ -160,6 +162,7 @@ export class FakeDevicesContainer {
 
   readonly items = {
     create: async (body: Record<string, unknown> & { id: string }) => {
+      this.beforeCreate?.(body.id);
       this.calls.push({ operation: 'create', id: body.id, partitionKey: body.id });
       this.takeFailure('create', WRITE_CHARGE);
       if (this.documents.has(body.id)) {

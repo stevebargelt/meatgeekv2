@@ -40,6 +40,7 @@ export const ERROR_CODES = [
   'DEVICE_NOT_FOUND',
   'DEVICE_NOT_OWNED',
   'DEVICE_CONFLICT',
+  'CLAIM_REFUSED',
   'CONCURRENT_UPDATE',
   'COOK_ALREADY_ACTIVE',
   'COOK_ID_REUSED',
@@ -75,6 +76,13 @@ export interface CookAlreadyActiveError extends ErrorResponse {
 export interface DeviceTwinUpdateFailedError extends ErrorResponse {
   error: 'DEVICE_TWIN_UPDATE_FAILED';
   cookId: string;
+  reason: string;
+}
+
+/** HAR-130: 503 from POST /devices/claim: a twin read or write failed before
+ *  anything was stored. `reason` is a fixed code. */
+export interface DeviceClaimTwinFailedError extends ErrorResponse {
+  error: 'DEVICE_TWIN_UPDATE_FAILED';
   reason: string;
 }
 

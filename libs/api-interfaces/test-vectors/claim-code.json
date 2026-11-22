@@ -1,0 +1,197 @@
+{
+  "description": "HAR-130 claim-code test vectors, shared by the API (TypeScript) and the device (Go). Normalizing: remove '-' and ASCII whitespace (space, tab, LF, CR, VT, FF); upper-case ASCII a-z only; map O to 0 and I and L to 1; then the result must be exactly 12 symbols of 0123456789ABCDEFGHJKMNPQRSTVWXYZ. Any other character (any non-ASCII one included) is invalid. normalized is null when the input must be refused with 400. hash is lowercase hex SHA-256 of UTF-8 'meatgeek-claim-v1:<deviceId>:<normalized>'; a claimant hash is the same over 'meatgeek-claimant-v1:<userId>'.",
+  "claimants": [
+    {
+      "userId": "tid-bbbb-2222:oid-aaaa-1111",
+      "hash": "fa0f5368e2fd4416f571dea7925c15f499ae00cd395ef8038f30e76b69bf7882"
+    },
+    {
+      "userId": "72f988bf-86f1-41af-91ab-2d7cd011db47:00000000-0000-0000-0000-000000000001",
+      "hash": "6bccad9440e61af3b2009b750577b927fd71cb4cb4719ac79b8cb9e4d192a14c"
+    }
+  ],
+  "cases": [
+    {
+      "note": "canonical display form",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HTV",
+      "normalized": "7K3M9QXR2HTV",
+      "hash": "e1c8e16c63f0fb48da2a038bf11cf7710d6500ce83164a7f17ad38dde42d2283"
+    },
+    {
+      "note": "no hyphens",
+      "deviceId": "meatgeek3",
+      "input": "7K3M9QXR2HTV",
+      "normalized": "7K3M9QXR2HTV",
+      "hash": "e1c8e16c63f0fb48da2a038bf11cf7710d6500ce83164a7f17ad38dde42d2283"
+    },
+    {
+      "note": "lower case",
+      "deviceId": "meatgeek3",
+      "input": "7k3m-9qxr-2htv",
+      "normalized": "7K3M9QXR2HTV",
+      "hash": "e1c8e16c63f0fb48da2a038bf11cf7710d6500ce83164a7f17ad38dde42d2283"
+    },
+    {
+      "note": "spaces, a tab and a newline",
+      "deviceId": "meatgeek3",
+      "input": "  7K3M 9QXR\t2HTV \n",
+      "normalized": "7K3M9QXR2HTV",
+      "hash": "e1c8e16c63f0fb48da2a038bf11cf7710d6500ce83164a7f17ad38dde42d2283"
+    },
+    {
+      "note": "extra hyphens anywhere",
+      "deviceId": "meatgeek3",
+      "input": "7K3M--9QXR-2H-TV",
+      "normalized": "7K3M9QXR2HTV",
+      "hash": "e1c8e16c63f0fb48da2a038bf11cf7710d6500ce83164a7f17ad38dde42d2283"
+    },
+    {
+      "note": "O reads as 0, I and L read as 1",
+      "deviceId": "meatgeek3",
+      "input": "OOOO-IIII-LLLL",
+      "normalized": "000011111111",
+      "hash": "7e70bd74d4e6837cee13f9a03b895f9875450e990b53f6b28efefc78e85ac598"
+    },
+    {
+      "note": "lower-case o, i, l",
+      "deviceId": "meatgeek3",
+      "input": "oooo-iiii-llll",
+      "normalized": "000011111111",
+      "hash": "7e70bd74d4e6837cee13f9a03b895f9875450e990b53f6b28efefc78e85ac598"
+    },
+    {
+      "note": "digits and letters",
+      "deviceId": "meatgeek3",
+      "input": "0123-4567-89AB",
+      "normalized": "0123456789AB",
+      "hash": "fb296b5f0868beffa8e4e26fccb313d9d4057d9fa96afbb60c2dfa49191179a1"
+    },
+    {
+      "note": "letters C to Q, skipping I, L and O",
+      "deviceId": "meatgeek3",
+      "input": "CDEF-GHJK-MNPQ",
+      "normalized": "CDEFGHJKMNPQ",
+      "hash": "f14183c9b6c76eb873b0ef186cee29511e0a90114a7d6c45605efd6ac043c2b1"
+    },
+    {
+      "note": "letters R to Z, skipping U",
+      "deviceId": "meatgeek3",
+      "input": "RSTV-WXYZ-0000",
+      "normalized": "RSTVWXYZ0000",
+      "hash": "696b1fdbdec863715c6b939eb34cebf927a1ec6cfb4a8787e56df5aa3d2bf150"
+    },
+    {
+      "note": "same code, another device: another hash",
+      "deviceId": "meatgeek-sim-1",
+      "input": "7K3M-9QXR-2HTV",
+      "normalized": "7K3M9QXR2HTV",
+      "hash": "9d272fa19d4d049c0c019fa1345d8fee8e1e03d7d903c696c96f3d9b8e4bcffe"
+    },
+    {
+      "note": "device id with the allowed punctuation",
+      "deviceId": "pi:garage.01_a",
+      "input": "ZZZZ-ZZZZ-ZZZZ",
+      "normalized": "ZZZZZZZZZZZZ",
+      "hash": "ae32336abe11cb05f3516cb2c4fd1f693c493a626da546c78855fe3c951bbd5e"
+    },
+    {
+      "note": "empty",
+      "deviceId": "meatgeek3",
+      "input": "",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "11 symbols",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HT",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "13 symbols",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HTVW",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "U is not in the alphabet",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HTU",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "punctuation other than a hyphen",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HT*",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "underscore is not a separator",
+      "deviceId": "meatgeek3",
+      "input": "7K3M_9QXR_2HTV",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "dot is not a separator",
+      "deviceId": "meatgeek3",
+      "input": "7K3M.9QXR.2HTV",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "non-ASCII letter",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HTÉ",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "separators only",
+      "deviceId": "meatgeek3",
+      "input": "----",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "two codes",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HTV-7K3M-9QXR-2HTV",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "sharp s: upper-casing must be ASCII-only, or it would become SS",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2Hß",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "no-break space is not ASCII whitespace",
+      "deviceId": "meatgeek3",
+      "input": "7K3M 9QXR-2HTV",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "full-width O is not O",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HTＯ",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "note": "dotless i is not I",
+      "deviceId": "meatgeek3",
+      "input": "7K3M-9QXR-2HTı",
+      "normalized": null,
+      "hash": null
+    }
+  ]
+}

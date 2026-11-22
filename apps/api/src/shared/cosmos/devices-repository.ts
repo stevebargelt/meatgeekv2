@@ -108,6 +108,7 @@ const DEVICE_FIELDS = [
   'configuration',
   'connectionStatus',
   'firmware',
+  'claimedAt',
 ] as const satisfies readonly (keyof Device)[];
 
 type UnmappedDeviceField = Exclude<keyof Device, (typeof DEVICE_FIELDS)[number]>;
@@ -149,6 +150,20 @@ export type DeviceOwnership =
 export type RegisterDeviceResult =
   | { readonly outcome: 'created'; readonly device: Device; readonly requestCharge: number }
   | { readonly outcome: 'conflict'; readonly requestCharge: number };
+
+/**
+ * HAR-130: a claim's outcome.
+ *   - `created`: this call created the document.
+ *   - `ownedByCaller`: the id is already the caller's device (a retry). Its
+ *     stored document is returned.
+ *   - `foreign`: the id is someone else's device.
+ *   - `nameConflict`: the caller already has another device with that name.
+ */
+export type ClaimDeviceResult =
+  | { readonly outcome: 'created'; readonly device: Device; readonly requestCharge: number }
+  | { readonly outcome: 'ownedByCaller'; readonly device: Device; readonly requestCharge: number }
+  | { readonly outcome: 'foreign'; readonly requestCharge: number }
+  | { readonly outcome: 'nameConflict'; readonly requestCharge: number };
 
 /** The fields PATCH may change. */
 export interface DeviceUpdate {
@@ -322,6 +337,54 @@ export class DevicesRepository {
       }
       throw new DevicesStoreError(status, requestCharge + chargeOf(error));
     }
+  }
+
+  /**
+   * HAR-130: stores a claimed device with Cosmos `create` (never upsert).
+   *
+   * The owner's device list is read first. If it already holds this id, the
+   * claim is a retry and the stored device is the answer, so a repeat never
+   * trips the name rule over its own name. Otherwise another of the owner's
+   * devices with the same name is `nameConflict`. A 409 on the create (the id
+   * is taken) is settled by a point read: the caller's device is
+   * `ownedByCaller` (a concurrent retry), anyone else's is `foreign`. A
+   * document deleted between the 409 and the read is also `foreign`: the
+   * claimant may simply claim again.
+   */
+  async claimDevice(device: Device): Promise<ClaimDeviceResult> {
+    const owned = await this.listDevicesByOwner(device.userId);
+    let requestCharge = owned.requestCharge;
+    const already = owned.devices.find(existing => existing.id === device.id);
+    if (already) {
+      return { outcome: 'ownedByCaller', device: already, requestCharge };
+    }
+    if (owned.devices.some(existing => existing.name === device.name)) {
+      return { outcome: 'nameConflict', requestCharge };
+    }
+
+    try {
+      const response = await this.container.items.create<StoredDevice>(device);
+      requestCharge += response.requestCharge;
+      return { outcome: 'created', device: toDevice(response.resource ?? device), requestCharge };
+    } catch (error) {
+      const status = statusCodeOf(error);
+      requestCharge += chargeOf(error);
+      if (status !== 409) {
+        throw new DevicesStoreError(status, requestCharge);
+      }
+    }
+
+    let existing: Awaited<ReturnType<DevicesRepository['readDocument']>>;
+    try {
+      existing = await this.readDocument(device.id);
+    } catch (error) {
+      throw new DevicesStoreError(statusCodeOf(error), requestCharge + chargeOf(error));
+    }
+    requestCharge += existing.requestCharge;
+    if (existing.document && existing.document.userId === device.userId) {
+      return { outcome: 'ownedByCaller', device: toDevice(existing.document), requestCharge };
+    }
+    return { outcome: 'foreign', requestCharge };
   }
 
   /**

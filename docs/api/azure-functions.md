@@ -25,6 +25,7 @@ yet wired.
 | `getTemperatureHistory`  | HTTP `GET`    | `temperatures/history`            | A page of a caller's device's readings, by continuation token |
 | `getDevices`             | HTTP `GET`    | `devices`                         | List the caller's devices                                     |
 | `registerDevice`         | HTTP `POST`   | `devices`                         | Register a device to the caller                               |
+| `claimDevice`            | HTTP `POST`   | `devices/claim`                   | HAR-130 — claim a device with the code it shows (403 else)    |
 | `getDevice`              | HTTP `GET`    | `devices/{id}`                    | One of the caller's devices (404 otherwise)                   |
 | `updateDevice`           | HTTP `PATCH`  | `devices/{id}`                    | Change name / location / configuration                        |
 | `deleteDevice`           | HTTP `DELETE` | `devices/{id}`                    | HAR-85 — delete one of the caller's devices                   |
@@ -554,7 +555,10 @@ TEMPERATURE_BROADCAST_CONSUMER_GROUP=api-broadcast
 # (api-version 2021-04-12) under the managed identity; see
 # apps/api/src/shared/iothub/device-twin.ts. Missing or not a bare hostname, a
 # start or stop answers 503 DEVICE_TWIN_UPDATE_FAILED with reason
-# iothub_configuration_failed (the cook is still written). The identity's
+# iothub_configuration_failed (the cook is still written). claimDevice
+# (HAR-130) reads the twin's reported claim-code hash and patches its desired
+# claim properties through the same client; without the setting a claim
+# answers 503 DEVICE_TWIN_UPDATE_FAILED and nothing is stored. The identity's
 # IoT Hub Twin Contributor grant is switched by api_device_twin_writer_enabled
 # (default false): ON in dev since HAR-64, OFF in prod, where twin writes fail.
 IOTHUB_SERVICE_HOSTNAME=<iot-hub-hostname>

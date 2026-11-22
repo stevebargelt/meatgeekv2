@@ -57,7 +57,7 @@ tags:
   - name: temperatures
     description: The latest and historical readings of the caller's devices.
   - name: devices
-    description: Register and manage the caller's devices.
+    description: Claim, register and manage the caller's devices.
   - name: users
     description: The authenticated caller's own profile.
   - name: recipes
@@ -84,6 +84,8 @@ paths:
     $ref: './paths/temperatures.yaml#/temperatures-history'
   /devices:
     $ref: './paths/devices.yaml#/devices-collection'
+  /devices/claim:
+    $ref: './paths/devices.yaml#/device-claim'
   /devices/{id}:
     $ref: './paths/devices.yaml#/device-item'
   /users/me:
@@ -160,6 +162,8 @@ components:
       $ref: './components/schemas/common.yaml#/SignalRUnavailableError'
     DeviceTwinUpdateFailedError:
       $ref: './components/schemas/common.yaml#/DeviceTwinUpdateFailedError'
+    DeviceClaimTwinFailedError:
+      $ref: './components/schemas/common.yaml#/DeviceClaimTwinFailedError'
     CosmosHealthResponse:
       $ref: './components/schemas/common.yaml#/CosmosHealthResponse'
     TemperatureUnit:
@@ -206,6 +210,8 @@ components:
       $ref: './components/schemas/device.yaml#/DeviceConfigurationPatch'
     RegisterDeviceRequest:
       $ref: './components/schemas/device.yaml#/RegisterDeviceRequest'
+    ClaimDeviceRequest:
+      $ref: './components/schemas/device.yaml#/ClaimDeviceRequest'
     UpdateDeviceRequest:
       $ref: './components/schemas/device.yaml#/UpdateDeviceRequest'
 

@@ -125,12 +125,16 @@ describe('DeviceTwinClient.getTwin', () => {
     expect(scopes).toEqual([IOTHUB_TOKEN_SCOPE]);
     expect(IOTHUB_TOKEN_SCOPE).toBe('https://iothubs.azure.net/.default');
 
-    expect(twin).toEqual({ etag: TWIN_BODY.etag, desired: TWIN_BODY.properties.desired });
+    expect(twin).toEqual({
+      etag: TWIN_BODY.etag,
+      desired: TWIN_BODY.properties.desired,
+      reported: TWIN_BODY.properties.reported,
+    });
   });
 
-  it('treats a twin with no desired properties as an empty desired set', async () => {
+  it('treats a twin with no desired or reported properties as empty sets', async () => {
     const { client: twins } = client(() => json({ etag: 'e1', properties: {} }));
-    expect(await twins.getTwin('pi')).toEqual({ etag: 'e1', desired: {} });
+    expect(await twins.getTwin('pi')).toEqual({ etag: 'e1', desired: {}, reported: {} });
   });
 
   it('keeps a 404 (no device identity) distinct', async () => {
