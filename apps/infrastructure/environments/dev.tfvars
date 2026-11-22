@@ -228,7 +228,7 @@ api_device_twin_writer_enabled = true
 
 # HAR-131 IoT Hub Device Provisioning Service, linked to the hub with the DPS's
 # own managed identity. Its one role (IoT Hub Registry Contributor on the hub)
-# is already allowlisted and in the live ABAC condition. The CI enroller grant
-# (dps_ci_enroller_enabled) stays OFF here until the owner re-runs bootstrap.sh
-# with Device Provisioning Service Data Contributor in the allowlist.
+# is already allowlisted and in the live ABAC condition.
 dps_enabled = true
+# HAR-131 CI enroller grant: on since the owner re-ran bootstrap.sh on 2026-11-22.
+dps_ci_enroller_enabled = true

@@ -282,7 +282,7 @@ Two consequences of how it is built:
 | Variable                  | Default | dev    | What it does                                                                                                                                                            |
 | ------------------------- | ------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dps_enabled`             | `false` | `true` | Creates the DPS, its identity-based link to the hub, and the DPS identity's `IoT Hub Registry Contributor` grant on the hub. Prod does not set it.                       |
-| `dps_ci_enroller_enabled` | `false` | off    | Grants the app-deploy identity `Device Provisioning Service Data Contributor` on the DPS, so CI can manage enrollments. Needs `dps_enabled` and `app_deploy_principal_object_id` too. |
+| `dps_ci_enroller_enabled` | `false` | `true` | Grants the app-deploy identity `Device Provisioning Service Data Contributor` on the DPS, so CI can manage enrollments. Needs `dps_enabled` and `app_deploy_principal_object_id` too. |
 
 **Switching on `dps_ci_enroller_enabled` needs a `bootstrap.sh` re-run first.**
 The role is in `bootstrap/tf-managed-role-allowlist.tsv`, but the infra-apply

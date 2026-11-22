@@ -671,6 +671,12 @@ hub (`azurerm_role_assignment.dps_hub_registry_contributor`, on with
 `dps_enabled`), needs no re-run: that role is already in the live condition
 (HAR-42).
 
+**Done for dev (HAR-137).** The owner re-ran `bootstrap.sh` from `main` on
+2026-11-22. It finished with "Bootstrap complete" and printed no allowlist
+change, so the committed GUID `dfce44e4-17b7-4bd1-a6d1-04996ec95633` stands, and
+`dev.tfvars` now sets `dps_ci_enroller_enabled = true`, so the dev grant is on.
+Prod still does not set it.
+
 ### Dev acceptance peer identity — zero roles, second caller for HAR-55 (HAR-61)
 
 **What it is.** A dedicated Entra app registration and service principal,
