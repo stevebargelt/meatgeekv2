@@ -141,6 +141,16 @@ describe('app-deploy-dev.yml web-acceptance: leak check, then upload (HAR-126)',
     );
     expect(stale).toEqual([]);
   });
+
+  it("ci-cd.md's web-acceptance paragraph puts the leak check before the upload and names the diagnostic", () => {
+    const doc = fs.readFileSync(path.join(REPO_ROOT, 'docs/development/ci-cd.md'), 'utf8');
+    const para = doc.split('\n').find(l => l.startsWith('**The web acceptance job (HAR-101).**'));
+    expect(para).toBeDefined();
+    // HAR-126 review: the check is no longer the job's last step, and it scans the diagnostics too.
+    expect(para).not.toMatch(/The last step checks/);
+    expect(para).toMatch(/sign-in-diagnostic\.txt/);
+    expect(para).toMatch(/before the failure upload/);
+  });
 });
 
 // ---------------------------------------------------------------------------
