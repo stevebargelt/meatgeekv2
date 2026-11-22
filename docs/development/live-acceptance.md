@@ -570,6 +570,12 @@ every value typed are replaced by `[redacted]` wherever they appear, even in
 an error Microsoft echoes. `live/sign-in-diagnostic.test.ts` proves it on a
 fake page whose inputs hold those values and whose URL carries tokens.
 
+In CI the file is uploaded on failure, in the `web-acceptance-diagnostics`
+artifact with the screenshot, only after the job's leak check has passed on
+it: the check scans every diagnostic for the same secrets as the proof's log,
+and deletes one it finds anything in before the upload step runs (see
+[Secrets in the CI log](#secrets-in-the-ci-log)).
+
 ## Running it locally against dev
 
 The suite takes six inputs, all from the environment. If any is missing it
@@ -739,11 +745,12 @@ inside the run step, and takes the acceptance user's UPN from the
 TOTP secret from its `ACCEPTANCE_USER_PASSWORD` and
 `ACCEPTANCE_USER_TOTP_SECRET` secrets. The run summary gets one `PASS` or
 `FAIL` line per step (printed by `apps/web-e2e/live/step-reporter.ts`), the two
-`METRIC` lines and Playwright's summary line. On failure the proof's
-screenshot is uploaded as the `web-acceptance-screenshots` artifact, kept 7
-days. A last step checks the proof's raw output for leaked secrets (see
-[Secrets in the CI log](#secrets-in-the-ci-log)). You can still run it by hand,
-below.
+`METRIC` lines and Playwright's summary line. A step then checks the proof's
+raw output and its sign-in diagnostics for leaked secrets (see
+[Secrets in the CI log](#secrets-in-the-ci-log)). On failure, and only after
+that check has finished, the proof's screenshot and every sign-in diagnostic
+that passed the check are uploaded as the `web-acceptance-diagnostics`
+artifact, kept 7 days. You can still run it by hand, below.
 
 ### Inputs
 
@@ -774,10 +781,12 @@ only once sign-in has finished and the browser is back on the app; it is
 
 GitHub masks the password and TOTP secret (repository secrets) and the
 connection string and its key (`::add-mask::`) in the job log, so the masked
-log cannot show whether the proof printed one. The `web-acceptance` job's last
-step, which runs whether the proof passed or not, checks the proof's **raw**
-output instead (the file `tee` wrote, before masking) and fails the job if it
-holds:
+log cannot show whether the proof printed one. The `web-acceptance` job's leak
+check (`.github/scripts/web-acceptance-leak-check.cjs`), which runs whether the
+proof passed or not, checks the proof's **raw** output instead (the file `tee`
+wrote, before masking), and every
+`dist/.playwright/web-e2e-live/test-results/**/sign-in-diagnostic.txt`, and
+fails the job if one holds:
 
 - a connection string's `SharedAccessKey=` field;
 - the password;
@@ -786,8 +795,24 @@ holds:
   1 min after it, which covers the job's 30 min timeout. A code is matched
   only as a whole 6-digit number.
 
-It prints one line per check (`leak check: password: none`, and so on) and,
-on a hit, line numbers only, never the text it found.
+It prints one line per file and check (`leak check: proof log: password:
+none`, and so on) and, on a hit, line numbers only, never the text it found.
+
+It runs before the failure upload (HAR-126). A sign-in diagnostic with a
+finding is deleted, so the upload cannot include it. If the check cannot finish
+(it exits 2), it deletes every diagnostic it did not prove clean and the upload
+step is skipped, because it uploads only when the check reports `checked`.
+
+To run it locally on a directory of files, from the repository root:
+
+```bash
+ACCEPTANCE_USER_PASSWORD=... ACCEPTANCE_USER_TOTP_SECRET=... \
+  node .github/scripts/web-acceptance-leak-check.cjs <proof-log> '<dir>/**/sign-in-diagnostic.txt'
+```
+
+It exits 0 when nothing is found, 1 when something is (and the diagnostics
+with findings are deleted), and 2 when it could not finish. A missing proof
+log is reported and skipped, not an error.
 
 ### Running it locally against production
 
