@@ -27,6 +27,7 @@ import type { Recipe } from '@meatgeekv2/api-interfaces';
 
 import { CosmosAdapter } from './cosmos-adapter';
 import {
+  closeEmulatorTier,
   createEmulatorContainer,
   EMULATOR_TIER_DATABASE,
   emulatorTierDatabase,
@@ -183,10 +184,8 @@ describe('HAR-36 recipes repository against the Cosmos emulator', () => {
     repository = steppedRepository(container);
   });
 
-  afterAll(async () => {
-    if (client) {
-      client.dispose();
-    }
+  afterAll(() => {
+    closeEmulatorTier(client);
   });
 
   it('creates the container with the Terraform partition key (/userId)', async () => {
