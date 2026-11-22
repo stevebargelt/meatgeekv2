@@ -157,6 +157,61 @@ Errors name HTTP status codes and DPS `errorCode`s, never response bodies.
 `simdevice` has the same DPS mode, with the same variables and the same
 `simdevice identity init` (see below).
 
+#### Claim code
+
+A user claims a device (`POST /devices/claim`) only with a code the device
+itself gives out. In DPS mode the device mints the code, keeps it on disk, and
+reports only its hash in the twin; the API compares the hash of what the user
+types with the reported one. Connection-string mode does none of this and
+reports nothing about claims. The design is in
+`learnings/decisions/har-130-device-provisioning-and-claim.md`.
+
+- **The code:** 12 Crockford base32 symbols (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`)
+  from `crypto/rand`, shown `XXXX-XXXX-XXXX`. Valid for 24 hours from minting.
+- **The hash:** lowercase hex SHA-256 of
+  `meatgeek-claim-v1:<deviceId>:<code without hyphens>`, the same as
+  `apps/api/src/shared/devices/claim-code.ts`. Both sides test against
+  `libs/api-interfaces/test-vectors/claim-code.json`.
+- **Twin properties** (flat strings, in the same reported patch as the cook
+  properties, so neither ever drops the other): the device reports
+  `claimCodeHash`, `claimExpiresAt` (RFC 3339 UTC) and `claimGeneration`; it
+  reads desired `claimGeneration` (absent = `"0"`) and `claimConsumedCodeHash`.
+  It never reads desired `claimClaimantHash`.
+- **The rule**, on every full twin sync and every desired patch:
+  - **claimed** (the stored hash is desired `claimConsumedCodeHash` and the
+    generations match): nothing changes;
+  - **released** (desired `claimGeneration` differs from the stored one, as
+    after the API raises it): a new code under the desired generation;
+  - **at process start**, unclaimed: a new code if there is none or it has
+    expired, otherwise the stored one is reported again (restoring a twin that
+    lost it).
+
+  A code that expires while the pusher runs is not replaced until the next
+  start. The onboarding command restarts the service, so running it again
+  always yields a valid code.
+
+- **File:** `<state dir>/claim/claim.json` (the directory `0700`, the file
+  `0600`), `{"deviceId","code","codeHash","expiresAt","generation","claimed"}`,
+  written atomically and always **before** its hash is reported.
+- The code never appears in a log line, a span or a telemetry message. Only
+  `claim-code` prints it.
+
+**`claim-code`** prints the current code as one JSON line. It only reads the
+file: it never mints a code and never connects.
+
+```bash
+meatgeek-pusher claim-code [--state-dir /var/lib/meatgeek-pusher]
+# {"deviceId":"meatgeek-pi-7","state":"unclaimed","claimCode":"7K3M-9QXR-2HTV","expiresAt":"2026-11-23T12:00:00Z"}
+# {"deviceId":"meatgeek-pi-7","state":"claimed"}
+# {"deviceId":"meatgeek-pi-7","state":"expired"}
+```
+
+Exit `0` for any of the three states, `1` the file cannot be read, `2` usage,
+`3` there is no claim file yet (the device has not read its twin in DPS mode).
+`--state-dir` defaults to `MEATGEEK_STATE_DIR`. `simdevice claim-code` is the
+same; `simdevice --twin --count 0` in DPS mode mints and reports a code and
+exits, and its `MEATGEEK_STATE_DIR` keeps the code between runs.
+
 ### Environment variables
 
 | Variable                       | Purpose                                                          | Default                |

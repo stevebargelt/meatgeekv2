@@ -1,11 +1,14 @@
 // Package dpsmode is the device path shared by the pusher and simdevice when
 // the device provisions itself: its configuration (the MEATGEEK_* variables),
-// the IoT Hub client that ties internal/identity, internal/provision and
-// internal/iothub together, and the `identity init` subcommand.
+// the IoT Hub client that ties internal/identity, internal/provision,
+// internal/claim and internal/iothub together, and the `identity init` and
+// `claim-code` subcommands.
 package dpsmode
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/claim"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/identity"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
@@ -83,6 +87,9 @@ func (c Config) Validate() error {
 // the cached assignment when there is one, otherwise a fresh registration.
 // When the hub refuses the connection as not authorised, the client deletes
 // the cached assignment and registers once more before its next connect.
+// When the twin is on (iothub.WithCookTwin in opts), the client also keeps the
+// device's claim code under cfg.StateDir/claim and reports its hash
+// (internal/claim); an iothub.WithClaim in opts replaces that.
 // provOpts and opts are passed through (tests point them at fakes).
 func NewClient(cfg Config, clk clock.Clock, provOpts []provision.Option, opts ...iothub.Option) (*iothub.AzureClient, error) {
 	if err := cfg.Validate(); err != nil {
@@ -99,7 +106,8 @@ func NewClient(cfg Config, clk clock.Clock, provOpts []provision.Option, opts ..
 		cfg:  cfg,
 		prov: provision.New(cert, append([]provision.Option{provision.WithClock(clk)}, provOpts...)...),
 	}
-	return iothub.NewX509Client("", cfg.DeviceID, cert, append(opts, iothub.WithClock(clk), iothub.WithHubResolver(r.hub))...)
+	all := append([]iothub.Option{iothub.WithClaim(claim.NewDevice(cfg.StateDir, cfg.DeviceID, clk, rand.Reader))}, opts...)
+	return iothub.NewX509Client("", cfg.DeviceID, cert, append(all, iothub.WithClock(clk), iothub.WithHubResolver(r.hub))...)
 }
 
 // resolver is the iothub.HubResolver for DPS mode.
@@ -183,6 +191,77 @@ func IdentityCommand(prog string, args []string, getenv func(string) string, std
 	}
 	if _, err := stdout.Write(certPEM); err != nil {
 		fmt.Fprintf(stderr, "%s identity init: write stdout: %v\n", prog, err)
+		return 1
+	}
+	return 0
+}
+
+// Exit codes of ClaimCodeCommand besides 0, 1 and 2.
+const (
+	// ExitNoClaim: there is no claim file yet (the device has not minted a
+	// code: it has not run in DPS mode, or has not reached the twin yet).
+	ExitNoClaim = 3
+)
+
+// ClaimCodeLine is the one JSON line ClaimCodeCommand prints. ClaimCode and
+// ExpiresAt are set only when State is "unclaimed".
+type ClaimCodeLine struct {
+	DeviceID  string `json:"deviceId"`
+	State     string `json:"state"` // unclaimed, claimed or expired
+	ClaimCode string `json:"claimCode,omitempty"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+}
+
+// ClaimCodeCommand runs `<prog> claim-code [--state-dir <dir>]`; args are those
+// after "claim-code". It only reads the claim file: it never mints a code and
+// never connects. It prints one ClaimCodeLine to stdout and returns the exit
+// code: 0 (whatever the state), 1 when the claim file cannot be read, 2 on a
+// usage error, ExitNoClaim when there is no claim file yet.
+func ClaimCodeCommand(prog string, args []string, getenv func(string) string, stdout, stderr io.Writer, clk clock.Clock) int {
+	if clk == nil {
+		clk = clock.Real()
+	}
+	env := FromEnv(getenv)
+	fs := flag.NewFlagSet(prog+" claim-code", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	stateDir := fs.String("state-dir", env.StateDir, "the state directory; the claim code lives in <dir>/"+claim.DirName+" (default $"+EnvStateDir+" or "+DefaultStateDir+")")
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "usage: %s claim-code [--state-dir <dir>]\n"+
+			"Prints the device's current claim code as one JSON line. Never mints a code or connects.\n", prog)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "%s claim-code: unexpected arguments %q\n", prog, fs.Args())
+		return 2
+	}
+	s, err := claim.Load(*stateDir)
+	if errors.Is(err, claim.ErrNoClaim) {
+		fmt.Fprintf(stderr, "%s claim-code: %v; the device mints its code when it first reads its twin in DPS mode\n", prog, err)
+		return ExitNoClaim
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "%s claim-code: %v\n", prog, err)
+		return 1
+	}
+	line := ClaimCodeLine{DeviceID: s.DeviceID}
+	switch {
+	case s.Claimed:
+		line.State = "claimed"
+	case !clk.Now().Before(s.ExpiresAt):
+		line.State = "expired"
+	default:
+		line.State = "unclaimed"
+		line.ClaimCode = claim.Format(s.Code)
+		line.ExpiresAt = s.Reported().ExpiresAt
+	}
+	if err := json.NewEncoder(stdout).Encode(line); err != nil {
+		fmt.Fprintf(stderr, "%s claim-code: write stdout: %v\n", prog, err)
 		return 1
 	}
 	return 0

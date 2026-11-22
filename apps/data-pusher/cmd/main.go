@@ -26,7 +26,9 @@
 // registers with the Device Provisioning Service and connects with its
 // certificate; or connection-string mode (IOTHUB_CONNECTION_STRING set). The
 // subcommand `meatgeek-pusher identity init` creates the identity and prints
-// only its certificate.
+// only its certificate. In DPS mode the device also mints a claim code, keeps
+// it under the state dir and reports only its hash in the twin (goal HAR-130);
+// `meatgeek-pusher claim-code` prints the current code.
 package main
 
 import (
@@ -35,6 +37,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -92,10 +95,10 @@ type Config struct {
 }
 
 func main() {
-	// `identity init` prints only the certificate on stdout: it runs before
-	// anything else can write there.
-	if len(os.Args) > 1 && os.Args[1] == "identity" {
-		os.Exit(dpsmode.IdentityCommand("meatgeek-pusher", os.Args[2:], os.Getenv, os.Stdout, os.Stderr, clock.Real()))
+	// The subcommands own stdout: they run before anything else can write
+	// there.
+	if code, ok := subcommand(os.Args[1:], os.Getenv, os.Stdout, os.Stderr, clock.Real()); ok {
+		os.Exit(code)
 	}
 
 	config := loadConfig(os.Args[1:], os.Getenv)
@@ -120,6 +123,22 @@ func main() {
 	}
 
 	logrus.Info("MeatGeek Data Pusher stopped")
+}
+
+// subcommand runs `identity init` (prints only the certificate) or
+// `claim-code` (only reads the claim file and prints one JSON line) when args
+// name one, and returns its exit code; ok is false for the service itself.
+func subcommand(args []string, getenv func(string) string, stdout, stderr io.Writer, clk clock.Clock) (code int, ok bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	switch args[0] {
+	case "identity":
+		return dpsmode.IdentityCommand("meatgeek-pusher", args[1:], getenv, stdout, stderr, clk), true
+	case "claim-code":
+		return dpsmode.ClaimCodeCommand("meatgeek-pusher", args[1:], getenv, stdout, stderr, clk), true
+	}
+	return 0, false
 }
 
 // loadConfig reads the configuration from flags, each defaulting to its

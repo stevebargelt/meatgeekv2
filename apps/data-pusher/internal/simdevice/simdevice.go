@@ -8,7 +8,9 @@
 // or, in DPS mode ($MEATGEEK_DPS_ID_SCOPE and $MEATGEEK_DEVICE_ID), exactly as
 // the Pi does: its own X.509 identity under $MEATGEEK_STATE_DIR, registered
 // with the Device Provisioning Service (internal/dpsmode). `simdevice identity
-// init` creates that identity and prints only its certificate.
+// init` creates that identity and prints only its certificate. In DPS mode
+// with --twin it also mints and reports a claim code exactly as the Pi does
+// (internal/claim), and `simdevice claim-code` prints the current code.
 // The cmd/simdevice binary is a thin wrapper around Main.
 package simdevice
 
@@ -145,6 +147,9 @@ func Main(ctx context.Context, env Env) int {
 	if len(env.Args) > 0 && env.Args[0] == "identity" {
 		return dpsmode.IdentityCommand("simdevice", env.Args[1:], env.Getenv, env.Stdout, env.Stderr, clk)
 	}
+	if len(env.Args) > 0 && env.Args[0] == "claim-code" {
+		return dpsmode.ClaimCodeCommand("simdevice", env.Args[1:], env.Getenv, env.Stdout, env.Stderr, clk)
+	}
 
 	connStr := env.Getenv(EnvConnectionString)
 	redact := newRedactor(connStr)
@@ -166,6 +171,7 @@ func Main(ctx context.Context, env Env) int {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: simdevice [--twin [--timeout DURATION]] [--count N] [--interval DURATION] [--inflight N] [--start RFC3339 --step DURATION] [--grill °F]\n"+
 			"       simdevice identity init --device-id <id> [--state-dir <dir>]\n"+
+			"       simdevice claim-code [--state-dir <dir>]\n"+
 			"Sends synthetic readings as the IoT Hub device named by $%s, or in DPS mode ($%s and $%s) as the device with its own X.509 identity.\n", EnvConnectionString, dpsmode.EnvIDScope, dpsmode.EnvDeviceID)
 		fs.PrintDefaults()
 	}
