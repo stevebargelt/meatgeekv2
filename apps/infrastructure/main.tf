@@ -597,8 +597,8 @@ resource "azurerm_role_assignment" "dps_hub_registry_contributor" {
 # manage enrollments as the app-deploy identity under OIDC. Nothing is stored:
 # no DPS shared access policy, no Key Vault, no repo secret.
 # Guarded by count on THREE conditions: var.dps_ci_enroller_enabled, the DPS
-# existing (var.dps_enabled), and the app-deploy principal being known. Switched
-# off by default and in every tfvars. The role is in
+# existing (var.dps_enabled), and the app-deploy principal being known. Off by
+# default and in prod; dev.tfvars switches it on (HAR-137). The role is in
 # bootstrap/tf-managed-role-allowlist.tsv, but the live ABAC condition on the
 # infra-apply identity only learns it when bootstrap.sh is re-run; setting
 # dps_ci_enroller_enabled in a tfvars before that re-run fails every dev apply
