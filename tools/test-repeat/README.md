@@ -106,7 +106,7 @@ The limit: a static scan cannot see a name computed at run time
 (`process.env[key]`, `os.Getenv(EnvConst)`), a variable a tool reads itself
 (`NODE_EXTRA_CA_CERTS`, `TF_*`, `GOFLAGS`, `PLAYWRIGHT_*`), or what the runner
 image sets that the allowlist does not cover. The proof for those is a harness
-change's CI run, which runs every suite once in CI's own environment.
+change's CI run, which runs every suite at least once in CI's own environment.
 
 ### `--parallel K` (load)
 
