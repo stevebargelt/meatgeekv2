@@ -41,9 +41,15 @@ pusher. It is not used by these scripts.
 | `--hub <name>`            | the only `Microsoft.Devices/IotHubs` in the resource group |
 | `--auth-type key\|login`  | `key`. Passed to every `az iot dps …` and `az iot hub …` call |
 
-If `--dps` or `--hub` is left out and the resource group has none or more than
-one of that resource, the script stops with exit 1 and lists what it found.
-Pass the name to choose one.
+The scripts list the resource group's DPSs and hubs (`az resource list`)
+whether or not you pass the names. If `--dps` or `--hub` is left out and the
+resource group has none or more than one of that resource, the script stops
+with exit 1 and lists what it found; pass the name to choose one. If a name
+you pass is not in the resource group, the script stops with exit 1 before it
+reads or changes anything, so a mistyped hub can never make a device look
+missing. An `az iot` error that says the extension cannot find the DPS or hub,
+or cannot find a usable access policy on it, is also exit 1, never "no such
+device".
 
 `--auth-type key` lets `az` fetch the DPS and hub access keys with your ARM
 rights. It suits the owner, who is subscription Owner. `--auth-type login`
@@ -143,7 +149,7 @@ apps/data-pusher/deploy/revoke-device.sh --auth-type login --device-id ci-sim-1
 | 2    | usage error, or a certificate refused (not a certificate, or the CN is not the device id) |
 | 3    | not found: revoke found neither an enrollment nor a hub identity           |
 | 4    | refused: the device is revoked and `REINSTATE=1` is not set (enrol)         |
-| 1    | anything else: `az` or the extension missing, DPS or hub discovery failed, an `az` call failed. The message names the `az` command and its exit status |
+| 1    | anything else: `az` or the extension missing, DPS or hub discovery failed or a named DPS or hub is not in the resource group, an `az` call failed. The message names the `az` command and its exit status |
 
 ## Tests
 

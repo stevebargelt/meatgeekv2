@@ -100,9 +100,14 @@ az_fail() {
   exit 1
 }
 
-# True when the last az_call failed because the thing does not exist. az
-# exits 3 for ResourceNotFoundError; older extension versions say so in text.
+# True when the last az_call failed because the device or enrollment does not
+# exist. az exits 3 for ResourceNotFoundError; older extension versions say so
+# in text. The azure-iot extension raises the same error when it cannot find
+# the DPS or hub itself ("Unable to find ...") or a usable access policy on it
+# ("Unable to discover a priviledged policy ..."); those are failures, not a
+# missing device, or a revoke against the wrong hub would report success.
 az_not_found() {
+  grep -qiE 'unable to (find|discover)' <<<"$AZ_ERR" && return 1
   [[ $AZ_RC -eq 3 ]] && return 0
   grep -qiE 'not ?found|(^|[^0-9])404([^0-9]|$)|does not exist' <<<"$AZ_ERR"
 }
@@ -113,10 +118,13 @@ az_write() {
   [[ $AZ_RC -eq 0 ]] || az_fail
 }
 
-# find_one <resource type> <label> <flag>: prints the name of the only
-# resource of that type in the resource group, or exits 1.
+# find_one <resource type> <label> <flag> <name-or-empty>: lists the resources
+# of that type in the resource group. With a name, prints that name if it is
+# in the list and exits 1 if it is not, so a mistyped --dps or --hub fails
+# here instead of making every device look missing. Without a name, prints the
+# only one, or exits 1 when there are none or several.
 find_one() {
-  local type=$1 label=$2 flag=$3
+  local type=$1 label=$2 flag=$3 want=$4
   az_call "resource list ($label)" resource list --resource-group "$RESOURCE_GROUP" \
     --resource-type "$type" --query "[].name" --output tsv
   [[ $AZ_RC -eq 0 ]] || az_fail
@@ -125,6 +133,22 @@ find_one() {
   while IFS= read -r line; do
     [[ -n "$line" ]] && names+=("$line")
   done <<<"$AZ_OUT"
+  if [[ -n "$want" ]]; then
+    local lower_want lower_name
+    lower_want=$(tr '[:upper:]' '[:lower:]' <<<"$want")
+    for line in ${names[@]+"${names[@]}"}; do
+      # Azure resource names are case-insensitive.
+      lower_name=$(tr '[:upper:]' '[:lower:]' <<<"$line")
+      if [[ "$lower_name" == "$lower_want" ]]; then
+        printf '%s\n' "$line"
+        return
+      fi
+    done
+    if [[ ${#names[@]} -eq 0 ]]; then
+      die 1 "no $label named $want in resource group $RESOURCE_GROUP: it has no $label ($type)"
+    fi
+    die 1 "no $label named $want in resource group $RESOURCE_GROUP (it has: ${names[*]}); check $flag"
+  fi
   case ${#names[@]} in
     1) printf '%s\n' "${names[0]}" ;;
     0) die 1 "no $label ($type) in resource group $RESOURCE_GROUP; pass $flag <name>" ;;
@@ -132,16 +156,13 @@ find_one() {
   esac
 }
 
+# Both run even when the name was given, to confirm the resource exists.
 resolve_dps() {
-  if [[ -z "$DPS_NAME" ]]; then
-    DPS_NAME=$(find_one Microsoft.Devices/provisioningServices DPS --dps)
-  fi
+  DPS_NAME=$(find_one Microsoft.Devices/provisioningServices DPS --dps "$DPS_NAME")
 }
 
 resolve_hub() {
-  if [[ -z "$HUB_NAME" ]]; then
-    HUB_NAME=$(find_one Microsoft.Devices/IotHubs "IoT hub" --hub)
-  fi
+  HUB_NAME=$(find_one Microsoft.Devices/IotHubs "IoT hub" --hub "$HUB_NAME")
 }
 
 # Sets ENROLLMENT_STATE to missing|enabled|disabled and ENROLLMENT_THUMBPRINT

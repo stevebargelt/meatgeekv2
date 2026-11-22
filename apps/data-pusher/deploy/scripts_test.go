@@ -514,13 +514,96 @@ func TestDiscoveryNeedsExactlyOne(t *testing.T) {
 	}
 }
 
-func TestExplicitNamesSkipDiscovery(t *testing.T) {
+func TestExplicitNamesAreChecked(t *testing.T) {
 	e := newEnv(t)
 	cert, thumb := e.writeCert("cert.pem", deviceID)
 	e.reply("iot_dps_enrollment_show", "enabled\t"+thumb+"\n", 0, "")
-	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert, "--dps", dpsName, "--hub", hubName)
+	// Azure resource names are case-insensitive; the listed name is used.
+	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert,
+		"--dps", strings.ToUpper(dpsName), "--hub", strings.ToUpper(hubName))
 	assertResult(t, r, 0, "unchanged "+deviceID+"\n")
-	assertCalls(t, r.calls, [][]string{callExtension, callEnrollmentShow("key")})
+	assertCalls(t, r.calls, calls(discovery(), [][]string{callEnrollmentShow("key")}))
+}
+
+// A mistyped --dps or --hub must fail before any device state is read, not
+// make the device look missing: revoke would otherwise print "revoked" while
+// the real hub identity stays enabled.
+func TestExplicitNameNotInResourceGroup(t *testing.T) {
+	cases := []struct {
+		name, flag, value, key, list, want string
+	}{
+		{"wrong hub", "--hub", hubName + "-typo", "", "",
+			"no IoT hub named " + hubName + "-typo in resource group " + rg + " (it has: " + hubName + "); check --hub"},
+		{"wrong DPS", "--dps", dpsName + "-typo", "", "",
+			"no DPS named " + dpsName + "-typo in resource group " + rg + " (it has: " + dpsName + "); check --dps"},
+		{"hub in an empty resource group", "--hub", hubName, "resource_list_IotHubs", "",
+			"no IoT hub named " + hubName + " in resource group " + rg + ": it has no IoT hub (Microsoft.Devices/IotHubs)"},
+		{"DPS among several", "--dps", "dps-c", "resource_list_provisioningServices", "dps-a\ndps-b\n",
+			"no DPS named dps-c in resource group " + rg + " (it has: dps-a dps-b); check --dps"},
+	}
+	for _, script := range []string{enrol, revoke} {
+		for _, c := range cases {
+			t.Run(script+"/"+c.name, func(t *testing.T) {
+				e := newEnv(t)
+				cert, _ := e.writeCert("cert.pem", deviceID)
+				if c.key != "" {
+					e.reply(c.key, c.list, 0, "")
+				}
+				// Were the device state read, it would look missing.
+				e.notFound("iot_dps_enrollment_show")
+				e.notFound("iot_hub_device-identity_show")
+				args := []string{"--device-id", deviceID, c.flag, c.value}
+				if script == enrol {
+					args = append(args, "--certificate", cert)
+				}
+				r := e.run(script, nil, args...)
+				assertResult(t, r, 1, "")
+				if !strings.Contains(r.stderr, c.want) {
+					t.Errorf("stderr:\n%s\nwant it to contain %q", r.stderr, c.want)
+				}
+				for _, call := range r.calls {
+					if call[0] == "iot" {
+						t.Errorf("an az iot call ran against an unchecked name: az %s", strings.Join(call, " "))
+					}
+				}
+			})
+		}
+	}
+}
+
+// The azure-iot extension exits 3 (ResourceNotFoundError) when it cannot find
+// the DPS or hub, or a usable access policy on it. That is a failure, not a
+// missing device.
+func TestRevokeExtensionCannotFindTheServiceIsAFailure(t *testing.T) {
+	cases := []struct {
+		name, key, stderr string
+	}{
+		{"hub not found", "iot_hub_device-identity_show",
+			"ERROR: Unable to find IoT Hub: " + hubName + " in resource group: " + rg + "\n"},
+		{"no hub policy", "iot_hub_device-identity_show",
+			"ERROR: Unable to discover a priviledged policy for IoT Hub: " + hubName + ", in subscription x.\n"},
+		{"DPS not found", "iot_dps_enrollment_show",
+			"ERROR: Unable to find DPS: " + dpsName + " in resource group: " + rg + "\n"},
+		{"no DPS policy", "iot_dps_enrollment_show",
+			"ERROR: Unable to discover a privileged policy for DPS: " + dpsName + ".\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+			e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+			e.reply(c.key, "", 3, c.stderr)
+			r := e.run(revoke, nil, "--device-id", deviceID)
+			assertResult(t, r, 1, "")
+			if strings.Contains(r.stdout+r.stderr, "revoked "+deviceID) {
+				t.Errorf("reported a revoke that did not happen:\n%s%s", r.stdout, r.stderr)
+			}
+			if !strings.Contains(r.stderr, "failed (exit 3)") {
+				t.Errorf("stderr:\n%s", r.stderr)
+			}
+			assertCalls(t, writes(r.calls), nil)
+		})
+	}
 }
 
 func TestAuthTypeLoginOnEveryAzIotCall(t *testing.T) {
