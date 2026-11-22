@@ -556,9 +556,15 @@ fi
 
 # Membership test for a newline-delimited set. -F (literal, so a '.' in a token
 # is a '.'), -x (whole line, so a substring can never masquerade as a member),
-# -- (so an entry starting with '-' is data, not an option).
+# -- (so an entry starting with '-' is data, not an option). The set reaches
+# grep through a here-document, not `printf | grep -q` (HAR-125): grep -q exits
+# at its first match, and under pipefail a printf still writing a large set then
+# takes SIGPIPE and the pipe reports "not a member". A here-document is POSIX
+# (a here-string is not) and the function's status is grep's alone.
 set_contains() {
-  printf '%s\n' "$1" | grep -F -x -q -- "$2"
+  grep -F -x -q -- "$2" <<EOF
+$1
+EOF
 }
 
 # Iterate members with IFS=newline and pathname expansion OFF. `set -f` is not

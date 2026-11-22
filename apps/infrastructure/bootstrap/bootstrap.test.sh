@@ -3212,6 +3212,86 @@ else bad "HAR-82: a credential on the SPA must die (rc=${H82_RC}, out: $(cat "$H
 unset -f az gh h82_rest h82_reset h82_run h82_secret h82_count h82_web_patch h82_api_step h82_preauth_ok
 rm -rf "$H82"
 
+# --- HAR-125: an early match in a large input is a match, not "no match" -----
+# `writer | grep -q X` under pipefail: grep -q exits at its first match, the
+# writer's next write() gets SIGPIPE, and the pipeline returns 141, which `if`
+# reads as "no match". The infrastructure scripts now hand grep a variable
+# through a here-string (bash) or a here-document (the POSIX-sh gates), so no
+# writer's status reaches the result.
+#
+# The input makes the old form fail EVERY time, not sometimes: the match is on
+# line 1 and 2 MiB follow it. Before grep -q exits, the writer can have pushed at
+# most one pipe buffer that grep read plus one pipe buffer still queued (64 KiB
+# each on Linux), so most of the 2 MiB is always still unwritten when grep exits.
+h125_big='main'$'\n'
+h125_line="$(printf '%099d' 0)"$'\n'
+h125_i=0
+while [ "$h125_i" -lt 21148 ]; do h125_big+="$h125_line"; h125_i=$((h125_i + 1)); done
+unset h125_line h125_i
+if [ "${#h125_big}" -gt 2097152 ]; then
+  ok "HAR-125: the test input is ${#h125_big} bytes, over 2 MiB, with the match on line 1"
+else bad "HAR-125: the test input must exceed 2 MiB (got ${#h125_big} bytes)"; fi
+
+# The OLD form fails, and the failure is the writer's: grep matched (exit 0),
+# printf died on the closed pipe (141 from SIGPIPE, or 1 if SIGPIPE is ignored
+# and the write returns EPIPE), and pipefail reports the pipeline as failed.
+# Sourcing bootstrap.sh turned errexit on; the `|| true` keeps this deliberate
+# failure from ending the suite and leaves PIPESTATUS to be read inside.
+{ printf '%s\n' "$h125_big" 2>/dev/null | grep -qx 'main'; h125_ps=("${PIPESTATUS[@]}"); } || true
+if [ "${h125_ps[1]}" -eq 0 ] && [ "${h125_ps[0]}" -ne 0 ]; then
+  ok "HAR-125: the old pipe form reads a match as a failure (printf exit ${h125_ps[0]}, grep exit ${h125_ps[1]})"
+else bad "HAR-125: the old pipe form was expected to fail on a 2 MiB writer (printf exit ${h125_ps[0]}, grep exit ${h125_ps[1]})"; fi
+h125_producer() { printf '%s\n' "$h125_big"; }
+{ h125_producer 2>/dev/null | cut -f1 | grep -qx 'main'; h125_ps=("${PIPESTATUS[@]}"); } || true
+if [ "${h125_ps[2]}" -eq 0 ] && [ "${h125_ps[1]}" -ne 0 ]; then
+  ok "HAR-125: the old command-producer form reads a match as a failure (cut exit ${h125_ps[1]}, grep exit ${h125_ps[2]})"
+else bad "HAR-125: the old 'producer | cut | grep -q' form was expected to fail (statuses ${h125_ps[*]})"; fi
+
+# The NEW forms pass the same input.
+if grep -qx 'main' <<<"$h125_big"; then
+  ok "HAR-125: the here-string form finds the match in the same input"
+else bad "HAR-125: the here-string form must find 'main' on line 1"; fi
+if h125_names="$(h125_producer | cut -f1)" && grep -qx 'main' <<<"$h125_names"; then
+  ok "HAR-125: capturing the producer first, then a here-string, finds the match"
+else bad "HAR-125: capture-then-here-string must find 'main' on line 1"; fi
+unset h125_names
+# The here-document form the POSIX-sh gates use (tf-plan-secret-inspection.sh,
+# tf-plan-destroy-guard.sh), run under bash AND sh, which is dash on the CI
+# runner, both with pipefail where the shell has it. The input goes through a
+# file because one argv string is capped at 128 KiB on Linux.
+h125_dir="$(mktemp -d)"
+printf '%s' "$h125_big" > "$h125_dir/input"
+# shellcheck disable=SC2016  # $v is expanded by the inner shell, not this one
+h125_heredoc='if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
+v="$(cat "$1")"
+grep -qx main <<EOF
+$v
+EOF'
+for h125_sh in bash sh; do
+  if "$h125_sh" -c "$h125_heredoc" h125 "$h125_dir/input"; then
+    ok "HAR-125: the here-document form finds the match under $h125_sh"
+  else bad "HAR-125: the here-document form must find 'main' on line 1 under $h125_sh"; fi
+done
+rm -rf "$h125_dir"
+unset h125_dir h125_heredoc h125_sh
+
+# A production site, end to end: az prints the not-found marker first and then a
+# great deal more. resource_absent_or_die must read that as ABSENT. With the old
+# `printf '%s' "$out" | grep -qiE` it died on this input every time.
+# shellcheck disable=SC2329  # called through resource_absent_or_die "$@"
+h125_az_notfound() { printf 'ERROR: (ResourceNotFound) The Resource was not found.\n%s' "$h125_big"; return 1; }
+if (resource_absent_or_die "har125-large-notfound" h125_az_notfound) >/dev/null 2>&1; then
+  ok "HAR-125: resource_absent_or_die reads a not-found marker ahead of 2 MiB of output as ABSENT"
+else bad "HAR-125: resource_absent_or_die must treat a not-found marker ahead of 2 MiB of output as absent"; fi
+# ...and a large REAL error is still a real error, not absence.
+# shellcheck disable=SC2329  # called through resource_absent_or_die "$@"
+h125_az_authfail() { printf 'ERROR: (AuthorizationFailed) forbidden\n%s' "$h125_big"; return 1; }
+if (resource_absent_or_die "har125-large-authfail" h125_az_authfail) >/dev/null 2>&1; then
+  bad "HAR-125: resource_absent_or_die must still DIE on a large auth error"
+else ok "HAR-125: resource_absent_or_die still dies on an auth error with 2 MiB of output"; fi
+unset -f h125_producer h125_az_notfound h125_az_authfail
+unset h125_big h125_ps
+
 echo "-----------------------------------------"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
