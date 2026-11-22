@@ -354,6 +354,8 @@ jobs:
       #    re-imaged-Pi path. The key goes with the runner.
       # 3. enrol-device.sh enrols that certificate in DPS and prints its one
       #    result line. Any non-zero exit fails the step.
+      # 4. The device registers with DPS (`simdevice --twin --count 0`), so
+      #    its hub identity exists before the suite writes its twin.
       #
       # `--auth-type login` makes az use this identity's Entra roles (IoT Hub
       # Registry Contributor, HAR-42; Device Provisioning Service Data
@@ -366,6 +368,7 @@ jobs:
           HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
           DPS_HOST: ${{ needs.deploy.outputs.dps_name }}.azure-devices-provisioning.net
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
+          MEATGEEK_DPS_ID_SCOPE: ${{ needs.deploy.outputs.dps_id_scope }}
         run: |
           set -euo pipefail
           migrate_sas_identity() {
@@ -393,9 +396,28 @@ jobs:
               --certificate "$dir.pem" --auth-type login \
               --dps "$DPS_HOST" --hub "$HUB"
           }
+          # Register with DPS now, so the device's hub identity exists before
+          # the suite writes its twin. Without this, the first POST /cooks
+          # after a migration (or for a new device id) wrote
+          # desired.activeCookId to a device the hub did not have, and the
+          # device's first registration then made a fresh identity with an
+          # empty twin (run 45080482155). --twin --count 0 registers, reads
+          # and reports the twin, and sends no reading.
+          register() {
+            local id="$1" dir="$RUNNER_TEMP/devices/$1" log="$RUNNER_TEMP/devices/$1.register.log"
+            if MEATGEEK_DEVICE_ID="$id" MEATGEEK_STATE_DIR="$dir" \
+              apps/data-pusher/dist/simdevice --twin --count 0 --timeout 2m >/dev/null 2>"$log"; then
+              echo "registered $id"
+            else
+              echo "simdevice could not register device $id with DPS:" >&2
+              cat "$log" >&2
+              exit 1
+            fi
+          }
           for id in "$DEVICE" "${DEVICE}-chart"; do
             migrate_sas_identity "$id"
             enrol "$id"
+            register "$id"
           done
 
       # The two bearer tokens (app-publish, and the acceptance peer's) are
@@ -656,6 +678,7 @@ jobs:
           HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
           DPS_HOST: ${{ needs.deploy.outputs.dps_name }}.azure-devices-provisioning.net
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}-web
+          MEATGEEK_DPS_ID_SCOPE: ${{ needs.deploy.outputs.dps_id_scope }}
         run: |
           set -euo pipefail
           err="$RUNNER_TEMP/web-device-auth.err" rc=0
@@ -679,6 +702,16 @@ jobs:
           apps/data-pusher/deploy/enrol-device.sh --device-id "$DEVICE" \
             --certificate "$dir.pem" --auth-type login \
             --dps "$DPS_HOST" --hub "$HUB"
+          # Register with DPS now, so the hub identity exists before the proof
+          # writes the twin (see the API acceptance job's enrol step).
+          if MEATGEEK_DEVICE_ID="$DEVICE" MEATGEEK_STATE_DIR="$dir" \
+            apps/data-pusher/dist/simdevice --twin --count 0 --timeout 2m >/dev/null 2>"$dir.register.log"; then
+            echo "registered $DEVICE"
+          else
+            echo "simdevice could not register device $DEVICE with DPS:" >&2
+            cat "$dir.register.log" >&2
+            exit 1
+          fi
 
       # HAR-139: simdevice runs in DPS mode as the web device, with the state
       # dir the step above made; the runner hands it no credential. The
