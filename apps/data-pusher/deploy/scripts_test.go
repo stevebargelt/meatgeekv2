@@ -323,6 +323,7 @@ func writes(cs [][]string) [][]string {
 const (
 	enrol  = "enrol-device.sh"
 	revoke = "revoke-device.sh"
+	del    = "delete-device.sh"
 )
 
 // --- enrol-device.sh ---------------------------------------------------------
@@ -934,7 +935,7 @@ func TestUsageErrors(t *testing.T) {
 }
 
 func TestHelp(t *testing.T) {
-	for _, script := range []string{enrol, revoke} {
+	for _, script := range []string{enrol, revoke, del} {
 		e := newEnv(t)
 		r := e.run(script, nil, "--help")
 		if r.code != 0 || !strings.Contains(r.stdout, "usage: "+script) || !strings.Contains(r.stdout, "Exit codes") {
@@ -944,10 +945,166 @@ func TestHelp(t *testing.T) {
 	}
 }
 
+// --- delete-device.sh (HAR-140) ----------------------------------------------
+//
+// CI's fresh acceptance devices are deleted after each run. --only-prefix is
+// the catch that keeps CI from ever deleting a real device.
+
+const (
+	acceptanceID     = "acceptance-temp-20261122-abc123"
+	acceptancePrefix = "acceptance-"
+)
+
+func callDeleteEnrollment(id string, svc ...string) []string {
+	c := split("iot dps enrollment delete")
+	c = append(c, svc...)
+	return append(c, split("--enrollment-id "+id+" --auth-type login --output none")...)
+}
+
+func callDeleteIdentity(id string, svc ...string) []string {
+	c := split("iot hub device-identity delete")
+	c = append(c, svc...)
+	return append(c, split("--device-id "+id+" --auth-type login --output none")...)
+}
+
+func deleteArgs(id string, extra ...string) []string {
+	return append(append([]string{"--device-id", id, "--only-prefix", acceptancePrefix}, hostArgs...), extra...)
+}
+
+func TestDeleteRefusesAnIdOutsideThePrefix(t *testing.T) {
+	for _, id := range []string{deviceID, "meatgeek-dev-simulated-smoker", "xacceptance-1", "acceptance"} {
+		t.Run(id, func(t *testing.T) {
+			e := newEnv(t)
+			e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+			e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+			r := e.run(del, nil, deleteArgs(id)...)
+			assertResult(t, r, 4, "")
+			if !strings.Contains(r.stderr, "does not start with --only-prefix 'acceptance-'") {
+				t.Errorf("stderr:\n%s", r.stderr)
+			}
+			// Refused before any az call at all, so certainly no write.
+			assertCalls(t, r.calls, nil)
+		})
+	}
+}
+
+func TestDeletePrefixIsMatchedLiterally(t *testing.T) {
+	e := newEnv(t)
+	r := e.run(del, nil, "--device-id", deviceID, "--only-prefix", "*", "--auth-type", "login")
+	assertResult(t, r, 4, "")
+	assertCalls(t, r.calls, nil)
+}
+
+func TestDeleteNeedsOnlyPrefix(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"no --only-prefix":    {"--device-id", acceptanceID},
+		"empty --only-prefix": {"--device-id", acceptanceID, "--only-prefix", ""},
+		"no --device-id":      {"--only-prefix", acceptancePrefix},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			r := e.run(del, nil, argv...)
+			assertResult(t, r, 2, "")
+			assertCalls(t, r.calls, nil)
+		})
+	}
+}
+
+func TestDeleteDeletesEnrollmentThenIdentity(t *testing.T) {
+	e := newEnv(t)
+	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+	r := e.run(del, nil, deleteArgs(acceptanceID)...)
+	assertResult(t, r, 0, "deleted "+acceptanceID+"\n")
+	assertNoARM(t, r.calls)
+	assertCalls(t, writes(r.calls), [][]string{
+		callDeleteEnrollment(acceptanceID, "--dps-name", dpsHost),
+		callDeleteIdentity(acceptanceID, "--hub-name", hubHost),
+	})
+}
+
+func TestDeleteSecondRunIsAlreadyDeleted(t *testing.T) {
+	e := newEnv(t)
+	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+	first := e.run(del, nil, deleteArgs(acceptanceID)...)
+	assertResult(t, first, 0, "deleted "+acceptanceID+"\n")
+	// Both are gone now.
+	e.notFound("iot_dps_enrollment_show")
+	e.notFound("iot_hub_device-identity_show")
+	second := e.run(del, nil, deleteArgs(acceptanceID)...)
+	assertResult(t, second, 0, "already deleted "+acceptanceID+"\n")
+	assertCalls(t, writes(second.calls), nil)
+}
+
+func TestDeleteOnlyOneExists(t *testing.T) {
+	t.Run("only the enrollment", func(t *testing.T) {
+		e := newEnv(t)
+		e.reply("iot_dps_enrollment_show", "disabled\tABC\n", 0, "")
+		e.notFound("iot_hub_device-identity_show")
+		r := e.run(del, nil, deleteArgs(acceptanceID)...)
+		assertResult(t, r, 0, "deleted "+acceptanceID+" (no IoT hub device identity)\n")
+		assertCalls(t, writes(r.calls), [][]string{callDeleteEnrollment(acceptanceID, "--dps-name", dpsHost)})
+	})
+	t.Run("only the hub identity", func(t *testing.T) {
+		e := newEnv(t)
+		e.notFound("iot_dps_enrollment_show")
+		e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+		r := e.run(del, nil, deleteArgs(acceptanceID)...)
+		assertResult(t, r, 0, "deleted "+acceptanceID+" (no DPS enrollment)\n")
+		assertCalls(t, writes(r.calls), [][]string{callDeleteIdentity(acceptanceID, "--hub-name", hubHost)})
+	})
+}
+
+func TestDeleteGoneInBetweenIsNotAFailure(t *testing.T) {
+	e := newEnv(t)
+	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+	e.notFound("iot_hub_device-identity_delete")
+	r := e.run(del, nil, deleteArgs(acceptanceID)...)
+	assertResult(t, r, 0, "deleted "+acceptanceID+"\n")
+}
+
+func TestDeleteFailureIsReported(t *testing.T) {
+	e := newEnv(t)
+	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+	e.reply("iot_dps_enrollment_delete", "", 1, "ERROR: Forbidden\n")
+	r := e.run(del, nil, deleteArgs(acceptanceID)...)
+	assertResult(t, r, 1, "")
+	if !strings.Contains(r.stderr, "az iot dps enrollment delete failed (exit 1)") {
+		t.Errorf("stderr:\n%s", r.stderr)
+	}
+	// Stopped at the enrollment: the hub identity is left for the next run.
+	assertCalls(t, writes(r.calls), [][]string{callDeleteEnrollment(acceptanceID, "--dps-name", dpsHost)})
+}
+
+func TestDeletePassesAuthTypeLoginOnEveryAzIotCall(t *testing.T) {
+	e := newEnv(t)
+	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
+	r := e.run(del, nil, "--device-id", acceptanceID, "--only-prefix", acceptancePrefix, "--auth-type", "login")
+	assertResult(t, r, 0, "deleted "+acceptanceID+"\n")
+	iot := 0
+	for _, c := range r.calls {
+		if c[0] != "iot" {
+			continue
+		}
+		iot++
+		joined := " " + strings.Join(c, " ") + " "
+		if !strings.Contains(joined, " --auth-type login ") || strings.Count(joined, "--auth-type") != 1 {
+			t.Errorf("az iot call without exactly --auth-type login: az %s", strings.Join(c, " "))
+		}
+	}
+	if iot != 4 {
+		t.Errorf("got %d az iot calls, want 4 (two shows, two deletes):%s", iot, formatCalls(r.calls))
+	}
+}
+
 // --- static checks -----------------------------------------------------------
 
 func TestScriptsParse(t *testing.T) {
-	scripts := []string{enrol, revoke, "device-common.sh"}
+	scripts := []string{enrol, revoke, del, "device-common.sh"}
 	for _, s := range scripts {
 		if out, err := exec.Command("bash", "-n", s).CombinedOutput(); err != nil {
 			t.Errorf("bash -n %s: %v\n%s", s, err, out)
