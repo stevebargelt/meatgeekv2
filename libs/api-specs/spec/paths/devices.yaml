@@ -1,8 +1,7 @@
 # Device path items (HAR-20 / MG-80).
 #
-# Implementation status — all six operations are implemented:
+# Implementation status — all five operations are implemented:
 #   - devices-collection GET  : apps/api/src/functions/devices/get-devices.ts
-#   - devices-collection POST : apps/api/src/functions/devices/register-device.ts
 #   - device-item GET         : apps/api/src/functions/devices/get-device.ts
 #   - device-item PATCH       : apps/api/src/functions/devices/update-device.ts
 #   - device-item DELETE      : apps/api/src/functions/devices/delete-device.ts (HAR-85; release, HAR-136)
@@ -12,6 +11,11 @@
 # There is no userId query parameter or x-user-id header: a device's owner is
 # the authenticated caller. GET /devices wraps the array in {devices: [...]};
 # the item routes return bare Device objects.
+#
+# HAR-145: there is no POST /devices. The first-come route that made the caller
+# the owner of any unused id is removed; a device is owned only by claiming it
+# with the code it shows (POST /devices/claim). No such operation exists, so
+# the Functions host, not the API, answers a POST to /devices.
 #
 # Every response that reached Cosmos carries x-meatgeek-request-charge (HAR-11).
 # A 401 or 400 is answered before any Cosmos call and carries none.
@@ -28,6 +32,9 @@ devices-collection:
       HAR-143: every device carries `connection`, read from its IoT Hub twin
       with one GET per device, at most 8 at a time. A device whose twin
       cannot be read is `unknown`; that never fails the list.
+
+      HAR-145: there is no POST /devices, so no such operation. A device is
+      owned only by claiming it with POST /devices/claim.
     tags: [devices]
     responses:
       '200':
@@ -43,54 +50,6 @@ devices-collection:
               $ref: '../components/schemas/device.yaml#/DeviceListResponse'
       '401':
         $ref: '../components/responses.yaml#/Unauthenticated'
-      '500':
-        $ref: '../components/responses.yaml#/ServerError'
-
-  post:
-    operationId: registerDevice
-    summary: Register a device to the caller
-    description: |
-      Creates the device with the caller as owner and `isActive: true`. The
-      response has no `connection`. A supplied `configuration` is completed
-      from DEFAULT_DEVICE_CONFIGURATION. The document is created, never
-      upserted, so an existing id is never overwritten.
-    tags: [devices]
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            $ref: '../components/schemas/device.yaml#/RegisterDeviceRequest'
-    responses:
-      '201':
-        description: The registered device.
-        headers:
-          X-Request-ID:
-            $ref: '../components/headers.yaml#/X-Request-ID'
-          x-meatgeek-request-charge:
-            $ref: '../components/headers.yaml#/RequestCharge'
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/device.yaml#/Device'
-      '400':
-        $ref: '../components/responses.yaml#/DeviceValidationError'
-      '401':
-        $ref: '../components/responses.yaml#/Unauthenticated'
-      '409':
-        description: |
-          DEVICE_CONFLICT: a device with this id already exists (whoever owns
-          it), or the caller already has a device with this name. The text is
-          fixed and does not say which.
-        headers:
-          X-Request-ID:
-            $ref: '../components/headers.yaml#/X-Request-ID'
-          x-meatgeek-request-charge:
-            $ref: '../components/headers.yaml#/RequestCharge'
-        content:
-          application/json:
-            schema:
-              $ref: '../components/schemas/common.yaml#/ErrorResponse'
       '500':
         $ref: '../components/responses.yaml#/ServerError'
 
@@ -304,8 +263,8 @@ device-item:
          `claimClaimantHash` is removed, under `If-Match`; a 412 re-reads once
          and retries. `claimConsumedCodeHash` is kept, so the old code stays
          consumed. The device sees the new generation and mints a new code. A
-         device with no IoT Hub identity (registered through POST /devices)
-         has no twin, and this step is skipped. Any other twin failure is 503
+         device with no IoT Hub identity (registered through POST /devices
+         before HAR-145) has no twin, and this step is skipped. Any other twin failure is 503
          DEVICE_TWIN_UPDATE_FAILED and the device is not released, so a retry
          is safe.
       4. The device document is deleted. No body on success.

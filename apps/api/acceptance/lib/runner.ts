@@ -58,7 +58,11 @@ import { spawnProcess } from './spawn';
  * operation in the spec, the status declared for it, a JSON body must match
  * that status's schema and a declared X-Request-ID header must be present. A
  * mismatch fails the proof. The run ends with a `CONTRACT validated …` line and
- * `METRIC contract-validated-responses`.
+ * `METRIC contract-validated-responses`. HAR-145: the one exception is a
+ * request marked `outsideContract`, for a route the spec deliberately lacks
+ * (the removed POST /devices): it is refused if it IS a spec operation, and its
+ * response is not checked or counted. A proof may resolve to a note, which its
+ * PASS line carries.
  *
  * HAR-84: a second standing device, the chart device, for the cook-chart RU
  * proof, which keeps one active cook running on it across runs. Its id and
@@ -609,7 +613,8 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
 
     async request<T>(request: RequestOptions): Promise<AcceptanceResponse<T>> {
       const authenticated = request.authenticated ?? true;
-      const expectCharge = request.expectRequestCharge ?? true;
+      const outsideContract = request.outsideContract ?? false;
+      const expectCharge = request.expectRequestCharge ?? !outsideContract;
       const as: Caller = request.as ?? 'owner';
       lastRequest = {
         method: request.method,
@@ -618,8 +623,16 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       };
       lastExec = undefined;
       // HAR-77: before anything is sent, the request must be a spec operation.
-      const operation = contract.resolve(request.method, request.path, request.route);
-      const route = operation.path;
+      // HAR-145: or, outside the contract, must not be one.
+      let operation: ReturnType<typeof contract.resolve> | undefined;
+      let route: string;
+      if (outsideContract) {
+        contract.assertNoOperation(request.method, request.path);
+        route = request.path.split('?')[0];
+      } else {
+        operation = contract.resolve(request.method, request.path, request.route);
+        route = operation.path;
+      }
       lastRequest.route = route;
 
       // A proof's own headers go first, so the runner's always win (Headers
@@ -720,6 +733,9 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
           result
         );
       }
+      if (operation === undefined) {
+        return result;
+      }
       const mismatch = contract.checkResponse(operation, {
         status: response.status,
         headers: response.headers,
@@ -777,9 +793,13 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       lastExec = undefined;
       write(`RUN  ${label}`);
       try {
-        await proof.run(api);
+        const note = await proof.run(api);
         passed += 1;
-        write(`PASS ${label}`);
+        write(
+          typeof note === 'string' && note !== ''
+            ? redact(`PASS ${label} — ${note}`)
+            : `PASS ${label}`
+        );
       } catch (error) {
         groupFailed = true;
         const at = error instanceof ProofFailure && error.response ? error.response : lastRequest;

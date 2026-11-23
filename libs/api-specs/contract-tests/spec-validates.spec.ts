@@ -55,12 +55,14 @@ describe('OpenAPI spec — structural validation', () => {
     expect(paths['/temperatures/current/{deviceId}']?.get).toBeDefined();
     expect(paths['/devices']).toBeDefined();
     expect(paths['/devices']?.get).toBeDefined();
-    // HAR-20 (MG-80): register, get, and patch are live.
-    expect(paths['/devices']?.post).toBeDefined();
+    // HAR-20 (MG-80): get and patch are live. HAR-145: POST /devices is gone;
+    // a device is owned only through POST /devices/claim.
+    expect(paths['/devices']?.post).toBeUndefined();
+    expect(paths['/devices/claim']?.post).toBeDefined();
     expect(paths['/devices/{id}']?.get).toBeDefined();
     expect(paths['/devices/{id}']?.patch).toBeDefined();
     for (const operation of [
-      paths['/devices']?.post,
+      paths['/devices/claim']?.post,
       paths['/devices/{id}']?.get,
       paths['/devices/{id}']?.patch,
     ]) {
@@ -69,7 +71,7 @@ describe('OpenAPI spec — structural validation', () => {
     // Identity comes only from the principal: no userId parameter anywhere.
     const deviceParams = [
       ...(paths['/devices']?.get?.parameters ?? []),
-      ...(paths['/devices']?.post?.parameters ?? []),
+      ...(paths['/devices/claim']?.post?.parameters ?? []),
     ] as OpenAPIV3.ParameterObject[];
     expect(deviceParams.map(param => param.name)).not.toContain('userId');
     expect(deviceParams.map(param => param.name)).not.toContain('x-user-id');

@@ -368,7 +368,7 @@ describe('GET /temperatures/current/{deviceId}: the claim bound (HAR-136)', () =
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(BOTH_CHARGES);
   });
 
-  it('a device without claimedAt (POST /devices) is not bounded', async () => {
+  it('a device without claimedAt (registered before HAR-145 removed POST /devices) is not bounded', async () => {
     const { devices, temperatures, deps } = setup();
     devices.seed(device());
     temperatures.seed(

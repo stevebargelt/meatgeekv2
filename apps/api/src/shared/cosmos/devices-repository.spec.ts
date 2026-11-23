@@ -215,62 +215,6 @@ describe('DevicesRepository.listDevicesByOwner', () => {
   });
 });
 
-describe('DevicesRepository.registerDevice', () => {
-  it('creates the document (never upsert) and returns it without system properties', async () => {
-    const { fake, repository } = setup();
-
-    const result = await repository.registerDevice(device());
-
-    expect(result).toEqual({
-      outcome: 'created',
-      device: device(),
-      requestCharge: QUERY_CHARGE + WRITE_CHARGE,
-    });
-    expect(fake.calls.map(c => c.operation)).toEqual(['query', 'create']);
-    expect(fake.stored('grill-1')).toMatchObject(device());
-  });
-
-  it('is a conflict when the id exists under another owner, and writes nothing', async () => {
-    const { fake, repository } = setup();
-    fake.seed(device({ userId: STRANGER, name: 'Theirs' }));
-
-    const result = await repository.registerDevice(device());
-
-    expect(result).toEqual({ outcome: 'conflict', requestCharge: QUERY_CHARGE + WRITE_CHARGE });
-    expect(fake.stored('grill-1')?.['userId']).toBe(STRANGER);
-  });
-
-  it('is a conflict when the owner already has a device with that name, without a create', async () => {
-    const { fake, repository } = setup();
-    fake.seed(device({ id: 'other' }));
-
-    const result = await repository.registerDevice(device());
-
-    expect(result).toEqual({ outcome: 'conflict', requestCharge: QUERY_CHARGE });
-    expect(fake.calls.map(c => c.operation)).toEqual(['query']);
-  });
-
-  it('allows the same name under a different owner', async () => {
-    const { fake, repository } = setup();
-    fake.seed(device({ id: 'theirs', userId: STRANGER }));
-    expect((await repository.registerDevice(device())).outcome).toBe('created');
-  });
-
-  it('re-throws a failed create as a DevicesStoreError with the total charge and no Cosmos text', async () => {
-    const { fake, repository } = setup();
-    fake.failNext('create', 503);
-
-    const error = await repository.registerDevice(device()).catch((e: unknown) => e);
-
-    expect(error).toBeInstanceOf(DevicesStoreError);
-    expect(error).toMatchObject({
-      statusCode: 503,
-      requestCharge: QUERY_CHARGE + WRITE_CHARGE,
-      message: 'devices store operation failed',
-    });
-  });
-});
-
 describe('DevicesRepository.claimDevice (HAR-130)', () => {
   const claimed = (overrides: Partial<Device> = {}) =>
     device({ claimedAt: '2026-11-22T12:00:00.000Z', ...overrides });
@@ -287,6 +231,12 @@ describe('DevicesRepository.claimDevice (HAR-130)', () => {
     });
     expect(fake.calls.map(call => call.operation)).toEqual(['query', 'create']);
     expect(fake.stored('grill-1')?.['claimedAt']).toBe('2026-11-22T12:00:00.000Z');
+  });
+
+  it('allows the same name under a different owner', async () => {
+    const { fake, repository } = setup();
+    fake.seed(device({ id: 'theirs', userId: STRANGER }));
+    expect((await repository.claimDevice(claimed())).outcome).toBe('created');
   });
 
   it('is ownedByCaller, with the stored device and no create, when the owner already has the id', async () => {

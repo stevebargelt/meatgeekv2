@@ -35,8 +35,8 @@ import {
  *     (absent = "0", so the first release writes "1") and `claimClaimantHash:
  *     null`, under `If-Match` on the etag read. `claimConsumedCodeHash` is kept,
  *     so the old code stays consumed. A 412 re-reads once and retries. A twin
- *     that does not exist (IoT Hub 404: a device registered through
- *     `POST /devices` with no hub identity) skips this step. Any other twin
+ *     that does not exist (IoT Hub 404: a device registered through the
+ *     removed `POST /devices` with no hub identity) skips this step. Any other twin
  *     failure is 503 DEVICE_TWIN_UPDATE_FAILED and the document is NOT deleted,
  *     so a retry is safe.
  *  4. Delete the device document → 204.

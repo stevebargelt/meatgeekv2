@@ -38,7 +38,6 @@ import { deleteDeviceHandler, type DeleteDeviceDeps } from './delete-device';
 import { defaultDevicesDeps } from './devices-http';
 import { getDeviceHandler } from './get-device';
 import { getDevicesHandler } from './get-devices';
-import { registerDeviceHandler } from './register-device';
 import { updateDeviceHandler } from './update-device';
 
 const TID = 'tid-bbbb-2222';
@@ -156,11 +155,6 @@ type Handler = (
 const ROUTES: Array<{ name: string; handler: Handler; request: () => RequestOptions }> = [
   { name: 'GET /devices', handler: getDevicesHandler, request: () => ({}) },
   {
-    name: 'POST /devices',
-    handler: registerDeviceHandler,
-    request: () => ({ body: { deviceId: 'grill-9', name: 'New one', model: 'MeatGeek V2' } }),
-  },
-  {
     name: 'GET /devices/{id}',
     handler: getDeviceHandler,
     request: () => ({ params: { id: 'grill-1' } }),
@@ -270,8 +264,6 @@ describe('HAR-20 devices routes — shared contract', () => {
 
       expect(response.status).toBeLessThan(300);
       expect(JSON.stringify(response.jsonBody ?? null)).not.toContain('connectionStatus');
-      // POST /devices writes a new document: it carries no connectionStatus.
-      expect(fake.stored('grill-9') ?? {}).not.toHaveProperty('connectionStatus');
     });
   });
 });
@@ -450,197 +442,6 @@ describe('GET /devices', () => {
     const { ctx } = context();
     const response = await getDevicesHandler(request(), ctx, deps);
     expect(response.jsonBody).toEqual({ devices: [] });
-  });
-});
-
-describe('POST /devices', () => {
-  it('creates the device for the principal and returns 201 with the Device', async () => {
-    const { fake, deps } = setup();
-    const { ctx } = context();
-
-    const response = await registerDeviceHandler(
-      request({
-        body: { deviceId: 'grill-9', name: '  New one ', model: 'MeatGeek V2', location: 'Deck' },
-      }),
-      ctx,
-      deps
-    );
-
-    expect(response.status).toBe(201);
-    expect(response.jsonBody).toEqual({
-      id: 'grill-9',
-      userId: USER_ID,
-      name: 'New one',
-      model: 'MeatGeek V2',
-      location: 'Deck',
-      isActive: true,
-    });
-    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(QUERY_CHARGE + WRITE_CHARGE));
-    expect(fake.calls.map(c => c.operation)).toEqual(['query', 'create']);
-  });
-
-  it('registers with no SignalR dependency and no warning (HAR-81)', async () => {
-    // Readings are pushed to the owner's SignalR user, so a new device needs no
-    // group membership: the handler's deps carry no SignalR client at all.
-    const { fake, deps } = setup();
-    const { ctx, warnings } = context();
-
-    const response = await registerDeviceHandler(
-      request({ body: { deviceId: 'grill-9', name: 'New one', model: 'MeatGeek V2' } }),
-      ctx,
-      deps
-    );
-
-    expect(response.status).toBe(201);
-    expect(fake.stored('grill-9')).toBeDefined();
-    // The production devices seam (HAR-143: the twin hub, which the GETs read
-    // connections from; the test seam also carries DELETE's cook lock).
-    // Neither is SignalR.
-    expect(Object.keys(defaultDevicesDeps).sort()).toEqual([
-      'getDeviceTwin',
-      'getRepository',
-      'resolvePrincipal',
-    ]);
-    expect(Object.keys(deps).filter(key => /signalr/i.test(key))).toEqual([]);
-    expect(warnings).toEqual([]);
-  });
-
-  it('completes a partial configuration from DEFAULT_DEVICE_CONFIGURATION', async () => {
-    const { deps } = setup();
-    const { ctx } = context();
-
-    const response = await registerDeviceHandler(
-      request({
-        body: {
-          deviceId: 'grill-9',
-          name: 'Configured',
-          model: 'MeatGeek V2',
-          configuration: { probe1Correction: -3, alertSettings: { highTempThreshold: 275 } },
-        },
-      }),
-      ctx,
-      deps
-    );
-
-    expect(response.status).toBe(201);
-    expect((response.jsonBody as Device).configuration).toEqual({
-      probe1Correction: -3,
-      temperatureUnit: 'fahrenheit',
-      pollingInterval: 30,
-      alertSettings: {
-        highTempThreshold: 275,
-        lowTempThreshold: 0,
-        enableSounds: false,
-        enablePushNotifications: false,
-      },
-    });
-  });
-
-  it('ignores ?userId= and x-user-id: the device is owned by the principal', async () => {
-    const { fake, deps } = setup();
-    const { ctx } = context();
-
-    await registerDeviceHandler(
-      request({
-        query: { userId: OTHER_USER_ID },
-        headers: { 'x-user-id': OTHER_USER_ID },
-        body: { deviceId: 'grill-9', name: 'Mine', model: 'M' },
-      }),
-      ctx,
-      deps
-    );
-
-    expect(fake.stored('grill-9')?.['userId']).toBe(USER_ID);
-  });
-
-  it.each([
-    ['a body userId', { deviceId: 'g', name: 'n', model: 'm', userId: OTHER_USER_ID }],
-    ['a missing deviceId', { name: 'n', model: 'm' }],
-    ['a deviceId with a slash', { deviceId: 'a/b', name: 'n', model: 'm' }],
-    ['a deviceId over 128 characters', { deviceId: 'x'.repeat(129), name: 'n', model: 'm' }],
-    ['a blank name', { deviceId: 'g', name: '   ', model: 'm' }],
-    ['a name over 100 characters', { deviceId: 'g', name: 'n'.repeat(101), model: 'm' }],
-    ['a non-string name', { deviceId: 'g', name: 7, model: 'm' }],
-    ['a missing model', { deviceId: 'g', name: 'n' }],
-    [
-      'an unknown configuration field',
-      { deviceId: 'g', name: 'n', model: 'm', configuration: { x: 1 } },
-    ],
-    [
-      'a bad temperatureUnit',
-      { deviceId: 'g', name: 'n', model: 'm', configuration: { temperatureUnit: 'kelvin' } },
-    ],
-    [
-      'a fractional pollingInterval',
-      { deviceId: 'g', name: 'n', model: 'm', configuration: { pollingInterval: 1.5 } },
-    ],
-    [
-      'a non-boolean alert flag',
-      {
-        deviceId: 'g',
-        name: 'n',
-        model: 'm',
-        configuration: { alertSettings: { enableSounds: 1 } },
-      },
-    ],
-    ['an array body', []],
-  ])('answers 400 VALIDATION_ERROR for %s, with no Cosmos call', async (_case, body) => {
-    const { fake, deps } = setup();
-    const { ctx } = context();
-
-    const response = await registerDeviceHandler(request({ body }), ctx, deps);
-
-    expect(response.status).toBe(400);
-    expect(response.jsonBody).toMatchObject({ error: 'VALIDATION_ERROR' });
-    expect(fake.calls).toEqual([]);
-    expect(header(response, REQUEST_CHARGE_HEADER)).toBeUndefined();
-  });
-
-  it('accepts a 128-character deviceId and a 100-character name', async () => {
-    const { deps } = setup();
-    const { ctx } = context();
-    const response = await registerDeviceHandler(
-      request({ body: { deviceId: 'x'.repeat(128), name: 'n'.repeat(100), model: 'm' } }),
-      ctx,
-      deps
-    );
-    expect(response.status).toBe(201);
-  });
-
-  it('answers 400 for malformed JSON', async () => {
-    const { deps } = setup();
-    const { ctx } = context();
-    const response = await registerDeviceHandler(request({ rawBody: '{nope' }), ctx, deps);
-    expect(response.status).toBe(400);
-  });
-
-  it('answers the same fixed 409 DEVICE_CONFLICT for a taken id (any owner) and a taken name', async () => {
-    const { fake, deps } = setup();
-    fake.seed(device({ id: 'theirs', userId: OTHER_USER_ID, name: 'Theirs' }));
-    fake.seed(device({ id: 'mine', name: 'Taken' }));
-
-    const idTaken = await registerDeviceHandler(
-      request({ body: { deviceId: 'theirs', name: 'Fresh', model: 'm' } }),
-      context().ctx,
-      deps
-    );
-    const nameTaken = await registerDeviceHandler(
-      request({ body: { deviceId: 'fresh', name: 'Taken', model: 'm' } }),
-      context().ctx,
-      deps
-    );
-
-    for (const response of [idTaken, nameTaken]) {
-      expect(response.status).toBe(409);
-      expect(response.jsonBody).toEqual({
-        error: 'DEVICE_CONFLICT',
-        message: 'A device with this id or name already exists.',
-        requestId: 'inv-7',
-      });
-      expect(header(response, REQUEST_CHARGE_HEADER)).toBeDefined();
-    }
-    expect(fake.stored('theirs')?.['userId']).toBe(OTHER_USER_ID);
-    expect(fake.stored('fresh')).toBeUndefined();
   });
 });
 

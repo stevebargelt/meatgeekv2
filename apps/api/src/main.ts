@@ -27,7 +27,6 @@ import {
 } from './functions/temperatures/rollup-temperatures';
 import { getDevicesHandler } from './functions/devices/get-devices';
 import { getDeviceHandler } from './functions/devices/get-device';
-import { registerDeviceHandler } from './functions/devices/register-device';
 import { claimDeviceHandler } from './functions/devices/claim-device';
 import { updateDeviceHandler } from './functions/devices/update-device';
 import { deleteDeviceHandler } from './functions/devices/delete-device';
@@ -170,12 +169,9 @@ app.http('getDevices', {
   handler: getDevicesHandler,
 });
 
-app.http('registerDevice', {
-  methods: ['POST'],
-  authLevel: 'anonymous',
-  route: 'devices',
-  handler: registerDeviceHandler,
-});
+// HAR-145: there is no POST on `devices`. The first-come route that let any
+// caller take any unused id is removed; a device is owned only by claiming it
+// below. The Functions host answers a POST to `devices` itself.
 
 // HAR-130: claim a device with the claim code the device itself published in
 // its twin's reported properties. The literal `devices/claim` cannot be taken

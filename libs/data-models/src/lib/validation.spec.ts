@@ -15,7 +15,6 @@ import { VALIDATION, MEAT_TYPES } from '@meatgeekv2/utils';
 import {
   StartCookRequest,
   UpdateCookRequest,
-  RegisterDeviceRequest,
   RegisterUserRequest,
 } from '@meatgeekv2/api-interfaces';
 import { DataValidator } from './validation';
@@ -327,98 +326,6 @@ describe('DataValidator', () => {
       expect(result.isValid).toBe(true);
       expect(result.errors).toEqual([]);
       expect(result.warnings).toEqual([]);
-    });
-  });
-
-  describe('validateDeviceRegistration', () => {
-    const baseRequest = (): RegisterDeviceRequest => ({
-      deviceId: 'dev_001',
-      name: 'Kitchen Smoker',
-      model: 'MeatGeek-Pro',
-    });
-
-    it('returns isValid: true for a fully valid request', () => {
-      const result = DataValidator.validateDeviceRegistration(baseRequest());
-      expect(result.isValid).toBe(true);
-      expect(result.errors).toEqual([]);
-    });
-
-    it('flags missing deviceId', () => {
-      const req = baseRequest();
-      req.deviceId = '';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain('Device ID is required');
-    });
-
-    it('flags whitespace-only deviceId', () => {
-      const req = baseRequest();
-      req.deviceId = '   ';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain('Device ID is required');
-    });
-
-    it('flags deviceId shorter than 3 chars', () => {
-      const req = baseRequest();
-      req.deviceId = 'ab';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain('Device ID must be at least 3 characters');
-    });
-
-    it('flags deviceId with disallowed characters', () => {
-      const req = baseRequest();
-      req.deviceId = 'bad id!';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain(
-        'Device ID can only contain letters, numbers, underscores, and hyphens'
-      );
-    });
-
-    it('accepts deviceId with letters, numbers, underscores, and hyphens', () => {
-      const req = baseRequest();
-      req.deviceId = 'abc_123-XYZ';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).not.toContain(
-        'Device ID can only contain letters, numbers, underscores, and hyphens'
-      );
-    });
-
-    it('flags missing name', () => {
-      const req = baseRequest();
-      req.name = '';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain('Device name is required');
-    });
-
-    it('flags name shorter than DEVICE_NAME.MIN_LENGTH', () => {
-      const req = baseRequest();
-      req.name = 'a'.repeat(VALIDATION.DEVICE_NAME.MIN_LENGTH - 1);
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain(
-        `Device name must be at least ${VALIDATION.DEVICE_NAME.MIN_LENGTH} characters`
-      );
-    });
-
-    it('flags name longer than DEVICE_NAME.MAX_LENGTH', () => {
-      const req = baseRequest();
-      req.name = 'a'.repeat(VALIDATION.DEVICE_NAME.MAX_LENGTH + 1);
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain(
-        `Device name cannot exceed ${VALIDATION.DEVICE_NAME.MAX_LENGTH} characters`
-      );
-    });
-
-    it('flags missing model', () => {
-      const req = baseRequest();
-      req.model = '';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain('Device model is required');
-    });
-
-    it('flags whitespace-only model', () => {
-      const req = baseRequest();
-      req.model = '   ';
-      const result = DataValidator.validateDeviceRegistration(req);
-      expect(result.errors).toContain('Device model is required');
     });
   });
 

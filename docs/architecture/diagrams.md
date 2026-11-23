@@ -466,8 +466,9 @@ claim code the device minted:
   Delivery -. "`POST /negotiate (signalr proofs)`" .-> MeatgeekCloudApi.Negotiate
   MeatgeekMobile -. "`negotiate`" .-> MeatgeekCloudApi.Negotiate
   MeatgeekWeb -. "`[...]`" .-> MeatgeekCloudApi.Cooks
-  MeatgeekWeb -. "`GET, POST /devices;
-PATCH /devices/{id}`" .-> MeatgeekCloudApi.Devices
+  MeatgeekWeb -. "`GET /devices; POST
+/devices/claim; PATCH,
+DELETE /devices/{id}`" .-> MeatgeekCloudApi.Devices
   MeatgeekWeb -. "`GET
 /temperatures/current/{deviceId}
 (backfill)`" .-> MeatgeekCloudApi.Temperatures

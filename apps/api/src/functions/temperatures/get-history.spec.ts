@@ -688,7 +688,7 @@ describe('GET /temperatures/history: the claim bound (HAR-136)', () => {
     expect(page(response).readings).toEqual([]);
   });
 
-  it('a device without claimedAt (POST /devices) is not bounded', async () => {
+  it('a device without claimedAt (registered before HAR-145 removed POST /devices) is not bounded', async () => {
     const { deps, temperatures } = ownedWithReadings(3);
 
     const response = await getTemperatureHistoryHandler(

@@ -61,7 +61,8 @@ Device:
       format: date-time
       description: |
         HAR-130: when the owner claimed the device with its claim code
-        (ISO-8601 UTC). Absent on a device registered through POST /devices.
+        (ISO-8601 UTC). Absent on a device registered through POST /devices
+        before HAR-145 removed that route.
     connection:
       $ref: '#/DeviceConnection'
 
@@ -162,9 +163,9 @@ DeviceListResponse:
 DeviceConfigurationPatch:
   type: object
   description: |
-    A partial DeviceConfiguration, as sent to POST /devices and PATCH
+    A partial DeviceConfiguration, as sent to POST /devices/claim and PATCH
     /devices/{id}. Every field is optional, `alertSettings` included, and each
-    one sent replaces only that field. On POST, required DeviceConfiguration
+    one sent replaces only that field. On a claim, required DeviceConfiguration
     fields left out are filled from DEFAULT_DEVICE_CONFIGURATION
     (fahrenheit, 30 s polling, thresholds 0, sounds and push off). Unknown
     fields are rejected with 400.
@@ -206,43 +207,13 @@ DeviceConfigurationPatch:
         enablePushNotifications:
           type: boolean
 
-RegisterDeviceRequest:
-  type: object
-  description: |
-    Body for POST /devices. The owner is the authenticated caller; a body
-    `userId` (or any other unlisted field) is rejected with 400.
-  required:
-    - deviceId
-    - name
-    - model
-  additionalProperties: false
-  properties:
-    deviceId:
-      type: string
-      pattern: '^[A-Za-z0-9._:-]{1,128}$'
-    name:
-      type: string
-      minLength: 1
-      maxLength: 100
-      description: Trimmed; must not be blank.
-    model:
-      type: string
-      minLength: 1
-      maxLength: 100
-    location:
-      type: string
-      minLength: 1
-      maxLength: 200
-    configuration:
-      $ref: '#/DeviceConfigurationPatch'
-
 ClaimDeviceRequest:
   type: object
   description: |
     Body for POST /devices/claim (HAR-130). The owner is the authenticated
-    caller; any unlisted field is rejected with 400. `deviceId`, `name`,
-    `location` and `configuration` follow the RegisterDeviceRequest rules.
-    `model` may be left out; the device is then stored with "MeatGeek".
+    caller; a body `userId` (or any other unlisted field) is rejected with
+    400. `model` may be left out; the device is then stored with "MeatGeek".
+    Since HAR-145 this is the only way a device gets an owner.
   required:
     - deviceId
     - claimCode

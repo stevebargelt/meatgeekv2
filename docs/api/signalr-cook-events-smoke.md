@@ -106,7 +106,8 @@ The code is `apps/api/src/functions/signalr/negotiate.ts`,
   delivered. No upstream is configured.
 - An Entra bearer token for the API, scope `api://<api-app-id>/access_as_user`
   (see [authentication.md](./authentication.md)).
-- A device registered to that caller (`POST /devices`).
+- A device that caller owns, claimed with the code it shows
+  (`POST /devices/claim`; there is no `POST /devices`, HAR-145).
 - Node 20 or later and this repository's `node_modules` (for
   `@microsoft/signalr`).
 

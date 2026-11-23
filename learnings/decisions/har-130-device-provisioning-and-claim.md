@@ -174,6 +174,9 @@ ever get shorter.
 still use it. It is removed (route, contract) in a later issue of HAR-130 once
 both claim instead.
 
+**Removed in HAR-145:** the first-come route is gone (route, handler, contract);
+a device is owned only by claiming it with `POST /devices/claim`.
+
 ## Decision 3 — release (built in HAR-136)
 
 `DELETE /devices/{id}` becomes release, owner only. **409 `COOK_ACTIVE`** while

@@ -8,8 +8,9 @@ import {
 } from '../../shared/cosmos/devices-repository';
 
 /**
- * HAR-20 (MG-80) — validation of the POST /devices and PATCH /devices/{id}
- * bodies; HAR-130 adds POST /devices/claim. Each validator returns the cleaned request or one fixed message for a
+ * HAR-20 (MG-80) — validation of the PATCH /devices/{id} body; HAR-130 adds
+ * POST /devices/claim. (HAR-145 removed POST /devices and its validator.) Each
+ * validator returns the cleaned request or one fixed message for a
  * 400 VALIDATION_ERROR. Unknown keys are rejected rather than ignored, so a body
  * can never carry `userId`, `isActive` or `connection` into a document: the
  * owner comes from the principal, `isActive` from the server, and `connection`
@@ -26,27 +27,23 @@ export type Validated<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly message: string };
 
-/** A register request after validation: strings trimmed, configuration cleaned. */
-export interface ValidRegisterDevice {
+/** A claim request after validation: strings trimmed, configuration cleaned,
+ *  the claim code normalized. `model` is filled with
+ *  {@link DEFAULT_CLAIMED_DEVICE_MODEL} when the request names none. */
+export interface ValidClaimDevice {
   readonly deviceId: string;
+  /** 12 Crockford base32 symbols. Never log it. */
+  readonly claimCode: string;
   readonly name: string;
   readonly model: string;
   readonly location?: string;
   readonly configuration?: DeviceConfigurationPatch;
 }
 
-/** A claim request after validation: the register fields plus the normalized
- *  claim code. `model` is filled with {@link DEFAULT_CLAIMED_DEVICE_MODEL}. */
-export interface ValidClaimDevice extends ValidRegisterDevice {
-  /** 12 Crockford base32 symbols. Never log it. */
-  readonly claimCode: string;
-}
-
 /** The model a claimed device is stored with when the request names none. */
 export const DEFAULT_CLAIMED_DEVICE_MODEL = 'MeatGeek';
 
-const REGISTER_KEYS = ['deviceId', 'name', 'model', 'location', 'configuration'];
-const CLAIM_KEYS = [...REGISTER_KEYS, 'claimCode'];
+const CLAIM_KEYS = ['deviceId', 'claimCode', 'name', 'model', 'location', 'configuration'];
 const UPDATE_KEYS = ['name', 'location', 'configuration'];
 const CORRECTION_KEYS = [
   'grillProbeCorrection',
@@ -169,23 +166,11 @@ function configurationPatch(value: unknown): Validated<DeviceConfigurationPatch>
   return { ok: true, value: patch as DeviceConfigurationPatch };
 }
 
-/** POST /devices body → a register request, or a 400 message. */
-export function validateRegisterDevice(body: unknown): Validated<ValidRegisterDevice> {
-  if (!isPlainObject(body)) {
-    return fail('Request body must be a JSON object');
-  }
-  const extra = unknownKey(body, REGISTER_KEYS);
-  if (extra !== undefined) {
-    return fail(`${extra} is not a register-device field`);
-  }
-  return deviceFields(body, body['model']);
-}
-
 /**
- * HAR-130: POST /devices/claim body → a claim request, or a 400 message. The
- * register rules apply to the shared fields, except that `model` may be left
- * out. The claim code is normalized (see shared/devices/claim-code); the 400
- * message never repeats it.
+ * HAR-130: POST /devices/claim body → a claim request, or a 400 message.
+ * `deviceId` must fit DEVICE_ID_PATTERN; `name`, `model` and `location` are
+ * bounded, trimmed and never blank; `model` may be left out. The claim code is
+ * normalized (see shared/devices/claim-code); the 400 message never repeats it.
  */
 export function validateClaimDevice(body: unknown): Validated<ValidClaimDevice> {
   if (!isPlainObject(body)) {
@@ -195,34 +180,17 @@ export function validateClaimDevice(body: unknown): Validated<ValidClaimDevice> 
   if (extra !== undefined) {
     return fail(`${extra} is not a claim-device field`);
   }
-  const fields = deviceFields(
-    body,
-    body['model'] === undefined ? DEFAULT_CLAIMED_DEVICE_MODEL : body['model']
-  );
-  if (!fields.ok) return fields;
-
-  const rawCode = body['claimCode'];
-  const claimCode = typeof rawCode === 'string' ? normalizeClaimCode(rawCode) : null;
-  if (claimCode === null) {
-    return fail(
-      'claimCode must be the 12-symbol code the device shows (XXXX-XXXX-XXXX: 0-9 and A-Z except I, L, O and U)'
-    );
-  }
-  return { ok: true, value: { ...fields.value, claimCode } };
-}
-
-/** The fields register and claim share, after the key check. */
-function deviceFields(
-  body: Record<string, unknown>,
-  rawModel: unknown
-): Validated<ValidRegisterDevice> {
   const deviceId = body['deviceId'];
   if (typeof deviceId !== 'string' || !DEVICE_ID_PATTERN.test(deviceId)) {
     return fail('deviceId must be 1-128 characters of A-Z, a-z, 0-9, ".", "_", ":" or "-"');
   }
   const name = text(body['name'], 'name', DEVICE_NAME_MAX_LENGTH);
   if (!name.ok) return name;
-  const model = text(rawModel, 'model', DEVICE_MODEL_MAX_LENGTH);
+  const model = text(
+    body['model'] === undefined ? DEFAULT_CLAIMED_DEVICE_MODEL : body['model'],
+    'model',
+    DEVICE_MODEL_MAX_LENGTH
+  );
   if (!model.ok) return model;
 
   let location: string | undefined;
@@ -239,10 +207,19 @@ function deviceFields(
     configuration = checked.value;
   }
 
+  const rawCode = body['claimCode'];
+  const claimCode = typeof rawCode === 'string' ? normalizeClaimCode(rawCode) : null;
+  if (claimCode === null) {
+    return fail(
+      'claimCode must be the 12-symbol code the device shows (XXXX-XXXX-XXXX: 0-9 and A-Z except I, L, O and U)'
+    );
+  }
+
   return {
     ok: true,
     value: {
       deviceId,
+      claimCode,
       name: name.value,
       model: model.value,
       ...(location !== undefined ? { location } : {}),

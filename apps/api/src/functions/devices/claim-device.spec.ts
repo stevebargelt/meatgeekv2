@@ -23,6 +23,7 @@ import { claimantHash, claimCodeHash } from '../../shared/devices/claim-code';
 import { DeviceTwinError } from '../../shared/iothub/device-twin';
 import { FakeTwinHub } from '../../shared/iothub/fake-device-twin.testing';
 import { CLAIM_REFUSED_MESSAGE, claimDeviceHandler, type ClaimDeviceDeps } from './claim-device';
+import { validateClaimDevice } from './device-requests';
 
 const TID = 'tid-bbbb-2222';
 const OID = 'oid-aaaa-1111';
@@ -597,6 +598,20 @@ describe('POST /devices/claim — 400 and 401', () => {
     ['a blank model', claimBody({ model: ' ' })],
     ['a bad configuration', claimBody({ configuration: { pollingInterval: 0 } })],
     ['a body that is not an object', ['not', 'an', 'object']],
+    // HAR-145: the field rules POST /devices had, now the claim route's own.
+    ['no device id', claimBody({ deviceId: undefined })],
+    ['a device id over 128 characters', claimBody({ deviceId: 'x'.repeat(129) })],
+    ['a name over 100 characters', claimBody({ name: 'n'.repeat(101) })],
+    ['a name that is not a string', claimBody({ name: 7 })],
+    ['a model over 100 characters', claimBody({ model: 'm'.repeat(101) })],
+    ['a blank location', claimBody({ location: ' ' })],
+    ['an unknown configuration field', claimBody({ configuration: { x: 1 } })],
+    ['a bad temperatureUnit', claimBody({ configuration: { temperatureUnit: 'kelvin' } })],
+    ['a fractional pollingInterval', claimBody({ configuration: { pollingInterval: 1.5 } })],
+    [
+      'a non-boolean alert flag',
+      claimBody({ configuration: { alertSettings: { enableSounds: 1 } } }),
+    ],
   ])('400 VALIDATION_ERROR for %s, before any twin or Cosmos call', async (_name, body) => {
     const { hub, deps, getRepository } = setup();
 
@@ -606,6 +621,13 @@ describe('POST /devices/claim — 400 and 401', () => {
     expect(response.jsonBody).toMatchObject({ error: 'VALIDATION_ERROR' });
     expect(hub.gets).toEqual([]);
     expect(getRepository).not.toHaveBeenCalled();
+  });
+
+  it('HAR-145: accepts a 128-character device id and a 100-character name', () => {
+    const checked = validateClaimDevice(
+      claimBody({ deviceId: 'x'.repeat(128), name: 'n'.repeat(100) })
+    );
+    expect(checked).toMatchObject({ ok: true, value: { deviceId: 'x'.repeat(128) } });
   });
 
   it('400 for malformed JSON', async () => {

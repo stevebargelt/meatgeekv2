@@ -204,7 +204,7 @@ model {
           description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart, POST /cooks/{cookId}/stop'
         }
         devices = component 'devices' {
-          description 'GET and POST /devices, POST /devices/claim, GET and PATCH /devices/{id}, and DELETE /devices/{id}, which is release (HAR-136: 409 COOK_ACTIVE while a cook is active; the next claim needs a fresh code)'
+          description 'GET /devices, POST /devices/claim (the only way a device gets an owner; HAR-145 removed POST /devices), GET and PATCH /devices/{id}, and DELETE /devices/{id}, which is release (HAR-136: 409 COOK_ACTIVE while a cook is active; the next claim needs a fresh code)'
         }
         temperatures = component 'temperatures' {
           description 'GET /temperatures/current/{deviceId}, GET /temperatures/history'
@@ -405,7 +405,7 @@ model {
         description 'Fetches and validates `/config.json`, signs in with MSAL (auth code + PKCE, no client secret) and builds the one API client, which adds `Authorization: Bearer <token>` from `acquireTokenSilent` and an `X-Request-ID` to every call.'
       }
       devices = component 'devices' {
-        description 'Devices page: GET /devices with one GET /cooks?status=active for the page, register (POST /devices) and rename (PATCH /devices/{id}).'
+        description 'Devices page: GET /devices with one GET /cooks?status=active for the page, rename (PATCH /devices/{id}) and release (DELETE /devices/{id}). A device is added only on the claim page, with the code it shows (POST /devices/claim).'
       }
       cooks = component 'cooks' {
         description 'Cooks list (GET /cooks, "Load more" by continuation token), the start form (POST /cooks with a client-generated id, one per intent, so a retry is idempotent), the cook detail page (GET /cooks/{cookId}) and stop (POST /cooks/{cookId}/stop).'
@@ -522,7 +522,7 @@ model {
       technology 'HTTPS, openapi-fetch'
       description 'Every call carries the user access token; Easy Auth validates it before any function runs.'
     }
-    web.devices -> cloud.api.devices 'GET, POST /devices; PATCH /devices/{id}'
+    web.devices -> cloud.api.devices 'GET /devices; POST /devices/claim; PATCH, DELETE /devices/{id}'
     web.cooks -> cloud.api.cooks 'GET, POST /cooks; GET /cooks/{cookId}; POST /cooks/{cookId}/stop'
     web.shell -> entra 'auth code + PKCE (MSAL), no secret'
     web.livePanel -> cloud.api.negotiate 'POST /negotiate'

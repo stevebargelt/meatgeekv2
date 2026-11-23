@@ -21,7 +21,7 @@ temperatures-current:
       ApiResponse).
 
       Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
-      The device must be registered to the caller (POST /devices); a device
+      The device must be the caller's (claimed with POST /devices/claim); a device
       that does not exist and one owned by someone else both answer
       404 DEVICE_NOT_FOUND with the same body.
 
@@ -35,7 +35,8 @@ temperatures-current:
       device unclaimed, or another owner's) never reach the caller. The bound
       is in the query. No reading at or after `claimedAt` is the same 404
       NO_READINGS as no reading at all. A device without `claimedAt`
-      (registered through POST /devices) is not bounded.
+      (registered through POST /devices before HAR-145 removed it) is not
+      bounded.
 
       Trust rule (MG-73): the reading's `deviceId` is the hub-authenticated
       `SystemProperties["iothub-connection-device-id"]`, never the
@@ -55,7 +56,7 @@ temperatures-current:
         required: true
         description: |
           The device id: 1-128 characters of A-Z, a-z, 0-9, ".", "_", ":" or
-          "-" (the POST /devices rule). Anything else is 400.
+          "-" (the device id rule). Anything else is 400.
         schema:
           type: string
           pattern: '^[A-Za-z0-9._:-]{1,128}$'
@@ -112,7 +113,7 @@ temperatures-history:
       `{ readings, limit, hasMore, continuationToken? }`.
 
       Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
-      The device must be registered to the caller (POST /devices); a device
+      The device must be the caller's (claimed with POST /devices/claim); a device
       that does not exist and one owned by someone else both answer
       404 DEVICE_NOT_FOUND with the same body. An owned device with no
       readings answers 200 with `{ readings: [], limit, hasMore: false }`
@@ -135,8 +136,8 @@ temperatures-history:
       one (or none) and the device's `claimedAt`, inside the query, so
       readings from before the caller's claim never reach the caller and
       paging stays right. A window that ends before `claimedAt` is an empty
-      page. A device without `claimedAt` (registered through POST /devices)
-      is not bounded.
+      page. A device without `claimedAt` (registered through POST /devices
+      before HAR-145 removed it) is not bounded.
 
       Trust rule (MG-73): a reading's `deviceId` is the hub-authenticated
       `SystemProperties["iothub-connection-device-id"]`, never
@@ -168,7 +169,7 @@ temperatures-history:
         required: true
         description: |
           Device whose readings to return: 1-128 characters of A-Z, a-z, 0-9,
-          ".", "_", ":" or "-" (the POST /devices rule). Missing or anything
+          ".", "_", ":" or "-" (the device id rule). Missing or anything
           else is 400.
         schema:
           type: string
