@@ -48,7 +48,7 @@ type Connect struct {
 	Conn        int // 1-based connection number
 	ClientID    string
 	Username    string
-	HasPassword bool // the CONNECT carried a password (SAS mode does; X.509 mode must not)
+	HasPassword bool // the CONNECT carried a password (an X.509 device must not)
 	ReturnCode  byte // the CONNACK return code sent (0 accepted)
 }
 

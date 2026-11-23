@@ -57,10 +57,8 @@ const (
 const systemPropertyPrefix = "$."
 
 const (
-	defaultSASTokenTTL     = 1 * time.Hour
 	defaultConnectTimeout  = 10 * time.Second
 	defaultPublishTimeout  = 10 * time.Second
-	defaultRefreshMargin   = 5 * time.Minute
 	defaultReconnectMin    = 1 * time.Second
 	defaultReconnectMax    = 60 * time.Second
 	mqttAPIVersion         = "2021-04-12"
@@ -92,22 +90,17 @@ type HubResolver func(ctx context.Context, refresh bool) (hostName string, err e
 // device id): telemetry publishes and, when WithCookTwin is set, the device
 // twin share it.
 //
-// It authenticates in one of two modes, fixed at construction: a SAS token
-// minted from a connection string's key (NewAzureClient), or the device's
-// X.509 client certificate in the TLS handshake (NewX509Client), where no SAS
-// token is generated or refreshed.
+// It authenticates with the device's own X.509 client certificate in the TLS
+// handshake (NewX509Client). There is no password and no token to refresh.
 type AzureClient struct {
 	deviceID       string
-	sasKey         string           // SAS mode: the device's shared access key
-	cert           *tls.Certificate // X.509 mode: the device's client certificate
-	resolveHub     HubResolver      // X.509 mode, optional
+	cert           *tls.Certificate // the device's client certificate
+	resolveHub     HubResolver      // optional
 	resolveSem     chan struct{}    // one hub resolution at a time
 	brokerFixed    bool             // WithBrokerURL was given
-	sasTokenTTL    time.Duration
 	connectTimeout time.Duration
 	publishTimeout time.Duration
 	twinTimeout    time.Duration
-	refreshMargin  time.Duration
 	reconnectMin   time.Duration
 	reconnectMax   time.Duration
 	twinState      CookState
@@ -120,8 +113,7 @@ type AzureClient struct {
 	brokerURL  string
 	refreshHub bool // IoT Hub refused the hub we have; resolve with refresh
 	mqttClient mqtt.Client
-	gen        uint64 // counts connections; a publish names the one it used by it
-	sasExpiry  time.Time
+	gen        uint64        // counts connections; a publish names the one it used by it
 	lost       chan struct{} // closed when the current connection drops or is replaced
 	markLost   func()
 	twin       *twin
@@ -132,15 +124,6 @@ type AzureClient struct {
 
 // Option configures an AzureClient.
 type Option func(*AzureClient)
-
-// WithSASTokenTTL overrides the SAS-token lifetime (default 1h).
-func WithSASTokenTTL(ttl time.Duration) Option {
-	return func(c *AzureClient) {
-		if ttl > 0 {
-			c.sasTokenTTL = ttl
-		}
-	}
-}
 
 // WithConnectTimeout overrides the MQTT CONNECT timeout (default 10s).
 func WithConnectTimeout(d time.Duration) Option {
@@ -174,15 +157,15 @@ func WithCookTwin(state CookState) Option {
 // full twin sync and desired patch applies the claim rule to the desired claim
 // properties, and every reported patch carries the claim properties next to
 // the cook ones. It does nothing without WithCookTwin. dpsmode.NewClient sets
-// it; connection-string mode never does.
+// it.
 func WithClaim(state ClaimState) Option {
 	return func(c *AzureClient) {
 		c.claimState = state
 	}
 }
 
-// WithBrokerURL replaces the broker address, `tls://<HostName>:8883` from the
-// connection string. A `tcp://` URL connects without TLS. Tests point it at
+// WithBrokerURL replaces the broker address, `tls://<HostName>:8883` for the
+// device's hub. A `tcp://` URL connects without TLS. Tests point it at
 // an iothubtest.Broker; production never sets it.
 func WithBrokerURL(u string) Option {
 	return func(c *AzureClient) {
@@ -193,7 +176,7 @@ func WithBrokerURL(u string) Option {
 	}
 }
 
-// WithHubResolver gives an X.509 client a way to find (and, after IoT Hub
+// WithHubResolver gives the client a way to find (and, after IoT Hub
 // refuses it as not authorised, re-find) the hub to connect to: before a
 // connect, when the client has no hub, it calls r with refresh false; after a
 // CONNACK 4 or 5 it calls r with refresh true, once, before the next connect
@@ -215,8 +198,7 @@ func WithTwinTimeout(d time.Duration) Option {
 }
 
 // WithClock replaces the clock behind every wait the client times itself:
-// reconnect backoff, SAS-token minting and refresh, and the connect, publish
-// and twin timeouts. Tests pass a clocktest.Fake; production never sets it.
+// reconnect backoff and the connect, publish and twin timeouts. Tests pass a clocktest.Fake; production never sets it.
 // paho's own internal timers (its dial and keepalive) stay on real time.
 func WithClock(clk clock.Clock) Option {
 	return func(c *AzureClient) {
@@ -241,27 +223,12 @@ func withMQTTClient(f func(*mqtt.ClientOptions) mqtt.Client) Option {
 	}
 }
 
-// NewAzureClient parses the per-device IoT Hub connection string and
-// returns a client ready to publish. Nothing connects until Start (which
-// connects at once and stays connected) or, without Start, the first publish.
-func NewAzureClient(connectionString string, opts ...Option) (*AzureClient, error) {
-	parsed, err := ParseDeviceConnectionString(connectionString)
-	if err != nil {
-		return nil, err
-	}
-	c := newAzureClient(parsed.HostName, parsed.DeviceID, opts)
-	if c.resolveHub != nil {
-		return nil, errors.New("iothub: WithHubResolver needs an X.509 client (NewX509Client)")
-	}
-	c.sasKey = parsed.SharedAccessKey
-	return c, nil
-}
-
 // NewX509Client returns a client that authenticates to IoT Hub hostName as
 // deviceID with the device's X.509 certificate: MQTT user name
 // `<hub>/<deviceId>/?api-version=...`, no password, and cert presented in the
-// TLS handshake. hostName may be empty only with WithHubResolver. Like
-// NewAzureClient, nothing connects until Start or the first publish.
+// TLS handshake. hostName may be empty only with WithHubResolver. Nothing
+// connects until Start (which connects at once and stays connected) or,
+// without Start, the first publish.
 func NewX509Client(hostName, deviceID string, cert tls.Certificate, opts ...Option) (*AzureClient, error) {
 	if deviceID == "" {
 		return nil, errors.New("iothub: X.509 client needs a device id")
@@ -282,11 +249,9 @@ func newAzureClient(hostName, deviceID string, opts []Option) *AzureClient {
 		deviceID:       deviceID,
 		hostName:       hostName,
 		resolveSem:     make(chan struct{}, 1),
-		sasTokenTTL:    defaultSASTokenTTL,
 		connectTimeout: defaultConnectTimeout,
 		publishTimeout: defaultPublishTimeout,
 		twinTimeout:    defaultTwinTimeout,
-		refreshMargin:  defaultRefreshMargin,
 		reconnectMin:   defaultReconnectMin,
 		reconnectMax:   defaultReconnectMax,
 		markLost:       func() {},
@@ -295,11 +260,6 @@ func newAzureClient(hostName, deviceID string, opts []Option) *AzureClient {
 	}
 	for _, opt := range opts {
 		opt(c)
-	}
-	// A token shorter than twice the margin would be refreshed constantly;
-	// refresh such a token halfway through its life instead.
-	if c.refreshMargin > c.sasTokenTTL/2 {
-		c.refreshMargin = c.sasTokenTTL / 2
 	}
 	if c.twinState != nil {
 		c.twin = newTwin(c.twinState, c.twinTimeout, c.clock)
@@ -313,22 +273,17 @@ func newAzureClient(hostName, deviceID string, opts []Option) *AzureClient {
 
 func hubBrokerURL(hostName string) string { return fmt.Sprintf("tls://%s:8883", hostName) }
 
-// DeviceID returns the device id: the connection string's, or the one given
-// to NewX509Client. Callers (the queue runner, MintMessageId) thread this
+// DeviceID returns the device id given to NewX509Client. Callers (the queue runner, MintMessageId) thread this
 // through instead of relying on the hard-coded legacy value.
 func (c *AzureClient) DeviceID() string { return c.deviceID }
 
-// HostName returns the IoT Hub host name the client connects to now: the
-// connection string's, or the X.509 client's current hub ("" before a
-// resolver has assigned one).
+// HostName returns the IoT Hub host name the client connects to now ("" before
+// a resolver has assigned one).
 func (c *AzureClient) HostName() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hostName
 }
-
-// x509 reports whether the client authenticates with a certificate.
-func (c *AzureClient) x509() bool { return c.cert != nil }
 
 // resolve asks the hub resolver for a hub when the client has none or IoT Hub
 // refused the one it has. It is a no-op without a resolver. Only one
@@ -374,9 +329,8 @@ func (c *AzureClient) resolve(ctx context.Context) error {
 
 // Start connects to IoT Hub now and keeps the connection up until ctx is
 // done or Close is called: it reconnects (with backoff) when the connection
-// drops and reconnects with a fresh SAS token before the current one expires.
-// Every connect, including those two, re-establishes the twin subscriptions
-// and re-reads the twin. Start returns at once; calling it again is a no-op.
+// drops. Every connect, including a reconnect, re-establishes the twin
+// subscriptions and re-reads the twin. Start returns at once; calling it again is a no-op.
 func (c *AzureClient) Start(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -415,11 +369,10 @@ func (c *AzureClient) supervise(ctx context.Context) {
 	for ctx.Err() == nil {
 		err := c.resolve(ctx)
 		var lost chan struct{}
-		var refreshAt time.Time
 		if err == nil {
 			c.mu.Lock()
 			err = c.ensureConnectedLocked()
-			lost, refreshAt = c.lost, c.sasExpiry.Add(-c.refreshMargin)
+			lost = c.lost
 			c.mu.Unlock()
 		}
 		if err != nil {
@@ -443,28 +396,11 @@ func (c *AzureClient) supervise(ctx context.Context) {
 		}
 
 		connectedAt := c.clock.Now()
-		// An X.509 connection has no token to refresh: it stays up until it
-		// drops.
-		var refreshC <-chan time.Time
-		var timer clock.Timer
-		if !c.x509() {
-			timer = c.clock.NewTimer(refreshAt.Sub(c.clock.Now()))
-			refreshC = timer.C()
-		}
-		stopTimer := func() {
-			if timer != nil {
-				timer.Stop()
-			}
-		}
+		// The connection has no token to refresh: it stays up until it drops.
 		select {
 		case <-ctx.Done():
-			stopTimer()
 			return
-		case <-refreshC:
-			// SAS token near expiry: the next ensureConnectedLocked reconnects.
-			continue
 		case <-lost:
-			stopTimer()
 		}
 		// The connection dropped. Back off before redialling, unless it had
 		// been up long enough to count as healthy.
@@ -478,11 +414,10 @@ func (c *AzureClient) supervise(ctx context.Context) {
 	}
 }
 
-// ensureConnectedLocked makes sure we have a live MQTT session and, in SAS
-// mode, that its token is not within the refresh margin (5 minutes) of
-// expiry. Each new connection is handed to the twin. Caller must hold c.mu.
+// ensureConnectedLocked makes sure we have a live MQTT session. Each new
+// connection is handed to the twin. Caller must hold c.mu.
 func (c *AzureClient) ensureConnectedLocked() error {
-	if c.mqttClient != nil && c.mqttClient.IsConnectionOpen() && (c.x509() || c.clock.Now().Before(c.sasExpiry.Add(-c.refreshMargin))) {
+	if c.mqttClient != nil && c.mqttClient.IsConnectionOpen() {
 		return nil
 	}
 	c.dropLocked()
@@ -495,10 +430,7 @@ func (c *AzureClient) ensureConnectedLocked() error {
 		// has registered again would only be refused again.
 		return fmt.Errorf("iothub: %s refused this device; waiting to register again", c.hostName)
 	}
-	opts, expiry, err := c.mqttOptionsLocked()
-	if err != nil {
-		return err
-	}
+	opts := c.mqttOptionsLocked()
 	lost := make(chan struct{})
 	var lostOnce sync.Once
 	markLost := func() { lostOnce.Do(func() { close(lost) }) }
@@ -525,27 +457,23 @@ func (c *AzureClient) ensureConnectedLocked() error {
 
 	c.mqttClient = client
 	c.gen++
-	c.sasExpiry = expiry
 	c.lost = lost
 	c.markLost = markLost
-	if c.x509() {
-		logrus.WithFields(logrus.Fields{"hub": c.hostName, "auth": "x509"}).Info("iothub: connected")
-	} else {
-		logrus.WithField("sasExpiry", expiry.UTC().Format(time.RFC3339)).Info("iothub: connected")
-	}
+	logrus.WithFields(logrus.Fields{"hub": c.hostName, "auth": "x509"}).Info("iothub: connected")
 	if c.twin != nil {
 		c.twin.connected(twinConn{client: client, lost: lost})
 	}
 	return nil
 }
 
-// mqttOptionsLocked builds the CONNECT options for the current hub. In SAS
-// mode it mints a token and returns its expiry; in X.509 mode there is no
-// password and the certificate rides in the TLS config. Caller must hold c.mu.
-func (c *AzureClient) mqttOptionsLocked() (*mqtt.ClientOptions, time.Time, error) {
+// mqttOptionsLocked builds the CONNECT options for the current hub: no
+// password, and the device certificate in the TLS config. Caller must hold
+// c.mu.
+func (c *AzureClient) mqttOptionsLocked() *mqtt.ClientOptions {
 	tlsConfig := &tls.Config{
-		ServerName: c.hostName,
-		MinVersion: tls.VersionTLS12,
+		ServerName:   c.hostName,
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{*c.cert},
 	}
 	opts := mqtt.NewClientOptions().
 		AddBroker(c.brokerURL).
@@ -554,20 +482,9 @@ func (c *AzureClient) mqttOptionsLocked() (*mqtt.ClientOptions, time.Time, error
 		SetProtocolVersion(4).
 		SetCleanSession(true).
 		SetAutoReconnect(false).
-		SetConnectTimeout(c.connectTimeout)
-	var expiry time.Time
-	if c.x509() {
-		tlsConfig.Certificates = []tls.Certificate{*c.cert}
-	} else {
-		sas, exp, err := generateSASTokenFrom(c.clock.Now(), c.hostName, c.deviceID, c.sasKey, c.sasTokenTTL)
-		if err != nil {
-			return nil, time.Time{}, fmt.Errorf("iothub: mint SAS token: %w", err)
-		}
-		opts.SetPassword(sas)
-		expiry = exp
-	}
-	opts.SetTLSConfig(tlsConfig)
-	return opts, expiry, nil
+		SetConnectTimeout(c.connectTimeout).
+		SetTLSConfig(tlsConfig)
+	return opts
 }
 
 // waitTimeout is token.WaitTimeout on c.clock: it reports whether the token

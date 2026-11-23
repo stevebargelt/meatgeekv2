@@ -24,14 +24,14 @@ import {
 import {
   CHART_DEVICE_INPUTS,
   DeviceCredential,
+  deviceCredential,
   DPS_ENDPOINT_ENV,
   DPS_HOST_ENV,
   DPS_ID_SCOPE_ENV,
-  deviceMode,
   IOT_HUB_HOST_ENV,
-  MEATGEEK_DPS_ENV,
   SIM_DEVICE_INPUTS,
   simDeviceEnv,
+  withoutDeviceInputs,
 } from './simdevice-env';
 import { spawnProcess } from './spawn';
 
@@ -43,10 +43,13 @@ import { spawnProcess } from './spawn';
  * line passes through a redactor that masks the token value as well.
  *
  * HAR-44: it also runs `simdevice` (ACCEPTANCE_SIMDEVICE_BIN) for proofs, as the
- * simulated device ACCEPTANCE_SIM_DEVICE_ID. The device credential,
- * SIMDEVICE_CONNECTION_STRING, is read here and nowhere else: the child inherits
- * it through its environment, never its command line, and the redactor masks
- * both the whole connection string and its SharedAccessKey value.
+ * simulated device ACCEPTANCE_SIM_DEVICE_ID. HAR-146: the device connects only
+ * in DPS mode (./simdevice-env), as its own X.509 identity in the state dir
+ * ACCEPTANCE_SIM_STATE_DIR, which `simdevice identity init` made and whose
+ * certificate is enrolled, with the ID scope ACCEPTANCE_DPS_ID_SCOPE (and
+ * optionally ACCEPTANCE_DPS_ENDPOINT). The child gets the MEATGEEK_* DPS
+ * variables through its environment, never its command line. No device key
+ * passes through the runner: it stays in the state dir.
  *
  * HAR-67: a proof may also send a request as the acceptance peer, a second
  * caller with no devices, whose token is ACCEPTANCE_PEER_BEARER_TOKEN
@@ -66,26 +69,18 @@ import { spawnProcess } from './spawn';
  *
  * HAR-84: a second standing device, the chart device, for the cook-chart RU
  * proof, which keeps one active cook running on it across runs. Its id and
- * credential (ACCEPTANCE_CHART_DEVICE_ID, SIMDEVICE_CHART_CONNECTION_STRING)
- * are optional: set both or neither. When set, `api.chartDeviceId` names it and
- * `runSimDevice(args, { device: 'chart' })` runs simdevice with the chart
- * credential as its SIMDEVICE_CONNECTION_STRING. The redactor masks it as it
- * masks the first device's, and no simdevice child is handed the credential of
- * the device it is not sending as.
+ * state dir (ACCEPTANCE_CHART_DEVICE_ID, ACCEPTANCE_CHART_STATE_DIR) are
+ * optional: set both or neither. When set, `api.chartDeviceId` names it and
+ * `runSimDevice(args, { device: 'chart' })` runs simdevice as it. No simdevice
+ * child is handed the inputs of a device it is not sending as.
  *
  * HAR-120: both of its own time limits, the per-request one and the simdevice
  * kill, are on the injected clock (./clock), and each failure says what it was
  * waiting for: `the response did not finish in <ms> ms …` for a request, and
  * `killedAfterMs` on a {@link SimDeviceRun} the runner killed.
  *
- * HAR-138: each device can instead run in DPS mode (./simdevice-env), from a
- * state dir `simdevice identity init` made and an enrolled certificate:
- * ACCEPTANCE_DPS_ID_SCOPE (and optionally ACCEPTANCE_DPS_ENDPOINT) plus the
- * device's state dir, ACCEPTANCE_SIM_STATE_DIR or ACCEPTANCE_CHART_STATE_DIR,
- * in place of its connection string. The child then gets the MEATGEEK_* DPS
- * variables and no SIMDEVICE_CONNECTION_STRING. A device given both, or a state
- * dir without the ID scope, stops the run before anything is sent. The
- * redactor also masks anything shaped like a claim code (HAR-134).
+ * HAR-138: the redactor also masks anything shaped like a claim code
+ * (HAR-134).
  *
  * HAR-140: a proof can enrol a fresh device of its own (./enrolment) and run
  * simdevice as it (`runSimDevice(args, { device: { deviceId, stateDir } })`,
@@ -99,17 +94,17 @@ export const REQUIRED_ENV = [
   'ACCEPTANCE_BASE_URL',
   'ACCEPTANCE_BEARER_TOKEN',
   'ACCEPTANCE_PEER_BEARER_TOKEN',
-  'SIMDEVICE_CONNECTION_STRING',
+  'ACCEPTANCE_DPS_ID_SCOPE',
   'ACCEPTANCE_SIM_DEVICE_ID',
+  'ACCEPTANCE_SIM_STATE_DIR',
   'ACCEPTANCE_SIMDEVICE_BIN',
 ] as const;
 
-/** HAR-84: the chart device's id and credential. Optional, but set both or
- *  neither: one without the other stops the run before anything is sent.
- *  HAR-138: in DPS mode its credential is ACCEPTANCE_CHART_STATE_DIR instead. */
+/** HAR-84: the chart device's id and state dir. Optional, but set both or
+ *  neither: one without the other stops the run before anything is sent. */
 export const CHART_DEVICE_ENV = [
   'ACCEPTANCE_CHART_DEVICE_ID',
-  'SIMDEVICE_CHART_CONNECTION_STRING',
+  'ACCEPTANCE_CHART_STATE_DIR',
 ] as const;
 
 export const PROOFS_DIR = join(__dirname, '..', 'proofs');
@@ -209,27 +204,12 @@ function errorCodeOf(body: unknown): string | undefined {
 
 /**
  * A function masking every secret in a line: the bearer tokens (the owner's and
- * the peer's), each device connection string (the standing device's and, when
- * set, the chart device's), and each one's SharedAccessKey value (with and
- * without the `SharedAccessKey=` prefix). Longest first, so a whole connection
- * string is one mask rather than a mangled partial. HAR-138: then anything
- * shaped like a claim code, which is known to no one before simdevice mints it.
+ * the peer's), longest first, so one token that contains another is one mask
+ * rather than a mangled partial. HAR-138: then anything shaped like a claim
+ * code, which is known to no one before simdevice mints it.
  */
-export function makeRedactor(
-  tokens: readonly string[],
-  connectionStrings: readonly string[]
-): (line: string) => string {
-  const keyed = connectionStrings.flatMap(connectionString => {
-    const key = connectionString
-      .split(';')
-      .map(part => part.trim())
-      .find(part => /^SharedAccessKey=/i.test(part))
-      ?.slice('SharedAccessKey='.length);
-    return [connectionString, ...(key ? [`SharedAccessKey=${key}`, key] : [])];
-  });
-  const secrets = [...tokens, ...keyed]
-    .filter(secret => secret.length > 0)
-    .sort((a, b) => b.length - a.length);
+export function makeRedactor(tokens: readonly string[]): (line: string) => string {
+  const secrets = tokens.filter(secret => secret.length > 0).sort((a, b) => b.length - a.length);
   return line =>
     maskClaimCodes(secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line));
 }
@@ -339,16 +319,7 @@ async function runChild(
 export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   const env = options.env;
   const isSet = (name: string) => (env[name]?.trim() ?? '') !== '';
-  // HAR-138: a simulated device given a state dir runs in DPS mode and needs no
-  // connection string; deviceMode() below checks the rest of that mode.
-  const required = REQUIRED_ENV.filter(
-    name =>
-      !(
-        name === SIM_DEVICE_INPUTS.connectionStringVariable &&
-        isSet(SIM_DEVICE_INPUTS.stateDirVariable)
-      )
-  );
-  const missing = required.filter(name => !isSet(name));
+  const missing = REQUIRED_ENV.filter(name => !isSet(name));
   if (missing.length > 0) {
     const failures = missing.map(
       name => `acceptance: ${name} is not set; the live acceptance run needs it`
@@ -357,37 +328,21 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
     return { exitCode: 2, failures };
   }
 
-  const simMode = deviceMode(env, SIM_DEVICE_INPUTS);
-  const chartMode = deviceMode(env, CHART_DEVICE_INPUTS);
-  const modeErrors = [simMode, chartMode].flatMap(mode =>
-    mode.kind === 'error' ? [`acceptance: ${mode.message}`] : []
-  );
-  if (modeErrors.length > 0) {
-    modeErrors.forEach(line => options.write(line));
-    return { exitCode: 2, failures: modeErrors };
-  }
-  if (simMode.kind !== 'configured') {
-    // Unreachable: the required-input check above guarantees one of the two.
-    const line = `acceptance: ${SIM_DEVICE_INPUTS.connectionStringVariable} is not set; the live acceptance run needs it`;
+  const simCredential = deviceCredential(env, SIM_DEVICE_INPUTS);
+  if (simCredential === undefined) {
+    // Unreachable: the required-input check above covers the state dir.
+    const line = `acceptance: ${SIM_DEVICE_INPUTS.stateDirVariable} is not set; the live acceptance run needs it`;
     options.write(line);
     return { exitCode: 2, failures: [line] };
   }
 
+  const chartCredential = deviceCredential(env, CHART_DEVICE_INPUTS);
   const chartIdSet = isSet(CHART_DEVICE_INPUTS.idVariable);
-  if (chartIdSet !== (chartMode.kind === 'configured')) {
-    const credentialVariable =
-      chartMode.kind === 'configured' && chartMode.credential.mode === 'dps'
-        ? CHART_DEVICE_INPUTS.stateDirVariable
-        : CHART_DEVICE_INPUTS.connectionStringVariable;
-    const line = chartIdSet
-      ? isSet(DPS_ID_SCOPE_ENV)
-        ? `acceptance: ${CHART_DEVICE_INPUTS.idVariable} is set but neither ` +
-          `${CHART_DEVICE_INPUTS.connectionStringVariable} nor ${CHART_DEVICE_INPUTS.stateDirVariable} ` +
-          'is; the chart device needs both or neither'
-        : `acceptance: ${CHART_DEVICE_INPUTS.idVariable} is set but ${credentialVariable} is not; ` +
-          'the chart device needs both or neither'
-      : `acceptance: ${credentialVariable} is set but ${CHART_DEVICE_INPUTS.idVariable} is not; ` +
-        'the chart device needs both or neither';
+  if (chartIdSet !== (chartCredential !== undefined)) {
+    const [set, unset] = chartIdSet
+      ? [CHART_DEVICE_INPUTS.idVariable, CHART_DEVICE_INPUTS.stateDirVariable]
+      : [CHART_DEVICE_INPUTS.stateDirVariable, CHART_DEVICE_INPUTS.idVariable];
+    const line = `acceptance: ${set} is set but ${unset} is not; the chart device needs both or neither`;
     options.write(line);
     return { exitCode: 2, failures: [line] };
   }
@@ -397,16 +352,8 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   const rawBaseUrl = (env['ACCEPTANCE_BASE_URL'] as string).trim();
   const simulatedDeviceId = (env['ACCEPTANCE_SIM_DEVICE_ID'] as string).trim();
   const simdeviceBin = (env['ACCEPTANCE_SIMDEVICE_BIN'] as string).trim();
-  const simCredential: DeviceCredential = simMode.credential;
-  const chartCredential: DeviceCredential | undefined =
-    chartMode.kind === 'configured' ? chartMode.credential : undefined;
-  const chartDeviceId = chartCredential
-    ? (env['ACCEPTANCE_CHART_DEVICE_ID'] as string).trim()
-    : undefined;
-  const connectionStrings = [simCredential, chartCredential].flatMap(credential =>
-    credential?.mode === 'connection-string' ? [credential.connectionString] : []
-  );
-  const redact = makeRedactor([token, peerToken], connectionStrings);
+  const chartDeviceId = chartCredential?.deviceId;
+  const redact = makeRedactor([token, peerToken]);
   const write = (line: string) => options.write(redact(line));
 
   let baseUrl: string;
@@ -456,14 +403,13 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   };
 
   // The child gets the runner's own environment for PATH and tracing, plus the
-  // credential of the device it sends as; never a bearer token, which it has
-  // no use for, nor the other device's credential. simDeviceEnv() drops any
-  // SIMDEVICE_CONNECTION_STRING and MEATGEEK_* DPS variable it inherited and
-  // sets only those of the device's mode (HAR-138).
+  // DPS variables of the device it sends as; never a bearer token, which it
+  // has no use for, nor another device's inputs. simDeviceEnv() drops any
+  // SIMDEVICE_* and MEATGEEK_* DPS variable it inherited and sets only the
+  // device's own (HAR-138).
   const baseChildEnv: NodeJS.ProcessEnv = { ...process.env };
   delete baseChildEnv['ACCEPTANCE_BEARER_TOKEN'];
   delete baseChildEnv['ACCEPTANCE_PEER_BEARER_TOKEN'];
-  delete baseChildEnv['SIMDEVICE_CHART_CONNECTION_STRING'];
 
   /** How a device is named in an EXEC line. */
   const deviceLabel = (device: DeviceRef): string =>
@@ -473,29 +419,23 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
         ? 'simdevice (chart)'
         : `simdevice (${device.deviceId})`;
 
-  /** The credential simdevice runs `device` with. A fresh device is always
-   *  DPS mode, with the run's ID scope (and endpoint, when set). */
+  /** The credential simdevice runs `device` with: a standing device's from
+   *  the run's inputs, a fresh one's from its own state dir, with the run's
+   *  ID scope (and endpoint, when set). */
   const credentialOf = (device: DeviceRef): DeviceCredential => {
     if (device === 'simulated') return simCredential;
     if (device === 'chart') {
       if (chartCredential === undefined) {
         throw new Error(
           'the chart device is not configured: ACCEPTANCE_CHART_DEVICE_ID and ' +
-            'SIMDEVICE_CHART_CONNECTION_STRING are not set'
+            'ACCEPTANCE_CHART_STATE_DIR are not set'
         );
       }
       return chartCredential;
     }
-    const idScope = env[DPS_ID_SCOPE_ENV]?.trim() ?? '';
-    if (idScope === '') {
-      throw new Error(
-        `${DPS_ID_SCOPE_ENV} is not set; a fresh device (${device.deviceId}) runs in DPS mode`
-      );
-    }
     const endpoint = env[DPS_ENDPOINT_ENV]?.trim() ?? '';
     return {
-      mode: 'dps',
-      idScope,
+      idScope: (env[DPS_ID_SCOPE_ENV] as string).trim(),
       endpoint: endpoint === '' ? undefined : endpoint,
       deviceId: device.deviceId,
       stateDir: device.stateDir,
@@ -538,12 +478,6 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       const label = `${deviceLabel(device)} claim-code`;
       lastExec = { label };
       const credential = credentialOf(device);
-      if (credential.mode !== 'dps') {
-        throw new Error(
-          `${deviceLabel(device)} is not in DPS mode, so it has no claim code ` +
-            `(set ${DPS_ID_SCOPE_ENV} and its state dir)`
-        );
-      }
       const started = clock().monotonic();
       let line: ClaimCodeLine | NoClaimYet;
       try {
@@ -561,10 +495,6 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       return line;
     },
 
-    inDpsMode(device: DeviceRef): boolean {
-      return credentialOf(device).mode === 'dps';
-    },
-
     async runDeviceScript(script: DeviceScript, args: readonly string[]): Promise<DeviceScriptRun> {
       lastRequest = undefined;
       lastExec = { label: script };
@@ -576,9 +506,7 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
             'the DPS and the IoT hub by host (it has no ARM read)'
         );
       }
-      const scriptEnv: NodeJS.ProcessEnv = { ...baseChildEnv };
-      delete scriptEnv['SIMDEVICE_CONNECTION_STRING'];
-      for (const name of MEATGEEK_DPS_ENV) delete scriptEnv[name];
+      const scriptEnv = withoutDeviceInputs(baseChildEnv);
       const fullArgs = [...args, '--auth-type', 'login', '--dps', dpsHost, '--hub', hubHost];
       const outcome = await spawnChild(
         script,

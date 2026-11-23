@@ -4,7 +4,6 @@ import { PassThrough } from 'node:stream';
 import {
   ClaimCodeError,
   DEFAULT_WEB_BASE_URL,
-  DPS_REQUIRED_VARIABLES,
   LAST_HEARD_SKEW_MS,
   LAST_HEARD_TEXT,
   heardSince,
@@ -38,13 +37,19 @@ const UNRELATED = '3333333333333333333333333333333333333333';
 /** RFC 6238 appendix B: the SHA-1 seed is the ASCII "12345678901234567890". */
 const RFC6238_SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
 
+// HAR-138: the web device is its own X.509 identity in a state dir
+// `simdevice identity init` made; HAR-146: DPS mode is the only mode.
+const ID_SCOPE = '0ne00SCOPE-VALUE';
+const STATE_DIR = '/state/WEB-STATE-DIR-VALUE';
+
 const FULL_ENV: Record<string, string> = {
   EXPECTED_WEB_SHA: EXPECTED,
   ACCEPTANCE_USER_UPN: 'acceptance@example.test',
   ACCEPTANCE_USER_PASSWORD: 'not-a-real-password',
   ACCEPTANCE_USER_TOTP_SECRET: 'jbsw y3dp ehpk 3pxp',
   ACCEPTANCE_WEB_DEVICE_ID: 'meatgeek-dev-simulated-smoker-web',
-  SIMDEVICE_WEB_CONNECTION_STRING: 'HostName=h;DeviceId=d;SharedAccessKey=k',
+  ACCEPTANCE_WEB_STATE_DIR: STATE_DIR,
+  ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
   ACCEPTANCE_SIMDEVICE_BIN: '/opt/simdevice',
 };
 
@@ -72,8 +77,10 @@ describe('readLiveEnv', () => {
       totpSecret: 'jbsw y3dp ehpk 3pxp',
       deviceId: 'meatgeek-dev-simulated-smoker-web',
       simdevice: {
-        mode: 'connection-string',
-        connectionString: 'HostName=h;DeviceId=d;SharedAccessKey=k',
+        idScope: ID_SCOPE,
+        endpoint: undefined,
+        deviceId: 'meatgeek-dev-simulated-smoker-web',
+        stateDir: STATE_DIR,
       },
       simdeviceBin: '/opt/simdevice',
       runId: '20261120T101112Z',
@@ -103,7 +110,7 @@ describe('readLiveEnv', () => {
     expect(error.message).toContain('Set ACCEPTANCE_USER_UPN, ACCEPTANCE_USER_PASSWORD.');
   });
 
-  it('names all seven when nothing is set', () => {
+  it('names all eight when nothing is set', () => {
     expect(envError({}).message).toContain(`Set ${REQUIRED_VARIABLES.join(', ')}.`);
   });
 
@@ -124,101 +131,26 @@ describe('readLiveEnv', () => {
     for (const name of REQUIRED_VARIABLES) {
       const message = envError(without(name)).message;
       expect(message).not.toContain(FULL_ENV['ACCEPTANCE_USER_PASSWORD']);
-      expect(message).not.toContain(FULL_ENV['SIMDEVICE_WEB_CONNECTION_STRING']);
       expect(message).not.toContain(FULL_ENV['ACCEPTANCE_USER_TOTP_SECRET']);
+      expect(message).not.toContain(STATE_DIR);
+      expect(message).not.toContain(ID_SCOPE);
     }
   });
 });
 
-// HAR-138: DPS mode, from a state dir `simdevice identity init` made.
-const ID_SCOPE = '0ne00SCOPE-VALUE';
-const STATE_DIR = '/state/WEB-STATE-DIR-VALUE';
-const DPS_ENV: Record<string, string> = {
-  ...without('SIMDEVICE_WEB_CONNECTION_STRING'),
-  ACCEPTANCE_WEB_STATE_DIR: STATE_DIR,
-  ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE,
-};
-const dpsWithout = (...names: string[]) =>
-  Object.fromEntries(Object.entries(DPS_ENV).filter(([name]) => !names.includes(name)));
-
-describe('readLiveEnv in DPS mode (HAR-138)', () => {
-  it('reads the DPS identity, with no connection string', () => {
-    expect(readLiveEnv(DPS_ENV).simdevice).toEqual({
-      mode: 'dps',
-      idScope: ID_SCOPE,
-      endpoint: undefined,
-      deviceId: 'meatgeek-dev-simulated-smoker-web',
-      stateDir: STATE_DIR,
-    });
-  });
-
+describe('readLiveEnv: the DPS identity (HAR-138)', () => {
   it('takes ACCEPTANCE_DPS_ENDPOINT when it is set', () => {
-    const env = readLiveEnv({ ...DPS_ENV, ACCEPTANCE_DPS_ENDPOINT: ' dps.example.test ' });
-    expect(env.simdevice).toMatchObject({ mode: 'dps', endpoint: 'dps.example.test' });
-  });
-
-  it.each(DPS_REQUIRED_VARIABLES.filter(name => name !== 'ACCEPTANCE_WEB_STATE_DIR'))(
-    'names %s when it is missing, and says the run is in DPS mode',
-    name => {
-      const error = envError(dpsWithout(name));
-      expect(error.message).toContain(`Set ${name}.`);
-      expect(error.message).toContain(
-        'ACCEPTANCE_WEB_STATE_DIR is set, so simdevice runs in DPS mode'
-      );
-      expect(error.message).not.toContain('SIMDEVICE_WEB_CONNECTION_STRING');
-      expect(error.message).not.toContain(STATE_DIR);
-    }
-  );
-
-  it('names every DPS input when nothing but the state dir is set', () => {
-    expect(envError({ ACCEPTANCE_WEB_STATE_DIR: STATE_DIR }).message).toContain(
-      `Set ${DPS_REQUIRED_VARIABLES.filter(n => n !== 'ACCEPTANCE_WEB_STATE_DIR').join(', ')}.`
-    );
-  });
-
-  it('a state dir without an ID scope fails, naming the scope and not the state dir value', () => {
-    const message = envError(dpsWithout('ACCEPTANCE_DPS_ID_SCOPE')).message;
-    expect(message).toContain('Set ACCEPTANCE_DPS_ID_SCOPE.');
-    expect(message).not.toContain(STATE_DIR);
-  });
-
-  it('without a state dir, it is connection-string mode: the connection string is required again', () => {
-    const error = envError(dpsWithout('ACCEPTANCE_WEB_STATE_DIR'));
-    expect(error.message).toContain('Set SIMDEVICE_WEB_CONNECTION_STRING.');
-    expect(error.message).not.toContain('DPS mode');
-    expect(error.message).not.toContain(ID_SCOPE);
-  });
-
-  it('an ID scope with a connection string and no state dir is connection-string mode', () => {
-    const env = readLiveEnv({ ...FULL_ENV, ACCEPTANCE_DPS_ID_SCOPE: ID_SCOPE });
-    expect(env.simdevice).toEqual({
-      mode: 'connection-string',
-      connectionString: FULL_ENV['SIMDEVICE_WEB_CONNECTION_STRING'],
-    });
-  });
-
-  it('refuses a connection string and a state dir together, naming both, never their values', () => {
-    const message = envError({ ...FULL_ENV, ...DPS_ENV }).message;
-    expect(message).toContain('SIMDEVICE_WEB_CONNECTION_STRING and ACCEPTANCE_WEB_STATE_DIR');
-    expect(message).toContain('simdevice runs in one mode');
-    for (const value of [FULL_ENV['SIMDEVICE_WEB_CONNECTION_STRING'], STATE_DIR, ID_SCOPE]) {
-      expect(message).not.toContain(value);
-    }
+    const env = readLiveEnv({ ...FULL_ENV, ACCEPTANCE_DPS_ENDPOINT: ' dps.example.test ' });
+    expect(env.simdevice).toMatchObject({ endpoint: 'dps.example.test' });
   });
 });
 
 // ---------------------------------------------------------------------------
 // simdevice's environment, read off the spawn call (HAR-138)
 
-const CONNECTION_STRING = 'HostName=h;DeviceId=d;SharedAccessKey=c2VjcmV0LWtleQ==';
 const CLAIM_CODE = '7K3M-9QXR-2HTV';
 
-const BY_CONNECTION_STRING: SimDeviceCredential = {
-  mode: 'connection-string',
-  connectionString: CONNECTION_STRING,
-};
 const DPS: SimDeviceCredential = {
-  mode: 'dps',
   idScope: ID_SCOPE,
   endpoint: undefined,
   deviceId: 'meatgeek-dev-simulated-smoker-web',
@@ -273,7 +205,7 @@ describe('simdevice spawn (HAR-138)', () => {
     }));
   const base = { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '' };
 
-  it('DPS mode: PATH, HOME and the three MEATGEEK_* variables, no connection string', () => {
+  it('PATH, HOME and the three MEATGEEK_* variables', () => {
     const run = startSimDevice('/opt/simdevice', DPS, ['--count', '10']);
     run.kill();
     expect(spawned()).toEqual([
@@ -290,7 +222,7 @@ describe('simdevice spawn (HAR-138)', () => {
     ]);
   });
 
-  it('DPS mode with an endpoint: the fourth variable', () => {
+  it('with an endpoint: the fourth variable', () => {
     startSimDevice('/opt/simdevice', { ...DPS, endpoint: 'dps.example.test' }, []);
     expect(spawned()[0].env).toEqual({
       ...base,
@@ -301,17 +233,11 @@ describe('simdevice spawn (HAR-138)', () => {
     });
   });
 
-  it("connection-string mode: today's env, PATH, HOME and SIMDEVICE_CONNECTION_STRING only", () => {
-    startSimDevice('/opt/simdevice', BY_CONNECTION_STRING, ['--count', '10']);
-    expect(spawned()[0].env).toEqual({ ...base, SIMDEVICE_CONNECTION_STRING: CONNECTION_STRING });
-    expect(spawned()[0].args).toEqual(['--count', '10']);
-  });
-
   it('simDeviceEnv takes nothing from the base env but PATH and HOME', () => {
     const env = simDeviceEnv(DPS, {
       PATH: '/bin',
       HOME: '/home/x',
-      SIMDEVICE_CONNECTION_STRING: CONNECTION_STRING,
+      SIMDEVICE_STRAY: 'stray',
       ACCEPTANCE_USER_PASSWORD: 'pw',
       MEATGEEK_DPS_ENDPOINT: 'inherited.example.test',
     });
@@ -325,32 +251,23 @@ describe('simdevice spawn (HAR-138)', () => {
   });
 
   describe('a claim code in simdevice output never reaches a result or an error (leak)', () => {
-    it.each([
-      ['DPS', DPS],
-      ['connection-string', BY_CONNECTION_STRING],
-    ])(
-      '%s mode: the first reading keeps only its three fields; stderr is masked',
-      async (_m, credential) => {
-        const run = startSimDevice('/opt/simdevice', credential, []);
-        children[0].finish(
-          `${JSON.stringify({
-            deviceId: 'd',
-            timestamp: 't',
-            sentAt: 's',
-            claimCode: CLAIM_CODE,
-          })}\n`,
-          `minted ${CLAIM_CODE} with ${CONNECTION_STRING}\n`,
-          0
-        );
-        await expect(run.first).resolves.toEqual({ deviceId: 'd', timestamp: 't', sentAt: 's' });
-        const exit = await run.exit;
-        expect(exit.stderrFirstLine).toContain('minted [redacted]');
-        expect(JSON.stringify(exit)).not.toContain(CLAIM_CODE);
-        if (credential.mode === 'connection-string') {
-          expect(exit.stderrFirstLine).not.toContain(CONNECTION_STRING);
-        }
-      }
-    );
+    it('the first reading keeps only its three fields; stderr is masked', async () => {
+      const run = startSimDevice('/opt/simdevice', DPS, []);
+      children[0].finish(
+        `${JSON.stringify({
+          deviceId: 'd',
+          timestamp: 't',
+          sentAt: 's',
+          claimCode: CLAIM_CODE,
+        })}\n`,
+        `minted ${CLAIM_CODE}\n`,
+        0
+      );
+      await expect(run.first).resolves.toEqual({ deviceId: 'd', timestamp: 't', sentAt: 's' });
+      const exit = await run.exit;
+      expect(exit.stderrFirstLine).toBe('minted [redacted]');
+      expect(JSON.stringify(exit)).not.toContain(CLAIM_CODE);
+    });
 
     it('a first line that is not JSON fails without quoting it', async () => {
       const run = startSimDevice('/opt/simdevice', DPS, []);

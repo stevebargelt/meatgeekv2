@@ -12,15 +12,15 @@ import (
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock/clocktest"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/collector"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/cooksession"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/dpsmode"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub/iothubtest"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/provision"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/simdevice"
 
 	"go.opentelemetry.io/otel"
 )
-
-const twinTestConnStr = "HostName=test-hub.azure-devices.net;DeviceId=pi-1;SharedAccessKey=ZmFrZS1rZXktZG8tbm90LXVzZS0xMjM0NTY3ODkw"
 
 // TestTwin_CookStartedWhileDisconnectedReachesTheNextReading is HAR-58's
 // reconnect case, end to end through the pusher's own wiring: a cook is set in
@@ -42,12 +42,20 @@ func TestTwin_CookStartedWhileDisconnectedReachesTheNextReading(t *testing.T) {
 	// The client's clock is fake: its reconnect backoff (default 1s) passes
 	// only when the test advances it, and no timeout can fire on its own.
 	clk := clocktest.New(time.Unix(1_700_000_000, 0))
-	client, err := iothub.NewAzureClient(twinTestConnStr,
-		iothub.WithBrokerURL(broker.URL()),
-		iothub.WithCookTwin(sess),
-		iothub.WithClock(clk))
+	// The pusher's DPS-mode client, with a cached assignment so it connects
+	// to the fake hub without registering.
+	state := t.TempDir()
+	if err := provision.SaveAssignment(state, provision.Assignment{AssignedHub: "test-hub.azure-devices.net", DeviceID: "pi-1", RegisteredAt: clk.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(nil, envOf(map[string]string{
+		dpsmode.EnvIDScope:  "0ne00ABCDEF",
+		dpsmode.EnvDeviceID: "pi-1",
+		dpsmode.EnvStateDir: state,
+	}))
+	client, err := newIoTHubClient(cfg, sess, clk, nil, iothub.WithBrokerURL(broker.URL()))
 	if err != nil {
-		t.Fatalf("NewAzureClient: %v", err)
+		t.Fatalf("newIoTHubClient: %v", err)
 	}
 	defer client.Close()
 	ctx, cancel := context.WithCancel(context.Background())

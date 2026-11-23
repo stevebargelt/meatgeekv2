@@ -25,7 +25,7 @@ import { readClaimCode, startSimDevice, type SimDeviceRun } from './simdevice';
  * docs/development/live-acceptance.md.
  *
  * Nothing secret is written out: no password, TOTP secret or code, claim
- * code, connection string or token. Trace, video and Playwright's own failure
+ * code or token. Trace, video and Playwright's own failure
  * screenshot and page snapshot are off (playwright.live.config.ts); this file
  * takes a screenshot on failure only once sign-in has finished, because the
  * sign-in pages show the UPN and what was typed, and never on the claim page,
@@ -221,13 +221,6 @@ test('live: sign in with TOTP, claim the device, start a cook, see a pushed read
     let syncedFrom: number | undefined;
     await test.step('4. claim the web device with its code', async () => {
       const credential = env.simdevice;
-      if (credential.mode !== 'dps') {
-        throw new Error(
-          'Claiming the web device needs simdevice in DPS mode, where the device mints its ' +
-            'claim code: set ACCEPTANCE_WEB_STATE_DIR and ACCEPTANCE_DPS_ID_SCOPE in place of ' +
-            'SIMDEVICE_WEB_CONNECTION_STRING'
-        );
-      }
       // A full twin sync: a device released since its last sync (step 3, or
       // an earlier run's end) sees the new claim generation and mints a code.
       syncedFrom = Date.now();

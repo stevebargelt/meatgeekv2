@@ -146,15 +146,14 @@ func TestClaimCycle_NoSecretInLogsSpansOrTelemetry(t *testing.T) {
 		dpsmode.EnvDeviceID: deviceID,
 		dpsmode.EnvStateDir: state,
 	}))
-	mode, err := cfg.iotMode()
-	if err != nil {
+	if _, err := cfg.iotMode(); err != nil {
 		t.Fatal(err)
 	}
 	sess, err := cooksession.Open(t.TempDir() + "/cooksession.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := newIoTHubClient(cfg, mode, sess, clk, nil, iothub.WithBrokerURL(broker.URL()))
+	client, err := newIoTHubClient(cfg, sess, clk, nil, iothub.WithBrokerURL(broker.URL()))
 	if err != nil {
 		t.Fatal(err)
 	}

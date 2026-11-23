@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import {
   ClaimCodeError,
   claimCodeResult,
-  redact,
+  maskClaimCodes,
   simDeviceEnv,
   type ClaimCodeLine,
   type NoClaimYet,
@@ -21,8 +21,7 @@ export interface SentLine {
 export interface SimDeviceExit {
   readonly code: number | null;
   readonly lines: number;
-  /** stderr's first line, with the connection string and any claim code
-   *  redacted. */
+  /** stderr's first line, with any claim code redacted. */
   readonly stderrFirstLine: string;
 }
 
@@ -35,11 +34,10 @@ export interface SimDeviceRun {
 }
 
 /**
- * Start simdevice as the web device. The credential goes to it only through
- * its own environment ({@link simDeviceEnv}: $SIMDEVICE_CONNECTION_STRING, or
- * in DPS mode the MEATGEEK_* variables), never on the command line, and
- * nothing it writes is echoed; stderr's first line is kept, redacted, for a
- * failure message. Of the first stdout line only the reading's three fields
+ * Start simdevice as the web device. Its DPS identity goes to it only through
+ * its own environment ({@link simDeviceEnv}: the MEATGEEK_* variables), never
+ * on the command line, and nothing it writes is echoed; stderr's first line is
+ * kept, with any claim code masked, for a failure message. Of the first stdout line only the reading's three fields
  * are kept.
  */
 export function startSimDevice(
@@ -47,7 +45,6 @@ export function startSimDevice(
   credential: SimDeviceCredential,
   args: readonly string[]
 ): SimDeviceRun {
-  const secrets = credential.mode === 'connection-string' ? [credential.connectionString] : [];
   const child = spawn(bin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: simDeviceEnv(credential, process.env),
@@ -79,7 +76,7 @@ export function startSimDevice(
     }
   });
   createInterface({ input: child.stderr }).on('line', text => {
-    if (!stderrFirstLine) stderrFirstLine = redact(text, secrets).slice(0, 300);
+    if (!stderrFirstLine) stderrFirstLine = maskClaimCodes(text).slice(0, 300);
   });
 
   const exit = new Promise<SimDeviceExit>(resolve => {

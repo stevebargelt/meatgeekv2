@@ -183,8 +183,8 @@ func TestTwinClaim_FailureStillReportsTheCook(t *testing.T) {
 	}
 }
 
-// Without WithClaim (connection-string mode) the reported patch is exactly the
-// cook properties, as before HAR-130.
+// Without WithClaim the reported patch is exactly the cook properties, as
+// before HAR-130.
 func TestTwinClaim_NoClaimPropertiesWithoutWithClaim(t *testing.T) {
 	b := iothubtest.NewBroker(t)
 	b.SetDesiredQuietly(map[string]any{claim.Generation: "3", claim.DesiredConsumedCodeHash: "h"})

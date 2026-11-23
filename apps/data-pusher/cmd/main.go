@@ -21,20 +21,18 @@
 // device is idle; every (re)connect re-reads the twin, which is how a device
 // that was offline when a cook started picks it up (HAR-58).
 //
-// The device authenticates to IoT Hub in one of two modes: DPS mode
-// (MEATGEEK_DPS_ID_SCOPE set), where it creates its own X.509 identity,
-// registers with the Device Provisioning Service and connects with its
-// certificate; or connection-string mode (IOTHUB_CONNECTION_STRING set). The
+// The device authenticates to IoT Hub only in DPS mode (MEATGEEK_DPS_ID_SCOPE
+// set; --mock-iot aside): it creates its own X.509 identity, registers with
+// the Device Provisioning Service and connects with its certificate. The
 // subcommand `meatgeek-pusher identity init` creates the identity and prints
-// only its certificate. In DPS mode the device also mints a claim code, keeps
-// it under the state dir and reports only its hash in the twin (goal HAR-130);
+// only its certificate. The device also mints a claim code, keeps it under the
+// state dir and reports only its hash in the twin (goal HAR-130);
 // `meatgeek-pusher claim-code` prints the current code.
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -82,9 +80,8 @@ const publishPollInterval = 100 * time.Millisecond
 const publishRetryDelay = 2 * time.Second
 
 type Config struct {
-	DeviceURL     string
-	IoTHubConnStr string
-	// DPS is DPS mode's configuration; DPS.IDScope set turns it on.
+	DeviceURL string
+	// DPS is DPS mode's configuration, required unless MockIoT.
 	DPS                  dpsmode.Config
 	PollInterval         time.Duration
 	Debug                bool
@@ -153,10 +150,6 @@ func loadConfig(args []string, getenv func(string) string) Config {
 		env.String("DEVICE_URL", "http://localhost:3000"),
 		"Device controller URL")
 
-	fs.StringVar(&config.IoTHubConnStr, "iothub-connection-string",
-		env.String("IOTHUB_CONNECTION_STRING", ""),
-		"Per-device Azure IoT Hub connection string (HostName=...;DeviceId=...;SharedAccessKey=...)")
-
 	fs.DurationVar(&config.PollInterval, "poll-interval",
 		env.Duration("POLL_INTERVAL", 5*time.Second),
 		"Polling interval for device data")
@@ -171,7 +164,7 @@ func loadConfig(args []string, getenv func(string) string) Config {
 
 	fs.StringVar(&config.MockDeviceID, "mock-device-id",
 		env.String("MOCK_DEVICE_ID", "meatgeek-mock"),
-		"Device id used when --mock-iot is set (production sourced from the conn-string)")
+		"Device id used when --mock-iot is set (otherwise it is "+dpsmode.EnvDeviceID+")")
 
 	fs.StringVar(&config.QueueDir, "queue-dir",
 		env.String("QUEUE_DIR", defaultQueueDir),
@@ -198,31 +191,28 @@ type iotMode int
 
 const (
 	modeMock iotMode = iota
-	modeConnectionString
 	modeDPS
 )
 
-// errBothModes is the refusal when both modes are configured.
-var errBothModes = fmt.Errorf("both %s and IOTHUB_CONNECTION_STRING are set; set only one: %s for DPS mode (the device's own certificate), or IOTHUB_CONNECTION_STRING for connection-string mode", dpsmode.EnvIDScope, dpsmode.EnvIDScope)
+// runbook is where an operator learns to set the device up for DPS mode.
+const runbook = "docs/devices/runbook.md"
+
+// errNoIDScope is the refusal when neither --mock-iot nor DPS mode is
+// configured.
+var errNoIDScope = fmt.Errorf("%s is not set: the pusher connects to IoT Hub only in DPS mode, as the device's own X.509 identity (set %s and %s; see %s), or with --mock-iot", dpsmode.EnvIDScope, dpsmode.EnvIDScope, dpsmode.EnvDeviceID, runbook)
 
 // iotMode decides the mode, or refuses the configuration.
 func (c Config) iotMode() (iotMode, error) {
-	if c.DPS.Enabled() && c.IoTHubConnStr != "" {
-		return 0, errBothModes
-	}
 	switch {
 	case c.MockIoT:
 		return modeMock, nil
-	case c.DPS.Enabled():
-		if err := c.DPS.Validate(); err != nil {
-			return 0, fmt.Errorf("DPS mode: %w", err)
-		}
-		return modeDPS, nil
-	case c.IoTHubConnStr != "":
-		return modeConnectionString, nil
-	default:
-		return 0, errors.New("IoT Hub connection string is required when not using --mock-iot (or set " + dpsmode.EnvIDScope + " and " + dpsmode.EnvDeviceID + " for DPS mode)")
+	case !c.DPS.Enabled():
+		return 0, errNoIDScope
 	}
+	if err := c.DPS.Validate(); err != nil {
+		return 0, fmt.Errorf("DPS mode: %w (see %s)", err, runbook)
+	}
+	return modeDPS, nil
 }
 
 func setupLogging(debug bool) {
@@ -306,8 +296,8 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// IoT Hub client. The deviceId source is the connection string in
-	// production; for --mock-iot it falls back to the configured mock id.
+	// IoT Hub client. The deviceId is DPS mode's device id in production;
+	// for --mock-iot it is the configured mock id.
 	var (
 		iotClient interface {
 			PublishTelemetry(ctx context.Context, payload []byte, properties map[string]string) error
@@ -325,7 +315,7 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 		iotClient = iothub.NewMockClient()
 		deviceID = config.MockDeviceID
 	} else {
-		azureClient, err := newIoTHubClient(config, mode, sess, clock.Real(), nil)
+		azureClient, err := newIoTHubClient(config, sess, clock.Real(), nil)
 		if err != nil {
 			return fmt.Errorf("failed to create IoT Hub client: %w", err)
 		}
@@ -342,7 +332,7 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	}()
 
 	if deviceID == "" {
-		return fmt.Errorf("deviceId resolved to empty string (mock or conn-string misconfigured)")
+		return fmt.Errorf("deviceId resolved to empty string (mock or DPS mode misconfigured)")
 	}
 
 	// Disk-backed outbound queue. The dir must exist; cooksession's
@@ -433,21 +423,17 @@ func run(ctx context.Context, config Config, tracer trace.Tracer) error {
 	return nil
 }
 
-// newIoTHubClient builds the IoT Hub client for the connection-string or DPS
-// mode, with the device twin writing sess. In DPS mode clk times every wait
-// and provOpts go to the DPS client; opts go to the IoT Hub client (tests point
-// both at fakes).
-func newIoTHubClient(config Config, mode iotMode, sess iothub.CookState, clk clock.Clock, provOpts []provision.Option, opts ...iothub.Option) (*iothub.AzureClient, error) {
+// newIoTHubClient builds the DPS-mode IoT Hub client, with the device twin
+// writing sess. clk times every wait and provOpts go to the DPS client; opts go
+// to the IoT Hub client (tests point both at fakes).
+func newIoTHubClient(config Config, sess iothub.CookState, clk clock.Clock, provOpts []provision.Option, opts ...iothub.Option) (*iothub.AzureClient, error) {
 	opts = append(opts, iothub.WithCookTwin(sess))
-	if mode == modeDPS {
-		logrus.WithFields(logrus.Fields{
-			"deviceId":    config.DPS.DeviceID,
-			"dpsEndpoint": config.DPS.Endpoint,
-			"stateDir":    config.DPS.StateDir,
-		}).Info("DPS mode: the device's own X.509 certificate, hub assigned by the Device Provisioning Service")
-		return dpsmode.NewClient(config.DPS, clk, provOpts, opts...)
-	}
-	return iothub.NewAzureClient(config.IoTHubConnStr, opts...)
+	logrus.WithFields(logrus.Fields{
+		"deviceId":    config.DPS.DeviceID,
+		"dpsEndpoint": config.DPS.Endpoint,
+		"stateDir":    config.DPS.StateDir,
+	}).Info("DPS mode: the device's own X.509 certificate, hub assigned by the Device Provisioning Service")
+	return dpsmode.NewClient(config.DPS, clk, provOpts, opts...)
 }
 
 // runEnqueuer drains samples until the channel closes. Each reading is mapped

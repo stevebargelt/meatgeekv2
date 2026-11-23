@@ -4,13 +4,13 @@
 // message properties, an iothub client for the MQTT send). With --twin it
 // first reads the device twin through the Pi's twin code (iothub.WithCookTwin
 // on an in-memory cooksession) and stamps the applied cook on its readings.
-// The device authenticates with a connection string ($SIMDEVICE_CONNECTION_STRING)
-// or, in DPS mode ($MEATGEEK_DPS_ID_SCOPE and $MEATGEEK_DEVICE_ID), exactly as
-// the Pi does: its own X.509 identity under $MEATGEEK_STATE_DIR, registered
-// with the Device Provisioning Service (internal/dpsmode). `simdevice identity
-// init` creates that identity and prints only its certificate. In DPS mode
-// with --twin it also mints and reports a claim code exactly as the Pi does
-// (internal/claim), and `simdevice claim-code` prints the current code.
+// The device connects in DPS mode ($MEATGEEK_DPS_ID_SCOPE and
+// $MEATGEEK_DEVICE_ID), exactly as the Pi does: its own X.509 identity under
+// $MEATGEEK_STATE_DIR, registered with the Device Provisioning Service
+// (internal/dpsmode). There is no other mode. `simdevice identity init`
+// creates that identity and prints only its certificate. With --twin it also
+// mints and reports a claim code exactly as the Pi does (internal/claim), and
+// `simdevice claim-code` prints the current code.
 // The cmd/simdevice binary is a thin wrapper around Main.
 package simdevice
 
@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,10 +35,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// EnvConnectionString names the ONLY source of the device credential. There is
-// deliberately no flag for it: a flag would land in shell history and `ps`.
-const EnvConnectionString = "SIMDEVICE_CONNECTION_STRING"
 
 // Exit codes returned by Main.
 const (
@@ -64,12 +59,14 @@ type Client interface {
 	Close() error
 }
 
-// ClientFactory builds the IoT Hub client for a connection string.
-type ClientFactory func(connectionString string) (Client, error)
+// ClientFactory builds the IoT Hub client for the DPS-mode device cfg. Main
+// passes iothub.WithClock in opts.
+type ClientFactory func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (Client, error)
 
-// AzureClientFactory is the production factory: the MQTT client the Pi uses.
-func AzureClientFactory(connectionString string) (Client, error) {
-	return iothub.NewAzureClient(connectionString)
+// AzureClientFactory is the production factory: the Pi's DPS path and MQTT
+// client.
+func AzureClientFactory(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (Client, error) {
+	return dpsmode.NewClient(cfg, clk, nil, opts...)
 }
 
 // TwinClient is a Client with the device twin on: what --twin needs.
@@ -81,23 +78,14 @@ type TwinClient interface {
 	GetTwin(ctx context.Context) (iothub.Twin, error)
 }
 
-// TwinClientFactory builds a twin-enabled client. Main passes
-// iothub.WithCookTwin, iothub.WithTwinTimeout and iothub.WithClock in opts.
-type TwinClientFactory func(connectionString string, opts ...iothub.Option) (TwinClient, error)
+// TwinClientFactory builds a twin-enabled client for the DPS-mode device cfg.
+// Main passes iothub.WithCookTwin, iothub.WithTwinTimeout and iothub.WithClock
+// in opts.
+type TwinClientFactory func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error)
 
-// AzureTwinClientFactory is the production twin factory: the Pi's MQTT client
-// and twin code.
-func AzureTwinClientFactory(connectionString string, opts ...iothub.Option) (TwinClient, error) {
-	return iothub.NewAzureClient(connectionString, opts...)
-}
-
-// DPSClientFactory builds the DPS-mode client: the device's own X.509
-// identity and the hub DPS assigns. Main passes iothub.WithClock and, with
-// --twin, the twin options in opts.
-type DPSClientFactory func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error)
-
-// AzureDPSClientFactory is the production DPS factory: the Pi's DPS path.
-func AzureDPSClientFactory(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error) {
+// AzureTwinClientFactory is the production twin factory: the Pi's DPS path,
+// MQTT client and twin code (with the claim code, as on the Pi).
+func AzureTwinClientFactory(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error) {
 	return dpsmode.NewClient(cfg, clk, nil, opts...)
 }
 
@@ -118,16 +106,15 @@ type Sent struct {
 
 // Env is everything Main takes from the process, injectable for tests.
 type Env struct {
-	Args      []string
-	Getenv    func(string) string
-	Stdout    io.Writer
-	Stderr    io.Writer
+	Args   []string
+	Getenv func(string) string
+	Stdout io.Writer
+	Stderr io.Writer
+	// NewClient builds the client for plain sends.
 	NewClient ClientFactory
 	// NewTwinClient builds the client for --twin.
 	NewTwinClient TwinClientFactory
-	// NewDPSClient builds the client in DPS mode, with or without --twin.
-	NewDPSClient DPSClientFactory
-	Tracer       trace.Tracer
+	Tracer        trace.Tracer
 	// Now stamps readings and sentAt; nil is Clock's Now.
 	Now func() time.Time
 	// Clock times every wait Main makes: the --interval gap, the --twin
@@ -137,8 +124,8 @@ type Env struct {
 }
 
 // Main runs the command and returns its exit code. Nothing but one JSON line
-// per sent message (and, with --twin, the twin line first) goes to Stdout. No path writes the connection string or
-// its key anywhere: errors go through a redactor before reaching Stderr.
+// per sent message (and, with --twin, the twin line first) goes to Stdout;
+// errors go to Stderr. The device's key never leaves its state dir.
 func Main(ctx context.Context, env Env) int {
 	clk := env.Clock
 	if clk == nil {
@@ -151,10 +138,8 @@ func Main(ctx context.Context, env Env) int {
 		return dpsmode.ClaimCodeCommand("simdevice", env.Args[1:], env.Getenv, env.Stdout, env.Stderr, clk)
 	}
 
-	connStr := env.Getenv(EnvConnectionString)
-	redact := newRedactor(connStr)
 	fail := func(code int, format string, a ...any) int {
-		fmt.Fprintln(env.Stderr, redact("simdevice: "+fmt.Sprintf(format, a...)))
+		fmt.Fprintln(env.Stderr, "simdevice: "+fmt.Sprintf(format, a...))
 		return code
 	}
 
@@ -172,7 +157,7 @@ func Main(ctx context.Context, env Env) int {
 		fmt.Fprintf(fs.Output(), "usage: simdevice [--twin [--timeout DURATION]] [--count N] [--interval DURATION] [--inflight N] [--start RFC3339 --step DURATION] [--grill °F]\n"+
 			"       simdevice identity init --device-id <id> [--state-dir <dir>]\n"+
 			"       simdevice claim-code [--state-dir <dir>]\n"+
-			"Sends synthetic readings as the IoT Hub device named by $%s, or in DPS mode ($%s and $%s) as the device with its own X.509 identity.\n", EnvConnectionString, dpsmode.EnvIDScope, dpsmode.EnvDeviceID)
+			"Sends synthetic readings as the IoT Hub device $%s, connecting in DPS mode (ID scope $%s) with the device's own X.509 identity under $%s.\n", dpsmode.EnvDeviceID, dpsmode.EnvIDScope, dpsmode.EnvStateDir)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(env.Args); err != nil {
@@ -182,7 +167,7 @@ func Main(ctx context.Context, env Env) int {
 		return ExitUsage
 	}
 	if fs.NArg() > 0 {
-		return fail(ExitUsage, "unexpected arguments %q (the connection string is read only from $%s)", fs.Args(), EnvConnectionString)
+		return fail(ExitUsage, "unexpected arguments %q", fs.Args())
 	}
 	if *twinMode && *count < 0 {
 		return fail(ExitUsage, "--count must not be negative, got %d", *count)
@@ -242,28 +227,12 @@ func Main(ctx context.Context, env Env) int {
 		synthStart = t.UTC().Truncate(time.Millisecond)
 	}
 
+	// DPS mode is the only way the device connects (goal HAR-130).
 	dps := dpsmode.FromEnv(env.Getenv)
-	var deviceID string
-	switch {
-	case dps.Enabled() && strings.TrimSpace(connStr) != "":
-		return fail(ExitUsage, "both %s and %s are set; set only one: %s for DPS mode, or %s for connection-string mode", dpsmode.EnvIDScope, EnvConnectionString, dpsmode.EnvIDScope, EnvConnectionString)
-	case dps.Enabled():
-		if err := dps.Validate(); err != nil {
-			return fail(ExitUsage, "DPS mode: %v", err)
-		}
-		if env.NewDPSClient == nil {
-			return fail(ExitUsage, "DPS mode is not available in this build (no DPS client)")
-		}
-		deviceID = dps.DeviceID
-	case strings.TrimSpace(connStr) == "":
-		return fail(ExitUsage, "%s is not set; export the device's IoT Hub connection string in it (or set %s and %s for DPS mode)", EnvConnectionString, dpsmode.EnvIDScope, dpsmode.EnvDeviceID)
-	default:
-		parsed, err := iothub.ParseDeviceConnectionString(connStr)
-		if err != nil {
-			return fail(ExitUsage, "%s is not a valid device connection string: %v", EnvConnectionString, err)
-		}
-		deviceID = parsed.DeviceID
+	if err := dps.Validate(); err != nil {
+		return fail(ExitUsage, "DPS mode: %v; simdevice connects only as a DPS device with its own X.509 identity (see docs/devices/runbook.md)", err)
 	}
+	deviceID := dps.DeviceID
 	enc := json.NewEncoder(env.Stdout)
 	tracer := env.Tracer
 	if tracer == nil {
@@ -277,13 +246,7 @@ func Main(ctx context.Context, env Env) int {
 		}
 		session := cooksession.NewMemory()
 		twinOpts := []iothub.Option{iothub.WithCookTwin(session), iothub.WithTwinTimeout(*timeout), iothub.WithClock(clk)}
-		var tc TwinClient
-		var err error
-		if dps.Enabled() {
-			tc, err = env.NewDPSClient(dps, clk, twinOpts...)
-		} else {
-			tc, err = env.NewTwinClient(connStr, twinOpts...)
-		}
+		tc, err := env.NewTwinClient(dps, clk, twinOpts...)
 		if err != nil {
 			return fail(ExitUsage, "create IoT Hub client: %v", err)
 		}
@@ -301,13 +264,10 @@ func Main(ctx context.Context, env Env) int {
 			return ExitOK
 		}
 	} else {
-		var client Client
-		var err error
-		if dps.Enabled() {
-			client, err = env.NewDPSClient(dps, clk, iothub.WithClock(clk))
-		} else {
-			client, err = env.NewClient(connStr)
+		if env.NewClient == nil {
+			return fail(ExitUsage, "sending is not available in this build (no client)")
 		}
+		client, err := env.NewClient(dps, clk, iothub.WithClock(clk))
 		if err != nil {
 			return fail(ExitUsage, "create IoT Hub client: %v", err)
 		}
@@ -607,28 +567,5 @@ func SyntheticStatus(deviceID string, i int) wire.V1Status {
 			Probe1Temp: round(150 + 0.5*float64(i)),
 			Probe2Temp: round(140 + 0.4*float64(i)),
 		},
-	}
-}
-
-// newRedactor returns a function that replaces the connection string, and its
-// SharedAccessKey value, wherever either appears in s.
-func newRedactor(connStr string) func(string) string {
-	var secrets []string
-	if strings.TrimSpace(connStr) != "" {
-		secrets = append(secrets, connStr, strings.TrimSpace(connStr))
-	}
-	for _, part := range strings.Split(connStr, ";") {
-		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
-		if len(kv) == 2 && strings.TrimSpace(kv[0]) == "SharedAccessKey" {
-			if k := strings.TrimSpace(kv[1]); k != "" {
-				secrets = append(secrets, k)
-			}
-		}
-	}
-	return func(s string) string {
-		for _, sec := range secrets {
-			s = strings.ReplaceAll(s, sec, "[REDACTED]")
-		}
-		return s
 	}
 }

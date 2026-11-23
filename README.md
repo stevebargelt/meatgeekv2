@@ -36,7 +36,8 @@ nx serve api          # Azure Functions (http://localhost:7071)
 
 Real secrets and Azure connection strings must **never** be committed. Keep them out of the repo:
 
-- Put local secrets in the **untracked** `apps/api/local.settings.json` (already gitignored) and/or supply them as environment variables: `COSMOSDB_CONNECTION_STRING`, `IOTHUB_CONNECTION_STRING`, `SIGNALR_CONNECTION_STRING`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, and related keys.
+- Put local secrets in the **untracked** `apps/api/local.settings.json` (already gitignored) and/or supply them as environment variables: `COSMOSDB_CONNECTION_STRING`, `SIGNALR_CONNECTION_STRING`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, and related keys.
+- No device credential is ever copied by hand: a device (a Pi, or `simdevice` in dev) connects to IoT Hub only in DPS mode, as its own X.509 identity. See the [device runbook](docs/devices/runbook.md) and [`apps/data-pusher/README.md`](apps/data-pusher/README.md#dps-mode-the-devices-own-x509-identity).
 - The fallback values committed in `apps/api/src/environments/environment.development.ts` are **not** real credentials — they are the publicly documented Azure Cosmos DB Emulator default key and explicit `fake-key` placeholders, used only when the environment variables above are unset.
 
 ## 🏗️ System Architecture

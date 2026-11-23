@@ -8,7 +8,7 @@ BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 
 # Build commands  
-.PHONY: build build-arm test lint format clean dev install init-dev check-deps info help status logs deploy-to-pi
+.PHONY: build build-arm test lint format clean dev init-dev check-deps info help status logs deploy-to-pi
 
 # Local development build (native architecture)
 build:
@@ -63,22 +63,6 @@ dev:
 	@echo "   - Mock IoT Hub connection"
 	go run cmd/main.go --device-url=http://localhost:3000 --debug=true --mock-iot=true
 
-# Install as systemd service (on Raspberry Pi).
-# Operator MUST populate /etc/meatgeek-pusher/env (chmod 600) with the
-# per-device IoT Hub connection string before the service can start cleanly.
-# See apps/data-pusher/README.md for the env file contents.
-install: build-arm
-	@echo "Installing $(BINARY_NAME) as systemd service..."
-	sudo install -m 0755 dist/$(BINARY_NAME)-arm /usr/local/bin/$(BINARY_NAME)
-	sudo install -d -m 0755 /var/lib/meatgeek-pusher
-	sudo install -d -m 0750 /etc/meatgeek-pusher
-	sudo cp deploy/$(SERVICE_NAME).service /etc/systemd/system/$(SERVICE_NAME).service
-	@echo "⚠️  Ensure /etc/meatgeek-pusher/env exists and is chmod 600 before starting (see README)."
-	sudo systemctl daemon-reload
-	sudo systemctl enable $(SERVICE_NAME)
-	sudo systemctl start $(SERVICE_NAME)
-	@echo "✅ Service installed and started"
-
 # Status and logs
 status:
 	sudo systemctl status $(SERVICE_NAME)
@@ -86,15 +70,14 @@ status:
 logs:
 	sudo journalctl -u $(SERVICE_NAME) -f
 
-# Deployment helpers
-deploy-to-pi: build-arm
-	@echo "Deploying to Raspberry Pi..."
+# Deployment: onboard-pi.sh builds the controller and the pusher, installs
+# them and the units, enrols the device's own certificate with DPS and starts
+# the pusher in DPS mode (HAR-144). Safe to run again on a set-up Pi: it
+# restarts the pusher on the new build. Extra options (--device-id, --dps,
+# --hub, ...) go in ONBOARD_ARGS. See docs/devices/runbook.md.
+deploy-to-pi:
 	@if [ -z "$(PI_HOST)" ]; then echo "❌ PI_HOST not set. Usage: make deploy-to-pi PI_HOST=pi@192.168.1.100"; exit 1; fi
-	scp dist/$(BINARY_NAME)-arm $(PI_HOST):~/$(BINARY_NAME)
-	ssh $(PI_HOST) 'sudo systemctl stop $(SERVICE_NAME) || true'
-	ssh $(PI_HOST) 'sudo cp ~/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)'
-	ssh $(PI_HOST) 'sudo systemctl start $(SERVICE_NAME)'
-	@echo "✅ Deployment complete"
+	deploy/onboard-pi.sh $(PI_HOST) $(ONBOARD_ARGS)
 
 # Development helpers
 init-dev:
@@ -132,8 +115,7 @@ help:
 	@echo "  format        - Format code"
 	@echo "  clean         - Clean build artifacts"
 	@echo "  dev           - Start development server with mock IoT Hub"
-	@echo "  install       - Install as systemd service (Raspberry Pi)"
-	@echo "  deploy-to-pi  - Deploy to Raspberry Pi (requires PI_HOST)"
+	@echo "  deploy-to-pi  - Onboard or update a Raspberry Pi with deploy/onboard-pi.sh (requires PI_HOST)"
 	@echo "  status        - Show systemd service status"
 	@echo "  logs          - Show live logs"
 	@echo "  info          - Show build information"

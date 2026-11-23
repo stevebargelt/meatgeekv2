@@ -268,8 +268,9 @@ the owner types the password once per phase. No sudoers change is made.
     unit changed. It does not start the pusher.
 - **`start`:**
   - It writes `/etc/meatgeek-pusher/env` (`0640`, `root:meatgeek`) with the
-    ID scope, the device id, the state dir and `DEVICE_URL`. There is no
-    `IOTHUB_CONNECTION_STRING`.
+    ID scope, the device id, the state dir and `DEVICE_URL`. It holds no
+    secret: no shared key and no connection string. An older env file is
+    replaced whole.
   - It enables and restarts the pusher. A restart re-mints an expired code.
   - It polls once a second, at most 120 times, until `identity/assignment.json`
     exists and `meatgeek-pusher claim-code` reports `unclaimed` or `claimed`.
@@ -317,7 +318,8 @@ URL or a command's arguments.
 `meatgeek-pusher`. It checks these:
 
 - a second `install` changes no file (by mtime) and runs no changing command;
-- the env file is `0640` with no `IOTHUB_CONNECTION_STRING`;
+- the env file is `0640`, holds only the DPS variables and `DEVICE_URL`, and
+  replaces a connection-string env file from before DPS mode whole;
 - only the certificate leaves the identity directory;
 - the I2C line is added once;
 - the wait in `start` passes an expired code and times out with exit 5.

@@ -33,9 +33,7 @@ export const sameInstant = (value: unknown, sent: string): boolean =>
 /**
  * HAR-140: make the simulated device the caller's with its own claim code
  * (`claimStandingDevice` in ./enrolment): claimed once per run, then claimed
- * again with the same code by each later group; never released. In
- * connection-string mode, where it shows no code, it must already be the
- * caller's.
+ * again with the same code by each later group; never released.
  */
 export async function registerSimulatedDevice(api: AcceptanceApi): Promise<void> {
   await claimStandingDevice(api, 'simulated', { name: DEVICE_NAME, model: 'simdevice' });

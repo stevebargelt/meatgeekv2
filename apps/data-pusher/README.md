@@ -10,7 +10,7 @@ local-to-cloud bridge:
 - **Polls device controller**: fetches temperature + hardware status from the local HTTP API every 5s (configurable).
 - **V1 -> V2 wire translation**: the api-interfaces integration boundary lives here, in the pusher. The device controller continues to emit its legacy V1-shaped JSON over local HTTP port 3000; the pusher translates it to the V2 `TemperatureReading` and `DeviceStatus` shapes from `@meatgeekv2/api-interfaces` before publishing.
 - **Cook session state**: the active cook id and correlation id, plus the twin desired `$version` they came from (`internal/cooksession`, restart-cached to disk so a boot with no network still stamps the last cook).
-- **IoT Hub publish**: MQTT over TLS, per-device connection string, deterministic message IDs.
+- **IoT Hub publish**: MQTT over TLS as the device's own X.509 identity, registered with DPS (no connection string, no shared key), deterministic message IDs.
 - **Local buffering**: disk-backed FIFO queue persists outbound payloads across restarts and network outages. Replay-on-reconnect with at-least-once semantics (sink-side upsert via the deterministic `messageId`).
 - **Device twin**: the active cook arrives as IoT Hub device twin desired properties over the same MQTT connection. The pusher connects at startup and stays connected, reads the whole twin on every (re)connect, applies desired patches as they arrive, and reports what it applied. A twin persists, so a Pi that was offline when a cook started gets it when it reconnects. See [Device twin](#device-twin-active-cook).
 - **OpenTelemetry**: tracing skeleton in place; Azure Monitor exporter wiring + trace propagation across IoT Hub is ticket #6's scope.
@@ -52,37 +52,28 @@ A real device is set up with one command from the owner's laptop,
 `apps/data-pusher/deploy/onboard-pi.sh pi@<lan ip>`. It installs the
 controller and the pusher as services, enrols the device in DPS and prints its
 claim code. The **[device runbook](../../docs/devices/runbook.md)** covers
-onboarding, claiming, releasing and revoking. The device runs in DPS mode
-(below) and needs no connection string.
-
-### Connection string (per device)
-
-The pusher still accepts a **device-scoped** IoT Hub connection string
-(`IOTHUB_CONNECTION_STRING`). It parses the `DeviceId` out of it and refuses to
-start with a hub-owner string. Onboarding no longer uses this mode, and it is
-removed later in goal HAR-130. The string is a device credential: it is never
-stored in Terraform state or outputs (MG-24 S1).
+onboarding, claiming, releasing and revoking. The device connects in DPS mode
+(below).
 
 ### DPS mode (the device's own X.509 identity)
 
-In DPS mode the device needs no connection string and no person copies a key:
-it creates its own key, which never leaves it, and a self-signed certificate,
-an operator enrols that certificate as an X.509 individual enrollment in the
-Azure IoT Hub Device Provisioning Service (DPS), and the device registers with
-DPS and connects to the hub DPS assigns, authenticating with the certificate.
-Set `MEATGEEK_DPS_ID_SCOPE` to turn it on. The connection-string mode above
-stays until it is removed later in goal HAR-130.
+DPS mode is the only way the pusher connects to IoT Hub (goal HAR-130): no
+person copies a key. The device creates its own key, which never leaves it, and
+a self-signed certificate; an operator enrols that certificate as an X.509
+individual enrollment in the Azure IoT Hub Device Provisioning Service (DPS);
+and the device registers with DPS and connects to the hub DPS assigns,
+authenticating with the certificate.
 
 | Variable                | Purpose                                                                 | Default |
 | ----------------------- | ----------------------------------------------------------------------- | ------- |
-| `MEATGEEK_DPS_ID_SCOPE` | The DPS ID scope. Set → DPS mode.                                       | (none)  |
-| `MEATGEEK_DEVICE_ID`    | The device id: the certificate's CN, the DPS registration id and the IoT Hub device id (letters, digits, `-` `.` `_` `:`, at most 128). Required in DPS mode. | (none) |
+| `MEATGEEK_DPS_ID_SCOPE` | The DPS ID scope. Required unless `--mock-iot`.                         | (none)  |
+| `MEATGEEK_DEVICE_ID`    | The device id: the certificate's CN, the DPS registration id and the IoT Hub device id (letters, digits, `-` `.` `_` `:`, at most 128). Required unless `--mock-iot`. | (none) |
 | `MEATGEEK_DPS_ENDPOINT` | The DPS device endpoint                                                 | `global.azure-devices-provisioning.net` |
 | `MEATGEEK_STATE_DIR`    | Where the identity and the cached assignment live                      | `/var/lib/meatgeek-pusher` (the unit's `WorkingDirectory`) |
 
-Set **only one** of `MEATGEEK_DPS_ID_SCOPE` and `IOTHUB_CONNECTION_STRING`: with
-both the pusher refuses to start and says so; with neither (and no
-`--mock-iot`) it refuses as before.
+Without `MEATGEEK_DPS_ID_SCOPE` (and no `--mock-iot`) the pusher refuses to
+start, naming the variable and pointing to the
+[device runbook](../../docs/devices/runbook.md).
 
 **Files** under `<state dir>/identity/` (the directory is mode `0700`):
 
@@ -145,8 +136,7 @@ Errors name HTTP status codes and DPS `errorCode`s, never response bodies.
 A user claims a device (`POST /devices/claim`) only with a code the device
 itself gives out. In DPS mode the device mints the code, keeps it on disk, and
 reports only its hash in the twin; the API compares the hash of what the user
-types with the reported one. Connection-string mode does none of this and
-reports nothing about claims. The design is in
+types with the reported one. The design is in
 `learnings/decisions/har-130-device-provisioning-and-claim.md`.
 
 - **The code:** 12 Crockford base32 symbols (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`)
@@ -199,12 +189,12 @@ exits, and its `MEATGEEK_STATE_DIR` keeps the code between runs.
 
 | Variable                       | Purpose                                                          | Default                |
 | ------------------------------ | ---------------------------------------------------------------- | ---------------------- |
-| `IOTHUB_CONNECTION_STRING`     | Device-scoped IoT Hub connection string (connection-string mode only; onboarded devices use DPS mode) | (none)                 |
+| `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_DPS_ENDPOINT`, `MEATGEEK_STATE_DIR` | [DPS mode](#dps-mode-the-devices-own-x509-identity) | (see above) |
 | `DEVICE_URL`                   | Device controller URL                                            | `http://localhost:3000`|
 | `POLL_INTERVAL`                | Polling interval for the device controller (Go duration)         | `5s`                   |
 | `DEBUG`                        | Enable debug logging                                             | `false`                |
 | `MOCK_IOT`                     | Use mock IoT Hub (development only; no device twin, so the cook session keeps its persisted state) | `false`                |
-| `MOCK_DEVICE_ID`               | Device id used with `MOCK_IOT` (production reads it from the connection string) | `meatgeek-mock`        |
+| `MOCK_DEVICE_ID`               | Device id used with `MOCK_IOT` (otherwise it is `MEATGEEK_DEVICE_ID`) | `meatgeek-mock`        |
 | `QUEUE_DIR`                    | Directory for the disk-backed outbound queue (falls back to `~/.meatgeek-pusher/queue` if not writable) | `/var/lib/meatgeek-pusher/queue` |
 | `COOKSESSION_STATE_PATH`       | Persisted cook-session state file (falls back to `~/.meatgeek-pusher/cooksession.json` if not writable) | `/var/lib/meatgeek-pusher/cooksession.json` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`  | OTLP endpoint of the OTel Collector; when set, spans export via OTLP/HTTP — no-op exporter when unset | (none)                 |
@@ -224,8 +214,7 @@ telemetry connection off.
 | desired  | the API    | `activeCookId`: string, or absent/`null` for no cook. `correlationId`: string, or absent/`null`. Plus IoT Hub's `$version`. |
 | reported | the device | `activeCookId`: string or `null`. `correlationId`: string or `null`. `appliedDesiredVersion`: the desired `$version` the device applied. |
 
-- **On every connect** (startup, a dropped connection, and the SAS-token refresh
-  reconnect 5 minutes before expiry): subscribe to `$iothub/twin/res/#` and
+- **On every connect** (startup and a dropped connection): subscribe to `$iothub/twin/res/#` and
   `$iothub/twin/PATCH/properties/desired/#` (the session is clean, so
   subscriptions do not survive a reconnect), GET the twin, apply its whole
   desired section, and report. The GET is the reconcile; there is no REST call
@@ -300,24 +289,28 @@ Runs the pusher against `http://localhost:3000` with the mock IoT Hub client
 `cmd/simdevice` sends synthetic temperature readings to IoT Hub as **one
 device**, so dev has a standing sender that behaves exactly like a Pi. Each
 reading is a plausible `V1Status` (pit near 225°F, two probes climbing,
-`smokerid` = the connection string's device id) built into a payload and
+`smokerid` = the device id) built into a payload and
 properties by the same `internal/publish` functions the pusher uses, then sent
 with the pusher's MQTT client (`iothub.AzureClient`). Tracing is set up the
 same way, so every message carries its own `traceparent`. It does not touch
 the disk queue and sends no device status. Without `--twin` its readings carry
 no cook.
 
+It connects in [DPS mode](#dps-mode-the-devices-own-x509-identity), exactly as
+the pusher, and has no other mode: create its identity, enrol the certificate
+(`deploy/enrol-device.sh`, see `deploy/README.md`), then send.
+
 ```bash
 make build
-export SIMDEVICE_CONNECTION_STRING='HostName=…;DeviceId=…;SharedAccessKey=…'
+export MEATGEEK_DPS_ID_SCOPE=<the DPS ID scope> MEATGEEK_DEVICE_ID=sim-device-1 MEATGEEK_STATE_DIR="$HOME/.meatgeek/sim-device-1"
+dist/simdevice identity init > /tmp/sim-device-1.crt   # then enrol /tmp/sim-device-1.crt
 dist/simdevice --count 3 --interval 2s
 dist/simdevice --twin --count 3      # read the twin first; readings carry its cook
 ```
 
 | Input | Meaning | Default |
 | ----- | ------- | ------- |
-| `SIMDEVICE_CONNECTION_STRING` (env) | Device-scoped IoT Hub connection string. The **only** source of the credential; there is no flag for it. | (required, unless DPS mode) |
-| `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_DPS_ENDPOINT`, `MEATGEEK_STATE_DIR` (env) | [DPS mode](#dps-mode-the-devices-own-x509-identity), exactly as the pusher: the device's own identity under the state dir, registered with DPS. Set these **or** `SIMDEVICE_CONNECTION_STRING`, not both (both exits `2`). CI should set `MEATGEEK_STATE_DIR` to a writable directory. | (off) |
+| `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_DPS_ENDPOINT`, `MEATGEEK_STATE_DIR` (env) | [DPS mode](#dps-mode-the-devices-own-x509-identity), exactly as the pusher: the device's own identity under the state dir, registered with DPS. The ID scope and device id are required (without them simdevice exits `2`). CI sets `MEATGEEK_STATE_DIR` to a writable directory. | (required) |
 | `--count N` | Readings to send | `1` |
 | `--interval D` | Go duration between sends (`500ms`, `2s`). With `--inflight` above 1, between send **starts**, so it caps the rate at one send per `D` whatever the acknowledgement latency. | `0s` |
 | `--inflight N` | How many sends may await IoT Hub's QoS 1 acknowledgement at once. `1` is the pusher's own send: publish, wait for the ack, wait `--interval`, repeat. Above 1, sends are pipelined over the one MQTT connection. | `1` |
@@ -366,9 +359,8 @@ cook-chart proof's one-time top-up adds `--start <cook startTime> --step 5s`, so
 **Exit codes:** `0` all sent; `1` a send failed, the run was interrupted, or
 `--twin` got no twin response within `--timeout` —
 nothing is printed for a reading that was not acknowledged; `2` usage or configuration error,
-including a missing or malformed `SIMDEVICE_CONNECTION_STRING`. No output
-contains the connection string or its key: parse errors never echo their
-input, and every error is redacted before it is printed.
+including a missing `MEATGEEK_DPS_ID_SCOPE` or `MEATGEEK_DEVICE_ID`. The device's
+key never leaves its state dir, so no output can contain it.
 
 ### Tests
 
@@ -454,10 +446,11 @@ az account set --subscription <subscription-id>
 #    on the consumer end is NOT in scope yet — that's ticket #6.)
 ```
 
-If step 1 fails: check the pusher journal (`make logs`) — most often it's a
-connection-string problem (hub-scoped instead of device-scoped) or the env
-file isn't being read. The pusher logs an actionable error on startup if the
-connection-string shape is wrong (hub-scoped instead of device-scoped).
+If step 1 fails: check the pusher journal (`make logs`) — most often the
+device's certificate is not enrolled (the pusher logs that DPS refused the
+registration and to enrol the certificate `identity init` prints) or the env
+file isn't being read (the pusher refuses to start, naming
+`MEATGEEK_DPS_ID_SCOPE`).
 
 If step 1 succeeds but step 2 doesn't: the IoT Hub route configuration is
 the suspect, not the pusher. See `apps/infrastructure` for the route
@@ -512,11 +505,12 @@ Plus IoT Hub message properties: `messageId`, `$.ct`, `$.ce`, `traceparent`, and
 
 ## Troubleshooting
 
-- **"connection string is not device-scoped"** — you used a hub-owner
-  (`iothubowner`) string. Retrieve the **device-scoped** string instead with
-  `az iot hub device-identity connection-string show --hub-name "$(terraform
-  output -raw iot_hub_name)" --device-id <device-id>` (see "Connection string
-  (per device)").
+- **"MEATGEEK_DPS_ID_SCOPE is not set"** — the pusher connects only in DPS
+  mode. Run `deploy/onboard-pi.sh` again to write the env file (see the
+  [device runbook](../../docs/devices/runbook.md)).
+- **DPS refused the registration** — the device's certificate is not enrolled,
+  or its enrollment is disabled (revoked). Enrol the certificate
+  `meatgeek-pusher identity init` prints with `deploy/enrol-device.sh`.
 - **"failed to read /etc/meatgeek-pusher/env"** — file missing, wrong owner,
   or wrong mode. The unit runs as `meatgeek`; the file should be
   `root:meatgeek` / `0640`. Run `deploy/onboard-pi.sh` again to rewrite it.

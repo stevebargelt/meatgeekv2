@@ -56,7 +56,6 @@ interface Script {
   claimCode?: (device: DeviceRef) => ClaimCodeLine | NoClaimYet;
   deviceScript?: (script: DeviceScript, args: readonly string[]) => DeviceScriptRun;
   request?: (options: RequestOptions) => { status: number; body?: unknown; charge?: number };
-  dpsMode?: boolean;
   runId?: string;
 }
 
@@ -91,7 +90,6 @@ function fakeApi(script: Script = {}) {
         }
       );
     },
-    inDpsMode: () => script.dpsMode ?? true,
     async runDeviceScript(which: DeviceScript, args: readonly string[]) {
       calls.push(`${which} ${args.join(' ')}`);
       if (script.deviceScript) return script.deviceScript(which, args);
@@ -485,23 +483,6 @@ describe('claimStandingDevice', () => {
     await claimStandingDevice(api, 'simulated', { name: 'Sim' });
     await expect(claimStandingDevice(api, 'simulated', { name: 'Sim' })).rejects.toThrow(
       'expected 200, got 201'
-    );
-  });
-
-  it('in connection-string mode only checks the caller holds it', async () => {
-    const { api, calls } = fakeApi({ runId: `standing-3`, dpsMode: false, request: held });
-    await claimStandingDevice(api, 'simulated', { name: 'Sim' });
-    expect(calls).toEqual([`GET /devices/${SIM}`]);
-  });
-
-  it('in connection-string mode fails when the caller does not hold it', async () => {
-    const { api } = fakeApi({
-      runId: `standing-4`,
-      dpsMode: false,
-      request: () => ({ status: 404 }),
-    });
-    await expect(claimStandingDevice(api, 'simulated', { name: 'Sim' })).rejects.toThrow(
-      `${SIM} is not the caller's (expected 200, got 404); in connection-string mode`
     );
   });
 

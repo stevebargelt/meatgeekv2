@@ -12,24 +12,13 @@ import { createGuardrails, generateSync } from 'otplib';
 
 export const DEFAULT_WEB_BASE_URL = 'https://meatgeekv2-web.vercel.app';
 
-/** Every input the proof cannot run without, in the order the docs list them,
- *  when simdevice runs with a connection string (the old mode). */
-export const REQUIRED_VARIABLES = [
-  'EXPECTED_WEB_SHA',
-  'ACCEPTANCE_USER_UPN',
-  'ACCEPTANCE_USER_PASSWORD',
-  'ACCEPTANCE_USER_TOTP_SECRET',
-  'ACCEPTANCE_WEB_DEVICE_ID',
-  'SIMDEVICE_WEB_CONNECTION_STRING',
-  'ACCEPTANCE_SIMDEVICE_BIN',
-] as const;
-
 /**
- * HAR-138: the same, in DPS mode (ACCEPTANCE_WEB_STATE_DIR is set). The device
- * is its own X.509 identity in that state dir, so no connection string; the
- * DPS ID scope instead. ACCEPTANCE_DPS_ENDPOINT is optional.
+ * Every input the proof cannot run without, in the order the docs list them.
+ * HAR-146: simdevice runs in DPS mode, the only mode: the device is its own
+ * X.509 identity in ACCEPTANCE_WEB_STATE_DIR, with the DPS ID scope.
+ * ACCEPTANCE_DPS_ENDPOINT is optional.
  */
-export const DPS_REQUIRED_VARIABLES = [
+export const REQUIRED_VARIABLES = [
   'EXPECTED_WEB_SHA',
   'ACCEPTANCE_USER_UPN',
   'ACCEPTANCE_USER_PASSWORD',
@@ -40,32 +29,24 @@ export const DPS_REQUIRED_VARIABLES = [
   'ACCEPTANCE_SIMDEVICE_BIN',
 ] as const;
 
-/** How simdevice gets the web device: a connection string, or DPS mode. */
-export type SimDeviceCredential =
-  | { readonly mode: 'connection-string'; readonly connectionString: string }
-  | {
-      readonly mode: 'dps';
-      readonly idScope: string;
-      readonly endpoint: string | undefined;
-      readonly deviceId: string;
-      readonly stateDir: string;
-    };
+/** How simdevice gets the web device: its DPS identity. */
+export interface SimDeviceCredential {
+  readonly idScope: string;
+  readonly endpoint: string | undefined;
+  readonly deviceId: string;
+  readonly stateDir: string;
+}
 
 /**
  * The whole environment simdevice runs with: PATH and HOME from `base`, plus
- * the credential. A connection string goes in as SIMDEVICE_CONNECTION_STRING;
- * DPS mode sets MEATGEEK_DPS_ID_SCOPE, MEATGEEK_DEVICE_ID, MEATGEEK_STATE_DIR
- * and, when given, MEATGEEK_DPS_ENDPOINT, and no connection string at all.
+ * MEATGEEK_DPS_ID_SCOPE, MEATGEEK_DEVICE_ID, MEATGEEK_STATE_DIR and, when
+ * given, MEATGEEK_DPS_ENDPOINT.
  */
 export function simDeviceEnv(
   credential: SimDeviceCredential,
   base: Readonly<Record<string, string | undefined>>
 ): Record<string, string> {
   const env: Record<string, string> = { PATH: base['PATH'] ?? '', HOME: base['HOME'] ?? '' };
-  if (credential.mode === 'connection-string') {
-    env['SIMDEVICE_CONNECTION_STRING'] = credential.connectionString;
-    return env;
-  }
   env['MEATGEEK_DPS_ID_SCOPE'] = credential.idScope;
   env['MEATGEEK_DEVICE_ID'] = credential.deviceId;
   env['MEATGEEK_STATE_DIR'] = credential.stateDir;
@@ -81,7 +62,7 @@ export interface LiveEnv {
   readonly password: string;
   readonly totpSecret: string;
   readonly deviceId: string;
-  /** HAR-138: the web device's connection string, or its DPS identity. */
+  /** HAR-138: the web device's DPS identity. */
   readonly simdevice: SimDeviceCredential;
   readonly simdeviceBin: string;
   /** Names this run's cook: the GitHub Actions run id, or a timestamp locally. */
@@ -101,32 +82,17 @@ export const isCommitSha = (value: string): boolean => SHA.test(value);
  * Read and check the proof's inputs. Throws one LiveEnvError naming every
  * variable that is unset or blank, then (once all are set) every one that is
  * malformed.
- *
- * HAR-138: ACCEPTANCE_WEB_STATE_DIR set means DPS mode, which needs
- * {@link DPS_REQUIRED_VARIABLES}; otherwise {@link REQUIRED_VARIABLES}. Both it
- * and SIMDEVICE_WEB_CONNECTION_STRING set is refused before anything else.
  */
 export function readLiveEnv(
   env: Readonly<Record<string, string | undefined>>,
   now: Date = new Date()
 ): LiveEnv {
   const value = (name: string) => env[name]?.trim() ?? '';
-  const dps = value('ACCEPTANCE_WEB_STATE_DIR') !== '';
-  if (dps && value('SIMDEVICE_WEB_CONNECTION_STRING') !== '') {
-    throw new LiveEnvError(
-      'The live browser proof was given SIMDEVICE_WEB_CONNECTION_STRING and ' +
-        'ACCEPTANCE_WEB_STATE_DIR. simdevice runs in one mode: set the connection string, ' +
-        'or the state dir for DPS mode. ' +
-        'See "Live browser proof" in docs/development/live-acceptance.md.'
-    );
-  }
-  const required: readonly string[] = dps ? DPS_REQUIRED_VARIABLES : REQUIRED_VARIABLES;
-  const missing = required.filter(name => value(name) === '');
+  const missing = REQUIRED_VARIABLES.filter(name => value(name) === '');
   if (missing.length > 0) {
     throw new LiveEnvError(
       `The live browser proof is missing ${missing.length === 1 ? 'an input' : 'inputs'}. ` +
         `Set ${missing.join(', ')}. ` +
-        (dps ? '(ACCEPTANCE_WEB_STATE_DIR is set, so simdevice runs in DPS mode.) ' : '') +
         'See "Live browser proof" in docs/development/live-acceptance.md.'
     );
   }
@@ -157,15 +123,12 @@ export function readLiveEnv(
     password: env['ACCEPTANCE_USER_PASSWORD'] ?? '',
     totpSecret: value('ACCEPTANCE_USER_TOTP_SECRET'),
     deviceId: value('ACCEPTANCE_WEB_DEVICE_ID'),
-    simdevice: dps
-      ? {
-          mode: 'dps',
-          idScope: value('ACCEPTANCE_DPS_ID_SCOPE'),
-          endpoint: value('ACCEPTANCE_DPS_ENDPOINT') || undefined,
-          deviceId: value('ACCEPTANCE_WEB_DEVICE_ID'),
-          stateDir: value('ACCEPTANCE_WEB_STATE_DIR'),
-        }
-      : { mode: 'connection-string', connectionString: value('SIMDEVICE_WEB_CONNECTION_STRING') },
+    simdevice: {
+      idScope: value('ACCEPTANCE_DPS_ID_SCOPE'),
+      endpoint: value('ACCEPTANCE_DPS_ENDPOINT') || undefined,
+      deviceId: value('ACCEPTANCE_WEB_DEVICE_ID'),
+      stateDir: value('ACCEPTANCE_WEB_STATE_DIR'),
+    },
     simdeviceBin: value('ACCEPTANCE_SIMDEVICE_BIN'),
     runId: value('GITHUB_RUN_ID') || now.toISOString().replace(/[-:]/g, '').replace(/\..*$/, 'Z'),
   };
