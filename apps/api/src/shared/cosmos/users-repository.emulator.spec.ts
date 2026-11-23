@@ -187,7 +187,6 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
       name: 'Emulator grill',
       model: 'MeatGeek V2',
       isActive: true,
-      connectionStatus: 'unknown',
     });
 
     // create

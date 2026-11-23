@@ -117,7 +117,6 @@ function device(overrides: Partial<Device> = {}): Device {
     name: 'Backyard Smoker',
     model: 'MeatGeek V1',
     isActive: true,
-    connectionStatus: 'unknown',
     ...overrides,
   };
 }

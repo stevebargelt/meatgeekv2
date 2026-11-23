@@ -29,7 +29,6 @@ const BRISKET = {
   model: 'MeatGeek V1',
   location: 'Backyard',
   isActive: true,
-  connectionStatus: 'online',
 };
 const OFFSET = { ...BRISKET, id: 'offset-1', name: 'Offset', location: undefined };
 

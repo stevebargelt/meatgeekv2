@@ -11,8 +11,9 @@ import {
  * HAR-20 (MG-80) — validation of the POST /devices and PATCH /devices/{id}
  * bodies; HAR-130 adds POST /devices/claim. Each validator returns the cleaned request or one fixed message for a
  * 400 VALIDATION_ERROR. Unknown keys are rejected rather than ignored, so a body
- * can never carry `userId`, `isActive` or `connectionStatus` into a document:
- * the owner comes from the principal and the status fields from the server.
+ * can never carry `userId`, `isActive` or `connection` into a document: the
+ * owner comes from the principal, `isActive` from the server, and `connection`
+ * is never stored (HAR-143).
  */
 
 export const DEVICE_NAME_MAX_LENGTH = 100;

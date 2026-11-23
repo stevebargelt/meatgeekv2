@@ -11,6 +11,7 @@ import {
   type DevicesRepository,
 } from '../../shared/cosmos/devices-repository';
 import { chargeAfterError, requestChargeHeaders } from '../../shared/cosmos/request-charge';
+import { getDeviceTwinClient, type DeviceTwinPort } from '../../shared/iothub/device-twin';
 
 /**
  * HAR-20 (MG-80) — what the devices handlers share: their injection seam
@@ -37,11 +38,15 @@ export type DevicesRepositoryPort = Pick<
 export interface DevicesHandlerDeps {
   resolvePrincipal(request: HeaderReader): PrincipalResult;
   getRepository(): DevicesRepositoryPort;
+  /** The IoT Hub twin client: the GETs read each device's connection from
+   *  it (HAR-143), DELETE releases the device through it (HAR-136). */
+  getDeviceTwin(): DeviceTwinPort;
 }
 
 export const defaultDevicesDeps: DevicesHandlerDeps = {
   resolvePrincipal: principalFromRequest,
   getRepository: getDevicesRepository,
+  getDeviceTwin: getDeviceTwinClient,
 };
 
 /** The request id echoed in `X-Request-ID`: the caller's, else the invocation id. */

@@ -5,10 +5,14 @@ import type { Cook, Device } from '../api/client';
 import { problemFromError, problemFromResponse, type ApiProblem } from '../api/problem';
 import { ProblemMessage } from '../api/problem-message';
 import { StartCookForm } from '../cooks/start-cook-form';
+import { connectionText } from './connection';
 import { validateLabel } from './validation';
 
 interface DeviceRowProps {
   device: Device;
+  /** HAR-143: when the list was read (epoch ms, from the page's clock); the
+   *  connection's "last heard" age is relative to it. */
+  now: number;
   /** The device's active cook, from the page's one GET /cooks?status=active. */
   activeCook?: Cook;
   /** Re-reads the list after a successful rename. */
@@ -20,7 +24,7 @@ interface DeviceRowProps {
 }
 
 /** Columns in the device table; the start-cook and release rows span them all. */
-export const DEVICE_COLUMNS = 5;
+export const DEVICE_COLUMNS = 6;
 
 /** What a refused DELETE /devices/{id} says, by status. */
 export const RELEASE_MESSAGES = {
@@ -30,6 +34,7 @@ export const RELEASE_MESSAGES = {
 
 export function DeviceRow({
   device,
+  now,
   activeCook,
   onChanged,
   onReleased,
@@ -162,6 +167,14 @@ export function DeviceRow({
         </td>
         <td>{device.model}</td>
         <td>{device.location ?? <span className="muted">—</span>}</td>
+        <td>
+          <span
+            className={`connection connection-${device.connection?.state ?? 'unknown'}`}
+            data-testid="device-connection"
+          >
+            {connectionText(device.connection, now)}
+          </span>
+        </td>
         <td>
           {activeCook ? (
             <Link to={`/cooks/${encodeURIComponent(activeCook.id)}`}>

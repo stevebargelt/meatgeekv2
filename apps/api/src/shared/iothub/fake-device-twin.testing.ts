@@ -21,7 +21,12 @@ import {
 export class FakeTwinHub implements DeviceTwinPort {
   private readonly twins = new Map<
     string,
-    { version: number; desired: Record<string, unknown>; reported: Record<string, unknown> }
+    {
+      version: number;
+      desired: Record<string, unknown>;
+      reported: Record<string, unknown>;
+      connection?: { connectionState?: string; lastActivityTime?: string };
+    }
   >();
   private readonly failures: Array<{ operation: 'get_twin' | 'patch_twin'; status?: number }> = [];
   readonly gets: string[] = [];
@@ -51,6 +56,22 @@ export class FakeTwinHub implements DeviceTwinPort {
         twin.reported[key] = value;
       }
     }
+  }
+
+  /**
+   * HAR-143: the twin's top-level `connectionState` and `lastActivityTime`,
+   * which IoT Hub itself maintains. A twin without them returns neither.
+   */
+  setConnection(
+    deviceId: string,
+    connection: { connectionState?: string; lastActivityTime?: string }
+  ): this {
+    const twin = this.twins.get(deviceId);
+    if (!twin) {
+      throw new Error(`no twin for ${deviceId}`);
+    }
+    twin.connection = { ...connection };
+    return this;
   }
 
   /** The next GET or PATCH fails: with `status`, or as a network failure. */
@@ -88,6 +109,7 @@ export class FakeTwinHub implements DeviceTwinPort {
       etag: this.etagOf(twin.version),
       desired: { ...twin.desired, $version: twin.version },
       reported: { ...twin.reported },
+      ...twin.connection,
     };
   }
 

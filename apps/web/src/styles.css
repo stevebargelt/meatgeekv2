@@ -316,3 +316,13 @@ ul.plain {
   margin-right: 0.35rem;
   vertical-align: middle;
 }
+
+/* HAR-143: a device's connection, read live from IoT Hub. */
+.connection {
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.connection-connected {
+  color: #1a7f37;
+}

@@ -3,6 +3,7 @@ import {
   distinctiveGrillF,
   grillText,
   isAncestorCommit,
+  LAST_HEARD_TEXT,
   readLiveEnv,
   waitForBuild,
   type LiveEnv,
@@ -15,7 +16,8 @@ import { readClaimCode, startSimDevice, type SimDeviceRun } from './simdevice';
  * The live browser proof (HAR-99): on the production web app, the acceptance
  * user signs in through Microsoft's real pages with a TOTP code, claims the
  * web device with the code it reports (HAR-141), starts a cook on it, sees a
- * reading simdevice pushes through IoT Hub and SignalR, stops the cook and
+ * reading simdevice pushes through IoT Hub and SignalR, stops the cook, sees
+ * on the devices page when IoT Hub last heard from the device (HAR-143) and
  * releases the device. See "Live browser proof" in
  * docs/development/live-acceptance.md.
  *
@@ -33,7 +35,8 @@ const DEVICE_NAME = 'Web acceptance smoker';
  * docs/development/live-acceptance.md, with the runs it was measured on.
  */
 const PUSH_TIMEOUT_MS = 60_000;
-/** The app-side waits after sign-in: the header, GET /devices, GET /cooks, a claim, a release. */
+/** The app-side waits after sign-in: the header, GET /devices, GET /cooks, a claim, a release,
+ *  the device row's connection text. */
 const APP_TIMEOUT_MS = 30_000;
 const APP_TIMEOUT_S = APP_TIMEOUT_MS / 1000;
 /** simdevice's own bound on the twin sync before the claim (`--twin --timeout`). */
@@ -368,8 +371,21 @@ test('live: sign in with TOTP, claim the device, start a cook, see a pushed read
       await expect(panel, 'the live panel is still on screen after the stop').toHaveCount(0);
     });
 
-    await test.step('8. release the device', async () => {
+    await test.step('8. the devices page says when the device was last heard from', async () => {
+      // HAR-143: a fresh GET /devices, which reads the device's IoT Hub twin.
+      // The device synced its twin in step 4 and sent in step 6, so the hub
+      // has heard from it: the row must say when, not "never heard from" (no
+      // activity) or "Status unknown" (the twin could not be read).
       await openDevicesPage(page);
+      const status = row.getByTestId('device-connection');
+      await expect(
+        status,
+        `${env.deviceId}'s row did not say when it was last heard from within ${APP_TIMEOUT_S} s`
+      ).toHaveText(LAST_HEARD_TEXT, { timeout: APP_TIMEOUT_MS });
+      log(`The devices page says ${env.deviceId} is: ${(await status.textContent()) ?? ''}`);
+    });
+
+    await test.step('9. release the device', async () => {
       await releaseThroughUi(page, row, apiBaseUrl, env.deviceId);
       claimed = false;
       log(`Released device ${env.deviceId}`);
@@ -377,12 +393,12 @@ test('live: sign in with TOTP, claim the device, start a cook, see a pushed read
   } finally {
     sim?.kill();
     if (cookId && !cookStopped) {
-      await test.step('9. cleanup: stop the cook through the API', async () => {
+      await test.step('10. cleanup: stop the cook through the API', async () => {
         await stopThroughApi(apiBaseUrl, cookId as string, api?.bearer);
       });
     }
     if (claimed) {
-      await test.step('9. cleanup: release the device through the API', async () => {
+      await test.step('10. cleanup: release the device through the API', async () => {
         await releaseThroughApi(apiBaseUrl, env.deviceId, api?.bearer);
       });
     }

@@ -10,7 +10,6 @@ export interface Device {
   lastSeen?: string;
   isActive: boolean;
   configuration?: DeviceConfiguration;
-  connectionStatus: 'online' | 'offline' | 'unknown';
   firmware?: {
     version: string;
     updateAvailable: boolean;
@@ -20,6 +19,27 @@ export interface Device {
    * UTC). Absent on a device registered through `POST /devices`.
    */
   claimedAt?: string;
+  /**
+   * HAR-143 (goal HAR-130): whether the device is connected to IoT Hub and
+   * when the hub last heard from it, read live from the device's twin on every
+   * `GET /devices` and `GET /devices/{id}`. Never stored. The other routes that
+   * return a Device leave it out.
+   */
+  connection?: DeviceConnection;
+}
+
+/** HAR-143: what IoT Hub says about a device's connection. */
+export type DeviceConnectionState = 'connected' | 'disconnected' | 'unknown';
+
+/**
+ * HAR-143: a device's connection, from its IoT Hub twin's top-level
+ * `connectionState` and `lastActivityTime`. `unknown` with `lastActivityAt:
+ * null` when the twin could not be read (no twin, a failure, a timeout).
+ */
+export interface DeviceConnection {
+  state: DeviceConnectionState;
+  /** ISO-8601 UTC; `null` when the hub has never heard from the device. */
+  lastActivityAt: string | null;
 }
 
 /**

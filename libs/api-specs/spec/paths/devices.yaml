@@ -24,6 +24,10 @@ devices-collection:
       Returns every device the authenticated caller owns, sorted by name,
       wrapped under a `devices` key (NOT a bare array, NOT ApiResponse).
       A `userId` query parameter or `x-user-id` header is ignored.
+
+      HAR-143: every device carries `connection`, read from its IoT Hub twin
+      with one GET per device, at most 8 at a time. A device whose twin
+      cannot be read is `unknown`; that never fails the list.
     tags: [devices]
     responses:
       '200':
@@ -46,8 +50,8 @@ devices-collection:
     operationId: registerDevice
     summary: Register a device to the caller
     description: |
-      Creates the device with the caller as owner, `isActive: true` and
-      `connectionStatus: 'unknown'`. A supplied `configuration` is completed
+      Creates the device with the caller as owner and `isActive: true`. The
+      response has no `connection`. A supplied `configuration` is completed
       from DEFAULT_DEVICE_CONFIGURATION. The document is created, never
       upserted, so an existing id is never overwritten.
     tags: [devices]
@@ -200,6 +204,10 @@ device-item:
       Returns the Device with id=`{id}` as a bare object. A device that does
       not exist and one owned by someone else both answer 404, so the
       response does not reveal that another user's device exists.
+
+      HAR-143: the device carries `connection`, read from its IoT Hub twin.
+      A twin that cannot be read gives `unknown`; that never fails the
+      request.
     tags: [devices]
     parameters:
       - $ref: '../components/parameters.yaml#/DeviceIdPath'

@@ -204,7 +204,10 @@ export class FakeApi {
     delete device.location;
     if (body.location !== undefined) device.location = body.location;
     this.options.device = device;
-    return this.options.device;
+    // HAR-143: as the real route, the claim answers without the live connection.
+    const claimed = { ...device };
+    delete claimed.connection;
+    return claimed;
   }
 
   private getDevice(): Json<'getDevice', 200> {

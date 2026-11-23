@@ -137,6 +137,30 @@ describe('DeviceTwinClient.getTwin', () => {
     expect(await twins.getTwin('pi')).toEqual({ etag: 'e1', desired: {}, reported: {} });
   });
 
+  it('HAR-143: carries the top-level connectionState and lastActivityTime as IoT Hub sent them', async () => {
+    const { client: twins } = client(() =>
+      json({
+        ...TWIN_BODY,
+        connectionState: 'Disconnected',
+        lastActivityTime: '2026-11-20T12:34:56.1234567Z',
+      })
+    );
+    expect(await twins.getTwin(DEVICE_ID)).toEqual({
+      etag: TWIN_BODY.etag,
+      desired: TWIN_BODY.properties.desired,
+      reported: TWIN_BODY.properties.reported,
+      connectionState: 'Disconnected',
+      lastActivityTime: '2026-11-20T12:34:56.1234567Z',
+    });
+  });
+
+  it('HAR-143: leaves out a connectionState or lastActivityTime that is not a string', async () => {
+    const { client: twins } = client(() =>
+      json({ etag: 'e1', properties: {}, connectionState: 1, lastActivityTime: null })
+    );
+    expect(await twins.getTwin('pi')).toEqual({ etag: 'e1', desired: {}, reported: {} });
+  });
+
   it('keeps a 404 (no device identity) distinct', async () => {
     const { client: twins } = client(() => json({ Message: `Device ${DEVICE_ID} not found` }, 404));
     const error = await failure(twins.getTwin(DEVICE_ID));

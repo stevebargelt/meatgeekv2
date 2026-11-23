@@ -460,9 +460,10 @@ model {
       description 'Desired activeCookId and correlationId, synced after the Cosmos write to the device lock under the twin etag (If-Match), so the twin follows Cosmos. A failed sync answers 503 DEVICE_TWIN_UPDATE_FAILED; the cook stays written and a retry of the same request heals the twin.'
     }
     // Claiming a device proves possession through the twin (HAR-130, HAR-133).
-    cloud.api.devices -> cloud.ingest.iothub 'read twin claim hash; set desired claim properties' {
+    // The GETs read each device's connection from it (HAR-143).
+    cloud.api.devices -> cloud.ingest.iothub 'GET reads connectionState and lastActivityTime; claim reads the twin claim hash and sets desired claim properties' {
       technology 'IoT Hub service REST, managed identity (IoT Hub Twin Contributor)'
-      description 'POST /devices/claim reads the twin and compares the reported claimCodeHash (written only by the device, with its own credential) to the hash of the submitted code, in constant time, and checks reported claimGeneration against desired and claimExpiresAt against the clock. It then patches desired claimConsumedCodeHash and claimClaimantHash under the read etag (If-Match), before the Cosmos create, so a code is single-use under concurrency; a 412 re-reads once. A twin read or write failure answers 503 DEVICE_TWIN_UPDATE_FAILED; every refusal is the same 403 CLAIM_REFUSED. Release (DELETE /devices/{id}, HAR-136) reads the twin and patches desired claimGeneration to its value + 1 and claimClaimantHash to null under If-Match (a 412 re-reads once), keeping claimConsumedCodeHash, before the document is deleted, so the device mints a fresh code and the old one can never claim again; a device with no twin (IoT Hub 404) skips it, and any other twin failure answers 503 DEVICE_TWIN_UPDATE_FAILED with the document kept.'
+      description 'GET /devices and GET /devices/{id} (HAR-143) read the twin of each device, one GET /twins/{id} per device and at most 8 at once (never an IoT Hub query), for its top-level connectionState (Connected / Disconnected) and lastActivityTime (0001-01-01 means never heard from), returned as connection { state, lastActivityAt } and never stored; a twin that cannot be read (404, a failure, the 10 s timeout) makes that device unknown and never fails the request, and the log carries counts only. POST /devices/claim reads the twin and compares the reported claimCodeHash (written only by the device, with its own credential) to the hash of the submitted code, in constant time, and checks reported claimGeneration against desired and claimExpiresAt against the clock. It then patches desired claimConsumedCodeHash and claimClaimantHash under the read etag (If-Match), before the Cosmos create, so a code is single-use under concurrency; a 412 re-reads once. A twin read or write failure answers 503 DEVICE_TWIN_UPDATE_FAILED; every refusal is the same 403 CLAIM_REFUSED. Release (DELETE /devices/{id}, HAR-136) reads the twin and patches desired claimGeneration to its value + 1 and claimClaimantHash to null under If-Match (a 412 re-reads once), keeping claimConsumedCodeHash, before the document is deleted, so the device mints a fresh code and the old one can never claim again; a device with no twin (IoT Hub 404) skips it, and any other twin failure answers 503 DEVICE_TWIN_UPDATE_FAILED with the document kept.'
     }
     cloud.ingest.iothub -> edge.pusher.twin 'desired properties' {
       description 'Read in full on every connect and patched on every change, so a Pi that was offline when the cook started gets it on reconnect.'
@@ -687,13 +688,19 @@ model {
     technology 'MQTT 8883, device SAS, QoS 1'
     description 'Built by the internal/publish builders of the data-pusher over the same internal/iothub transport, so messageId, $.ct, $.ce and traceparent match the readings of the Pi. No correlation.id and no cook id: simdevice passes an empty correlation and a nil cook id.'
   }
-  delivery.acceptance -> meatgeek.cloud.ingest.iothub 'ensure the device identity, read its connection string' {
-    technology 'az iot hub device-identity --auth-type login, OIDC'
+  delivery.acceptance -> meatgeek.cloud.ingest.iothub 'enrol each simulated device through DPS (enrol-device.sh), register it with simdevice' {
+    technology 'enrol-device.sh (az iot dps, --auth-type login, OIDC); simdevice X.509 over DPS'
     description '''
-      As the dev app-publish identity, which holds `IoT Hub Registry Contributor` on the dev hub
-      through `azurerm_role_assignment.simulated_device_registry_contributor`. That grant exists
-      only when `simulated_device_id` is set (only `dev.tfvars` sets it) and the app-deploy
-      principal is known.
+      Since HAR-139, the job's "Enrol the simulated devices through DPS" step: `simdevice identity
+      init` makes each device's key and certificate on the runner, `enrol-device.sh` enrols the
+      certificate in DPS as an individual enrollment, and `simdevice --twin --count 0 --timeout 2m`
+      registers the device through DPS and syncs its twin. No connection string is read. HAR-140:
+      the proofs enrol their fresh `acceptance-*` devices the same way, and `delete-device.sh`
+      removes the enrollment and hub identity afterwards. As the dev app-publish identity, which
+      holds `Device Provisioning Service Data Contributor` on the DPS through
+      `azurerm_role_assignment.dps_ci_enroller`, and `IoT Hub Registry Contributor` on the hub
+      through `azurerm_role_assignment.simulated_device_registry_contributor` (to retire an old
+      SAS identity and delete fresh ones).
     '''
   }
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices/claim with the claim code the device minted: 201, or 200 on a retry'
@@ -723,8 +730,8 @@ model {
   vercel -> meatgeek.web 'builds apps/web on every push to main, serves production'
   delivery.webAcceptance -> meatgeek.web 'Playwright, production'
   delivery.webAcceptance -> entra 'signs in as the test user'
-  delivery.webAcceptance -> meatgeek.cloud.ingest.iothub 'ensure <sim>-web, read its connection string' {
-    technology 'az iot hub device-identity --auth-type login, OIDC'
+  delivery.webAcceptance -> meatgeek.cloud.ingest.iothub 'enrol <sim>-web through DPS (enrol-device.sh), register it with simdevice' {
+    technology 'enrol-device.sh (az iot dps, --auth-type login, OIDC); simdevice X.509 over DPS'
   }
   meatgeek.cloud.observability.actionGroup -> operator 'alert email'
   meatgeek.cloud.observability.budgets -> operator 'budget email (contact_emails)'
