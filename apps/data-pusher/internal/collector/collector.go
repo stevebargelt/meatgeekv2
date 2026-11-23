@@ -56,7 +56,8 @@ type Sample struct {
 
 // gobotCommandResponse is the {"result": "<json-string>"} envelope that
 // gobot.io's HTTP API wraps every command handler in. The device-controller's
-// get_status handler calls `json.Marshal(SmokerStatus)` and `return string(res)`,
+// get_status handler (internal/deviceapi) calls `json.Marshal(status)` and
+// `return string(res)`,
 // which gobot then JSON-encodes inside the "result" field, producing a
 // JSON-encoded STRING (not a struct). The unwrap path is therefore: decode
 // outer envelope -> read .Result -> json.Unmarshal that string into V1Status.
