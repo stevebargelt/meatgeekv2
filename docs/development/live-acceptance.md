@@ -757,13 +757,15 @@ dir, enrolled in the dev Device Provisioning Service (HAR-131); there is no
 device key to fetch. Each device gets its own state dir. The runner chooses the
 mode per device:
 
-| Variable                     | Value                                                                                            |
-| ---------------------------- | ------------------------------------------------------------------------------------------------ |
-| `ACCEPTANCE_DPS_ID_SCOPE`    | The dev DPS's ID scope. Needed for any device in DPS mode                                        |
-| `ACCEPTANCE_DPS_ENDPOINT`    | Optional. The DPS global endpoint; simdevice defaults to `global.azure-devices-provisioning.net` |
-| `ACCEPTANCE_SIM_STATE_DIR`   | The simulated device's state dir. In place of `SIMDEVICE_CONNECTION_STRING`                      |
-| `ACCEPTANCE_CHART_STATE_DIR` | Optional: the chart device's state dir, in place of `SIMDEVICE_CHART_CONNECTION_STRING`          |
-| `ACCEPTANCE_WEB_STATE_DIR`   | The [browser proof](#inputs)'s device's, in place of `SIMDEVICE_WEB_CONNECTION_STRING`           |
+| Variable                     | Value                                                                                              |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `ACCEPTANCE_DPS_ID_SCOPE`    | The dev DPS's ID scope. Needed for any device in DPS mode                                          |
+| `ACCEPTANCE_DPS_ENDPOINT`    | Optional. The DPS global endpoint; simdevice defaults to `global.azure-devices-provisioning.net`   |
+| `ACCEPTANCE_SIM_STATE_DIR`   | The simulated device's state dir. In place of `SIMDEVICE_CONNECTION_STRING`                        |
+| `ACCEPTANCE_CHART_STATE_DIR` | Optional: the chart device's state dir, in place of `SIMDEVICE_CHART_CONNECTION_STRING`            |
+| `ACCEPTANCE_WEB_STATE_DIR`   | The [browser proof](#inputs)'s device's, in place of `SIMDEVICE_WEB_CONNECTION_STRING`             |
+| `ACCEPTANCE_DPS_HOST`        | HAR-140: the DPS service host, `<dps_name>.azure-devices-provisioning.net`, for the device scripts |
+| `ACCEPTANCE_IOT_HUB_HOST`    | HAR-140: the IoT hub host (`iot_hub_hostname`), for the device scripts                             |
 
 - A device whose state dir is set, with `ACCEPTANCE_DPS_ID_SCOPE`, runs in DPS
   mode: simdevice gets `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID` (the
@@ -868,9 +870,9 @@ the same way. No `SIMDEVICE_*CONNECTION_STRING` variable is set. The
 registration in step 4 is a real-time wait ([its row](#real-time-waits)); the
 suite's simdevice runs reuse the assignment it cached in the state dir.
 
-HAR-140: the suite step also needs `ACCEPTANCE_DPS_HOST`
+HAR-140: the suite step also sets `ACCEPTANCE_DPS_HOST`
 (`<dps_name>.azure-devices-provisioning.net`) and `ACCEPTANCE_IOT_HUB_HOST`
-(`iot_hub_hostname`). The suite runs `enrol-device.sh` and `delete-device.sh`
+(Terraform output `iot_hub_hostname`). The suite runs `enrol-device.sh` and `delete-device.sh`
 itself, as the same identity and in the same host-name mode, for the fresh
 `acceptance-*` devices it enrols and deletes each run
 ([Fresh devices](#fresh-devices-har-140)). Without them, every fresh-device

@@ -433,6 +433,11 @@ jobs:
           AUDIENCE: ${{ needs.deploy.outputs.audience }}
           DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}
           ACCEPTANCE_DPS_ID_SCOPE: ${{ needs.deploy.outputs.dps_id_scope }}
+          # HAR-140: enrol-device.sh and delete-device.sh for the fresh
+          # acceptance-* devices. This identity has data-plane roles only (no
+          # ARM read), so the scripts name the DPS and the hub by host.
+          ACCEPTANCE_IOT_HUB_HOST: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          ACCEPTANCE_DPS_HOST: ${{ needs.deploy.outputs.dps_name }}.azure-devices-provisioning.net
           TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           APP_DEPLOY_CLIENT_ID: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
           PEER_CLIENT_ID: ${{ vars.AZURE_ACCEPTANCE_PEER_CLIENT_ID }}
