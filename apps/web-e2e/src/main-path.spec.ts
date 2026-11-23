@@ -11,7 +11,7 @@ const DEVICE: Device = {
   id: 'e2e-smoker-1',
   userId: `${TEST_CONFIG.tenantId}:${TEST_USER.oid}`,
   name: 'Backyard Smoker',
-  model: 'MeatGeek V1',
+  model: 'MeatGeek',
   location: 'Patio',
   isActive: true,
   connectionStatus: 'online',
@@ -33,7 +33,10 @@ async function blockTheInternet(page: Page, appOrigin: string, escaped: string[]
   });
 }
 
-test('sign in, start a cook, see a pushed reading and the chart, stop the cook', async ({
+/** The code the fake device shows; the spec's example, not a real device's. */
+const CLAIM_CODE = '7K3M-9QXR-2HTV';
+
+test('sign in, claim the device, start a cook, see a pushed reading and the chart, stop the cook, release the device', async ({
   page,
   baseURL,
 }) => {
@@ -45,6 +48,7 @@ test('sign in, start a cook, see a pushed reading and the chart, stop the cook',
     apiBaseUrl: TEST_CONFIG.apiBaseUrl,
     device: DEVICE,
     negotiate: hub.connectionInfo,
+    claimCode: CLAIM_CODE,
   });
 
   await blockTheInternet(page, appOrigin, escaped);
@@ -64,7 +68,26 @@ test('sign in, start a cook, see a pushed reading and the chart, stop the cook',
   expect(entra.authorizeRequests).toHaveLength(1);
   expect(entra.tokenRequests.map(body => body.get('grant_type'))).toEqual(['authorization_code']);
 
-  // Devices: the fake device, and a cook started on it.
+  // Claim: no device yet. The onboarding link carries the id, never the code.
+  await expect(page.getByText(/You have no devices yet/)).toBeVisible();
+  await page.getByRole('link', { name: 'Claim a device' }).click();
+  await expect(page).toHaveURL(/\/devices\/claim$/);
+  await page.goto(`/devices/claim?deviceId=${encodeURIComponent(DEVICE.id)}`);
+  const claim = page.getByRole('form', { name: 'Claim a device' });
+  await expect(claim.getByLabel('Device ID')).toHaveValue(DEVICE.id);
+  // A wrong code first: refused, the form stays.
+  await claim.getByLabel('Claim code').fill('0000-0000-0000');
+  await claim.getByLabel('Name', { exact: true }).fill(DEVICE.name);
+  await claim.getByRole('button', { name: 'Claim device' }).click();
+  await expect(claim.getByRole('alert')).toContainText("That code doesn't match this device");
+  // Typed lower case with spaces, shown as the device shows it.
+  await claim.getByLabel('Claim code').fill('');
+  await claim.getByLabel('Claim code').pressSequentially('7k3m 9qxr 2htv');
+  await expect(claim.getByLabel('Claim code')).toHaveValue(CLAIM_CODE);
+  await claim.getByRole('button', { name: 'Claim device' }).click();
+
+  // Devices: the claimed device, and a cook started on it.
+  await expect(page).toHaveURL(/\/$/);
   const row = page.getByRole('row').filter({ hasText: DEVICE.name });
   await expect(row).toContainText(DEVICE.id);
   await row.getByRole('button', { name: 'Start cook' }).click();
@@ -124,7 +147,25 @@ test('sign in, start a cook, see a pushed reading and the chart, stop the cook',
   await expect(panel).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Stop cook' })).toHaveCount(0);
 
+  // Release, with the confirm step: the device leaves the list.
+  await page
+    .getByRole('navigation', { name: 'Main' })
+    .getByRole('link', { name: 'Devices' })
+    .click();
+  await row.getByRole('button', { name: 'Release' }).click();
+  const confirmRelease = page.getByRole('group', { name: `Confirm release of ${DEVICE.name}` });
+  await expect(confirmRelease).toContainText("You'll need a new code from the device");
+  await confirmRelease.getByRole('button', { name: 'Yes, release' }).click();
+  await expect(row).toHaveCount(0);
+  await expect(page.getByText(/You have no devices yet/)).toBeVisible();
+
   // What the fake API received.
+  expect(api.calls('POST', '/devices/claim').map(r => r.body)).toEqual([
+    { deviceId: DEVICE.id, claimCode: '0000-0000-0000', name: DEVICE.name },
+    { deviceId: DEVICE.id, claimCode: CLAIM_CODE, name: DEVICE.name },
+  ]);
+  expect(api.calls('DELETE', `/devices/${DEVICE.id}`)).toHaveLength(1);
+  expect(api.claimed).toBe(false);
   expect(api.calls('POST', `/cooks/${cookId}/stop`)).toHaveLength(1);
   const starts = api.calls('POST', '/cooks');
   expect(starts).toHaveLength(1);

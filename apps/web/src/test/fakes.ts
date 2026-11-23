@@ -49,6 +49,19 @@ export function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+/** The API's flat error body, `{error, message, requestId}`, with `status`. */
+export function errorResponse(
+  status: number,
+  error: string,
+  message: string,
+  requestId = `req-${status}`
+): Response {
+  return jsonResponse(status, { error, message, requestId });
+}
+
+/** A claim code of the shape a device shows (the spec's example, not a real device's). */
+export const TEST_CLAIM_CODE = '7K3M-9QXR-2HTV';
+
 export interface RecordedRequest {
   method: string;
   url: string;

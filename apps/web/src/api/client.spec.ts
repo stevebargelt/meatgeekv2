@@ -14,8 +14,8 @@ describe('createApiClient', () => {
     await client.GET('/not-in-the-spec');
     // @ts-expect-error /devices has no DELETE operation in the spec
     await client.DELETE('/devices');
-    // @ts-expect-error RegisterDeviceRequest requires model
-    await client.POST('/devices', { body: { deviceId: 'a', name: 'b' } });
+    // @ts-expect-error ClaimDeviceRequest requires claimCode
+    await client.POST('/devices/claim', { body: { deviceId: 'a', name: 'b' } });
 
     // A path the spec does declare type-checks.
     await client.GET('/devices');
