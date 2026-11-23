@@ -13,6 +13,7 @@ import {
   freshDeviceId,
   IDENTITY_DIR,
   prepareClaim,
+  sendClaim,
   setEnrolmentFs,
 } from './lib/enrolment';
 import type {
@@ -352,6 +353,18 @@ describe('claimDevice', () => {
   });
 });
 
+describe('sendClaim', () => {
+  it('posts the code as given, as the caller named, and returns any answer without checking it', async () => {
+    const { api, calls, bodies } = fakeApi({
+      request: () => ({ status: 403, body: { error: 'CLAIM_REFUSED' }, charge: undefined }),
+    });
+    const response = await sendClaim(api, DEVICE_ID, '0000-0000-0000', { name: 'Guess' }, 'peer');
+    expect(response.status).toBe(403);
+    expect(calls).toEqual(['POST /devices/claim (peer)']);
+    expect(bodies[0]).toEqual({ name: 'Guess', deviceId: DEVICE_ID, claimCode: '0000-0000-0000' });
+  });
+});
+
 describe('cleanupFreshDevice', () => {
   const steps = (claimed: boolean, released = false) =>
     cleanupFreshDevice('always: cleanup', () => ({ device: fresh, claimed, released }));
@@ -377,6 +390,18 @@ describe('cleanupFreshDevice', () => {
     }).run(api);
     expect(calls[0]).toBe(`GET /cooks?deviceId=${DEVICE_ID}&status=active`);
     expect(calls[1]).toBe(`DELETE /devices/${DEVICE_ID}`);
+  });
+
+  it('releases as the holder the state names (HAR-142: a device the peer re-claimed)', async () => {
+    const { api, calls } = fakeApi();
+    await cleanupFreshDevice('c', () => ({ device: fresh, claimed: true, holder: 'peer' })).run(
+      api
+    );
+    expect(calls).toEqual([
+      `DELETE /devices/${DEVICE_ID} (peer)`,
+      `delete-device.sh --device-id ${DEVICE_ID} --only-prefix acceptance-`,
+    ]);
+    expect(removed).toEqual([DIR]);
   });
 
   it('does nothing when no device was made', async () => {

@@ -110,7 +110,7 @@ export const CHART_DEVICE_ENV = [
 
 export const PROOFS_DIR = join(__dirname, '..', 'proofs');
 
-/** HAR-140: enrol-device.sh and delete-device.sh. */
+/** HAR-140: enrol-device.sh and delete-device.sh. HAR-142: revoke-device.sh. */
 export const DEVICE_SCRIPTS_DIR = join(__dirname, '..', '..', '..', 'data-pusher', 'deploy');
 
 /** How long one request may take, response body included, before it fails.
@@ -289,6 +289,15 @@ function firstLine(text: string): string | undefined {
     ?.trim();
 }
 
+/** The last non-empty line of `text`, trimmed. */
+function lastLine(text: string): string | undefined {
+  return text
+    .split('\n')
+    .filter(line => line.trim() !== '')
+    .pop()
+    ?.trim();
+}
+
 /** Run `bin` with `args`, reducing its output to a {@link SimDeviceRun}. */
 async function runChild(
   bin: string,
@@ -309,12 +318,14 @@ async function runChild(
     }
   }
   const first = firstLine(outcome.stderr);
+  const last = lastLine(outcome.stderr);
   return {
     run: {
       exitCode: outcome.exitCode,
       messages,
       unparsedLines,
       stderrFirstLine: first === undefined ? undefined : redact(first),
+      ...(last === undefined ? {} : { stderrLastLine: redact(last) }),
       ...(outcome.killedAfterMs !== undefined ? { killedAfterMs: outcome.killedAfterMs } : {}),
     },
     durationMs: outcome.durationMs,

@@ -245,6 +245,30 @@ export async function claimDevice(
   return postClaim(api, deviceIdOf(api, device), code, body, as);
 }
 
+/**
+ * HAR-142: `POST /devices/claim` with `claimCode`, whatever the answer: the
+ * claim proofs send wrong codes on purpose and check the refusal themselves
+ * (./claim-refusal). The request body is never logged.
+ */
+export function sendClaim<T = unknown>(
+  api: AcceptanceApi,
+  deviceId: string,
+  claimCode: string,
+  body: ClaimBody,
+  as: Caller = 'owner'
+): Promise<AcceptanceResponse<T>> {
+  const request: ClaimDeviceRequest = { ...body, deviceId, claimCode };
+  // A refusal (403 CLAIM_REFUSED) carries no request charge by design, so the
+  // charge is checked by the caller, for the answers that must have one.
+  return api.request<T>({
+    method: 'POST',
+    path: '/devices/claim',
+    body: request,
+    as,
+    expectRequestCharge: false,
+  });
+}
+
 /** `POST /devices/claim` with a code already read: 201 or 200, as above. */
 export async function postClaim(
   api: AcceptanceApi,
@@ -253,16 +277,7 @@ export async function postClaim(
   body: ClaimBody,
   as: Caller = 'owner'
 ): Promise<AcceptanceResponse<Device>> {
-  const request: ClaimDeviceRequest = { ...body, deviceId, claimCode };
-  // A refusal (403 CLAIM_REFUSED) carries no request charge by design, so the
-  // charge is checked here, for the answers that must have one.
-  const response = await api.request<Device>({
-    method: 'POST',
-    path: '/devices/claim',
-    body: request,
-    as,
-    expectRequestCharge: false,
-  });
+  const response = await sendClaim<Device>(api, deviceId, claimCode, body, as);
   if (response.status !== 201 && response.status !== 200) {
     const code = (response.body as { error?: unknown } | null)?.error;
     throw new ProofFailure(
@@ -377,6 +392,9 @@ export interface FreshDeviceState {
   readonly claimed: boolean;
   /** An earlier step released it (`DELETE /devices/{id}` 204). */
   readonly released?: boolean;
+  /** HAR-142: who holds it, or would if the claim went through: the release
+   *  is sent as them. Default the owner. */
+  readonly holder?: Caller;
 }
 
 /**
@@ -384,7 +402,8 @@ export interface FreshDeviceState {
  * failed (`always`). Each part runs even when the one before it failed, and
  * the first failure is reported once all have run:
  *
- *   1. `DELETE /devices/{id}` as the owner: 204 when the claim was confirmed;
+ *   1. `DELETE /devices/{id}` as its holder (the owner unless the state says
+ *      otherwise): 204 when the claim was confirmed;
  *      204 or 404 when it was not (it may or may not have happened); skipped
  *      when an earlier step released it. With `stopCooksFirst`, any cook left
  *      active on the device is stopped first, or the release is 409;
@@ -402,7 +421,7 @@ export function cleanupFreshDevice(
     name,
     always: true,
     async run(api: AcceptanceApi) {
-      const { device, claimed, released } = state();
+      const { device, claimed, released, holder } = state();
       if (device === undefined) {
         return;
       }
@@ -420,7 +439,7 @@ export function cleanupFreshDevice(
           if (options.stopCooksFirst) {
             await stopActiveCooks(api, device.deviceId);
           }
-          const response = await deleteDevice(api, device.deviceId);
+          const response = await deleteDevice(api, device.deviceId, holder ?? 'owner');
           if (claimed) {
             api.expectStatus(response, 204);
           } else {
