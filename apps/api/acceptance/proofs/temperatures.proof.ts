@@ -1,17 +1,19 @@
-import type { RegisterDeviceRequest, TemperatureHistoryResponse } from '@meatgeekv2/api-interfaces';
+import type { TemperatureHistoryResponse } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { expectErrorCode } from '../lib/checks';
-import { deleteRegisteredDevice } from '../lib/devices';
+import { claimDevice, cleanupFreshDevice, enrolFreshDevice, FreshDevice } from '../lib/enrolment';
 import { defineProofs } from '../lib/proof';
 
 /**
  * HAR-28 (MG-79 part 1) — GET /temperatures/current/{deviceId} reads the real
  * temperatures container behind device ownership. Read-only, as the owner
  * decided for goal HAR-18: nothing here writes telemetry, so a freshly
- * registered device has no readings.
+ * claimed device has no readings.
  *
- *   1. register `acceptance-temp-<runId>` (run-unique id and name);
+ *   1. (HAR-140) enrol a fresh device, `acceptance-temp-<runId>`, through DPS
+ *      and claim it with its own claim code (../lib/enrolment); its
+ *      registration sends no reading;
  *   2. its current reading is 404 NO_READINGS (owned, nothing routed);
  *   3. `acceptance-temp-unowned-<runId>`, never registered, is 404
  *      DEVICE_NOT_FOUND;
@@ -25,14 +27,16 @@ import { defineProofs } from '../lib/proof';
  * Every step but the 400 reaches Cosmos, so those responses must carry their
  * request charge (the runner's default). The 400 is answered before any read.
  *
- * HAR-85: the last step, run even after a failure, deletes
- * `acceptance-temp-<runId>`.
+ * HAR-85, HAR-140: the last step, run even after a failure, releases
+ * `acceptance-temp-<runId>`, deletes its DPS enrollment and hub identity, and
+ * removes its state dir.
  */
 
 export default defineProofs('temperatures', () => {
-  let registered: RegisterDeviceRequest | undefined;
-  /** POST /devices answered 201. */
-  let created = false;
+  let fresh: FreshDevice | undefined;
+  /** POST /devices/claim answered 201. */
+  let claimed = false;
+  const registered = (): FreshDevice | undefined => (claimed ? fresh : undefined);
 
   const current = (api: AcceptanceApi, deviceId: string) =>
     api.request({
@@ -51,25 +55,35 @@ export default defineProofs('temperatures', () => {
 
   return [
     {
-      name: 'POST /devices registers acceptance-temp-<runId>',
+      name: 'a fresh device acceptance-temp-<runId> is enrolled through DPS',
       async run(api: AcceptanceApi) {
-        registered = {
-          deviceId: `acceptance-temp-${api.runId}`,
+        await enrolFreshDevice(api, 'temp', device => {
+          fresh = device;
+        });
+      },
+    },
+    {
+      name: 'POST /devices/claim claims acceptance-temp-<runId> with its own claim code',
+      async run(api: AcceptanceApi) {
+        if (!fresh) {
+          throw new Error('no device was enrolled by an earlier proof');
+        }
+        const response = await claimDevice(api, fresh, {
           name: `Acceptance temperatures ${api.runId}`,
           model: 'Acceptance Rig',
-        };
-        const response = await api.request({ method: 'POST', path: '/devices', body: registered });
+        });
         api.expectStatus(response, 201);
-        created = true;
+        claimed = true;
       },
     },
     {
       name: 'GET /temperatures/current/{deviceId} is 404 NO_READINGS for the new device',
       async run(api: AcceptanceApi) {
-        if (!registered) {
-          throw new Error('no device was registered by an earlier proof');
+        const device = registered();
+        if (!device) {
+          throw new Error('no device was claimed by an earlier proof');
         }
-        const response = await current(api, registered.deviceId);
+        const response = await current(api, device.deviceId);
         api.expectStatus(response, 404);
         expectErrorCode(api, response, 'NO_READINGS');
       },
@@ -85,10 +99,11 @@ export default defineProofs('temperatures', () => {
     {
       name: 'GET /temperatures/history is an empty first page for the new device',
       async run(api: AcceptanceApi) {
-        if (!registered) {
-          throw new Error('no device was registered by an earlier proof');
+        const device = registered();
+        if (!device) {
+          throw new Error('no device was claimed by an earlier proof');
         }
-        const response = await history(api, registered.deviceId);
+        const response = await history(api, device.deviceId);
         api.expectStatus(response, 200);
         const expected: TemperatureHistoryResponse = {
           readings: [],
@@ -114,10 +129,11 @@ export default defineProofs('temperatures', () => {
     {
       name: 'GET /temperatures/history with offset=0 is 400 VALIDATION_ERROR',
       async run(api: AcceptanceApi) {
-        if (!registered) {
-          throw new Error('no device was registered by an earlier proof');
+        const device = registered();
+        if (!device) {
+          throw new Error('no device was claimed by an earlier proof');
         }
-        const response = await history(api, registered.deviceId, '&offset=0', false);
+        const response = await history(api, device.deviceId, '&offset=0', false);
         api.expectStatus(response, 400);
         expectErrorCode(api, response, 'VALIDATION_ERROR');
       },
@@ -130,9 +146,9 @@ export default defineProofs('temperatures', () => {
         expectErrorCode(api, response, 'DEVICE_NOT_FOUND');
       },
     },
-    deleteRegisteredDevice('always: DELETE /devices/{id} removes acceptance-temp-<runId>', () => ({
-      deviceId: registered?.deviceId,
-      created,
-    })),
+    cleanupFreshDevice(
+      'always: acceptance-temp-<runId> is released and its enrollment and hub identity deleted',
+      () => ({ device: fresh, claimed })
+    ),
   ];
 });

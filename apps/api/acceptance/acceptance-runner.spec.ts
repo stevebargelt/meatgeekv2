@@ -68,6 +68,7 @@ import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof
 import liveGroup, { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
 import volumeGroup, { topupDrainedAt, VOLUME } from './proofs/telemetry-volume.proof';
+import temperaturesGroup from './proofs/temperatures.proof';
 import usersGroup from './proofs/users.proof';
 import chartGroup, {
   CHART,
@@ -234,6 +235,7 @@ type CookChartRoute = 'GET /cooks/{cookId}/chart';
 type DeviceRoute =
   | 'GET /devices'
   | 'POST /devices'
+  | 'POST /devices/claim'
   | 'GET /devices/{id}'
   | 'PATCH /devices/{id}'
   | 'DELETE /devices/{id}';
@@ -400,6 +402,8 @@ interface StubDevice {
   location?: string;
   isActive: boolean;
   connectionStatus: string;
+  /** HAR-140: set on a device claimed through POST /devices/claim. */
+  claimedAt?: string;
 }
 
 interface Stub {
@@ -434,6 +438,14 @@ interface Stub {
   readonly chartRegistered: () => boolean;
   /** HAR-85: the ids of the devices registered now, sorted. */
   readonly deviceIds: () => string[];
+  /** HAR-140: each fake device-script run, in order. */
+  readonly scriptRuns: Array<{ script: string; args: string[] }>;
+  /** HAR-140: the fresh devices with a fake DPS enrollment or hub identity
+   *  now, sorted. */
+  readonly enrolledIds: () => string[];
+  /** HAR-140: every claim code the stub has minted, so a test can check none
+   *  reached the output. */
+  readonly mintedCodes: string[];
   /** HAR-120: the fake time at each `simdevice --count 1` report, which the
    *  fake prints as that reading's `sentAt`. */
   readonly sendTimes: number[];
@@ -466,6 +478,7 @@ const RU: Record<Exclude<StubRoute, SignalRRoute>, string> = {
   'GET /cooks/{cookId}/chart': '3.94',
   'GET /devices': '3.11',
   'POST /devices': '9.52',
+  'POST /devices/claim': '12.64',
   'GET /devices/{id}': '1',
   'PATCH /devices/{id}': '11.9',
   'DELETE /devices/{id}': '9.71',
@@ -519,6 +532,14 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       meatType: 'acceptance',
     });
   }
+  // HAR-140: the fresh devices' fake DPS enrollments and hub identities, and
+  // the claim code each one shows (minted when it registers, dropped when it
+  // is released, as a release raises the claim generation).
+  const enrolledIds = new Set<string>();
+  const hubIds = new Set<string>();
+  const claimCodes = new Map<string, { code: string; consumedBy?: string }>();
+  const mintedCodes: string[] = [];
+  const scriptRuns: Array<{ script: string; args: string[] }> = [];
   const recipes = new Map<string, Record<string, unknown>>();
   // The acceptance identity's profile persists between runs, as it does in dev.
   let profile: Record<string, unknown> | undefined;
@@ -841,6 +862,70 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         response.end(JSON.stringify({ now: new Date(now).toISOString() }));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/__scripts/run') {
+        // HAR-140: a fake enrol-device.sh or delete-device.sh. Not an API route.
+        const { script, args } = (await readJson(request)) as { script: string; args: string[] };
+        scriptRuns.push({ script, args });
+        const id = args[args.indexOf('--device-id') + 1];
+        let line: string;
+        if (script === 'enrol-device.sh') {
+          line = enrolledIds.has(id) ? `unchanged ${id}` : `enrolled ${id}`;
+          enrolledIds.add(id);
+        } else {
+          const had = enrolledIds.has(id) || hubIds.has(id);
+          enrolledIds.delete(id);
+          hubIds.delete(id);
+          claimCodes.delete(id);
+          line = had ? `deleted ${id}` : `already deleted ${id}`;
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ line }));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/__simdevice/register') {
+        // HAR-140: a fresh device registering through the fake DPS, which
+        // needs its enrollment, and syncing its twin, which mints a claim
+        // code when it shows none. Not an API route.
+        const { deviceId } = (await readJson(request)) as { deviceId: string };
+        if (!enrolledIds.has(deviceId)) {
+          response.writeHead(403, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({ error: 'not enrolled' }));
+          return;
+        }
+        hubIds.add(deviceId);
+        if (!claimCodes.has(deviceId)) {
+          const code = `7K3M-9QXR-${String(1000 + mintedCodes.length)}`;
+          mintedCodes.push(code);
+          claimCodes.set(deviceId, { code });
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end('{}');
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/__simdevice/claim-state') {
+        // HAR-140: what `simdevice claim-code` prints for a fresh device.
+        const deviceId = url.searchParams.get('deviceId') ?? '';
+        const entry = claimCodes.get(deviceId);
+        if (!entry) {
+          response.writeHead(404);
+          response.end();
+          return;
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify(
+            entry.consumedBy
+              ? { deviceId, state: 'claimed' }
+              : {
+                  deviceId,
+                  state: 'unclaimed',
+                  claimCode: entry.code,
+                  expiresAt: new Date(fakeClock.now() + 86_400_000).toISOString(),
+                }
+          )
+        );
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/__simdevice/twin') {
         // HAR-68: the fake simdevice reconnecting with --twin. Not an API route.
         const { args } = (await readJson(request)) as { args: string[] };
@@ -956,6 +1041,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'GET' && url.pathname === '/api/devices') route = 'GET /devices';
       else if (request.method === 'POST' && url.pathname === '/api/devices')
         route = 'POST /devices';
+      else if (request.method === 'POST' && url.pathname === '/api/devices/claim')
+        route = 'POST /devices/claim';
       else if (request.method === 'GET' && deviceMatch) route = 'GET /devices/{id}';
       else if (request.method === 'PATCH' && deviceMatch) route = 'PATCH /devices/{id}';
       else if (request.method === 'DELETE' && deviceMatch) route = 'DELETE /devices/{id}';
@@ -1227,6 +1314,55 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         };
         devices.set(device.id, device);
         send(201, device, route);
+      } else if (route === 'POST /devices/claim') {
+        // HAR-140: the device's own claim code, as it shows it; every refusal
+        // is the one 403 with no request charge, as the deployed route does.
+        const body = (await readJson(request)) as {
+          deviceId?: string;
+          claimCode?: string;
+          name?: string;
+          model?: string;
+          location?: string;
+        } | null;
+        if (
+          !body?.deviceId ||
+          !/^[A-Za-z0-9._:-]{1,128}$/.test(body.deviceId) ||
+          !body.name ||
+          typeof body.claimCode !== 'string'
+        ) {
+          send(400, errorBody('VALIDATION_ERROR'));
+          return;
+        }
+        const refuse = () =>
+          send(403, errorBody('CLAIM_REFUSED', 'Device could not be claimed with that code'));
+        const entry = claimCodes.get(body.deviceId);
+        if (
+          !entry ||
+          entry.code !== body.claimCode ||
+          (entry.consumedBy !== undefined && entry.consumedBy !== caller) ||
+          caller === 'peer'
+        ) {
+          refuse();
+          return;
+        }
+        entry.consumedBy = caller;
+        const existing = devices.get(body.deviceId);
+        if (existing) {
+          send(200, existing, route);
+          return;
+        }
+        const device: StubDevice = {
+          id: body.deviceId,
+          userId: 'stub-tenant:stub-user',
+          name: body.name,
+          model: body.model ?? 'MeatGeek',
+          location: body.location,
+          isActive: true,
+          connectionStatus: 'unknown',
+          claimedAt: new Date(fakeClock.now()).toISOString(),
+        };
+        devices.set(device.id, device);
+        send(201, device, route);
       } else if (route === 'DELETE /devices/{id}') {
         // HAR-85: 403 for the peer on the owner's device, 404 for no device.
         const id = decodeURIComponent(deviceMatch![1]);
@@ -1251,6 +1387,9 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         }
         if (options.deviceDeleteFault !== 'keeps') {
           devices.delete(id);
+          // HAR-140: a release raises the claim generation: the old code is
+          // dead, and the device mints a new one at its next twin sync.
+          claimCodes.delete(id);
         }
         const headers: Record<string, string> = { 'X-Request-ID': responseRequestId };
         if (options.omitChargeOn !== route) headers[REQUEST_CHARGE_HEADER] = RU[route];
@@ -1445,6 +1584,9 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         .map(({ id, status, startTime }) => ({ id, status, startTime })),
     chartRegistered: () => devices.has(CHART_DEVICE),
     deviceIds: () => [...devices.keys()].sort(),
+    scriptRuns,
+    enrolledIds: () => [...new Set([...enrolledIds, ...hubIds])].sort(),
+    mintedCodes,
     sendTimes,
     settled,
     whenHeld: () =>
@@ -1487,6 +1629,7 @@ async function run(
     env,
     write: line => lines.push(line),
     groups,
+    deviceScriptsDir,
   });
   return { ...result, lines, output: lines.join('\n') };
 }
@@ -1522,7 +1665,69 @@ const chartHandedOver = conn === ${JSON.stringify(CHART_CONNECTION_STRING)} && !
 const chartTopup = /^--count ([1-9][0-9]*) --start ([^ ]+) --step ([1-9][0-9]*)s --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
 const topup = /^--count ([1-9][0-9]*) --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
 const twin = /^--twin --count ([01]) --timeout 60s$/.exec(args);
-if (mode === 'ok' && chartTopup && chartHandedOver) {
+// HAR-140: a fresh device. identity init makes a state dir; in DPS mode a
+// --twin --count 0 registers through the stub's fake DPS (which mints the
+// claim code); claim-code prints the stub's claim state. In every mode.
+const fs = require('fs');
+const pathJoin = require('path').join;
+const argv = process.argv.slice(2);
+const stubBase = ${JSON.stringify(stub ? stub.baseUrl : '')};
+const freshId = process.env.MEATGEEK_DEVICE_ID || '';
+const FAKE_PEM = '-----BEGIN CERTIFICATE-----\\nZmFrZS1jZXJ0\\n-----END CERTIFICATE-----\\\n';
+let handledFresh = true;
+if (argv[0] === 'claim-code' && argv[1] === '--state-dir' && argv.length === 3) {
+  let id;
+  try {
+    id = JSON.parse(fs.readFileSync(pathJoin(argv[2], 'identity.json'), 'utf8')).deviceId;
+  } catch {
+    process.stderr.write('claim-code: no identity in the state dir\\n');
+    process.exit(1);
+  }
+  fetch(stubBase + '/__simdevice/claim-state?deviceId=' + encodeURIComponent(id)).then(r => {
+    if (r.status === 404) process.exit(3);
+    return r.json().then(body => line(body));
+  }, () => process.exit(1));
+} else if (argv[0] === 'identity' && argv[1] === 'init') {
+  const id = argv[argv.indexOf('--device-id') + 1];
+  const dir = argv[argv.indexOf('--state-dir') + 1];
+  if (id !== freshId || dir !== process.env.MEATGEEK_STATE_DIR) {
+    process.stderr.write('fake simdevice: identity init for another device\\n');
+    process.exit(2);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(pathJoin(dir, 'device.key'), 'fake private key');
+  fs.writeFileSync(pathJoin(dir, 'device.crt'), FAKE_PEM);
+  fs.writeFileSync(pathJoin(dir, 'identity.json'), JSON.stringify({ deviceId: id }));
+  process.stdout.write(FAKE_PEM);
+} else if (freshId.startsWith('acceptance-')) {
+  let stored;
+  try {
+    stored = JSON.parse(fs.readFileSync(pathJoin(process.env.MEATGEEK_STATE_DIR || '', 'identity.json'), 'utf8')).deviceId;
+  } catch {}
+  if (
+    args !== '--twin --count 0 --timeout 2m' || stored !== freshId || !process.env.MEATGEEK_DPS_ID_SCOPE ||
+    process.env.SIMDEVICE_CONNECTION_STRING || process.env.ACCEPTANCE_BEARER_TOKEN
+  ) {
+    process.stderr.write('fake simdevice: bad DPS hand-over: ' + args + '\\n');
+    process.exit(2);
+  }
+  fetch(stubBase + '/__simdevice/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: freshId }),
+  }).then(r => {
+    if (!r.ok) {
+      process.stderr.write('dps: registration refused: the device is not enrolled\\n');
+      process.exit(1);
+    }
+    line({ event: 'twin', desired: {}, reported: {} });
+  }, () => process.exit(1));
+} else {
+  handledFresh = false;
+}
+if (handledFresh) {
+  // done above
+} else if (mode === 'ok' && chartTopup && chartHandedOver) {
   fetch(${JSON.stringify(notifyUrl)}, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1607,6 +1812,62 @@ if (mode === 'ok' && chartTopup && chartHandedOver) {
   return path;
 }
 
+/**
+ * HAR-140: stand-ins for enrol-device.sh and delete-device.sh, written next to
+ * each other as the runner expects. Each checks the runner's hand-over (login
+ * auth, both host names, no bearer token or device credential in its
+ * environment) and its own rules (enrol: the certificate file exists; delete:
+ * `--only-prefix` is given and the id starts with it, else exit 4), then has
+ * the stub do the work and prints the stub's result line.
+ */
+function writeFakeDeviceScripts(hang?: 'enrol-device.sh' | 'delete-device.sh'): string {
+  const dir = mkdtempSync(join(fakeDir, 'scripts-'));
+  for (const script of ['enrol-device.sh', 'delete-device.sh']) {
+    const path = join(dir, script);
+    writeFileSync(
+      path,
+      `#!${process.execPath}
+const script = ${JSON.stringify(script)};
+if (${JSON.stringify(hang === script)}) setInterval(() => undefined, 1000);
+else {
+const args = process.argv.slice(2);
+const get = flag => { const i = args.indexOf(flag); return i < 0 ? undefined : args[i + 1]; };
+const fail = (code, message) => { process.stderr.write(script + ': ' + message + '\\n'); process.exit(code); };
+if (get('--auth-type') !== 'login' || get('--dps') !== ${JSON.stringify(DPS_HOST)} || get('--hub') !== ${JSON.stringify(HUB_HOST)}) fail(2, 'bad hand-over: ' + args.join(' '));
+if (process.env.ACCEPTANCE_BEARER_TOKEN || process.env.ACCEPTANCE_PEER_BEARER_TOKEN || process.env.SIMDEVICE_CONNECTION_STRING || process.env.MEATGEEK_STATE_DIR) fail(2, 'handed a secret');
+const id = get('--device-id');
+if (!id) fail(2, '--device-id is required');
+if (script === 'enrol-device.sh' && !require('fs').existsSync(get('--certificate') || '')) fail(2, 'cannot read the certificate');
+if (script === 'delete-device.sh') {
+  const prefix = get('--only-prefix');
+  if (!prefix) fail(2, '--only-prefix is required');
+  if (!id.startsWith(prefix)) fail(4, 'refusing to delete device ' + id);
+}
+fetch(${JSON.stringify(stub ? `${stub.baseUrl}/__scripts/run` : '')}, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ script, args }),
+}).then(r => r.json()).then(body => process.stdout.write(body.line + '\\n'), () => fail(1, 'no stub'));
+}
+`
+    );
+    chmodSync(path, 0o755);
+  }
+  return dir;
+}
+
+/** HAR-140: the fake services' host names the runner hands the scripts. */
+const DPS_HOST = 'stub-dps.azure-devices-provisioning.net';
+const HUB_HOST = 'stub-hub.azure-devices.net';
+/** The DPS inputs a stub run has, so fresh devices run in DPS mode. */
+const dpsEnv = {
+  ACCEPTANCE_DPS_ID_SCOPE: '0ne00STUB01',
+  ACCEPTANCE_DPS_HOST: DPS_HOST,
+  ACCEPTANCE_IOT_HUB_HOST: HUB_HOST,
+};
+/** The fake device scripts of the current stub run, handed to the runner. */
+let deviceScriptsDir: string | undefined;
+
 /** The HAR-44 variables, with the fake simdevice in `mode`. */
 function simEnv(mode: FakeMode = 'ok'): Record<string, string> {
   return {
@@ -1625,6 +1886,7 @@ async function runAgainstStub(
   groups?: readonly ProofGroup[]
 ): Promise<Run> {
   stub = await startStub(options);
+  deviceScriptsDir = writeFakeDeviceScripts();
   return run(
     {
       ACCEPTANCE_BASE_URL: stub.baseUrl,
@@ -1632,6 +1894,7 @@ async function runAgainstStub(
       ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
       ...simEnv(mode),
       ...chartEnv,
+      ...dpsEnv,
     },
     groups
   );
@@ -1668,6 +1931,7 @@ beforeEach(() => {
 afterEach(async () => {
   await stub?.close();
   stub = undefined;
+  deviceScriptsDir = undefined;
   restoreClock?.();
   restoreClock = undefined;
 });
@@ -1687,6 +1951,7 @@ const COOK_ITEM_ROUTE: CookItemRoute = 'GET /cooks/{cookId}';
 const COOK_CHART_ROUTE: CookChartRoute = 'GET /cooks/{cookId}/chart';
 const DEVICE_ROUTES: DeviceRoute[] = [
   'POST /devices',
+  'POST /devices/claim',
   'GET /devices/{id}',
   'GET /devices',
   'PATCH /devices/{id}',
@@ -1930,7 +2195,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
   });
 
   /** HAR-26 and HAR-28: the cooks lifecycle and the temperatures proof also
-   *  register their own device, so a broken POST /devices fails them too.
+   *  have their own device. HAR-140: they, and the devices group, enrol a
+   *  fresh one and claim it with POST /devices/claim, so a broken claim fails
+   *  those three, and POST /devices is left to the simulated device's groups.
    *  HAR-68: the device twin group registers the simulated device first
    *  (201), so the isolation (HAR-67), live-temperature (HAR-63) and round
    *  trip groups, which run after it, take the 409 path and read
@@ -1945,24 +2212,23 @@ describe('live acceptance runner (against an in-process stub)', () => {
         ? ['cooks lifecycle ›', 'devices ›', 'devices ›', 'temperatures ›']
         : route === 'POST /devices'
           ? [
-              'cooks lifecycle ›',
               'device twin ›',
-              'devices ›',
-              'temperatures ›',
               'signalr isolation ›',
               'signalr live temperature ›',
               'telemetry round-trip ›',
             ]
-          : route === 'GET /devices/{id}'
-            ? [
-                'devices ›',
-                'signalr isolation ›',
-                'signalr live temperature ›',
-                'telemetry round-trip ›',
-                // HAR-87: it checks the chart device is registered.
-                'cook chart ›',
-              ]
-            : ['devices ›'];
+          : route === 'POST /devices/claim'
+            ? ['cooks lifecycle ›', 'devices ›', 'temperatures ›']
+            : route === 'GET /devices/{id}'
+              ? [
+                  'devices ›',
+                  'signalr isolation ›',
+                  'signalr live temperature ›',
+                  'telemetry round-trip ›',
+                  // HAR-87: it checks the chart device is registered.
+                  'cook chart ›',
+                ]
+              : ['devices ›'];
 
   it.each(DEVICE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',
@@ -2171,7 +2437,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.failures).toEqual([]);
     const deletes = deviceDeletes();
     const own = deletes[1]?.id;
-    expect(own).toMatch(/^acceptance-\d/);
+    expect(own).toMatch(/^acceptance-device-\d/);
     expect(deletes).toEqual([
       { id: expect.stringMatching(/^acceptance-cook-\d/), as: 'owner' },
       { id: own, as: 'peer' },
@@ -2200,12 +2466,32 @@ describe('live acceptance runner (against an in-process stub)', () => {
       'PASS devices › DELETE /devices/{id} deletes the caller’s device',
       'PASS devices › GET /devices/{id} is 404 after the delete',
       'PASS devices › DELETE /devices/{id} again is 404 DEVICE_NOT_FOUND',
-      'PASS devices › always: DELETE /devices/{id} removes acceptance-<runId>',
-      'PASS temperatures › always: DELETE /devices/{id} removes acceptance-temp-<runId>',
-      'PASS cooks lifecycle › always: DELETE /devices/{id} removes acceptance-cook-<runId>',
+      'PASS devices › always: acceptance-device-<runId> is released and its enrollment and hub identity deleted',
+      'PASS temperatures › always: acceptance-temp-<runId> is released and its enrollment and hub identity deleted',
+      'PASS cooks lifecycle › always: acceptance-cook-<runId> is released and its enrollment and hub identity deleted',
     ]) {
       expect(result.lines).toContain(step);
     }
+    // HAR-140: each fresh device was enrolled, claimed with the code it
+    // minted, and deleted from the fake DPS and hub; no code reached the log.
+    for (const label of ['cook', 'device', 'temp']) {
+      const id = new RegExp(`^acceptance-${label}-\\d`);
+      const runs = stub!.scriptRuns.filter(r => id.test(r.args[r.args.indexOf('--device-id') + 1]));
+      expect(runs.map(r => r.script)).toEqual(['enrol-device.sh', 'delete-device.sh']);
+      expect(runs[1].args).toEqual(expect.arrayContaining(['--only-prefix', 'acceptance-']));
+    }
+    expect(stub!.enrolledIds()).toEqual([]);
+    expect(
+      result.lines.filter(line => /^\s+POST\s+\/devices\/claim\s+201\s/.test(line))
+    ).toHaveLength(3);
+    expect(
+      result.lines.filter(line => /delete-device\.sh .* exit 0 .*  deleted acceptance-/.test(line))
+    ).toHaveLength(3);
+    expect(stub!.mintedCodes).toHaveLength(3);
+    for (const code of stub!.mintedCodes) expect(result.output).not.toContain(code);
+    expect(result.output).not.toContain('BEGIN CERTIFICATE');
+    expect(result.output).not.toContain('PRIVATE KEY');
+    expect(result.output).not.toContain('"claimCode"');
     // The standing chart device is there from the start, and is not swept.
     expect(result.output).toMatch(/^METRIC acceptance-devices-before 1$/m);
     expect(result.output).toMatch(/^METRIC acceptance-devices-swept 0$/m);
@@ -2263,7 +2549,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
     expect(result.failures).toHaveLength(1);
     expect(result.lines).toContain(
-      'PASS cooks lifecycle › always: DELETE /devices/{id} removes acceptance-cook-<runId>'
+      'PASS cooks lifecycle › always: acceptance-cook-<runId> is released and its enrollment and hub identity deleted'
     );
     const cleanup = deviceDeletes().find(d => d.id.startsWith('acceptance-cook-'));
     expect(cleanup).toEqual({ id: expect.stringMatching(/^acceptance-cook-/), as: 'owner' });
@@ -2277,6 +2563,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       devicesAtStart: [...standing, 'acceptance-old-run'],
       chartCook: 'none',
     });
+    deviceScriptsDir = writeFakeDeviceScripts();
     const result = await run(
       {
         ACCEPTANCE_BASE_URL: stub.baseUrl,
@@ -2286,12 +2573,17 @@ describe('live acceptance runner (against an in-process stub)', () => {
         ACCEPTANCE_SIM_DEVICE_ID: standing[0],
         ACCEPTANCE_CHART_DEVICE_ID: standing[1],
         SIMDEVICE_CHART_CONNECTION_STRING: SIM_CONNECTION_STRING,
+        ...dpsEnv,
       },
       [sweepGroup]
     );
 
     expect(result.failures).toEqual([]);
     expect(deviceDeletes()).toEqual([{ id: 'acceptance-old-run', as: 'owner' }]);
+    // HAR-140: and only it is handed to delete-device.sh.
+    expect(stub.scriptRuns.map(r => r.args[r.args.indexOf('--device-id') + 1])).toEqual([
+      'acceptance-old-run',
+    ]);
     expect(stub.deviceIds()).toEqual([...standing].sort());
   });
 
@@ -2302,7 +2594,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
     expect(result.failures).toHaveLength(1);
     expect(result.lines).toContain(
-      'PASS devices › always: DELETE /devices/{id} removes acceptance-<runId>'
+      'PASS devices › always: acceptance-device-<runId> is released and its enrollment and hub identity deleted'
     );
     expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
   });
@@ -2317,7 +2609,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       'FAIL devices › DELETE /devices/{id} as the peer is 403 DEVICE_NOT_OWNED and the device stays'
     );
     expect(result.failures[1]).toContain(
-      'FAIL devices › always: DELETE /devices/{id} removes acceptance-<runId> — DELETE /devices/{id} → 404: expected 204, got 404'
+      'FAIL devices › always: acceptance-device-<runId> is released and its enrollment and hub identity deleted — DELETE /devices/{id} → 404: expected 204, got 404'
     );
     expect(result.failures[0]).toContain(
       'DELETE /devices/{id} (peer) → 204: expected 403, got 204'
@@ -2472,13 +2764,21 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
       ...simEnv(),
       ...chartEnv,
+      ...dpsEnv,
     };
-    const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
+    const scripts = writeFakeDeviceScripts();
+    const first = await runAcceptance({
+      env,
+      write: () => undefined,
+      runId: `r-${randomUUID()}`,
+      deviceScriptsDir: scripts,
+    });
     const lines: string[] = [];
     const second = await runAcceptance({
       env,
       write: line => lines.push(line),
       runId: `r-${randomUUID()}`,
+      deviceScriptsDir: scripts,
     });
 
     expect([first.exitCode, second.exitCode]).toEqual([0, 0]);
@@ -2687,13 +2987,21 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
       ...simEnv(),
       ...chartEnv,
+      ...dpsEnv,
     };
-    const first = await runAcceptance({ env, write: () => undefined, runId: `r-${randomUUID()}` });
+    const scripts = writeFakeDeviceScripts();
+    const first = await runAcceptance({
+      env,
+      write: () => undefined,
+      runId: `r-${randomUUID()}`,
+      deviceScriptsDir: scripts,
+    });
     const lines: string[] = [];
     const second = await runAcceptance({
       env,
       write: line => lines.push(line),
       runId: `r-${randomUUID()}`,
+      deviceScriptsDir: scripts,
     });
 
     expect([first.exitCode, second.exitCode]).toEqual([0, 0]);
@@ -2876,7 +3184,9 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     expect(failures[0]).toContain('GET /devices/{id} → 404');
     expect(failures[0]).toContain('not to the caller');
     // simdevice was never run for someone else's device.
-    expect(result.output).not.toMatch(/^\s+EXEC\s/m);
+    // HAR-140: the fresh devices run simdevice as themselves; the simulated
+    // device never runs.
+    expect(result.output).not.toMatch(/^\s+EXEC\s+simdevice\s(?!\()/m);
   });
 });
 
@@ -3305,7 +3615,8 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
     // the live push's (HAR-63) and the round trip's, one reading each, besides
     // the twin group's two reconnects (HAR-68).
     expect(stub!.topups).toEqual([]);
-    const execs = result.lines.filter(line => /^\s+EXEC\s/.test(line));
+    // HAR-140: the simulated device's runs only; fresh devices run as themselves.
+    const execs = result.lines.filter(line => /^\s+EXEC\s+simdevice\s(?!\()/.test(line));
     const sends = execs.filter(line => !/^\s+EXEC\s+simdevice --twin\s/.test(line));
     expect(execs).toHaveLength(sends.length + 2);
     expect(sends).toHaveLength(3);
@@ -4297,6 +4608,33 @@ describe('real-time waits, on the fake clock (HAR-120)', () => {
         'simdevice → exit killed: simdevice did not exit within its 120000 ms limit and was ' +
         'killed, expected exit 0',
     ]);
+  });
+
+  it('HAR-140: a device script still running at the 300 s limit is killed, and the cleanup still runs', async () => {
+    stub = await startStub();
+    deviceScriptsDir = writeFakeDeviceScripts('enrol-device.sh');
+    const running = run(
+      {
+        ACCEPTANCE_BASE_URL: stub.baseUrl,
+        ACCEPTANCE_BEARER_TOKEN: TOKEN,
+        ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
+        ...simEnv(),
+        ...dpsEnv,
+      },
+      [temperaturesGroup]
+    );
+    await fakeClock.armed(300_000);
+    fakeClock.advance(300_000);
+    const result = await running;
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatch(
+      /^FAIL temperatures › a fresh device acceptance-temp-<runId> is enrolled through DPS — enrol-device\.sh → exit killed: enrol-device\.sh for acceptance-temp-\S+ did not exit within its 300000 ms limit and was killed$/
+    );
+    expect(result.lines).toContain(
+      'PASS temperatures › always: acceptance-temp-<runId> is released and its enrollment and hub identity deleted'
+    );
+    expect(stub.scriptRuns.map(r => r.script)).toEqual(['delete-device.sh']);
   });
 
   it('the live-temperature wait gives up at exactly its 90 s cap', async () => {

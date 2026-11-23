@@ -20,6 +20,12 @@ export const DPS_ID_SCOPE_ENV = 'ACCEPTANCE_DPS_ID_SCOPE';
 /** Optional; simdevice defaults to `global.azure-devices-provisioning.net`. */
 export const DPS_ENDPOINT_ENV = 'ACCEPTANCE_DPS_ENDPOINT';
 
+/** HAR-140: the DPS service host (`<dps>.azure-devices-provisioning.net`) and
+ *  the IoT hub host the device scripts name the services by. CI's identity
+ *  holds data-plane roles only, so the scripts cannot look either up in ARM. */
+export const DPS_HOST_ENV = 'ACCEPTANCE_DPS_HOST';
+export const IOT_HUB_HOST_ENV = 'ACCEPTANCE_IOT_HUB_HOST';
+
 /** The four variables simdevice reads in DPS mode. */
 export const MEATGEEK_DPS_ENV = [
   'MEATGEEK_DPS_ID_SCOPE',

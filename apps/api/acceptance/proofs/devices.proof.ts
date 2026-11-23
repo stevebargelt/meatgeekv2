@@ -1,14 +1,21 @@
 import { randomUUID } from 'crypto';
 
-import type { Device, RegisterDeviceRequest } from '@meatgeekv2/api-interfaces';
+import type { Device } from '@meatgeekv2/api-interfaces';
 
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { expectErrorCode, expectNoSystemProperties } from '../lib/checks';
-import { deleteDevice, deleteRegisteredDevice } from '../lib/devices';
+import { deleteDevice } from '../lib/devices';
+import {
+  ClaimBody,
+  claimDevice,
+  cleanupFreshDevice,
+  enrolFreshDevice,
+  FreshDevice,
+} from '../lib/enrolment';
 import { defineProofs } from '../lib/proof';
 
 /**
- * HAR-20 (MG-80) — a device registered through the deployed API is a real Cosmos
+ * HAR-20 (MG-80) — a device claimed through the deployed API is a real Cosmos
  * document owned by the authenticated caller: it reads back by id, appears in the
  * caller's list, takes a PATCH, and reads the change back. An unknown id is a
  * 404. Every response is checked for Cosmos system properties, and every route
@@ -20,8 +27,13 @@ import { defineProofs } from '../lib/proof';
  * DEVICE_NOT_FOUND. If an earlier step failed, the always-run last step deletes
  * the device instead, so no run leaves it behind.
  *
- * The device id is `acceptance-<runId>` and its name is run-unique, so repeated
- * runs never collide on id or name.
+ * HAR-140: the device is a real one. A fresh device,
+ * `acceptance-device-<runId>`, is enrolled through DPS (../lib/enrolment) and
+ * claimed with the claim code it minted (`POST /devices/claim`, 201). Its name
+ * is run-unique, so repeated runs never collide on id or name. The always-run
+ * last step releases it if it is still held, deletes its DPS enrollment and
+ * hub identity (`delete-device.sh --only-prefix acceptance-`), and removes its
+ * state dir.
  */
 
 const CONNECTION_STATUSES = ['online', 'offline', 'unknown'];
@@ -43,16 +55,17 @@ function expectDevice(api: AcceptanceApi, response: AcceptanceResponse, value: u
 }
 
 export default defineProofs('devices', () => {
-  let registered: RegisterDeviceRequest | undefined;
+  let fresh: FreshDevice | undefined;
+  let registered: (ClaimBody & { deviceId: string }) | undefined;
   let owner: string | undefined;
-  /** POST /devices answered 201. */
-  let created = false;
+  /** POST /devices/claim answered 201. */
+  let claimed = false;
   /** The DELETE step answered 204. */
   let deleted = false;
 
-  const registeredDevice = (): RegisterDeviceRequest => {
+  const registeredDevice = (): ClaimBody & { deviceId: string } => {
     if (!registered) {
-      throw new Error('no device was registered by an earlier proof');
+      throw new Error('no device was claimed by an earlier proof');
     }
     return registered;
   };
@@ -69,17 +82,28 @@ export default defineProofs('devices', () => {
 
   return [
     {
-      name: 'POST /devices registers a device to the caller',
+      name: 'a fresh device acceptance-device-<runId> is enrolled through DPS and mints a claim code',
       async run(api: AcceptanceApi) {
-        registered = {
-          deviceId: `acceptance-${api.runId}`,
+        await enrolFreshDevice(api, 'device', device => {
+          fresh = device;
+        });
+      },
+    },
+    {
+      name: 'POST /devices/claim claims the device for the caller with its own claim code',
+      async run(api: AcceptanceApi) {
+        if (!fresh) {
+          throw new Error('no device was enrolled by an earlier proof');
+        }
+        const body: ClaimBody = {
           name: `Acceptance ${api.runId}`,
           model: 'Acceptance Rig',
           location: 'CI',
         };
-        const response = await api.request({ method: 'POST', path: '/devices', body: registered });
+        const response = await claimDevice(api, fresh, body);
         api.expectStatus(response, 201);
-        created = true;
+        claimed = true;
+        registered = { ...body, deviceId: fresh.deviceId };
         expectNoSystemProperties(api, response);
         const device = expectDevice(api, response, response.body);
         api.check(
@@ -106,17 +130,15 @@ export default defineProofs('devices', () => {
         const device = expectDevice(api, response, response.body);
         api.check(response, device.id === deviceId, `device.id ${device.id} is not ${deviceId}`);
         api.check(response, device.name === name, 'device.name does not match');
-        api.check(response, device.userId === owner, 'device.userId is not the registering caller');
+        api.check(response, device.userId === owner, 'device.userId is not the claiming caller');
       },
     },
     {
       name: 'GET /devices includes the device',
       async run(api: AcceptanceApi) {
         const { deviceId } = registeredDevice();
-        const response = await api.request<{ devices: unknown[] }>({
-          method: 'GET',
-          path: '/devices',
-        });
+        const list = { method: 'GET', path: '/devices' } as const;
+        const response = await api.request<{ devices: unknown[] }>(list);
         api.expectStatus(response, 200);
         expectNoSystemProperties(api, response);
         api.check(response, Array.isArray(response.body?.devices), 'body.devices is not an array');
@@ -181,7 +203,7 @@ export default defineProofs('devices', () => {
         const response = await getById(api, deviceId);
         api.expectStatus(response, 200);
         const device = expectDevice(api, response, response.body);
-        api.check(response, device.userId === owner, 'device.userId is not the registering caller');
+        api.check(response, device.userId === owner, 'device.userId is not the claiming caller');
       },
     },
     {
@@ -210,10 +232,9 @@ export default defineProofs('devices', () => {
         expectErrorCode(api, response, 'DEVICE_NOT_FOUND');
       },
     },
-    deleteRegisteredDevice('always: DELETE /devices/{id} removes acceptance-<runId>', () => ({
-      deviceId: registered?.deviceId,
-      created,
-      deleted,
-    })),
+    cleanupFreshDevice(
+      'always: acceptance-device-<runId> is released and its enrollment and hub identity deleted',
+      () => ({ device: fresh, claimed, released: deleted })
+    ),
   ];
 });
