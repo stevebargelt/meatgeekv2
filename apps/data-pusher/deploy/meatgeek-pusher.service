@@ -1,28 +1,31 @@
 [Unit]
-Description=MeatGeek Data Pusher Service
-Documentation=https://github.com/sbargelt/meatgeekv2/tree/main/apps/data-pusher
+Description=MeatGeek Data Pusher (readings to Azure IoT Hub, DPS mode)
+Documentation=https://github.com/stevebargelt/meatgeekv2/blob/main/docs/devices/runbook.md
 After=network-online.target meatgeek-controller.service
-Wants=network-online.target
+Wants=network-online.target meatgeek-controller.service
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=meatgeek
+Group=meatgeek
+# /var/lib/meatgeek-pusher: the device's key and certificate, the cached DPS
+# assignment, the claim code, the queue and the cook session.
+StateDirectory=meatgeek-pusher
+StateDirectoryMode=0700
 WorkingDirectory=/var/lib/meatgeek-pusher
 ExecStart=/usr/local/bin/meatgeek-pusher
 Restart=on-failure
 RestartSec=10
 
-# Secrets (per-device IoT Hub connection string) live in a permission-restricted
-# file rather than a shell-visible Environment= line. See README for the
-# expected file contents and recommended `chmod 600`.
+# MEATGEEK_DPS_ID_SCOPE, MEATGEEK_DEVICE_ID, MEATGEEK_STATE_DIR and DEVICE_URL,
+# written by onboard-pi.sh (mode 0640, root:meatgeek). No secret: the device
+# authenticates with its own certificate.
 EnvironmentFile=/etc/meatgeek-pusher/env
 
 # journald captures stdout/stderr; structured JSON logs ship through unchanged.
 StandardOutput=journal
 StandardError=journal
 
-# Minor hardening; safe defaults for a single-user Pi service.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

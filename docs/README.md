@@ -36,6 +36,7 @@ A comprehensive BBQ temperature monitoring and cook management system built with
 - **[Dashboards & Alerts](monitoring/dashboards.md)** - KQL queries, dashboards, and monitoring setup
 
 ### Applications
+- **[Device runbook](devices/runbook.md)** - Onboard a Raspberry Pi with one command, then claim, release or revoke it
 - **[Device Controller](applications/device-controller.md)** - Raspberry Pi Go application for temperature monitoring
 - **[Data Pusher](applications/data-pusher.md)** - IoT Hub integration service and local buffering
 - **Mobile App** - Native iOS (Swift) app, planned and not built; it shares only the OpenAPI contract with the web app

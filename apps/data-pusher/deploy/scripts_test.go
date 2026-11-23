@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -177,14 +178,22 @@ func (e *env) calls() [][]string {
 	return calls
 }
 
-var pemBodies []string
+// pemBodies holds the base64 lines of every certificate the tests wrote;
+// the onboarding tests run in parallel, so it is guarded.
+var (
+	pemMu     sync.Mutex
+	pemBodies []string
+)
 
 func assertNoPEM(t *testing.T, out string) {
 	t.Helper()
 	if strings.Contains(out, "-----BEGIN") || strings.Contains(out, "-----END") {
 		t.Errorf("output contains a PEM marker:\n%s", out)
 	}
-	for _, body := range pemBodies {
+	pemMu.Lock()
+	bodies := append([]string(nil), pemBodies...)
+	pemMu.Unlock()
+	for _, body := range bodies {
 		if strings.Contains(out, body) {
 			t.Errorf("output contains certificate PEM content:\n%s", out)
 		}
@@ -213,7 +222,9 @@ func (e *env) writeCert(name, cn string) (path, thumbprint string) {
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	lines := strings.Split(string(pemBytes), "\n")
+	pemMu.Lock()
 	pemBodies = append(pemBodies, lines[1:len(lines)-2]...) // the base64 body lines
+	pemMu.Unlock()
 	path = filepath.Join(e.dir, name)
 	if err := os.WriteFile(path, pemBytes, 0o644); err != nil {
 		e.t.Fatal(err)
@@ -833,7 +844,10 @@ func TestEnrolNeverPrintsThePEM(t *testing.T) {
 		e.run(enrol, []string{"REINSTATE=1"}, "--device-id", deviceID, "--certificate", cert)
 	}
 	e.run(enrol, nil, "--device-id", deviceID, "--certificate", mismatch)
-	if len(pemBodies) == 0 {
+	pemMu.Lock()
+	n := len(pemBodies)
+	pemMu.Unlock()
+	if n == 0 {
 		t.Fatal("no PEM bodies recorded to check against")
 	}
 }
@@ -1104,7 +1118,7 @@ func TestDeletePassesAuthTypeLoginOnEveryAzIotCall(t *testing.T) {
 // --- static checks -----------------------------------------------------------
 
 func TestScriptsParse(t *testing.T) {
-	scripts := []string{enrol, revoke, del, "device-common.sh"}
+	scripts := []string{enrol, revoke, del, "device-common.sh", onboard, remoteScript}
 	for _, s := range scripts {
 		if out, err := exec.Command("bash", "-n", s).CombinedOutput(); err != nil {
 			t.Errorf("bash -n %s: %v\n%s", s, err, out)

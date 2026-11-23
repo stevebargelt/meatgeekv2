@@ -46,39 +46,22 @@ Device Controller (V1 HTTP API) ──┐
 
 ## Configuration
 
+### Provisioning a Pi
+
+A real device is set up with one command from the owner's laptop,
+`apps/data-pusher/deploy/onboard-pi.sh pi@<lan ip>`. It installs the
+controller and the pusher as services, enrols the device in DPS and prints its
+claim code. The **[device runbook](../../docs/devices/runbook.md)** covers
+onboarding, claiming, releasing and revoking. The device runs in DPS mode
+(below) and needs no connection string.
+
 ### Connection string (per device)
 
-The pusher requires a **device-scoped** IoT Hub connection string (it parses the
-`DeviceId` out of it and refuses to start with a hub-owner string). This string
-is a **device credential**: it is **retrieved on demand from IoT Hub via the
-Azure CLI at provisioning time and is NEVER stored in Terraform state or exported
-as a Terraform output**. The former `iot_hub_device_connection_strings` output
-was removed in MG-24 S1 precisely so no device SAS key persists in state/outputs.
-IoT Hub device SAS auth is the one documented key-auth exception (see the
-[ADR](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md)), so
-the device legitimately needs this string — but it is minted/read straight from
-the hub, not from Terraform.
-
-Create the device identity once (idempotent — safe to skip if it already exists),
-then read its connection string. The hub name is the non-secret `iot_hub_name`
-Terraform output:
-
-```bash
-cd apps/infrastructure
-HUB="$(terraform output -raw iot_hub_name)"
-DEVICE=meatgeek3
-
-# Create the device identity first if it does not exist yet:
-az iot hub device-identity create --hub-name "$HUB" --device-id "$DEVICE"
-
-# Retrieve the device-scoped connection string on demand (never stored in TF):
-az iot hub device-identity connection-string show \
-  --hub-name "$HUB" --device-id "$DEVICE" -o tsv
-```
-
-Treat the output as a secret — it carries the device SAS-signing key. Do not
-capture it into Terraform state, an output, a log, or version control: read it at
-provisioning time and write it straight into the pusher's env file (below).
+The pusher still accepts a **device-scoped** IoT Hub connection string
+(`IOTHUB_CONNECTION_STRING`). It parses the `DeviceId` out of it and refuses to
+start with a hub-owner string. Onboarding no longer uses this mode, and it is
+removed later in goal HAR-130. The string is a device credential: it is never
+stored in Terraform state or outputs (MG-24 S1).
 
 ### DPS mode (the device's own X.509 identity)
 
@@ -119,7 +102,7 @@ existing key.
 **`identity init`** creates the identity if there is none and prints **only**
 the certificate PEM on stdout (no key, no logs), the same bytes on every run.
 It is what the onboarding command reads over ssh. Run it as the service user
-(`pi`) so the files belong to the pusher:
+(`meatgeek`) so the files belong to the pusher:
 
 ```bash
 meatgeek-pusher identity init --device-id meatgeek-pi-7 [--state-dir /var/lib/meatgeek-pusher]
@@ -216,7 +199,7 @@ exits, and its `MEATGEEK_STATE_DIR` keeps the code between runs.
 
 | Variable                       | Purpose                                                          | Default                |
 | ------------------------------ | ---------------------------------------------------------------- | ---------------------- |
-| `IOTHUB_CONNECTION_STRING`     | Device-scoped IoT Hub connection string (REQUIRED on production) | (none)                 |
+| `IOTHUB_CONNECTION_STRING`     | Device-scoped IoT Hub connection string (connection-string mode only; onboarded devices use DPS mode) | (none)                 |
 | `DEVICE_URL`                   | Device controller URL                                            | `http://localhost:3000`|
 | `POLL_INTERVAL`                | Polling interval for the device controller (Go duration)         | `5s`                   |
 | `DEBUG`                        | Enable debug logging                                             | `false`                |
@@ -416,55 +399,24 @@ Tests wait on events, never on the wall clock: no `time.Sleep`, no
 
 ## Deployment
 
-### Service unit
+### Service units and install
 
-The systemd unit file is checked in at `deploy/meatgeek-pusher.service`. It
-sets `Restart=on-failure`, `RestartSec=10`, sends stdout/stderr to journald,
-orders the service `After=network-online.target meatgeek-controller.service`,
-and reads secrets from an `EnvironmentFile` rather than inlining them.
+Install a Pi with `deploy/onboard-pi.sh`, from the owner's laptop. The
+[device runbook](../../docs/devices/runbook.md) has the steps. It installs
+these files from `deploy/`:
 
-### Operator install procedure (on the Pi)
+| File                          | Installed as                                      |
+| ----------------------------- | ------------------------------------------------- |
+| `meatgeek-controller.service` | `/etc/systemd/system/meatgeek-controller.service` |
+| `meatgeek-pusher.service`     | `/etc/systemd/system/meatgeek-pusher.service`     |
+| `99-meatgeek.rules`           | `/etc/udev/rules.d/99-meatgeek.rules`             |
 
-1. **Provision the per-device IoT Hub connection string.** Retrieve it on demand
-   from IoT Hub via the Azure CLI (`az iot hub device-identity connection-string
-   show --hub-name "$(terraform output -raw iot_hub_name)" --device-id <device>`;
-   create the identity first with `az iot hub device-identity create` if it does
-   not exist — see "Connection string (per device)" above). It is a device
-   credential fetched at provisioning time, never a Terraform output/state value.
-2. **Write the secret file** (one shot, before first `make install`):
-
-   ```bash
-   sudo mkdir -p /etc/meatgeek-pusher
-   sudo tee /etc/meatgeek-pusher/env > /dev/null <<'EOF'
-   IOTHUB_CONNECTION_STRING=HostName=<host>;DeviceId=<id>;SharedAccessKey=<key>
-   DEVICE_URL=http://localhost:3000
-   EOF
-   sudo chmod 600 /etc/meatgeek-pusher/env
-   sudo chown root:root /etc/meatgeek-pusher/env
-   ```
-
-   The `chmod 600` is intentional — the file holds a SAS-signing key. Never
-   put the connection string on an `Environment=` line (visible via
-   `systemctl show` and `ps auxe`).
-3. **Cross-compile and install** from a build host:
-
-   ```bash
-   make build-arm
-   make deploy-to-pi PI_HOST=pi@<your-pi>
-   # then on the Pi itself:
-   sudo make -C apps/data-pusher install
-   ```
-
-   `make install` copies the ARM binary into `/usr/local/bin`, creates
-   `/var/lib/meatgeek-pusher` (queue + cook-session state) and
-   `/etc/meatgeek-pusher` (env dir), copies `deploy/meatgeek-pusher.service`
-   into `/etc/systemd/system/`, then enables and starts the unit.
-4. **Confirm the service is running**:
-
-   ```bash
-   make status
-   make logs
-   ```
+Both units run as the system user `meatgeek` with `Restart=on-failure`. The
+pusher's unit is `After=` and `Wants=` the controller. It gets
+`/var/lib/meatgeek-pusher` (mode `0700`) from `StateDirectory=`. It reads
+`/etc/meatgeek-pusher/env` (mode `0640`, `root:meatgeek`), which holds
+`MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_STATE_DIR` and
+`DEVICE_URL`, and no secret. `deploy/README.md` describes the scripts.
 
 ### Service dependency order
 
@@ -566,8 +518,8 @@ Plus IoT Hub message properties: `messageId`, `$.ct`, `$.ce`, `traceparent`, and
   output -raw iot_hub_name)" --device-id <device-id>` (see "Connection string
   (per device)").
 - **"failed to read /etc/meatgeek-pusher/env"** — file missing, wrong owner,
-  or wrong mode. The unit runs as `pi`; the file should be `root:root` /
-  `0600` and at the documented path.
+  or wrong mode. The unit runs as `meatgeek`; the file should be
+  `root:meatgeek` / `0640`. Run `deploy/onboard-pi.sh` again to rewrite it.
 - **Pusher running but no IoT Hub messages** — check the queue is draining
   (look for `queue: enqueued`/`queue: published` log fields). A growing
   queue with no publishes points at MQTT auth or connectivity.
