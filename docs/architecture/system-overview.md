@@ -108,7 +108,7 @@ The Event Hub → Functions → SignalR broadcast path is **live end to end**: I
 - **Application Insights**: Monitoring and observability
 
 #### 3. Client Applications
-- **Web App (React, live)**: On Vercel production at `https://meatgeekv2-web.vercel.app`, built from `main`. Entra sign-in (MSAL, auth code + PKCE); list, register and rename devices; start and stop a cook; list cooks; a cook's page with a live panel by push and a chart of the whole cook from the rollups
+- **Web App (React, live)**: On Vercel production at `https://meatgeekv2-web.vercel.app`, built from `main`. Entra sign-in (MSAL, auth code + PKCE); claim a device with its code, list, rename and release devices, and see whether each is connected; start and stop a cook; list cooks; a cook's page with a live panel by push and a chart of the whole cook from the rollups
 - **Mobile App (native iOS, Swift)**: Planned and not built. It shares no code with the web app; the two clients share only the OpenAPI contract in `libs/api-specs/spec`
 - **Shared Libraries**: TypeScript libraries the web app and API use for consistent API integration
 
@@ -157,7 +157,11 @@ The Event Hub → Functions → SignalR broadcast path is **live end to end**: I
 - **Live readings** pushed to the cook's page, with a `stale` state when the device goes quiet
 - **A chart of the whole cook** from server-side rollups: at most 720 points, 6.19 RU for a 12-hour cook
 - **Cook history**: the cooks list, paged by continuation token, and each cook's chart
-- **Devices**: register, rename, and see which has an active cook
+- **Devices**: claim one with the device's code, rename, release, see whether each is connected and when it was last heard from, and which has an active cook
+
+### Device provisioning and ownership
+
+A Pi gets its cloud identity from the Device Provisioning Service (DPS) with an X.509 certificate it generated itself; the key never leaves the Pi, and no device uses a connection string or SAS key (HAR-146). `apps/data-pusher/deploy/onboard-pi.sh`, run from the operator's laptop, installs the Pi, enrols its certificate in DPS and prints a claim code. A user owns a device only by claiming it with that code in the web app (`POST /devices/claim`; HAR-145 removed `POST /devices`), and releasing it makes the device mint a fresh code. `revoke-device.sh` disables a lost device's DPS enrollment and hub identity. The views [`onboardDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/onboardDevice/), [`claimDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/claimDevice/) and [`revokeDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/revokeDevice/) show the three flows; the procedures are in [`docs/devices/runbook.md`](../devices/runbook.md), and the decision in [`learnings/decisions/har-130-device-provisioning-and-claim.md`](../../learnings/decisions/har-130-device-provisioning-and-claim.md).
 
 ## Next Steps
 

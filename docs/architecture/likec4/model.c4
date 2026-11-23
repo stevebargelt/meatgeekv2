@@ -150,8 +150,21 @@ model {
             Two routes on device messages, both with condition `true`: `cosmos-storage-route`
             writes each message into the `temperatures` container (identity-based, partition
             value from `{deviceid}`), and `eventhub-realtime-route` copies it to the Event Hub.
-            Device-side senders: the Pi data-pusher, and in dev the simulated device
-            `meatgeek-dev-simulated-smoker`.
+            Device-side senders, all authenticated by X.509 certificates issued through DPS: the
+            Pi data-pusher, and in dev the simulated device `meatgeek-dev-simulated-smoker`.
+          '''
+        }
+        dps = service 'Device Provisioning Service' {
+          #live
+          technology 'S1, system-assigned identity'
+          description '''
+            Individual X.509 enrollments, one per device, each holding the certificate the device
+            generated itself (`identity init`); the key never leaves the device. Static allocation
+            to the dev hub. The link to the hub is identity-based: the DPS identity holds
+            `IoT Hub Registry Contributor` on the hub (HAR-131), and the linked hub has no
+            connection string, which needs azapi `Microsoft.Devices/provisioningServices@2026-11-01`.
+            $0.10 per 1,000 operations and no standing fee. Dev instance:
+            `meatgeek-v2-dev-dps-259d4bf5b628`.
           '''
         }
         eventhub = stream 'Event Hub: temperature-data' {
@@ -257,7 +270,7 @@ model {
         principal -> recipes 'userId'
         principal -> users 'userId'
         cooks -> ownership 'start, stop: 403 DEVICE_NOT_OWNED' {
-          description 'A foreign or unregistered device gets 403 DEVICE_NOT_OWNED: no write, no event.'
+          description 'A foreign or unclaimed device gets 403 DEVICE_NOT_OWNED: no write, no event.'
         }
         devices -> ownership 'GET, PATCH /devices/{id}: 404' {
           description 'Foreign and unknown both answer 404 (error code NOT_FOUND).'
@@ -268,7 +281,7 @@ model {
         temperatures -> ownership 'current, history: 404 DEVICE_NOT_FOUND'
         cooks -> repos 'write cook'
         cooks -> repos 'chart: cook point read + one single-partition rollup query'
-        devices -> repos 'list by userId, register, update, delete'
+        devices -> repos 'list by userId, claim (create), update, release (delete)'
         temperatures -> repos 'query readings'
         recipes -> repos
         users -> repos
@@ -391,7 +404,8 @@ model {
       #live
       technology 'React 18, Vite, TypeScript; MSAL (auth code + PKCE); openapi-fetch with types generated from libs/api-specs/spec; @microsoft/signalr 8.0.17; recharts'
       description '''
-        Sign in with Entra; list, register and rename devices; start and stop a cook; list cooks,
+        Sign in with Entra; claim a device with its code, list, rename and release devices, and
+        see whether each is connected; start and stop a cook; list cooks,
         paged by continuation token; a cook's detail page with a live panel by push and a chart of
         the whole cook. Hosted on Vercel production (`https://meatgeekv2-web.vercel.app`), built by
         Vercel's Git integration from `main`; there is no Vercel token in GitHub. Its runtime
@@ -431,8 +445,19 @@ model {
 
     // Telemetry: the storage path is live end to end.
     edge.pusher.iot -[event]-> cloud.ingest.iothub 'telemetry: messageId, $.ct=application/json, $.ce=utf-8, correlation.id, traceparent' {
-      technology 'MQTT 8883, device SAS, QoS 1'
+      technology 'MQTT 8883, X.509 client certificate, QoS 1'
       description 'Each reading as JSON with message properties messageId, $.ct=application/json, $.ce=utf-8, correlation.id (cook-scoped, from cooksession) and traceparent (per message, from the publisher.publish span). No Function reads traceparent back.'
+    }
+    // Provisioning (HAR-130, HAR-146): the device's own certificate is its only credential.
+    edge.pusher.iot -> cloud.ingest.dps 'register (HTTPS, mutual TLS with the device certificate)' {
+      #live
+      technology 'DPS device REST, X.509'
+      description 'Only when there is no cached `assignment.json` under `<stateDir>/identity`, or the hub refused the certificate (MQTT CONNACK 4 or 5, then once before the next connect). The answer (the assigned hub and device id) is cached in `assignment.json`. The key never leaves the Pi.'
+    }
+    cloud.ingest.dps -> cloud.ingest.iothub 'create or update the device identity (X.509 thumbprint)' {
+      #live
+      technology 'managed identity (IoT Hub Registry Contributor)'
+      description 'Static allocation to the one linked hub. The identity is created on the first registration and updated to the enrolled certificate on a later one.'
     }
     cloud.ingest.iothub -[event]-> cloud.data.temperatures 'cosmos-storage-route' {
       technology 'identity-based, no Function in the path'
@@ -471,7 +496,7 @@ model {
       description 'Read in full on every connect and patched on every change, so a Pi that was offline when the cook started gets it on reconnect.'
     }
     edge.pusher.twin -> cloud.ingest.iothub 'reported properties' {
-      description 'activeCookId, correlationId and appliedDesiredVersion: what the Pi applied, so the cloud can see it took effect. In DPS mode, the same patch also carries claimCodeHash, claimExpiresAt and claimGeneration (HAR-134): the hash of the claim code the device minted, never the code, which POST /devices/claim checks a submitted code against.'
+      description 'activeCookId, correlationId and appliedDesiredVersion: what the Pi applied, so the cloud can see it took effect. The same patch also carries claimCodeHash, claimExpiresAt and claimGeneration (HAR-134): the hash of the claim code the device minted, never the code, which POST /devices/claim checks a submitted code against.'
     }
 
     // Cook lifecycle.
@@ -492,7 +517,7 @@ model {
 
     // API to data (partition keys in each container's technology).
     cloud.api.ownership -> cloud.data.devices 'point read'
-    cloud.api.repos -> cloud.data.devices 'list by userId, register, update, delete'
+    cloud.api.repos -> cloud.data.devices 'list by userId, claim (create), update, release (delete)'
     cloud.api.repos -> cloud.data.cooks 'read, write; caller partition'
     cloud.api.repos -> cloud.data.users 'point read, write; id = caller'
     cloud.api.repos -> cloud.data.recipes 'read, write; caller partition'
@@ -599,7 +624,7 @@ model {
       '''
 
       roundtrip = component 'telemetry-roundtrip.proof.ts' {
-        description 'Registers the simulated device (201, or 409 then GET), sends one reading with simdevice and times it until GET /temperatures/current returns it: METRIC roundtrip-ms.'
+        description 'Claims the simulated device with the claim code the device minted (201, or 200 on a retry; HAR-140), sends one reading with simdevice and times it until GET /temperatures/current returns it: METRIC roundtrip-ms.'
       }
       volume = component 'telemetry-volume.proof.ts' {
         description 'Walks the simulated device history by continuation token, tops it up to one long cook of readings (12 h at one every 5 s = 8,640), walks again, and checks the last page costs at most 1.5 x the first.'
@@ -621,8 +646,9 @@ model {
         A job in Deploy Dev App, in parallel with `acceptance`: the live browser proof against the
         production web app. It waits for `/version.json` to show the deployed commit (or a
         descendant), signs in on Microsoft's real pages as `ACCEPTANCE_USER_UPN` (password +
-        TOTP), registers `<sim>-web`, starts a cook, sees a reading pushed by `simdevice` in the
-        live panel, and stops the cook. Prints `METRIC web-deploy-wait-s` and `web-push-ms` (510
+        TOTP), claims `<sim>-web` through the claim screen with the code the device minted,
+        starts a cook, sees a reading pushed by `simdevice` in the live panel, stops the cook, and
+        releases the device at the end (HAR-141). Prints `METRIC web-deploy-wait-s` and `web-push-ms` (510
         in run 44837747351). When a sign-in step fails, the proof writes a scrubbed
         `sign-in-diagnostic.txt`: URL origin and path, title, which selectors are present, and
         Microsoft's error text. It never contains an input value, the UPN, a password or TOTP, a
@@ -641,15 +667,18 @@ model {
         A software IoT Hub device for dev. It sends synthetic readings as any of the three standing
         devices (`<sim>` = `meatgeek-dev-simulated-smoker`, `<sim>-chart`, `<sim>-web`) through
         the data-pusher's own `internal/publish` and
-        `internal/iothub` code: MQTT on 8883, device SAS, QoS 1, with `messageId`,
+        `internal/iothub` code: MQTT on 8883 with its own X.509 client certificate (no
+        password), QoS 1, with `messageId`,
         `$.ct=application/json`, `$.ce=utf-8` and a per-reading `traceparent` (span
         `simdevice.publish`), as the Pi's readings carry. Unlike the Pi, it sends no
         `correlation.id` and no cook id: it has no cook. Readings carry the wall-clock time unless
         `--start/--step` stamps synthetic timestamps (reading i at start + i x step). Built and
-        spawned per run by the acceptance and web-acceptance jobs. Its credential
-        reaches it only via an env var, fetched per run under
-        OIDC as the dev app-publish identity and masked. It is never stored (no repo secret, no
-        Key Vault, no hub shared-access policy) and never passed to PR CI.
+        spawned per run by the acceptance and web-acceptance jobs. Its credential is an X.509 key
+        and certificate it makes per run in a fresh state dir (`simdevice identity init`), whose
+        certificate the job enrols in DPS; simdevice gets only `MEATGEEK_DPS_ID_SCOPE`,
+        `MEATGEEK_DEVICE_ID` and `MEATGEEK_STATE_DIR`. The key never leaves the state dir: it is
+        never stored (no repo secret, no Key Vault, no hub shared-access policy) and never
+        reaches PR CI.
       '''
       link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/data-pusher/cmd/simdevice 'Source'
     }
@@ -686,9 +715,16 @@ model {
     #notBuilt
   }
 
+  // Enrolment and revocation, by the operator from the laptop (HAR-135, HAR-144).
+  operator -> meatgeek.cloud.ingest.dps 'enrol-device.sh / revoke-device.sh' {
+    #live
+    technology 'az iot dps, --auth-type key'
+    description 'enrol-device.sh creates the individual enrollment from the public certificate the Pi printed (onboard-pi.sh runs it); the key never leaves the Pi. revoke-device.sh disables the enrollment and the IoT Hub device identity and deletes nothing. enrol-device.sh refuses a revoked device (exit 4) unless REINSTATE=1.'
+  }
+
   // Simulated device (dev acceptance).
   delivery.simdevice -[event]-> meatgeek.cloud.ingest.iothub 'telemetry as <sim>, <sim>-chart or <sim>-web: messageId, $.ct=application/json, $.ce=utf-8, traceparent' {
-    technology 'MQTT 8883, device SAS, QoS 1'
+    technology 'MQTT 8883, X.509 client certificate, QoS 1'
     description 'Built by the internal/publish builders of the data-pusher over the same internal/iothub transport, so messageId, $.ct, $.ce and traceparent match the readings of the Pi. No correlation.id and no cook id: simdevice passes an empty correlation and a nil cook id.'
   }
   delivery.acceptance -> meatgeek.cloud.ingest.iothub 'enrol each simulated device through DPS (enrol-device.sh), register it with simdevice' {
@@ -719,6 +755,9 @@ model {
   // Landscape.
   pitmaster -> smoker 'cooks on'
   pitmaster -> meatgeek.web 'watches a cook live, reviews cooks'
+  pitmaster -> meatgeek.web 'claims a device with its claim code, releases it' {
+    #live
+  }
   pitmaster -[decided]-> meatgeek.mobile 'monitors a cook' {
     #decided
   }

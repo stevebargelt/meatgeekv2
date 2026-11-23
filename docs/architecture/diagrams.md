@@ -19,7 +19,7 @@ opacity or the dashed and dotted borders the site gives to elements that are not
 so check the site when an element's state matters. A flow (a dynamic view) is drawn as a
 flowchart without step numbers; its numbered steps and their notes follow the diagram.
 
-17 views, grouped as: Landscape and containers (3), Drill-downs (6), Deployment (1), Flows, today (7).
+20 views, grouped as: Landscape and containers (3), Drill-downs (6), Deployment (1), Flows, today (10).
 
 **Legend: the honesty convention**, copied from the
 [model README](likec4/README.md#the-honesty-convention).
@@ -85,6 +85,7 @@ graph TB
   Delivery -. "`[...]`" .-> Entra
   Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge
   Smoker -. "`RTD sensor readings`" .-> Meatgeek.Edge
+  Operator -. "`enrol-device.sh / revoke-device.sh`" .-> Meatgeek.Cloud
   Delivery -. "`[...]`" .-> Meatgeek.Cloud
   Meatgeek.Edge -. "`[...]`" .-> Meatgeek.Cloud
   Meatgeek.Cloud -. "`[...]`" .-> Operator
@@ -93,7 +94,7 @@ graph TB
   Pitmaster -. "`monitors a cook`" .-> Meatgeek.Mobile
   Meatgeek.Cloud -. "`live temperatures, cook events`" .-> Meatgeek.Mobile
   Meatgeek.Mobile -. "`[...]`" .-> Meatgeek.Cloud
-  Pitmaster -. "`watches a cook live, reviews cooks`" .-> Meatgeek.Web
+  Pitmaster -. "`[...]`" .-> Meatgeek.Web
   Vercel -. "`builds apps/web on every push
 to main, serves production`" .-> Meatgeek.Web
   Delivery -. "`Playwright, production`" .-> Meatgeek.Web
@@ -108,9 +109,9 @@ to main, serves production`" .-> Meatgeek.Web
   class Delivery,Meatgeek.Edge,Meatgeek.Cloud,Meatgeek.Web primary
   classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
   class Meatgeek.Mobile sky
-  linkStyle 0,1,2,3,4,5,6,7,8,13,14,15,16,17,18,19 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 9 stroke:#8D8D8D
-  linkStyle 10,11,12 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,9,14,15,16,17,18,19,20 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 10 stroke:#8D8D8D
+  linkStyle 11,12,13 stroke:#0ea5e9,stroke-dasharray:8 4
 ```
 
 ## MeatGeek V2: containers
@@ -130,6 +131,7 @@ graph TB
     subgraph Meatgeek.Cloud["`MeatGeek cloud`"]
       subgraph Meatgeek.Cloud.Ingest["`Ingest`"]
         Meatgeek.Cloud.Ingest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
+        Meatgeek.Cloud.Ingest.Dps@{ shape: rectangle, label: "Device Provisioning Service" }
         Meatgeek.Cloud.Ingest.Iothub@{ shape: rectangle, label: "IoT Hub" }
       end
       subgraph Meatgeek.Cloud.Observability["`Observability`"]
@@ -162,7 +164,7 @@ graph TB
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   Pitmaster -. "`monitors a cook`" .-> Meatgeek.Mobile
-  Pitmaster -. "`watches a cook live, reviews cooks`" .-> Meatgeek.Web
+  Pitmaster -. "`[...]`" .-> Meatgeek.Web
   Vercel -. "`builds apps/web on every push
 to main, serves production`" .-> Meatgeek.Web
   Meatgeek.Web -. "`auth code + PKCE
@@ -183,7 +185,10 @@ token (access_as_user)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Data
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Realtime
   Meatgeek.Cloud.Data -. "`change feed (leases)`" .-> Meatgeek.Cloud.Api
+  Operator -. "`enrol-device.sh / revoke-device.sh`" .-> Meatgeek.Cloud.Ingest.Dps
   Meatgeek.Edge.Pusher -. "`[...]`" .-> Meatgeek.Cloud.Ingest.Iothub
+  Meatgeek.Edge.Pusher -. "`register (HTTPS, mutual TLS
+with the device certificate)`" .-> Meatgeek.Cloud.Ingest.Dps
   Meatgeek.Edge.Updater -. "`installed version, result`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Cloud.Deviceupdate -. "`deployment to a device group`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Ingest.Iothub
@@ -192,6 +197,8 @@ token (access_as_user)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Cloud.Ingest.Iothub -. "`cosmos-storage-route`" .-> Meatgeek.Cloud.Data
   Meatgeek.Cloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> Meatgeek.Cloud.Api
   Meatgeek.Cloud.Ingest.Iothub -. "`eventhub-realtime-route`" .-> Meatgeek.Cloud.Ingest.Eventhub
+  Meatgeek.Cloud.Ingest.Dps -. "`create or update the device
+identity (X.509 thumbprint)`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Edge.Controller -. "`OTLP/HTTP`" .-> Meatgeek.Cloud.Observability.Collector
   Meatgeek.Edge.Pusher -. "`OTLP/HTTP`" .-> Meatgeek.Cloud.Observability.Collector
   Meatgeek.Cloud.Api -. "`traces and logs, samplingRatio 0.5`" .-> Meatgeek.Cloud.Observability.Appinsights
@@ -218,7 +225,7 @@ $.ct=application/json, $.ce=utf-
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Vercel,Smoker,Meatgeek.Edge.Updater,Meatgeek.Cloud.Deviceupdate,Entra muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class Meatgeek.Cloud.Ingest.Eventhub,Meatgeek.Cloud.Observability.Budgets,Meatgeek.Cloud.Observability.ActivityAlerts,Meatgeek.Cloud.Observability.ActionGroup,Meatgeek.Cloud.Realtime,Meatgeek.Cloud.Ingest.Iothub,Meatgeek.Cloud.Observability.Workbook,Meatgeek.Cloud.Observability.Appinsights,Meatgeek.Cloud.Observability.Logs,Meatgeek.Cloud.Observability.MetricAlerts indigo
+  class Meatgeek.Cloud.Ingest.Eventhub,Meatgeek.Cloud.Observability.Budgets,Meatgeek.Cloud.Observability.ActivityAlerts,Meatgeek.Cloud.Observability.ActionGroup,Meatgeek.Cloud.Realtime,Meatgeek.Cloud.Ingest.Dps,Meatgeek.Cloud.Ingest.Iothub,Meatgeek.Cloud.Observability.Workbook,Meatgeek.Cloud.Observability.Appinsights,Meatgeek.Cloud.Observability.Logs,Meatgeek.Cloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery.Simdevice,Meatgeek.Web,Meatgeek.Edge.Pusher,Meatgeek.Edge.Controller,Meatgeek.Cloud.Api primary
   classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
@@ -228,9 +235,9 @@ $.ct=application/json, $.ce=utf-
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class Meatgeek.Cloud.Observability.Collector amber
   linkStyle 0,10,14 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,2,3,4,5,6,7,11,12,13,15,16,22,23,30,31,32,33,34,35,36,37,38,39,40,41,43,44,45,46 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 8,9,20,21,24,28,29,42 stroke:#8D8D8D
-  linkStyle 17,18,19,25,26,27,47 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 1,2,3,4,5,6,7,11,12,13,15,16,19,21,24,25,30,33,34,35,36,37,38,39,40,41,42,43,44,46,47,48,49 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 8,9,22,23,26,31,32,45 stroke:#8D8D8D
+  linkStyle 17,18,20,27,28,29,50 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## MeatGeek cloud (Azure)
@@ -242,7 +249,18 @@ View `cloud` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/cloud
 title: "MeatGeek cloud (Azure)"
 ---
 graph TB
+  Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   subgraph MeatgeekCloud["`MeatGeek cloud`"]
+    subgraph MeatgeekCloud.Observability["`Observability`"]
+      MeatgeekCloud.Observability.Budgets@{ shape: rectangle, label: "Budgets" }
+      MeatgeekCloud.Observability.ActivityAlerts@{ shape: rectangle, label: "Activity-log alerts" }
+      MeatgeekCloud.Observability.ActionGroup@{ shape: rectangle, label: "Action group" }
+      MeatgeekCloud.Observability.Workbook@{ shape: rectangle, label: "Workbook" }
+      MeatgeekCloud.Observability.Collector@{ shape: rectangle, label: "OTLP collector" }
+      MeatgeekCloud.Observability.Appinsights@{ shape: rectangle, label: "Application Insights" }
+      MeatgeekCloud.Observability.Logs@{ shape: rectangle, label: "Log Analytics" }
+      MeatgeekCloud.Observability.MetricAlerts@{ shape: rectangle, label: "Metric alerts" }
+    end
     subgraph MeatgeekCloud.Api["`Functions API`"]
       MeatgeekCloud.Api.Rollup@{ shape: rectangle, label: "rollupTemperatures" }
       MeatgeekCloud.Api.Cooks@{ shape: rectangle, label: "cooks" }
@@ -254,25 +272,16 @@ graph TB
     end
     MeatgeekCloud.Deviceupdate@{ shape: rectangle, label: "Device Update for IoT Hub" }
     subgraph MeatgeekCloud.Ingest["`Ingest`"]
+      MeatgeekCloud.Ingest.Dps@{ shape: rectangle, label: "Device Provisioning Service" }
       MeatgeekCloud.Ingest.Iothub@{ shape: rectangle, label: "IoT Hub" }
       MeatgeekCloud.Ingest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
     end
     MeatgeekCloud.Realtime@{ shape: rectangle, label: "SignalR Service" }
-    subgraph MeatgeekCloud.Observability["`Observability`"]
-      MeatgeekCloud.Observability.Budgets@{ shape: rectangle, label: "Budgets" }
-      MeatgeekCloud.Observability.Workbook@{ shape: rectangle, label: "Workbook" }
-      MeatgeekCloud.Observability.Collector@{ shape: rectangle, label: "OTLP collector" }
-      MeatgeekCloud.Observability.ActivityAlerts@{ shape: rectangle, label: "Activity-log alerts" }
-      MeatgeekCloud.Observability.Appinsights@{ shape: rectangle, label: "Application Insights" }
-      MeatgeekCloud.Observability.Logs@{ shape: rectangle, label: "Log Analytics" }
-      MeatgeekCloud.Observability.MetricAlerts@{ shape: rectangle, label: "Metric alerts" }
-      MeatgeekCloud.Observability.ActionGroup@{ shape: rectangle, label: "Action group" }
-    end
   end
-  Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   subgraph Delivery["`Delivery pipeline`"]
     Delivery.Simdevice@{ shape: rectangle, label: "simdevice" }
   end
+  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   subgraph MeatgeekEdge["`MeatGeek device`"]
     MeatgeekEdge.PusherTwin@{ shape: rectangle, label: "twin client" }
   end
@@ -281,10 +290,12 @@ graph TB
     MeatgeekWeb.LivePanel@{ shape: rectangle, label: "live panel" }
     MeatgeekWeb.Chart@{ shape: rectangle, label: "chart" }
   end
-  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekMobile
+  Operator -. "`enrol-device.sh / revoke-device.sh`" .-> MeatgeekCloud.Ingest.Dps
   MeatgeekCloud.Deviceupdate -. "`deployment to a device group`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Ingest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloud.Ingest.Eventhub
+  MeatgeekCloud.Ingest.Dps -. "`create or update the device
+identity (X.509 thumbprint)`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Realtime -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Realtime -. "`signalr-connection-failure-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
   MeatgeekCloud.Ingest.Iothub -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
@@ -321,20 +332,20 @@ $.ct=application/json, $.ce=utf-
   MeatgeekCloud.Data -. "`cosmos-429-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra,MeatgeekCloud.Deviceupdate muted
+  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
+  class MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.ActionGroup,MeatgeekCloud.Ingest.Dps,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekCloud.Api.Negotiate,MeatgeekWeb.Chart primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data.TemperatureRollups green
-  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts,MeatgeekCloud.Observability.ActionGroup indigo
   classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
   class MeatgeekMobile sky
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.Observability.Collector amber
-  linkStyle 0,17 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,11 stroke:#8D8D8D
-  linkStyle 2,15,19,29 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 3,4,5,6,7,8,9,10,12,13,14,16,18,20,21,22,23,24,25,26,27,28,30,31,32 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,19 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,4,5,6,7,8,9,10,11,12,14,15,16,18,20,22,23,24,25,26,27,28,29,30,32,33,34 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,13 stroke:#8D8D8D
+  linkStyle 3,17,21,31 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -365,8 +376,9 @@ graph TB
     MeatgeekEdge.Controller@{ shape: rectangle, label: "device-controller" }
   end
   subgraph MeatgeekCloud["`MeatGeek cloud`"]
-    MeatgeekCloud.IngestIothub@{ shape: rectangle, label: "IoT Hub" }
+    MeatgeekCloud.IngestDps@{ shape: rectangle, label: "Device Provisioning Service" }
     MeatgeekCloud.ObservabilityCollector@{ shape: rectangle, label: "OTLP collector" }
+    MeatgeekCloud.IngestIothub@{ shape: rectangle, label: "IoT Hub" }
   end
   Operator -. "`onboard-pi.sh`" .-> MeatgeekEdge.Controller
   Smoker -. "`RTD sensor readings`" .-> MeatgeekEdge.Controller
@@ -386,6 +398,11 @@ $.ct=application/json, $.ce=utf-
   MeatgeekEdge.Pusher.Twin -. "`reported properties`" .-> MeatgeekCloud.IngestIothub
   MeatgeekCloud.IngestIothub -. "`update available`" .-> MeatgeekEdge.Updater
   MeatgeekCloud.IngestIothub -. "`desired properties`" .-> MeatgeekEdge.Pusher.Twin
+  Operator -. "`enrol-device.sh / revoke-device.sh`" .-> MeatgeekCloud.IngestDps
+  MeatgeekEdge.Pusher.Iot -. "`register (HTTPS, mutual TLS
+with the device certificate)`" .-> MeatgeekCloud.IngestDps
+  MeatgeekCloud.IngestDps -. "`create or update the device
+identity (X.509 thumbprint)`" .-> MeatgeekCloud.IngestIothub
   MeatgeekEdge.Controller -. "`OTLP/HTTP`" .-> MeatgeekCloud.ObservabilityCollector
   MeatgeekEdge.Pusher.Tracing -. "`OTLP/HTTP`" .-> MeatgeekCloud.ObservabilityCollector
   Operator -. "`onboard-pi.sh`" .-> MeatgeekEdge.Pusher
@@ -395,11 +412,11 @@ $.ct=application/json, $.ce=utf-
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class MeatgeekEdge.Pusher.Tracing,MeatgeekEdge.Pusher.Twin,MeatgeekEdge.Pusher.Session,MeatgeekEdge.Pusher.Collector,MeatgeekEdge.Controller,MeatgeekEdge.Pusher.Queue,MeatgeekEdge.Pusher.Iot primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloud.IngestIothub indigo
+  class MeatgeekCloud.IngestDps,MeatgeekCloud.IngestIothub indigo
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.ObservabilityCollector amber
-  linkStyle 0,1,3,4,5,6,7,8,9,12,14,17 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,10,13,15,16,18 stroke:#8D8D8D
+  linkStyle 0,1,3,4,5,6,7,8,9,12,14,15,16,17,20 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,10,13,18,19,21 stroke:#8D8D8D
   linkStyle 11 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -483,8 +500,8 @@ DELETE /devices/{id}`" .-> MeatgeekCloudApi.Devices
 DEVICE_NOT_OWNED`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Cooks -. "`[...]`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Devices -. "`[...]`" .-> MeatgeekCloudApi.Ownership
-  MeatgeekCloudApi.Devices -. "`list by userId, register,
-update, delete`" .-> MeatgeekCloudApi.Repos
+  MeatgeekCloudApi.Devices -. "`list by userId, claim (create),
+update, release (delete)`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Temperatures -. "`current, history: 404
 DEVICE_NOT_FOUND`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Temperatures -. "`query readings`" .-> MeatgeekCloudApi.Repos
@@ -500,8 +517,8 @@ to the owning userId`" .-> MeatgeekCloudRealtime
   MeatgeekCloudApi.Rollup -. "`read-merge-replace, If-Match`" .-> MeatgeekCloudData.TemperatureRollups
   MeatgeekCloudApi.Rollup -. "`change-feed checkpoints`" .-> MeatgeekCloudData.Leases
   MeatgeekCloudApi.Ownership -. "`point read`" .-> MeatgeekCloudData.Devices
-  MeatgeekCloudApi.Repos -. "`list by userId, register,
-update, delete`" .-> MeatgeekCloudData.Devices
+  MeatgeekCloudApi.Repos -. "`list by userId, claim (create),
+update, release (delete)`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Repos -. "`read only; partition = deviceId`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Cooks
   MeatgeekCloudApi.Repos -. "`point read, write; id = caller`" .-> MeatgeekCloudData.Users
@@ -581,8 +598,8 @@ graph TB
   end
   MeatgeekEdgePusher@{ shape: rectangle, label: "data-pusher" }
   MeatgeekCloudApi.Repos -. "`read only; partition = deviceId`" .-> MeatgeekCloudData.Temperatures
-  MeatgeekCloudApi.Repos -. "`list by userId, register,
-update, delete`" .-> MeatgeekCloudData.Devices
+  MeatgeekCloudApi.Repos -. "`list by userId, claim (create),
+update, release (delete)`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Cooks
   MeatgeekCloudApi.Repos -. "`point read, write; id = caller`" .-> MeatgeekCloudData.Users
   MeatgeekCloudApi.Repos -. "`read, write; caller partition`" .-> MeatgeekCloudData.Recipes
@@ -617,12 +634,14 @@ View `ingest` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/inge
 title: "Ingest"
 ---
 graph TB
+  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   MeatgeekCloudDeviceupdate@{ shape: rectangle, label: "Device Update for IoT Hub" }
   subgraph Delivery["`Delivery pipeline`"]
     Delivery.Acceptance@{ shape: rectangle, label: "Acceptance" }
     Delivery.Simdevice@{ shape: rectangle, label: "simdevice" }
   end
   subgraph MeatgeekCloudIngest["`Ingest`"]
+    MeatgeekCloudIngest.Dps@{ shape: rectangle, label: "Device Provisioning Service" }
     MeatgeekCloudIngest.Iothub@{ shape: rectangle, label: "IoT Hub" }
     MeatgeekCloudIngest.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
   end
@@ -637,10 +656,16 @@ graph TB
   end
   MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
   MeatgeekCloudObservability@{ shape: rectangle, label: "Observability" }
+  Operator -. "`enrol-device.sh / revoke-device.sh`" .-> MeatgeekCloudIngest.Dps
   MeatgeekCloudDeviceupdate -. "`deployment to a device group`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngest.Eventhub
+  MeatgeekCloudIngest.Dps -. "`create or update the device
+identity (X.509 thumbprint)`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`diagnostic settings`" .-> MeatgeekCloudObservability
+  Operator -. "`onboard-pi.sh`" .-> MeatgeekEdge.Pusher
   MeatgeekCloudIngest.Iothub -. "`desired properties`" .-> MeatgeekEdge.Pusher
+  MeatgeekEdge.Pusher -. "`register (HTTPS, mutual TLS
+with the device certificate)`" .-> MeatgeekCloudIngest.Dps
   MeatgeekEdge.Pusher -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekEdge.Pusher -. "`OTLP/HTTP`" .-> MeatgeekCloudObservability
   MeatgeekCloudIngest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures
@@ -656,6 +681,7 @@ through DPS (enrol-device.sh),
 register it with simdevice`" .-> MeatgeekCloudIngest.Iothub
   Delivery.Acceptance -. "`connects as a SignalR client`" .-> MeatgeekCloudRealtime
   Delivery.Acceptance -. "`[...]`" .-> Delivery.Simdevice
+  MeatgeekCloudObservability -. "`[...]`" .-> Operator
   Delivery.Acceptance -. "`live acceptance probes`" .-> MeatgeekCloudApi
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class MeatgeekCloudDeviceupdate muted
@@ -664,12 +690,12 @@ register it with simdevice`" .-> MeatgeekCloudIngest.Iothub
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery.Simdevice,MeatgeekEdge.Pusher,MeatgeekCloudApi.Broadcast,MeatgeekCloudObservability primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
+  class MeatgeekCloudIngest.Dps,MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.Temperatures green
-  linkStyle 0,5 stroke:#8D8D8D
-  linkStyle 1,4,6,7,10 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 2,3,8,9,11,12,13,14 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,6,7,12,13,15,16,17,18,19 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 1,9 stroke:#8D8D8D
+  linkStyle 2,8,10,11,14 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Observability
@@ -843,6 +869,7 @@ graph TB
     DevVercelHost.Web@{ shape: rounded, label: "Web app" }
   end
   subgraph DevRg["`Azure resource group (dev)`"]
+    DevRg.Dps@{ shape: rectangle, label: "Device Provisioning Service" }
     DevRg.Api@{ shape: rectangle, label: "Functions API" }
     DevRg.Workbook@{ shape: rectangle, label: "Workbook" }
     DevRg.Iothub@{ shape: rectangle, label: "IoT Hub" }
@@ -859,6 +886,8 @@ graph TB
   DevRg.Iothub -. "`eventhub-realtime-route`" .-> DevRg.Eventhub
   DevRg.Iothub -. "`cosmos-storage-route`" .-> DevRg.Cosmos
   DevRg.Iothub -. "`diagnostic settings`" .-> DevRg.Logs
+  DevRg.Dps -. "`create or update the device
+identity (X.509 thumbprint)`" .-> DevRg.Iothub
   DevRg.Api -. "`[...]`" .-> DevRg.Iothub
   DevRg.Eventhub -. "`Event Hub trigger`" .-> DevRg.Api
   DevRg.Api -. "`[...]`" .-> DevRg.Cosmos
@@ -873,6 +902,8 @@ graph TB
   DevCi.Acceptance -. "`[...]`" .-> DevCi.Simdevice
   DevCi.WebAcceptance -. "`spawns as <sim>-web`" .-> DevCi.Simdevice
   DevPi.Pusher -. "`[...]`" .-> DevRg.Iothub
+  DevPi.Pusher -. "`register (HTTPS, mutual TLS
+with the device certificate)`" .-> DevRg.Dps
   DevRg.Iothub -. "`desired properties`" .-> DevPi.Pusher
   DevCi.Acceptance -. "`enrol each simulated device
 through DPS (enrol-device.sh),
@@ -900,13 +931,13 @@ $.ct=application/json, $.ce=utf-
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
   class DevCi.Acceptance,DevCi.WebAcceptance slate
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class DevRg.Workbook,DevRg.Iothub,DevRg.Signalr,DevRg.Appinsights,DevRg.Eventhub,DevRg.Logs indigo
+  class DevRg.Dps,DevRg.Workbook,DevRg.Iothub,DevRg.Signalr,DevRg.Appinsights,DevRg.Eventhub,DevRg.Logs indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class DevRg.Cosmos green
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class DevIdentity.Entra muted
-  linkStyle 0,3,4,6,8,9,11,12,13,14,15,16,18,19,20,22,23,24,25,26,27,28,29,30,31 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,2,5,7,10,17,21 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,7,9,10,12,13,14,15,16,17,19,20,21,22,24,25,26,27,28,29,30,31,32,33 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 1,2,6,8,11,18,23 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -983,7 +1014,7 @@ Steps:
 - **4.** collector → disk queue: enqueue
 - **5.** disk queue → iothub client: drain
 - **6.** telemetry → iothub client: publisher.publish span, traceparent. Every message gets its own span and `traceparent` (W3C Trace Context), sampled always.
-- **7.** iothub client → IoT Hub: publish (MQTT 8883, QoS 1). Message properties: `messageId`, `$.ct=application/json`, `$.ce=utf-8`, `correlation.id` (cook-scoped) and `traceparent` (per message). Device SAS, renewed five minutes before it expires.
+- **7.** iothub client → IoT Hub: publish (MQTT 8883, QoS 1). Message properties: `messageId`, `$.ct=application/json`, `$.ce=utf-8`, `correlation.id` (cook-scoped) and `traceparent` (per message). X.509 client certificate from DPS; no password, no token to renew.
 - **8a.** IoT Hub → temperatures (`meatgeek.cloud.data.temperatures`): cosmos-storage-route. **Live.** IoT Hub writes the document itself, by managed identity, partition value from `{deviceid}`. No Function runs, so nothing reads `traceparent` back.
 - **8b.** IoT Hub → Event Hub: temperature-data: eventhub-realtime-route. **Live.** Every message is copied to the `temperature-data` Event Hub.
 - **9.** Event Hub: temperature-data → realtime broadcast: Event Hub trigger, consumer group api-broadcast. **Live.** `broadcastTemperature` (HAR-60), `cardinality: many`, identity-based. The device is the hub-stamped `iothub-connection-device-id`; the reading is mapped by `toTemperatureReading`, as `GET /temperatures/current` does, plus `enqueuedTimeUtc`.
@@ -1115,7 +1146,7 @@ graph LR
 
 Steps:
 
-- **1.** cooks (`meatgeek.web.cooks`) → cooks (`meatgeek.cloud.api.cooks`): POST /cooks. Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The web app's start form sends a client-generated id, one per intent, so a retried submit starts the cook once. The ownership check is one point read on `devices`: a foreign or unregistered device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live callers are the web app and the acceptance proofs.
+- **1.** cooks (`meatgeek.web.cooks`) → cooks (`meatgeek.cloud.api.cooks`): POST /cooks. Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The web app's start form sends a client-generated id, one per intent, so a retried submit starts the cook once. The ownership check is one point read on `devices`: a foreign or unclaimed device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live callers are the web app and the acceptance proofs.
 - **2.** cooks (`meatgeek.cloud.api.cooks`) → cooks (`meatgeek.cloud.data.cooks`): cook and device lock. One transactional batch in the caller partition: the cook and its device lock commit together, so a device holds at most one active cook (MG-84).
 - **3.** cooks (`meatgeek.cloud.api.cooks`) → IoT Hub: set desired: activeCookId, correlationId. After the write, synced to the device lock under the twin etag (`If-Match`): GET the twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Managed identity with `IoT Hub Twin Contributor`. A failed sync answers 503 `DEVICE_TWIN_UPDATE_FAILED`; the cook stays written and a retry of the same request heals the twin.
 - **4.** IoT Hub → twin client: desired properties. Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up. Patches apply in `$version` order.
@@ -1232,7 +1263,7 @@ Steps:
 
 Every Deploy Dev App acceptance job proves the telemetry path end to end:
 `telemetry-roundtrip.proof.ts`, then `telemetry-volume.proof.ts`. `simdevice` sends as
-`meatgeek-dev-simulated-smoker` (MQTT 8883, device SAS, QoS 1, the data-pusher's own
+`meatgeek-dev-simulated-smoker` (MQTT 8883, X.509 client certificate, QoS 1, the data-pusher's own
 publish code); no Function is in the write path.
 
 Measured (single dev samples, not targets): `roundtrip-ms` 1211 (run 44603121177) and
@@ -1301,6 +1332,172 @@ Steps:
 - **12.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): GET /temperatures/current/{id}, until the top-up end. After a top-up only. Polled every 10 s, 15 min cap, until the current reading is at or after the reading 32 places from the top-up last.
 - **13.** telemetry-volume.proof.ts → temperatures (`meatgeek.cloud.api.temperatures`): the same walk again. Prints `history-ru-first-page`, `history-ru-last-page` and `history-pages`; fails unless the last page costs at most 1.5 x the first.
 - **14.** temperatures (`meatgeek.cloud.api.temperatures`) → temperatures (`meatgeek.cloud.data.temperatures`): one page per request: maxItemCount + continuation token. No COUNT and no OFFSET (HAR-75), so a deep page costs what the first does. The job copies every `METRIC` line into the run summary.
+
+## Onboard a Pi: one command, DPS enrolment, claim code
+
+`apps/data-pusher/deploy/onboard-pi.sh <user@host>`, run from a checkout on the operator's
+laptop, takes a fresh Pi to a running, enrolled device and prints its claim code (HAR-144).
+The Pi makes its own key and certificate; only the public certificate leaves it. The
+laptop enrols it in DPS, then the pusher registers itself with that certificate and gets
+its IoT Hub identity. The steps follow `onboard-pi.sh` and `remote-install.sh`. See
+`docs/devices/runbook.md`.
+
+View `onboardDevice` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/onboardDevice/
+
+```mermaid
+---
+title: "Onboard a Pi: one command, DPS enrolment, claim code"
+---
+graph LR
+  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
+  MeatgeekEdgePusher@{ shape: rectangle, label: "data-pusher" }
+  MeatgeekEdgeController@{ shape: rectangle, label: "device-controller" }
+  MeatgeekCloudIngestDps@{ shape: rectangle, label: "Device Provisioning Service" }
+  MeatgeekCloudIngestIothub@{ shape: rectangle, label: "IoT Hub" }
+  Operator -. "`preflight, then build on the laptop`" .-> MeatgeekEdgePusher
+  Operator -. "`install over ssh (first sudo): identity
+init`" .-> MeatgeekEdgePusher
+  Operator -. "`controller started`" .-> MeatgeekEdgeController
+  MeatgeekEdgePusher -. "`device.crt copied back (never the key)`" .-> Operator
+  Operator -. "`enrol-device.sh: individual enrollment`" .-> MeatgeekCloudIngestDps
+  Operator -. "`start (second sudo): env file, pusher
+started`" .-> MeatgeekEdgePusher
+  MeatgeekEdgePusher -. "`register (mutual TLS, device
+certificate)`" .-> MeatgeekCloudIngestDps
+  MeatgeekCloudIngestDps -. "`create the device identity (X.509
+thumbprint)`" .-> MeatgeekCloudIngestIothub
+  MeatgeekEdgePusher -. "`MQTT connect with the certificate`" .-> MeatgeekCloudIngestIothub
+  MeatgeekEdgePusher -. "`twin sync: reported claimCodeHash,
+claimExpiresAt, claimGeneration`" .-> MeatgeekCloudIngestIothub
+  MeatgeekEdgePusher -. "`device id, claim code, claim URL`" .-> Operator
+  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
+  class MeatgeekEdgePusher,MeatgeekEdgeController primary
+  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
+  class MeatgeekCloudIngestDps,MeatgeekCloudIngestIothub indigo
+  linkStyle 0,1,2,3,4,5,6,7,10 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 8,9 stroke:#b45309,stroke-dasharray:8 4
+```
+
+Steps:
+
+- **1.** Operator → data-pusher: preflight, then build on the laptop. Preflight changes nothing: Go, `az` signed in with the `azure-iot` extension, one DPS and one hub in the resource group (and the DPS ID scope), key-based ssh, an `aarch64` Pi with SPI on. A failed check prints the one command that fixes it. Then both binaries are built for linux/arm64 (CGO off) and copied with the units, the udev rule and `remote-install.sh` to `/tmp/meatgeek-onboard` on the Pi.
+- **2.** Operator → data-pusher: install over ssh (first sudo): identity init. `remote-install.sh install`: the `meatgeek` user, both binaries, the udev rule, I2C, the systemd units, then `meatgeek-pusher identity init`, which makes the key and the certificate under `/var/lib/meatgeek-pusher/identity` (an existing key is kept) and prints only the certificate. If I2C was off, it turns it on and exits 4: reboot the Pi and run the same command again.
+- **3.** Operator → device-controller: controller started. Enabled and started in the install phase; the pusher is not started yet.
+- **4.** data-pusher → Operator: device.crt copied back (never the key). `scp` of the public certificate only; `remote-install.sh` refuses output that holds a private key.
+- **5.** Operator → Device Provisioning Service: enrol-device.sh: individual enrollment. `az iot dps enrollment create`, X.509 attestation with that certificate, static allocation to the hub (`--auth-type key` by default). A revoked device is refused with exit 4; `REINSTATE=1` enables it again with this certificate.
+- **6.** Operator → data-pusher: start (second sudo): env file, pusher started. `remote-install.sh start` writes `/etc/meatgeek-pusher/env` (0640: ID scope, device id, state dir, `DEVICE_URL`; no secret), then enables and restarts the pusher, and waits for it to register (exit 5 if it does not in time).
+- **7.** data-pusher → Device Provisioning Service: register (mutual TLS, device certificate). Only with no cached `assignment.json` (or after the hub refuses the certificate). The assignment is cached there.
+- **8.** Device Provisioning Service → IoT Hub: create the device identity (X.509 thumbprint). By the DPS managed identity, which holds `IoT Hub Registry Contributor` on the hub.
+- **9.** data-pusher → IoT Hub: MQTT connect with the certificate. Port 8883, X.509 client certificate, no password.
+- **10.** data-pusher → IoT Hub: twin sync: reported claimCodeHash, claimExpiresAt, claimGeneration. The code stays in `<stateDir>/claim/claim.json` (0600); only its hash is reported.
+- **11.** data-pusher → Operator: device id, claim code, claim URL. The Pi's `claim-code` output reaches the laptop over ssh and is kept in a variable, never in a file; the laptop prints the device id, the code, its expiry and `<web>/devices/claim?deviceId=<id>`. The code is never in the URL or a file. An already claimed device prints "already claimed" instead. Running it again is safe: on a set-up Pi it changes nothing but restarting the pusher, and prints the same device id and a valid code. (Opens `claimDevice`.)
+
+## Claim and release a device
+
+Ownership comes only from the code the device minted: `POST /devices/claim` is the only
+way a device gets an owner (HAR-133, HAR-145), and release, `DELETE /devices/{id}`, makes
+the device mint a fresh code (HAR-136). The steps follow
+`apps/api/src/functions/devices/claim-device.ts` and `delete-device.ts`. Every refusal is
+the same `403 CLAIM_REFUSED` body, which does not say which check failed. Readings from
+before the claim (`claimedAt`) are never returned to the new owner.
+
+View `claimDevice` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/claimDevice/
+
+```mermaid
+---
+title: "Claim and release a device"
+---
+graph LR
+  Pitmaster@{ icon: "fa:user", shape: rounded, label: "Pitmaster" }
+  MeatgeekWebDevices@{ shape: rectangle, label: "devices" }
+  MeatgeekCloudApiDevices@{ shape: rectangle, label: "devices" }
+  MeatgeekCloudIngestIothub@{ shape: rectangle, label: "IoT Hub" }
+  MeatgeekCloudDataDevices@{ shape: cylinder, label: "devices" }
+  MeatgeekEdgePusherTwin@{ shape: rectangle, label: "twin client" }
+  MeatgeekCloudApiBroadcast@{ shape: rectangle, label: "realtime broadcast" }
+  MeatgeekCloudApiRepos@{ shape: rectangle, label: "cosmos repositories" }
+  Pitmaster -. "`claim screen: /devices/claim?deviceId=,
+types the code`" .-> MeatgeekWebDevices
+  MeatgeekWebDevices -. "`POST /devices/claim`" .-> MeatgeekCloudApiDevices
+  MeatgeekCloudApiDevices -. "`read the twin: reported hash,
+generation, expiry`" .-> MeatgeekCloudIngestIothub
+  MeatgeekCloudApiDevices -. "`desired: claimConsumedCodeHash,
+claimClaimantHash (If-Match)`" .-> MeatgeekCloudIngestIothub
+  MeatgeekCloudApiDevices -. "`create the device document (claimedAt)`" .-> MeatgeekCloudDataDevices
+  MeatgeekCloudApiDevices -. "`201 the device`" .-> MeatgeekWebDevices
+  MeatgeekCloudIngestIothub -. "`desired patch: consumed hash is its code`" .-> MeatgeekEdgePusherTwin
+  Pitmaster -. "`Release`" .-> MeatgeekWebDevices
+  MeatgeekWebDevices -. "`DELETE /devices/{id}`" .-> MeatgeekCloudApiDevices
+  MeatgeekCloudApiDevices -. "`desired: claimGeneration + 1,
+claimClaimantHash null (If-Match)`" .-> MeatgeekCloudIngestIothub
+  MeatgeekCloudApiDevices -. "`delete the device document`" .-> MeatgeekCloudDataDevices
+  MeatgeekCloudIngestIothub -. "`desired patch: new generation`" .-> MeatgeekEdgePusherTwin
+  MeatgeekEdgePusherTwin -. "`reported: hash of a fresh code, expiry,
+generation`" .-> MeatgeekCloudIngestIothub
+  MeatgeekCloudApiBroadcast -. "`next reading: owner lookup finds nobody`" .-> MeatgeekCloudApiRepos
+  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
+  class MeatgeekWebDevices,MeatgeekCloudApiDevices,MeatgeekEdgePusherTwin,MeatgeekCloudApiBroadcast,MeatgeekCloudApiRepos primary
+  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
+  class MeatgeekCloudIngestIothub indigo
+  classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
+  class MeatgeekCloudDataDevices green
+  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13 stroke:#8D8D8D,stroke-dasharray:8 4
+```
+
+Steps:
+
+- **1.** Pitmaster → devices (`meatgeek.web.devices`): claim screen: /devices/claim?deviceId=, types the code
+- **2.** devices (`meatgeek.web.devices`) → devices (`meatgeek.cloud.api.devices`): POST /devices/claim. Through Easy Auth and the principal. A bad body is 400 before any twin or Cosmos call.
+- **3.** devices (`meatgeek.cloud.api.devices`) → IoT Hub: read the twin: reported hash, generation, expiry. Refused (`403 CLAIM_REFUSED`) unless reported `claimCodeHash` is the hash of the typed code (constant time), reported `claimGeneration` equals desired, and `claimExpiresAt` is later than now. No twin is refused too. A twin failure is 503 `DEVICE_TWIN_UPDATE_FAILED`.
+- **4.** devices (`meatgeek.cloud.api.devices`) → IoT Hub: desired: claimConsumedCodeHash, claimClaimantHash (If-Match). Under the etag just read, so a code is single-use when two claimants race; a 412 re-reads once. A retry by the same claimant carries on.
+- **5.** devices (`meatgeek.cloud.api.devices`) → devices (`meatgeek.cloud.data.devices`): create the device document (claimedAt). Never an upsert. If the id exists and the caller owns it: 200 with it; owned by anyone else: refused.
+- **6.** devices (`meatgeek.cloud.api.devices`) → devices (`meatgeek.web.devices`): 201 the device
+- **7.** IoT Hub → twin client: desired patch: consumed hash is its code. The device applies the claim rule: its code is consumed, so it reports itself claimed and `claim-code` says so.
+- **8.** Pitmaster → devices (`meatgeek.web.devices`): Release
+- **9.** devices (`meatgeek.web.devices`) → devices (`meatgeek.cloud.api.devices`): DELETE /devices/{id}. 409 `COOK_ACTIVE` while the caller has an active cook on the device; nothing changes. 403 `DEVICE_NOT_OWNED` for a device the caller does not own.
+- **10.** devices (`meatgeek.cloud.api.devices`) → IoT Hub: desired: claimGeneration + 1, claimClaimantHash null (If-Match). `claimConsumedCodeHash` is kept, so the old code can never claim again. A twin failure is 503 and the document is kept, so a retry is safe.
+- **11.** devices (`meatgeek.cloud.api.devices`) → devices (`meatgeek.cloud.data.devices`): delete the device document. 204. Its cooks stay in the owner history; its readings expire on the TTL.
+- **12.** IoT Hub → twin client: desired patch: new generation
+- **13.** twin client → IoT Hub: reported: hash of a fresh code, expiry, generation. The pusher mints a fresh code, writes it to `claim.json`, then reports its hash.
+- **14.** realtime broadcast → cosmos repositories: next reading: owner lookup finds nobody. Still stored by `cosmos-storage-route`, but pushed to no one and counted as `unowned`.
+
+## Revoke a device
+
+`apps/data-pusher/deploy/revoke-device.sh --device-id <id>` (HAR-135), for a lost or stolen
+device: IoT Hub accepts nothing more from it. It deletes nothing and running it again
+changes nothing. Ownership is untouched: release the device in the web app (see
+`claimDevice`). `enrol-device.sh` with `REINSTATE=1` brings it back.
+
+View `revokeDevice` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/revokeDevice/
+
+```mermaid
+---
+title: "Revoke a device"
+---
+graph LR
+  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
+  MeatgeekCloudIngestDps@{ shape: rectangle, label: "Device Provisioning Service" }
+  MeatgeekEdgePusher@{ shape: rectangle, label: "data-pusher" }
+  MeatgeekCloudIngestIothub@{ shape: rectangle, label: "IoT Hub" }
+  Operator -. "`revoke-device.sh: disable the enrollment`" .-> MeatgeekCloudIngestDps
+  Operator -. "`disable the device identity (reason
+revoked)`" .-> MeatgeekCloudIngestIothub
+  MeatgeekEdgePusher -. "`reconnect: refused`" .-> MeatgeekCloudIngestIothub
+  MeatgeekEdgePusher -. "`re-register: refused`" .-> MeatgeekCloudIngestDps
+  classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
+  class MeatgeekCloudIngestDps,MeatgeekCloudIngestIothub indigo
+  classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
+  class MeatgeekEdgePusher primary
+  linkStyle 0,1,3 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2 stroke:#b45309,stroke-dasharray:8 4
+```
+
+Steps:
+
+- **1.** Operator → Device Provisioning Service: revoke-device.sh: disable the enrollment. The individual enrollment is set to disabled, so the device cannot register again.
+- **2.** Operator → IoT Hub: disable the device identity (reason revoked). IoT Hub refuses a disabled identity at connect and drops its open connections.
+- **3.** data-pusher → IoT Hub: reconnect: refused
+- **4.** data-pusher → Device Provisioning Service: re-register: refused. After the hub refuses it (CONNACK 4 or 5), the pusher registers again; the disabled enrollment refuses it. The device sends nothing to the cloud.
 
 ## Device software updates
 
