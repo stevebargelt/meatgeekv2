@@ -1734,9 +1734,10 @@ if (argv[0] === 'claim-code' && argv[1] === '--state-dir' && argv.length === 3) 
     process.stderr.write('fake simdevice: identity init for another device\\n');
     process.exit(2);
   }
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(pathJoin(dir, 'device.key'), 'fake private key');
-  fs.writeFileSync(pathJoin(dir, 'device.crt'), FAKE_PEM);
+  // The real layout (data-pusher identity.go): key and certificate under identity/.
+  fs.mkdirSync(pathJoin(dir, 'identity'), { recursive: true });
+  fs.writeFileSync(pathJoin(dir, 'identity', 'device.key'), 'fake private key');
+  fs.writeFileSync(pathJoin(dir, 'identity', 'device.crt'), FAKE_PEM);
   fs.writeFileSync(pathJoin(dir, 'identity.json'), JSON.stringify({ deviceId: id }));
   process.stdout.write(FAKE_PEM);
 } else if (freshId.startsWith('acceptance-') || (dpsDevice !== '' && args === '--twin --count 0 --timeout 2m')) {
@@ -2041,9 +2042,10 @@ function freshDeviceStep(
         err('fake simdevice: identity init for another device\n');
         return 2;
       }
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, 'device.key'), 'fake private key');
-      writeFileSync(join(dir, 'device.crt'), FAKE_PEM);
+      // The real layout (data-pusher identity.go): key and certificate under identity/.
+      mkdirSync(join(dir, 'identity'), { recursive: true });
+      writeFileSync(join(dir, 'identity', 'device.key'), 'fake private key');
+      writeFileSync(join(dir, 'identity', 'device.crt'), FAKE_PEM);
       writeFileSync(join(dir, 'identity.json'), JSON.stringify({ deviceId: id }));
       out(FAKE_PEM);
       return 0;

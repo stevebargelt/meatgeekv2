@@ -53,8 +53,20 @@ export const TWIN_SYNC_TIMEOUT = '2m';
  *  2 min, plus 30 s for it to give up and exit. */
 export const TWIN_SYNC_KILL_MS = 150_000;
 
-/** The certificate `simdevice identity init` writes into the state dir. */
+/**
+ * Where `simdevice identity init` writes the device's certificate, relative to
+ * its state dir: `<state dir>/identity/device.crt`. These are the data-pusher's
+ * `identity.DirName` and `identity.CertFile`
+ * (apps/data-pusher/internal/identity/identity.go); enrolment.spec.ts reads
+ * that file and fails if they drift apart.
+ */
+export const IDENTITY_DIR = 'identity';
 export const CERT_FILE = 'device.crt';
+
+/** The certificate path of the device whose state dir is `stateDir`. */
+export function certificatePath(stateDir: string): string {
+  return join(stateDir, IDENTITY_DIR, CERT_FILE);
+}
 
 /** A device enrolled by {@link enrolFreshDevice}. `dir` is the temporary
  *  directory holding `stateDir`; cleanup removes it. */
@@ -145,8 +157,8 @@ async function syncTwin(api: AcceptanceApi, device: DeviceRef): Promise<void> {
  *
  *   1. a new state dir under `$RUNNER_TEMP` (`os.tmpdir()` locally);
  *   2. `simdevice identity init`: the device makes its key there and writes
- *      its certificate, `device.crt`;
- *   3. `enrol-device.sh --device-id <id> --certificate <state dir>/device.crt`
+ *      its certificate, `identity/device.crt` ({@link certificatePath});
+ *   3. `enrol-device.sh --device-id <id> --certificate <state dir>/identity/device.crt`
  *      (the runner adds `--auth-type login` and the host names);
  *   4. `simdevice --twin --count 0 --timeout 2m`: the device registers with
  *      DPS, which creates its hub identity, and mints its first claim code.
@@ -175,7 +187,7 @@ export async function enrolFreshDevice(
     '--device-id',
     deviceId,
     '--certificate',
-    join(device.stateDir, CERT_FILE),
+    certificatePath(device.stateDir),
   ]);
   expectScriptExit0(`enrol-device.sh for ${deviceId}`, enrolled);
   if (enrolled.resultLine !== `enrolled ${deviceId}`) {
