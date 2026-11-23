@@ -41,7 +41,7 @@ views {
     title 'MeatGeek device (Raspberry Pi)'
     include *
     include pusher.*
-    include meatgeek.cloud.ingest.iothub, meatgeek.cloud.observability.collector
+    include meatgeek.cloud.ingest.iothub, meatgeek.cloud.ingest.dps, meatgeek.cloud.observability.collector
   }
 
   view cloud of meatgeek.cloud {
@@ -92,7 +92,7 @@ views {
     title 'Ingest'
     include *
     include meatgeek.edge.pusher, meatgeek.cloud.data.temperatures, meatgeek.cloud.api.broadcast, meatgeek.cloud.realtime
-    include delivery.simdevice, delivery.acceptance
+    include delivery.simdevice, delivery.acceptance, operator
   }
 
   view observability of meatgeek.cloud.observability {
@@ -173,7 +173,7 @@ views {
       notes '''
         Message properties: `messageId`, `$.ct=application/json`, `$.ce=utf-8`,
         `correlation.id` (cook-scoped) and `traceparent` (per message).
-        Device SAS, renewed five minutes before it expires.
+        X.509 client certificate from DPS; no password, no token to renew.
       '''
     }
     parallel {
@@ -264,7 +264,7 @@ views {
         Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The
         web app's start form sends a client-generated id, one per intent, so a retried submit
         starts the cook once. The ownership check is one point read on `devices`: a foreign or
-        unregistered device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live
+        unclaimed device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live
         callers are the web app and the acceptance proofs.
       '''
     }
@@ -332,7 +332,7 @@ views {
     description '''
       Every Deploy Dev App acceptance job proves the telemetry path end to end:
       `telemetry-roundtrip.proof.ts`, then `telemetry-volume.proof.ts`. `simdevice` sends as
-      `meatgeek-dev-simulated-smoker` (MQTT 8883, device SAS, QoS 1, the data-pusher's own
+      `meatgeek-dev-simulated-smoker` (MQTT 8883, X.509 client certificate, QoS 1, the data-pusher's own
       publish code); no Function is in the write path.
 
       Measured (single dev samples, not targets): `roundtrip-ms` 1211 (run 44603121177) and
@@ -411,6 +411,158 @@ views {
     delivery.webAcceptance -> meatgeek.web 'Playwright, production' {
       notes 'Waits for `/version.json` to show this commit or a descendant (`METRIC web-deploy-wait-s`), signs in on the Microsoft pages as the test user, starts a cook on `<sim>-web` and sees a pushed reading (`METRIC web-push-ms`).'
       navigateTo watchCook
+    }
+  }
+
+  dynamic view onboardDevice {
+    #live
+    variant sequence
+    title 'Onboard a Pi: one command, DPS enrolment, claim code'
+    description '''
+      `apps/data-pusher/deploy/onboard-pi.sh <user@host>`, run from a checkout on the operator's
+      laptop, takes a fresh Pi to a running, enrolled device and prints its claim code (HAR-144).
+      The Pi makes its own key and certificate; only the public certificate leaves it. The
+      laptop enrols it in DPS, then the pusher registers itself with that certificate and gets
+      its IoT Hub identity. The steps follow `onboard-pi.sh` and `remote-install.sh`. See
+      `docs/devices/runbook.md`.
+    '''
+
+    operator -> meatgeek.edge.pusher 'preflight, then build on the laptop' {
+      notes '''
+        Preflight changes nothing: Go, `az` signed in with the `azure-iot` extension, one DPS and
+        one hub in the resource group (and the DPS ID scope), key-based ssh, an `aarch64` Pi with
+        SPI on. A failed check prints the one command that fixes it. Then both binaries are built
+        for linux/arm64 (CGO off) and copied with the units, the udev rule and
+        `remote-install.sh` to `/tmp/meatgeek-onboard` on the Pi.
+      '''
+    }
+    operator -> meatgeek.edge.pusher 'install over ssh (first sudo): identity init' {
+      notes '''
+        `remote-install.sh install`: the `meatgeek` user, both binaries, the udev rule, I2C, the
+        systemd units, then `meatgeek-pusher identity init`, which makes the key and the
+        certificate under `/var/lib/meatgeek-pusher/identity` (an existing key is kept) and
+        prints only the certificate. If I2C was off, it turns it on and exits 4: reboot the Pi
+        and run the same command again.
+      '''
+    }
+    operator -> meatgeek.edge.controller 'controller started' {
+      notes 'Enabled and started in the install phase; the pusher is not started yet.'
+    }
+    meatgeek.edge.pusher -> operator 'device.crt copied back (never the key)' {
+      notes '`scp` of the public certificate only; `remote-install.sh` refuses output that holds a private key.'
+    }
+    operator -> meatgeek.cloud.ingest.dps 'enrol-device.sh: individual enrollment' {
+      notes '''
+        `az iot dps enrollment create`, X.509 attestation with that certificate, static allocation
+        to the hub (`--auth-type key` by default). A revoked device is refused with exit 4;
+        `REINSTATE=1` enables it again with this certificate.
+      '''
+    }
+    operator -> meatgeek.edge.pusher 'start (second sudo): env file, pusher started' {
+      notes '''
+        `remote-install.sh start` writes `/etc/meatgeek-pusher/env` (0640: ID scope, device id,
+        state dir, `DEVICE_URL`; no secret), then enables and restarts the pusher, and waits for
+        it to register (exit 5 if it does not in time).
+      '''
+    }
+    meatgeek.edge.pusher -> meatgeek.cloud.ingest.dps 'register (mutual TLS, device certificate)' {
+      notes 'Only with no cached `assignment.json` (or after the hub refuses the certificate). The assignment is cached there.'
+    }
+    meatgeek.cloud.ingest.dps -> meatgeek.cloud.ingest.iothub 'create the device identity (X.509 thumbprint)' {
+      notes 'By the DPS managed identity, which holds `IoT Hub Registry Contributor` on the hub.'
+    }
+    meatgeek.edge.pusher -> meatgeek.cloud.ingest.iothub 'MQTT connect with the certificate' {
+      notes 'Port 8883, X.509 client certificate, no password.'
+    }
+    meatgeek.edge.pusher -> meatgeek.cloud.ingest.iothub 'twin sync: reported claimCodeHash, claimExpiresAt, claimGeneration' {
+      notes 'The code stays in `<stateDir>/claim/claim.json` (0600); only its hash is reported.'
+    }
+    meatgeek.edge.pusher -> operator 'device id, claim code, claim URL' {
+      notes '''
+        The Pi's `claim-code` output reaches the laptop over ssh and is kept in a variable, never
+        in a file; the laptop prints the device id, the code, its expiry and
+        `<web>/devices/claim?deviceId=<id>`. The code is never in the URL or a file. An already
+        claimed device prints "already claimed" instead.
+        Running it again is safe: on a set-up Pi it changes nothing but restarting the pusher,
+        and prints the same device id and a valid code.
+      '''
+      navigateTo claimDevice
+    }
+  }
+
+  dynamic view claimDevice {
+    #live
+    variant sequence
+    title 'Claim and release a device'
+    description '''
+      Ownership comes only from the code the device minted: `POST /devices/claim` is the only
+      way a device gets an owner (HAR-133, HAR-145), and release, `DELETE /devices/{id}`, makes
+      the device mint a fresh code (HAR-136). The steps follow
+      `apps/api/src/functions/devices/claim-device.ts` and `delete-device.ts`. Every refusal is
+      the same `403 CLAIM_REFUSED` body, which does not say which check failed. Readings from
+      before the claim (`claimedAt`) are never returned to the new owner.
+    '''
+
+    pitmaster -> meatgeek.web.devices 'claim screen: /devices/claim?deviceId=, types the code'
+    meatgeek.web.devices -> meatgeek.cloud.api.devices 'POST /devices/claim' {
+      notes 'Through Easy Auth and the principal. A bad body is 400 before any twin or Cosmos call.'
+    }
+    meatgeek.cloud.api.devices -> meatgeek.cloud.ingest.iothub 'read the twin: reported hash, generation, expiry' {
+      notes '''
+        Refused (`403 CLAIM_REFUSED`) unless reported `claimCodeHash` is the hash of the typed
+        code (constant time), reported `claimGeneration` equals desired, and `claimExpiresAt` is
+        later than now. No twin is refused too. A twin failure is 503
+        `DEVICE_TWIN_UPDATE_FAILED`.
+      '''
+    }
+    meatgeek.cloud.api.devices -> meatgeek.cloud.ingest.iothub 'desired: claimConsumedCodeHash, claimClaimantHash (If-Match)' {
+      notes 'Under the etag just read, so a code is single-use when two claimants race; a 412 re-reads once. A retry by the same claimant carries on.'
+    }
+    meatgeek.cloud.api.devices -> meatgeek.cloud.data.devices 'create the device document (claimedAt)' {
+      notes 'Never an upsert. If the id exists and the caller owns it: 200 with it; owned by anyone else: refused.'
+    }
+    meatgeek.cloud.api.devices -> meatgeek.web.devices '201 the device'
+    meatgeek.cloud.ingest.iothub -> meatgeek.edge.pusher.twin 'desired patch: consumed hash is its code' {
+      notes 'The device applies the claim rule: its code is consumed, so it reports itself claimed and `claim-code` says so.'
+    }
+    pitmaster -> meatgeek.web.devices 'Release'
+    meatgeek.web.devices -> meatgeek.cloud.api.devices 'DELETE /devices/{id}' {
+      notes '409 `COOK_ACTIVE` while the caller has an active cook on the device; nothing changes. 403 `DEVICE_NOT_OWNED` for a device the caller does not own.'
+    }
+    meatgeek.cloud.api.devices -> meatgeek.cloud.ingest.iothub 'desired: claimGeneration + 1, claimClaimantHash null (If-Match)' {
+      notes '`claimConsumedCodeHash` is kept, so the old code can never claim again. A twin failure is 503 and the document is kept, so a retry is safe.'
+    }
+    meatgeek.cloud.api.devices -> meatgeek.cloud.data.devices 'delete the device document' {
+      notes '204. Its cooks stay in the owner history; its readings expire on the TTL.'
+    }
+    meatgeek.cloud.ingest.iothub -> meatgeek.edge.pusher.twin 'desired patch: new generation'
+    meatgeek.edge.pusher.twin -> meatgeek.cloud.ingest.iothub 'reported: hash of a fresh code, expiry, generation' {
+      notes 'The pusher mints a fresh code, writes it to `claim.json`, then reports its hash.'
+    }
+    meatgeek.cloud.api.broadcast -> meatgeek.cloud.api.repos 'next reading: owner lookup finds nobody' {
+      notes 'Still stored by `cosmos-storage-route`, but pushed to no one and counted as `unowned`.'
+    }
+  }
+
+  dynamic view revokeDevice {
+    #live
+    title 'Revoke a device'
+    description '''
+      `apps/data-pusher/deploy/revoke-device.sh --device-id <id>` (HAR-135), for a lost or stolen
+      device: IoT Hub accepts nothing more from it. It deletes nothing and running it again
+      changes nothing. Ownership is untouched: release the device in the web app (see
+      `claimDevice`). `enrol-device.sh` with `REINSTATE=1` brings it back.
+    '''
+
+    operator -> meatgeek.cloud.ingest.dps 'revoke-device.sh: disable the enrollment' {
+      notes 'The individual enrollment is set to disabled, so the device cannot register again.'
+    }
+    operator -> meatgeek.cloud.ingest.iothub 'disable the device identity (reason revoked)' {
+      notes 'IoT Hub refuses a disabled identity at connect and drops its open connections.'
+    }
+    meatgeek.edge.pusher -> meatgeek.cloud.ingest.iothub 'reconnect: refused'
+    meatgeek.edge.pusher -> meatgeek.cloud.ingest.dps 're-register: refused' {
+      notes 'After the hub refuses it (CONNACK 4 or 5), the pusher registers again; the disabled enrollment refuses it. The device sends nothing to the cloud.'
     }
   }
 }

@@ -22,6 +22,9 @@ deployment {
     resourceGroup rg 'Azure resource group (dev)' {
       technology 'Terraform: apps/infrastructure'
       iothub = instanceOf meatgeek.cloud.ingest.iothub
+      dps = instanceOf meatgeek.cloud.ingest.dps {
+        description 'meatgeek-v2-dev-dps-259d4bf5b628, S1, linked to the dev hub by its managed identity (no connection string). Enrollments are made by enrol-device.sh, from the laptop or the acceptance jobs.'
+      }
       eventhub = instanceOf meatgeek.cloud.ingest.eventhub {
         description 'Event Hub temperature-data, 2 partitions, consumer group api-broadcast, read by the API broadcastTemperature trigger.'
       }
@@ -45,7 +48,7 @@ deployment {
 
     runner ci 'GitHub Actions runner' {
       technology 'Deploy Dev App, acceptance and web-acceptance jobs, environment development'
-      description 'Logs in under OIDC as the dev app-publish identity, which holds IoT Hub Registry Contributor on the dev hub (dev only).'
+      description 'Logs in under OIDC as the dev app-publish identity, which holds IoT Hub Registry Contributor on the dev hub and Device Provisioning Service Data Contributor on the dev DPS (dev only).'
       acceptance = instanceOf delivery.acceptance
       webAcceptance = instanceOf delivery.webAcceptance {
         description 'Playwright with Chromium against the production web app on Vercel, signed in as the TOTP acceptance user.'

@@ -145,6 +145,10 @@ A cook's chart is never read from the raw readings. The `rollupTemperatures` Fun
 
 The change feed is **at-least-once**: a batch written but not checkpointed (a host crash between the two) is folded again, which double-counts `n` and `sum` for those readings and skews one or a few minutes of one chart; `min` and `max` are unaffected. This is accepted: exact-once would need a write per reading. See `apps/api/src/shared/cosmos/temperature-rollups-repository.ts`.
 
+## Provisioning and claiming
+
+Before a device sends anything it is enrolled in the Device Provisioning Service with the X.509 certificate it generated, registers with DPS, and connects to IoT Hub with that certificate; its readings carry no owner until a user claims it with the claim code it minted. The [`onboardDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/onboardDevice/) view shows onboarding, [`claimDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/claimDevice/) shows claim and release (readings from before `claimedAt` are never returned to the new owner), and [`revokeDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/revokeDevice/) shows revoking a lost device. See [`docs/devices/runbook.md`](../devices/runbook.md).
+
 ## Cook Session Management Flow
 
 ### Starting a Cook
@@ -154,7 +158,7 @@ The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) v
 **Sequence**:
 1. A client (the web app's start form, or an acceptance proof) calls `POST /cooks` with a `deviceId`. The web app sends a client-generated cook id, one per intent, so a retried submit starts the cook once
 2. The API resolves the caller from the Easy Auth principal, `"<tid>:<oid>"`
-3. The API point-reads the device in the `devices` container. A device registered to someone else, or not registered at all, gets **403 `DEVICE_NOT_OWNED`**: no write, no SignalR event
+3. The API point-reads the device in the `devices` container. A device owned by someone else, or not claimed by anyone, gets **403 `DEVICE_NOT_OWNED`**: no write, no SignalR event
 4. For an owned device, the API creates the cook record in the `cooks` container, partitioned on the caller's `userId`:
    ```json
    {

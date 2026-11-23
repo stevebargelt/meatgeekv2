@@ -73,7 +73,7 @@ apps/web/
 │   ├── auth/                   # MSAL instance and the silent token
 │   ├── config/                 # /config.json, fetched and validated before render
 │   ├── api/                    # openapi-fetch client (types from libs/api-specs)
-│   ├── devices/                # Devices page: list, register, rename
+│   ├── devices/                # Devices page: list, claim, rename, release
 │   ├── cooks/                  # Cooks list, start form, cook detail, chart
 │   └── live/                   # SignalR connection and the live panel
 ├── build/                      # version.json generation
@@ -124,6 +124,7 @@ apps/device-controller/
 ```
 apps/data-pusher/
 ├── cmd/                        # Service entry point
+├── deploy/                     # onboard-pi.sh, enrol-, revoke- and delete-device.sh, systemd units, udev rule
 ├── internal/                   # Private service logic
 │   ├── collector/              # Temperature data collection
 │   ├── buffer/                 # Local buffering and retry logic
