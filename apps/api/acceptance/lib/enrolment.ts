@@ -202,6 +202,33 @@ export async function enrolFreshDevice(
 }
 
 /**
+ * HAR-149 (goal HAR-130): run `enrol-device.sh` again for an enrolled fresh
+ * device, with the same certificate, as re-running onboarding on a set-up Pi
+ * does. The device's key has not changed, so the script must find the
+ * enrollment's certificate is this one and print `unchanged <id>`, writing
+ * nothing. (It printed `certificate replaced` on every re-run before HAR-149;
+ * the CI devices never re-enrolled, so nothing caught it.) No real-time wait
+ * of its own: the script's run is bounded like every device script's.
+ */
+export async function reenrolFreshDevice(api: AcceptanceApi, device: FreshDevice): Promise<string> {
+  const { deviceId } = device;
+  const again = await api.runDeviceScript('enrol-device.sh', [
+    '--device-id',
+    deviceId,
+    '--certificate',
+    certificatePath(device.stateDir),
+  ]);
+  expectScriptExit0(`enrol-device.sh again for ${deviceId}`, again);
+  if (again.resultLine !== `unchanged ${deviceId}`) {
+    throw new ProofFailure(
+      `enrol-device.sh again with the same certificate printed ${JSON.stringify(again.resultLine)}, ` +
+        `not "unchanged ${deviceId}"`
+    );
+  }
+  return again.resultLine;
+}
+
+/**
  * Get `device`'s current claim code: sync its twin first (`simdevice --twin
  * --count 0`), which picks up a release, since a release raises the desired
  * claim generation and the device then mints a new code; then `simdevice

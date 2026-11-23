@@ -198,8 +198,19 @@ resolve_hub() {
 }
 
 # Sets ENROLLMENT_STATE to missing|enabled|disabled and ENROLLMENT_THUMBPRINT
-# to the primary certificate's SHA-1 thumbprint (upper-case hex, no colons).
-# Only those two fields are read, so nothing else in the record is printed.
+# to the primary certificate's SHA-1 thumbprint (upper-case hex, no colons;
+# empty when DPS reports none). Only those two fields are read, so nothing
+# else in the record is printed.
+#
+# The record is DPS's own JSON (azure-iot returns the service's response as
+# is, the same for --auth-type key and login); the thumbprint is at
+# attestation.x509.clientCertificates.primary.info.sha1Thumbprint, and
+# primary.certificate is not returned. az's TSV output prints a list of
+# scalars one per line, not tab-separated (knack's _TsvOutput: each list item
+# is a row), and a null in the list as "None". So the output is
+# "<status>\n<thumbprint>\n" (HAR-149: reading only the first line left the
+# thumbprint empty, and every re-enrol replaced an unchanged certificate).
+# Tabs are accepted too.
 read_enrollment() {
   az_call "iot dps enrollment show" iot dps enrollment show \
     "${DPS_ARGS[@]}" \
@@ -214,14 +225,25 @@ read_enrollment() {
     fi
     az_fail
   fi
-  local status thumb
-  IFS=$'\t' read -r status thumb <<<"$AZ_OUT" || true
-  ENROLLMENT_THUMBPRINT=$(tr -d ':[:space:]' <<<"$thumb" | tr '[:lower:]' '[:upper:]')
+  local status="" thumb="" rest=""
+  IFS=$'\t\n' read -r -d '' status thumb rest <<<"$AZ_OUT" || true
+  ENROLLMENT_THUMBPRINT=$(normalise_thumbprint "$thumb")
   if [[ "$status" == "disabled" ]]; then
     ENROLLMENT_STATE=disabled
   else
     ENROLLMENT_STATE=enabled
   fi
+}
+
+# normalise_thumbprint <text>: upper-case hex with no colons or whitespace;
+# empty for az's renderings of a null ("None", "null").
+normalise_thumbprint() {
+  local t
+  t=$(tr -d ':[:space:]' <<<"$1" | tr '[:lower:]' '[:upper:]')
+  case "$t" in
+    NONE | NULL) t="" ;;
+  esac
+  printf '%s' "$t"
 }
 
 # Sets IDENTITY_STATE to missing|enabled|disabled for the hub device identity.

@@ -103,6 +103,15 @@ enrollment and compares SHA-1 thumbprints:
 | disabled (revoked)                 | refuses, exit 4                                | (none)                      |
 | disabled, with `REINSTATE=1`       | sets this certificate, enables the enrollment, and enables the hub device identity if there is one | `reinstated <id>`           |
 
+The enrollment's thumbprint is DPS's
+`attestation.x509.clientCertificates.primary.info.sha1Thumbprint`, compared
+upper-case with colons and whitespace removed; `--auth-type` does not change
+it. If DPS reports no thumbprint, the script reads the enrollment's
+certificate and compares its thumbprint instead. If it can read neither, it
+replaces the certificate and prints a warning on stderr that it could not
+compare them (HAR-149: before this fix, every re-run printed
+`certificate replaced` for an unchanged key).
+
 ### Owner (key auth)
 
 ```sh

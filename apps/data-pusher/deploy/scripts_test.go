@@ -40,7 +40,10 @@ const (
 // separated by \x1f, and answers from $FAKE_AZ_DIR/<key>.{out,err,rc}. The
 // key is the command words before the first option, joined by '_', plus the
 // last segment of --resource-type when there is one (so the DPS and hub
-// `resource list` calls can answer differently). No fixture: exit 0, no output.
+// `resource list` calls can answer differently). The n-th call with a key
+// answers from <key>.<n>.{out,err,rc} instead when <key>.<n>.rc exists
+// (HAR-149: a second `enrollment show` asks for a different field). No
+// fixture: exit 0, no output.
 const fakeAz = `#!/usr/bin/env bash
 set -u
 { for a in "$@"; do printf '%s\x1f' "$a"; done; printf '\n'; } >>"$FAKE_AZ_LOG"
@@ -58,6 +61,10 @@ for a in "$@"; do
   prev=$a
 done
 f="$FAKE_AZ_DIR/$key"
+n=1
+[[ -f "$f.count" ]] && n=$(( $(cat "$f.count") + 1 ))
+echo "$n" >"$f.count"
+[[ -f "$f.$n.rc" ]] && f="$f.$n"
 [[ -f "$f.out" ]] && cat "$f.out"
 [[ -f "$f.err" ]] && cat "$f.err" >&2
 if [[ -f "$f.rc" ]]; then exit "$(cat "$f.rc")"; fi
@@ -108,6 +115,13 @@ func (e *env) reply(key, stdout string, rc int, stderr string) {
 	write(base+".out", stdout)
 	write(base+".err", stderr)
 	write(base+".rc", strconv.Itoa(rc))
+}
+
+// replyNth answers the n-th call with key (counting from 1), as reply does
+// for every other call.
+func (e *env) replyNth(key string, n int, stdout string, rc int, stderr string) {
+	e.t.Helper()
+	e.reply(key+"."+strconv.Itoa(n), stdout, rc, stderr)
 }
 
 func (e *env) notFound(key string) {
@@ -254,6 +268,27 @@ func callEnrollmentShow(auth string) []string {
 		"--output", "tsv")
 }
 
+// enrollmentOut is what real az prints for callEnrollmentShow (HAR-149). The
+// query is a JMESPath list of two scalars, and az's TSV output writes each
+// item of a list as its own row (knack's _TsvOutput.dump), so the status and
+// the thumbprint are on separate lines, not one tab-separated row. A null
+// thumbprint is written as "None". The thumbprint itself is DPS's
+// attestation.x509.clientCertificates.primary.info.sha1Thumbprint, upper-case
+// hex, the same for --auth-type key and login (azure-iot returns DPS's JSON
+// as is, and the auth type only picks the credential).
+func enrollmentOut(status, thumbprint string) string {
+	return status + "\n" + thumbprint + "\n"
+}
+
+// callEnrollmentCertificate is enrol-device.sh's fallback when DPS reports no
+// thumbprint: it asks for the enrollment's certificate itself.
+func callEnrollmentCertificate(auth string) []string {
+	return append(split("iot dps enrollment show --dps-name "+dpsName+" --resource-group "+rg+
+		" --enrollment-id "+deviceID+" --auth-type "+auth+" --query"),
+		"attestation.x509.clientCertificates.primary.certificate",
+		"--output", "tsv")
+}
+
 func callIdentityShow(auth string) []string {
 	return split("iot hub device-identity show --hub-name " + hubName + " --resource-group " + rg +
 		" --device-id " + deviceID + " --auth-type " + auth + " --query status --output tsv")
@@ -358,13 +393,24 @@ func TestEnrolNewDevice(t *testing.T) {
 	}
 }
 
+// HAR-149: the real Pi printed "certificate replaced" on every re-run with an
+// unchanged key, because the thumbprint was read from the wrong line of az's
+// output. With real-shaped output the same certificate is unchanged and
+// nothing is written, for both auth types.
 func TestEnrolSameCertificateChangesNothing(t *testing.T) {
-	e := newEnv(t)
-	cert, thumb := e.writeCert("cert.pem", deviceID)
-	e.reply("iot_dps_enrollment_show", "enabled\t"+thumb+"\n", 0, "")
-	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
-	assertResult(t, r, 0, "unchanged "+deviceID+"\n")
-	assertCalls(t, r.calls, calls(discovery(), [][]string{callEnrollmentShow("key")}))
+	for _, auth := range []string{"key", "login"} {
+		t.Run(auth, func(t *testing.T) {
+			e := newEnv(t)
+			cert, thumb := e.writeCert("cert.pem", deviceID)
+			e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", thumb), 0, "")
+			r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert, "--auth-type", auth)
+			assertResult(t, r, 0, "unchanged "+deviceID+"\n")
+			assertCalls(t, r.calls, calls(discovery(), [][]string{callEnrollmentShow(auth)}))
+			if r.stderr != "" {
+				t.Errorf("stderr is not empty:\n%s", r.stderr)
+			}
+		})
+	}
 }
 
 func TestEnrolSameCertificateThumbprintCaseAndColons(t *testing.T) {
@@ -374,22 +420,125 @@ func TestEnrolSameCertificateThumbprintCaseAndColons(t *testing.T) {
 	for i := 0; i < len(thumb); i += 2 {
 		colons = append(colons, strings.ToLower(thumb[i:i+2]))
 	}
-	e.reply("iot_dps_enrollment_show", "enabled\t"+strings.Join(colons, ":")+"\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", " "+strings.Join(colons, ":")+" "), 0, "")
+	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
+	assertResult(t, r, 0, "unchanged "+deviceID+"\n")
+	assertCalls(t, writes(r.calls), nil)
+}
+
+// Older output, one tab-separated row, is still read the same way.
+func TestEnrolSameCertificateTabSeparated(t *testing.T) {
+	e := newEnv(t)
+	cert, thumb := e.writeCert("cert.pem", deviceID)
+	e.reply("iot_dps_enrollment_show", "enabled\t"+thumb+"\n", 0, "")
 	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
 	assertResult(t, r, 0, "unchanged "+deviceID+"\n")
 	assertCalls(t, writes(r.calls), nil)
 }
 
 func TestEnrolDifferentCertificateReplacesIt(t *testing.T) {
+	for _, auth := range []string{"key", "login"} {
+		t.Run(auth, func(t *testing.T) {
+			e := newEnv(t)
+			cert, _ := e.writeCert("cert.pem", deviceID)
+			_, oldThumb := e.writeCert("old.pem", deviceID)
+			e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", oldThumb), 0, "")
+			r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert, "--auth-type", auth)
+			assertResult(t, r, 0, "certificate replaced "+deviceID+"\n")
+			assertCalls(t, r.calls, calls(discovery(), [][]string{
+				callEnrollmentShow(auth), callUpdateCert(auth, cert),
+			}))
+			if !strings.Contains(r.stderr, "has a different certificate") {
+				t.Errorf("stderr does not say the certificate differs:\n%s", r.stderr)
+			}
+		})
+	}
+}
+
+// readPEM returns the certificate file's PEM text and its base64 body on one
+// line, the two ways DPS could hand a certificate back.
+func readPEM(t *testing.T, path string) (pemText, oneLine string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body strings.Builder
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "-----") {
+			body.WriteString(line)
+		}
+	}
+	return string(b), body.String()
+}
+
+// With no thumbprint in the record, enrol-device.sh compares the enrollment's
+// certificate itself, when DPS returns it.
+func TestEnrolNoThumbprintComparesTheCertificate(t *testing.T) {
+	for _, form := range []string{"pem", "base64"} {
+		t.Run(form, func(t *testing.T) {
+			e := newEnv(t)
+			cert, _ := e.writeCert("cert.pem", deviceID)
+			pemText, oneLine := readPEM(t, cert)
+			stored := pemText
+			if form == "base64" {
+				stored = oneLine + "\n"
+			}
+			e.replyNth("iot_dps_enrollment_show", 1, enrollmentOut("enabled", "None"), 0, "")
+			e.replyNth("iot_dps_enrollment_show", 2, stored, 0, "")
+			r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
+			assertResult(t, r, 0, "unchanged "+deviceID+"\n")
+			assertCalls(t, r.calls, calls(discovery(), [][]string{
+				callEnrollmentShow("key"), callEnrollmentCertificate("key"),
+			}))
+		})
+	}
+}
+
+func TestEnrolNoThumbprintDifferentCertificateReplacesIt(t *testing.T) {
 	e := newEnv(t)
 	cert, _ := e.writeCert("cert.pem", deviceID)
-	_, oldThumb := e.writeCert("old.pem", deviceID)
-	e.reply("iot_dps_enrollment_show", "enabled\t"+oldThumb+"\n", 0, "")
+	old, _ := e.writeCert("old.pem", deviceID)
+	oldPEM, _ := readPEM(t, old)
+	e.replyNth("iot_dps_enrollment_show", 1, enrollmentOut("enabled", "None"), 0, "")
+	e.replyNth("iot_dps_enrollment_show", 2, oldPEM, 0, "")
 	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
 	assertResult(t, r, 0, "certificate replaced "+deviceID+"\n")
-	assertCalls(t, r.calls, calls(discovery(), [][]string{
-		callEnrollmentShow("key"), callUpdateCert("key", cert),
-	}))
+	assertCalls(t, writes(r.calls), [][]string{callUpdateCert("key", cert)})
+	if !strings.Contains(r.stderr, "has a different certificate") {
+		t.Errorf("stderr does not say the certificate differs:\n%s", r.stderr)
+	}
+}
+
+// Neither the thumbprint nor the certificate: replace it, and say on stderr
+// that it could not be compared.
+func TestEnrolNothingReadableReplacesWithAWarning(t *testing.T) {
+	for _, missing := range []string{"None", ""} {
+		t.Run("certificate="+missing, func(t *testing.T) {
+			e := newEnv(t)
+			cert, _ := e.writeCert("cert.pem", deviceID)
+			e.replyNth("iot_dps_enrollment_show", 1, enrollmentOut("enabled", "None"), 0, "")
+			e.replyNth("iot_dps_enrollment_show", 2, missing+"\n", 0, "")
+			r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
+			assertResult(t, r, 0, "certificate replaced "+deviceID+"\n")
+			assertCalls(t, r.calls, calls(discovery(), [][]string{
+				callEnrollmentShow("key"), callEnrollmentCertificate("key"), callUpdateCert("key", cert),
+			}))
+			if !strings.Contains(r.stderr, "warning: cannot read the certificate of the enrollment") {
+				t.Errorf("stderr has no warning that it could not compare:\n%s", r.stderr)
+			}
+		})
+	}
+}
+
+func TestEnrolCertificateReadFailureFails(t *testing.T) {
+	e := newEnv(t)
+	cert, _ := e.writeCert("cert.pem", deviceID)
+	e.replyNth("iot_dps_enrollment_show", 1, enrollmentOut("enabled", "None"), 0, "")
+	e.replyNth("iot_dps_enrollment_show", 2, "", 1, "ERROR: throttled\n")
+	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
+	assertResult(t, r, 1, "")
+	assertCalls(t, writes(r.calls), nil)
 }
 
 func TestEnrolRevokedIsRefused(t *testing.T) {
@@ -397,7 +546,7 @@ func TestEnrolRevokedIsRefused(t *testing.T) {
 		t.Run("REINSTATE="+reinstate, func(t *testing.T) {
 			e := newEnv(t)
 			cert, thumb := e.writeCert("cert.pem", deviceID)
-			e.reply("iot_dps_enrollment_show", "disabled\t"+thumb+"\n", 0, "")
+			e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", thumb), 0, "")
 			var extra []string
 			if reinstate != "" {
 				extra = []string{"REINSTATE=" + reinstate}
@@ -418,7 +567,7 @@ func TestEnrolReinstate(t *testing.T) {
 			e := newEnv(t)
 			cert, _ := e.writeCert("cert.pem", deviceID)
 			_, oldThumb := e.writeCert("old.pem", deviceID)
-			e.reply("iot_dps_enrollment_show", "disabled\t"+oldThumb+"\n", 0, "")
+			e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", oldThumb), 0, "")
 			e.reply("iot_hub_device-identity_show", "disabled\n", 0, "")
 			r := e.run(enrol, []string{"REINSTATE=1"},
 				"--device-id", deviceID, "--certificate", cert, "--auth-type", auth)
@@ -436,7 +585,7 @@ func TestEnrolReinstate(t *testing.T) {
 func TestEnrolReinstateWithoutHubIdentity(t *testing.T) {
 	e := newEnv(t)
 	cert, thumb := e.writeCert("cert.pem", deviceID)
-	e.reply("iot_dps_enrollment_show", "disabled\t"+thumb+"\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", thumb), 0, "")
 	e.notFound("iot_hub_device-identity_show")
 	r := e.run(enrol, []string{"REINSTATE=1"}, "--device-id", deviceID, "--certificate", cert)
 	assertResult(t, r, 0, "reinstated "+deviceID+"\n")
@@ -529,7 +678,7 @@ func TestDiscoveryNeedsExactlyOne(t *testing.T) {
 func TestExplicitNamesAreChecked(t *testing.T) {
 	e := newEnv(t)
 	cert, thumb := e.writeCert("cert.pem", deviceID)
-	e.reply("iot_dps_enrollment_show", "enabled\t"+thumb+"\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", thumb), 0, "")
 	// Azure resource names are case-insensitive; the listed name is used.
 	r := e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert,
 		"--dps", strings.ToUpper(dpsName), "--hub", strings.ToUpper(hubName))
@@ -602,7 +751,7 @@ func TestRevokeExtensionCannotFindTheServiceIsAFailure(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t)
-			e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+			e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 			e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 			e.reply(c.key, "", 3, c.stderr)
 			r := e.run(revoke, nil, "--device-id", deviceID)
@@ -625,10 +774,10 @@ func TestAuthTypeLoginOnEveryAzIotCall(t *testing.T) {
 	// enrol: new device, then revoke, then reinstate.
 	e.notFound("iot_dps_enrollment_show")
 	all = append(all, e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert, "--auth-type", "login").calls...)
-	e.reply("iot_dps_enrollment_show", "enabled\tX\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "X"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	all = append(all, e.run(revoke, nil, "--device-id", deviceID, "--auth-type", "login").calls...)
-	e.reply("iot_dps_enrollment_show", "disabled\tX\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", "X"), 0, "")
 	e.reply("iot_hub_device-identity_show", "disabled\n", 0, "")
 	all = append(all, e.run(enrol, []string{"REINSTATE=1"}, "--device-id", deviceID, "--certificate", cert, "--auth-type", "login").calls...)
 
@@ -684,7 +833,7 @@ func TestHostNamesEnrolReplacedCertificateWithoutARM(t *testing.T) {
 	e := newEnv(t)
 	cert, _ := e.writeCert("cert.pem", deviceID)
 	_, oldThumb := e.writeCert("old.pem", deviceID)
-	e.reply("iot_dps_enrollment_show", "enabled\t"+oldThumb+"\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", oldThumb), 0, "")
 	r := e.run(enrol, nil, append([]string{"--device-id", deviceID, "--certificate", cert}, hostArgs...)...)
 	assertResult(t, r, 0, "certificate replaced "+deviceID+"\n")
 	assertNoARM(t, r.calls)
@@ -697,7 +846,7 @@ func TestHostNamesEnrolReplacedCertificateWithoutARM(t *testing.T) {
 func TestHostNamesEnrolReinstateWithoutARM(t *testing.T) {
 	e := newEnv(t)
 	cert, _ := e.writeCert("cert.pem", deviceID)
-	e.reply("iot_dps_enrollment_show", "disabled\tX\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", "X"), 0, "")
 	e.reply("iot_hub_device-identity_show", "disabled\n", 0, "")
 	r := e.run(enrol, []string{"REINSTATE=1"}, append([]string{"--device-id", deviceID, "--certificate", cert}, hostArgs...)...)
 	assertResult(t, r, 0, "reinstated "+deviceID+"\n")
@@ -713,7 +862,7 @@ func TestHostNamesEnrolReinstateWithoutARM(t *testing.T) {
 
 func TestHostNamesRevokeWithoutARM(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	r := e.run(revoke, nil, append([]string{"--device-id", deviceID}, hostArgs...)...)
 	assertResult(t, r, 0, "revoked "+deviceID+"\n")
@@ -835,9 +984,9 @@ func TestEnrolNeverPrintsThePEM(t *testing.T) {
 	mismatch, _ := e.writeCert("other.pem", "someone-else")
 	for _, setup := range []func(){
 		func() { e.notFound("iot_dps_enrollment_show") },
-		func() { e.reply("iot_dps_enrollment_show", "enabled\t"+thumb+"\n", 0, "") },
-		func() { e.reply("iot_dps_enrollment_show", "enabled\tOLD\n", 0, "") },
-		func() { e.reply("iot_dps_enrollment_show", "disabled\tOLD\n", 0, "") },
+		func() { e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", thumb), 0, "") },
+		func() { e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "OLD"), 0, "") },
+		func() { e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", "OLD"), 0, "") },
 	} {
 		setup()
 		e.run(enrol, nil, "--device-id", deviceID, "--certificate", cert)
@@ -856,7 +1005,7 @@ func TestEnrolNeverPrintsThePEM(t *testing.T) {
 
 func TestRevokeEnabledDevice(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	r := e.run(revoke, nil, "--device-id", deviceID)
 	assertResult(t, r, 0, "revoked "+deviceID+"\n")
@@ -870,7 +1019,7 @@ func TestRevokeEnabledDevice(t *testing.T) {
 
 func TestRevokeSecondRunIsAlreadyRevoked(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "disabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "disabled\n", 0, "")
 	r := e.run(revoke, nil, "--device-id", deviceID)
 	assertResult(t, r, 0, "already revoked "+deviceID+"\n")
@@ -906,7 +1055,7 @@ func TestRevokeOnlyHubIdentity(t *testing.T) {
 
 func TestRevokeOnlyEnrollment(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "", 1, "ERROR: DeviceNotFound: device meatgeek-pi-7 does not exist\n")
 	r := e.run(revoke, nil, "--device-id", deviceID)
 	assertResult(t, r, 0, "revoked "+deviceID+" (no IoT hub device identity)\n")
@@ -919,7 +1068,7 @@ func TestRevokeOnlyEnrollment(t *testing.T) {
 
 func TestRevokeReadFailureStopsBeforeWriting(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "", 1, "ERROR: Unauthorized\n")
 	r := e.run(revoke, nil, "--device-id", deviceID)
 	assertResult(t, r, 1, "")
@@ -989,7 +1138,7 @@ func TestDeleteRefusesAnIdOutsideThePrefix(t *testing.T) {
 	for _, id := range []string{deviceID, "meatgeek-dev-simulated-smoker", "xacceptance-1", "acceptance"} {
 		t.Run(id, func(t *testing.T) {
 			e := newEnv(t)
-			e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+			e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 			e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 			r := e.run(del, nil, deleteArgs(id)...)
 			assertResult(t, r, 4, "")
@@ -1026,7 +1175,7 @@ func TestDeleteNeedsOnlyPrefix(t *testing.T) {
 
 func TestDeleteDeletesEnrollmentThenIdentity(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	r := e.run(del, nil, deleteArgs(acceptanceID)...)
 	assertResult(t, r, 0, "deleted "+acceptanceID+"\n")
@@ -1039,7 +1188,7 @@ func TestDeleteDeletesEnrollmentThenIdentity(t *testing.T) {
 
 func TestDeleteSecondRunIsAlreadyDeleted(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	first := e.run(del, nil, deleteArgs(acceptanceID)...)
 	assertResult(t, first, 0, "deleted "+acceptanceID+"\n")
@@ -1054,7 +1203,7 @@ func TestDeleteSecondRunIsAlreadyDeleted(t *testing.T) {
 func TestDeleteOnlyOneExists(t *testing.T) {
 	t.Run("only the enrollment", func(t *testing.T) {
 		e := newEnv(t)
-		e.reply("iot_dps_enrollment_show", "disabled\tABC\n", 0, "")
+		e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", "ABC"), 0, "")
 		e.notFound("iot_hub_device-identity_show")
 		r := e.run(del, nil, deleteArgs(acceptanceID)...)
 		assertResult(t, r, 0, "deleted "+acceptanceID+" (no IoT hub device identity)\n")
@@ -1072,7 +1221,7 @@ func TestDeleteOnlyOneExists(t *testing.T) {
 
 func TestDeleteGoneInBetweenIsNotAFailure(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	e.notFound("iot_hub_device-identity_delete")
 	r := e.run(del, nil, deleteArgs(acceptanceID)...)
@@ -1081,7 +1230,7 @@ func TestDeleteGoneInBetweenIsNotAFailure(t *testing.T) {
 
 func TestDeleteFailureIsReported(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	e.reply("iot_dps_enrollment_delete", "", 1, "ERROR: Forbidden\n")
 	r := e.run(del, nil, deleteArgs(acceptanceID)...)
@@ -1095,7 +1244,7 @@ func TestDeleteFailureIsReported(t *testing.T) {
 
 func TestDeletePassesAuthTypeLoginOnEveryAzIotCall(t *testing.T) {
 	e := newEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tABC\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "ABC"), 0, "")
 	e.reply("iot_hub_device-identity_show", "enabled\n", 0, "")
 	r := e.run(del, nil, "--device-id", acceptanceID, "--only-prefix", acceptancePrefix, "--auth-type", "login")
 	assertResult(t, r, 0, "deleted "+acceptanceID+"\n")

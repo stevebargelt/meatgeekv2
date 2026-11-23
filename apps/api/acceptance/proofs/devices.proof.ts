@@ -12,6 +12,7 @@ import {
   cleanupFreshDevice,
   enrolFreshDevice,
   FreshDevice,
+  reenrolFreshDevice,
 } from '../lib/enrolment';
 import { defineProofs } from '../lib/proof';
 
@@ -35,6 +36,10 @@ import { defineProofs } from '../lib/proof';
  * last step releases it if it is still held, deletes its DPS enrollment and
  * hub identity (`delete-device.sh --only-prefix acceptance-`), and removes its
  * state dir.
+ *
+ * HAR-149: the device is then enrolled a second time with the same
+ * certificate, as re-running onboarding on a set-up Pi does: enrol-device.sh
+ * must print `unchanged <id>`, and the PASS line quotes it.
  *
  * HAR-143: no response carries the removed stored status field. The two GETs carry
  * `connection`, read live from the device's IoT Hub twin, and the other routes
@@ -167,6 +172,15 @@ export default defineProofs('devices', () => {
         await enrolFreshDevice(api, 'device', device => {
           fresh = device;
         });
+      },
+    },
+    {
+      name: 'enrol-device.sh again with the same certificate prints unchanged and writes nothing',
+      async run(api: AcceptanceApi) {
+        if (!fresh) {
+          throw new Error('no device was enrolled by an earlier proof');
+        }
+        return reenrolFreshDevice(api, fresh);
       },
     },
     {

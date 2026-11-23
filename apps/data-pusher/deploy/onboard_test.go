@@ -474,7 +474,7 @@ func TestOnboardSecondRunOnASetUpPi(t *testing.T) {
 	e := newOnboardEnv(t)
 	// The enrollment holds this very certificate: enrol says unchanged.
 	certThumb := certThumbprint(t, e.cert)
-	e.reply("iot_dps_enrollment_show", "enabled\t"+certThumb+"\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", certThumb), 0, "")
 	r := e.run(nil, piHost)
 	if r.code != 0 || r.stdout != unclaimedOutput(derivedID) {
 		t.Fatalf("exit %d, stdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
@@ -503,7 +503,7 @@ func certThumbprint(t *testing.T, path string) string {
 func TestOnboardReplacedCertificateIsFine(t *testing.T) {
 	t.Parallel()
 	e := newOnboardEnv(t)
-	e.reply("iot_dps_enrollment_show", "enabled\tOLDTHUMBPRINT\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("enabled", "OLDTHUMBPRINT"), 0, "")
 	r := e.run(nil, piHost)
 	if r.code != 0 || r.stdout != unclaimedOutput(derivedID) {
 		t.Fatalf("exit %d, stdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
@@ -791,7 +791,7 @@ func TestOnboardUsageErrors(t *testing.T) {
 func TestOnboardRevokedStopsBeforeStart(t *testing.T) {
 	t.Parallel()
 	e := newOnboardEnv(t)
-	e.reply("iot_dps_enrollment_show", "disabled\tOLD\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", "OLD"), 0, "")
 	r := e.run(nil, piHost)
 	if r.code != 4 || r.stdout != "" ||
 		!strings.Contains(r.stderr, "this device was revoked; re-run with REINSTATE=1 if you mean to bring it back") {
@@ -805,7 +805,7 @@ func TestOnboardRevokedStopsBeforeStart(t *testing.T) {
 func TestOnboardReinstatePassesThrough(t *testing.T) {
 	t.Parallel()
 	e := newOnboardEnv(t)
-	e.reply("iot_dps_enrollment_show", "disabled\tOLD\n", 0, "")
+	e.reply("iot_dps_enrollment_show", enrollmentOut("disabled", "OLD"), 0, "")
 	e.reply("iot_hub_device-identity_show", "disabled\n", 0, "")
 	r := e.run([]string{"REINSTATE=1"}, piHost)
 	if r.code != 0 || r.stdout != unclaimedOutput(derivedID) || !strings.Contains(r.stderr, "reinstated "+derivedID) {

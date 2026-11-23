@@ -13,6 +13,7 @@ import {
   freshDeviceId,
   IDENTITY_DIR,
   prepareClaim,
+  reenrolFreshDevice,
   sendClaim,
   setEnrolmentFs,
 } from './lib/enrolment';
@@ -247,6 +248,34 @@ describe('enrolFreshDevice', () => {
     });
     await expect(enrolFreshDevice(api, 'temp', () => undefined)).rejects.toThrow(
       'did not exit within its 150000 ms limit and was killed'
+    );
+  });
+});
+
+describe('reenrolFreshDevice (HAR-149)', () => {
+  it('runs enrol-device.sh again with the same certificate and returns its unchanged line', async () => {
+    const { api, calls } = fakeApi({ deviceScript: () => scriptOk(`unchanged ${DEVICE_ID}`) });
+    await expect(reenrolFreshDevice(api, fresh)).resolves.toBe(`unchanged ${DEVICE_ID}`);
+    expect(calls).toEqual([
+      `enrol-device.sh --device-id ${DEVICE_ID} --certificate ${STATE}/identity/device.crt`,
+    ]);
+  });
+
+  it('fails when the script replaced the certificate', async () => {
+    const { api } = fakeApi({
+      deviceScript: () => scriptOk(`certificate replaced ${DEVICE_ID}`),
+    });
+    await expect(reenrolFreshDevice(api, fresh)).rejects.toThrow(
+      `enrol-device.sh again with the same certificate printed "certificate replaced ${DEVICE_ID}", not "unchanged ${DEVICE_ID}"`
+    );
+  });
+
+  it('fails when the script fails', async () => {
+    const { api } = fakeApi({
+      deviceScript: () => ({ exitCode: 1, resultLine: undefined, stderrFirstLine: 'az failed' }),
+    });
+    await expect(reenrolFreshDevice(api, fresh)).rejects.toThrow(
+      `enrol-device.sh again for ${DEVICE_ID} exited 1, expected 0: az failed`
     );
   });
 });
