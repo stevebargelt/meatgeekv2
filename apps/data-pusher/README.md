@@ -486,6 +486,12 @@ declarations.
 NaN-valued temps in the V1 wire format mean "probe unplugged" and map to
 nullable `*float64` (i.e. JSON `null`) in V2.
 
+A grill or probe temperature outside −40…800 °F is also published as no reading
+(`null`), whatever controller sent it (`wire.OutOfRangeFields`, HAR-151). The
+enqueuer logs one `out_of_range` warning per poll that had any, with the field
+names (`fields: ["probe3"]`), that poll's `count` and the running `total`, never
+the value.
+
 The collector polls with a plain `GET` and no body; the controller answers it
 (HAR-148). The controller's real get_status body is pinned in
 `libs/api-interfaces/test-vectors/controller-get-status.json`: the

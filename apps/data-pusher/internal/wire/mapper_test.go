@@ -204,3 +204,82 @@ func TestTemperatureReading_JSON_OmitsNilProbes(t *testing.T) {
 		}
 	}
 }
+
+// HAR-151: a grill or probe temperature outside -40..800 °F is "no reading".
+// 2409.9 is what an unplugged probe read on the owner's Pi.
+func TestMapV1_OutOfRangeIsNoReading(t *testing.T) {
+	tests := []struct {
+		name    string
+		v       float64
+		inRange bool
+	}{
+		{"unplugged probe on the owner's Pi", 2409.9, false},
+		{"just above 800", 800.0001, false},
+		{"just below -40", -40.0001, false},
+		{"far below", -459.67, false},
+		{"exactly 800", 800, true},
+		{"exactly -40", -40, true},
+		{"cook temperature", 225.5, true},
+		{"room temperature", 66.2, true},
+		{"below zero", -10, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v1 := V1Status{SmokerID: "meatgeek3", Temps: V1Temps{
+				GrillTemp:  float64Ptr(tc.v),
+				Probe1Temp: float64Ptr(tc.v),
+				Probe2Temp: float64Ptr(tc.v),
+				Probe3Temp: float64Ptr(tc.v),
+				Probe4Temp: float64Ptr(tc.v),
+			}}
+			r := MapV1ToTemperatureReading(v1, fixedTS, nil)
+			s := MapV1ToDeviceStatus(v1, fixedTS)
+			fields := OutOfRangeFields(v1.Temps)
+			all := map[string]*float64{
+				"grill": r.GrillTemp, "probe1": r.Probe1Temp, "probe2": r.Probe2Temp,
+				"probe3": r.Probe3Temp, "probe4": r.Probe4Temp,
+				"status.probe1": s.CurrentTemps.Probe1, "status.probe4": s.CurrentTemps.Probe4,
+			}
+			for name, got := range all {
+				if tc.inRange && (got == nil || *got != tc.v) {
+					t.Errorf("%s = %v, want %v unchanged", name, got, tc.v)
+				}
+				if !tc.inRange && got != nil {
+					t.Errorf("%s = %v, want absent (no reading)", name, *got)
+				}
+			}
+			wantGrill := tc.v
+			wantFields := 0
+			if !tc.inRange {
+				wantGrill = 0
+				wantFields = 5
+			}
+			if s.CurrentTemps.Grill != wantGrill {
+				t.Errorf("status grill = %v, want %v", s.CurrentTemps.Grill, wantGrill)
+			}
+			if len(fields) != wantFields {
+				t.Errorf("OutOfRangeFields = %v, want %d fields", fields, wantFields)
+			}
+		})
+	}
+}
+
+func TestOutOfRangeFields_NamesOnlyTheOutOfRangeNumbers(t *testing.T) {
+	nan := math.NaN()
+	got := OutOfRangeFields(V1Temps{
+		GrillTemp:  float64Ptr(225),    // in range
+		Probe1Temp: &nan,               // the controller's "no reading": not counted
+		Probe2Temp: nil,                // null: not counted
+		Probe3Temp: float64Ptr(2409.9), // out of range
+		Probe4Temp: float64Ptr(-41),    // out of range
+	})
+	if strings.Join(got, ",") != "probe3,probe4" {
+		t.Fatalf("OutOfRangeFields = %v, want [probe3 probe4]", got)
+	}
+	if got := OutOfRangeFields(V1Temps{GrillTemp: float64Ptr(801)}); strings.Join(got, ",") != "grill" {
+		t.Fatalf("OutOfRangeFields = %v, want [grill]", got)
+	}
+	if got := OutOfRangeFields(V1Temps{}); got != nil {
+		t.Fatalf("OutOfRangeFields(empty) = %v, want nil", got)
+	}
+}
