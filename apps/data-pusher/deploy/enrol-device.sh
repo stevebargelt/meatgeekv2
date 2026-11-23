@@ -98,7 +98,7 @@ fi
 
 fingerprint=$(openssl x509 -in "$CERT_PATH" -noout -fingerprint -sha1 2>/dev/null) ||
   usage_error "cannot read the SHA-1 thumbprint of $CERT_PATH"
-CERT_THUMBPRINT=$(tr -d ':[:space:]' <<<"${fingerprint#*=}" | tr '[:lower:]' '[:upper:]')
+CERT_THUMBPRINT=$(normalise_thumbprint "${fingerprint#*=}")
 
 # --- Azure. ------------------------------------------------------------------
 
@@ -123,6 +123,31 @@ hub_host_name() {
   printf '%s\n' "$host"
 }
 
+# DPS reported no thumbprint for the enrollment (read_enrollment): read the
+# enrollment's certificate itself and take its SHA-1 thumbprint. DPS does not
+# normally return the certificate, only its info, so this usually leaves
+# ENROLLMENT_THUMBPRINT empty; the caller then says it cannot compare. The
+# certificate is never printed: it goes only to openssl, whose errors are
+# dropped.
+read_enrollment_certificate() {
+  az_call "iot dps enrollment show (certificate)" iot dps enrollment show \
+    "${DPS_ARGS[@]}" \
+    --enrollment-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \
+    --query "attestation.x509.clientCertificates.primary.certificate" \
+    --output tsv
+  [[ $AZ_RC -eq 0 ]] || az_fail
+  local body fp
+  body=${AZ_OUT//-----BEGIN CERTIFICATE-----/}
+  body=${body//-----END CERTIFICATE-----/}
+  body=$(tr -d '[:space:]' <<<"$body")
+  case "$body" in
+    "" | None | null) return ;;
+  esac
+  fp=$(printf -- '-----BEGIN CERTIFICATE-----\n%s\n-----END CERTIFICATE-----\n' "$(fold -w 64 <<<"$body")" |
+    openssl x509 -noout -fingerprint -sha1 2>/dev/null) || return 0
+  ENROLLMENT_THUMBPRINT=$(normalise_thumbprint "${fp#*=}")
+}
+
 case "$ENROLLMENT_STATE" in
   missing)
     host=$(hub_host_name)
@@ -136,12 +161,17 @@ case "$ENROLLMENT_STATE" in
     ;;
 
   enabled)
-    if [[ "$ENROLLMENT_THUMBPRINT" == "$CERT_THUMBPRINT" ]]; then
+    [[ -n "$ENROLLMENT_THUMBPRINT" ]] || read_enrollment_certificate
+    if [[ -n "$ENROLLMENT_THUMBPRINT" && "$ENROLLMENT_THUMBPRINT" == "$CERT_THUMBPRINT" ]]; then
       echo "unchanged $DEVICE_ID"
       exit 0
     fi
-    # A re-imaged device: same id, new key.
-    log "the enrollment for $DEVICE_ID has a different certificate; replacing it"
+    if [[ -z "$ENROLLMENT_THUMBPRINT" ]]; then
+      log "warning: cannot read the certificate of the enrollment for $DEVICE_ID (DPS returned neither its thumbprint nor the certificate), so it cannot be compared; replacing it with this one"
+    else
+      # A re-imaged device: same id, new key.
+      log "the enrollment for $DEVICE_ID has a different certificate; replacing it"
+    fi
     az_write "iot dps enrollment update" iot dps enrollment update \
       "${DPS_ARGS[@]}" \
       --enrollment-id "$DEVICE_ID" --auth-type "$AUTH_TYPE" \

@@ -2939,17 +2939,33 @@ describe('live acceptance runner (against an in-process stub)', () => {
     ]) {
       expect(result.lines).toContain(step);
     }
+    // HAR-149: the second enrolment with the same certificate.
+    expect(result.lines).toContainEqual(
+      expect.stringMatching(
+        /^PASS devices › enrol-device\.sh again with the same certificate prints unchanged and writes nothing — unchanged acceptance-device-\S+$/
+      )
+    );
     // HAR-140: each fresh device was enrolled, claimed with the code it
     // minted, and deleted from the fake DPS and hub; no code reached the log.
     const scriptsOf = (label: string) => {
       const id = new RegExp(`^acceptance-${label}-\\d`);
       return stub!.scriptRuns.filter(r => id.test(r.args[r.args.indexOf('--device-id') + 1]));
     };
-    for (const label of ['cook', 'claim', 'release', 'control', 'device', 'temp']) {
+    for (const label of ['cook', 'claim', 'release', 'control', 'temp']) {
       const runs = scriptsOf(label);
       expect(runs.map(r => r.script)).toEqual(['enrol-device.sh', 'delete-device.sh']);
       expect(runs[1].args).toEqual(expect.arrayContaining(['--only-prefix', 'acceptance-']));
     }
+    // HAR-149: the devices group enrols its device a second time with the
+    // same certificate, and the stub answers that as the real script does.
+    const deviceRuns = scriptsOf('device');
+    expect(deviceRuns.map(r => r.script)).toEqual([
+      'enrol-device.sh',
+      'enrol-device.sh',
+      'delete-device.sh',
+    ]);
+    expect(deviceRuns[1].args).toEqual(deviceRuns[0].args);
+    expect(deviceRuns[2].args).toEqual(expect.arrayContaining(['--only-prefix', 'acceptance-']));
     // HAR-142: the revoked device is revoked twice before it is deleted.
     expect(scriptsOf('revoke').map(r => r.script)).toEqual([
       'enrol-device.sh',
