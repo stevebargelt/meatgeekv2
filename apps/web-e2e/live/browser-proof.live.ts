@@ -2,8 +2,11 @@ import { expect, test, type Locator, type Page, type Response } from '@playwrigh
 import {
   distinctiveGrillF,
   grillText,
+  heardSince,
   isAncestorCommit,
+  LAST_HEARD_SKEW_MS,
   LAST_HEARD_TEXT,
+  lastHeardAgeMs,
   readLiveEnv,
   waitForBuild,
   type LiveEnv,
@@ -214,6 +217,8 @@ test('live: sign in with TOTP, claim the device, start a cook, see a pushed read
     });
 
     let device: DeviceSummary | undefined;
+    /** When step 4's twin sync began, on the runner's clock (HAR-143, step 8). */
+    let syncedFrom: number | undefined;
     await test.step('4. claim the web device with its code', async () => {
       const credential = env.simdevice;
       if (credential.mode !== 'dps') {
@@ -225,6 +230,7 @@ test('live: sign in with TOTP, claim the device, start a cook, see a pushed read
       }
       // A full twin sync: a device released since its last sync (step 3, or
       // an earlier run's end) sees the new claim generation and mints a code.
+      syncedFrom = Date.now();
       const sync = startSimDevice(env.simdeviceBin, credential, [
         '--twin',
         '--count',
@@ -373,16 +379,26 @@ test('live: sign in with TOTP, claim the device, start a cook, see a pushed read
 
     await test.step('8. the devices page says when the device was last heard from', async () => {
       // HAR-143: a fresh GET /devices, which reads the device's IoT Hub twin.
-      // The device synced its twin in step 4 and sent in step 6, so the hub
-      // has heard from it: the row must say when, not "never heard from" (no
-      // activity) or "Status unknown" (the twin could not be read).
+      // The device reported to its twin in step 4 and sent in step 6, so the
+      // row must say it was heard from since step 4 began, not an earlier
+      // run's time, "never heard from" (no activity) or "Status unknown" (the
+      // twin could not be read).
       await openDevicesPage(page);
       const status = row.getByTestId('device-connection');
       await expect(
         status,
         `${env.deviceId}'s row did not say when it was last heard from within ${APP_TIMEOUT_S} s`
       ).toHaveText(LAST_HEARD_TEXT, { timeout: APP_TIMEOUT_MS });
-      log(`The devices page says ${env.deviceId} is: ${(await status.textContent()) ?? ''}`);
+      const text = (await status.textContent()) ?? '';
+      const readAt = Date.now();
+      log(`The devices page says ${env.deviceId} is: ${text}`);
+      const age = lastHeardAgeMs(text) as number;
+      expect(
+        heardSince(age, readAt, syncedFrom as number),
+        `${env.deviceId}'s row says "${text}": that is before step 4's twin sync began ` +
+          `(${new Date(syncedFrom as number).toISOString()}) less ` +
+          `${LAST_HEARD_SKEW_MS / 60_000} min, so it is not this run's activity`
+      ).toBe(true);
     });
 
     await test.step('9. release the device', async () => {

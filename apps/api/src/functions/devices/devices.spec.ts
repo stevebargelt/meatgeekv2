@@ -337,6 +337,29 @@ describe('GET /devices', () => {
     expect(devices[0].connection).toEqual({ state: 'disconnected', lastActivityAt: null });
   });
 
+  it('HAR-143: a device that only synced its twin is heard from at its last reported-properties write', async () => {
+    const { fake, deps, twins } = setup();
+    fake.seed(device());
+    twins
+      .addDevice(
+        'grill-1',
+        {},
+        { claimGeneration: '0', $metadata: { $lastUpdated: '2026-11-23T09:28:49.5Z' } }
+      )
+      .setConnection('grill-1', {
+        connectionState: 'Disconnected',
+        lastActivityTime: '0001-01-01T00:00:00Z',
+      });
+
+    const response = await getDevicesHandler(request(), context().ctx, deps);
+
+    const { devices } = response.jsonBody as { devices: Device[] };
+    expect(devices[0].connection).toEqual({
+      state: 'disconnected',
+      lastActivityAt: '2026-11-23T09:28:49.500Z',
+    });
+  });
+
   it('HAR-143: a twin 404 or a twin failure makes that device unknown, and the list still answers 200', async () => {
     const { fake, deps, twins } = setup();
     fake.seed(device({ id: 'grill-1', name: 'A' })); // no twin: 404

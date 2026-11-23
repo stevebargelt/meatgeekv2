@@ -517,8 +517,9 @@ update, delete`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Otel -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloudObservability.Appinsights
   Delivery -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudApi.Cooks -. "`set twin desired properties`" .-> MeatgeekCloudIngest.Iothub
-  MeatgeekCloudApi.Devices -. "`GET reads connectionState
-and lastActivityTime; claim
+  MeatgeekCloudApi.Devices -. "`GET reads connectionState,
+lastActivityTime and the
+reported $lastUpdated; claim
 reads the twin claim hash and
 sets desired claim properties`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures

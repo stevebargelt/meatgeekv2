@@ -5,7 +5,10 @@ import {
   ClaimCodeError,
   DEFAULT_WEB_BASE_URL,
   DPS_REQUIRED_VARIABLES,
+  LAST_HEARD_SKEW_MS,
   LAST_HEARD_TEXT,
+  heardSince,
+  lastHeardAgeMs,
   LiveEnvError,
   REQUIRED_VARIABLES,
   checkDeployedSha,
@@ -746,5 +749,42 @@ describe('LAST_HEARD_TEXT (HAR-143, step 8)', () => {
     'Online · last heard 12 s ago',
   ])('does not match %s', text => {
     expect(text).not.toMatch(LAST_HEARD_TEXT);
+  });
+});
+
+describe('lastHeardAgeMs (HAR-143, step 8)', () => {
+  it.each([
+    ['Connected · last heard 0 s ago', 0],
+    ['Connected · last heard 12 s ago', 12_000],
+    ['Offline · last heard 3 min 4 s ago', 184_000],
+    ['Offline · last heard 1 h 39 min ago', 99 * 60_000],
+    ['  Offline · last heard 26 h 0 min ago ', 26 * 3_600_000],
+  ])('reads %s as %i ms', (text, ms) => {
+    expect(lastHeardAgeMs(text)).toBe(ms);
+  });
+
+  it.each(['Connected', 'Offline · never heard from', 'Status unknown', ''])(
+    'is null for %s',
+    text => {
+      expect(lastHeardAgeMs(text)).toBeNull();
+    }
+  );
+});
+
+describe('heardSince (HAR-143, step 8)', () => {
+  const since = Date.parse('2026-11-23T09:28:00Z');
+  const readAt = Date.parse('2026-11-23T09:30:20Z');
+
+  it('accepts activity after the sync began', () => {
+    expect(heardSince(60_000, readAt, since)).toBe(true);
+  });
+
+  it('accepts a hub clock up to 5 min behind', () => {
+    expect(heardSince(readAt - since + LAST_HEARD_SKEW_MS, readAt, since)).toBe(true);
+  });
+
+  it('refuses an earlier run’s activity: the 1 h 39 min of Deploy Dev App run 45146229868', () => {
+    expect(heardSince(99 * 60_000, readAt, since)).toBe(false);
+    expect(heardSince(readAt - since + LAST_HEARD_SKEW_MS + 1, readAt, since)).toBe(false);
   });
 });

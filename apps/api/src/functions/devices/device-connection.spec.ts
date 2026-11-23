@@ -63,6 +63,63 @@ describe('connectionFromTwin', () => {
     expect(connectionFromTwin({ connectionState: 'Connected' }).lastActivityAt).toBeNull();
     expect(connectionFromTwin({ lastActivityTime: 'not a time' }).lastActivityAt).toBeNull();
   });
+
+  describe('the device’s last reported-properties write', () => {
+    const reported = (lastUpdated: unknown) => ({
+      activeCookId: 'c1',
+      $metadata: { $lastUpdated: lastUpdated, activeCookId: { $lastUpdated: lastUpdated } },
+      $version: 3,
+    });
+
+    it('counts when lastActivityTime is unset: a device that only synced its twin', () => {
+      expect(
+        connectionFromTwin({
+          connectionState: 'Disconnected',
+          lastActivityTime: '0001-01-01T00:00:00Z',
+          reported: reported('2026-11-23T09:28:49.1234567Z'),
+        })
+      ).toEqual({ state: 'disconnected', lastActivityAt: '2026-11-23T09:28:49.123Z' });
+      expect(
+        connectionFromTwin({ reported: reported('2026-11-23T09:28:49Z') }).lastActivityAt
+      ).toBe('2026-11-23T09:28:49.000Z');
+    });
+
+    it('wins when it is later than lastActivityTime', () => {
+      expect(
+        connectionFromTwin({
+          connectionState: 'Connected',
+          lastActivityTime: '2026-11-23T07:51:05Z',
+          reported: reported('2026-11-23T09:28:49Z'),
+        }).lastActivityAt
+      ).toBe('2026-11-23T09:28:49.000Z');
+    });
+
+    it('loses when lastActivityTime is later: telemetry after the last report', () => {
+      expect(
+        connectionFromTwin({
+          lastActivityTime: '2026-11-23T09:40:00Z',
+          reported: reported('2026-11-23T09:28:49Z'),
+        }).lastActivityAt
+      ).toBe('2026-11-23T09:40:00.000Z');
+    });
+
+    it('is ignored when it is 0001-01-01, garbage, not a string, or there is no $metadata', () => {
+      for (const value of ['0001-01-01T00:00:00Z', 'not a time', 42, null, undefined]) {
+        expect(connectionFromTwin({ reported: reported(value) }).lastActivityAt).toBeNull();
+      }
+      expect(connectionFromTwin({ reported: {} }).lastActivityAt).toBeNull();
+      expect(connectionFromTwin({ reported: { $metadata: 'x' } }).lastActivityAt).toBeNull();
+      expect(connectionFromTwin({ reported: { $metadata: null } }).lastActivityAt).toBeNull();
+    });
+
+    it('never reads a desired-properties time: the API writes those, not the device', () => {
+      const written: DeviceTwin = {
+        ...twin({}),
+        desired: { $metadata: { $lastUpdated: '2026-11-23T09:30:00Z' } },
+      };
+      expect(connectionFromTwin(written).lastActivityAt).toBeNull();
+    });
+  });
 });
 
 describe('withConnections', () => {

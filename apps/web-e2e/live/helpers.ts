@@ -515,3 +515,30 @@ export function livePanelGaveUp(state: string | null, badge: string | null): boo
  */
 export const LAST_HEARD_TEXT =
   /^(Connected|Offline) · last heard (\d+ s|\d+ min \d+ s|\d+ h \d+ min) ago$/;
+
+/** How far the hub's clock may be behind the runner's (HAR-143; the API proof's CLOCK_SKEW_MS). */
+export const LAST_HEARD_SKEW_MS = 5 * 60_000;
+
+/**
+ * HAR-143: the age a {@link LAST_HEARD_TEXT} row text states, in ms; `null`
+ * when the text does not match. The app floors the age to its unit, so this
+ * is never more than the true age.
+ */
+export function lastHeardAgeMs(text: string): number | null {
+  const age = LAST_HEARD_TEXT.exec(text.trim())?.[2];
+  if (age === undefined) return null;
+  const n = age.match(/\d+/g)!.map(Number);
+  if (age.endsWith(' s') && n.length === 1) return n[0] * 1000;
+  if (age.endsWith(' s')) return (n[0] * 60 + n[1]) * 1000;
+  return (n[0] * 60 + n[1]) * 60_000;
+}
+
+/**
+ * HAR-143: whether a row that says the device was last heard `ageMs` ago, read
+ * at `readAt`, is about activity at or after `since` (both epoch ms on the
+ * runner's clock), allowing {@link LAST_HEARD_SKEW_MS} for the hub's clock.
+ * An age older than that is an earlier run's activity, not this run's.
+ */
+export function heardSince(ageMs: number, readAt: number, since: number): boolean {
+  return readAt - ageMs >= since - LAST_HEARD_SKEW_MS;
+}
