@@ -1,0 +1,6 @@
+# Installed by onboard-pi.sh (remote-install.sh) as
+# /etc/udev/rules.d/99-meatgeek.rules. Plain Debian has no gpio/spi/i2c
+# groups, so the meatgeek service user gets the SPI bus (the MCP3008 ADC) and
+# the I2C buses (the LCD on bus 1) through its own group.
+SUBSYSTEM=="spidev", KERNEL=="spidev*", GROUP="meatgeek", MODE="0660"
+SUBSYSTEM=="i2c-dev", KERNEL=="i2c-[0-9]*", GROUP="meatgeek", MODE="0660"

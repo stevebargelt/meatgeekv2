@@ -420,77 +420,25 @@ func main() {
 
 ## Deployment
 
-### **Systemd Services**
+A Pi is set up, enrolled and updated with one command from a laptop,
+`apps/data-pusher/deploy/onboard-pi.sh pi@<lan ip>`. Run it again after pulling a newer
+`main` to update both binaries. [`docs/devices/runbook.md`](../devices/runbook.md) covers
+onboarding, claiming, releasing, revoking and troubleshooting.
 
-Both services run as systemd services on the Raspberry Pi:
+It installs both programs as systemd services, both running as the `meatgeek` system user:
 
-**Device Controller Service** (`/etc/systemd/system/meatgeek-controller.service`):
-```ini
-[Unit]
-Description=MeatGeek Device Controller
-After=network.target
-Wants=network.target
+- **Device Controller**: `/usr/local/bin/meatgeek-controller`, unit
+  [`meatgeek-controller.service`](../../apps/data-pusher/deploy/meatgeek-controller.service).
+  A udev rule (`/etc/udev/rules.d/99-meatgeek.rules`) gives the `meatgeek` group access to
+  `spidev*` and `i2c-*`.
+- **Data Pusher**: `/usr/local/bin/meatgeek-pusher`, unit
+  [`meatgeek-pusher.service`](../../apps/data-pusher/deploy/meatgeek-pusher.service), started
+  after the controller. It runs in DPS mode: `/etc/meatgeek-pusher/env` (0640, root:meatgeek)
+  holds `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_STATE_DIR` and `DEVICE_URL`,
+  and no connection string. Its key, certificate and state live in `/var/lib/meatgeek-pusher`.
 
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/meatgeek
-ExecStart=/usr/local/bin/MeatGeek-DeviceController
-Restart=always
-RestartSec=5
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**Data Pusher Service** (`/etc/systemd/system/meatgeek-pusher.service`):
-```ini
-[Unit]
-Description=MeatGeek Data Pusher
-After=network.target meatgeek-controller.service
-Wants=network.target
-Requires=meatgeek-controller.service
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/meatgeek
-ExecStart=/usr/local/bin/meatgeek-pusher
-Restart=always
-RestartSec=10
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### **Deployment Commands**
-
-```bash
-# Build for Raspberry Pi
-nx build-arm device-controller
-nx build-arm data-pusher
-
-# Copy to device  
-scp dist/MeatGeek-DeviceController-arm pi@192.168.1.37:/tmp/
-scp dist/meatgeek-pusher-arm pi@192.168.1.37:/tmp/
-
-# Install on device
-ssh pi@192.168.1.37
-sudo mv /tmp/MeatGeek-DeviceController-arm /usr/local/bin/MeatGeek-DeviceController
-sudo mv /tmp/meatgeek-pusher-arm /usr/local/bin/meatgeek-pusher
-sudo chmod +x /usr/local/bin/MeatGeek-DeviceController
-sudo chmod +x /usr/local/bin/meatgeek-pusher
-
-# Restart services
-sudo systemctl restart meatgeek-controller
-sudo systemctl restart meatgeek-pusher
-
-# Check status
-sudo systemctl status meatgeek-controller
-sudo systemctl status meatgeek-pusher
-```
+The unit files in `apps/data-pusher/deploy/` are the source of truth; this page does not copy
+them.
 
 ## Benefits of This Architecture
 
