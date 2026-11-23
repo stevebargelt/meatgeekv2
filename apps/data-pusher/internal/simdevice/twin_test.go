@@ -109,6 +109,30 @@ func TestTwin_PrintsTwinLineThenSendsReadingsWithTheCook(t *testing.T) {
 	}
 }
 
+// HAR-152: the twin line carries the apply lag the twin code measured on the
+// sync it applied, from the API's cookUpdatedAt to the device's clock. The
+// live device twin proof reads applyLagMs from it.
+func TestTwin_TwinLineCarriesTheApplyLag(t *testing.T) {
+	b := iothubtest.NewBroker(t)
+	written := clockStart.Add(-2500 * time.Millisecond)
+	b.SetDesiredQuietly(map[string]any{
+		"activeCookId":  "c1",
+		"correlationId": "r1",
+		"cookUpdatedAt": written.UTC().Format("2006-01-02T15:04:05.000Z"),
+	}) // $version 2
+
+	res := runTwinMain(t, b, "--twin", "--count", "0", "--timeout", "5s")
+	if res.code != ExitOK {
+		t.Fatalf("exit %d, stderr: %s", res.code, res.stderr)
+	}
+	want := `{"event":"twin","desired":{"activeCookId":"c1","correlationId":"r1","$version":2},` +
+		`"reported":{"activeCookId":"c1","correlationId":"r1","appliedDesiredVersion":2},` +
+		`"desiredUpdatedAt":"` + written.UTC().Format(time.RFC3339Nano) + `","applyLagMs":2500}` + "\n"
+	if res.stdout != want {
+		t.Errorf("stdout:\n got %s\nwant %s", res.stdout, want)
+	}
+}
+
 func TestTwin_NoCookAndCountZero(t *testing.T) {
 	b := iothubtest.NewBroker(t)
 	res := runTwinMain(t, b, "--twin", "--count", "0", "--timeout", "5s")

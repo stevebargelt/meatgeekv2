@@ -33,6 +33,8 @@ const OTHER = { tenantId: 'tenant-other', objectId: 'other-oid' };
 const OWNER_DEVICES = ['grill-1', 'grill-2', 'grill-7', 'grill-8', 'grill-9'];
 /** A device registered to OTHER. */
 const OTHER_DEVICE = 'grill-other';
+/** HAR-152: the fixed time the twin sync stamps on each PATCH (cookUpdatedAt). */
+const TWIN_WRITTEN_AT = '2026-11-23T19:35:19.000Z';
 
 function principalHeader(identity: typeof OWNER): string {
   return Buffer.from(
@@ -273,7 +275,12 @@ function containerContract() {
     repository,
     twins,
     syncDeviceTwin: (userId: string, deviceId: string, correlationId: string) =>
-      syncDeviceTwinWith({ twin: twins, cooks: repository }, userId, deviceId, correlationId),
+      syncDeviceTwinWith(
+        { twin: twins, cooks: repository, now: () => new Date(TWIN_WRITTEN_AT) },
+        userId,
+        deviceId,
+        correlationId
+      ),
     getDeviceOwnership: (userId: string, deviceId: string) =>
       devices.getDeviceOwnership(userId, deviceId),
     reassignDevice: (id: string, userId: string) => seedDevice({ id, userId, name: id }),
@@ -358,6 +365,7 @@ describe('MG-59 cooks persistence flow', () => {
     expect(store.twins.desired('grill-7')).toEqual({
       activeCookId: created.id,
       correlationId: 'start-request',
+      cookUpdatedAt: TWIN_WRITTEN_AT,
     });
 
     const beforeStop = await getCooksHandler(
@@ -383,8 +391,9 @@ describe('MG-59 cooks persistence flow', () => {
     expect(stopped.jsonBody).toMatchObject({ id: created.id, status: 'completed' });
     expect((stopped.jsonBody as Cook).endTime).toEqual(expect.any(String));
     expect(stopContext.messages()).toHaveLength(1);
-    // HAR-66: the stop cleared both desired properties.
-    expect(store.twins.desired('grill-7')).toEqual({});
+    // HAR-66: the stop cleared both desired properties (HAR-152: and stamped
+    // when it did).
+    expect(store.twins.desired('grill-7')).toEqual({ cookUpdatedAt: TWIN_WRITTEN_AT });
 
     const finalRead = await getCooksHandler(
       request({ identity: OWNER }),
@@ -491,6 +500,7 @@ describe('MG-59 cooks persistence flow', () => {
     expect(store.twins.desired('grill-8')).toEqual({
       activeCookId: created.id,
       correlationId: 'owner-start',
+      cookUpdatedAt: TWIN_WRITTEN_AT,
     });
     expect(store.cooks.get(`tenant-owner:owner-oid/${created.id}`)).toMatchObject({
       status: 'active',

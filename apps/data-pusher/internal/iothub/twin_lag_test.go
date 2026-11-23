@@ -13,9 +13,13 @@ import (
 )
 
 // HAR-150: the "applied and reported desired properties" line carries
-// desiredUpdatedAt and applyLagMs, read from IoT Hub's $metadata and the
-// injected clock. Every time here is on the fake clock, which only moves when
-// a test advances it.
+// desiredUpdatedAt and applyLagMs, against the injected clock. HAR-152: the
+// write time is desired.cookUpdatedAt, which the API stamps on every cook
+// PATCH; IoT Hub's $metadata is only the fallback. A desired patch IoT Hub
+// sends over MQTT carries only the changed properties and $version, never
+// $metadata, so the patch fixtures here carry none either; only a full GET
+// returns $metadata. Every time here is on the fake clock, which only moves
+// when a test advances it.
 
 // appliedLogHook records every "applied and reported" entry of the standard
 // logger. It is an await.Source: it signals after each entry, so a test waits
@@ -94,17 +98,21 @@ func metadataAt(at map[string]time.Time) map[string]any {
 	return md
 }
 
-func TestTwin_PatchLogsApplyLagFromMetadata(t *testing.T) {
+// stamp formats t as the API stamps cookUpdatedAt: RFC 3339, UTC, millis.
+func stamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
+
+func TestTwin_PatchLogsApplyLagFromCookUpdatedAt(t *testing.T) {
 	h := hookAppliedLog(t)
 	b := iothubtest.NewBroker(t)
 	st := &memState{}
 	startTwinClient(t, b, st)
 
+	// The patch as IoT Hub sends it: the API's properties and $version only.
 	written := testClockStart.Add(-1500 * time.Millisecond)
 	v := b.SetDesired(map[string]any{
 		"activeCookId":  "c1",
 		"correlationId": "r1",
-		"$metadata":     metadataAt(map[string]time.Time{"activeCookId": written, "correlationId": written}),
+		"cookUpdatedAt": stamp(written),
 	})
 	got := h.awaitApplied(t, v)
 
@@ -119,6 +127,29 @@ func TestTwin_PatchLogsApplyLagFromMetadata(t *testing.T) {
 	}
 }
 
+// A stop nulls the cook and stamps cookUpdatedAt in the same patch, so its
+// apply is measured too.
+func TestTwin_StopPatchLogsApplyLag(t *testing.T) {
+	h := hookAppliedLog(t)
+	b := iothubtest.NewBroker(t)
+	st := &memState{}
+	startTwinClient(t, b, st)
+
+	v := b.SetDesired(map[string]any{"activeCookId": "c1", "correlationId": "r1", "cookUpdatedAt": stamp(testClockStart.Add(-time.Minute))})
+	h.awaitApplied(t, v)
+	v = b.SetDesired(map[string]any{"activeCookId": nil, "correlationId": nil, "cookUpdatedAt": stamp(testClockStart.Add(-250 * time.Millisecond))})
+	got := h.awaitApplied(t, v)
+
+	if got["cookId"] != "" {
+		t.Errorf("cookId = %v, want empty after the stop", got["cookId"])
+	}
+	if got["applyLagMs"] != int64(250) {
+		t.Errorf("applyLagMs = %v, want 250", got["applyLagMs"])
+	}
+}
+
+// A twin the API wrote before HAR-152 has no cookUpdatedAt; the GET after a
+// reconnect still measures the lag from $metadata.
 func TestTwin_SyncAfterReconnectLogsApplyLagIncludingTimeOffline(t *testing.T) {
 	h := hookAppliedLog(t)
 	b := iothubtest.NewBroker(t)
@@ -145,7 +176,38 @@ func TestTwin_SyncAfterReconnectLogsApplyLagIncludingTimeOffline(t *testing.T) {
 	}
 }
 
-func TestTwin_NoMetadataLogsNoLagFields(t *testing.T) {
+// The GET carries both; cookUpdatedAt wins.
+func TestTwin_SyncPrefersCookUpdatedAtOverMetadata(t *testing.T) {
+	h := hookAppliedLog(t)
+	b := iothubtest.NewBroker(t)
+	st := &memState{}
+	_, clk := startTwinClient(t, b, st)
+
+	written := clk.Now().Add(-4 * time.Second)
+	v := b.SetDesiredQuietly(map[string]any{
+		"activeCookId":  "c1",
+		"correlationId": "r1",
+		"cookUpdatedAt": stamp(written),
+		"$metadata":     metadataAt(map[string]time.Time{"activeCookId": written.Add(-time.Hour)}),
+	})
+	dropAndRedial(t, b, clk)
+	got := h.awaitApplied(t, v)
+
+	if got["source"] != "get" {
+		t.Errorf("source = %v, want get", got["source"])
+	}
+	if got["desiredUpdatedAt"] != written.UTC().Format(time.RFC3339Nano) {
+		t.Errorf("desiredUpdatedAt = %v, want %s", got["desiredUpdatedAt"], written.UTC().Format(time.RFC3339Nano))
+	}
+	want := (4*time.Second + testBackoff).Milliseconds()
+	if got["applyLagMs"] != want {
+		t.Errorf("applyLagMs = %v, want %d", got["applyLagMs"], want)
+	}
+}
+
+// Neither cookUpdatedAt nor $metadata: the cook applies and the line has no
+// lag fields.
+func TestTwin_NoWriteTimeLogsNoLagFields(t *testing.T) {
 	h := hookAppliedLog(t)
 	b := iothubtest.NewBroker(t)
 	st := &memState{}
@@ -159,7 +221,7 @@ func TestTwin_NoMetadataLogsNoLagFields(t *testing.T) {
 	}
 	for _, key := range []string{"desiredUpdatedAt", "applyLagMs"} {
 		if _, ok := got[key]; ok {
-			t.Errorf("applied line has %s without $metadata: %v", key, got)
+			t.Errorf("applied line has %s without a write time: %v", key, got)
 		}
 	}
 }
@@ -182,6 +244,11 @@ func TestNewApplyLag(t *testing.T) {
 	both := raw(map[string]any{"$metadata": metadataAt(map[string]time.Time{
 		TwinDesiredActiveCookID: earlier, TwinDesiredCorrelationID: later,
 	})})
+	withStamp := func(v any) map[string]json.RawMessage {
+		m := map[string]any{"$metadata": metadataAt(map[string]time.Time{TwinDesiredActiveCookID: earlier})}
+		m[TwinDesiredCookUpdatedAt] = v
+		return raw(m)
+	}
 
 	cases := []struct {
 		name    string
@@ -198,6 +265,14 @@ func TestNewApplyLag(t *testing.T) {
 		{"$lastUpdated not a time", raw(map[string]any{"$metadata": map[string]any{
 			TwinDesiredActiveCookID: map[string]any{"$lastUpdated": "soon"},
 		}}), []string{TwinDesiredActiveCookID}, 0},
+		{"cookUpdatedAt without $metadata, as on a patch", raw(map[string]any{
+			TwinDesiredActiveCookID: "c1", TwinDesiredCookUpdatedAt: stamp(later),
+		}), []string{TwinDesiredActiveCookID}, time.Second},
+		{"cookUpdatedAt over $metadata", withStamp(stamp(later)), []string{TwinDesiredActiveCookID}, time.Second},
+		{"cookUpdatedAt but no changed key", withStamp(stamp(later)), nil, 0},
+		{"cookUpdatedAt not a time falls back to $metadata", withStamp("soon"), []string{TwinDesiredActiveCookID}, 3 * time.Second},
+		{"cookUpdatedAt not a string falls back to $metadata", withStamp(42), []string{TwinDesiredActiveCookID}, 3 * time.Second},
+		{"cookUpdatedAt null falls back to $metadata", withStamp(nil), []string{TwinDesiredActiveCookID}, 3 * time.Second},
 		{"IoT Hub's 7-digit fraction", raw(map[string]any{"$metadata": map[string]any{
 			TwinDesiredActiveCookID: map[string]any{"$lastUpdated": "2023-11-14T22:13:18.5000000Z"},
 		}}), []string{TwinDesiredActiveCookID}, 1500 * time.Millisecond},

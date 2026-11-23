@@ -22,6 +22,21 @@ const COOK_B = 'cook-b';
 /** RU each fake Cosmos read reports. */
 const READ_CHARGE = 1.5;
 
+/** HAR-152: the fake clock's reading. Every PATCH is stamped `cookUpdatedAt`
+ *  with it. */
+const NOW = '2026-11-23T19:35:19.000Z';
+const fixedClock = () => new Date(NOW);
+
+/** A fake clock that reads one second later each time it is read. */
+function tickingClock(start: string) {
+  let next = Date.parse(start);
+  return () => {
+    const reading = new Date(next);
+    next += 1_000;
+    return reading;
+  };
+}
+
 /** The device's active cook as Cosmos holds it, changeable mid-test. */
 function fakeCooks(active?: string) {
   const state = { active, reads: [] as Array<{ userId: string; deviceId: string }> };
@@ -77,7 +92,7 @@ describe('syncDeviceTwinWith', () => {
     const cooks = fakeCooks(COOK_A);
 
     const result = await syncDeviceTwinWith(
-      { twin: hub, cooks: cooks.reader },
+      { twin: hub, cooks: cooks.reader, now: fixedClock },
       USER,
       DEVICE,
       'req-1'
@@ -87,7 +102,7 @@ describe('syncDeviceTwinWith', () => {
     expect(hub.patches).toEqual([
       {
         deviceId: DEVICE,
-        desired: { activeCookId: COOK_A, correlationId: 'req-1' },
+        desired: { activeCookId: COOK_A, correlationId: 'req-1', cookUpdatedAt: NOW },
         etag: 'etag-1',
       },
     ]);
@@ -102,22 +117,71 @@ describe('syncDeviceTwinWith', () => {
     ]);
   });
 
+  it('HAR-152: stamps the start PATCH with cookUpdatedAt, an RFC 3339 UTC string from the clock', async () => {
+    const hub = new FakeTwinHub().addDevice(DEVICE);
+
+    await syncDeviceTwinWith(
+      { twin: hub, cooks: fakeCooks(COOK_A).reader, now: fixedClock },
+      USER,
+      DEVICE,
+      'req-1'
+    );
+
+    expect(hub.patches.map(p => p.desired['cookUpdatedAt'])).toEqual([NOW]);
+    expect(hub.desired(DEVICE)?.['cookUpdatedAt']).toBe(NOW);
+  });
+
+  it('HAR-152: stamps the stop PATCH, the one that nulls the cook, with cookUpdatedAt too', async () => {
+    const hub = new FakeTwinHub().addDevice(DEVICE, {
+      activeCookId: COOK_A,
+      correlationId: 'r1',
+      cookUpdatedAt: '2026-11-23T19:00:00.000Z',
+    });
+
+    await syncDeviceTwinWith(
+      { twin: hub, cooks: fakeCooks(undefined).reader, now: fixedClock },
+      USER,
+      DEVICE,
+      'r2'
+    );
+
+    expect(hub.patches.map(p => p.desired)).toEqual([
+      { activeCookId: null, correlationId: null, cookUpdatedAt: NOW },
+    ]);
+    expect(hub.desired(DEVICE)).toEqual({ cookUpdatedAt: NOW });
+  });
+
   it('sends null for both properties when no cook is active, so IoT Hub deletes them', async () => {
     const hub = new FakeTwinHub().addDevice(DEVICE, { activeCookId: COOK_A, correlationId: 'r1' });
     const cooks = fakeCooks(undefined);
 
-    const result = await syncDeviceTwinWith({ twin: hub, cooks: cooks.reader }, USER, DEVICE, 'r2');
+    const result = await syncDeviceTwinWith(
+      { twin: hub, cooks: cooks.reader, now: fixedClock },
+      USER,
+      DEVICE,
+      'r2'
+    );
 
     expect(result.outcome).toBe('patched');
-    expect(hub.patches.map(p => p.desired)).toEqual([{ activeCookId: null, correlationId: null }]);
-    expect(hub.desired(DEVICE)).toEqual({});
+    expect(hub.patches.map(p => p.desired)).toEqual([
+      { activeCookId: null, correlationId: null, cookUpdatedAt: NOW },
+    ]);
+    expect(cookProps(hub.desired(DEVICE))).toEqual({
+      activeCookId: undefined,
+      correlationId: undefined,
+    });
   });
 
   it('makes no PATCH when the twin already matches', async () => {
     const hub = new FakeTwinHub().addDevice(DEVICE, { activeCookId: COOK_A, correlationId: 'r1' });
     const cooks = fakeCooks(COOK_A);
 
-    const result = await syncDeviceTwinWith({ twin: hub, cooks: cooks.reader }, USER, DEVICE, 'r1');
+    const result = await syncDeviceTwinWith(
+      { twin: hub, cooks: cooks.reader, now: fixedClock },
+      USER,
+      DEVICE,
+      'r1'
+    );
 
     expect(result).toEqual({ outcome: 'unchanged', requestCharge: READ_CHARGE });
     expect(hub.patches).toEqual([]);
@@ -126,7 +190,7 @@ describe('syncDeviceTwinWith', () => {
   it('makes no PATCH when no cook is active and the twin is already clear', async () => {
     const hub = new FakeTwinHub().addDevice(DEVICE);
     const result = await syncDeviceTwinWith(
-      { twin: hub, cooks: fakeCooks(undefined).reader },
+      { twin: hub, cooks: fakeCooks(undefined).reader, now: fixedClock },
       USER,
       DEVICE,
       'r1'
@@ -143,7 +207,7 @@ describe('syncDeviceTwinWith', () => {
     });
 
     const result = await syncDeviceTwinWith(
-      { twin: hub, cooks: fakeCooks(COOK_A).reader },
+      { twin: hub, cooks: fakeCooks(COOK_A).reader, now: fixedClock },
       USER,
       DEVICE,
       'retry-of-start'
@@ -158,7 +222,12 @@ describe('syncDeviceTwinWith', () => {
     const hub = new FakeTwinHub(); // no device identity in the hub
     const cooks = fakeCooks(COOK_A);
 
-    const result = await syncDeviceTwinWith({ twin: hub, cooks: cooks.reader }, USER, DEVICE, 'r1');
+    const result = await syncDeviceTwinWith(
+      { twin: hub, cooks: cooks.reader, now: fixedClock },
+      USER,
+      DEVICE,
+      'r1'
+    );
 
     expect(result).toEqual({ outcome: 'noTwin', requestCharge: 0 });
     expect(hub.patches).toEqual([]);
@@ -166,7 +235,7 @@ describe('syncDeviceTwinWith', () => {
   });
 
   describe('412 handling', () => {
-    it('re-reads the twin and Cosmos and retries after a 412', async () => {
+    it('re-reads the twin and Cosmos and retries after a 412, stamping each PATCH when it is sent', async () => {
       const hub = new FakeTwinHub().addDevice(DEVICE);
       const cooks = fakeCooks(COOK_A);
       // Another writer lands between our GET and our PATCH.
@@ -174,7 +243,7 @@ describe('syncDeviceTwinWith', () => {
         hub.forceWrite(DEVICE, { activeCookId: 'someone', correlationId: 'x' });
 
       const result = await syncDeviceTwinWith(
-        { twin: hub, cooks: cooks.reader },
+        { twin: hub, cooks: cooks.reader, now: tickingClock(NOW) },
         USER,
         DEVICE,
         'r1'
@@ -183,6 +252,12 @@ describe('syncDeviceTwinWith', () => {
       expect(result.outcome).toBe('patched');
       expect(hub.gets).toHaveLength(2);
       expect(hub.patches.map(p => p.etag)).toEqual(['etag-1', 'etag-2']);
+      // The clock is read once per PATCH, just before it is sent.
+      expect(hub.patches.map(p => p.desired['cookUpdatedAt'])).toEqual([
+        '2026-11-23T19:35:19.000Z',
+        '2026-11-23T19:35:20.000Z',
+      ]);
+      expect(hub.desired(DEVICE)?.['cookUpdatedAt']).toBe('2026-11-23T19:35:20.000Z');
       // Attempt 1 read, attempt 2 read, then the post-PATCH check.
       expect(cooks.state.reads).toHaveLength(3);
       expect(cookProps(hub.desired(DEVICE))).toEqual({ activeCookId: COOK_A, correlationId: 'r1' });
@@ -199,7 +274,12 @@ describe('syncDeviceTwinWith', () => {
       const cooks = fakeCooks(COOK_A);
 
       const error = await syncError(
-        syncDeviceTwinWith({ twin: alwaysStale, cooks: cooks.reader }, USER, DEVICE, 'r1')
+        syncDeviceTwinWith(
+          { twin: alwaysStale, cooks: cooks.reader, now: fixedClock },
+          USER,
+          DEVICE,
+          'r1'
+        )
       );
 
       expect(DEVICE_TWIN_SYNC_MAX_ATTEMPTS).toBe(3);
@@ -219,7 +299,7 @@ describe('syncDeviceTwinWith', () => {
         correlationId: 'start-a',
       });
       const cooks = fakeCooks(COOK_B);
-      const deps = { twin: hub, cooks: cooks.reader };
+      const deps = { twin: hub, cooks: cooks.reader, now: fixedClock };
 
       hub.beforePatch = async () => {
         const lateStop = await syncDeviceTwinWith(deps, USER, DEVICE, 'retry-stop-a');
@@ -244,13 +324,13 @@ describe('syncDeviceTwinWith', () => {
         correlationId: 'start-a',
       });
       const cooks = fakeCooks(undefined); // A is completed in Cosmos
-      const deps = { twin: hub, cooks: cooks.reader };
+      const deps = { twin: hub, cooks: cooks.reader, now: fixedClock };
 
       expect((await syncDeviceTwinWith(deps, USER, DEVICE, 'stop-a')).outcome).toBe('patched');
       const slowStart = await syncDeviceTwinWith(deps, USER, DEVICE, 'start-a');
 
       expect(slowStart.outcome).toBe('unchanged');
-      expect(hub.desired(DEVICE)).toEqual({});
+      expect(hub.desired(DEVICE)).toEqual({ cookUpdatedAt: NOW });
     });
 
     it('a start whose PATCH lands after a stop that wrote nothing is undone by its own re-check', async () => {
@@ -259,7 +339,7 @@ describe('syncDeviceTwinWith', () => {
       // etag does not move. The start's PATCH then succeeds with A.
       const hub = new FakeTwinHub().addDevice(DEVICE);
       const cooks = fakeCooks(COOK_A);
-      const deps = { twin: hub, cooks: cooks.reader };
+      const deps = { twin: hub, cooks: cooks.reader, now: fixedClock };
 
       hub.beforePatch = async () => {
         cooks.state.active = undefined; // stop A committed
@@ -270,10 +350,10 @@ describe('syncDeviceTwinWith', () => {
       // The re-read after the PATCH saw A completed, and the next attempt cleared it.
       expect(slowStart.outcome).toBe('patched');
       expect(hub.patches.map(p => p.desired)).toEqual([
-        { activeCookId: COOK_A, correlationId: 'start-a' },
-        { activeCookId: null, correlationId: null },
+        { activeCookId: COOK_A, correlationId: 'start-a', cookUpdatedAt: NOW },
+        { activeCookId: null, correlationId: null, cookUpdatedAt: NOW },
       ]);
-      expect(hub.desired(DEVICE)).toEqual({});
+      expect(hub.desired(DEVICE)).toEqual({ cookUpdatedAt: NOW });
     });
 
     it('fails as contended when Cosmos keeps changing under every PATCH', async () => {
@@ -288,7 +368,7 @@ describe('syncDeviceTwinWith', () => {
       };
 
       const error = await syncError(
-        syncDeviceTwinWith({ twin: hub, cooks: flapping }, USER, DEVICE, 'r1')
+        syncDeviceTwinWith({ twin: hub, cooks: flapping, now: fixedClock }, USER, DEVICE, 'r1')
       );
 
       expect(error.reason).toBe('device_twin_sync_contended');
@@ -305,7 +385,12 @@ describe('syncDeviceTwinWith', () => {
         patchDesired: async () => undefined,
       };
       const error = await syncError(
-        syncDeviceTwinWith({ twin: failing, cooks: fakeCooks(COOK_A).reader }, USER, DEVICE, 'r')
+        syncDeviceTwinWith(
+          { twin: failing, cooks: fakeCooks(COOK_A).reader, now: fixedClock },
+          USER,
+          DEVICE,
+          'r'
+        )
       );
       expect(error.reason).toBe('iothub_get_twin_status_403');
     });
@@ -319,7 +404,12 @@ describe('syncDeviceTwinWith', () => {
         },
       };
       const error = await syncError(
-        syncDeviceTwinWith({ twin: failing, cooks: fakeCooks(COOK_A).reader }, USER, DEVICE, 'r')
+        syncDeviceTwinWith(
+          { twin: failing, cooks: fakeCooks(COOK_A).reader, now: fixedClock },
+          USER,
+          DEVICE,
+          'r'
+        )
       );
       expect(error.reason).toBe('iothub_patch_twin_status_403');
       expect(error.requestCharge).toBe(READ_CHARGE);
@@ -334,7 +424,7 @@ describe('syncDeviceTwinWith', () => {
         },
       };
       const result = await syncDeviceTwinWith(
-        { twin: vanishing, cooks: fakeCooks(COOK_A).reader },
+        { twin: vanishing, cooks: fakeCooks(COOK_A).reader, now: fixedClock },
         USER,
         DEVICE,
         'r'
@@ -352,7 +442,7 @@ describe('syncDeviceTwinWith', () => {
         },
       };
       const error = await syncError(
-        syncDeviceTwinWith({ twin: hub, cooks: failing }, USER, DEVICE, 'r')
+        syncDeviceTwinWith({ twin: hub, cooks: failing, now: fixedClock }, USER, DEVICE, 'r')
       );
       expect(error.reason).toBe('cosmos_active_cook_read_failed');
       expect(error.message).not.toContain('mgv2-secret-account');
@@ -367,7 +457,12 @@ describe('syncDeviceTwinWith', () => {
         patchDesired: async () => undefined,
       };
       const error = await syncError(
-        syncDeviceTwinWith({ twin: failing, cooks: fakeCooks().reader }, USER, DEVICE, 'r')
+        syncDeviceTwinWith(
+          { twin: failing, cooks: fakeCooks().reader, now: fixedClock },
+          USER,
+          DEVICE,
+          'r'
+        )
       );
       expect(error.reason).toBe('iothub_failure');
       expect(error.message).not.toContain('azure-devices');

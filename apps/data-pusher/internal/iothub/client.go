@@ -698,6 +698,24 @@ func (c *AzureClient) WaitTwinSynced(ctx context.Context) error {
 	}
 }
 
+// SyncedApplyLag is the apply lag the twin sync WaitTwinSynced waits for
+// measured (HAR-152): when the API wrote the cook it applied, and how long
+// before that sync's GET reached the device. ok is false until that sync has
+// happened, or when it changed no cook property or carried no write time.
+// simdevice prints it on its twin line.
+func (c *AzureClient) SyncedApplyLag() (desiredUpdatedAt time.Time, lag time.Duration, ok bool) {
+	if c.twin == nil {
+		return time.Time{}, 0, false
+	}
+	select {
+	case <-c.twin.synced:
+		l := c.twin.syncedLag
+		return l.updatedAt, l.lag, !l.updatedAt.IsZero()
+	default:
+		return time.Time{}, 0, false
+	}
+}
+
 // GetTwin reads the whole twin over the current connection. It does not apply
 // anything. Requires WithCookTwin and a started, connected client.
 func (c *AzureClient) GetTwin(ctx context.Context) (Twin, error) {

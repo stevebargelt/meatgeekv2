@@ -28,6 +28,7 @@ import (
 // Contract (decided in goal HAR-55):
 //
 //	desired  (API writes):    activeCookId, correlationId (string, or absent/null = none), $version
+//	                          cookUpdatedAt (RFC 3339 UTC, when the API wrote the two above; HAR-152)
 //	reported (device writes): activeCookId, correlationId (string or null), appliedDesiredVersion
 //
 // With WithClaim (DPS mode, goal HAR-130) the twin also carries the claim:
@@ -44,6 +45,9 @@ import (
 const (
 	TwinDesiredActiveCookID  = "activeCookId"
 	TwinDesiredCorrelationID = "correlationId"
+	// TwinDesiredCookUpdatedAt is when the API wrote activeCookId and
+	// correlationId (HAR-152). Only the apply lag reads it.
+	TwinDesiredCookUpdatedAt = "cookUpdatedAt"
 	TwinReportedAppliedVer   = "appliedDesiredVersion"
 
 	twinResponseFilter     = "$iothub/twin/res/#"
@@ -161,6 +165,9 @@ type twin struct {
 
 	syncedOnce sync.Once
 	synced     chan struct{} // closed after the first GET applied and reported
+	// syncedLag is the apply lag of that first GET. Written once, before
+	// synced closes, so a reader that saw synced closed may read it.
+	syncedLag applyLag
 
 	// observe, when a test sets it before Start, is told each twinEvent so the
 	// test can wait for the worker instead of guessing. Production leaves it
@@ -304,7 +311,10 @@ func (t *twin) fullSync(ctx context.Context, c twinConn) {
 		t.claimKnown = true
 	}
 	if t.apply(ctx, c, cook, corr, version, "get", lag) {
-		t.syncedOnce.Do(func() { close(t.synced) })
+		t.syncedOnce.Do(func() {
+			t.syncedLag = lag
+			close(t.synced)
+		})
 	}
 }
 
@@ -414,28 +424,65 @@ func (t *twin) apply(ctx context.Context, c twinConn, cook, corr *string, versio
 // docs/devices/runbook.md ("Measuring latency") greps for its applyLagMs.
 const twinAppliedLogMessage = "iothub twin: applied and reported desired properties"
 
-// applyLag is how long a desired cook change took to reach the device (HAR-150):
-// from IoT Hub's $metadata.<property>.$lastUpdated, the time the API wrote the
-// property, to the device's clock when it received the patch or GET. On a GET
-// after a reconnect it includes the time the device was offline; the log's
-// source field tells the two apart. The zero value means unknown, and adds no
-// fields.
+// applyLag is how long a desired cook change took to reach the device
+// (HAR-150): from the time the API wrote the cook to the device's clock when it
+// received the patch or GET. On a GET after a reconnect it includes the time
+// the device was offline; the log's source field tells the two apart. The zero
+// value means unknown, and adds no fields.
+//
+// The write time is desired.cookUpdatedAt, which the API stamps on every cook
+// PATCH (HAR-152). A desired patch IoT Hub delivers over MQTT carries only the
+// changed properties and $version, never $metadata, so cookUpdatedAt is the
+// only write time a live cook change brings. Without it (a twin the API wrote
+// before HAR-152) the lag falls back to IoT Hub's
+// $metadata.<property>.$lastUpdated, which only a full GET carries.
 type applyLag struct {
 	updatedAt time.Time
 	lag       time.Duration
 }
 
-// newApplyLag reads the latest $metadata.<key>.$lastUpdated among keys from a
-// desired section or patch. Without keys, $metadata, or a parseable time for
-// any of them, it returns the zero applyLag: the measurement is skipped, never
-// the apply.
+// newApplyLag measures the lag of a cook change whose changed cook properties
+// are keys, in a desired section or patch: from its cookUpdatedAt, else from
+// the latest $metadata.<key>.$lastUpdated among keys. Without keys, or without
+// a parseable time from either source, it returns the zero applyLag: the
+// measurement is skipped, never the apply.
 func newApplyLag(desired map[string]json.RawMessage, keys []string, now time.Time) applyLag {
 	if len(keys) == 0 {
 		return applyLag{}
 	}
+	if at, ok := cookUpdatedAt(desired); ok {
+		return applyLag{updatedAt: at, lag: now.Sub(at)}
+	}
+	latest := metadataUpdatedAt(desired, keys)
+	if latest.IsZero() {
+		return applyLag{}
+	}
+	return applyLag{updatedAt: latest, lag: now.Sub(latest)}
+}
+
+// cookUpdatedAt reads desired.cookUpdatedAt, when it is an RFC 3339 string.
+func cookUpdatedAt(desired map[string]json.RawMessage) (time.Time, bool) {
+	raw, ok := desired[TwinDesiredCookUpdatedAt]
+	if !ok {
+		return time.Time{}, false
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// metadataUpdatedAt is the latest $metadata.<key>.$lastUpdated among keys, or
+// the zero time when there is none.
+func metadataUpdatedAt(desired map[string]json.RawMessage, keys []string) time.Time {
 	var metadata map[string]json.RawMessage
 	if raw, ok := desired["$metadata"]; !ok || json.Unmarshal(raw, &metadata) != nil {
-		return applyLag{}
+		return time.Time{}
 	}
 	var latest time.Time
 	for _, key := range keys {
@@ -454,10 +501,7 @@ func newApplyLag(desired map[string]json.RawMessage, keys []string, now time.Tim
 			latest = at
 		}
 	}
-	if latest.IsZero() {
-		return applyLag{}
-	}
-	return applyLag{updatedAt: latest, lag: now.Sub(latest)}
+	return latest
 }
 
 // addTo adds desiredUpdatedAt (RFC 3339, UTC) and applyLagMs to fields when
