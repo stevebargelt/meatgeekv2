@@ -535,6 +535,12 @@ What it creates (and nothing else):
    a terminal for one browser sign-in. See
    [Dev web SPA registration and acceptance test user](#dev-web-spa-registration-and-acceptance-test-user-har-82).
 
+4. **The dev iOS public-client registration (HAR-159)** — the Entra app the
+   native iOS app signs in with (MSAL for iOS, public client, custom-scheme
+   redirect, no secret). It publishes `DEV_IOS_CLIENT_ID` as a GitHub
+   `development` variable. See
+   [Dev iOS public-client registration](#dev-ios-public-client-registration-har-159).
+
 A **V1-safety guard** (`assert_v2_name`) refuses to operate on any name that is
 not unambiguously `meatgeek-v2` / `meatgeekv2`, and explicitly rejects the known
 V1 identifiers (`meatgeek-shared`, `meatgeekterraformstate`). This is the last
@@ -792,11 +798,12 @@ minted by **any other client** — even with the correct audience — is **rejec
 by `allowed_applications`. Keep the tfvars list and `SMOKE_TEST_CLIENT_IDS` in
 sync: the allowed caller and the pre-authorized caller must be the same set.
 
-**Pre-authorization is merged, never replaced (HAR-82).** Two steps write
-`api.preAuthorizedApplications`: this one (`SMOKE_TEST_CLIENT_IDS`) and the dev
-web SPA step below (the SPA's own appId). Each reads the list already on the
-app, adds what it needs, and PATCHes only if something changed, so a re-run of
-either step, in either order, keeps the other's entry. Bootstrap never
+**Pre-authorization is merged, never replaced (HAR-82).** Three steps write
+`api.preAuthorizedApplications`: this one (`SMOKE_TEST_CLIENT_IDS`), the dev
+web SPA step below (the SPA's own appId) and the dev iOS step (the iOS app's
+appId, HAR-159). Each reads the list already on the app, adds what it needs,
+and PATCHes only if something changed, so a re-run of any step, in any order,
+keeps the others' entries. Bootstrap never
 **removes** a pre-authorized client. To drop one, edit the API registration's
 *Expose an API → Authorized client applications* in the portal.
 
@@ -877,6 +884,38 @@ otherwise the sign-in asks for a code from it.
 Bootstrap does not edit that file. A follow-up issue sets it, together with the
 Easy Auth `functions_auth_allowed_client_app_ids` entry in
 `environments/dev.tfvars` and CORS for the web origin.
+
+### Dev iOS public-client registration (HAR-159)
+
+The native iOS app signs people in with MSAL for iOS in the system browser
+(authorization code + PKCE). A native app is a public client with a
+custom-scheme redirect, so it gets its own registration.
+`bootstrap_dev_ios_registration` creates it, right after the web SPA step (and
+so after the API registration it depends on).
+
+**What it creates (create-if-absent, converged on every run):**
+
+| Object | Shape |
+| ------ | ----- |
+| App registration `meatgeek-v2-dev-ios` (override: `DEV_IOS_APP_NAME`) | Single tenant (`AzureADMyOrg`). **Public client** platform only, exactly one redirect URI, `msauth.com.meatgeek.ios://auth` (the constant `DEV_IOS_REDIRECT_URIS`; not overridable, a redirect URI is a security decision made in a reviewed commit). No `spa`/`web` redirect URIs, implicit grant off, `isFallbackPublicClient: true`. **No client secret, no certificate**: a read-back on every run aborts if one has been added. Two registrations with the name abort the run before anything changes. |
+| Its permissions | The same as the web SPA: the dev API's `access_as_user` (pre-authorized on `meatgeek-v2-dev-api`, merged with the other callers) and Microsoft Graph `openid`, `profile`, `offline_access`, admin-consented tenant-wide by its own `AllPrincipals` grant. |
+| Its service principal | Needed for the consent grant. |
+
+**What it writes to the GitHub `development` environment:**
+
+| Name | Kind | When |
+| ---- | ---- | ---- |
+| `DEV_IOS_CLIENT_ID` | variable | Every run, if it differs. The iOS app's appId. |
+
+`gh` must be authenticated for this step; it aborts before creating anything
+otherwise.
+
+**After the run.** The summary block headed `dev iOS public-client
+registration` prints `DEV_IOS_CLIENT_ID` beside `DEV_WEB_CLIENT_ID`. The
+Function App's Easy Auth `allowed_applications`
+(`functions_auth_allowed_client_app_ids` in `environments/dev.tfvars`) must
+include `DEV_IOS_CLIENT_ID`, or the API rejects the app's tokens. Bootstrap
+does not edit that file; a follow-up issue adds the id once it exists.
 
 ---
 

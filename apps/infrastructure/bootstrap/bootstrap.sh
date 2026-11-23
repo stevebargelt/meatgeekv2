@@ -55,6 +55,15 @@
 #      (ACCEPTANCE_USER_PASSWORD, ACCEPTANCE_USER_TOTP_SECRET). The TOTP key
 #      takes one interactive browser sign-in. Also sets the `development`
 #      variables DEV_WEB_CLIENT_ID and ACCEPTANCE_USER_UPN.
+#   7. The dev iOS PUBLIC-CLIENT REGISTRATION (HAR-159). An AAD app
+#      `meatgeek-v2-dev-ios` for the native app (MSAL for iOS, auth-code + PKCE
+#      in the system browser): single tenant, publicClient platform ONLY with
+#      the one custom-scheme redirect in DEV_IOS_REDIRECT_URIS, no spa/web
+#      redirect URIs, implicit grant off, isFallbackPublicClient true, NO client
+#      secret and NO certificate. Same permissions as the web SPA (access_as_user
+#      pre-authorized on the dev API, MERGED; Graph openid/profile/
+#      offline_access admin-consented tenant-wide). Sets the `development`
+#      variable DEV_IOS_CLIENT_ID.
 #
 # TERMS (use these precisely — they name two DIFFERENT things):
 #   MG-24 = Terraform reconciliation, OPERATOR-run apply from a workstation.
@@ -419,6 +428,15 @@ SMOKE_TEST_CLIENT_IDS="${SMOKE_TEST_CLIENT_IDS:-${AZURE_CLI_PUBLIC_CLIENT_ID}} $
 # reviewed commit, not from the operator's shell.
 DEV_WEB_APP_NAME="${DEV_WEB_APP_NAME:-meatgeek-v2-dev-web}"
 DEV_WEB_REDIRECT_URIS="https://meatgeekv2-web.vercel.app http://localhost:3000"
+
+# --- dev iOS public-client registration (HAR-159) ---------------------------
+# The native iOS app signs users in with MSAL for iOS in the system browser
+# (auth-code + PKCE). A native app is a PUBLIC client: no secret, and Entra
+# hands the code back to a custom URL scheme, msauth.<bundle id>://auth. Like the
+# web redirects, the redirect URI is NOT overridable: it is a security decision
+# made in a reviewed commit, not from the operator's shell.
+DEV_IOS_APP_NAME="${DEV_IOS_APP_NAME:-meatgeek-v2-dev-ios}"
+DEV_IOS_REDIRECT_URIS="msauth.com.meatgeek.ios://auth"
 # The GitHub Environment the acceptance job reads the user's credentials from.
 WEB_ACCEPTANCE_ENVIRONMENT="development"
 ACCEPTANCE_USER_NICKNAME="meatgeek-dev-acceptance"
@@ -2913,23 +2931,26 @@ ensure_acceptance_variable() {
   ok "GitHub '${env}' variable ${name} = ${value}"
 }
 
-# Tenant-wide (AllPrincipals) admin consent for the SPA's Graph scopes, created
-# if absent and widened if it lacks one of them. Never narrowed.
+# Tenant-wide (AllPrincipals) admin consent for a client's Graph scopes
+# (GRAPH_CONSENT_SCOPES), created if absent and widened if it lacks one of them.
+# Never narrowed. Shared by the dev web SPA (HAR-82) and the dev iOS app
+# (HAR-159); <label> names the client in every message.
+#   usage: ensure_graph_admin_consent <client-sp-id> <label>
 ensure_graph_admin_consent() {
-  local client_sp_id="$1" graph_sp_id rows grant_id grant_scope s missing="" new_scope
+  local client_sp_id="$1" label="$2" graph_sp_id rows grant_id grant_scope s missing="" new_scope
   graph_sp_id="$(az_discover_unique "the Microsoft Graph service principal" \
     az ad sp list --filter "appId eq '${MS_GRAPH_APP_ID}'" --query '[].id' -o tsv)" || exit 1
   [ -n "$graph_sp_id" ] \
     || die "this tenant has no Microsoft Graph service principal (appId ${MS_GRAPH_APP_ID}), so admin consent cannot be granted."
 
-  rows="$(az_discover "admin-consent grants held by the dev web SPA (${client_sp_id})" \
+  rows="$(az_discover "admin-consent grants held by the ${label} (${client_sp_id})" \
     az rest --method GET \
     --uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?\$filter=clientId%20eq%20'${client_sp_id}'" \
     --query "value[?resourceId=='${graph_sp_id}' && consentType=='AllPrincipals'].[id, scope]" -o tsv)" || exit 1
   rows="$(printf '%s\n' "$rows" | grep -v '^[[:space:]]*$' || true)"
 
   if [ -z "$rows" ]; then
-    # BOUNDED RETRY: on a first run the SPA's service principal was created
+    # BOUNDED RETRY: on a first run the client's service principal was created
     # moments ago, and Graph can answer "does not exist" for it until the
     # directory has replicated. Delay overridable only so tests do not sleep.
     local attempt=1 max_attempts="${WEB_CONSENT_ATTEMPTS:-6}" delay="${WEB_CONSENT_RETRY_DELAY:-5}"
@@ -2938,17 +2959,17 @@ ensure_graph_admin_consent() {
       --body "{\"clientId\": \"${client_sp_id}\", \"consentType\": \"AllPrincipals\", \"resourceId\": \"${graph_sp_id}\", \"scope\": \"${GRAPH_CONSENT_SCOPES}\"}" \
       -o none; do
       [ "$attempt" -lt "$max_attempts" ] \
-        || die "failed to grant tenant-wide admin consent for Graph '${GRAPH_CONSENT_SCOPES}' to the dev web SPA after ${max_attempts} attempts. You need a role that may grant consent (Global Administrator, Privileged Role Administrator or Cloud Application Administrator); if you hold one, re-run (the SPA's service principal may still be replicating)."
+        || die "failed to grant tenant-wide admin consent for Graph '${GRAPH_CONSENT_SCOPES}' to the ${label} after ${max_attempts} attempts. You need a role that may grant consent (Global Administrator, Privileged Role Administrator or Cloud Application Administrator); if you hold one, re-run (its service principal may still be replicating)."
       warn "Admin consent POST failed (attempt ${attempt} of ${max_attempts}); retrying in ${delay}s in case the new service principal has not replicated yet."
       attempt=$((attempt + 1))
       sleep "$delay"
     done
-    ok "Admin consent granted tenant-wide for Graph: ${GRAPH_CONSENT_SCOPES}"
+    ok "Admin consent granted tenant-wide for Graph to the ${label}: ${GRAPH_CONSENT_SCOPES}"
     return 0
   fi
 
   [ "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')" -eq 1 ] \
-    || die "the dev web SPA holds more than one AllPrincipals Graph grant; refusing to guess which to update:
+    || die "the ${label} holds more than one AllPrincipals Graph grant; refusing to guess which to update:
 $(printf '%s\n' "$rows" | sed 's/^/    /')"
   grant_id="$(printf '%s' "$rows" | cut -f1)"
   grant_scope="$(printf '%s' "$rows" | cut -f2-)"
@@ -2956,15 +2977,60 @@ $(printf '%s\n' "$rows" | sed 's/^/    /')"
     case " ${grant_scope} " in *" ${s} "*) ;; *) missing="${missing} ${s}" ;; esac
   done
   if [ -z "$missing" ]; then
-    ok "Admin consent already covers Graph: ${GRAPH_CONSENT_SCOPES}"
+    ok "Admin consent for the ${label} already covers Graph: ${GRAPH_CONSENT_SCOPES}"
     return 0
   fi
   new_scope="$(printf '%s %s' "$grant_scope" "$missing" | tr -s ' ' | sed 's/^ //; s/ $//')"
   az rest --method PATCH --uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/${grant_id}" \
     --headers "Content-Type=application/json" \
     --body "{\"scope\": \"${new_scope}\"}" -o none \
-    || die "failed to widen the dev web SPA's admin consent to include:${missing}"
-  ok "Admin consent widened to: ${new_scope}"
+    || die "failed to widen the ${label}'s admin consent to include:${missing}"
+  ok "Admin consent for the ${label} widened to: ${new_scope}"
+}
+
+# The dev API registration's appId, for a client step (web SPA, iOS) that
+# requests its access_as_user scope. Printed to stdout; dies if the API
+# registration is absent or ambiguous.
+#   usage: api_app_id="$(require_dev_api_app_id)" || exit 1
+require_dev_api_app_id() {
+  local id
+  id="$(az_discover_unique "dev API registration '${DEV_API_APP_NAME}'" \
+    az ad app list --display-name "$DEV_API_APP_NAME" --query '[].appId' -o tsv)" || exit 1
+  [ -n "$id" ] \
+    || die "the dev API registration '${DEV_API_APP_NAME}' does not exist. bootstrap_dev_api_registration creates it and runs before this step in main()."
+  assert_uuid "$id" "the dev API registration's appId"
+  printf '%s' "$id"
+}
+
+# The requiredResourceAccess every dev sign-in client asks for: exactly the dev
+# API's access_as_user and Graph openid/profile/offline_access. Shared so the
+# web SPA and the iOS app cannot drift apart.
+#   usage: dev_client_required_resource_access <api-appId> <scope-id>
+dev_client_required_resource_access() {
+  jq -cn --arg api "$1" --arg scope "$2" --arg graph "$MS_GRAPH_APP_ID" \
+    --arg openid "$GRAPH_SCOPE_ID_OPENID" --arg profile "$GRAPH_SCOPE_ID_PROFILE" \
+    --arg offline "$GRAPH_SCOPE_ID_OFFLINE_ACCESS" '
+    [ { resourceAppId: $api, resourceAccess: [ { id: $scope, type: "Scope" } ] },
+      { resourceAppId: $graph, resourceAccess: [
+          { id: $openid, type: "Scope" }, { id: $profile, type: "Scope" },
+          { id: $offline, type: "Scope" } ] } ]'
+}
+
+# NO SECRET, NO CERTIFICATE, proven by read-back on every run: a public client
+# (SPA or native app) authenticates with PKCE alone, so a credential on it is
+# something someone added by hand.
+#   usage: assert_app_has_no_credentials <appId> <label> <"A SPA"|"A public client">
+assert_app_has_no_credentials() {
+  local app_id="$1" label="$2" kind="$3" creds
+  creds="$(az ad app credential list --id "$app_id" --query '[].keyId' -o tsv)" \
+    || die "could not read back the client secrets of the ${label} registration ${app_id}."
+  creds="${creds}
+$(az ad app credential list --id "$app_id" --cert --query '[].keyId' -o tsv)" \
+    || die "could not read back the certificates of the ${label} registration ${app_id}."
+  creds="$(printf '%s\n' "$creds" | grep -v '^[[:space:]]*$' | grep -v '^null$' || true)"
+  [ -z "$creds" ] \
+    || die "the ${label} registration ${app_id} carries a client secret or certificate. ${kind} must have neither; remove them (keyIds below), then re-run:
+$(printf '%s\n' "$creds" | sed 's/^/    /')"
 }
 
 # The acceptance user (create-if-absent). Sets the globals ACCEPTANCE_USER_UPN,
@@ -3136,8 +3202,9 @@ STEPS
 }
 
 bootstrap_dev_web_registration() {
-  local api_app_id scope_id web_app_id web_sp_id redirects_json body creds
+  local api_app_id scope_id web_app_id web_sp_id redirects_json body
   ACCEPTANCE_TOTP_STATUS=""
+  DEV_WEB_CLIENT_ID_RESOLVED=""
 
   log "── dev WEB SPA registration ${DEV_WEB_APP_NAME} + acceptance test user (HAR-82)"
 
@@ -3147,11 +3214,7 @@ bootstrap_dev_web_registration() {
   gh auth status >/dev/null 2>&1 \
     || die "the GitHub CLI is unavailable or not authenticated. The dev web step stores the acceptance user's password in a GitHub secret, so it cannot run without it. Run 'gh auth login' and re-run bootstrap (every earlier step is idempotent)."
 
-  api_app_id="$(az_discover_unique "dev API registration '${DEV_API_APP_NAME}'" \
-    az ad app list --display-name "$DEV_API_APP_NAME" --query '[].appId' -o tsv)" || exit 1
-  [ -n "$api_app_id" ] \
-    || die "the dev API registration '${DEV_API_APP_NAME}' does not exist. bootstrap_dev_api_registration creates it and runs before this step in main()."
-  assert_uuid "$api_app_id" "the dev API registration's appId"
+  api_app_id="$(require_dev_api_app_id)" || exit 1
   scope_id="$(dev_api_scope_id "$api_app_id")"
 
   web_app_id="$(az_discover_unique "dev web SPA registration '${DEV_WEB_APP_NAME}'" \
@@ -3174,18 +3237,12 @@ bootstrap_dev_web_registration() {
   redirects_json="$(jq -cn --arg u "$DEV_WEB_REDIRECT_URIS" '$u | split(" ")')"
   body="$(jq -cn \
     --argjson redirects "$redirects_json" \
-    --arg api "$api_app_id" --arg scope "$scope_id" --arg graph "$MS_GRAPH_APP_ID" \
-    --arg openid "$GRAPH_SCOPE_ID_OPENID" --arg profile "$GRAPH_SCOPE_ID_PROFILE" \
-    --arg offline "$GRAPH_SCOPE_ID_OFFLINE_ACCESS" '
+    --argjson rra "$(dev_client_required_resource_access "$api_app_id" "$scope_id")" '
     { spa: { redirectUris: $redirects },
       web: { redirectUris: [],
              implicitGrantSettings: { enableAccessTokenIssuance: false, enableIdTokenIssuance: false } },
       publicClient: { redirectUris: [] },
-      requiredResourceAccess: [
-        { resourceAppId: $api, resourceAccess: [ { id: $scope, type: "Scope" } ] },
-        { resourceAppId: $graph, resourceAccess: [
-            { id: $openid, type: "Scope" }, { id: $profile, type: "Scope" },
-            { id: $offline, type: "Scope" } ] } ] }')"
+      requiredResourceAccess: $rra }')"
   az rest --method PATCH \
     --uri "https://graph.microsoft.com/v1.0/applications(appId='${web_app_id}')" \
     --headers "Content-Type=application/json" \
@@ -3193,17 +3250,8 @@ bootstrap_dev_web_registration() {
     || die "failed to configure the dev web SPA registration ${web_app_id} (SPA redirect URIs, implicit grant off, permissions)."
   ok "SPA platform: ${DEV_WEB_REDIRECT_URIS// /, } (auth-code + PKCE, implicit grant off)"
 
-  # NO SECRET, NO CERTIFICATE, proven by read-back: a SPA is a public client,
-  # and a credential on it is something someone added by hand.
-  creds="$(az ad app credential list --id "$web_app_id" --query '[].keyId' -o tsv)" \
-    || die "could not read back the client secrets of the dev web SPA registration ${web_app_id}."
-  creds="${creds}
-$(az ad app credential list --id "$web_app_id" --cert --query '[].keyId' -o tsv)" \
-    || die "could not read back the certificates of the dev web SPA registration ${web_app_id}."
-  creds="$(printf '%s\n' "$creds" | grep -v '^[[:space:]]*$' | grep -v '^null$' || true)"
-  [ -z "$creds" ] \
-    || die "the dev web SPA registration ${web_app_id} carries a client secret or certificate. A SPA must have neither; remove them (keyIds below), then re-run:
-$(printf '%s\n' "$creds" | sed 's/^/    /')"
+  # NO SECRET, NO CERTIFICATE, proven by read-back: a SPA is a public client.
+  assert_app_has_no_credentials "$web_app_id" "dev web SPA" "A SPA"
   ok "No client secret and no certificate on ${DEV_WEB_APP_NAME} (verified)"
 
   web_sp_id="$(az_discover_unique "service principal for the dev web SPA (${web_app_id})" \
@@ -3217,13 +3265,15 @@ $(printf '%s\n' "$creds" | sed 's/^/    /')"
 
   log "Pre-authorizing the dev web SPA ${web_app_id} for ${DEV_API_SCOPE_NAME}"
   ensure_api_preauthorized "$api_app_id" "$scope_id" "$web_app_id"
-  ensure_graph_admin_consent "$web_sp_id"
+  ensure_graph_admin_consent "$web_sp_id" "dev web SPA"
 
   ensure_acceptance_user
   enrol_acceptance_user_totp
   ACCEPTANCE_USER_FRESH_PASSWORD=""
 
   ensure_acceptance_variable DEV_WEB_CLIENT_ID "$web_app_id"
+  # For the iOS step's summary, which prints both client ids side by side.
+  DEV_WEB_CLIENT_ID_RESOLVED="$web_app_id"
   ensure_acceptance_variable ACCEPTANCE_USER_UPN "$ACCEPTANCE_USER_UPN"
 
   cat <<SUMMARY
@@ -3246,6 +3296,116 @@ dev WEB SPA registration + acceptance test user (HAR-82).
     "clientId": "${web_app_id}"
 
   The SPA is pre-authorized for ${DEV_API_SCOPE_NAME} on ${DEV_API_APP_NAME}
+  and admin-consented for Graph ${GRAPH_CONSENT_SCOPES}. No client secret.
+────────────────────────────────────────────────────────────────────
+SUMMARY
+}
+
+# --------------------------------------------------------------------------
+# 6. dev iOS PUBLIC-CLIENT registration (HAR-159).
+#
+#     WHAT     An Entra app `meatgeek-v2-dev-ios` for the native iOS app, which
+#              signs in with MSAL for iOS in the system browser (auth-code +
+#              PKCE): single tenant, publicClient platform ONLY with the one
+#              custom-scheme redirect in DEV_IOS_REDIRECT_URIS (spa and web
+#              emptied), implicit grant off, isFallbackPublicClient true, NO
+#              client secret and NO certificate (verified by read-back on every
+#              run). Same permissions as the web SPA: the dev API's
+#              access_as_user (pre-authorized on the API, merged) and Graph
+#              openid/profile/offline_access (admin-consented tenant-wide).
+#     VARS     DEV_IOS_CLIENT_ID, as a `development` environment VARIABLE.
+#     NOT HERE The Function App's Easy Auth allowed_applications
+#              (functions_auth_allowed_client_app_ids in environments/dev.tfvars)
+#              must also list this id; the id exists only after this runs, so a
+#              follow-up issue adds it. Until then the API rejects the app's
+#              tokens.
+# --------------------------------------------------------------------------
+bootstrap_dev_ios_registration() {
+  local api_app_id scope_id ios_app_id ios_sp_id redirects_json body
+
+  log "── dev iOS public-client registration ${DEV_IOS_APP_NAME} (HAR-159)"
+
+  # Before anything is created: the step ends by publishing DEV_IOS_CLIENT_ID
+  # to GitHub, so a missing gh should stop it while nothing has changed.
+  gh auth status >/dev/null 2>&1 \
+    || die "the GitHub CLI is unavailable or not authenticated. The dev iOS step publishes DEV_IOS_CLIENT_ID as a GitHub '${WEB_ACCEPTANCE_ENVIRONMENT}' variable, so it cannot run without it. Run 'gh auth login' and re-run bootstrap (every earlier step is idempotent)."
+
+  api_app_id="$(require_dev_api_app_id)" || exit 1
+  scope_id="$(dev_api_scope_id "$api_app_id")"
+
+  ios_app_id="$(az_discover_unique "dev iOS registration '${DEV_IOS_APP_NAME}'" \
+    az ad app list --display-name "$DEV_IOS_APP_NAME" --query '[].appId' -o tsv)" || exit 1
+  if [ -z "$ios_app_id" ]; then
+    log "Creating dev iOS registration: ${DEV_IOS_APP_NAME}"
+    ios_app_id="$(az ad app create --display-name "$DEV_IOS_APP_NAME" \
+      --sign-in-audience AzureADMyOrg --query appId -o tsv)" \
+      || die "failed to create the dev iOS registration '${DEV_IOS_APP_NAME}' — check tenant app-registration permissions."
+    ok "Dev iOS registration created: ${ios_app_id}"
+  else
+    ok "Dev iOS registration already exists: ${ios_app_id}"
+  fi
+  assert_uuid "$ios_app_id" "the dev iOS registration's appId"
+
+  # The whole sign-in shape in one idempotent PATCH, converged on every run:
+  # the redirect on the publicClient platform ONLY (spa and web emptied, so a
+  # URI added by hand on another platform does not survive), implicit grant
+  # off, public-client flows allowed (isFallbackPublicClient), and exactly the
+  # four delegated permissions the web SPA also requests.
+  redirects_json="$(jq -cn --arg u "$DEV_IOS_REDIRECT_URIS" '$u | split(" ")')"
+  body="$(jq -cn \
+    --argjson redirects "$redirects_json" \
+    --argjson rra "$(dev_client_required_resource_access "$api_app_id" "$scope_id")" '
+    { publicClient: { redirectUris: $redirects },
+      spa: { redirectUris: [] },
+      web: { redirectUris: [],
+             implicitGrantSettings: { enableAccessTokenIssuance: false, enableIdTokenIssuance: false } },
+      isFallbackPublicClient: true,
+      requiredResourceAccess: $rra }')"
+  az rest --method PATCH \
+    --uri "https://graph.microsoft.com/v1.0/applications(appId='${ios_app_id}')" \
+    --headers "Content-Type=application/json" \
+    --body "$body" -o none \
+    || die "failed to configure the dev iOS registration ${ios_app_id} (publicClient redirect URI, implicit grant off, permissions)."
+  ok "Public-client platform: ${DEV_IOS_REDIRECT_URIS// /, } (auth-code + PKCE, implicit grant off, isFallbackPublicClient)"
+
+  # A native app is a public client: PKCE, never a secret or a certificate.
+  assert_app_has_no_credentials "$ios_app_id" "dev iOS" "A public client"
+  ok "No client secret and no certificate on ${DEV_IOS_APP_NAME} (verified)"
+
+  ios_sp_id="$(az_discover_unique "service principal for the dev iOS app (${ios_app_id})" \
+    az ad sp list --filter "appId eq '${ios_app_id}'" --query '[].id' -o tsv)" || exit 1
+  if [ -z "$ios_sp_id" ]; then
+    ios_sp_id="$(az ad sp create --id "$ios_app_id" --query id -o tsv)" \
+      || die "failed to create the service principal for the dev iOS app (${ios_app_id})."
+    ok "Service principal created for the dev iOS app: ${ios_sp_id}"
+  fi
+  assert_uuid "$ios_sp_id" "the dev iOS app's service principal id"
+
+  log "Pre-authorizing the dev iOS app ${ios_app_id} for ${DEV_API_SCOPE_NAME}"
+  ensure_api_preauthorized "$api_app_id" "$scope_id" "$ios_app_id"
+  ensure_graph_admin_consent "$ios_sp_id" "dev iOS app"
+
+  ensure_acceptance_variable DEV_IOS_CLIENT_ID "$ios_app_id"
+
+  cat <<SUMMARY
+
+────────────────────────────────────────────────────────────────────
+dev iOS public-client registration (HAR-159).
+
+  Set on the GitHub '${WEB_ACCEPTANCE_ENVIRONMENT}' environment as VARIABLES:
+
+    DEV_IOS_CLIENT_ID   = ${ios_app_id}
+    DEV_WEB_CLIENT_ID   = ${DEV_WEB_CLIENT_ID_RESOLVED:-(see the dev WEB SPA summary above)}
+
+  Redirect URI (MSAL for iOS): ${DEV_IOS_REDIRECT_URIS}
+
+  STILL TO DO (a follow-up issue): the Function App's Easy Auth
+  allowed_applications must include DEV_IOS_CLIENT_ID, or the API rejects
+  the app's tokens. In environments/dev.tfvars add it to:
+
+    functions_auth_allowed_client_app_ids  (+= "${ios_app_id}")
+
+  The app is pre-authorized for ${DEV_API_SCOPE_NAME} on ${DEV_API_APP_NAME}
   and admin-consented for Graph ${GRAPH_CONSENT_SCOPES}. No client secret.
 ────────────────────────────────────────────────────────────────────
 SUMMARY
@@ -3314,7 +3474,7 @@ assert_federated_environment_map() {
 }
 
 main() {
-  log "🚀 MeatGeek V2 bootstrap (remote state + plan/deploy identities + dev API auth + dev web SPA)"
+  log "🚀 MeatGeek V2 bootstrap (remote state + plan/deploy identities + dev API auth + dev web SPA + dev iOS app)"
   require_tools
   # BEFORE anything is provisioned: refuse to build a map that reintroduces F8.
   assert_federated_environment_map
@@ -3331,6 +3491,7 @@ main() {
   bootstrap_infra_apply_identity # dev INFRA-APPLY identity (MG-23, RG-scoped)
   bootstrap_dev_api_registration # dev Entra API auth registration (access_as_user)
   bootstrap_dev_web_registration # dev web SPA + TOTP acceptance user (HAR-82)
+  bootstrap_dev_ios_registration # dev iOS public client (HAR-159)
   # GitHub-side, not Azure-side. BOTH environments must EXIST WITH THE RIGHT
   # PROTECTION before activation, or GitHub auto-creates them unprotected on
   # first workflow reference. Neither may be left to auto-creation: the apply

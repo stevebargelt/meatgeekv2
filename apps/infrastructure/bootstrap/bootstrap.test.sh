@@ -2894,12 +2894,16 @@ H82_NEW_USER="dddddddd-0000-4000-8000-000000000005"
 H82_UPN="meatgeek-dev-acceptance@contoso.onmicrosoft.com"
 H82_SMOKE_2="eeeeeeee-0000-4000-8000-000000000007"
 H82_SCOPE="$(dev_api_scope_id "$H82_API")"
+# HAR-159: the dev iOS app shares these stubs (same API, same Graph, same gh).
+H159_IOS="99999999-1590-4000-8000-000000000010"
+H159_IOS_SP="99999999-1590-4000-8000-000000000011"
+H159_OTHER_IOS="99999999-1590-4000-8000-000000000012"
 
 h82_reset() {
   rm -rf "$H82"; mkdir -p "$H82"
   printf '%s' "$H82_API" > "$H82/api_app"
   printf '[]' > "$H82/preauth.json"
-  for f in web_app web_sp user roles dirroles grant secrets secret-values vars argv.log rest.log creds consent_failures; do
+  for f in web_app web_sp user roles dirroles grant secrets secret-values vars argv.log rest.log creds consent_failures ios_app ios_sp ios_creds ios_grant; do
     : > "$H82/$f"
   done
   H82_TTY=""; H82_STDIN="/dev/null"; H82_GH_UNAUTH=""
@@ -2920,13 +2924,21 @@ h82_rest() {
         printf '%s' "$body" | jq -c '.api.preAuthorizedApplications' > "$H82/preauth.json"
       fi ;;
     "GET https://graph.microsoft.com/v1.0/domains") echo "contoso.onmicrosoft.com" ;;
-    "GET https://graph.microsoft.com/v1.0/oauth2PermissionGrants"*) cat "$H82/grant" ;;
+    "GET https://graph.microsoft.com/v1.0/oauth2PermissionGrants"*)
+      # One grant per client SP: the iOS app's consent is not the SPA's.
+      case "$uri" in
+        *"'${H159_IOS_SP}'"*) cat "$H82/ios_grant" ;;
+        *) cat "$H82/grant" ;;
+      esac ;;
     "POST https://graph.microsoft.com/v1.0/oauth2PermissionGrants")
       if [ -s "$H82/consent_failures" ] && [ "$(cat "$H82/consent_failures")" -gt 0 ]; then
         echo $(( $(cat "$H82/consent_failures") - 1 )) > "$H82/consent_failures"
         return 1
       fi
-      printf 'grant-1\topenid profile offline_access' > "$H82/grant" ;;
+      case "$body" in
+        *"\"${H159_IOS_SP}\""*) printf 'grant-2\topenid profile offline_access' > "$H82/ios_grant" ;;
+        *) printf 'grant-1\topenid profile offline_access' > "$H82/grant" ;;
+      esac ;;
     "POST https://graph.microsoft.com/v1.0/users")
       printf '%s' "$H82_NEW_USER" > "$H82/user"; echo "$H82_NEW_USER" ;;
     "GET https://graph.microsoft.com/v1.0/users/"*) cat "$H82/dirroles" ;;
@@ -2944,12 +2956,19 @@ az() {
     "ad app create --display-name ${DEV_WEB_APP_NAME} "*)
       printf '%s' "$H82_NEW_WEB" > "$H82/web_app"; echo "$H82_NEW_WEB" ;;
     "ad app show --id ${H82_API} --query api.preAuthorizedApplications -o json") cat "$H82/preauth.json" ;;
+    "ad app list --display-name ${DEV_IOS_APP_NAME} "*) cat "$H82/ios_app" ;;
+    "ad app create --display-name ${DEV_IOS_APP_NAME} "*)
+      printf '%s' "$H159_IOS" > "$H82/ios_app"; echo "$H159_IOS" ;;
+    "ad app credential list --id ${H159_IOS} "*|"ad app credential list --id ${H159_OTHER_IOS} "*) cat "$H82/ios_creds" ;;
     "ad app credential list"*) cat "$H82/creds" ;;
     "ad sp list --filter appId eq '${MS_GRAPH_APP_ID}' "*) echo "$H82_GRAPH_SP" ;;
     "ad sp list --filter appId eq '${H82_API}' "*) echo "$H82_API_SP" ;;
     "ad sp list --filter appId eq '${H82_NEW_WEB}' "*) cat "$H82/web_sp" ;;
     "ad sp create --id ${H82_NEW_WEB} "*)
       printf '%s' "$H82_NEW_WEB_SP" > "$H82/web_sp"; echo "$H82_NEW_WEB_SP" ;;
+    "ad sp list --filter appId eq '${H159_IOS}' "*|"ad sp list --filter appId eq '${H159_OTHER_IOS}' "*) cat "$H82/ios_sp" ;;
+    "ad sp create --id ${H159_IOS} "*|"ad sp create --id ${H159_OTHER_IOS} "*)
+      printf '%s' "$H159_IOS_SP" > "$H82/ios_sp"; echo "$H159_IOS_SP" ;;
     "ad user list"*) cat "$H82/user" ;;
     "role assignment list"*) cat "$H82/roles" ;;
     *) : ;;
@@ -3209,7 +3228,154 @@ if [ "$H82_RC" -ne 0 ] && grep -q 'client secret or certificate' "$H82/out" && !
   ok "HAR-82: a client secret or certificate found on the SPA stops the run"
 else bad "HAR-82: a credential on the SPA must die (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
 
-unset -f az gh h82_rest h82_reset h82_run h82_secret h82_count h82_web_patch h82_api_step h82_preauth_ok
+
+# ===========================================================================
+# HAR-159: the dev iOS public-client registration
+# ===========================================================================
+# Reuses the HAR-82 stubs above: the same API registration, Graph and gh, with
+# the iOS app's own registration, service principal, credentials and grant in
+# $H82/ios_*.
+h159_run() {
+  H82_RC=0
+  ( OIDC_SUBJECT_PREFIX="repo:${GITHUB_REPO}"; bootstrap_dev_ios_registration ) \
+    < /dev/null > "$H82/out" 2>&1 || H82_RC=$?
+}
+h159_ios_patch() { grep -F "PATCH https://graph.microsoft.com/v1.0/applications(appId='$1')" "$H82/rest.log" | tail -1 | cut -d' ' -f3-; }
+h159_redirect='msauth.com.meatgeek.ios://auth'
+
+# --- static: name, wiring, and a redirect URI nobody can override ------------
+if [ "$DEV_IOS_APP_NAME" = "meatgeek-v2-dev-ios" ]; then
+  ok "HAR-159: DEV_IOS_APP_NAME defaults to meatgeek-v2-dev-ios"
+else bad "HAR-159: DEV_IOS_APP_NAME must default to meatgeek-v2-dev-ios (got '${DEV_IOS_APP_NAME}')"; fi
+h159_web_line="$(grep -n '^[[:space:]]*bootstrap_dev_web_registration\b' "$BOOT" | tail -1 | cut -d: -f1)"
+h159_ios_line="$(grep -n '^[[:space:]]*bootstrap_dev_ios_registration\b' "$BOOT" | tail -1 | cut -d: -f1)"
+if [ -n "$h159_web_line" ] && [ -n "$h159_ios_line" ] && [ "$h159_ios_line" -eq $((h159_web_line+1)) ]; then
+  ok "HAR-159: main() calls bootstrap_dev_ios_registration right after the web step (and so after the API step)"
+else bad "HAR-159: main() must call bootstrap_dev_ios_registration right after bootstrap_dev_web_registration (web@${h159_web_line:-none}, ios@${h159_ios_line:-none})"; fi
+if [ "$(grep -cF "$h159_redirect" "$BOOT")" -eq 1 ] \
+   && grep -qxF "DEV_IOS_REDIRECT_URIS=\"${h159_redirect}\"" "$BOOT"; then
+  ok "HAR-159: the msauth redirect URI appears once in bootstrap.sh, as the DEV_IOS_REDIRECT_URIS constant"
+else bad "HAR-159: '${h159_redirect}' must appear exactly once, as DEV_IOS_REDIRECT_URIS=\"...\" (found $(grep -cF "$h159_redirect" "$BOOT"))"; fi
+h159_override="$(DEV_IOS_REDIRECT_URIS='evil://steal' bash -c 'source "$1"; printf "%s" "$DEV_IOS_REDIRECT_URIS"' h159 "$BOOT" 2>/dev/null)"
+if [ "$h159_override" = "$h159_redirect" ]; then
+  ok "HAR-159: DEV_IOS_REDIRECT_URIS in the environment does not change the redirect URI"
+else bad "HAR-159: DEV_IOS_REDIRECT_URIS must not be overridable (got '${h159_override}')"; fi
+
+# --- FIRST RUN: created with exactly the public-client shape -----------------
+h82_reset
+h159_run
+h159_body="$(h159_ios_patch "$H159_IOS")"
+if [ "$H82_RC" -eq 0 ]; then
+  ok "HAR-159: a first run exits 0"
+else bad "HAR-159: a first run must exit 0 (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
+if grep -q "^AZ ad app create --display-name meatgeek-v2-dev-ios --sign-in-audience AzureADMyOrg " "$H82/argv.log"; then
+  ok "HAR-159: first run creates meatgeek-v2-dev-ios, single tenant (AzureADMyOrg)"
+else bad "HAR-159: first run must create meatgeek-v2-dev-ios with --sign-in-audience AzureADMyOrg (log: $(cat "$H82/argv.log"))"; fi
+if [ "$(printf '%s' "$h159_body" | jq -c '.publicClient.redirectUris' 2>/dev/null)" = "[\"${h159_redirect}\"]" ]; then
+  ok "HAR-159: publicClient.redirectUris is exactly [\"${h159_redirect}\"]"
+else bad "HAR-159: publicClient.redirectUris must be exactly the msauth URI (body: ${h159_body})"; fi
+if [ "$(printf '%s' "$h159_body" | jq -c '[.spa.redirectUris, .web.redirectUris, .web.implicitGrantSettings.enableAccessTokenIssuance, .web.implicitGrantSettings.enableIdTokenIssuance, .isFallbackPublicClient]' 2>/dev/null)" = '[[],[],false,false,true]' ]; then
+  ok "HAR-159: no spa/web redirect URIs, implicit grant off, isFallbackPublicClient true"
+else bad "HAR-159: spa/web redirects must be empty, implicit grant off, isFallbackPublicClient true (body: ${h159_body})"; fi
+if [ "$(printf '%s' "$h159_body" | jq -c --arg a "$H82_API" --arg g "$MS_GRAPH_APP_ID" '[(.requiredResourceAccess[] | select(.resourceAppId == $a) | [.resourceAccess[].id]), (.requiredResourceAccess[] | select(.resourceAppId == $g) | [.resourceAccess[].id] | sort), (.requiredResourceAccess | length)]' 2>/dev/null)" \
+   = "$(jq -cn --arg s "$H82_SCOPE" --arg o "$GRAPH_SCOPE_ID_OPENID" --arg p "$GRAPH_SCOPE_ID_PROFILE" --arg f "$GRAPH_SCOPE_ID_OFFLINE_ACCESS" '[[$s], ([$o, $p, $f] | sort), 2]')" ]; then
+  ok "HAR-159: requiredResourceAccess = the API's access_as_user + Graph openid/profile/offline_access"
+else bad "HAR-159: requiredResourceAccess is wrong (body: ${h159_body})"; fi
+if ! grep -qiE 'passwordCredentials|keyCredentials|addPassword|addKey' "$H82/rest.log" \
+   && ! grep -qE '^AZ ad app (credential reset|update .*--password)' "$H82/argv.log" \
+   && grep -q "^AZ ad app credential list --id ${H159_IOS} --query" "$H82/argv.log" \
+   && grep -q "^AZ ad app credential list --id ${H159_IOS} --cert " "$H82/argv.log"; then
+  ok "HAR-159: no secret or certificate is written, and both are read back"
+else bad "HAR-159: the iOS app must get no credential and both kinds must be read back (argv: $(cat "$H82/argv.log"))"; fi
+if grep -q "^AZ ad sp create --id ${H159_IOS} " "$H82/argv.log"; then
+  ok "HAR-159: the iOS app's service principal is created"
+else bad "HAR-159: the iOS app's service principal must be created (argv: $(cat "$H82/argv.log"))"; fi
+if jq -e --arg i "$H159_IOS" --arg s "$H82_SCOPE" 'any(.[]; .appId == $i and (.delegatedPermissionIds | index($s)))' "$H82/preauth.json" >/dev/null 2>&1; then
+  ok "HAR-159: the iOS app is pre-authorized on the API for access_as_user"
+else bad "HAR-159: the iOS app must be pre-authorized on the API (preauth: $(cat "$H82/preauth.json"))"; fi
+if grep -F "POST https://graph.microsoft.com/v1.0/oauth2PermissionGrants " "$H82/rest.log" | cut -d' ' -f3- \
+   | jq -e --arg c "$H159_IOS_SP" --arg r "$H82_GRAPH_SP" '.clientId == $c and .resourceId == $r and .consentType == "AllPrincipals" and .scope == "openid profile offline_access"' >/dev/null 2>&1; then
+  ok "HAR-159: tenant-wide (AllPrincipals) admin consent for Graph openid profile offline_access"
+else bad "HAR-159: an AllPrincipals Graph grant for the iOS SP must be created (rest: $(cat "$H82/rest.log"))"; fi
+if grep -qF "DEV_IOS_CLIENT_ID	${H159_IOS}	" "$H82/vars" \
+   && grep -q "^GH variable set DEV_IOS_CLIENT_ID --env development .*--body ${H159_IOS}" "$H82/argv.log"; then
+  ok "HAR-159: DEV_IOS_CLIENT_ID is set on the development environment"
+else bad "HAR-159: DEV_IOS_CLIENT_ID must be set on development (vars: $(cat "$H82/vars"), argv: $(cat "$H82/argv.log"))"; fi
+if grep -qF "DEV_IOS_CLIENT_ID   = ${H159_IOS}" "$H82/out" && grep -q 'DEV_WEB_CLIENT_ID   = ' "$H82/out" \
+   && grep -qF 'functions_auth_allowed_client_app_ids' "$H82/out" && grep -q 'allowed_applications' "$H82/out"; then
+  ok "HAR-159: the summary prints DEV_IOS_CLIENT_ID beside DEV_WEB_CLIENT_ID and the allowed_applications follow-up"
+else bad "HAR-159: the summary must print both client ids and the functions_auth_allowed_client_app_ids line (out: $(cat "$H82/out"))"; fi
+
+# --- SECOND RUN: idempotent ---------------------------------------------------
+: > "$H82/argv.log"; : > "$H82/rest.log"
+h159_run
+if [ "$H82_RC" -eq 0 ] \
+   && ! grep -qE '^AZ (ad app create|ad sp create)' "$H82/argv.log" \
+   && ! grep -qE '^POST ' "$H82/rest.log" \
+   && ! grep -q '^GH variable set' "$H82/argv.log" \
+   && ! grep -qF "PATCH https://graph.microsoft.com/v1.0/applications(appId='${H82_API}')" "$H82/rest.log"; then
+  ok "HAR-159: a second run creates nothing, sets no variable, and leaves the API's preauth alone"
+else bad "HAR-159: the second run must be a no-op apart from the converging PATCH (rc=${H82_RC}, argv: $(cat "$H82/argv.log"), rest: $(cut -c1-120 "$H82/rest.log"))"; fi
+
+# --- an existing registration is reused, not duplicated -----------------------
+h82_reset
+printf '%s\n' "$H159_OTHER_IOS" > "$H82/ios_app"
+h159_run
+if [ "$H82_RC" -eq 0 ] \
+   && ! grep -q "^AZ ad app create --display-name ${DEV_IOS_APP_NAME} " "$H82/argv.log" \
+   && [ -n "$(h159_ios_patch "$H159_OTHER_IOS")" ] \
+   && grep -qF "DEV_IOS_CLIENT_ID	${H159_OTHER_IOS}	" "$H82/vars"; then
+  ok "HAR-159: an existing meatgeek-v2-dev-ios is reused (configured and published), not created again"
+else bad "HAR-159: an existing registration must be reused (rc=${H82_RC}, argv: $(cat "$H82/argv.log"))"; fi
+
+# --- two registrations with the name: refuse to guess -------------------------
+h82_reset
+printf '%s\n%s\n' "$H159_IOS" "$H159_OTHER_IOS" > "$H82/ios_app"
+h159_run
+if [ "$H82_RC" -ne 0 ] && grep -q 'AMBIGUOUS' "$H82/out" \
+   && ! grep -q "^AZ ad app create --display-name ${DEV_IOS_APP_NAME} " "$H82/argv.log" \
+   && [ ! -s "$H82/rest.log" ] && ! grep -q '^GH variable set' "$H82/argv.log"; then
+  ok "HAR-159: two meatgeek-v2-dev-ios registrations stop the run before anything is changed"
+else bad "HAR-159: duplicate registrations must die as AMBIGUOUS with nothing done (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
+
+# --- a secret or certificate on the registration stops the run ----------------
+h82_reset
+printf '%s' "$H159_IOS" > "$H82/ios_app"
+printf '99999999-0000-4000-8000-000000000009\n' > "$H82/ios_creds"
+h159_run
+if [ "$H82_RC" -ne 0 ] \
+   && grep -qF "the dev iOS registration ${H159_IOS} carries a client secret or certificate. A public client must have neither" "$H82/out" \
+   && grep -q '99999999-0000-4000-8000-000000000009' "$H82/out" \
+   && ! grep -q '^GH variable set' "$H82/argv.log" \
+   && ! grep -qF "PATCH https://graph.microsoft.com/v1.0/applications(appId='${H82_API}')" "$H82/rest.log"; then
+  ok "HAR-159: a client secret or certificate found on the iOS app stops the run with the read-back message"
+else bad "HAR-159: a credential on the iOS app must die with the read-back message (rc=${H82_RC}, out: $(cat "$H82/out"))"; fi
+
+# --- no authenticated gh: nothing is created ----------------------------------
+h82_reset
+H82_GH_UNAUTH=1
+h159_run
+if [ "$H82_RC" -ne 0 ] && grep -q 'not authenticated' "$H82/out" && ! grep -q '^AZ ' "$H82/argv.log"; then
+  ok "HAR-159: without an authenticated gh the step dies before any az call"
+else bad "HAR-159: an unauthenticated gh must stop the iOS step before az runs (rc=${H82_RC}, argv: $(cat "$H82/argv.log"))"; fi
+
+# --- API, web, iOS in main()'s order: every caller stays pre-authorized -------
+h82_reset; printf 'ACCEPTANCE_USER_TOTP_SECRET\n' > "$H82/secrets"
+h82_api_step; h159_rc1="$H82_RC"
+h82_run; h159_rc2="$H82_RC"
+h159_run
+if [ "$h159_rc1" -eq 0 ] && [ "$h159_rc2" -eq 0 ] && [ "$H82_RC" -eq 0 ] \
+   && jq -e --arg w "$H82_NEW_WEB" --arg i "$H159_IOS" --arg c "$AZURE_CLI_PUBLIC_CLIENT_ID" --arg s2 "$H82_SMOKE_2" --arg s "$H82_SCOPE" '
+        ([.[] | select(.delegatedPermissionIds | index($s)) | .appId] | sort) == ([$w, $i, $c, $s2] | sort)' \
+        "$H82/preauth.json" >/dev/null 2>&1; then
+  ok "HAR-159: after API, web and iOS steps the API pre-authorizes the SPA, the iOS app and every smoke-test id (merged)"
+else bad "HAR-159: a pre-authorization was lost (rc=${h159_rc1}/${h159_rc2}/${H82_RC}, preauth: $(cat "$H82/preauth.json"))"; fi
+if [ -s "$H82/grant" ] && [ -s "$H82/ios_grant" ] \
+   && grep -qF "DEV_WEB_CLIENT_ID	${H82_NEW_WEB}	" "$H82/vars" && grep -qF "DEV_IOS_CLIENT_ID	${H159_IOS}	" "$H82/vars"; then
+  ok "HAR-159: the SPA and the iOS app each get their own Graph grant and their own development variable"
+else bad "HAR-159: each client needs its own grant and variable (vars: $(cat "$H82/vars"))"; fi
+
+unset -f az gh h82_rest h82_reset h82_run h82_secret h82_count h82_web_patch h82_api_step h82_preauth_ok h159_run h159_ios_patch
 rm -rf "$H82"
 
 # --- HAR-125: an early match in a large input is a match, not "no match" -----
