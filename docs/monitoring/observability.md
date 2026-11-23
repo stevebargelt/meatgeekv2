@@ -27,7 +27,7 @@ MG-6 lands observability in three buckets. This section is the authoritative sta
 
 - **Bucket A — OTel instrumentation (IMPLEMENTED).** The OTel discipline described here is shipped across `data-pusher`, `device-controller`, and the `api` Functions app, plus this document. Both Go services run an OTel `TracerProvider` with `AlwaysSample` and a swappable span exporter (a no-op exporter offline; an OTLP/HTTP exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), and set W3C Trace Context as the global propagator. The Go OTLP exporter's operational target is the **OTel Collector** (`apps/infrastructure/otel-collector/`), reached via `OTEL_EXPORTER_OTLP_ENDPOINT`; the collector's `otlphttp` exporter posts to the full native-OTLP `traces_endpoint` URL on a **Data Collection Endpoint (DCE)** — routed by URL path to a **Data Collection Rule (DCR)** that lands in the workspace-based App Insights tables — authenticated by the `azure_auth` extension via a **user-assigned Container App managed identity** with an explicitly-configured `https://monitor.azure.com/.default` scope (Entra-only; App Insights `local_authentication_enabled` stays `false`) — App Insights does not accept raw OTLP, so the collector is the required translation hop. This native-OTLP forwarding leg is **authored + static-validated only, not operational**: live Go-span-to-App-Insights proof is gated on **MG-34** (secure off-VNet edge ingress + the live proof and negative RBAC check), which is itself **MG-24** (Container Apps environment)/**MG-25** (native-OTLP preview acceptance)-gated. The native-OTLP `traces_endpoint`, the explicit `azure_auth` scope (`https://monitor.azure.com/.default`), the `azapi` native-OTLP DCR shape (built-in `Microsoft-OTel-Traces-*` streams), and the pinned Contrib collector version (`0.151.0` by tag + digest; floor `>=0.132.0` native OTLP / `>=0.148.0` `azure_auth` syntax / `>0.150.0` outside advisory `GHSA-pjv4-3c63-699f`) are **DOC-VERIFIED against Microsoft primary sources but operationally unverified — to confirm at MG-25**. The Functions app runs the `@azure/monitor-opentelemetry` distribution with fixed-ratio 50% sampling. **Scaffolding for cross-hop propagation is implemented — not yet operational end-to-end:** both Go services install the W3C propagator and inject a `traceparent` onto outbound IoT Hub messages (a per-reading W3C trace is minted device-side), and a pure, unit-tested restore helper exists on the Functions side (`extractCorrelation` in `apps/api/src/shared/telemetry/correlation.ts`). But the ingest Function that would continue that trace — the live IoT-Hub receiver — is **not built** (Bucket C), so end-to-end `device-controller → data-pusher → IoT Hub → Functions` propagation is not yet exercised in a running system. See Bucket C for the MG-24 gate.
 - **Bucket B — Sentry org / project architecture (PENDING operator decision).** The iOS lane's `traceparent` injection contract is designable now (see [Sentry (iOS lane)](#sentry-ios-lane)), but the Sentry organization, project structure, and DSN specifics await an operator decision and are not yet wired.
-- **Bucket C — live Azure Monitor alerts + end-to-end trace smoke + live IoT-Hub receiver + live OTel Collector (BLOCKED).** Standing up live alerts, a real end-to-end trace smoke test, the live IoT-Hub receiver Function, and the OTel Collector itself is **blocked on the MG-24 greenfield bootstrap**. The collector directory (`apps/infrastructure/otel-collector/`) ships the config + deployment doc only — no Terraform there creates it, because the Container Apps environment it runs in does not exist until the bootstrap runs. The KQL, dashboard, and alert definitions below are authored against the standard dimensions but are not yet deployed against a live resource.
+- **Bucket C — end-to-end trace smoke + live IoT-Hub receiver + live OTel Collector (BLOCKED).** Live Azure Monitor alerts are no longer part of this bucket: the alerts in [Live alerts](#live-alerts-what-each-one-means-and-what-to-do) are live in dev, Terraform-managed in `apps/infrastructure/modules/monitoring/main.tf`. Standing up a real end-to-end trace smoke test, the live IoT-Hub receiver Function, and the OTel Collector itself is **blocked on the MG-24 greenfield bootstrap**. The collector directory (`apps/infrastructure/otel-collector/`) ships the config + deployment doc only — no Terraform there creates it, because the Container Apps environment it runs in does not exist until the bootstrap runs. The KQL and dashboard definitions below, and the KQL alerts under [Alerting Strategy](#alerting-strategy), are authored against the standard dimensions but are not yet deployed against a live resource.
 
 > **Env var by runtime — the connection string is not shared with the edge services.** The Functions app reads the Azure-standard `APPLICATIONINSIGHTS_CONNECTION_STRING` (Terraform-managed via the Flex `site_config.application_insights_connection_string` field, which Azure surfaces to the host as this env var — not an app setting) from the environment — never hardcoded — because it exports straight to App Insights through the Azure Monitor exporter. The two Go edge services do **not** read the connection string at all: they select export-vs-no-op on the presence of `OTEL_EXPORTER_OTLP_ENDPOINT` and, when it is set, send OTLP to the collector. The **collector** does **not** use `APPLICATIONINSIGHTS_CONNECTION_STRING` either: under the native-OTLP path its `otlphttp` exporter authenticates to Azure Monitor via the `azure_auth` extension (explicit `https://monitor.azure.com/.default` scope) backed by a **user-assigned managed identity** (Entra-only), so neither tier carries the App Insights connection string on the Go path. (The connection string is used only by the Functions app, for its own Azure Monitor exporter.)
 
@@ -557,7 +557,50 @@ customMetrics
 - **Dependency Failures**: CosmosDB, SignalR, IoT Hub failures
 - **Recovery Metrics**: Auto-recovery success rates
 
+## Live alerts: what each one means and what to do
+
+These are the alerts live in dev today. All of them are Terraform-managed in `apps/infrastructure/modules/monitoring/main.tf`. Every alert emails the action group `<prefix>-alerts` (in dev, `meatgeek-v2-dev-alerts`); the budgets email the same address (`admin_email`) directly. The conditions below are copied from `main.tf`.
+
+### `cosmos-429-rate` (severity 2)
+
+- **Condition:** Cosmos `TotalRequests` with `StatusCode` = `429`, `Count` > `50` over a 15-minute window (`PT15M`), checked every 5 minutes (`PT5M`).
+- **Means:** throttling is sustained, beyond the brief bursts a deploy's live acceptance suite causes, which the SDK retries. Dev runs on the Cosmos free tier at 400 RU/s, and single 429s there are normal.
+- **Do:** check `NormalizedRUConsumption`, and the 429s split by collection and operation (`TotalRequests` split by `CollectionName` and `OperationType`, filtered to `StatusCode` 429). Check `function-failure-rate` for requests that failed after retries. Find the caller that is hot. Do not raise dev throughput; dev stays on the free tier.
+- **Tuning evidence (HAR-155):** over 2026-11-16 to 2026-11-23, the old rule (any 429 in 5 minutes) would have fired 59 times and the new rule 0 times. The worst 15-minute window had 6 throttles.
+
+### `function-failure-rate` (severity 2)
+
+- **Condition:** App Insights `requests/failed`, `Count` > `5` over a 5-minute window (`PT5M`), checked every minute (`PT1M`).
+- **Means:** the API is failing requests (5xx, or 4xx that App Insights counts as failed).
+- **Do:** App Insights → Failures, grouped by operation name and result code. Check whether a deploy was running at the time: `gh run list --workflow "Deploy Dev App"`.
+
+### `signalr-connection-failure-rate` (severity 2)
+
+- **Condition:** SignalR `SystemErrors` (a percentage), `Maximum` > `5` over a 5-minute window (`PT5M`), checked every minute (`PT1M`).
+- **Means:** the SignalR service itself is erroring, so live updates to the web app stop.
+- **Do:** check the SignalR resource's Resource health, and its `allLogs` diagnostic logs in the Log Analytics workspace.
+
+### `ingestion-cap-reached` (severity 1)
+
+- **Condition:** workspace `Heartbeat`, `Count` ≤ `0` over a 15-minute window (`PT15M`), checked every 5 minutes (`PT5M`).
+- **Means, as designed:** workspace ingestion stopped, most likely because the daily cap was reached.
+- **This rule cannot fire today.** The `Heartbeat` metric only has data when VM or Arc agents send heartbeats, and nothing in this system does. The metric had no data points at all from 2026-11-16 to 2026-11-23.
+- **Do, if it ever fires:** check the workspace's Usage and estimated costs, and its daily cap setting.
+
+### `role-assignment-write`, `user-assigned-identity-write`, `cosmos-sql-role-assignment-write` (activity log)
+
+- **Condition:** an `Administrative` activity-log event in the workload resource group for, respectively, `Microsoft.Authorization/roleAssignments/write`, `Microsoft.ManagedIdentity/userAssignedIdentities/write`, and `Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments/write`.
+- **Means:** an RBAC role assignment, a user-assigned identity, or a Cosmos data-plane role assignment was written in the resource group. These are expected when a Terraform apply adds one, and when the owner grants one by hand.
+- **Do:** match the event's caller and time to an `Apply Dev Infrastructure` run (`gh run list --workflow "Apply Dev Infrastructure"`) or to a known manual grant. Anything else is out-of-band persistence; see the MG-23 context in [CI/CD — Dev infrastructure (MG-23)](../development/ci-cd.md#dev-infrastructure--automated-gitops-reconciliation-mg-23).
+
+### Budgets
+
+- **Condition:** the resource-group budget `<prefix>-budget` (`budget_limit`), plus the subscription credit budget `<prefix>-credit-budget` (`secondary_budget_limit`) only when `manage_subscription_budget` is set. Each emails when monthly cost is > `80`% and > `100`% of its amount.
+- **Do:** Cost Management → Cost analysis, cost by resource.
+
 ## Alerting Strategy
+
+The KQL alerts in this section are the target design and are not deployed; the live set is [Live alerts](#live-alerts-what-each-one-means-and-what-to-do) above.
 
 ### **Critical Alerts**
 
