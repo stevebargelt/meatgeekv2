@@ -19,7 +19,7 @@ The [`edge`](https://stevebargelt.github.io/meatgeekv2/#/view/edge/) view shows 
 **Device Controller (Enhanced)**:
 - Reads 5 RTD sensors every 10ms
 - Maintains 100-sample averaging queues
-- Writes a startup banner to the LCD (the per-probe readout is commented out in `main.go`)
+- Writes a startup banner to the 20x4 LCD, then every 5 s rewrites it with the four probes, the grill, and the time
 - Provides HTTP API for Data Pusher
 
 **Data Pusher Service (New)**:

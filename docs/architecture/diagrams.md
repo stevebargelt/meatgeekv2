@@ -201,7 +201,8 @@ with the device certificate)`" .-> Meatgeek.Cloud.Ingest.Dps
 identity (X.509 thumbprint)`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Edge.Controller -. "`OTLP/HTTP`" .-> Meatgeek.Cloud.Observability.Collector
   Meatgeek.Edge.Pusher -. "`OTLP/HTTP`" .-> Meatgeek.Cloud.Observability.Collector
-  Meatgeek.Cloud.Api -. "`traces and logs, samplingRatio 0.5`" .-> Meatgeek.Cloud.Observability.Appinsights
+  Meatgeek.Cloud.Api -. "`traces, logs (samplingRatio
+0.5) and metrics (unsampled)`" .-> Meatgeek.Cloud.Observability.Appinsights
   Meatgeek.Cloud.Api -. "`diagnostic settings`" .-> Meatgeek.Cloud.Observability.Logs
   Meatgeek.Cloud.Data -. "`diagnostic settings`" .-> Meatgeek.Cloud.Observability.Logs
   Meatgeek.Cloud.Data -. "`cosmos-429-rate`" .-> Meatgeek.Cloud.Observability.MetricAlerts
@@ -532,7 +533,8 @@ update, release (delete)`" .-> MeatgeekCloudData.Devices
   Delivery -. "`[...]`" .-> Entra
   MeatgeekWeb -. "`auth code + PKCE
 (MSAL), no secret`" .-> Entra
-  MeatgeekCloudApi.Otel -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloudObservability.Appinsights
+  MeatgeekCloudApi.Otel -. "`traces, logs (samplingRatio
+0.5) and metrics (unsampled)`" .-> MeatgeekCloudObservability.Appinsights
   Delivery -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudApi.Cooks -. "`set twin desired properties`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudApi.Devices -. "`GET reads connectionState,
@@ -734,7 +736,8 @@ graph TB
   subgraph MeatgeekCloudIngest["`Ingest`"]
     MeatgeekCloudIngest.Iothub@{ shape: rectangle, label: "IoT Hub" }
   end
-  MeatgeekCloudApi -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloudObservability.Appinsights
+  MeatgeekCloudApi -. "`traces, logs (samplingRatio
+0.5) and metrics (unsampled)`" .-> MeatgeekCloudObservability.Appinsights
   MeatgeekCloudApi -. "`diagnostic settings`" .-> MeatgeekCloudObservability.Logs
   MeatgeekCloudData -. "`diagnostic settings`" .-> MeatgeekCloudObservability.Logs
   MeatgeekCloudData -. "`cosmos-429-rate`" .-> MeatgeekCloudObservability.MetricAlerts
@@ -892,7 +895,8 @@ identity (X.509 thumbprint)`" .-> DevRg.Iothub
   DevRg.Eventhub -. "`Event Hub trigger`" .-> DevRg.Api
   DevRg.Api -. "`[...]`" .-> DevRg.Cosmos
   DevRg.Api -. "`[...]`" .-> DevRg.Signalr
-  DevRg.Api -. "`traces and logs, samplingRatio 0.5`" .-> DevRg.Appinsights
+  DevRg.Api -. "`traces, logs (samplingRatio
+0.5) and metrics (unsampled)`" .-> DevRg.Appinsights
   DevRg.Api -. "`diagnostic settings`" .-> DevRg.Logs
   DevRg.Cosmos -. "`change feed (leases)`" .-> DevRg.Api
   DevRg.Cosmos -. "`diagnostic settings`" .-> DevRg.Logs
@@ -1129,7 +1133,8 @@ graph LR
   MeatgeekCloudRealtime@{ shape: rectangle, label: "SignalR Service" }
   MeatgeekWebCooks -. "`POST /cooks`" .-> MeatgeekCloudApiCooks
   MeatgeekCloudApiCooks -. "`cook and device lock`" .-> MeatgeekCloudDataCooks
-  MeatgeekCloudApiCooks -. "`set desired: activeCookId, correlationId`" .-> MeatgeekCloudIngestIothub
+  MeatgeekCloudApiCooks -. "`set desired: activeCookId,
+correlationId, cookUpdatedAt`" .-> MeatgeekCloudIngestIothub
   MeatgeekCloudIngestIothub -. "`desired properties`" .-> MeatgeekEdgePusherTwin
   MeatgeekEdgePusherTwin -. "`persist cook, correlation id, version`" .-> MeatgeekEdgePusherSession
   MeatgeekEdgePusherTwin -. "`reported: applied`" .-> MeatgeekCloudIngestIothub
@@ -1148,8 +1153,8 @@ Steps:
 
 - **1.** cooks (`meatgeek.web.cooks`) → cooks (`meatgeek.cloud.api.cooks`): POST /cooks. Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The web app's start form sends a client-generated id, one per intent, so a retried submit starts the cook once. The ownership check is one point read on `devices`: a foreign or unclaimed device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live callers are the web app and the acceptance proofs.
 - **2.** cooks (`meatgeek.cloud.api.cooks`) → cooks (`meatgeek.cloud.data.cooks`): cook and device lock. One transactional batch in the caller partition: the cook and its device lock commit together, so a device holds at most one active cook (MG-84).
-- **3.** cooks (`meatgeek.cloud.api.cooks`) → IoT Hub: set desired: activeCookId, correlationId. After the write, synced to the device lock under the twin etag (`If-Match`): GET the twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Managed identity with `IoT Hub Twin Contributor`. A failed sync answers 503 `DEVICE_TWIN_UPDATE_FAILED`; the cook stays written and a retry of the same request heals the twin.
-- **4.** IoT Hub → twin client: desired properties. Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up. Patches apply in `$version` order.
+- **3.** cooks (`meatgeek.cloud.api.cooks`) → IoT Hub: set desired: activeCookId, correlationId, cookUpdatedAt. After the write, synced to the device lock under the twin etag (`If-Match`): GET the twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Every cook PATCH stamps `cookUpdatedAt`, the API's write time (HAR-152). Managed identity with `IoT Hub Twin Contributor`. A failed sync answers 503 `DEVICE_TWIN_UPDATE_FAILED`; the cook stays written and a retry of the same request heals the twin.
+- **4.** IoT Hub → twin client: desired properties. Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up. Patches apply in `$version` order. The twin client logs `applyLagMs`, the time from desired `cookUpdatedAt` to the apply (HAR-150, HAR-152); on a full GET it falls back to the twin's `$metadata`, which an MQTT patch never carries.
 - **5.** twin client → cooksession: persist cook, correlation id, version. Written to `/var/lib/meatgeek-pusher/cooksession.json`. From then every reading carries this cook id and correlation id. (Opens `telemetry`.)
 - **6.** twin client → IoT Hub: reported: applied. `activeCookId`, `correlationId` and `appliedDesiredVersion`: the acknowledgement. Proven live by the `device twin` acceptance proof, with the device offline when the cook starts.
 - **7.** cooks (`meatgeek.cloud.api.cooks`) → SignalR Service: cook_started to the owning userId. Sent only after the write succeeds, on hub `temperatureHub`, to the caller's `userId` ("<tid>:<oid>"), never to the deviceId (MG-30). The envelope carries `correlation: CorrelationContext { id }`, the same id the twin carries. The `signalr isolation` proof receives it as the owner. The web live panel listens for `temperature` and `cook_stopped`: when the cook is stopped, `cook_stopped` reaches it the same way and the page shows the cook as ended.
