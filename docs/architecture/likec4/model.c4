@@ -42,7 +42,8 @@ model {
         description '''
           Reads the five RTD sensors (grill and four probes) every 10 ms, averages each over
           5 s, and serves the current status on a local HTTP API. At startup it writes a fixed
-          banner to an I2C LCD; the per-probe LCD readout is commented out. Its OpenTelemetry Go
+          banner to a 20x4 I2C LCD, then every 5 s rewrites it with the four probes, the grill,
+          and the time. Its OpenTelemetry Go
           SDK samples every span (AlwaysSample) and exports only when
           OTEL_EXPORTER_OTLP_ENDPOINT is set. The HTTP API (internal/deviceapi, HAR-148)
           supplies an empty {} body when a command request has none, so the pusher's body-less
