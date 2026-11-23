@@ -15,6 +15,7 @@ import (
 	dc_i2c "github.com/davecheney/i2c"
 	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
 	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/deviceapi"
+	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/rtd"
 	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/telemetry"
 
 	"go.opentelemetry.io/otel"
@@ -38,6 +39,14 @@ var smoker = deviceapi.NewStore(deviceapi.Status{
     FireHealthy: true,
     Mode: "test",
     SetPoint: 200,
+    // No probe has a reading until its first window is evaluated.
+    Temps: deviceapi.Temps{
+        GrillTemp: math.NaN(),
+        Probe1Temp: math.NaN(),
+        Probe2Temp: math.NaN(),
+        Probe3Temp: math.NaN(),
+        Probe4Temp: math.NaN(),
+    },
 })
 
 func main() {
@@ -99,11 +108,12 @@ func main() {
 
     RTDs := []*RTD{}
     for i := 0; i<5 ;i++ {
-        rtd := new(RTD)
-        rtd.title = "P" + strconv.Itoa(i)
-        rtd.channel = i 
-        rtd.resistanceQueue = *queue.New(100)
-        RTDs = append(RTDs, rtd)
+        probe := new(RTD)
+        probe.title = "P" + strconv.Itoa(i)
+        probe.channel = i
+        probe.resistanceQueue = *queue.New(100)
+        probe.temp = math.NaN()
+        RTDs = append(RTDs, probe)
     }
     RTDs[0].title = "Grill"
     
@@ -118,37 +128,30 @@ func main() {
 
     work := func() {
         gobot.Every(10*time.Millisecond, func() {
-        for _, rtd := range RTDs {
-            result, err := adc.Read(rtd.channel)
+        for _, probe := range RTDs {
+            result, err := adc.Read(probe.channel)
 
             if err != nil {
                 fmt.Println("ERROR: ", err.Error())
             }
             if result <=0 {
-                //fmt.Printf("%s not connected. result = %d \n", rtd.title, result)
-                rtd.resistanceQueue.Push(0)
+                // Not connected (or floating low): a zero sample makes the
+                // whole window "no reading" (see rtd.Evaluate).
+                probe.resistanceQueue.Push(0.0)
             } else {
-                var resistance = GetResistance(result)
-                rtd.resistanceQueue.Push(resistance)
-                //fmt.Printf("%s resistance %f\n", rtd.title, resistance)
+                probe.resistanceQueue.Push(GetResistance(result))
             }
-        } 
+        }
 
         })
         gobot.Every(5000*time.Millisecond, func() {
-            for _, rtd := range RTDs {
-                resAve := rtd.resistanceQueue.Average()
-                fmt.Printf("%s resAverageQueue %f\n", rtd.title, resAve)
-                if !math.IsNaN(resAve) && resAve > 0.0 {
-                    rtd.temp = GetTempFahrenheitFromResistance(resAve) + rtd.tempCorrection
-                    // fmt.Printf("%s Temp F %f\n", rtd.title, rtd.temp)
-                    // SetPosition(*lcd, i, 0)
-                    // fmt.Fprint(lcd, rtd.title,"Temp F ", math.Round(rtd.temp))
-                } else {
-                    // fmt.Printf("%s unplugged\n", rtd.title)
-                    // SetPosition(*lcd, i, 0)
-                    // fmt.Fprint(lcd, rtd.title, "Unplg")
-                }
+            for _, probe := range RTDs {
+                // A window gives a temperature only if every sample is a
+                // plausible probe resistance; otherwise the probe has no
+                // reading (NaN: null in get_status, "unplg" on the LCD). The
+                // previous value is never kept (HAR-151).
+                probe.temp = rtd.Reading(rtd.Samples(probe.resistanceQueue.Values()), probe.tempCorrection)
+                fmt.Printf("%s resAverageQueue %f temp %f\n", probe.title, probe.resistanceQueue.Average(), probe.temp)
             }
             smoker.Update(func(s *deviceapi.Status) {
                 s.Temps.GrillTemp = RTDs[0].temp
@@ -198,22 +201,13 @@ func GetResistance(adcValue int) (float64) {
     return R
 }
 
-func GetTempFahrenheitFromResistance(resistance float64) (float64) {
-    // fmt.Printf("GetTempFahrenheitFromResistance: resistance=%f\n", resistance)
-    var A float64 = 3.90830e-3 // Coefficient A
-    var B float64 = -5.775e-7 // Coefficient B
-    var ReferenceResistor float64 = 1000
-    var TempCelsius float64 = (-A + math.Sqrt(A * A - 4 * B * (1 - resistance / ReferenceResistor))) / (2 * B);
-    return TempCelsius * 9 / 5 + 32;
-}
-
 ///RTD is a Resisteance Temperature Detector
 type RTD struct {  
     title string
     channel int
     resistanceQueue queue.Queue
     tempCorrection float64
-    temp float64
+    temp float64 // Fahrenheit, corrected; NaN when the probe has no reading
 }
 
 func check(err error) {
@@ -260,10 +254,8 @@ func justifyWithSpaces(string1, string2 string, maxChars int) (string) {
     return (fmt.Sprintf("%-*v%v", spacesCount, string1, string2))
 }
 
+// formatTemp shows "unplg" for a probe with no reading (NaN), and the
+// temperature otherwise, including one at or below 0 °F.
 func formatTemp(title string, temp float64) (string) {
-    if temp > 0.0 {
-        return fmt.Sprintf("%s %.0f F", title, math.Round(temp))
-    } else {
-        return fmt.Sprintf("%s unplg", title)
-    }
+    return rtd.Format(title, temp)
 }

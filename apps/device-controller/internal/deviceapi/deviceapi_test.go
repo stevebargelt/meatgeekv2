@@ -41,9 +41,11 @@ const (
 )
 
 // fixedSource is a StatusSource with fixed temperatures: what the owner's Pi
-// read on 2026-11-23 (grill 64, P1 66, P2 66), with P3 unplugged (0) and P4
-// reading NaN (served as null). Every field is fixed, so the body has nothing
-// variable to normalise.
+// read on 2026-11-23 (grill 64, P1 66, P2 66), with P3 reading exactly 0 °F
+// (a real, in-range reading: since HAR-151 an unplugged probe is never 0) and
+// P4 with no reading (NaN, served as null). Every field is fixed, so the body
+// has nothing variable to normalise. Every reading is inside -40..800 °F, so
+// the golden file did not change for HAR-151.
 type fixedSource struct{}
 
 func (fixedSource) Status() Status {
