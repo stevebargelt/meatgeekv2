@@ -1,11 +1,17 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
 import type { ClaimCodeLine, NoClaimYet } from './lib/claim-code';
 import {
+  CERT_FILE,
+  certificatePath,
   claimDevice,
   claimStandingDevice,
   cleanupFreshDevice,
   enrolFreshDevice,
   FreshDevice,
   freshDeviceId,
+  IDENTITY_DIR,
   prepareClaim,
   setEnrolmentFs,
 } from './lib/enrolment';
@@ -162,6 +168,24 @@ const DIR = `/fake-tmp/${DEVICE_ID}-0`;
 const STATE = `${DIR}/state`;
 const fresh: FreshDevice = { deviceId: DEVICE_ID, dir: DIR, stateDir: STATE };
 
+describe('certificatePath', () => {
+  // The live run of 2026-11-23 (Deploy Dev App 45108600912) failed every
+  // fresh device with "cannot read the certificate file <state>/device.crt":
+  // simdevice writes it under identity/. The fakes here copy the layout, so
+  // only the device's own code can say where the file is.
+  it('is where simdevice identity init writes it (data-pusher identity.go)', () => {
+    const source = readFileSync(
+      join(__dirname, '../../data-pusher/internal/identity/identity.go'),
+      'utf8'
+    );
+    const constant = (name: string) =>
+      new RegExp(`^\\s*${name}\\s*=\\s*"([^"]+)"`, 'm').exec(source)?.[1];
+    expect(constant('DirName')).toBe(IDENTITY_DIR);
+    expect(constant('CertFile')).toBe(CERT_FILE);
+    expect(certificatePath('/s')).toBe('/s/identity/device.crt');
+  });
+});
+
 describe('freshDeviceId', () => {
   it('is acceptance-<label>-<runId>, a valid device id', () => {
     expect(freshDeviceId({ runId: RUN_ID }, 'temp')).toBe(DEVICE_ID);
@@ -183,7 +207,7 @@ describe('enrolFreshDevice', () => {
     expect(tracked).toEqual([fresh]);
     expect(calls).toEqual([
       `simdevice[${DEVICE_ID}] identity init --device-id ${DEVICE_ID} --state-dir ${STATE}`,
-      `enrol-device.sh --device-id ${DEVICE_ID} --certificate ${STATE}/device.crt`,
+      `enrol-device.sh --device-id ${DEVICE_ID} --certificate ${STATE}/identity/device.crt`,
       `simdevice[${DEVICE_ID}] --twin --count 0 --timeout 2m`,
     ]);
   });
