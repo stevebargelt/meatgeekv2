@@ -157,6 +157,59 @@ run "function_failure_alert_targets_app_insights_requests_failed" {
   }
 }
 
+# HAR-155 — the Cosmos throttling alert fires only on sustained throttling.
+# A single 429 is expected on the 400 RU/s free tier during deploys (the SDK
+# retries it); the alert needs more than 50 throttled requests in 15 minutes.
+run "cosmos_429_alert_fires_only_on_sustained_throttling" {
+  command = plan
+
+  assert {
+    condition     = one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).metric_namespace == "Microsoft.DocumentDB/databaseAccounts"
+    error_message = "cosmos_429_rate metric_namespace must be Microsoft.DocumentDB/databaseAccounts"
+  }
+  assert {
+    condition     = one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).metric_name == "TotalRequests"
+    error_message = "cosmos_429_rate metric_name must be TotalRequests"
+  }
+  assert {
+    condition     = one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).aggregation == "Count"
+    error_message = "cosmos_429_rate aggregation must be Count"
+  }
+  assert {
+    condition     = one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).operator == "GreaterThan"
+    error_message = "cosmos_429_rate operator must be GreaterThan"
+  }
+  assert {
+    condition     = one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).threshold == 50
+    error_message = "cosmos_429_rate threshold must be 50 (single 429s are expected and retried by the SDK)"
+  }
+  # Exactly one dimension: StatusCode Include ["429"].
+  assert {
+    condition     = length(one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).dimension) == 1
+    error_message = "cosmos_429_rate must carry exactly one dimension"
+  }
+  assert {
+    condition     = one(one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).dimension).name == "StatusCode" && one(one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).dimension).operator == "Include" && one(one(azurerm_monitor_metric_alert.cosmos_429_rate.criteria).dimension).values == tolist(["429"])
+    error_message = "cosmos_429_rate dimension must be StatusCode Include [\"429\"]"
+  }
+  assert {
+    condition     = azurerm_monitor_metric_alert.cosmos_429_rate.window_size == "PT15M" && azurerm_monitor_metric_alert.cosmos_429_rate.frequency == "PT5M"
+    error_message = "cosmos_429_rate must use window_size PT15M / frequency PT5M"
+  }
+  assert {
+    condition     = azurerm_monitor_metric_alert.cosmos_429_rate.severity == 2
+    error_message = "cosmos_429_rate severity must stay 2"
+  }
+  assert {
+    condition     = length(azurerm_monitor_metric_alert.cosmos_429_rate.action) == 1
+    error_message = "cosmos_429_rate must have exactly one action block"
+  }
+  assert {
+    condition     = strcontains(azurerm_monitor_metric_alert.cosmos_429_rate.description, "50") && strcontains(azurerm_monitor_metric_alert.cosmos_429_rate.description, "15 minutes")
+    error_message = "cosmos_429_rate description must state the rule: more than 50 in 15 minutes"
+  }
+}
+
 # MG-23 F5 — the three out-of-band-persistence Activity Log alerts.
 #
 # These are the compensating DETECTIVE control for what the MG-23 final drift plan

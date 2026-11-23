@@ -206,21 +206,24 @@ resource "azurerm_monitor_metric_alert" "function_failure_rate" {
   tags = var.tags
 }
 
+# Cosmos throttling fires only when sustained: more than 50 429s in 15 minutes.
+# Single 429s are expected on the 400 RU/s free tier (the SDK retries them), and
+# 50 in 15 minutes is 8x the worst 15-minute window seen across a week of deploys.
 resource "azurerm_monitor_metric_alert" "cosmos_429_rate" {
   name                = "${var.resource_prefix}-cosmos-429-rate"
   resource_group_name = var.resource_group_name
   scopes              = [var.cosmos_db_id]
-  description         = "Any Cosmos DB 429 throttling responses over a 5m window"
+  description         = "Cosmos DB refused more than 50 requests with 429 (throttled: over the provisioned RU/s) in 15 minutes. Brief throttling during deploys is normal and the SDK retries it. This much, sustained, means users see slow or failed reads and writes. Check NormalizedRUConsumption and which collection and operation are throttled; also check function-failure-rate for requests that failed after retries."
   severity            = 2
-  frequency           = "PT1M"
-  window_size         = "PT5M"
+  frequency           = "PT5M"
+  window_size         = "PT15M"
 
   criteria {
     metric_namespace = "Microsoft.DocumentDB/databaseAccounts"
     metric_name      = "TotalRequests"
     aggregation      = "Count"
     operator         = "GreaterThan"
-    threshold        = 0
+    threshold        = 50
 
     dimension {
       name     = "StatusCode"
