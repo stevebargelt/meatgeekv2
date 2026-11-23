@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useApi } from '../api/api-context';
 import type { Cook, Device } from '../api/client';
 import { problemFromError, problemFromResponse, type ApiProblem } from '../api/problem';
 import { ProblemMessage } from '../api/problem-message';
 import { DeviceRow } from './device-row';
-import { RegisterDeviceForm } from './register-device-form';
 
 type ListState =
   | { status: 'loading' }
@@ -26,6 +26,15 @@ export function DevicesPage() {
   const deviceGone = useCallback((problem: ApiProblem) => {
     setNotice(problem);
     setReloads(n => n + 1);
+  }, []);
+  // 204 from DELETE /devices/{id}: the device leaves the list, with no re-read.
+  const released = useCallback((deviceId: string) => {
+    setNotice(null);
+    setState(current =>
+      current.status === 'loaded'
+        ? { ...current, devices: current.devices.filter(device => device.id !== deviceId) }
+        : current
+    );
   }, []);
 
   useEffect(() => {
@@ -49,7 +58,7 @@ export function DevicesPage() {
   }, [api, reloads]);
 
   // One GET /cooks?status=active for the page, not one call per device. It is
-  // not re-read when the device list is: renaming or registering a device does
+  // not re-read when the device list is: renaming or releasing a device does
   // not start or stop a cook. A user has at most one active cook per device;
   // 100 is the API's largest page.
   const [activeCooks, setActiveCooks] = useState<ActiveCooks>(undefined);
@@ -78,6 +87,9 @@ export function DevicesPage() {
   return (
     <section className="devices">
       <h1>Devices</h1>
+      <p>
+        <Link to="/devices/claim">Claim a device</Link>
+      </p>
       {notice && <ProblemMessage problem={notice} />}
       {state.status === 'loaded' && activeCooks && 'problem' in activeCooks && (
         <ProblemMessage
@@ -91,9 +103,9 @@ export function DevicesPage() {
         state={state}
         activeCooks={activeCooks instanceof Map ? activeCooks : undefined}
         onChanged={refresh}
+        onReleased={released}
         onNotFound={deviceGone}
       />
-      <RegisterDeviceForm onRegistered={refresh} />
     </section>
   );
 }
@@ -102,10 +114,11 @@ interface DeviceListProps {
   state: ListState;
   activeCooks: Map<string, Cook> | undefined;
   onChanged: () => void;
+  onReleased: (deviceId: string) => void;
   onNotFound: (problem: ApiProblem) => void;
 }
 
-function DeviceList({ state, activeCooks, onChanged, onNotFound }: DeviceListProps) {
+function DeviceList({ state, activeCooks, onChanged, onReleased, onNotFound }: DeviceListProps) {
   if (state.status === 'loading') {
     return <p className="muted">Loading devices…</p>;
   }
@@ -113,7 +126,9 @@ function DeviceList({ state, activeCooks, onChanged, onNotFound }: DeviceListPro
     return <ProblemMessage problem={state.problem} />;
   }
   if (state.devices.length === 0) {
-    return <p className="muted">You have no devices yet. Register one below.</p>;
+    return (
+      <p className="muted">You have no devices yet. Claim one with the code your device shows.</p>
+    );
   }
   return (
     <table className="device-table">
@@ -133,6 +148,7 @@ function DeviceList({ state, activeCooks, onChanged, onNotFound }: DeviceListPro
             device={device}
             activeCook={activeCooks?.get(device.id)}
             onChanged={onChanged}
+            onReleased={onReleased}
             onNotFound={onNotFound}
           />
         ))}

@@ -2,7 +2,7 @@
 
 `apps/web` is the React (Vite) web client. It signs in with Entra ID, calls the
 API through a client generated from the OpenAPI contract, and today manages
-devices (list, register, rename) and cooks (start from a device, list, open,
+devices (list, claim with the code the device shows, rename, release) and cooks (start from a device, list, open,
 stop), shows an active cook's readings live over SignalR, and draws each
 cook's temperatures as one chart.
 
@@ -66,14 +66,59 @@ Errors follow the API's flat `{error, message, requestId}` body. The UI shows
 
 ## Pages
 
-| Route        | File                             | What it does                                             |
-| ------------ | -------------------------------- | -------------------------------------------------------- |
-| `/`          | `src/devices/devices-page.tsx`   | Devices: list, register, rename, start a cook            |
-| `/cooks`     | `src/cooks/cooks-page.tsx`       | Cooks list, newest first, with device and status filters |
-| `/cooks/:id` | `src/cooks/cook-detail-page.tsx` | One cook, its chart, and Stop while it is active         |
-| `*`          |                                  | Redirects to `/`                                         |
+| Route            | File                                | What it does                                                      |
+| ---------------- | ----------------------------------- | ----------------------------------------------------------------- |
+| `/`              | `src/devices/devices-page.tsx`      | Devices: list, rename, release, start a cook                      |
+| `/devices/claim` | `src/devices/claim-device-page.tsx` | Claim a device with its claim code (`?deviceId=` prefills the id) |
+| `/cooks`         | `src/cooks/cooks-page.tsx`          | Cooks list, newest first, with device and status filters          |
+| `/cooks/:id`     | `src/cooks/cook-detail-page.tsx`    | One cook, its chart, and Stop while it is active                  |
+| `*`              |                                     | Redirects to `/`                                                  |
 
 Times show in the browser's local time zone.
+
+### Claim a device (`/devices/claim`)
+
+A user owns a device only by proving they hold it (goal HAR-130): the device
+mints a claim code and shows it (the onboarding command prints it), and the
+user types it here. The devices page links here with **Claim a device**; there
+is no other way to add a device in the app, and the app never calls
+`POST /devices`. The onboarding command prints
+`<web origin>/devices/claim?deviceId=<id>`, which prefills the device ID. The
+code is never put in a URL.
+
+The fields: **Device ID** (required, `^[A-Za-z0-9._:-]{1,128}$`), **Claim
+code** (required), **Name** (required, 1-100 characters after trimming) and
+**Location** (optional). There is no model: the API stores `MeatGeek`. The
+code field shows what is typed upper case, in groups of four
+(`XXXX-XXXX-XXXX`), whatever spaces or hyphens were typed, keeping the caret
+after the same characters (`formatClaimCode` in `src/devices/validation.ts`);
+it is `autocomplete="off"` and `spellcheck="false"`. The code is sent as shown;
+the API normalizes it and judges it.
+
+| Answer of `POST /devices/claim` | The form                                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| 201, or 200 (a retry)           | Clears the code field and goes to `/`, which lists the device                                                                         |
+| 403 `CLAIM_REFUSED`             | "That code doesn't match this device, or it has expired or been used. Run the setup command on the device again to get a fresh code." |
+| 409 `DEVICE_CONFLICT`           | "You already have a device with that name."                                                                                           |
+| 400                             | The API's message                                                                                                                     |
+| 503                             | "The device service is busy — try again."                                                                                             |
+
+Every answer keeps the request id visible. The code lives only in the form's
+state: not in a store, the URL or local storage, and nothing logs it.
+
+### Release a device (devices page)
+
+Each device row has **Release**, which asks first: "Release <name>? You'll
+need a new code from the device to claim it again." **Yes, release** sends
+`DELETE /devices/{id}`.
+
+| Answer            | The row                                                                |
+| ----------------- | ---------------------------------------------------------------------- |
+| 204               | Leaves the list (no re-read)                                           |
+| 409 `COOK_ACTIVE` | "Stop the active cook on this device before releasing it."             |
+| 503               | "The device service is busy — try again." **Release** is offered again |
+| 404               | Says the device was not found and re-reads the list                    |
+| Anything else     | Shows the problem message and request id                               |
 
 ### Start a cook (devices page)
 
@@ -230,8 +275,9 @@ If Nx fails with a socket path that is too long (deep worktree paths), set
 
 `apps/web-e2e` is a Playwright project (Chromium only) with one test,
 `src/main-path.spec.ts`, of the main path in a real browser against the built
-app: sign in, the devices page, start a cook, the live panel waiting, one pushed
-reading making it live, the chart, stop, completed.
+app: sign in, claim the device (a wrong code refused first), start a cook, the
+live panel waiting, one pushed reading making it live, the chart, stop,
+completed, release the device.
 
 ```bash
 npx playwright install chromium        # once per machine

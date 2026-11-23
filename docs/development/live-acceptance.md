@@ -624,11 +624,13 @@ already served the expected commit (`web-deploy-wait-s 0`).
 | `microsoft-sign-in.ts` (`waitForTimeout(left + 250)`)                    | the next 30 s TOTP window, when the current one has under 5 s left                                                                  | at most 5.25 s, a fixed wait     | A code typed in its last seconds can expire before Microsoft checks it (HAR-99). It cannot time out; it notes `Waiting <s> s for the next TOTP window`. Never reached in the 19                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | — (a fixed wait). A code Microsoft still rejects: `Microsoft rejected the TOTP code (step totp): check ACCEPTANCE_USER_TOTP_SECRET and this machine's clock` |
 | `browser-proof.live.ts:APP_TIMEOUT_MS` (header `toHaveText`)             | the app header to show the signed-in user                                                                                           | 30 s                             | The app's own render after the redirect. Measured, with the `GET /devices` poll below: 0.8–11.0 s from Microsoft's last page                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | `the app header did not show the signed-in user within 30 s` (Playwright adds the locator and `Timeout 30000ms exceeded`)                                    |
 | `browser-proof.live.ts:APP_TIMEOUT_MS` (`GET /devices` poll)             | the page's `GET /devices` to answer `200`                                                                                           | 30 s                             | A dev Function App cold start: about 10 s in the 6 slow attempts (10.1–11.0 s with the header), matching the API suite's 9.4 s cold start above                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `GET /devices did not answer 200 within 30 s of sign-in`                                                                                                     |
-| `browser-proof.live.ts:APP_TIMEOUT_MS` (`waitForResponse`)               | the `POST /devices` the register form sends                                                                                         | 30 s                             | One API request, cold start included (as above). Only when the device is not registered yet; never ran in the 19                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | `POST /devices (registering <device>) did not answer within 30 s`                                                                                            |
-| `browser-proof.live.ts:APP_TIMEOUT_MS` (`GET /cooks?status=active` poll) | the page's active-cooks request to answer `200`                                                                                     | 30 s                             | As `GET /devices`. Measured: step 4 took 0.0 s in all 18 that reached it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `GET /cooks?status=active did not answer 200 within 30 s`                                                                                                    |
+| `browser-proof.live.ts:TWIN_SYNC_TIMEOUT` (simdevice `--timeout`)        | step 4's `simdevice --twin --count 0`: the twin's GETs and the claim report, in the child (Go); it exits `1` when one does not come | 60 s                             | HAR-141. The same bound the API suite's `--twin --count 0` checks use (the rows above): one MQTT connection and a twin round trip. The device is registered with DPS already (the job's enrol step), so the run reuses the cached assignment. Not measured yet: the first runs on `main` after HAR-141 measure it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | `the twin sync failed: simdevice exited 1: <stderr's first line, redacted>`                                                                                  |
+| `browser-proof.live.ts:APP_TIMEOUT_MS` (`waitForResponse`, claim)        | the `POST /devices/claim` the claim page sends                                                                                      | 30 s                             | HAR-141. One API request that reads and patches the device twin, cold start included (as `GET /devices`). Not measured yet                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | `POST /devices/claim (claiming <device>) did not answer within 30 s`                                                                                         |
+| `browser-proof.live.ts:APP_TIMEOUT_MS` (`waitForResponse`, release)      | the `DELETE /devices/{id}` **Yes, release** sends, in step 8 (and step 3 when an earlier run left the device claimed)               | 30 s                             | HAR-141. One API request that patches the device twin, as the claim. Not measured yet                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `DELETE /devices/<device> (releasing it) did not answer within 30 s`                                                                                         |
+| `browser-proof.live.ts:APP_TIMEOUT_MS` (`GET /cooks?status=active` poll) | the page's active-cooks request to answer `200`                                                                                     | 30 s                             | As `GET /devices`. Since HAR-141 only in step 3, when an earlier run left the device claimed. Measured (as the old step 4, before HAR-141): 0.0 s in all 18 that reached it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `GET /cooks?status=active did not answer 200 within 30 s`                                                                                                    |
 | `live-panel.ts:expectLivePanelConnected` (`APP_TIMEOUT_MS`)              | the cook page's live panel to be connected (`waiting`, `live`, or stale "No reading for …"); "Sign in again" fails at once          | 30 s, read every 250 ms          | Negotiate plus the SignalR start (HAR-101). Measured: the whole of step 5, form included, 0.4–2.9 s in the 17 passing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `the live panel is not connected within 30 s: not connected (data-state <state>, badge "<badge>")`; `… and has stopped trying: …` for "Sign in again"        |
 | `browser-proof.live.ts:PUSH_TIMEOUT_MS` (`waitForFunction`)              | the live panel to be `live` showing the value simdevice sent                                                                        | 60 s, read every 100 ms          | simdevice → IoT Hub → Event Hub → Function → SignalR → browser (HAR-99). Measured `web-push-ms` 416–19,748 ms over the 17 that got there; step 6 took 10.1–19.8 s                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | `The live panel did not show grill <value> within 60 s (it shows <value or nothing>, data-state <state>): <cause>`                                           |
-| `playwright.live.config.ts:expect.timeout`                               | every other `expect` in the proof without its own bound (`toBeVisible`, `toHaveURL`, `toHaveText`, `toHaveCount`)                   | 30 s each                        | Page renders and single API calls, as the rows above. Each message names what was expected, e.g. `starting the cook did not open its page`, `the cook did not complete`, `the live panel is still on screen after the stop`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Playwright: the expect's message, the locator, and `Timeout 30000ms exceeded`                                                                                |
+| `playwright.live.config.ts:expect.timeout`                               | every other `expect` in the proof without its own bound (`toBeVisible`, `toHaveURL`, `toHaveText`, `toHaveCount`, `toHaveValue`)    | 30 s each                        | Page renders and single API calls, as the rows above. Each message names what was expected, e.g. `starting the cook did not open its page`, `the cook did not complete`, `the live panel is still on screen after the stop`; since HAR-141 also `the claim page did not take ?deviceId=`, `a successful claim did not open the devices page`, `<device> is not on the devices page after the claim` and `<device> is still on the devices page after the release`                                                                                                                                                                                                                                                                                                                                                                                 | Playwright: the expect's message, the locator, and `Timeout 30000ms exceeded`                                                                                |
 | `playwright.live.config.ts:actionTimeout`, `navigationTimeout`           | every click, fill and `goto` on the app without its own bound                                                                       | 30 s each; 60 s for a navigation | The same app renders; the first `goto` loads the app from Vercel                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Playwright: the action, the locator or URL, and `Timeout <n>ms exceeded`                                                                                     |
 
 #### The sign-in diagnostic
@@ -908,7 +910,9 @@ a chart run fails as `simdevice (chart) → not started`.
 
 The suite above proves the API. The live browser proof (HAR-99, goal HAR-71)
 proves the **production web app**, `https://meatgeekv2-web.vercel.app`, end to
-end in a real browser:
+end in a real browser. Since HAR-141 the acceptance user claims the web device
+through the app's claim page with the code the device reports, and releases it
+at the end, so every run starts with the device unclaimed:
 
 1. **Wait for the build.** It polls `<web>/version.json` every 15 s, for at
    most 15 min, until the `sha` there is `EXPECTED_WEB_SHA` or a commit that
@@ -921,10 +925,26 @@ end in a real browser:
    **No** on "Stay signed in?". Signed in means the app header shows the user
    and `GET /devices` answered `200`. If Microsoft asks for no second factor,
    the run notes it and carries on.
-3. **Device.** If `ACCEPTANCE_WEB_DEVICE_ID` is not on the devices page, it is
-   registered through the page's register form.
-4. **Clean slate.** A cook left running on that device (a "Cooking: …" link)
-   is opened and stopped through the UI.
+3. **Clean slate.** If `ACCEPTANCE_WEB_DEVICE_ID` is still on the devices
+   page (an earlier run failed before it released it), a cook left running on
+   it (a "Cooking: …" link) is opened and stopped through the UI, since a
+   release is refused while a cook runs, and the device is then released
+   through the UI as in step 8.
+4. **Claim.** `simdevice --twin --count 0 --timeout 60s` in DPS mode (the
+   spawn `startSimDevice` in `apps/web-e2e/live/simdevice.ts` uses) does a full
+   twin sync, so a device released since its last sync sees the new claim
+   generation and mints a fresh code. `readClaimCode` (that is,
+   `simdevice claim-code --state-dir $ACCEPTANCE_WEB_STATE_DIR`) must then
+   report `unclaimed` with a code; `claimed` means another user holds the device, and the step says so.
+   The proof opens `/devices/claim?deviceId=<id>`, checks the id is
+   prefilled, types the code and the name `Web acceptance smoker`, and
+   submits: `POST /devices/claim` must answer `201`, the app go to `/` and the
+   device be listed. On a `403` the step asks `DELETE /devices/{id}` (with the
+   page's token) whether another user owns the device
+   (`403 DEVICE_NOT_OWNED`) or nobody does (`404`), and names which; the device is
+   not the acceptance user's, so that request changes nothing. Claiming needs
+   DPS mode: with `SIMDEVICE_WEB_CONNECTION_STRING` the step fails, naming the
+   variables to set instead.
 5. **Start a cook** through the UI, named `acceptance web <run id>` (the
    GitHub run id, or a UTC timestamp locally). Its page opens and the live
    panel is connected: `waiting`, `live`, or `stale` with a "No reading for …"
@@ -942,9 +962,15 @@ end in a real browser:
    (300.0 to 399.9 °F, from the run's start time; `simdevice --grill`). Within
    60 s the live panel must be `data-state="live"` showing that value.
 7. **Stop** through the UI: the cook shows `completed` and the live panel goes.
-8. **Cleanup.** If a cook from step 5 was not stopped on screen, it is stopped
+8. **Release** through the UI: **Release** on the device's row, then **Yes,
+   release** on its confirm step. `DELETE /devices/{id}` must answer `204` and
+   the row leave the list.
+9. **Cleanup.** If a cook from step 5 was not stopped on screen, it is stopped
    through the API with the token the page itself sent (taken from the page's
-   requests, never printed).
+   requests, never printed). If the device this run claimed was not released
+   on screen, it is released the same way (`DELETE /devices/{id}`; only the
+   status is logged). A device still left claimed is released by the next
+   run's step 3.
 
 It runs after every dev deploy, as the `web-acceptance` job in
 `.github/workflows/app-deploy-dev.yml` (HAR-101; see
@@ -971,30 +997,41 @@ All from the environment. Global setup checks them before a browser starts: a
 missing one fails the run at once, naming every missing variable, never a
 value.
 
-| Variable                          | Value                                                                                                       |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `WEB_BASE_URL`                    | The web app's origin. Optional, default `https://meatgeekv2-web.vercel.app`                                 |
-| `EXPECTED_WEB_SHA`                | The full 40-character commit production must serve (or contain), usually the merge commit                   |
-| `ACCEPTANCE_USER_UPN`             | The acceptance user's sign-in name, in the dev tenant                                                       |
-| `ACCEPTANCE_USER_PASSWORD`        | Its password                                                                                                |
-| `ACCEPTANCE_USER_TOTP_SECRET`     | Its authenticator-app secret (base32; spaces, dashes, lower case and `=` padding are accepted)              |
-| `ACCEPTANCE_WEB_DEVICE_ID`        | The IoT Hub device the proof sends as, owned by the acceptance user (`<simulated device id>-web`)           |
-| `SIMDEVICE_WEB_CONNECTION_STRING` | That device's connection string. Only simdevice's own environment gets it, as `SIMDEVICE_CONNECTION_STRING` |
-| `ACCEPTANCE_SIMDEVICE_BIN`        | Path to the built `simdevice`, the same binary the API suite uses                                           |
+| Variable                          | Value                                                                                                               |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `WEB_BASE_URL`                    | The web app's origin. Optional, default `https://meatgeekv2-web.vercel.app`                                         |
+| `EXPECTED_WEB_SHA`                | The full 40-character commit production must serve (or contain), usually the merge commit                           |
+| `ACCEPTANCE_USER_UPN`             | The acceptance user's sign-in name, in the dev tenant                                                               |
+| `ACCEPTANCE_USER_PASSWORD`        | Its password                                                                                                        |
+| `ACCEPTANCE_USER_TOTP_SECRET`     | Its authenticator-app secret (base32; spaces, dashes, lower case and `=` padding are accepted)                      |
+| `ACCEPTANCE_WEB_DEVICE_ID`        | The IoT Hub device the proof claims and sends as (`<simulated device id>-web`). Unclaimed, or the acceptance user's |
+| `SIMDEVICE_WEB_CONNECTION_STRING` | That device's connection string. Only simdevice's own environment gets it, as `SIMDEVICE_CONNECTION_STRING`         |
+| `ACCEPTANCE_SIMDEVICE_BIN`        | Path to the built `simdevice`, the same binary the API suite uses                                                   |
 
 HAR-138: in [DPS mode](#dps-mode-har-138) set `ACCEPTANCE_WEB_STATE_DIR` and
 `ACCEPTANCE_DPS_ID_SCOPE` (and optionally `ACCEPTANCE_DPS_ENDPOINT`) instead of
 `SIMDEVICE_WEB_CONNECTION_STRING`, which is then not required. Setting the
 connection string and the state dir together stops the proof before a browser
-starts, naming both.
+starts, naming both. HAR-141: the claim (step 4) needs DPS mode, because only
+there does the device mint a claim code; with the connection string the proof
+signs in and then fails at step 4.
 
-The proof writes none of the password, the TOTP secret or code, the connection
-string or any token anywhere. Playwright's trace, video, HTML report, failure
-page snapshot (`error-context.md`) and automatic screenshot are all off for it
-(`apps/web-e2e/playwright.live.config.ts`), because the sign-in pages show the
-UPN and what was typed. It takes its own full-page screenshot on failure, and
-only once sign-in has finished and the browser is back on the app; it is
-`failure.png` under `dist/.playwright/web-e2e-live/test-results/`.
+The proof writes none of the password, the TOTP secret or code, the claim
+code, the connection string or any token anywhere. Playwright's trace, video,
+HTML report, failure page snapshot (`error-context.md`) and automatic
+screenshot are all off for it (`apps/web-e2e/playwright.live.config.ts`),
+because the sign-in pages show the UPN and what was typed, and the claim form
+the claim code; none of them records the `POST /devices/claim` request body
+either. It takes its own full-page screenshot on failure, and only once
+sign-in has finished and the browser is back on the app, and never on the
+claim page (`/devices/claim`), whose code field may still hold the code: it
+logs `No failure screenshot: the claim page can show the claim code` instead.
+After a successful claim the app has blanked the field and left that page. The
+screenshot is `failure.png` under
+`dist/.playwright/web-e2e-live/test-results/`. The sign-in diagnostic is
+written during step 2, before the code is read in step 4, so it cannot hold
+it. The code is passed to the page by `fill` only: no `expect` and no log line
+names it.
 
 ### Secrets in the CI log
 
@@ -1017,7 +1054,12 @@ fails the job if one holds:
 - anything shaped like a device claim code (HAR-134, `XXXX-XXXX-XXXX` in
   Crockford base32, not inside a longer dashed id such as a UUID). Nobody knows
   a claim code before the device mints it, so its shape is what is matched
-  (HAR-138).
+  (HAR-138). That includes the bare value the proof types into the claim form
+  (HAR-141): it is the code exactly as `simdevice claim-code` printed it, in
+  that shape, so a line holding it alone, in a Playwright call log or as an
+  input's value is found. The check does not read the code from the state dir:
+  by the time it runs the device has been released and the code is used up,
+  and a shape match already finds any code, this run's or not.
 - a PEM private key block: a `-----BEGIN … PRIVATE KEY-----` line of any key
   type (HAR-139). Each simulated device now holds its own key.
 - a JSON `claimCode` member with a string value, whatever the value's shape
@@ -1057,17 +1099,18 @@ read -rs ACCEPTANCE_USER_PASSWORD && export ACCEPTANCE_USER_PASSWORD
 read -rs ACCEPTANCE_USER_TOTP_SECRET && export ACCEPTANCE_USER_TOTP_SECRET
 export ACCEPTANCE_WEB_DEVICE_ID=meatgeek-dev-simulated-smoker-web
 export ACCEPTANCE_SIMDEVICE_BIN="$PWD/apps/data-pusher/dist/simdevice"
-HUB_HOST=$(az iot hub list -g meatgeek-v2-dev-rg --query '[0].properties.hostName' -o tsv)
-export SIMDEVICE_WEB_CONNECTION_STRING=$(az iot hub device-identity connection-string show \
-  --hub-name "$HUB_HOST" --device-id "$ACCEPTANCE_WEB_DEVICE_ID" --auth-type login \
-  --query connectionString -o tsv)
+# DPS mode: the state dir of a device enrolled as in "DPS mode (HAR-138)" above.
+export ACCEPTANCE_WEB_STATE_DIR="$HOME/.meatgeek-acceptance/$ACCEPTANCE_WEB_DEVICE_ID"
+export ACCEPTANCE_DPS_ID_SCOPE=...       # the dev DPS's ID scope
 
 npx nx e2e-live web-e2e
 ```
 
 `read -rs` keeps the two secrets out of your shell history. The device must
-already exist in IoT Hub; the proof registers it with the API, not with the
-hub. The unit tests for the proof's pure parts (env checks, the build and
+already be enrolled in DPS, with its key in `ACCEPTANCE_WEB_STATE_DIR`
+([DPS mode](#dps-mode-har-138)); the proof claims it with the API, it does
+not enrol it. Run against the same device CI uses, the next CI run's step 3
+releases it if this run left it claimed. The unit tests for the proof's pure parts (env checks, the build and
 ancestor checks, the TOTP code) run with `npx nx test web-e2e` and need none of
 this.
 

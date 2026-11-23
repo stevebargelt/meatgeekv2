@@ -343,6 +343,34 @@ describe('web-acceptance-leak-check.cjs on a fixture directory (HAR-126)', () =>
     expect(r.stdout + r.stderr).not.toContain(claimCode);
   });
 
+  // HAR-141: the proof reads the code from the device's state dir and types it
+  // into the claim form, so a leak would be the bare typed value: on a line of
+  // its own, in a Playwright call log, or as an input's value. No line names
+  // it as a claim code, and the check cannot know the value in advance, so
+  // the shape alone has to find it.
+  it('finds a bare typed claim code, as the claim form would hold it', () => {
+    const typed = ['Q4ZN', '8WBD', '1KPC'].join('-');
+    const log = path.join(root, 'web-acceptance.log');
+    fs.writeFileSync(
+      log,
+      [
+        'PASS 3. clean slate (0.4s)',
+        typed,
+        `    - fill("${typed}")`,
+        `<input name="claim${'C'}ode" value="${typed}">`,
+        'PASS 4. claim the web device with its code (2.1s)',
+      ].join('\n')
+    );
+    const bad = diag('a-chromium', `${CLEAN}\n${typed}`);
+
+    const r = cli(env);
+
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('leak check: proof log: FAILED: claim code on line(s) 2, 3, 4');
+    expect(fs.existsSync(bad)).toBe(false);
+    expect(r.stdout + r.stderr).not.toContain(typed);
+  });
+
   // HAR-139: each simulated device holds its own private key, and its claim
   // code may be printed in a shape the claim-code scan does not know.
   it('finds a PEM private key block of any kind, in the log and in a diagnostic', () => {

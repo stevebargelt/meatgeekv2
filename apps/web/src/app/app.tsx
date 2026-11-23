@@ -8,6 +8,7 @@ import { createTokenGetter } from '../auth/token';
 import type { AppConfig } from '../config/config';
 import { CookDetailPage } from '../cooks/cook-detail-page';
 import { CooksPage } from '../cooks/cooks-page';
+import { ClaimDevicePage } from '../devices/claim-device-page';
 import { DevicesPage } from '../devices/devices-page';
 
 /** The signed-in frame (header, nav, routes) or the sign-in page. */
@@ -84,6 +85,7 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<DevicesPage />} />
+      <Route path="/devices/claim" element={<ClaimDevicePage />} />
       <Route path="/cooks" element={<CooksPage />} />
       <Route path="/cooks/:id" element={<CookDetailPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />

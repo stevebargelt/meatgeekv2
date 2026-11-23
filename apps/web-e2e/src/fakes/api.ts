@@ -9,6 +9,7 @@ export type Device = Schemas['Device'];
 export type Cook = Schemas['Cook'];
 export type CookChart = Schemas['CookChart'];
 export type StartCookRequest = Schemas['StartCookRequest'];
+export type ClaimDeviceRequest = Schemas['ClaimDeviceRequest'];
 export type SignalRConnectionInfo = Schemas['SignalRConnectionInfo'];
 export type TemperatureReading = Schemas['TemperatureReading'];
 
@@ -52,6 +53,11 @@ export interface FakeApiOptions {
   currentReading?: TemperatureReading;
   /** Answer POST /negotiate with this error status instead of the connection info. */
   negotiateError?: 401;
+  /**
+   * HAR-141: the device starts unclaimed, claimable with this code (as the
+   * device shows it, `XXXX-XXXX-XXXX`). Unset: it is the user's already.
+   */
+  claimCode?: string;
 }
 
 /**
@@ -63,7 +69,11 @@ export class FakeApi {
   readonly requests: RecordedRequest[] = [];
   readonly unexpected: string[] = [];
   readonly cooks = new Map<string, Cook>();
-  constructor(private readonly options: FakeApiOptions) {}
+  /** Whether the device is the user's: listed, and its routes answer. */
+  claimed: boolean;
+  constructor(private readonly options: FakeApiOptions) {
+    this.claimed = options.claimCode === undefined;
+  }
 
   async install(page: Page): Promise<void> {
     await page.route(`${this.options.apiBaseUrl}/**`, route => this.handle(route));
@@ -105,10 +115,26 @@ export class FakeApi {
     if (method === 'GET' && path === '/devices') {
       return reply(200, this.listDevices());
     }
+    if (method === 'POST' && path === '/devices/claim') {
+      const claimed = this.claim(recorded.body as ClaimDeviceRequest);
+      return claimed ? reply(201, claimed) : reply(403, claimRefused());
+    }
     if (method === 'GET' && (params = match(/^\/devices\/([^/]+)$/))) {
-      return params[0] === this.options.device.id
+      return this.owns(params[0])
         ? reply(200, this.getDevice())
         : reply(404, notFound('DEVICE_NOT_FOUND'));
+    }
+    if (method === 'DELETE' && (params = match(/^\/devices\/([^/]+)$/))) {
+      if (!this.owns(params[0])) return reply(404, notFound('DEVICE_NOT_FOUND'));
+      const cooking = [...this.cooks.values()].some(
+        c => c.deviceId === params?.[0] && c.status === 'active'
+      );
+      if (cooking) return reply(409, cookActive());
+      this.claimed = false;
+      return route.fulfill({
+        status: 204,
+        headers: { ...corsHeaders(route), 'x-request-id': randomUUID() },
+      });
     }
     if (method === 'GET' && path === '/cooks') {
       return reply(200, this.listCooks(url.searchParams.get('status')));
@@ -147,8 +173,38 @@ export class FakeApi {
     return reply(404, notFound('NOT_FOUND'));
   }
 
+  private owns(deviceId: string): boolean {
+    return this.claimed && deviceId === this.options.device.id;
+  }
+
   private listDevices(): Json<'getDevices', 200> {
-    return { devices: [this.options.device] };
+    return { devices: this.claimed ? [this.options.device] : [] };
+  }
+
+  /**
+   * The device, now the user's, when it is unclaimed and `body` carries its
+   * id and code (case, spaces and hyphens ignored, as the API does); else
+   * undefined, a refusal. A claimed code is used up: it never claims again.
+   */
+  private claim(body: ClaimDeviceRequest): Json<'claimDevice', 201> | undefined {
+    const code = this.options.claimCode;
+    const normalize = (value: string) => value.replace(/[\s-]/g, '').toUpperCase();
+    if (
+      this.claimed ||
+      code === undefined ||
+      body.deviceId !== this.options.device.id ||
+      normalize(body.claimCode) !== normalize(code)
+    ) {
+      return undefined;
+    }
+    this.claimed = true;
+    this.options.claimCode = undefined;
+    // The stored device takes the name and location the claim sent.
+    const device: Device = { ...this.options.device, name: body.name.trim() };
+    delete device.location;
+    if (body.location !== undefined) device.location = body.location;
+    this.options.device = device;
+    return this.options.device;
   }
 
   private getDevice(): Json<'getDevice', 200> {
@@ -216,6 +272,22 @@ type ErrorResponse = Json<'getCook', 404>;
 
 function unauthenticated(): ErrorResponse {
   return { error: 'UNAUTHENTICATED', message: 'Unauthenticated.', requestId: randomUUID() };
+}
+
+function claimRefused(): Json<'claimDevice', 403> {
+  return {
+    error: 'CLAIM_REFUSED',
+    message: 'Device could not be claimed with that code',
+    requestId: randomUUID(),
+  };
+}
+
+function cookActive(): Json<'deleteDevice', 409> {
+  return {
+    error: 'COOK_ACTIVE',
+    message: 'Stop the active cook before releasing this device',
+    requestId: randomUUID(),
+  };
 }
 
 function notFound(error: ErrorResponse['error']): ErrorResponse {
