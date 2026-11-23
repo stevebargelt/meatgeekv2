@@ -621,6 +621,15 @@ MEATGEEK_ENVIRONMENT=<dev|prod>
 > is safe **only while local auth stays disabled**, a coupling enforced by the
 > pre-apply secret-inspection gate. See
 > [ADR: App Insights instrumentation key remains in Terraform state](../../learnings/decisions/mg-24-appinsights-key-in-terraform-state.md).
+>
+> Only the Functions **host** reads `APPLICATIONINSIGHTS_AUTHENTICATION_STRING`.
+> The Node worker's Azure Monitor distro does not; it authenticates only when
+> given a credential. `apps/api/src/shared/telemetry/setup.ts` therefore reads
+> the same setting and, when it says `Authorization=AAD`, passes a
+> `ManagedIdentityCredential` (with `ClientId=` for a user-assigned identity) as
+> `azureMonitorExporterOptions.credential`. Without it every span, log and
+> metric the worker exports (including the `meatgeek.reading.*` histograms) is
+> rejected by the resource (HAR-150).
 
 ## Function Deployment
 

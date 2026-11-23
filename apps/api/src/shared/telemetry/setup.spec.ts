@@ -5,7 +5,9 @@ jest.mock('@azure/monitor-opentelemetry', () => ({
 }));
 
 import { useAzureMonitor } from '@azure/monitor-opentelemetry';
-import { initializeTelemetry } from './setup';
+import type { TokenCredential } from '@azure/core-auth';
+import { ManagedIdentityCredential } from '@azure/identity';
+import { initializeTelemetry, parseAuthenticationString } from './setup';
 
 const mockUseAzureMonitor = useAzureMonitor as jest.Mock;
 
@@ -18,6 +20,7 @@ describe('initializeTelemetry', () => {
     process.env = { ...ORIGINAL_ENV };
     delete process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'];
     delete process.env['ENVIRONMENT'];
+    delete process.env['APPLICATIONINSIGHTS_AUTHENTICATION_STRING'];
     jest.spyOn(console, 'log').mockImplementation(() => undefined);
   });
 
@@ -92,5 +95,71 @@ describe('initializeTelemetry', () => {
 
     const options = mockUseAzureMonitor.mock.calls[0][0];
     expect(options.resource.attributes['environment']).toBe('dev');
+  });
+
+  describe('Entra (AAD) ingestion', () => {
+    const fakeCredential: TokenCredential = { getToken: async () => null };
+
+    it('passes a managed-identity credential to the exporter when the authentication string asks for AAD', () => {
+      // The deployed shape: modules/functions/main.tf sets both settings and the
+      // App Insights resource rejects anything not AAD-authenticated.
+      process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+      process.env['APPLICATIONINSIGHTS_AUTHENTICATION_STRING'] = 'Authorization=AAD';
+      const credentialFactory = jest.fn(() => fakeCredential);
+
+      initializeTelemetry({ credentialFactory });
+
+      expect(credentialFactory).toHaveBeenCalledWith(undefined);
+      const options = mockUseAzureMonitor.mock.calls[0][0];
+      expect(options.azureMonitorExporterOptions.credential).toBe(fakeCredential);
+      expect(options.azureMonitorExporterOptions.connectionString).toBe('InstrumentationKey=test-key');
+    });
+
+    it('uses ManagedIdentityCredential by default', () => {
+      process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+      process.env['APPLICATIONINSIGHTS_AUTHENTICATION_STRING'] = 'Authorization=AAD';
+
+      initializeTelemetry();
+
+      const options = mockUseAzureMonitor.mock.calls[0][0];
+      expect(options.azureMonitorExporterOptions.credential).toBeInstanceOf(ManagedIdentityCredential);
+    });
+
+    it('hands a user-assigned ClientId to the credential factory', () => {
+      process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+      process.env['APPLICATIONINSIGHTS_AUTHENTICATION_STRING'] =
+        'Authorization=AAD;ClientId=00000000-0000-0000-0000-000000000001';
+      const credentialFactory = jest.fn(() => fakeCredential);
+
+      initializeTelemetry({ credentialFactory });
+
+      expect(credentialFactory).toHaveBeenCalledWith('00000000-0000-0000-0000-000000000001');
+    });
+
+    it('sets no credential when the authentication string is absent', () => {
+      process.env['APPLICATIONINSIGHTS_CONNECTION_STRING'] = 'InstrumentationKey=test-key';
+      const credentialFactory = jest.fn(() => fakeCredential);
+
+      initializeTelemetry({ credentialFactory });
+
+      expect(credentialFactory).not.toHaveBeenCalled();
+      const options = mockUseAzureMonitor.mock.calls[0][0];
+      expect(options.azureMonitorExporterOptions.credential).toBeUndefined();
+    });
+  });
+
+  describe('parseAuthenticationString', () => {
+    it.each([
+      [undefined, undefined],
+      ['', undefined],
+      ['Authorization=None', undefined],
+      ['ClientId=abc', undefined],
+      ['Authorization=AAD', { clientId: undefined }],
+      ['authorization=aad', { clientId: undefined }],
+      [' Authorization = AAD ; ClientId = abc ', { clientId: 'abc' }],
+      ['Authorization=AAD;ClientId=', { clientId: undefined }],
+    ])('%p -> %p', (input, expected) => {
+      expect(parseAuthenticationString(input)).toEqual(expected);
+    });
   });
 });
