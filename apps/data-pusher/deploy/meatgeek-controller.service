@@ -1,0 +1,26 @@
+[Unit]
+Description=MeatGeek Device Controller (RTD sensors, LCD, local API on :3000)
+Documentation=https://github.com/stevebargelt/meatgeekv2/blob/main/docs/devices/runbook.md
+After=network.target
+
+[Service]
+Type=simple
+# The SPI and I2C device nodes belong to group meatgeek (99-meatgeek.rules).
+User=meatgeek
+Group=meatgeek
+ExecStart=/usr/local/bin/meatgeek-controller
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+# Hardening that leaves /dev alone: PrivateDevices= would hide /dev/spidev0.0
+# and /dev/i2c-1.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
