@@ -28,7 +28,7 @@ import { getDeviceTwinClient, type DeviceTwinPort } from '../../shared/iothub/de
 /** The repository surface the handlers use. */
 export type DevicesRepositoryPort = Pick<
   DevicesRepository,
-  'listDevicesByOwner' | 'getDeviceOwnership' | 'registerDevice' | 'updateDevice' | 'deleteDevice'
+  'listDevicesByOwner' | 'getDeviceOwnership' | 'updateDevice' | 'deleteDevice'
 >;
 
 /** Injection seam. Production wires Easy Auth and the adapter-backed

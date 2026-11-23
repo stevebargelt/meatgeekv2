@@ -24,7 +24,6 @@ yet wired.
 | `getCurrentTemperatures` | HTTP `GET`    | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else)               |
 | `getTemperatureHistory`  | HTTP `GET`    | `temperatures/history`            | A page of a caller's device's readings, by continuation token |
 | `getDevices`             | HTTP `GET`    | `devices`                         | List the caller's devices                                     |
-| `registerDevice`         | HTTP `POST`   | `devices`                         | Register a device to the caller                               |
 | `claimDevice`            | HTTP `POST`   | `devices/claim`                   | HAR-130 — claim a device with the code it shows (403 else)    |
 | `getDevice`              | HTTP `GET`    | `devices/{id}`                    | One of the caller's devices (404 otherwise)                   |
 | `updateDevice`           | HTTP `PATCH`  | `devices/{id}`                    | Change name / location / configuration                        |
@@ -158,7 +157,8 @@ In order:
   `claimClaimantHash: null` under `If-Match`, keeping `claimConsumedCodeHash`;
   a 412 re-reads once. The device mints a fresh code for the new generation, and
   the old code can never claim again. A device with no IoT Hub identity (IoT
-  Hub 404, registered through `registerDevice`) skips this step. Any other twin
+  Hub 404, registered through the first-come `POST /devices` before HAR-145
+  removed it) skips this step. Any other twin
   failure is `503 DEVICE_TWIN_UPDATE_FAILED`, and the document is kept, so a
   retry is safe.
 - `204`, no body: the document is deleted.
@@ -177,7 +177,8 @@ enqueued at or after it (none is `404 NO_READINGS`), `getTemperatureHistory`
 uses the later of `startTime` and `claimedAt`, and `getCookChart` starts at the
 first whole minute at or after it. Readings from before the claim, while the
 device was unclaimed or another owner's, never reach the new owner. A device
-without `claimedAt` (registered through `registerDevice`) is not bounded.
+without `claimedAt` (registered through `POST /devices` before HAR-145 removed
+it) is not bounded.
 
 `storageHeartbeat` exists because, when it was added, it was the **only**
 registration that needed `AzureWebJobsStorage`: the Functions host keeps a timer's schedule status and

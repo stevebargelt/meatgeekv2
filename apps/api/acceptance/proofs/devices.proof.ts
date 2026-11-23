@@ -46,6 +46,13 @@ import { defineProofs } from '../lib/proof';
  * `lastActivityTime` was still unset 10 min after such a sync in Deploy Dev App
  * run 45146229868, so the proof does not wait for it.) `state` may be either
  * value: simdevice disconnects after each run.
+ *
+ * HAR-145: the first-come path is closed. The first step sends `POST /devices`
+ * with a body the removed route would have accepted, for a never-enrolled id
+ * `acceptance-firstcome-<runId>`. The spec has no such operation, so the
+ * request goes outside the contract, and the Functions host answers it: 404
+ * or 405, never 2xx. The PASS line names the status it got. A
+ * `GET /devices/{that id}` by the same caller is then 404: no device was made.
  */
 
 const CONNECTION_STATES: ReadonlyArray<DeviceConnection['state']> = [
@@ -128,6 +135,31 @@ export default defineProofs('devices', () => {
   };
 
   return [
+    {
+      name: 'POST /devices is not served (404 or 405) and creates no device: a device is owned only by claiming it',
+      async run(api: AcceptanceApi) {
+        const deviceId = `acceptance-firstcome-${api.runId}`;
+        const response = await api.request({
+          method: 'POST',
+          path: '/devices',
+          outsideContract: true,
+          body: {
+            deviceId,
+            name: `First come ${api.runId}`,
+            model: 'Acceptance Rig',
+            location: 'CI',
+          },
+        });
+        api.check(
+          response,
+          response.status === 404 || response.status === 405,
+          `expected 404 or 405 (no such operation), got ${response.status}`
+        );
+        const after = await getById(api, deviceId);
+        api.expectStatus(after, 404);
+        return `POST /devices answered ${response.status}`;
+      },
+    },
     {
       name: 'a fresh device acceptance-device-<runId> is enrolled through DPS and mints a claim code',
       async run(api: AcceptanceApi) {

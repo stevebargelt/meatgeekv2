@@ -181,7 +181,7 @@ describe('HAR-27 users repository against the Cosmos emulator', () => {
 
     // a device the user owns, so `devices` is visibly filled from the owner query
     const deviceId = `emu-${randomUUID()}`;
-    await devicesRepository.registerDevice({
+    await devicesRepository.claimDevice({
       id: deviceId,
       userId,
       name: 'Emulator grill',

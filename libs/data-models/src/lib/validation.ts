@@ -6,7 +6,6 @@ import { VALIDATION, resolveMeatType } from '@meatgeekv2/utils';
 import { 
   StartCookRequest, 
   UpdateCookRequest, 
-  RegisterDeviceRequest,
   RegisterUserRequest 
 } from '@meatgeekv2/api-interfaces';
 
@@ -181,44 +180,6 @@ export class DataValidator {
       isValid: errors.length === 0,
       errors,
       warnings,
-    };
-  }
-
-  /**
-   * Validates device registration
-   */
-  static validateDeviceRegistration(request: RegisterDeviceRequest): ValidationResult {
-    const errors: string[] = [];
-
-    if (!request.deviceId || request.deviceId.trim().length === 0) {
-      errors.push('Device ID is required');
-    } else {
-      if (request.deviceId.length < 3) {
-        errors.push('Device ID must be at least 3 characters');
-      }
-      if (!/^[a-zA-Z0-9_-]+$/.test(request.deviceId)) {
-        errors.push('Device ID can only contain letters, numbers, underscores, and hyphens');
-      }
-    }
-
-    if (!request.name || request.name.trim().length === 0) {
-      errors.push('Device name is required');
-    } else {
-      if (request.name.length < VALIDATION.DEVICE_NAME.MIN_LENGTH) {
-        errors.push(`Device name must be at least ${VALIDATION.DEVICE_NAME.MIN_LENGTH} characters`);
-      }
-      if (request.name.length > VALIDATION.DEVICE_NAME.MAX_LENGTH) {
-        errors.push(`Device name cannot exceed ${VALIDATION.DEVICE_NAME.MAX_LENGTH} characters`);
-      }
-    }
-
-    if (!request.model || request.model.trim().length === 0) {
-      errors.push('Device model is required');
-    }
-
-    return {
-      isValid: errors.length === 0,
-      errors,
     };
   }
 

@@ -36,7 +36,7 @@ import { getCosmosAdapter } from './cosmos-adapter';
  * number.
  */
 
-/** A device id: what the register route accepts and what may address Cosmos.
+/** A device id: what the claim route accepts and what may address Cosmos.
  *  Excludes the characters Cosmos forbids in ids (`/ \ ? #`). */
 export const DEVICE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -147,12 +147,6 @@ export type DeviceOwnership =
   | { readonly status: 'owned'; readonly device: Device; readonly requestCharge: number }
   | { readonly status: 'foreign'; readonly requestCharge: number }
   | { readonly status: 'unknown'; readonly requestCharge: number };
-
-/** A register's outcome. `conflict` covers a taken id (whoever owns it) and a
- *  name the owner already uses, without saying which. */
-export type RegisterDeviceResult =
-  | { readonly outcome: 'created'; readonly device: Device; readonly requestCharge: number }
-  | { readonly outcome: 'conflict'; readonly requestCharge: number };
 
 /**
  * HAR-130: a claim's outcome.
@@ -316,30 +310,6 @@ export class DevicesRepository {
       .map(toDevice)
       .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
     return { devices, requestCharge: response.requestCharge };
-  }
-
-  /**
-   * Creates the device with Cosmos `create` (never upsert), so an existing id is
-   * a 409 rather than an overwrite. The owner's names are checked first.
-   */
-  async registerDevice(device: Device): Promise<RegisterDeviceResult> {
-    const owned = await this.listDevicesByOwner(device.userId);
-    let requestCharge = owned.requestCharge;
-    if (owned.devices.some(existing => existing.name === device.name)) {
-      return { outcome: 'conflict', requestCharge };
-    }
-
-    try {
-      const response = await this.container.items.create<StoredDevice>(device);
-      requestCharge += response.requestCharge;
-      return { outcome: 'created', device: toDevice(response.resource ?? device), requestCharge };
-    } catch (error) {
-      const status = statusCodeOf(error);
-      if (status === 409) {
-        return { outcome: 'conflict', requestCharge: requestCharge + chargeOf(error) };
-      }
-      throw new DevicesStoreError(status, requestCharge + chargeOf(error));
-    }
   }
 
   /**

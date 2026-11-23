@@ -209,6 +209,22 @@ export class Contract {
     return candidates[0];
   }
 
+  /**
+   * HAR-145: for a request a proof sends to a route the spec deliberately
+   * lacks (a removed one, `RequestOptions.outsideContract`). Throws an Error
+   * naming the operation when `method path` is one after all, so such a proof
+   * cannot silently go on sending a route the spec still describes.
+   */
+  assertNoOperation(method: HttpMethod, path: string): void {
+    const bare = path.split('?')[0];
+    const operation = this.operations.find(o => o.method === method && fits(o.path, bare));
+    if (operation) {
+      throw new Error(
+        `contract: ${method} ${bare} is ${operation.operationId} in openapi.yaml, so it is not outside the contract`
+      );
+    }
+  }
+
   /** Check a response against `operation`; the mismatch line, or `undefined`. */
   checkResponse(operation: Operation, response: CheckedResponse): string | undefined {
     this.responsesChecked += 1;

@@ -178,7 +178,7 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
     const device = newDevice(userId, { location: 'Deck' });
 
     // create
-    const created = await repository.registerDevice(device);
+    const created = await repository.claimDevice(device);
     expect(created.outcome).toBe('created');
     if (created.outcome !== 'created') return;
     expect(created.device).toEqual(device);
@@ -200,8 +200,8 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
 
     // list by owner (cross-partition), with a second device and a stranger's
     const second = newDevice(userId);
-    expect((await repository.registerDevice(second)).outcome).toBe('created');
-    expect((await repository.registerDevice(newDevice(`user-${randomUUID()}`))).outcome).toBe(
+    expect((await repository.claimDevice(second)).outcome).toBe('created');
+    expect((await repository.claimDevice(newDevice(`user-${randomUUID()}`))).outcome).toBe(
       'created'
     );
     const listed = await repository.listDevicesByOwner(userId);
@@ -235,41 +235,21 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
     expect(reread.status === 'owned' && reread.device.location).toBe('Garage');
   });
 
-  it('a duplicate id is a conflict, whoever owns it, and leaves the stored device alone', async () => {
-    const owner = `user-${randomUUID()}`;
-    const device = newDevice(owner);
-    expect((await repository.registerDevice(device)).outcome).toBe('created');
-
-    const sameOwner = await repository.registerDevice({ ...device, name: 'Another name' });
-    const stranger = await repository.registerDevice({
-      ...device,
-      userId: `user-${randomUUID()}`,
-      name: 'Hijack',
-    });
-
-    for (const result of [sameOwner, stranger]) {
-      expect(result.outcome).toBe('conflict');
-      expectPositiveCharge(result.requestCharge);
-    }
-    const stored = await repository.getDeviceOwnership(owner, device.id);
-    expect(stored.status === 'owned' && stored.device.name).toBe(device.name);
-  });
-
-  it('a duplicate name for the same owner is a conflict; the same name for another owner is not', async () => {
+  it('a duplicate name for the same owner is nameConflict; the same name for another owner is not', async () => {
     const owner = `user-${randomUUID()}`;
     const first = newDevice(owner, { name: 'Smoker' });
-    expect((await repository.registerDevice(first)).outcome).toBe('created');
+    expect((await repository.claimDevice(first)).outcome).toBe('created');
 
-    const clash = await repository.registerDevice(newDevice(owner, { name: 'Smoker' }));
-    expect(clash.outcome).toBe('conflict');
+    const clash = await repository.claimDevice(newDevice(owner, { name: 'Smoker' }));
+    expect(clash.outcome).toBe('nameConflict');
 
-    const elsewhere = await repository.registerDevice(
+    const elsewhere = await repository.claimDevice(
       newDevice(`user-${randomUUID()}`, { name: 'Smoker' })
     );
     expect(elsewhere.outcome).toBe('created');
 
     const second = newDevice(owner, { name: 'Kettle' });
-    expect((await repository.registerDevice(second)).outcome).toBe('created');
+    expect((await repository.claimDevice(second)).outcome).toBe('created');
     const rename = await repository.updateDevice(owner, second.id, { name: 'Smoker' });
     expect(rename.outcome).toBe('nameConflict');
   });
@@ -333,16 +313,6 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
     expect(systemKeys(result.outcome === 'ownedByCaller' ? result.device : undefined)).toEqual([]);
   });
 
-  it('HAR-130 claimDevice: another device of the owner with the same name is nameConflict', async () => {
-    const owner = `user-${randomUUID()}`;
-    expect((await repository.registerDevice(newDevice(owner, { name: 'Smoker' }))).outcome).toBe(
-      'created'
-    );
-
-    const clash = await repository.claimDevice(newDevice(owner, { name: 'Smoker' }));
-    expect(clash.outcome).toBe('nameConflict');
-  });
-
   it('documents why names are checked in code: the (userId, name) unique key is per partition', async () => {
     // Every device is its own `/id` partition, and Cosmos enforces unique keys
     // within a logical partition only. Two raw creates with the same
@@ -357,7 +327,7 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
   it('ownership is foreign for another user and unknown for a missing id', async () => {
     const owner = `user-${randomUUID()}`;
     const device = newDevice(owner);
-    await repository.registerDevice(device);
+    await repository.claimDevice(device);
 
     const foreign = await repository.getDeviceOwnership(`user-${randomUUID()}`, device.id);
     expect(foreign.status).toBe('foreign');
@@ -374,7 +344,7 @@ describe('HAR-20 devices repository against the Cosmos emulator', () => {
   it('a stale ETag is a concurrentUpdate under real If-Match', async () => {
     const owner = `user-${randomUUID()}`;
     const device = newDevice(owner);
-    await repository.registerDevice(device);
+    await repository.claimDevice(device);
 
     // A replace between the repository's read and its write: wrap the container so
     // the first replace call is preceded by a concurrent write.

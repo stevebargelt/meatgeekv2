@@ -211,6 +211,15 @@ describe('(a) routes: main.ts registrations equal the spec operations', () => {
       'Operations the spec describes that main.ts does not register:\n  - PATCH /cooks/{id} (updateCook)'
     );
   });
+
+  it('HAR-145: neither main.ts nor the spec has POST /devices (a device is owned only by claiming it)', () => {
+    const isFirstCome = (operation: Operation) =>
+      operation.path === '/devices' && ['POST', 'ANY'].includes(operation.method);
+    expect(registeredOperations(mockHttpRegistrations).filter(isFirstCome)).toEqual([]);
+    expect(specOperations(validated).filter(isFirstCome)).toEqual([]);
+    expect(validated.paths['/devices']?.get?.operationId).toBe('getDevices');
+    expect(validated.paths['/devices/claim']?.post?.operationId).toBe('claimDevice');
+  });
 });
 
 describe('(b) auth: every operation requires the bearer token and declares a 401', () => {

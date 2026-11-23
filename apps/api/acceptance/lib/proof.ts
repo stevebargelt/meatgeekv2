@@ -40,8 +40,18 @@ export interface RequestOptions {
   /** Fail the proof when the response lacks a numeric
    *  `x-meatgeek-request-charge` header. Default `true`: every route that
    *  touches Cosmos must report its RU. Set `false` only for a response that
-   *  makes no Cosmos call (e.g. an unauthenticated 401). */
+   *  makes no Cosmos call (e.g. an unauthenticated 401). Default `false` for
+   *  an `outsideContract` request. */
   readonly expectRequestCharge?: boolean;
+  /**
+   * HAR-145: the request is for a route openapi.yaml deliberately does not
+   * describe, e.g. the removed `POST /devices`, to prove the API no longer
+   * serves it. The runner refuses it when the method and path ARE a spec
+   * operation, does not check the response against the contract, and uses
+   * `path` (query dropped) as the route; `route` is ignored. The proof checks
+   * the status itself.
+   */
+  readonly outsideContract?: boolean;
 }
 
 export interface AcceptanceResponse<T = unknown> {
@@ -185,7 +195,10 @@ export interface Proof {
   /** Run even after an earlier proof in the group failed (HAR-68): for a
    *  cleanup step that must leave the system as the group found it. */
   readonly always?: boolean;
-  run(api: AcceptanceApi): Promise<void>;
+  /** Resolves when the proof passes. HAR-145: a string it resolves to is
+   *  added to its PASS line (`PASS <group> › <name> — <note>`), e.g. a status
+   *  the proof accepted from a set. */
+  run(api: AcceptanceApi): Promise<void | string>;
 }
 
 /**

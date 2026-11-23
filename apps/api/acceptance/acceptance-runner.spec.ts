@@ -250,7 +250,6 @@ type CookItemRoute = 'GET /cooks/{cookId}';
 type CookChartRoute = 'GET /cooks/{cookId}/chart';
 type DeviceRoute =
   | 'GET /devices'
-  | 'POST /devices'
   | 'POST /devices/claim'
   | 'GET /devices/{id}'
   | 'PATCH /devices/{id}'
@@ -540,7 +539,6 @@ const RU: Record<Exclude<StubRoute, SignalRRoute>, string> = {
   'GET /cooks/{cookId}': '1.17',
   'GET /cooks/{cookId}/chart': '3.94',
   'GET /devices': '3.11',
-  'POST /devices': '9.52',
   'POST /devices/claim': '12.64',
   'GET /devices/{id}': '1',
   'PATCH /devices/{id}': '11.9',
@@ -1200,8 +1198,6 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'GET' && cookMatch) route = 'GET /cooks/{cookId}';
       else if (request.method === 'GET' && chartMatch) route = 'GET /cooks/{cookId}/chart';
       else if (request.method === 'GET' && url.pathname === '/api/devices') route = 'GET /devices';
-      else if (request.method === 'POST' && url.pathname === '/api/devices')
-        route = 'POST /devices';
       else if (request.method === 'POST' && url.pathname === '/api/devices/claim')
         route = 'POST /devices/claim';
       else if (request.method === 'GET' && deviceMatch) route = 'GET /devices/{id}';
@@ -1461,29 +1457,6 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           },
           route
         );
-      } else if (route === 'POST /devices') {
-        const body = (await readJson(request)) as Partial<StubDevice> & { deviceId?: string };
-        if (!body?.deviceId || !/^[A-Za-z0-9._:-]{1,128}$/.test(body.deviceId) || !body.name) {
-          send(400, errorBody('VALIDATION_ERROR'));
-          return;
-        }
-        if (
-          devices.has(body.deviceId) ||
-          (options.simOwnedByOther && body.deviceId === SIM_DEVICE)
-        ) {
-          send(409, errorBody('DEVICE_CONFLICT'), route);
-          return;
-        }
-        const device: StubDevice = {
-          id: body.deviceId,
-          userId: 'stub-tenant:stub-user',
-          name: body.name,
-          model: body.model ?? '',
-          location: body.location,
-          isActive: true,
-        };
-        devices.set(device.id, device);
-        send(201, device, route);
       } else if (route === 'POST /devices/claim') {
         // HAR-140: the device's own claim code, as it shows it; every refusal
         // is the one 403 with no request charge, as the deployed route does.
@@ -2437,7 +2410,8 @@ function escape(text: string): string {
 const ROUTES: CookRoute[] = ['POST /cooks', 'GET /cooks', 'POST /cooks/{cookId}/stop'];
 const COOK_ITEM_ROUTE: CookItemRoute = 'GET /cooks/{cookId}';
 const COOK_CHART_ROUTE: CookChartRoute = 'GET /cooks/{cookId}/chart';
-// HAR-140: no proof sends POST /devices any more; the stub still serves it.
+// HAR-145: POST /devices is removed; the stub, like the Functions host, answers
+// it 404 NOT_FOUND.
 const DEVICE_ROUTES: DeviceRoute[] = [
   'POST /devices/claim',
   'GET /devices/{id}',
@@ -2685,7 +2659,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
   /** HAR-26 and HAR-28: the cooks lifecycle and the temperatures proof also
    *  have their own device. HAR-140: they, and the devices group, enrol a
    *  fresh one and claim it with POST /devices/claim, so a broken claim fails
-   *  those three, and POST /devices is left to the simulated device's groups.
+   *  those three. (HAR-145: POST /devices is removed.)
    *  HAR-68: the device twin group registers the simulated device first
    *  (201), so the isolation (HAR-67), live-temperature (HAR-63) and round
    *  trip groups, which run after it, take the 409 path and read
@@ -2742,14 +2716,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
       expect(result.exitCode).not.toBe(0);
       const groups = groupsUsing(route);
-      // HAR-45: the volume group relies on the round trip's registration, so a
-      // refused POST /devices leaves it reading an unregistered device.
-      const volume = result.failures.filter(line => line.startsWith('FAIL telemetry volume ›'));
-      expect(volume).toHaveLength(route === 'POST /devices' ? 1 : 0);
-      volume.forEach(failure =>
-        expect(failure).toContain('GET /temperatures/history → 404: expected 200, got 404')
-      );
-      expect(result.failures).toHaveLength(groups.length + volume.length);
+      expect(result.failures).toHaveLength(groups.length);
       groups.forEach(group => {
         const failure = result.failures.find(line => line.includes(group));
         expect(failure).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
@@ -2987,6 +2954,8 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(deleteLines[3]).toContain('(peer)');
     expect(deleteLines[6]).toContain('(peer)');
     for (const step of [
+      // HAR-145: the stub answers the removed route as the Functions host does.
+      'PASS devices › POST /devices is not served (404 or 405) and creates no device: a device is owned only by claiming it — POST /devices answered 404',
       'PASS devices › DELETE /devices/{id} as the peer is 403 DEVICE_NOT_OWNED and the device stays',
       'PASS devices › DELETE /devices/{id} deletes the caller’s device',
       'PASS devices › GET /devices/{id} is 404 after the delete',
@@ -3578,9 +3547,11 @@ describe('live acceptance runner (against an in-process stub)', () => {
       '201',
       ...['200', '201', '200', '200', '200', '201', '200'],
     ]);
-    expect(stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/devices')).toEqual(
-      []
-    );
+    // HAR-145: one POST /devices, the devices group's proof that the removed
+    // route is not served; it registers nothing.
+    expect(
+      stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/devices')
+    ).toHaveLength(1);
     // The simulated device's code is read once: its first claim; later
     // groups reuse it without another twin sync or read.
     const readsOf = (label: string) =>
@@ -3622,9 +3593,13 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect([first.exitCode, second.exitCode]).toEqual([0, 0]);
     // HAR-44: the standing simulated device is reused, never registered again.
     // HAR-140: in connection-string mode it shows no claim code, so the GET
-    // proves it is the caller's; nothing calls POST /devices.
+    // proves it is the caller's. HAR-145: the one POST /devices is the devices
+    // group's proof that the removed route is not served (404).
     expect(lines.some(line => /^\s+GET\s+\/devices\/\{id\}\s+200\s/.test(line))).toBe(true);
-    expect(lines.some(line => /^\s+POST\s+\/devices\s/.test(line))).toBe(false);
+    const requestLines = lines.slice(0, lines.indexOf('RU per route'));
+    expect(requestLines.filter(line => /^\s+POST\s+\/devices\s/.test(line))).toEqual([
+      expect.stringMatching(/^\s+POST\s+\/devices\s+404\s/),
+    ]);
     expect(lines).toContain(
       'PASS telemetry round-trip › POST /devices/claim claims the simulated device for the caller'
     );
@@ -5157,9 +5132,11 @@ describe('OpenAPI contract (HAR-77, against the stub)', () => {
 
     expect(result.failures).toEqual([]);
     // One line per request above the RU table, whose rows look the same.
+    // HAR-145: less the one request outside the contract, POST /devices.
     const requests = result.lines
       .slice(0, result.lines.indexOf('RU per route'))
-      .filter(line => /^\s+(GET|POST|PATCH|PUT|DELETE)\s+\//.test(line));
+      .filter(line => /^\s+(GET|POST|PATCH|PUT|DELETE)\s+\//.test(line))
+      .filter(line => !/^\s+POST\s+\/devices\s/.test(line));
     const summary = contractLine(result);
     // Every response was checked, and the SignalR proofs checked what they received.
     expect(summary).toMatch(
@@ -5206,23 +5183,93 @@ describe('OpenAPI contract (HAR-77, against the stub)', () => {
     const result = await runAgainstStub(
       {
         alterBody: {
-          route: 'POST /devices',
+          route: 'GET /devices/{id}',
           alter: body => ({ ...(body as object), isActive: 'yes', colour: 'red-1.2' }),
         },
       },
       'ok',
-      [one({ method: 'POST', path: '/devices', body: { deviceId: 'contract-1', name: 'Smoker' } })]
+      [one({ method: 'GET', path: `/devices/${SIM_DEVICE}`, route: '/devices/{id}' })]
     );
 
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0]).toContain(
-      `FAIL ${GROUP} › POST /devices — POST /devices → 201: contract: POST /devices (registerDevice) 201: ` +
-        'the body does not match the schema: '
+      `FAIL ${GROUP} › GET /devices/${SIM_DEVICE} — GET /devices/{id} → 200: ` +
+        'contract: GET /devices/{id} (getDevice) 200: the body does not match the schema: '
     );
     expect(result.failures[0]).toContain("(root) must NOT have additional properties 'colour'");
     expect(result.failures[0]).toContain('/isActive must be boolean');
     // The line names the field, never its value.
     expect(result.failures[0]).not.toContain('red-1.2');
+  });
+
+  describe('HAR-145: a request outside the contract (the removed POST /devices)', () => {
+    const removed = {
+      method: 'POST',
+      path: '/devices',
+      outsideContract: true,
+      body: { deviceId: 'acceptance-firstcome-1', name: 'First come', model: 'm' },
+    } as const;
+
+    it('is sent, is neither checked nor counted, needs no request charge, and its note reaches the PASS line', async () => {
+      const result = await runAgainstStub({}, 'ok', [
+        {
+          name: GROUP,
+          create: () => [
+            {
+              name: 'POST /devices is not served',
+              async run(api) {
+                const response = await api.request(removed);
+                api.expectStatus(response, 404);
+                return `POST /devices answered ${response.status}`;
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(result.failures).toEqual([]);
+      expect(result.lines).toContain(
+        `PASS ${GROUP} › POST /devices is not served — POST /devices answered 404`
+      );
+      expect(result.lines.some(line => /^\s+POST\s+\/devices\s+404\s/.test(line))).toBe(true);
+      expect(contractLine(result)).toBe(
+        'CONTRACT validated 0 responses, 0 hub messages, 0 mismatches'
+      );
+      expect(stub!.deviceIds()).not.toContain('acceptance-firstcome-1');
+    });
+
+    it('a proof that resolves to nothing keeps the bare PASS line', async () => {
+      const result = await runAgainstStub({}, 'ok', [
+        one({ method: 'GET', path: '/devices' }, 200),
+      ]);
+      expect(result.lines).toContain(`PASS ${GROUP} › GET /devices`);
+      expect(
+        result.lines.filter(line => line.startsWith(`PASS ${GROUP} › GET /devices —`))
+      ).toEqual([]);
+    });
+
+    it('is refused, before anything is sent, for a method and path the spec does describe', async () => {
+      const result = await runAgainstStub({}, 'ok', [
+        one({ method: 'GET', path: '/devices', outsideContract: true }),
+      ]);
+
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(
+        'contract: GET /devices is getDevices in openapi.yaml, so it is not outside the contract'
+      );
+      expect(stub!.requests.filter(r => r.path === '/api/devices')).toEqual([]);
+    });
+
+    it('without outsideContract, POST /devices fails: the contract has no such operation', async () => {
+      const result = await runAgainstStub({}, 'ok', [
+        one({ method: 'POST', path: '/devices', body: removed.body }),
+      ]);
+
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain(
+        'contract: POST /devices matches no operation in openapi.yaml'
+      );
+    });
   });
 
   it('fails the proof when the declared X-Request-ID header is missing', async () => {

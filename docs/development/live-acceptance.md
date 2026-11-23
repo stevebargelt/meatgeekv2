@@ -78,7 +78,8 @@ Every proof below also checks each response against the OpenAPI contract,
 |                                     | `POST /cooks/{cookId}/stop`                                                                                                                                                                                                                      | `200`; the cook is `completed`                                                                                                                                                                                                                                                                                                                                                                         |
 |                                     | `simdevice --twin --count 0 --timeout 60s`                                                                                                                                                                                                       | exit `0`; `desired.activeCookId` absent or `null`, `reported.activeCookId` `null`, `reported.appliedDesiredVersion` is `desired.$version`, which is later than the start's                                                                                                                                                                                                                             |
 |                                     | always, even after a failed step: `GET /cooks?deviceId=<simulated device>&status=active`, and `POST /cooks/{cookId}/stop` for each cook listed                                                                                                   | `200`, then `200` per stop: no cook is left active on the simulated device                                                                                                                                                                                                                                                                                                                             |
-| `devices.proof.ts`                  | a fresh device, `acceptance-device-<runId>`, enrolled as in `cooks-lifecycle.proof.ts` (HAR-140)                                                                                                                                                 | each step exits `0`; `enrolled <id>`                                                                                                                                                                                                                                                                                                                                                                   |
+| `devices.proof.ts`                  | `POST /devices` (HAR-145: removed) outside the contract, with a body the old route took, for the never-enrolled `acceptance-firstcome-<runId>`; then `GET /devices/{id}` for that id                                                             | `404` or `405`, never `2xx`, and the PASS line names which; the `GET` is `404`: no device was made                                                                                                                                                                                                                                                                                                     |
+|                                     | a fresh device, `acceptance-device-<runId>`, enrolled as in `cooks-lifecycle.proof.ts` (HAR-140)                                                                                                                                                 | each step exits `0`; `enrolled <id>`                                                                                                                                                                                                                                                                                                                                                                   |
 |                                     | `POST /devices/claim` with the code the device shows (after a twin sync) and a run-unique name                                                                                                                                                   | `201` with a request charge; body is an api-interfaces `Device` with the id and name sent, `isActive: true`, and no `connectionStatus` or `connection` (HAR-143)                                                                                                                                                                                                                                       |
 |                                     | `GET /devices/{id}` for the registered device                                                                                                                                                                                                    | `200`; the same device, owned by the claiming caller, with a `connection` (`state` and `lastActivityAt`, HAR-143)                                                                                                                                                                                                                                                                                      |
 |                                     | `GET /devices/{id}` once, right after the claim (HAR-143)                                                                                                                                                                                        | `200`; `connection.lastActivityAt` set and not before the proof's start less 5 min of clock skew: the device reported its claim code to its twin before the claim, and the API counts the device's last reported-properties write (`properties.reported.$metadata.$lastUpdated`) as well as the hub's `lastActivityTime`; `state` `connected` or `disconnected` (simdevice disconnects after each run) |
@@ -173,7 +174,10 @@ two steps use `acceptance-unowned-<runId>`, which is never enrolled or claimed.
 
 ### Fresh devices (HAR-140)
 
-No proof calls `POST /devices`. A group that needs a device of its own gets a
+No proof uses `POST /devices` to get a device; HAR-145 removed the route. The
+devices group's first step sends it once, outside the contract
+(`outsideContract`, below), to prove it is not served: 404 or 405, and its
+PASS line names the status. A group that needs a device of its own gets a
 real one, enrolled the way the owner's Pi is (`lib/enrolment.ts`):
 
 1. `enrolFreshDevice`: a new state dir under `$RUNNER_TEMP` (`os.tmpdir()`
@@ -529,6 +533,12 @@ Every `api.request(...)`, the unauthenticated ones included, is checked:
   `path` must fit it. With no `route`, the spec path that `path` fits is used,
   and a literal segment wins over a `{parameter}`. Anything else fails the
   proof with no request sent.
+- **HAR-145, `outsideContract: true`:** for a route the spec deliberately
+  lacks (the removed `POST /devices`). The method and path must NOT be a spec
+  operation, or the proof fails with no request sent. The response is not
+  checked or counted, and needs no request charge; the proof checks the status
+  itself. A proof may resolve to a note, which its PASS line carries:
+  `PASS devices › POST /devices is not served … — POST /devices answered 404`.
 - **When it comes back:**
   - The status must be declared for the operation.
   - A JSON body must match that status's `application/json` schema. A JSON
@@ -547,8 +557,8 @@ The line names the operation, the status and up to three Ajv errors with their
 path in the body. It never prints a value from the body, and the redactor
 masks it like every other line.
 
-There is no per-proof opt-out. If the spec is wrong, fix the spec. If the API
-is wrong, fix the handler.
+There is no per-proof opt-out for a route the spec describes. If the spec is
+wrong, fix the spec. If the API is wrong, fix the handler.
 
 SignalR proofs check each message they receive with `expectHubMessage(api,
 target, message)` from `lib/signalr.ts`, against `x-signalr.messages.<target>`.

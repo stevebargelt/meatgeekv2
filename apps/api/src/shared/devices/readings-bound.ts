@@ -12,8 +12,8 @@ import type { Device } from '@meatgeekv2/api-interfaces';
  * bound is part of the query, never a filter on its results, so paging and
  * limits stay right.
  *
- * A device without `claimedAt` (registered through `POST /devices`) has no
- * bound.
+ * A device without `claimedAt` (registered through `POST /devices` before
+ * HAR-145 removed it) has no bound.
  */
 
 /** A stored `claimedAt` that does not parse. Data the API never writes; the

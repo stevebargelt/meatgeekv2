@@ -394,7 +394,7 @@ describe('GET /cooks/{cookId}/chart: the claim bound (HAR-136)', () => {
     expect(chart.points.map(p => p.t)).toEqual(['2026-11-20T06:15:00.000Z']);
   });
 
-  it('a device without claimedAt (POST /devices) is not bounded', async () => {
+  it('a device without claimedAt (registered before HAR-145 removed POST /devices) is not bounded', async () => {
     const fixture = setup('2026-11-20T08:00:00.000Z');
     fixture.seedCook({ ...cook() });
     fixture.seedHour('2026-11-20T06', { '15': grill(1, 225, 225, 225) });

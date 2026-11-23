@@ -210,8 +210,6 @@ components:
       $ref: './components/schemas/device.yaml#/DeviceListResponse'
     DeviceConfigurationPatch:
       $ref: './components/schemas/device.yaml#/DeviceConfigurationPatch'
-    RegisterDeviceRequest:
-      $ref: './components/schemas/device.yaml#/RegisterDeviceRequest'
     ClaimDeviceRequest:
       $ref: './components/schemas/device.yaml#/ClaimDeviceRequest'
     UpdateDeviceRequest:

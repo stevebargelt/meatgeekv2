@@ -189,7 +189,7 @@ StartCookRequest:
       type: string
       minLength: 1
       description: |
-        A device registered to the caller (POST /devices). Any other value is
+        A device the caller owns (claimed with POST /devices/claim). Any other value is
         403 DEVICE_NOT_OWNED.
     meatType:
       type: string

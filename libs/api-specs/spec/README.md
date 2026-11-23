@@ -117,7 +117,8 @@ bash libs/api-specs/contract-tests/oapi-codegen-smoke.sh
 - `GET /cooks/{cookId}`, `POST /cooks` and `POST /cooks/{cookId}/stop` return the `Cook` directly.
 - `GET /temperatures/current/{deviceId}` returns a bare `TemperatureReading`.
 - `GET /devices` wraps the array in `{ devices: [...] }`; `GET`/`PATCH
-/devices/{id}` and `POST /devices` return a bare `Device`.
+/devices/{id}` and `POST /devices/claim` return a bare `Device`. There is no
+  `POST /devices` (HAR-145).
 - `GET /recipes` wraps the array in `{ recipes: [...] }`; `POST /recipes`,
   `GET`/`PATCH /recipes/{id}` return a bare `Recipe`; `DELETE /recipes/{id}`
   is `204` with no body.
