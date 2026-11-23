@@ -271,17 +271,23 @@ views {
     meatgeek.cloud.api.cooks -> meatgeek.cloud.data.cooks 'cook and device lock' {
       notes 'One transactional batch in the caller partition: the cook and its device lock commit together, so a device holds at most one active cook (MG-84).'
     }
-    meatgeek.cloud.api.cooks -> meatgeek.cloud.ingest.iothub 'set desired: activeCookId, correlationId' {
+    meatgeek.cloud.api.cooks -> meatgeek.cloud.ingest.iothub 'set desired: activeCookId, correlationId, cookUpdatedAt' {
       notes '''
         After the write, synced to the device lock under the twin etag (`If-Match`): GET the
-        twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Managed
+        twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Every
+        cook PATCH stamps `cookUpdatedAt`, the API's write time (HAR-152). Managed
         identity with `IoT Hub Twin Contributor`. A failed sync answers 503
         `DEVICE_TWIN_UPDATE_FAILED`; the cook stays written and a retry of the same request
         heals the twin.
       '''
     }
     meatgeek.cloud.ingest.iothub -> meatgeek.edge.pusher.twin 'desired properties' {
-      notes 'Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up. Patches apply in `$version` order.'
+      notes '''
+        Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up.
+        Patches apply in `$version` order. The twin client logs `applyLagMs`, the time from
+        desired `cookUpdatedAt` to the apply (HAR-150, HAR-152); on a full GET it falls back to
+        the twin's `$metadata`, which an MQTT patch never carries.
+      '''
     }
     meatgeek.edge.pusher.twin -> meatgeek.edge.pusher.session 'persist cook, correlation id, version' {
       notes 'Written to `/var/lib/meatgeek-pusher/cooksession.json`. From then every reading carries this cook id and correlation id.'

@@ -39,7 +39,21 @@ model {
       controller = app 'device-controller' {
         #live
         technology 'Go / Gobot, local HTTP API on :3000'
-        description 'Reads the five RTD sensors (grill and four probes) every 10 ms, averages each over 5 s, and serves the current status on a local HTTP API. At startup it writes a fixed banner to an I2C LCD; the per-probe LCD readout is commented out. Its OpenTelemetry Go SDK samples every span (AlwaysSample) and exports only when OTEL_EXPORTER_OTLP_ENDPOINT is set.'
+        description '''
+          Reads the five RTD sensors (grill and four probes) every 10 ms, averages each over
+          5 s, and serves the current status on a local HTTP API. At startup it writes a fixed
+          banner to an I2C LCD; the per-probe LCD readout is commented out. Its OpenTelemetry Go
+          SDK samples every span (AlwaysSample) and exports only when
+          OTEL_EXPORTER_OTLP_ENDPOINT is set. The HTTP API (internal/deviceapi, HAR-148)
+          supplies an empty {} body when a command request has none, so the pusher's body-less
+          GET works, and turns any handler panic into a 500 instead of a dropped connection; a
+          contract test checks the real gobot API against
+          libs/api-interfaces/test-vectors/controller-get-status.json, which the pusher also
+          parses. RTD validity (internal/rtd, HAR-151): a 5 s window yields a temperature only
+          if every sample is non-zero and inside the Pt1000 range for -40 to 800 °F (about 842.7
+          to 2,562.4 Ω); otherwise the probe has no reading (null, and unplg on the LCD), and a
+          previous value is never kept.
+        '''
         link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/device-controller 'Source'
       }
 
@@ -58,7 +72,13 @@ model {
         link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/data-pusher 'Source'
 
         collector = component 'collector' {
-          description 'Polls the controller status endpoint every 5 s (POLL_INTERVAL) and stamps each reading with the active cook id and the current correlation id.'
+          description '''
+            Polls the controller status endpoint every 5 s (POLL_INTERVAL) and stamps each reading
+            with the active cook id and the current correlation id. The V1 to V2 mapping
+            (`internal/wire`, HAR-151) turns a grill or probe temperature outside -40 to 800 °F into
+            `null`, and the enqueuer counts those in one `out_of_range` log line per poll, with the
+            field names only, never the values.
+          '''
         }
         queue = component 'disk queue' {
           technology '/var/lib/meatgeek-pusher/queue'
@@ -83,7 +103,10 @@ model {
             so an offline Pi catches up on reconnect. It applies desired patches in `$version`
             order (an older version is ignored; a skipped version triggers a fresh GET),
             persists each to `cooksession`, then reports `activeCookId`, `correlationId` and
-            `appliedDesiredVersion`. It also carries the claim code (HAR-134)
+            `appliedDesiredVersion`. When it applies desired cook properties it logs
+            `desiredUpdatedAt` and `applyLagMs` (HAR-150, HAR-152): from desired `cookUpdatedAt`,
+            with the twin's `$metadata` as a fallback on a full sync; an MQTT patch carries no
+            `$metadata`. It also carries the claim code (HAR-134)
             (internal/claim): on every full twin sync and desired patch it applies the claim rule
             to desired `claimGeneration` and `claimConsumedCodeHash` (it never reads
             `claimClaimantHash`), keeps the code in `<stateDir>/claim/claim.json` (0600, written
@@ -250,7 +273,18 @@ model {
         }
         broadcast = component 'realtime broadcast' {
           technology 'Event Hub trigger, cardinality many; SignalR output binding'
-          description 'broadcastTemperature (HAR-60): sends each reading on temperature-data to the userId of the device owner (HAR-81: one point read of the device per batch), the device taken from the hub-stamped iothub-connection-device-id, the reading mapped by toTemperatureReading (the same mapper as GET /temperatures/current) plus enqueuedTimeUtc. Bad events are skipped and counted, never thrown.'
+          description '''
+            broadcastTemperature (HAR-60): sends each reading on temperature-data to the userId
+            of the device owner (HAR-81: one point read of the device per batch), the device
+            taken from the hub-stamped iothub-connection-device-id, the reading mapped by
+            toTemperatureReading (the same mapper as GET /temperatures/current) plus
+            enqueuedTimeUtc. Bad events are skipped and counted, never thrown. For every reading
+            it pushes it records two OpenTelemetry histograms (HAR-150):
+            meatgeek.reading.push_lag_ms (push time minus the reading's timestamp) and
+            meatgeek.reading.hub_lag_ms (hub enqueue time minus the reading's timestamp). They
+            carry no device or user attribute and are pre-aggregated, so App Insights sampling
+            does not drop them.
+          '''
         }
         rollup = component 'rollupTemperatures' {
           technology 'Cosmos DB change-feed trigger, identity-based, startFromBeginning'
@@ -484,7 +518,13 @@ model {
     // The active cook is device state, carried by the IoT Hub device twin (HAR-58, HAR-66).
     cloud.api.cooks -> cloud.ingest.iothub 'set twin desired properties' {
       technology 'IoT Hub service REST, managed identity (IoT Hub Twin Contributor)'
-      description 'Desired activeCookId and correlationId, synced after the Cosmos write to the device lock under the twin etag (If-Match), so the twin follows Cosmos. A failed sync answers 503 DEVICE_TWIN_UPDATE_FAILED; the cook stays written and a retry of the same request heals the twin.'
+      description '''
+        Desired activeCookId, correlationId and cookUpdatedAt (the API's write time, stamped on
+        every cook patch, HAR-152), synced after the Cosmos write to the device lock under the
+        twin etag (If-Match), so the twin follows Cosmos. A failed sync answers 503
+        DEVICE_TWIN_UPDATE_FAILED; the cook stays written and a retry of the same request heals
+        the twin.
+      '''
     }
     // Claiming a device proves possession through the twin (HAR-130, HAR-133).
     // The GETs read each device's connection from it (HAR-143).
@@ -526,7 +566,12 @@ model {
     }
 
     // Observability.
-    cloud.api.otel -> cloud.observability.appinsights 'traces and logs, samplingRatio 0.5'
+    cloud.api.otel -> cloud.observability.appinsights 'traces, logs (samplingRatio 0.5) and metrics (unsampled)' {
+      description '''
+        The Node worker's Azure Monitor exporter authenticates with the Function App's managed
+        identity, because ingestion is AAD-only (HAR-150, #182).
+      '''
+    }
     edge.pusher.tracing -[planned]-> cloud.observability.collector 'OTLP/HTTP' {
       #notBuilt
       description 'The exporter is in the code; it is a no-op until OTEL_EXPORTER_OTLP_ENDPOINT is set and the collector is switched on.'
