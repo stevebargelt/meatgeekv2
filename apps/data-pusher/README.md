@@ -486,6 +486,14 @@ declarations.
 NaN-valued temps in the V1 wire format mean "probe unplugged" and map to
 nullable `*float64` (i.e. JSON `null`) in V2.
 
+The collector polls with a plain `GET` and no body; the controller answers it
+(HAR-148). The controller's real get_status body is pinned in
+`libs/api-interfaces/test-vectors/controller-get-status.json`: the
+device-controller's `internal/deviceapi` test asserts it serves that body
+byte for byte, and `internal/collector/contract_test.go` here feeds the same
+file through the collector and wire mapping. A shape change on either side
+fails one of the two.
+
 ### V2 output (to IoT Hub)
 
 ```json

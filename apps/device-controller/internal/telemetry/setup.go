@@ -72,11 +72,11 @@ const (
 // safe to defer and safe to call with a context that carries a timeout.
 type ShutdownFunc func(context.Context) error
 
-// Config holds the telemetry wiring inputs. DeviceID comes from the
-// SmokerStatus (SmokerID); the remaining values are sourced from the process
+// Config holds the telemetry wiring inputs. DeviceID is the
+// smoker ID (main.go smokerID); the remaining values are sourced from the process
 // environment.
 type Config struct {
-	// DeviceID populates the device.id custom dimension (SmokerStatus.SmokerID).
+	// DeviceID populates the device.id custom dimension (the smoker ID).
 	DeviceID string
 	// Environment populates the environment custom dimension (ENVIRONMENT).
 	Environment string

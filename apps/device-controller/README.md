@@ -20,8 +20,44 @@ This Go application interfaces directly with hardware components to:
 
 ## API Endpoints
 
+The API is gobot's HTTP API on port 3000. The two commands the data-pusher
+and you care about:
+
 - `GET /api/robots/MeatGeekBot/commands/get_status` - Complete device status
 - `GET /api/robots/MeatGeekBot/commands/get_temps` - Temperature readings only
+
+Both answer `GET` (or `POST`) with `{"result": "<JSON string>"}`; the result is
+a JSON-encoded string, not an object. **A request body is optional.** gobot
+reads the body as the command's parameters and panics on an empty one, so the
+controller supplies `{}` when a command request has none; the data-pusher sends
+a plain `GET` with no body. Sending `{}` yourself works too. A panic in any
+handler answers `500` with `{"error":"internal error"}` and one log line (method,
+path, panic value); it never drops the connection.
+
+```bash
+curl http://localhost:3000/api/robots/MeatGeekBot/commands/get_status
+```
+
+The routes, commands and middleware live in `internal/deviceapi`, so the real
+HTTP surface runs in tests without hardware. `main.go` only adds the ADC, LCD
+and work loop.
+
+### Contract test
+
+The get_status body is pinned by a golden file shared with the data-pusher:
+`libs/api-interfaces/test-vectors/controller-get-status.json`.
+
+- `internal/deviceapi/deviceapi_test.go` serves the real API with fixed
+  temperatures, sends get_status exactly as the pusher builds it (body-less
+  `GET` with a `traceparent`), and asserts `200` and the golden body byte for
+  byte. It also covers the `{}` body, a panicking command answering `500`, and
+  gobot's own API dropping the body-less `GET` (the bug this guards against).
+- `apps/data-pusher/internal/collector/contract_test.go` serves the same file
+  to the pusher's real collector and wire mapping and asserts the reading.
+
+If you change the Status shape on purpose, regenerate the golden file with
+`go test -tags testserver ./internal/deviceapi -run Golden -update` and update
+the pusher side to match.
 
 ## Development
 
@@ -131,27 +167,34 @@ This device controller is designed to work with the new V2 system through:
 
 ## Temperature Data Structure
 
+get_status's `result` string, decoded (from the golden file). A NaN reading is
+`null`; a probe that never read is `0`.
+
 ```json
 {
+  "id": "",
+  "ttl": 259200,
+  "smokerid": "meatgeek3",
+  "type": "",
+  "augerOn": false,
+  "blowerOn": false,
+  "igniterOn": false,
   "temps": {
-    "grillTemp": 225.0,
-    "probe1Temp": 160.0,
-    "probe2Temp": 145.0,
-    "probe3Temp": null,
-    "probe4Temp": 200.0
+    "grillTemp": 64.4,
+    "probe1Temp": 66.2,
+    "probe2Temp": 65.9,
+    "probe3Temp": 0,
+    "probe4Temp": null
   },
-  "status": {
-    "smokerid": "meatgeek3",
-    "augerOn": false,
-    "blowerOn": false,
-    "igniterOn": false,
-    "fireHealthy": true,
-    "mode": "test",
-    "setPoint": 200,
-    "currentTime": "2025-01-26T10:30:00Z"
-  }
+  "fireHealthy": true,
+  "mode": "test",
+  "setPoint": 200,
+  "modeTime": "0001-01-01T00:00:00Z",
+  "currentTime": "2026-11-23T15:04:05Z"
 }
 ```
+
+get_temps's `result` is the `temps` object alone.
 
 ## Build Information
 

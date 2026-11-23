@@ -1,0 +1,1 @@
+{"result":"{\"id\":\"\",\"ttl\":259200,\"smokerid\":\"meatgeek3\",\"type\":\"\",\"augerOn\":false,\"blowerOn\":false,\"igniterOn\":false,\"temps\":{\"grillTemp\":64.4,\"probe1Temp\":66.2,\"probe2Temp\":65.9,\"probe3Temp\":0,\"probe4Temp\":null},\"fireHealthy\":true,\"mode\":\"test\",\"setPoint\":200,\"modeTime\":\"0001-01-01T00:00:00Z\",\"currentTime\":\"2026-11-23T15:04:05Z\"}"}

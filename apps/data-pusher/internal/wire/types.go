@@ -15,7 +15,7 @@ import (
 
 // V1Status mirrors the JSON the device-controller serves at
 // GET /api/robots/MeatGeekBot/commands/get_status. The shape lives in
-// apps/device-controller/main.go's Status struct; the NaN-aware MarshalJSON
+// apps/device-controller/internal/deviceapi/status.go (Status); the NaN-aware MarshalJSON
 // on Temps means GrillTemp et al. arrive as `null` from the wire (not NaN),
 // so the V1 unwrap uses *float64 to model both the "missing" and the
 // "explicit 0.0 unplugged" cases.

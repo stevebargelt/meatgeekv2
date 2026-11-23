@@ -6,40 +6,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"log"
 	"math"
 	"net/http"
 	"strconv"
 	"time"
 
-	//using standard json with custom NaN handling
-	"encoding/json"
-
 	dc_i2c "github.com/davecheney/i2c"
 	queue "github.com/stevebargelt/meatgeekv2/apps/device-controller/goqueue"
-	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/httptrace"
+	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/deviceapi"
 	"github.com/stevebargelt/meatgeekv2/apps/device-controller/internal/telemetry"
 
 	"go.opentelemetry.io/otel"
 
 	// Updated to gobot.io/x/gobot/v2 for Go 1.25 compatibility
 	"gobot.io/x/gobot/v2"
-	"gobot.io/x/gobot/v2/api"
 	"gobot.io/x/gobot/v2/drivers/spi"
 	"gobot.io/x/gobot/v2/platforms/raspi"
 )
 
-var SmokerStatus = Status {
-    SmokerID: "meatgeek3",
+// smokerID is the device.id on telemetry and the smokerid get_status serves.
+const smokerID = "meatgeek3"
+
+// smoker is the state the hardware loop writes and the HTTP commands read.
+var smoker = deviceapi.NewStore(deviceapi.Status{
+    SmokerID: smokerID,
     AugerOn: false,
     TTL: 259200,
     BlowerOn: false,
-    IgniterOn: false, 
+    IgniterOn: false,
     FireHealthy: true,
     Mode: "test",
     SetPoint: 200,
-}
+})
 
 func main() {
 
@@ -48,7 +47,7 @@ func main() {
     // the controller works fully offline. device.id comes from the SmokerID.
     // The App Insights connection string lives only on the collector, which
     // fronts Azure Monitor; this edge service never reads it.
-    shutdownTelemetry, err := telemetry.Setup(context.Background(), telemetry.ConfigFromEnv(SmokerStatus.SmokerID))
+    shutdownTelemetry, err := telemetry.Setup(context.Background(), telemetry.ConfigFromEnv(smokerID))
     check(err)
     defer func() {
         shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -59,20 +58,25 @@ func main() {
     }()
 
     manager := gobot.NewManager()
-    deviceApi := api.NewAPI(manager)
-    deviceApi.Port = "3000"
 
-    // Continue the W3C trace injected by the data-pusher collector on the
-    // inbound get_status hop (MG-6). This gobot middleware runs per-request with
-    // access to the raw *http.Request, extracts the `traceparent`, and opens a
-    // server span parented to the upstream trace.
-    deviceApi.AddHandler(httptrace.Middleware(otel.Tracer("device-controller")))
-
-    deviceApi.AddHandler(func(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintf(w, "Hello, %q \n", html.EscapeString(r.URL.Path))
+    // The HTTP surface (routes, commands, middleware) lives in
+    // internal/deviceapi so it runs in tests without hardware (HAR-148). It
+    // continues the W3C trace the data-pusher injects on get_status (MG-6),
+    // answers a command request that has no body (the pusher's plain GET), and
+    // turns a panic in any handler into a 500 instead of a dropped connection.
+    handler := deviceapi.NewHandler(manager, deviceapi.Config{
+        Tracer: otel.Tracer("device-controller"),
+        Debug:  true,
     })
-    deviceApi.Debug()
-    deviceApi.Start()
+    go func() {
+        server := &http.Server{
+            Addr:              ":" + deviceapi.Port,
+            Handler:           handler,
+            ReadHeaderTimeout: 30 * time.Second,
+        }
+        log.Println("Initializing API on :" + deviceapi.Port + "...")
+        log.Fatal(server.ListenAndServe())
+    }()
 
     a := raspi.NewAdaptor()
     adc := spi.NewMCP3008Driver(a)
@@ -146,12 +150,14 @@ func main() {
                     // fmt.Fprint(lcd, rtd.title, "Unplg")
                 }
             }
-            SmokerStatus.Temps.GrillTemp = RTDs[0].temp
-            SmokerStatus.Temps.Probe1Temp = RTDs[1].temp
-            SmokerStatus.Temps.Probe2Temp = RTDs[2].temp
-            SmokerStatus.Temps.Probe3Temp = RTDs[3].temp
-            SmokerStatus.Temps.Probe4Temp = RTDs[4].temp
-            SmokerStatus.CurrentTime = time.Now()
+            smoker.Update(func(s *deviceapi.Status) {
+                s.Temps.GrillTemp = RTDs[0].temp
+                s.Temps.Probe1Temp = RTDs[1].temp
+                s.Temps.Probe2Temp = RTDs[2].temp
+                s.Temps.Probe3Temp = RTDs[3].temp
+                s.Temps.Probe4Temp = RTDs[4].temp
+                s.CurrentTime = time.Now()
+            })
 
             left := formatTemp(RTDs[1].title, RTDs[1].temp)
             right := formatTemp(RTDs[2].title, RTDs[2].temp)
@@ -173,26 +179,11 @@ func main() {
             fmt.Fprint(lcd, t.Format("Mon Jan 2 15:04"))
         })                
     }
-    robot := gobot.NewRobot("MeatGeekBot",
+    robot := deviceapi.NewRobot(smoker,
             []gobot.Connection{a},
             []gobot.Device{adc},
             work,
     )
-    robot.AddCommand("get_temps", func(params map[string]interface{}) interface{} {
-        res, err := json.Marshal(SmokerStatus.Temps)
-        if err != nil {
-            fmt.Println("ERROR: ", err.Error())
-        }
-        return string(res)
-    })
-
-    robot.AddCommand("get_status", func(params map[string]interface{}) interface{} {
-        res, err := json.Marshal(SmokerStatus)
-        if err != nil {
-            fmt.Println("ERROR: ", err.Error())
-        }
-        return string(res)
-    })
 
     manager.AddRobot(robot)
     if err := manager.Start(); err != nil {
@@ -275,60 +266,4 @@ func formatTemp(title string, temp float64) (string) {
     } else {
         return fmt.Sprintf("%s unplg", title)
     }
-}
-
-type Temps struct {
-	GrillTemp  float64 `json:"grillTemp"`
-	Probe1Temp float64 `json:"probe1Temp"`
-	Probe2Temp float64 `json:"probe2Temp"`
-	Probe3Temp float64 `json:"probe3Temp"`
-	Probe4Temp float64 `json:"probe4Temp"`
-}
-
-type Status struct {
-	ID           string     `json:"id"`
-	TTL          int        `json:"ttl"`
-	SmokerID     string     `json:"smokerid"`
-    Type         string     `json:"type"`
-	AugerOn      bool       `json:"augerOn"`
-	BlowerOn     bool       `json:"blowerOn"`
-	IgniterOn    bool       `json:"igniterOn"`
-	Temps        Temps      `json:"temps"`
-	FireHealthy  bool       `json:"fireHealthy"`
-	Mode         string     `json:"mode"`
-	SetPoint     int        `json:"setPoint"`
-	ModeTime     time.Time  `json:"modeTime"`
-	CurrentTime  time.Time  `json:"currentTime"`
-}
-
-// MarshalJSON handles NaN values for Temps
-func (t Temps) MarshalJSON() ([]byte, error) {
-	type Alias Temps
-	temp := struct {
-		GrillTemp  interface{} `json:"grillTemp"`
-		Probe1Temp interface{} `json:"probe1Temp"`
-		Probe2Temp interface{} `json:"probe2Temp"`
-		Probe3Temp interface{} `json:"probe3Temp"`
-		Probe4Temp interface{} `json:"probe4Temp"`
-		Alias
-	}{
-		Alias: Alias(t),
-	}
-	
-	// Convert NaN values to null or string representation
-	temp.GrillTemp = handleNaN(t.GrillTemp)
-	temp.Probe1Temp = handleNaN(t.Probe1Temp)
-	temp.Probe2Temp = handleNaN(t.Probe2Temp)
-	temp.Probe3Temp = handleNaN(t.Probe3Temp)
-	temp.Probe4Temp = handleNaN(t.Probe4Temp)
-	
-	return json.Marshal(temp)
-}
-
-// handleNaN converts NaN to null for JSON compatibility
-func handleNaN(val float64) interface{} {
-	if math.IsNaN(val) || math.IsInf(val, 0) {
-		return nil // Will serialize as null
-	}
-	return val
 }

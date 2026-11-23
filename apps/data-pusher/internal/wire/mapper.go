@@ -18,7 +18,7 @@ import (
 // (minted from the same ts) stays consistent with the reading.
 //
 // V1 grill probe quirk: the device-controller emits 0.0 for an unplugged
-// grill probe (see formatTemp at apps/device-controller/main.go:246) and
+// grill probe (see formatTemp in apps/device-controller/main.go) and
 // emits null (via Temps.MarshalJSON) for NaN/Inf. Both shapes mean
 // "sensor unplugged" in the V1 contract; we collapse both to *float64(nil)
 // here so the V2 reading carries a clean "absent" signal.
