@@ -83,14 +83,14 @@ model {
             so an offline Pi catches up on reconnect. It applies desired patches in `$version`
             order (an older version is ignored; a skipped version triggers a fresh GET),
             persists each to `cooksession`, then reports `activeCookId`, `correlationId` and
-            `appliedDesiredVersion`. In DPS mode only (HAR-134) it also carries the claim code
+            `appliedDesiredVersion`. It also carries the claim code (HAR-134)
             (internal/claim): on every full twin sync and desired patch it applies the claim rule
             to desired `claimGeneration` and `claimConsumedCodeHash` (it never reads
             `claimClaimantHash`), keeps the code in `<stateDir>/claim/claim.json` (0600, written
             before its hash is reported), and reports `claimCodeHash`, `claimExpiresAt` and
             `claimGeneration` in the same patch as the cook properties, so neither drops the
             other. The code itself is never reported or logged; only the local `claim-code`
-            subcommand prints it. Connection-string mode reports nothing about claims.
+            subcommand prints it.
           '''
         }
         session = component 'cooksession' {

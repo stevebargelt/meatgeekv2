@@ -51,7 +51,7 @@ deployment {
         description 'Playwright with Chromium against the production web app on Vercel, signed in as the TOTP acceptance user.'
       }
       simdevice = instanceOf delivery.simdevice {
-        description 'Built per run from apps/data-pusher. Sends as one of the three standing devices: <sim> and <sim>-chart (acceptance job), <sim>-web (web-acceptance job). Each connection string is fetched per run, masked, never stored.'
+        description 'Built per run from apps/data-pusher. Sends as one of the three standing devices: <sim> and <sim>-chart (acceptance job), <sim>-web (web-acceptance job). Each run gives each device a new X.509 identity in a fresh state dir and enrols its certificate in DPS; no device key leaves the state dir.'
       }
     }
 
