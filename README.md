@@ -50,7 +50,7 @@ MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time a
 - **Terraform** - Infrastructure as Code
 - **OpenTelemetry** - End-to-end observability
 - **React** - Web client application
-- **Swift** - Native iOS client (planned, not built)
+- **Swift** - Native iOS client, so far a skeleton in [`apps/ios`](apps/ios/README.md)
 - **Go** - High-performance device services
 - **TypeScript** - Type-safe development across all layers
 
@@ -178,7 +178,7 @@ Comprehensive documentation is available in the `/docs` directory:
 ### Current (Phase 0)
 - **Monorepo Architecture**: Unified development with NX
 - **Type Safety**: Comprehensive TypeScript interfaces
-- **Platforms**: React (web) + Go (device); a native iOS (Swift) app is planned and not built
+- **Platforms**: React (web) + Go (device); a native iOS (Swift) app, so far a skeleton in `apps/ios`
 - **Modern Tooling**: ESLint, Prettier, Jest configured
 - **Development Ready**: Hot reloading, testing, linting all set up
 
