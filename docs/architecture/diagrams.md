@@ -459,8 +459,9 @@ graph TB
     MeatgeekCloudData.Recipes@{ shape: cylinder, label: "recipes" }
   end
   Delivery -. "`GET /cooks/{cookId}/chart`" .-> MeatgeekCloudApi.Cooks
-  Delivery -. "`POST /devices: 201, or
-409 then GET /devices/{id}`" .-> MeatgeekCloudApi.Devices
+  Delivery -. "`POST /devices/claim with the
+claim code the device minted:
+201, or 200 on a retry`" .-> MeatgeekCloudApi.Devices
   Delivery -. "`[...]`" .-> MeatgeekCloudApi.Temperatures
   Delivery -. "`POST /negotiate (signalr proofs)`" .-> MeatgeekCloudApi.Negotiate
   MeatgeekMobile -. "`negotiate`" .-> MeatgeekCloudApi.Negotiate
@@ -1248,7 +1249,7 @@ graph LR
   MeatgeekCloudDataTemperatures@{ shape: cylinder, label: "temperatures" }
   DeliveryAcceptanceVolume@{ shape: rectangle, label: "telemetry-volume.proof.ts" }
   MeatgeekCloudApiTemperatures@{ shape: rectangle, label: "temperatures" }
-  DeliveryAcceptanceRoundtrip -. "`POST /devices
+  DeliveryAcceptanceRoundtrip -. "`POST /devices/claim
 (meatgeek-dev-simulated-smoker)`" .-> MeatgeekCloudApiDevices
   DeliveryAcceptanceRoundtrip -. "`simdevice --count 1`" .-> DeliverySimdevice
   DeliverySimdevice -. "`one reading, MQTT QoS 1`" .-> MeatgeekCloudIngestIothub
@@ -1279,7 +1280,7 @@ continuation token`" .-> MeatgeekCloudDataTemperatures
 
 Steps:
 
-- **1.** telemetry-roundtrip.proof.ts → devices: POST /devices (meatgeek-dev-simulated-smoker). Register or 409: 201 if new; 409 `DEVICE_CONFLICT` if already registered, then `GET /devices/{id}` must answer 200.
+- **1.** telemetry-roundtrip.proof.ts → devices: POST /devices/claim (meatgeek-dev-simulated-smoker). HAR-140: claimed with the claim code the device minted (`simdevice claim-code`), once per run and never released: 201 if the caller did not hold it, 200 if it did (`claimedAt` unchanged); later groups claim again with the same code and get 200.
 - **2.** telemetry-roundtrip.proof.ts → simdevice: simdevice --count 1
 - **3.** simdevice → IoT Hub: one reading, MQTT QoS 1. Properties `messageId`, `$.ct=application/json`, `$.ce=utf-8`, `traceparent`.
 - **4.** IoT Hub → temperatures (`meatgeek.cloud.data.temperatures`): cosmos-storage-route

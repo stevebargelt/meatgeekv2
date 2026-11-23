@@ -1,16 +1,18 @@
-import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { readdirSync } from 'fs';
 import { join } from 'path';
 
 import { REQUEST_CHARGE_HEADER } from '../../src/shared/cosmos/request-charge';
-import { maskClaimCodes } from './claim-code';
+import { ClaimCodeLine, maskClaimCodes, NoClaimYet, readClaimCode } from './claim-code';
 import { clock } from './clock';
 import { Contract, SPEC_PATH } from './contract';
 import {
   AcceptanceApi,
   AcceptanceResponse,
   Caller,
+  DeviceRef,
+  DeviceScript,
+  DeviceScriptRun,
   HttpMethod,
   Proof,
   ProofFailure,
@@ -22,11 +24,16 @@ import {
 import {
   CHART_DEVICE_INPUTS,
   DeviceCredential,
+  DPS_ENDPOINT_ENV,
+  DPS_HOST_ENV,
   DPS_ID_SCOPE_ENV,
   deviceMode,
+  IOT_HUB_HOST_ENV,
+  MEATGEEK_DPS_ENV,
   SIM_DEVICE_INPUTS,
   simDeviceEnv,
 } from './simdevice-env';
+import { spawnProcess } from './spawn';
 
 /**
  * HAR-11 — the live acceptance runner. Runs every proof group found in
@@ -75,6 +82,13 @@ import {
  * variables and no SIMDEVICE_CONNECTION_STRING. A device given both, or a state
  * dir without the ID scope, stops the run before anything is sent. The
  * redactor also masks anything shaped like a claim code (HAR-134).
+ *
+ * HAR-140: a proof can enrol a fresh device of its own (./enrolment) and run
+ * simdevice as it (`runSimDevice(args, { device: { deviceId, stateDir } })`,
+ * always DPS mode), read a device's claim code (`readClaimCode`, logged
+ * without what it printed), and run the device scripts in
+ * apps/data-pusher/deploy (`runDeviceScript`) as the job's `az` login, named
+ * by host with ACCEPTANCE_DPS_HOST and ACCEPTANCE_IOT_HUB_HOST.
  */
 
 export const REQUIRED_ENV = [
@@ -96,6 +110,9 @@ export const CHART_DEVICE_ENV = [
 
 export const PROOFS_DIR = join(__dirname, '..', 'proofs');
 
+/** HAR-140: enrol-device.sh and delete-device.sh. */
+export const DEVICE_SCRIPTS_DIR = join(__dirname, '..', '..', '..', 'data-pusher', 'deploy');
+
 /** How long one request may take, response body included, before it fails.
  *  A cold start of the dev Function App answers its first request in ~9.5 s
  *  (docs/development/live-acceptance.md, "Real-time waits"). */
@@ -104,6 +121,10 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 /** A `simdevice` run longer than this is killed, unless the proof passes its
  *  own limit. One reading takes seconds. */
 const SIMDEVICE_TIMEOUT_MS = 120_000;
+
+/** A device-script run longer than this is killed. Each makes three to five
+ *  `az` calls of a few seconds each. */
+const DEVICE_SCRIPT_TIMEOUT_MS = 300_000;
 
 const REDACTED = '[redacted]';
 
@@ -118,6 +139,10 @@ export interface RunOptions {
   /** The OpenAPI document to check responses against. Defaults to
    *  libs/api-specs/spec/openapi.yaml ({@link SPEC_PATH}). */
   readonly specPath?: string;
+  /** HAR-140: where `runDeviceScript` finds its scripts. Defaults to
+   *  apps/data-pusher/deploy ({@link DEVICE_SCRIPTS_DIR}); the self-test
+   *  points it at fakes. */
+  readonly deviceScriptsDir?: string;
 }
 
 export interface RunResult {
@@ -205,20 +230,30 @@ export function makeRedactor(
     maskClaimCodes(secrets.reduce((masked, secret) => masked.split(secret).join(REDACTED), line));
 }
 
-/** Run `bin` with `args`, reducing its output to a {@link SimDeviceRun}. A run
- *  still going after `timeoutMs` (on the {@link clock}) is killed with SIGKILL
- *  and reports `killedAfterMs`. */
-function runChild(
+/** What a child process left behind: its exit, raw stdout and stderr (never
+ *  logged as they are), and whether the time limit killed it. */
+interface ChildOutcome {
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly killedAfterMs?: number;
+  readonly durationMs: number;
+}
+
+/** Run `bin` with `args`. A run still going after `timeoutMs` (on the
+ *  {@link clock}) is killed with SIGKILL and reports `killedAfterMs`.
+ *  `what` names it if it cannot be started. */
+function spawnChild(
+  what: string,
   bin: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
-  redact: (line: string) => string,
   timeoutMs: number
-): Promise<{ readonly run: SimDeviceRun; readonly durationMs: number }> {
+): Promise<ChildOutcome> {
   return new Promise((resolve, reject) => {
     const started = clock().monotonic();
     // stdio is piped, never inherited: nothing the child prints reaches the log raw.
-    const child = spawn(bin, [...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnProcess(bin, args, env);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
@@ -231,36 +266,59 @@ function runChild(
     child.on('error', error => {
       cancelKill();
       const code = (error as NodeJS.ErrnoException).code;
-      reject(new Error(`simdevice could not be started${code ? ` (${code})` : ''}`));
+      reject(new Error(`${what} could not be started${code ? ` (${code})` : ''}`));
     });
     child.on('close', exitCode => {
       cancelKill();
-      const messages: unknown[] = [];
-      let unparsedLines = 0;
-      for (const line of Buffer.concat(stdout).toString('utf8').split('\n')) {
-        if (line.trim() === '') continue;
-        try {
-          messages.push(JSON.parse(line));
-        } catch {
-          unparsedLines += 1;
-        }
-      }
-      const first = Buffer.concat(stderr)
-        .toString('utf8')
-        .split('\n')
-        .find(line => line.trim() !== '');
       resolve({
-        run: {
-          exitCode,
-          messages,
-          unparsedLines,
-          stderrFirstLine: first === undefined ? undefined : redact(first.trim()),
-          ...(killed && exitCode === null ? { killedAfterMs: timeoutMs } : {}),
-        },
+        exitCode,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+        ...(killed && exitCode === null ? { killedAfterMs: timeoutMs } : {}),
         durationMs: Math.round(clock().monotonic() - started),
       });
     });
   });
+}
+
+/** The first non-empty line of `text`, trimmed. */
+function firstLine(text: string): string | undefined {
+  return text
+    .split('\n')
+    .find(line => line.trim() !== '')
+    ?.trim();
+}
+
+/** Run `bin` with `args`, reducing its output to a {@link SimDeviceRun}. */
+async function runChild(
+  bin: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  redact: (line: string) => string,
+  timeoutMs: number
+): Promise<{ readonly run: SimDeviceRun; readonly durationMs: number }> {
+  const outcome = await spawnChild('simdevice', bin, args, env, timeoutMs);
+  const messages: unknown[] = [];
+  let unparsedLines = 0;
+  for (const line of outcome.stdout.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      messages.push(JSON.parse(line));
+    } catch {
+      unparsedLines += 1;
+    }
+  }
+  const first = firstLine(outcome.stderr);
+  return {
+    run: {
+      exitCode: outcome.exitCode,
+      messages,
+      unparsedLines,
+      stderrFirstLine: first === undefined ? undefined : redact(first),
+      ...(outcome.killedAfterMs !== undefined ? { killedAfterMs: outcome.killedAfterMs } : {}),
+    },
+    durationMs: outcome.durationMs,
+  };
 }
 
 export async function runAcceptance(options: RunOptions): Promise<RunResult> {
@@ -392,6 +450,43 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
   delete baseChildEnv['ACCEPTANCE_PEER_BEARER_TOKEN'];
   delete baseChildEnv['SIMDEVICE_CHART_CONNECTION_STRING'];
 
+  /** How a device is named in an EXEC line. */
+  const deviceLabel = (device: DeviceRef): string =>
+    device === 'simulated'
+      ? 'simdevice'
+      : device === 'chart'
+        ? 'simdevice (chart)'
+        : `simdevice (${device.deviceId})`;
+
+  /** The credential simdevice runs `device` with. A fresh device is always
+   *  DPS mode, with the run's ID scope (and endpoint, when set). */
+  const credentialOf = (device: DeviceRef): DeviceCredential => {
+    if (device === 'simulated') return simCredential;
+    if (device === 'chart') {
+      if (chartCredential === undefined) {
+        throw new Error(
+          'the chart device is not configured: ACCEPTANCE_CHART_DEVICE_ID and ' +
+            'SIMDEVICE_CHART_CONNECTION_STRING are not set'
+        );
+      }
+      return chartCredential;
+    }
+    const idScope = env[DPS_ID_SCOPE_ENV]?.trim() ?? '';
+    if (idScope === '') {
+      throw new Error(
+        `${DPS_ID_SCOPE_ENV} is not set; a fresh device (${device.deviceId}) runs in DPS mode`
+      );
+    }
+    const endpoint = env[DPS_ENDPOINT_ENV]?.trim() ?? '';
+    return {
+      mode: 'dps',
+      idScope,
+      endpoint: endpoint === '' ? undefined : endpoint,
+      deviceId: device.deviceId,
+      stateDir: device.stateDir,
+    };
+  };
+
   const api: AcceptanceApi = {
     runId,
     simulatedDeviceId,
@@ -403,19 +498,14 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       simOptions?: SimDeviceOptions
     ): Promise<SimDeviceRun> {
       lastRequest = undefined;
-      const chart = simOptions?.device === 'chart';
-      const label = chart ? 'simdevice (chart)' : 'simdevice';
+      const device = simOptions?.device ?? 'simulated';
+      const label = deviceLabel(device);
       lastExec = { label };
-      if (chart && chartCredential === undefined) {
-        throw new Error(
-          'the chart device is not configured: ACCEPTANCE_CHART_DEVICE_ID and ' +
-            'SIMDEVICE_CHART_CONNECTION_STRING are not set'
-        );
-      }
+      const credential = credentialOf(device);
       const { run, durationMs } = await runChild(
         simdeviceBin,
         args,
-        simDeviceEnv(baseChildEnv, chart ? (chartCredential as DeviceCredential) : simCredential),
+        simDeviceEnv(baseChildEnv, credential),
         redact,
         simOptions?.timeoutMs ?? SIMDEVICE_TIMEOUT_MS
       );
@@ -426,6 +516,77 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
           `  ${run.messages.length} message(s)`
       );
       return run;
+    },
+
+    async readClaimCode(device: DeviceRef): Promise<ClaimCodeLine | NoClaimYet> {
+      lastRequest = undefined;
+      const label = `${deviceLabel(device)} claim-code`;
+      lastExec = { label };
+      const credential = credentialOf(device);
+      if (credential.mode !== 'dps') {
+        throw new Error(
+          `${deviceLabel(device)} is not in DPS mode, so it has no claim code ` +
+            `(set ${DPS_ID_SCOPE_ENV} and its state dir)`
+        );
+      }
+      const started = clock().monotonic();
+      let line: ClaimCodeLine | NoClaimYet;
+      try {
+        line = await readClaimCode(simdeviceBin, credential.stateDir);
+        lastExec.exitCode = line.state === 'no-claim-yet' ? 3 : 0;
+      } catch (error) {
+        lastExec.exitCode = (error as { exitCode?: number | null }).exitCode ?? null;
+        throw error;
+      }
+      // Only the state: the line itself holds the claim code.
+      write(
+        `  ${'EXEC'.padEnd(6)} ${label.padEnd(30)} ${`exit ${lastExec.exitCode}`.padEnd(7)}` +
+          ` ${`${Math.round(clock().monotonic() - started)} ms`.padStart(6)}  state ${line.state}`
+      );
+      return line;
+    },
+
+    inDpsMode(device: DeviceRef): boolean {
+      return credentialOf(device).mode === 'dps';
+    },
+
+    async runDeviceScript(script: DeviceScript, args: readonly string[]): Promise<DeviceScriptRun> {
+      lastRequest = undefined;
+      lastExec = { label: script };
+      const dpsHost = env[DPS_HOST_ENV]?.trim() ?? '';
+      const hubHost = env[IOT_HUB_HOST_ENV]?.trim() ?? '';
+      if (dpsHost === '' || hubHost === '') {
+        throw new Error(
+          `${script} needs ${DPS_HOST_ENV} and ${IOT_HUB_HOST_ENV}: CI's identity can only name ` +
+            'the DPS and the IoT hub by host (it has no ARM read)'
+        );
+      }
+      const scriptEnv: NodeJS.ProcessEnv = { ...baseChildEnv };
+      delete scriptEnv['SIMDEVICE_CONNECTION_STRING'];
+      for (const name of MEATGEEK_DPS_ENV) delete scriptEnv[name];
+      const fullArgs = [...args, '--auth-type', 'login', '--dps', dpsHost, '--hub', hubHost];
+      const outcome = await spawnChild(
+        script,
+        join(options.deviceScriptsDir ?? DEVICE_SCRIPTS_DIR, script),
+        fullArgs,
+        scriptEnv,
+        DEVICE_SCRIPT_TIMEOUT_MS
+      );
+      lastExec.exitCode = outcome.exitCode;
+      const resultLine = firstLine(outcome.stdout);
+      const stderrFirst = firstLine(outcome.stderr);
+      const result: DeviceScriptRun = {
+        exitCode: outcome.exitCode,
+        resultLine: resultLine === undefined ? undefined : redact(resultLine),
+        stderrFirstLine: stderrFirst === undefined ? undefined : redact(stderrFirst),
+        ...(outcome.killedAfterMs !== undefined ? { killedAfterMs: outcome.killedAfterMs } : {}),
+      };
+      write(
+        `  ${'EXEC'.padEnd(6)} ${`${script} ${args.join(' ')}`.padEnd(30)}` +
+          ` ${`exit ${outcome.exitCode ?? 'killed'}`.padEnd(7)} ${`${outcome.durationMs} ms`.padStart(6)}` +
+          (result.resultLine === undefined ? '' : `  ${result.resultLine}`)
+      );
+      return result;
     },
 
     metric(name: string, value: number) {

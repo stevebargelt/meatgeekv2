@@ -117,7 +117,7 @@ export default defineProofs('signalr live temperature', () => {
 
   return [
     {
-      name: 'POST /devices registers the simulated device to the caller',
+      name: 'POST /devices/claim claims the simulated device for the caller',
       async run(api: AcceptanceApi) {
         await registerSimulatedDevice(api);
         registered = true;

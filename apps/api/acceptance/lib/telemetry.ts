@@ -1,12 +1,10 @@
-import type { Device, RegisterDeviceRequest } from '@meatgeekv2/api-interfaces';
-
-import { expectErrorCode } from './checks';
+import { claimStandingDevice } from './enrolment';
 import type { AcceptanceApi, SimDeviceRun } from './proof';
 import { ProofFailure } from './proof';
 
 /**
  * Steps more than one telemetry proof takes with the standing simulated device
- * (`api.simulatedDeviceId`): registering it to the caller and sending one
+ * (`api.simulatedDeviceId`): claiming it for the caller and sending one
  * reading through IoT Hub with `simdevice`.
  */
 
@@ -33,30 +31,14 @@ export const sameInstant = (value: unknown, sent: string): boolean =>
   isDate(value) && Date.parse(value) === Date.parse(sent);
 
 /**
- * Register the simulated device to the caller: `201`, or `409 DEVICE_CONFLICT`
- * (an earlier run registered it) and then `GET /devices/{id}` `200`, which that
- * route answers only for the caller's own device (`404` for someone else's).
+ * HAR-140: make the simulated device the caller's with its own claim code
+ * (`claimStandingDevice` in ./enrolment): claimed once per run, then claimed
+ * again with the same code by each later group; never released. In
+ * connection-string mode, where it shows no code, it must already be the
+ * caller's.
  */
 export async function registerSimulatedDevice(api: AcceptanceApi): Promise<void> {
-  const deviceId = api.simulatedDeviceId;
-  const body: RegisterDeviceRequest = { deviceId, name: DEVICE_NAME, model: 'simdevice' };
-  const response = await api.request({ method: 'POST', path: '/devices', body });
-  if (response.status !== 409) {
-    api.expectStatus(response, 201);
-    return;
-  }
-  expectErrorCode(api, response, 'DEVICE_CONFLICT');
-  const owned = await api.request<Device>({
-    method: 'GET',
-    path: `/devices/${encodeURIComponent(deviceId)}`,
-    route: '/devices/{id}',
-  });
-  api.check(
-    owned,
-    owned.status === 200,
-    `${deviceId} is registered, but not to the caller (expected 200, got ${owned.status})`
-  );
-  api.check(owned, owned.body?.id === deviceId, `device.id is not ${deviceId}`);
+  await claimStandingDevice(api, 'simulated', { name: DEVICE_NAME, model: 'simdevice' });
 }
 
 /**

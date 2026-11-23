@@ -4,13 +4,11 @@ import type {
   Cook,
   CookChart,
   CookListResponse,
-  Device,
-  RegisterDeviceRequest,
   StartCookRequest,
 } from '@meatgeekv2/api-interfaces';
 
 import { expectErrorCode } from '../lib/checks';
-import { deleteRegisteredDevice } from '../lib/devices';
+import { claimDevice, cleanupFreshDevice, enrolFreshDevice, FreshDevice } from '../lib/enrolment';
 import type { AcceptanceApi, AcceptanceResponse, Caller } from '../lib/proof';
 import { defineProofs } from '../lib/proof';
 
@@ -21,8 +19,9 @@ import { defineProofs } from '../lib/proof';
  * cook while it runs and nothing once it is stopped.
  *
  * HAR-26 (MG-88, MG-83): a cook may only start on a device the caller owns. The
- * first proof registers `acceptance-cook-<runId>` (a run-unique name too; the
- * devices proof owns `acceptance-<runId>`) and the lifecycle runs on it. The
+ * first proofs enrol a fresh device, `acceptance-cook-<runId>`, through DPS and
+ * claim it with its own claim code (HAR-140, ../lib/enrolment; a run-unique
+ * name too), and the lifecycle runs on it. The
  * last proof starts a cook on `acceptance-unowned-<runId>`, which nobody
  * registered, and expects 403 DEVICE_NOT_OWNED with no cook written.
  *
@@ -40,9 +39,11 @@ import { defineProofs } from '../lib/proof';
  * them (the chart's data is proved by HAR-87's standing cook).
  *
  * The cook uses a client-generated UUID id as MG-84 requires (the id is the
- * start's idempotency key). HAR-85: the last step, run even after a failure,
- * deletes `acceptance-cook-<runId>`. The cook stays in the owner's history:
- * deleting a device leaves its cooks, and there is no cook delete route.
+ * start's idempotency key). HAR-85, HAR-140: the last step, run even after a
+ * failure, stops any cook left active, releases `acceptance-cook-<runId>`,
+ * deletes its DPS enrollment and hub identity, and removes its state dir. The
+ * cook stays in the owner's history: releasing a device leaves its cooks, and
+ * there is no cook delete route.
  */
 
 const COOK_STATUSES = ['planning', 'active', 'paused', 'completed', 'cancelled'];
@@ -154,18 +155,18 @@ async function findCook(
 }
 
 export default defineProofs('cooks lifecycle', () => {
-  let device: RegisterDeviceRequest | undefined;
-  /** POST /devices answered 201. */
-  let deviceCreated = false;
+  let fresh: FreshDevice | undefined;
+  /** POST /devices/claim answered 201. */
+  let deviceClaimed = false;
   let started: StartCookRequest | undefined;
   /** HAR-75: the Cook the POST answered with. */
   let startedCook: Cook | undefined;
 
-  const registeredDevice = (): RegisterDeviceRequest => {
-    if (!device) {
-      throw new Error('no device was registered by an earlier proof');
+  const registeredDevice = (): FreshDevice => {
+    if (!fresh || !deviceClaimed) {
+      throw new Error('no device was claimed by an earlier proof');
     }
-    return device;
+    return fresh;
   };
 
   const startRequest = (): StartCookRequest => {
@@ -184,26 +185,26 @@ export default defineProofs('cooks lifecycle', () => {
 
   return [
     {
-      name: 'POST /devices registers the device the cook runs on',
+      name: 'a fresh device acceptance-cook-<runId> is enrolled through DPS',
       async run(api: AcceptanceApi) {
-        device = {
-          deviceId: `acceptance-cook-${api.runId}`,
+        await enrolFreshDevice(api, 'cook', device => {
+          fresh = device;
+        });
+      },
+    },
+    {
+      name: 'POST /devices/claim claims the device the cook runs on with its own claim code',
+      async run(api: AcceptanceApi) {
+        if (!fresh) {
+          throw new Error('no device was enrolled by an earlier proof');
+        }
+        const response = await claimDevice(api, fresh, {
           name: `Acceptance cook ${api.runId}`,
           model: 'Acceptance Rig',
           location: 'CI',
-        };
-        const response = await api.request<Device>({
-          method: 'POST',
-          path: '/devices',
-          body: device,
         });
         api.expectStatus(response, 201);
-        deviceCreated = true;
-        api.check(
-          response,
-          response.body?.id === device.deviceId,
-          `device.id ${response.body?.id} is not the id sent`
-        );
+        deviceClaimed = true;
       },
     },
     {
@@ -431,9 +432,9 @@ export default defineProofs('cooks lifecycle', () => {
     },
     // HAR-136: a release is refused while a cook is active, so the cleanup
     // stops any cook a failed step left active before its DELETE.
-    deleteRegisteredDevice(
-      'always: DELETE /devices/{id} removes acceptance-cook-<runId>',
-      () => ({ deviceId: device?.deviceId, created: deviceCreated }),
+    cleanupFreshDevice(
+      'always: acceptance-cook-<runId> is released and its enrollment and hub identity deleted',
+      () => ({ device: fresh, claimed: deviceClaimed }),
       { stopCooksFirst: true }
     ),
   ];

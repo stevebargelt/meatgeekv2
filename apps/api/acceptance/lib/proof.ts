@@ -5,6 +5,7 @@
  * file name, so adding a proof never means editing the runner.
  */
 
+import type { ClaimCodeLine, NoClaimYet } from './claim-code';
 import type { Contract } from './contract';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -76,14 +77,42 @@ export interface SimDeviceRun {
   readonly killedAfterMs?: number;
 }
 
+/**
+ * HAR-140: a device a proof enrolled for itself (../lib/enrolment): its own id
+ * and the state dir `simdevice identity init` made its key in. It always runs
+ * in DPS mode, with the run's ACCEPTANCE_DPS_ID_SCOPE.
+ */
+export interface FreshDeviceRef {
+  readonly deviceId: string;
+  readonly stateDir: string;
+}
+
+/** Which device a simdevice run is for: a standing one, or a fresh one. */
+export type DeviceRef = 'simulated' | 'chart' | FreshDeviceRef;
+
 export interface SimDeviceOptions {
   /** Kill the run after this long. Default 120 s, plenty for a few readings;
    *  a long top-up (HAR-45) passes its own. */
   readonly timeoutMs?: number;
   /** HAR-84: which standing device to send as. `'chart'` uses the chart
    *  device's credential and throws if it is not configured
-   *  (`chartDeviceId` is undefined). Default the simulated device. */
-  readonly device?: 'simulated' | 'chart';
+   *  (`chartDeviceId` is undefined). Default the simulated device.
+   *  HAR-140: or a fresh device, in DPS mode from its own state dir. */
+  readonly device?: DeviceRef;
+}
+
+/** HAR-140: the device scripts in apps/data-pusher/deploy the suite runs. */
+export type DeviceScript = 'enrol-device.sh' | 'delete-device.sh';
+
+/** The outcome of one device-script run. As with simdevice, nothing here is
+ *  raw output: stdout is reduced to its first line (the script's one result
+ *  line, e.g. `deleted acceptance-temp-…`) and stderr to its first line, both
+ *  redacted. */
+export interface DeviceScriptRun {
+  readonly exitCode: number | null;
+  readonly resultLine: string | undefined;
+  readonly stderrFirstLine: string | undefined;
+  readonly killedAfterMs?: number;
 }
 
 /** What a proof is handed: a client bound to the deployed API and the run id. */
@@ -106,6 +135,25 @@ export interface AcceptanceApi {
    *  `options.timeoutMs` (default 120 s, on the injected clock) is killed:
    *  `exitCode` is `null` and `killedAfterMs` is the limit. */
   runSimDevice(args: readonly string[], options?: SimDeviceOptions): Promise<SimDeviceRun>;
+  /**
+   * HAR-140: `simdevice claim-code` for a DPS-mode device (../lib/claim-code).
+   * The line holds the claim code, a secret until it is used: the runner logs
+   * that it ran, never what it printed. Throws for a device that is not in
+   * DPS mode.
+   */
+  readClaimCode(device: DeviceRef): Promise<ClaimCodeLine | NoClaimYet>;
+  /** HAR-140: whether `device` runs in DPS mode, and so can show a claim
+   *  code. A fresh device always does; a standing one when the run was given
+   *  its state dir and the DPS ID scope. */
+  inDpsMode(device: DeviceRef): boolean;
+  /**
+   * HAR-140: run one of the device scripts (`enrol-device.sh`,
+   * `delete-device.sh`) with `args`, as the job's `az` login. The runner adds
+   * `--auth-type login --dps <ACCEPTANCE_DPS_HOST> --hub
+   * <ACCEPTANCE_IOT_HUB_HOST>` and throws when either host is not set.
+   * Resolves on exit whatever the exit code.
+   */
+  runDeviceScript(script: DeviceScript, args: readonly string[]): Promise<DeviceScriptRun>;
   /** Print `METRIC <name> <value>`. The CI job copies these lines to the run
    *  summary. `name` is lower-case kebab-case; `value` a finite number. */
   metric(name: string, value: number): void;

@@ -1,11 +1,14 @@
 # Device enrolment and revocation
 
-Two operator scripts for the IoT Hub Device Provisioning Service (DPS):
+Three operator scripts for the IoT Hub Device Provisioning Service (DPS):
 
 - **`enrol-device.sh`** enrols a device's public X.509 certificate, so the
   device can register with DPS and connect to IoT Hub.
 - **`revoke-device.sh`** revokes a lost device, so IoT Hub accepts nothing more
   from it.
+- **`delete-device.sh`** deletes a throwaway device's enrollment and hub
+  identity. CI uses it for the fresh `acceptance-*` devices the live suite
+  enrols each run (HAR-140). It refuses any id outside `--only-prefix`.
 
 The device creates its own key and never gives it up.
 `meatgeek-pusher identity init` (or `simdevice identity init`) prints only the
@@ -162,23 +165,56 @@ apps/data-pusher/deploy/revoke-device.sh --auth-type login \
   --dps "$DPS_NAME.azure-devices-provisioning.net" --hub "$HUB_HOSTNAME" --device-id ci-sim-1
 ```
 
+## `delete-device.sh`
+
+```
+delete-device.sh --device-id <id> --only-prefix <prefix> [common options]
+```
+
+This is for throwaway devices only. To retire a real device, revoke it with
+`revoke-device.sh`, which deletes nothing.
+
+`--only-prefix` is required. An id that does not start with the prefix is
+refused with exit 4 before any `az` call. The prefix is matched literally, not
+as a glob. This check is what stops CI from ever deleting a real device such
+as the owner's Pi.
+
+The script deletes the DPS individual enrollment first, so the device cannot
+register again, and then the hub device identity. A delete that finds the
+thing already gone counts as done.
+
+| State                                     | Exit | Result line                                     |
+| ----------------------------------------- | ---- | ----------------------------------------------- |
+| id does not start with `--only-prefix`    | 4    | (none). No `az` call                            |
+| both exist                                | 0    | `deleted <id>`                                  |
+| no enrollment, hub identity exists        | 0    | `deleted <id> (no DPS enrollment)`              |
+| enrollment exists, no hub identity        | 0    | `deleted <id> (no IoT hub device identity)`     |
+| neither exists (a second run)             | 0    | `already deleted <id>`                          |
+
+```sh
+# CI, from the live acceptance suite
+apps/data-pusher/deploy/delete-device.sh --auth-type login \
+  --dps "$DPS_NAME.azure-devices-provisioning.net" --hub "$HUB_HOSTNAME" \
+  --device-id acceptance-temp-20261122-abc123 --only-prefix acceptance-
+```
+
 ## Exit codes
 
 | Code | Meaning                                                                    |
 | ---- | -------------------------------------------------------------------------- |
-| 0    | success (including `unchanged` and `already revoked`)                       |
+| 0    | success (including `unchanged`, `already revoked` and `already deleted`)    |
 | 2    | usage error, or a certificate refused (not a certificate, or the CN is not the device id) |
 | 3    | not found: revoke found neither an enrollment nor a hub identity           |
-| 4    | refused: the device is revoked and `REINSTATE=1` is not set (enrol)         |
+| 4    | refused: the device is revoked and `REINSTATE=1` is not set (enrol), or the id does not start with `--only-prefix` (delete) |
 | 1    | anything else: `az` or the extension missing, DPS or hub discovery failed or a named DPS or hub is not in the resource group, an `az` call failed. The message names the `az` command and its exit status |
 
 ## Tests
 
-`scripts_test.go` runs both scripts with `bash` against a fake `az` on `PATH`.
+`scripts_test.go` runs the three scripts with `bash` against a fake `az` on `PATH`.
 The fake records every invocation and answers from a fixture directory set up
 by each test. The tests check the result line, the exit code and the exact
 `az` calls for every path above. They also check that the PEM never appears in
-the output. They also run `bash -n` on both scripts, and `shellcheck` when it
+the output. They also run `bash -n` on every script, and `shellcheck` when it
 is installed. They run under `npx nx test data-pusher`:
 
 ```sh

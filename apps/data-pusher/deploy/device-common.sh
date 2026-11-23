@@ -2,18 +2,21 @@
 # The variables set here are read by the scripts that source this file.
 # shellcheck disable=SC2034
 #
-# Shared by enrol-device.sh and revoke-device.sh (HAR-135). Sourced, not run.
+# Shared by enrol-device.sh, revoke-device.sh (HAR-135) and delete-device.sh
+# (HAR-140). Sourced, not run.
 #
 # The caller sets PROG (its name, for messages) before sourcing, and calls
 # parse_common_option for each option it does not handle itself.
 #
-# Exit codes, the same for both scripts:
+# Exit codes, the same for every script:
 #   0 success, 2 usage (or a certificate that is refused), 3 not found,
-#   4 refused because the device is revoked, 1 anything else.
+#   4 refused (enrol: the device is revoked; delete: the id is outside
+#   --only-prefix), 1 anything else.
 
 readonly EXIT_USAGE=2
 readonly EXIT_NOT_FOUND=3
 readonly EXIT_REVOKED=4
+readonly EXIT_REFUSED=4
 
 RESOURCE_GROUP="meatgeek-v2-dev-rg"
 DPS_NAME=""

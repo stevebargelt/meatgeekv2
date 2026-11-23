@@ -1,8 +1,9 @@
 import type { Device } from '@meatgeekv2/api-interfaces';
 
 import { deleteDevice, stopActiveCooks } from '../lib/devices';
+import { FRESH_DEVICE_PREFIX } from '../lib/enrolment';
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
-import { defineProofs } from '../lib/proof';
+import { defineProofs, ProofFailure } from '../lib/proof';
 
 /**
  * HAR-85 — the sweep. Before HAR-85 every run registered three run-unique
@@ -27,12 +28,19 @@ import { defineProofs } from '../lib/proof';
  * COOK_ACTIVE) while a cook is active on the device, so the sweep stops any
  * cook still active on a device before it deletes it.
  *
+ * HAR-140: the run-unique devices are real now, fresh devices enrolled through
+ * DPS and claimed (../lib/enrolment). A run killed before its cleanup leaves
+ * the device claimed and its DPS enrollment and hub identity in place. So
+ * after the release, the sweep runs `delete-device.sh --only-prefix
+ * acceptance-` on each one too. For a device from before HAR-140, which had
+ * neither, it prints `already deleted` and exits 0.
+ *
  * Metrics: `acceptance-devices-before` (the owner's device count before),
  * `acceptance-devices-swept`, and `acceptance-devices-after`.
  */
 
-/** The prefix every run-unique device a proof registers starts with. */
-export const SWEPT_PREFIX = 'acceptance-';
+/** The prefix every run-unique device a proof enrols starts with. */
+export const SWEPT_PREFIX = FRESH_DEVICE_PREFIX;
 
 async function listDevices(api: AcceptanceApi): Promise<{
   devices: Device[];
@@ -54,7 +62,7 @@ export default defineProofs('device sweep', () => {
 
   return [
     {
-      name: 'DELETE /devices/{id} for every acceptance-* device an earlier run left',
+      name: 'DELETE /devices/{id} and delete-device.sh for every acceptance-* device an earlier run left',
       async run(api: AcceptanceApi) {
         const before = await listDevices(api);
         const swept = stale(api, before.devices);
@@ -65,6 +73,18 @@ export default defineProofs('device sweep', () => {
           await stopActiveCooks(api, device.id);
           const response = await deleteDevice(api, device.id);
           api.expectStatus(response, 204);
+          const deleted = await api.runDeviceScript('delete-device.sh', [
+            '--device-id',
+            device.id,
+            '--only-prefix',
+            SWEPT_PREFIX,
+          ]);
+          if (deleted.exitCode !== 0) {
+            throw new ProofFailure(
+              `delete-device.sh for ${device.id} exited ${deleted.exitCode ?? '(killed)'}, expected 0` +
+                (deleted.stderrFirstLine ? `: ${deleted.stderrFirstLine}` : '')
+            );
+          }
         }
         api.metric('acceptance-devices-swept', swept.length);
 
