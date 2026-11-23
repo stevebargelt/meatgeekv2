@@ -400,7 +400,7 @@ model {
           description 'Terraform is on main but count-guarded off (enable_native_otlp = false). No span from the Pi has reached App Insights.'
         }
         metricAlerts = service 'Metric alerts' {
-          description 'function-failure-rate (App Insights requests/failed), cosmos-429-rate (Cosmos TotalRequests, StatusCode 429), signalr-connection-failure-rate (SignalR SystemErrors), ingestion-cap-reached (workspace Heartbeat).'
+          description 'function-failure-rate (App Insights requests/failed > 5 in 5 min), cosmos-429-rate (Cosmos 429s > 50 in 15 min), signalr-connection-failure-rate (SignalR SystemErrors > 5%), ingestion-cap-reached (workspace Heartbeat ≤ 0 in 15 min; no heartbeat source exists, so it cannot fire today).'
         }
         activityAlerts = service 'Activity-log alerts' {
           description 'role-assignment-write, user-assigned-identity-write, cosmos-sql-role-assignment-write.'
