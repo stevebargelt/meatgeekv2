@@ -77,7 +77,7 @@ import { realSpawn, setSpawn } from './lib/spawn';
 import sweepGroup from './proofs/acceptance-device-sweep.proof';
 import claimGroup from './proofs/device-claim.proof';
 import releaseGroup, { RELEASE_WAIT } from './proofs/device-release.proof';
-import revokeGroup from './proofs/device-revoke.proof';
+import revokeGroup, { REVOKED_SEND_KILL_MS } from './proofs/device-revoke.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import liveGroup, { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
@@ -396,6 +396,13 @@ interface StubOptions {
   /** HAR-142: revoke-device.sh changes nothing, so the revoked device still
    *  registers and sends. */
   readonly revokeIgnored?: boolean;
+  /** HAR-142: a fresh device's reading reaches the hub but is never pushed to
+   *  SignalR, for the release proof's released device (`release`) or its
+   *  control device (`control`). */
+  readonly freshPushDropped?: 'release' | 'control';
+  /** HAR-142: the revoked device's send is neither refused nor accepted: its
+   *  simdevice never exits. */
+  readonly revokedSendHangs?: boolean;
   /** HAR-142: a refusal for an id that was never enrolled says so, an
    *  oracle: `DEVICE_NOT_FOUND` instead of `CLAIM_REFUSED`. */
   readonly claimOracle?: boolean;
@@ -477,7 +484,16 @@ interface Stub {
   readonly mintedCodes: string[];
   /** HAR-142: each `simdevice --count 1` a fresh device sent (or tried to),
    *  with the user it was pushed to, if any. */
-  readonly freshSends: Array<{ deviceId: string; pushedTo?: 'owner' | 'peer'; refused?: boolean }>;
+  /** HAR-142: the revoked device's send never exits, so fresh devices'
+   *  sends run as real children, which the runner's kill can end. */
+  readonly revokedSendHangs: boolean;
+  readonly freshSends: Array<{
+    deviceId: string;
+    pushedTo?: 'owner' | 'peer';
+    refused?: boolean;
+    dropped?: boolean;
+    hung?: boolean;
+  }>;
   /** HAR-142: the fresh devices revoked now, sorted. */
   readonly revokedIds: () => string[];
   /** HAR-120: the fake time at each `simdevice --count 1` report, which the
@@ -491,6 +507,9 @@ interface Stub {
   settled(): Promise<void>;
   /** HAR-120: resolves once a request to `holdRoute` has arrived. */
   whenHeld(): Promise<void>;
+  /** HAR-142: resolves once the stub has answered a revoked device's send
+   *  with "hang" (`revokedSendHangs`), so no request of it is still open. */
+  whenSendHung(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -701,6 +720,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   let apiInFlight = 0;
   const heldApi: ServerResponse[] = [];
   const heldWaiters: Array<() => void> = [];
+  const hungWaiters: Array<() => void> = [];
   const sendTimes: number[] = [];
   const settleWaiters: Array<() => void> = [];
   const isSettled = () =>
@@ -966,6 +986,14 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         // pushes the reading to the device's holder, read now, as the deployed
         // function reads the owner on every batch. Not an API route.
         const { deviceId } = (await readJson(request)) as { deviceId: string };
+        if (options.revokedSendHangs && revokedIds.has(deviceId)) {
+          freshSends.push({ deviceId, hung: true });
+          response.writeHead(200, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({ hang: true }), () =>
+            hungWaiters.splice(0).forEach(resolve => resolve())
+          );
+          return;
+        }
         if (!hubIds.has(deviceId) || revokedIds.has(deviceId)) {
           freshSends.push({ deviceId, refused: true });
           response.writeHead(403, { 'Content-Type': 'application/json' });
@@ -984,8 +1012,15 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
               : options.releaseLeaks
                 ? lastHolder.get(deviceId)
                 : undefined;
-        freshSends.push({ deviceId, ...(holder ? { pushedTo: holder } : {}) });
-        if (holder) {
+        const dropped =
+          options.freshPushDropped !== undefined &&
+          deviceId.startsWith(`acceptance-${options.freshPushDropped}-`);
+        freshSends.push({
+          deviceId,
+          ...(holder && !dropped ? { pushedTo: holder } : {}),
+          ...(dropped ? { dropped: true } : {}),
+        });
+        if (holder && !dropped) {
           const payload = {
             deviceId,
             timestamp,
@@ -1708,6 +1743,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         .sort(),
     mintedCodes,
     freshSends,
+    revokedSendHangs: options.revokedSendHangs ?? false,
     revokedIds: () => [...revokedIds].sort(),
     sendTimes,
     settled,
@@ -1715,6 +1751,11 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       new Promise<void>(resolve => {
         if (heldApi.length > 0) resolve();
         else heldWaiters.push(resolve);
+      }),
+    whenSendHung: () =>
+      new Promise<void>(resolve => {
+        if (freshSends.some(send => send.hung)) resolve();
+        else hungWaiters.push(resolve);
       }),
     close: () =>
       new Promise<void>(resolve => {
@@ -1849,7 +1890,7 @@ if (argv[0] === 'claim-code' && argv[1] === '--state-dir' && argv.length === 3) 
       process.stderr.write('simdevice: send reading 1 of 1: iothub: publish failed after retry: iothub: find the hub: provision: DPS refused the enrollment: the enrollment for ' + freshId + ' is disabled\\n');
       process.exit(1);
     }
-    return r.json().then(body => line({ messageId: 'f'.repeat(64), deviceId: freshId, timestamp: body.timestamp, sentAt: body.now }));
+    return r.json().then(body => body.hang ? setInterval(() => undefined, 1000) : line({ messageId: 'f'.repeat(64), deviceId: freshId, timestamp: body.timestamp, sentAt: body.now }));
   }, () => process.exit(1));
 } else if (freshId.startsWith('acceptance-') || (dpsDevice !== '' && args === '--twin --count 0 --timeout 2m')) {
   if (args !== '--twin --count 0 --timeout 2m' || !dpsHandedOver) {
@@ -2060,11 +2101,15 @@ function inProcessChild(
  * same checks of the arguments and environment the runner hands over, and
  * against the same stub routes. The two must agree. The DPS-mode test sets
  * {@link inProcessChildren} to false and runs the real ones. Anything else
- * (sends, top-ups, twin reconnects, a hanging script) is a real child.
+ * (sends, top-ups, twin reconnects, a hanging script, and a fresh device's
+ * `--count 1` in a run whose revoked send hangs) is a real child.
  */
 const inProcessSpawn: Spawn = (bin, args, env) => {
+  const hangingSend = stub?.revokedSendHangs === true && args.join(' ') === '--count 1';
   const fresh =
-    inProcessChildren && stub ? freshDeviceStep(bin, args, env, stub.baseUrl) : undefined;
+    inProcessChildren && stub && !hangingSend
+      ? freshDeviceStep(bin, args, env, stub.baseUrl)
+      : undefined;
   return fresh ? inProcessChild(fresh) : realSpawn(bin, args, env);
 };
 
@@ -3974,6 +4019,54 @@ describe('device claim, release and revoke (HAR-142, against the stub and a fake
     expect(result.failures[0]).toMatch(
       /^FAIL device revoke › simdevice --count 1 as the revoked device is refused by the hub and by DPS: it exits non-zero and sends nothing — simdevice \(acceptance-revoke-\S+\) → exit 0: simdevice as the revoked acceptance-revoke-\S+ exited 0 and printed 1 reading\(s\): the revoked device was accepted$/
     );
+    expect(result.lines).toContain(
+      'PASS device revoke › always: acceptance-revoke-<runId> is released and its enrollment and hub identity deleted'
+    );
+    expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
+    expect(stub!.enrolledIds()).toEqual([]);
+  });
+  it('HAR-120: the release proof gives up on the first reading at exactly its 90 s cap', async () => {
+    const result = await runAgainstStub({ freshPushDropped: 'release' }, 'ok', [releaseGroup]);
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatch(
+      /^FAIL device release › a reading from acceptance-release-<runId> reaches the owner while the owner holds it — simdevice \(acceptance-release-\S+\) → exit 0: sent a reading as acceptance-release-\S+ \(timestamp [^)]+\), but it did not reach the owner: nothing within the 90 s cap; the connection is Connected$/
+    );
+    expect(fakeClock.slept).toEqual([RELEASE_WAIT.capMs]);
+    expect(fakeClock.deadlines()).toEqual([]);
+    expect(stub!.freshSends.map(send => send.dropped)).toEqual([true]);
+    expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
+    expect(stub!.enrolledIds()).toEqual([]);
+  });
+
+  it('HAR-120: the release proof gives up on the control device’s reading at exactly its 90 s cap, before any grace', async () => {
+    const result = await runAgainstStub({ freshPushDropped: 'control' }, 'ok', [releaseGroup]);
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatch(
+      /^FAIL device release › its next reading never reaches the old owner, while a later reading from the owner’s control device does — simdevice \(acceptance-control-\S+\) → exit 0: the control device's reading \(timestamp [^)]+\) did not reach the owner, so the path to the owner was not shown to work: nothing within the 90 s cap; the connection is Connected$/
+    );
+    expect(fakeClock.slept).toEqual([RELEASE_WAIT.capMs]);
+    expect(fakeClock.deadlines()).toEqual([]);
+    expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
+    expect(stub!.enrolledIds()).toEqual([]);
+  });
+
+  it('a revoked device whose simdevice never exits is killed at exactly 120 s, and still released and deleted', async () => {
+    const running = runAgainstStub({ revokedSendHangs: true }, 'ok', [revokeGroup]);
+    await fakeClock.armed(REVOKED_SEND_KILL_MS);
+    // The kill only once the stub has answered the send, so no request is left open.
+    await stub!.whenSendHung();
+    expect(fakeClock.deadlines()).toEqual([REVOKED_SEND_KILL_MS]);
+    fakeClock.advance(REVOKED_SEND_KILL_MS);
+    const result = await running;
+
+    expect(REVOKED_SEND_KILL_MS).toBe(120_000);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatch(
+      /^FAIL device revoke › simdevice --count 1 as the revoked device is refused by the hub and by DPS: it exits non-zero and sends nothing — simdevice \(acceptance-revoke-\S+\) → exit killed: simdevice as the revoked acceptance-revoke-\S+ did not exit within its 120000 ms limit and was killed: it should be refused at once$/
+    );
+    expect(stub!.freshSends.map(send => send.hung)).toEqual([true]);
     expect(result.lines).toContain(
       'PASS device revoke › always: acceptance-revoke-<runId> is released and its enrollment and hub identity deleted'
     );
