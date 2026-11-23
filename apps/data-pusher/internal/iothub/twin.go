@@ -287,12 +287,23 @@ func (t *twin) fullSync(ctx context.Context, c twinConn) {
 	}
 	cook := desiredString(doc.Desired, TwinDesiredActiveCookID, nil)
 	corr := desiredString(doc.Desired, TwinDesiredCorrelationID, nil)
+	// The GET carries every property, so only the cook properties whose value
+	// differs from the applied one count as changed for the apply lag.
+	prevCook, prevCorr, _ := t.state.AppliedDesired()
+	var changed []string
+	if !sameString(cook, prevCook) {
+		changed = append(changed, TwinDesiredActiveCookID)
+	}
+	if !sameString(corr, prevCorr) {
+		changed = append(changed, TwinDesiredCorrelationID)
+	}
+	lag := newApplyLag(doc.Desired, changed, t.clock.Now())
 	if t.claims != nil {
 		// The GET is authoritative: absent claim properties are the defaults.
 		t.claimDesired = desiredClaim(doc.Desired, claim.Desired{})
 		t.claimKnown = true
 	}
-	if t.apply(ctx, c, cook, corr, version, "get") {
+	if t.apply(ctx, c, cook, corr, version, "get", lag) {
 		t.syncedOnce.Do(func() { close(t.synced) })
 	}
 }
@@ -331,7 +342,16 @@ func (t *twin) onPatch(ctx context.Context, p twinPatch) {
 	}
 	cook = desiredString(patch, TwinDesiredActiveCookID, cook)
 	corr = desiredString(patch, TwinDesiredCorrelationID, corr)
-	t.apply(ctx, t.conn(), cook, corr, p.version, "patch")
+	// A patch carries only what the API wrote, so its cook properties are the
+	// changed ones.
+	var changed []string
+	for _, key := range []string{TwinDesiredActiveCookID, TwinDesiredCorrelationID} {
+		if _, ok := patch[key]; ok {
+			changed = append(changed, key)
+		}
+	}
+	lag := newApplyLag(patch, changed, t.clock.Now())
+	t.apply(ctx, t.conn(), cook, corr, p.version, "patch", lag)
 }
 
 // apply stores the desired values and reports them. It returns true when both
@@ -341,7 +361,9 @@ func (t *twin) onPatch(ctx context.Context, p twinPatch) {
 // mint and store a new code) and puts the claim properties in the same
 // report. A claim failure is logged and the report goes out with what the
 // claim file still holds, so the cook is never held up by the claim.
-func (t *twin) apply(ctx context.Context, c twinConn, cook, corr *string, version int64, source string) bool {
+//
+// lag, when known, adds desiredUpdatedAt and applyLagMs to the log line.
+func (t *twin) apply(ctx context.Context, c twinConn, cook, corr *string, version int64, source string, lag applyLag) bool {
 	if err := t.state.ApplyDesired(cook, corr, version); err != nil {
 		t.fail(fmt.Errorf("apply desired version %d: %w", version, err))
 		return false
@@ -383,8 +405,76 @@ func (t *twin) apply(ctx context.Context, c twinConn, cook, corr *string, versio
 	if patch.ClaimGeneration != "" {
 		fields["claimGeneration"] = patch.ClaimGeneration
 	}
-	logrus.WithFields(fields).Info("iothub twin: applied and reported desired properties")
+	lag.addTo(fields)
+	logrus.WithFields(fields).Info(twinAppliedLogMessage)
 	return true
+}
+
+// twinAppliedLogMessage is the line logged after a desired apply is reported.
+// docs/devices/runbook.md ("Measuring latency") greps for its applyLagMs.
+const twinAppliedLogMessage = "iothub twin: applied and reported desired properties"
+
+// applyLag is how long a desired cook change took to reach the device (HAR-150):
+// from IoT Hub's $metadata.<property>.$lastUpdated, the time the API wrote the
+// property, to the device's clock when it received the patch or GET. On a GET
+// after a reconnect it includes the time the device was offline; the log's
+// source field tells the two apart. The zero value means unknown, and adds no
+// fields.
+type applyLag struct {
+	updatedAt time.Time
+	lag       time.Duration
+}
+
+// newApplyLag reads the latest $metadata.<key>.$lastUpdated among keys from a
+// desired section or patch. Without keys, $metadata, or a parseable time for
+// any of them, it returns the zero applyLag: the measurement is skipped, never
+// the apply.
+func newApplyLag(desired map[string]json.RawMessage, keys []string, now time.Time) applyLag {
+	if len(keys) == 0 {
+		return applyLag{}
+	}
+	var metadata map[string]json.RawMessage
+	if raw, ok := desired["$metadata"]; !ok || json.Unmarshal(raw, &metadata) != nil {
+		return applyLag{}
+	}
+	var latest time.Time
+	for _, key := range keys {
+		var prop struct {
+			LastUpdated string `json:"$lastUpdated"`
+		}
+		raw, ok := metadata[key]
+		if !ok || json.Unmarshal(raw, &prop) != nil {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, prop.LastUpdated)
+		if err != nil {
+			continue
+		}
+		if at.After(latest) {
+			latest = at
+		}
+	}
+	if latest.IsZero() {
+		return applyLag{}
+	}
+	return applyLag{updatedAt: latest, lag: now.Sub(latest)}
+}
+
+// addTo adds desiredUpdatedAt (RFC 3339, UTC) and applyLagMs to fields when
+// the lag is known.
+func (l applyLag) addTo(fields logrus.Fields) {
+	if l.updatedAt.IsZero() {
+		return
+	}
+	fields["desiredUpdatedAt"] = l.updatedAt.UTC().Format(time.RFC3339Nano)
+	fields["applyLagMs"] = l.lag.Milliseconds()
+}
+
+func sameString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // request publishes a twin request with a fresh $rid and waits for the

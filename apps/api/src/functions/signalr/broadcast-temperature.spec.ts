@@ -1,9 +1,12 @@
 import type { InvocationContext } from '@azure/functions';
+import type { Attributes, Histogram, Meter } from '@opentelemetry/api';
 
 import { toTemperatureReading } from '../../shared/cosmos/temperatures-repository';
 import {
   broadcastTemperatureHandler,
   decodeBody,
+  HUB_LAG_METRIC,
+  PUSH_LAG_METRIC,
   type BroadcastTemperatureDeps,
 } from './broadcast-temperature';
 import { signalROutput, SignalRTemperatureMessage, TEMPERATURE } from './envelope';
@@ -31,6 +34,29 @@ interface Captured {
   messages(): SignalRTemperatureMessage[];
   /** Every owner lookup, in call order. */
   lookups: string[];
+  /** Every histogram value recorded, by metric name, in record order. */
+  recorded: Map<string, Array<{ value: number; attributes: Attributes }>>;
+}
+
+/** The fixed push time every test's handler reads from its clock. */
+const PUSHED_AT = '2026-11-19T10:00:30.000Z';
+
+/** A meter whose histograms record every value and attribute set. */
+function recordingMeter(): {
+  meter: Meter;
+  recorded: Map<string, Array<{ value: number; attributes: Attributes }>>;
+} {
+  const recorded = new Map<string, Array<{ value: number; attributes: Attributes }>>();
+  const meter = {
+    createHistogram: (name: string): Histogram => {
+      const values = recorded.get(name) ?? [];
+      recorded.set(name, values);
+      return {
+        record: (value: number, attributes: Attributes = {}) => values.push({ value, attributes }),
+      };
+    },
+  } as unknown as Meter;
+  return { meter, recorded };
 }
 
 /** `smoker-<x>` is owned by `owner-<x>`; anything else has no owner. */
@@ -40,14 +66,18 @@ function defaultOwner(deviceId: string): string | undefined {
 
 function invoke(
   events: TestEvent[],
-  ownerOf: (deviceId: string) => Promise<string | undefined> = async id => defaultOwner(id)
+  ownerOf: (deviceId: string) => Promise<string | undefined> = async id => defaultOwner(id),
+  meter?: Meter
 ): { run: Promise<void>; captured: Captured } {
   const lookups: string[] = [];
+  const telemetry = recordingMeter();
   const deps: BroadcastTemperatureDeps = {
     ownerOf: deviceId => {
       lookups.push(deviceId);
       return ownerOf(deviceId);
     },
+    now: () => new Date(PUSHED_AT),
+    meter: meter ?? telemetry.meter,
   };
   const sets: Array<{ output: unknown; value: unknown }> = [];
   const logs: string[] = [];
@@ -74,6 +104,7 @@ function invoke(
     sets,
     logs,
     lookups,
+    recorded: telemetry.recorded,
     messages: () => {
       const forSignalR = sets.filter(s => s.output === signalROutput);
       return (forSignalR[forSignalR.length - 1]?.value ?? []) as SignalRTemperatureMessage[];
@@ -420,5 +451,127 @@ describe('broadcastTemperatureHandler', () => {
       'broadcastTemperature sent=0 skipped=3 unowned=0 lookupFailed=0',
       'broadcastTemperature sent=0 skipped=0 unowned=0 lookupFailed=0',
     ]);
+  });
+
+  describe('latency metrics (HAR-150)', () => {
+    it('records push lag (push time - reading timestamp) and hub lag (iothub-enqueuedtime - reading timestamp) for each pushed reading', async () => {
+      const { run, captured } = invoke([
+        {
+          deviceId: 'smoker-a',
+          // Device stamped 10:00:00, hub enqueued 10:00:02, pushed at 10:00:30.
+          iothubEnqueuedTime: '2026-11-19T10:00:02.000Z',
+          enqueuedTimeUtc: '2026-11-19T10:00:03.000Z',
+          body: { timestamp: T0, grillTemp: 225 },
+        },
+        {
+          deviceId: 'smoker-b',
+          iothubEnqueuedTime: '2026-11-19T10:00:05.250Z',
+          enqueuedTimeUtc: '2026-11-19T10:00:06.000Z',
+          body: { timestamp: T1, grillTemp: 226 },
+        },
+      ]);
+      await run;
+
+      expect(captured.recorded.get(PUSH_LAG_METRIC)).toEqual([
+        { value: 30_000, attributes: {} },
+        { value: 25_000, attributes: {} },
+      ]);
+      expect(captured.recorded.get(HUB_LAG_METRIC)).toEqual([
+        { value: 2_000, attributes: {} },
+        { value: 250, attributes: {} },
+      ]);
+    });
+
+    it('records nothing for a reading that is not pushed: unowned, lookup failed, or skipped', async () => {
+      const { run, captured } = invoke(
+        [
+          { deviceId: 'nobody', iothubEnqueuedTime: T0, body: { timestamp: T0 } },
+          { deviceId: 'smoker-broken', iothubEnqueuedTime: T0, body: { timestamp: T0 } },
+          { deviceId: 'smoker-a', iothubEnqueuedTime: T0, body: 'not json' },
+          { deviceId: 'smoker-a', iothubEnqueuedTime: T1, body: { timestamp: T1 } },
+        ],
+        async id => {
+          if (id === 'smoker-broken') {
+            throw new Error('cosmos down');
+          }
+          return defaultOwner(id);
+        }
+      );
+      await run;
+
+      expect(captured.recorded.get(PUSH_LAG_METRIC)).toEqual([{ value: 25_000, attributes: {} }]);
+      expect(captured.recorded.get(HUB_LAG_METRIC)).toEqual([{ value: 0, attributes: {} }]);
+    });
+
+    it('clamps a reading stamped ahead of the push or hub time to 0 with negative: true', async () => {
+      const ahead = '2026-11-19T10:01:00.000Z'; // after PUSHED_AT and after the hub time
+      const { run, captured } = invoke([
+        { deviceId: 'smoker-a', iothubEnqueuedTime: T2, body: { timestamp: ahead } },
+      ]);
+      await run;
+
+      expect(captured.recorded.get(PUSH_LAG_METRIC)).toEqual([
+        { value: 0, attributes: { negative: true } },
+      ]);
+      expect(captured.recorded.get(HUB_LAG_METRIC)).toEqual([
+        { value: 0, attributes: { negative: true } },
+      ]);
+    });
+
+    it('carries no attribute that identifies a device, user, cook or reading', async () => {
+      const { run, captured } = invoke([
+        {
+          deviceId: 'smoker-a',
+          iothubEnqueuedTime: T1,
+          body: { timestamp: T0, cookId: 'cook-1', grillTemp: 225 },
+        },
+        {
+          deviceId: 'smoker-b',
+          iothubEnqueuedTime: T0,
+          body: { timestamp: '2026-11-19T10:05:00.000Z', cookId: 'cook-2' },
+        },
+      ]);
+      await run;
+
+      const all = [...captured.recorded.values()].flat();
+      expect(all).toHaveLength(4);
+      for (const { attributes } of all) {
+        expect(Object.keys(attributes).every(key => key === 'negative')).toBe(true);
+        expect(Object.values(attributes).every(value => value === true)).toBe(true);
+      }
+      const text = JSON.stringify(all);
+      for (const forbidden of ['smoker', 'owner', 'cook']) {
+        expect(text).not.toContain(forbidden);
+      }
+    });
+
+    it('records no hub lag when the event has no iothub-enqueuedtime, and still records push lag', async () => {
+      const { run, captured } = invoke([
+        { deviceId: 'smoker-a', enqueuedTimeUtc: T1, body: { timestamp: T0 } },
+      ]);
+      await run;
+
+      expect(captured.recorded.get(PUSH_LAG_METRIC)).toEqual([{ value: 30_000, attributes: {} }]);
+      expect(captured.recorded.get(HUB_LAG_METRIC)).toEqual([]);
+    });
+
+    it('still pushes the batch when the meter throws', async () => {
+      const throwing = {
+        createHistogram: () => {
+          throw new Error('meter broken');
+        },
+      } as unknown as Meter;
+      const { run, captured } = invoke(
+        [{ deviceId: 'smoker-a', iothubEnqueuedTime: T0, body: { timestamp: T0 } }],
+        async id => defaultOwner(id),
+        throwing
+      );
+      await expect(run).resolves.toBeUndefined();
+
+      expect(captured.messages()).toHaveLength(1);
+      expect(captured.logs).toEqual([
+        'broadcastTemperature sent=1 skipped=0 unowned=0 lookupFailed=0',
+      ]);
+    });
   });
 });
