@@ -517,8 +517,10 @@ update, delete`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Otel -. "`traces and logs, samplingRatio 0.5`" .-> MeatgeekCloudObservability.Appinsights
   Delivery -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudApi.Cooks -. "`set twin desired properties`" .-> MeatgeekCloudIngest.Iothub
-  MeatgeekCloudApi.Devices -. "`read twin claim hash; set
-desired claim properties`" .-> MeatgeekCloudIngest.Iothub
+  MeatgeekCloudApi.Devices -. "`GET reads connectionState
+and lastActivityTime; claim
+reads the twin claim hash and
+sets desired claim properties`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudIngest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngest.Eventhub
   MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Broadcast
@@ -647,8 +649,9 @@ graph TB
 chart or <sim>-web: messageId,
 $.ct=application/json, $.ce=utf-
 8, traceparent`" .-> MeatgeekCloudIngest.Iothub
-  Delivery.Acceptance -. "`ensure the device identity,
-read its connection string`" .-> MeatgeekCloudIngest.Iothub
+  Delivery.Acceptance -. "`enrol each simulated device
+through DPS (enrol-device.sh),
+register it with simdevice`" .-> MeatgeekCloudIngest.Iothub
   Delivery.Acceptance -. "`connects as a SignalR client`" .-> MeatgeekCloudRealtime
   Delivery.Acceptance -. "`[...]`" .-> Delivery.Simdevice
   Delivery.Acceptance -. "`live acceptance probes`" .-> MeatgeekCloudApi
@@ -869,10 +872,12 @@ graph TB
   DevCi.WebAcceptance -. "`spawns as <sim>-web`" .-> DevCi.Simdevice
   DevPi.Pusher -. "`[...]`" .-> DevRg.Iothub
   DevRg.Iothub -. "`desired properties`" .-> DevPi.Pusher
-  DevCi.Acceptance -. "`ensure the device identity,
-read its connection string`" .-> DevRg.Iothub
-  DevCi.WebAcceptance -. "`ensure <sim>-web, read
-its connection string`" .-> DevRg.Iothub
+  DevCi.Acceptance -. "`enrol each simulated device
+through DPS (enrol-device.sh),
+register it with simdevice`" .-> DevRg.Iothub
+  DevCi.WebAcceptance -. "`enrol <sim>-web through
+DPS (enrol-device.sh),
+register it with simdevice`" .-> DevRg.Iothub
   DevCi.Simdevice -. "`telemetry as <sim>, <sim>-
 chart or <sim>-web: messageId,
 $.ct=application/json, $.ce=utf-

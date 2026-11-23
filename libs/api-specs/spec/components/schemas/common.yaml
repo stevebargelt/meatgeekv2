@@ -252,14 +252,16 @@ TemperatureUnit:
     - fahrenheit
     - celsius
 
-ConnectionStatus:
+DeviceConnectionState:
   type: string
   description: |
-    Reachability of a device from the cloud side. Named enum (not anonymous
-    union) so Go codegen produces a typed constant set.
+    HAR-143: a device's IoT Hub connection as its twin reports it
+    (`Connected` / `Disconnected`); `unknown` when the twin could not be
+    read. Named enum (not anonymous union) so Go codegen produces a typed
+    constant set.
   enum:
-    - online
-    - offline
+    - connected
+    - disconnected
     - unknown
 
 ISODateTime:

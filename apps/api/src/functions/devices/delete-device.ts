@@ -5,7 +5,6 @@ import { getCooksRepository, type CooksRepository } from '../../shared/cosmos/co
 import { requestChargeHeaders } from '../../shared/cosmos/request-charge';
 import {
   DeviceTwinError,
-  getDeviceTwinClient,
   type DeviceTwin,
   type DeviceTwinPort,
 } from '../../shared/iothub/device-twin';
@@ -58,17 +57,15 @@ export const COOK_ACTIVE_MESSAGE = 'Stop the active cook before releasing this d
 /** Twin reads per release: the first, and one more after a 412 on the patch. */
 export const RELEASE_TWIN_MAX_READS = 2;
 
-/** Injection seam: the devices seam plus the cook lock and the device twin.
- *  Tests pass fake containers and a fake twin hub. */
+/** Injection seam: the devices seam (which carries the device twin) plus the
+ *  cook lock. Tests pass fake containers and a fake twin hub. */
 export interface DeleteDeviceDeps extends DevicesHandlerDeps {
   getCooksRepository(): Pick<CooksRepository, 'getActiveCookIdForDevice'>;
-  getDeviceTwin(): DeviceTwinPort;
 }
 
 export const defaultDeleteDeviceDeps: DeleteDeviceDeps = {
   ...defaultDevicesDeps,
   getCooksRepository,
-  getDeviceTwin: getDeviceTwinClient,
 };
 
 /**

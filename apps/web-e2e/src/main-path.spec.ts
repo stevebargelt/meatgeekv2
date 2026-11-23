@@ -14,7 +14,9 @@ const DEVICE: Device = {
   model: 'MeatGeek',
   location: 'Patio',
   isActive: true,
-  connectionStatus: 'online',
+  // HAR-143: the fake API lists it as the real one does, with the connection
+  // it read from IoT Hub: connected, heard from 12 s before the frozen now.
+  connection: { state: 'connected', lastActivityAt: frozenIso(-12_000) },
   configuration: { temperatureUnit: 'fahrenheit', pollingInterval: 30 },
 };
 
@@ -90,6 +92,7 @@ test('sign in, claim the device, start a cook, see a pushed reading and the char
   await expect(page).toHaveURL(/\/$/);
   const row = page.getByRole('row').filter({ hasText: DEVICE.name });
   await expect(row).toContainText(DEVICE.id);
+  await expect(row.getByTestId('device-connection')).toHaveText('Connected · last heard 12 s ago');
   await row.getByRole('button', { name: 'Start cook' }).click();
   const form = page.getByRole('form', { name: `Start a cook on ${DEVICE.name}` });
   await form.getByLabel('Name', { exact: true }).fill('Saturday brisket');

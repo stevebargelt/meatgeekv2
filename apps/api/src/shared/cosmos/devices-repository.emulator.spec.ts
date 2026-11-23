@@ -102,7 +102,6 @@ function newDevice(userId: string, overrides: Partial<Device> = {}): Device {
     name: `Emulator grill ${randomUUID().slice(0, 8)}`,
     model: 'MeatGeek V2',
     isActive: true,
-    connectionStatus: 'unknown',
     ...overrides,
   };
 }

@@ -277,7 +277,6 @@ async function claimDevice(
     model,
     ...(location !== undefined ? { location } : {}),
     isActive: true,
-    connectionStatus: 'unknown',
     ...(configuration !== undefined
       ? { configuration: mergeDeviceConfiguration(undefined, configuration) }
       : {}),

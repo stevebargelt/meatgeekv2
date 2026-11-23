@@ -15,7 +15,6 @@ Device:
     - name
     - model
     - isActive
-    - connectionStatus
   additionalProperties: false
   properties:
     id:
@@ -46,8 +45,6 @@ Device:
       type: boolean
     configuration:
       $ref: '#/DeviceConfiguration'
-    connectionStatus:
-      $ref: './common.yaml#/ConnectionStatus'
     firmware:
       type: object
       additionalProperties: false
@@ -65,6 +62,34 @@ Device:
       description: |
         HAR-130: when the owner claimed the device with its claim code
         (ISO-8601 UTC). Absent on a device registered through POST /devices.
+    connection:
+      $ref: '#/DeviceConnection'
+
+DeviceConnection:
+  type: object
+  description: |
+    HAR-143 (goal HAR-130): whether the device is connected to IoT Hub and
+    when the hub last heard from it, read live from the device's twin
+    (top-level `connectionState` and `lastActivityTime`) and never stored.
+    GET /devices and GET /devices/{id} always include it on every device;
+    the other routes that return a Device leave it out. A twin that could
+    not be read (no twin, a failure, a timeout) gives
+    `{ state: unknown, lastActivityAt: null }` and never fails the request.
+  required:
+    - state
+    - lastActivityAt
+  additionalProperties: false
+  properties:
+    state:
+      $ref: './common.yaml#/DeviceConnectionState'
+    lastActivityAt:
+      type: string
+      format: date-time
+      nullable: true
+      description: |
+        When IoT Hub last heard from the device (ISO-8601 UTC, millisecond
+        precision). `null` when it never has (IoT Hub's
+        `0001-01-01T00:00:00Z`) or the twin could not be read.
 
 DeviceConfiguration:
   type: object

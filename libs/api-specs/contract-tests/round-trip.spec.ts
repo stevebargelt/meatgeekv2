@@ -27,7 +27,7 @@ const DEVICE = {
   model: 'MeatGeek V1',
   location: 'Austin, TX',
   isActive: true,
-  connectionStatus: 'unknown',
+  connection: { state: 'disconnected', lastActivityAt: '2026-11-20T12:34:56.123Z' },
   configuration: {
     temperatureUnit: 'fahrenheit',
     pollingInterval: 30,

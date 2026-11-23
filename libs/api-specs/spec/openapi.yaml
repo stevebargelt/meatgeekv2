@@ -168,8 +168,8 @@ components:
       $ref: './components/schemas/common.yaml#/CosmosHealthResponse'
     TemperatureUnit:
       $ref: './components/schemas/common.yaml#/TemperatureUnit'
-    ConnectionStatus:
-      $ref: './components/schemas/common.yaml#/ConnectionStatus'
+    DeviceConnectionState:
+      $ref: './components/schemas/common.yaml#/DeviceConnectionState'
     ISODateTime:
       $ref: './components/schemas/common.yaml#/ISODateTime'
 
@@ -204,6 +204,8 @@ components:
       $ref: './components/schemas/device.yaml#/Device'
     DeviceConfiguration:
       $ref: './components/schemas/device.yaml#/DeviceConfiguration'
+    DeviceConnection:
+      $ref: './components/schemas/device.yaml#/DeviceConnection'
     DeviceListResponse:
       $ref: './components/schemas/device.yaml#/DeviceListResponse'
     DeviceConfigurationPatch:

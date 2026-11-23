@@ -24,7 +24,6 @@ const DEVICE: Device = {
   model: 'MeatGeek V1',
   location: 'Patio',
   isActive: true,
-  connectionStatus: 'online',
   configuration: { temperatureUnit: 'fahrenheit', pollingInterval: 30 },
 };
 

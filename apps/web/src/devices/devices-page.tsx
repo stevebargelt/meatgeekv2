@@ -8,13 +8,23 @@ import { DeviceRow } from './device-row';
 
 type ListState =
   | { status: 'loading' }
-  | { status: 'loaded'; devices: Device[] }
+  /** `readAt`: when the list answered, on the page's clock (HAR-143). */
+  | { status: 'loaded'; devices: Device[]; readAt: number }
   | { status: 'error'; problem: ApiProblem };
 
 /** The caller's active cooks keyed by device id, or why they could not be read. */
 type ActiveCooks = Map<string, Cook> | { problem: ApiProblem } | undefined;
 
-export function DevicesPage() {
+interface DevicesPageProps {
+  /**
+   * HAR-143: the clock each device's "last heard" age is measured on (epoch
+   * ms). It is read once per load of the list, so the age is as of the same
+   * moment as the connection it describes; nothing polls.
+   */
+  clock?: () => number;
+}
+
+export function DevicesPage({ clock = Date.now }: DevicesPageProps = {}) {
   const api = useApi();
   const [state, setState] = useState<ListState>({ status: 'loading' });
   const [notice, setNotice] = useState<ApiProblem | null>(null);
@@ -46,7 +56,7 @@ export function DevicesPage() {
         if (data === undefined) {
           setState({ status: 'error', problem: problemFromResponse(error, response) });
         } else {
-          setState({ status: 'loaded', devices: data.devices });
+          setState({ status: 'loaded', devices: data.devices, readAt: clock() });
         }
       } catch (err) {
         if (current) setState({ status: 'error', problem: problemFromError(err) });
@@ -55,7 +65,7 @@ export function DevicesPage() {
     return () => {
       current = false;
     };
-  }, [api, reloads]);
+  }, [api, reloads, clock]);
 
   // One GET /cooks?status=active for the page, not one call per device. It is
   // not re-read when the device list is: renaming or releasing a device does
@@ -138,6 +148,7 @@ function DeviceList({ state, activeCooks, onChanged, onReleased, onNotFound }: D
           <th scope="col">ID</th>
           <th scope="col">Model</th>
           <th scope="col">Location</th>
+          <th scope="col">Status</th>
           <th scope="col">Cook</th>
         </tr>
       </thead>
@@ -146,6 +157,7 @@ function DeviceList({ state, activeCooks, onChanged, onReleased, onNotFound }: D
           <DeviceRow
             key={device.id}
             device={device}
+            now={state.readAt}
             activeCook={activeCooks?.get(device.id)}
             onChanged={onChanged}
             onReleased={onReleased}

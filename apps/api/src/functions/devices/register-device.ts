@@ -19,8 +19,9 @@ import {
  * HAR-20 (MG-80) — POST /devices: register a device to the caller.
  *
  * The document is created with Cosmos `create` (never upsert) with the
- * principal as owner, `isActive: true` and `connectionStatus: 'unknown'`. A
- * supplied `configuration` is completed from DEFAULT_DEVICE_CONFIGURATION.
+ * principal as owner and `isActive: true`. A supplied `configuration` is
+ * completed from DEFAULT_DEVICE_CONFIGURATION. Connection state is not stored:
+ * the GETs read it from IoT Hub (HAR-143).
  *
  *   - 201: the stored Device;
  *   - 400 VALIDATION_ERROR: a bad body (no Cosmos call);
@@ -61,7 +62,6 @@ export async function registerDeviceHandler(
     model,
     ...(location !== undefined ? { location } : {}),
     isActive: true,
-    connectionStatus: 'unknown',
     ...(configuration !== undefined
       ? { configuration: mergeDeviceConfiguration(undefined, configuration) }
       : {}),

@@ -9,12 +9,16 @@ import {
   serverError,
   type DevicesHandlerDeps,
 } from './devices-http';
+import { formatConnectionCounts, withConnections } from './device-connection';
 
 /**
  * HAR-20 (MG-80) — GET /devices/{id}: one device the caller owns, as a bare
  * Device. One point read (partition key = device id). A device that does not
  * exist and one owned by someone else both answer 404, so the response does not
  * reveal that a foreign device exists.
+ *
+ * HAR-143: the device carries `connection`, read from its IoT Hub twin. A twin
+ * that cannot be read makes it `unknown`; it never fails the request.
  */
 export async function getDeviceHandler(
   request: HttpRequest,
@@ -38,7 +42,9 @@ export async function getDeviceHandler(
     if (ownership.status !== 'owned') {
       return deviceNotFound(correlationId, context, ownership.requestCharge);
     }
-    return jsonResponse(200, ownership.device, correlationId, ownership.requestCharge);
+    const connected = await withConnections([ownership.device], () => deps.getDeviceTwin());
+    context.log(`getDevice connection ${formatConnectionCounts(connected.counts)}`);
+    return jsonResponse(200, connected.devices[0], correlationId, ownership.requestCharge);
   } catch (error) {
     return serverError('getDevice', 'Failed to retrieve device', error, correlationId, context);
   }

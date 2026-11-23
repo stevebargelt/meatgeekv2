@@ -93,9 +93,12 @@ export function mergeDeviceConfiguration(
 
 /**
  * The ONE place a stored devices document becomes an api-interfaces
- * {@link Device}. An ALLOW-list, checked against `keyof Device` at compile time
- * in both directions, so Cosmos system properties (`_rid`, `_self`, `_etag`,
- * `_attachments`, `_ts`) and any unmodelled stored field never reach a caller.
+ * {@link Device}. An ALLOW-list, checked against `keyof StoredDevice` at
+ * compile time in both directions, so Cosmos system properties (`_rid`,
+ * `_self`, `_etag`, `_attachments`, `_ts`) and any unmodelled stored field
+ * never reach a caller. HAR-143: that includes the stored connection status
+ * field that documents written before HAR-143 still carry; `connection` is
+ * read live from IoT Hub, never stored.
  */
 const DEVICE_FIELDS = [
   'id',
@@ -106,19 +109,19 @@ const DEVICE_FIELDS = [
   'lastSeen',
   'isActive',
   'configuration',
-  'connectionStatus',
   'firmware',
   'claimedAt',
-] as const satisfies readonly (keyof Device)[];
+] as const satisfies readonly (keyof StoredDevice)[];
 
-type UnmappedDeviceField = Exclude<keyof Device, (typeof DEVICE_FIELDS)[number]>;
+type UnmappedDeviceField = Exclude<keyof StoredDevice, (typeof DEVICE_FIELDS)[number]>;
 /** Compile-time guard: fails if the Device contract gains a field not listed above. */
 const deviceFieldsAreExhaustive: [UnmappedDeviceField] extends [never] ? true : never = true;
 void deviceFieldsAreExhaustive;
 
-/** A devices document as Cosmos returns it: the Device fields plus system
- *  properties the static type cannot see. Never returned without {@link toDevice}. */
-type StoredDevice = Device;
+/** A devices document as Cosmos returns it: the Device fields but the live
+ *  `connection`, plus system properties the static type cannot see. Never
+ *  returned without {@link toDevice}. */
+type StoredDevice = Omit<Device, 'connection'>;
 
 /** Projects a stored document onto the Device shape. Absent fields stay absent. */
 export function toDevice(document: StoredDevice): Device {

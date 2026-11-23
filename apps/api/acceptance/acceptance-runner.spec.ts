@@ -76,6 +76,7 @@ import type { ChildProcess, Spawn } from './lib/spawn';
 import { realSpawn, setSpawn } from './lib/spawn';
 import sweepGroup from './proofs/acceptance-device-sweep.proof';
 import claimGroup from './proofs/device-claim.proof';
+import devicesGroup, { CLOCK_SKEW_MS, LAST_ACTIVITY_POLL } from './proofs/devices.proof';
 import releaseGroup, { RELEASE_WAIT } from './proofs/device-release.proof';
 import revokeGroup, { REVOKED_SEND_KILL_MS } from './proofs/device-revoke.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
@@ -287,6 +288,18 @@ const STALE_COOK_ID = '0b7c1d52-9e1f-4c3a-8d2e-5f6a7b8c9d0e';
 const RS = '\u001e';
 
 interface StubOptions {
+  /**
+   * HAR-143: how the fake hub publishes a device's last activity, which it
+   * records when the device registers or sends. `lagMs`: `lastActivityAt`
+   * stays null until this much fake time has passed (IoT Hub's eventual
+   * consistency). `never`: it stays null. `offsetMs`: the recorded time is
+   * moved by this much (negative: the hub's clock is behind).
+   */
+  readonly lastActivity?: {
+    readonly lagMs?: number;
+    readonly never?: boolean;
+    readonly offsetMs?: number;
+  };
   /** Answer this route with this status (and an RU header) instead. */
   readonly failRoute?: { readonly route: StubRoute; readonly status: number };
   /** Answer this route normally but without the RU header. */
@@ -437,7 +450,6 @@ interface StubDevice {
   model: string;
   location?: string;
   isActive: boolean;
-  connectionStatus: string;
   /** HAR-140: set on a device claimed through POST /devices/claim. */
   claimedAt?: string;
 }
@@ -571,7 +583,6 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       name: `Left by an earlier run: ${id}`,
       model: 'Acceptance Rig',
       isActive: true,
-      connectionStatus: 'unknown',
     });
   }
   // HAR-140: the owner holds the standing simulated device, as in dev, unless
@@ -584,7 +595,6 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       name: 'Simulated smoker (acceptance)',
       model: 'simdevice',
       isActive: true,
-      connectionStatus: 'unknown',
     });
   }
   for (const deviceId of options.activeCookAtStartOn ?? []) {
@@ -603,6 +613,24 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   // is released, as a release raises the claim generation).
   const enrolledIds = new Set<string>([SIM_DEVICE, CHART_DEVICE]);
   const hubIds = new Set<string>();
+  // HAR-143: when the fake hub last heard from each device (fake time).
+  const heardAt = new Map<string, number>();
+  const withConnection = (device: StubDevice) => {
+    const at = heardAt.get(device.id);
+    const published =
+      at !== undefined &&
+      !options.lastActivity?.never &&
+      fakeClock.now() >= at + (options.lastActivity?.lagMs ?? 0);
+    return {
+      ...device,
+      connection: {
+        state: published ? 'disconnected' : 'unknown',
+        lastActivityAt: published
+          ? new Date(at + (options.lastActivity?.offsetMs ?? 0)).toISOString()
+          : null,
+      },
+    };
+  };
   const claimCodes = new Map<string, { code: string; consumedBy?: string }>();
   const mintedCodes: string[] = [];
   // HAR-142: revoked fresh devices (their enrollment and identity disabled),
@@ -631,7 +659,6 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       model: 'simdevice',
       location: 'CI',
       isActive: true,
-      connectionStatus: 'unknown',
     });
     cooks.push({
       id: STANDING_CHART_COOK_ID,
@@ -971,6 +998,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           return;
         }
         hubIds.add(deviceId);
+        heardAt.set(deviceId, fakeClock.now());
         if (!claimCodes.has(deviceId)) {
           const code = `7K3M-9QXR-${String(1000 + mintedCodes.length)}`;
           mintedCodes.push(code);
@@ -1431,7 +1459,13 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         }
         send(200, options.emptyHistoryBody ?? { readings: [], limit: 100, hasMore: false }, route);
       } else if (route === 'GET /devices') {
-        send(200, { devices: [...devices.values()].filter(d => d.userId === callerUser) }, route);
+        send(
+          200,
+          {
+            devices: [...devices.values()].filter(d => d.userId === callerUser).map(withConnection),
+          },
+          route
+        );
       } else if (route === 'POST /devices') {
         const body = (await readJson(request)) as Partial<StubDevice> & { deviceId?: string };
         if (!body?.deviceId || !/^[A-Za-z0-9._:-]{1,128}$/.test(body.deviceId) || !body.name) {
@@ -1452,7 +1486,6 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           model: body.model ?? '',
           location: body.location,
           isActive: true,
-          connectionStatus: 'unknown',
         };
         devices.set(device.id, device);
         send(201, device, route);
@@ -1509,7 +1542,6 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           model: body.model ?? 'MeatGeek',
           location: body.location,
           isActive: true,
-          connectionStatus: 'unknown',
           claimedAt: new Date(fakeClock.now()).toISOString(),
         };
         devices.set(device.id, device);
@@ -1559,7 +1591,8 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
             location: body.location ?? device.location,
           });
         }
-        send(200, device, route);
+        // HAR-143: only the GET carries the live connection.
+        send(200, route === 'GET /devices/{id}' ? withConnection(device) : device, route);
       } else if (route === 'GET /cooks') {
         // Honours the MG-87 filters, as the deployed route does.
         const deviceId = url.searchParams.get('deviceId');
@@ -3600,6 +3633,66 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(lines).toContain(
       'PASS telemetry round-trip › POST /devices/claim claims the simulated device for the caller'
     );
+  });
+});
+
+describe('devices: the live connection (HAR-143, against the stub)', () => {
+  const STEP = 'devices › GET /devices/{id} shows when IoT Hub last heard from the device';
+  const CLEANUP =
+    'devices › always: acceptance-device-<runId> is released and its enrollment and hub identity deleted';
+  const runDevices = (options: StubOptions = {}) => runAgainstStub(options, 'ok', [devicesGroup]);
+
+  it('(a) passes at once when the hub has published the activity; prints METRIC last-activity-wait-ms 0', async () => {
+    const result = await runDevices();
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    expect(result.lines).toContain(`PASS ${STEP}`);
+    expect(result.lines).toContain('METRIC last-activity-wait-ms 0');
+    expect(fakeClock.slept.filter(ms => ms === LAST_ACTIVITY_POLL.intervalMs)).toEqual([]);
+  });
+
+  it('(a) polls every 5 s until the hub publishes it (eventual consistency)', async () => {
+    const result = await runDevices({ lastActivity: { lagMs: 30_000 } });
+
+    expect(result.failures).toEqual([]);
+    expect(result.lines).toContain(`PASS ${STEP}`);
+    const metric = result.lines.find(line => line.startsWith('METRIC last-activity-wait-ms '));
+    expect(Number(metric?.split(' ')[2])).toBeGreaterThanOrEqual(30_000);
+    expect(Number(metric?.split(' ')[2])).toBeLessThan(30_000 + LAST_ACTIVITY_POLL.intervalMs);
+  });
+
+  it('(a) accepts a hub clock up to 5 min behind the runner', async () => {
+    const result = await runDevices({ lastActivity: { offsetMs: -CLOCK_SKEW_MS + 1_000 } });
+
+    expect(result.failures).toEqual([]);
+    expect(result.lines).toContain(`PASS ${STEP}`);
+  });
+
+  it('(b) fails naming the 10 min cap when lastActivityAt stays null, and still cleans up', async () => {
+    const result = await runDevices({ lastActivity: { never: true } });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(`FAIL ${STEP}`);
+    expect(result.failures[0]).toContain(
+      'GET /devices/{id} → 200: device.connection.lastActivityAt was still null after the ' +
+        '10 min cap; last state unknown'
+    );
+    expect(LAST_ACTIVITY_POLL).toEqual({ intervalMs: 5_000, capMs: 600_000 });
+    expect(fakeClock.slept.filter(ms => ms === LAST_ACTIVITY_POLL.intervalMs)).toHaveLength(120);
+    expect(result.lines).toContain(`PASS ${CLEANUP}`);
+  });
+
+  it('(b) fails when lastActivityAt is more than 5 min before the proof started', async () => {
+    const result = await runDevices({ lastActivity: { offsetMs: -CLOCK_SKEW_MS - 60_000 } });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(`FAIL ${STEP}`);
+    expect(result.failures[0]).toContain("is before the proof's start");
+    expect(result.failures[0]).toContain('less 5 min');
+    expect(result.lines).toContain(`PASS ${CLEANUP}`);
   });
 });
 

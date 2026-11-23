@@ -287,6 +287,39 @@ describe('(c) the spec validates', () => {
   });
 });
 
+describe('HAR-143: a device carries its live connection, never connectionStatus', () => {
+  const DEVICE = {
+    id: 'grill-1',
+    userId: 'tid:oid',
+    name: 'Backyard',
+    model: 'MeatGeek',
+    isActive: true,
+  };
+
+  it('a Device with connection validates, with lastActivityAt set or null', () => {
+    const validate = compile(schemaAt('Device'));
+    expectValid(validate, {
+      ...DEVICE,
+      connection: { state: 'connected', lastActivityAt: '2026-11-20T12:00:00.000Z' },
+    });
+    expectValid(validate, { ...DEVICE, connection: { state: 'unknown', lastActivityAt: null } });
+    expect(schemaAt('DeviceConnectionState').enum).toEqual([
+      'connected',
+      'disconnected',
+      'unknown',
+    ]);
+  });
+
+  it('refuses connectionStatus, a connection without lastActivityAt, and an unknown state', () => {
+    const validate = compile(schemaAt('Device'));
+    expect(validate({ ...DEVICE, connectionStatus: 'unknown' })).toBe(false);
+    expect(validate({ ...DEVICE, connection: { state: 'connected' } })).toBe(false);
+    expect(validate({ ...DEVICE, connection: { state: 'online', lastActivityAt: null } })).toBe(
+      false
+    );
+  });
+});
+
 describe('ErrorCode lists every code the API emits', () => {
   it("equals api-interfaces' ERROR_CODES", () => {
     const codes = schemaAt('ErrorCode').enum ?? [];

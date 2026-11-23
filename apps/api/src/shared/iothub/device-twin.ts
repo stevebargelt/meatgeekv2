@@ -49,6 +49,17 @@ export interface DeviceTwin {
    * Empty when the twin has none.
    */
   readonly reported: Readonly<Record<string, unknown>>;
+  /**
+   * HAR-143: the twin's top-level `connectionState` as IoT Hub sends it
+   * (`Connected` / `Disconnected`). Absent when the body has none.
+   */
+  readonly connectionState?: string;
+  /**
+   * HAR-143: the twin's top-level `lastActivityTime` as IoT Hub sends it. A
+   * device the hub has never heard from carries `0001-01-01T00:00:00Z`.
+   * Absent when the body has none.
+   */
+  readonly lastActivityTime?: string;
 }
 
 /**
@@ -130,10 +141,18 @@ export class DeviceTwinClient implements DeviceTwinPort {
     private readonly seams: DeviceTwinSeams
   ) {}
 
-  /** `GET /twins/{id}` — the twin's etag, desired and reported properties. */
+  /**
+   * `GET /twins/{id}` — the twin's etag, desired and reported properties, and
+   * its top-level `connectionState` and `lastActivityTime` (HAR-143).
+   */
   async getTwin(deviceId: string): Promise<DeviceTwin> {
     const response = await this.call('get_twin', 'GET', deviceId);
-    let body: { etag?: unknown; properties?: { desired?: unknown; reported?: unknown } } | null;
+    let body: {
+      etag?: unknown;
+      connectionState?: unknown;
+      lastActivityTime?: unknown;
+      properties?: { desired?: unknown; reported?: unknown };
+    } | null;
     try {
       body = (await response.json()) as typeof body;
     } catch {
@@ -152,10 +171,13 @@ export class DeviceTwinClient implements DeviceTwinPort {
     ) {
       throw new DeviceTwinError('get_twin', response.status);
     }
+    const { connectionState, lastActivityTime } = body ?? {};
     return {
       etag,
       desired: desired as Record<string, unknown>,
       reported: reported as Record<string, unknown>,
+      ...(typeof connectionState === 'string' ? { connectionState } : {}),
+      ...(typeof lastActivityTime === 'string' ? { lastActivityTime } : {}),
     };
   }
 

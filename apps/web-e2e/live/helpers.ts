@@ -505,3 +505,13 @@ export function livePanelConnection(state: string | null, badge: string | null):
 export function livePanelGaveUp(state: string | null, badge: string | null): boolean {
   return state === 'stale' && (badge ?? '').trim() === 'Sign in again';
 }
+
+/**
+ * HAR-143: a device row's connection text when IoT Hub has heard from the
+ * device: "Connected · last heard <age> ago" or "Offline · last heard <age>
+ * ago", the age in the app's duration style ("12 s", "3 min 4 s", "2 h 5 min";
+ * apps/web/src/devices/connection.ts). "Connected" alone, "Offline · never
+ * heard from" and "Status unknown" do not match.
+ */
+export const LAST_HEARD_TEXT =
+  /^(Connected|Offline) · last heard (\d+ s|\d+ min \d+ s|\d+ h \d+ min) ago$/;

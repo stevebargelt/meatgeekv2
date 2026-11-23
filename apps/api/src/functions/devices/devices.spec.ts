@@ -32,6 +32,7 @@ import {
   WRITE_CHARGE,
 } from '../../shared/cosmos/fake-devices-container.testing';
 import { REQUEST_CHARGE_HEADER } from '../../shared/cosmos/request-charge';
+import { DeviceTwinError } from '../../shared/iothub/device-twin';
 import { FakeTwinHub } from '../../shared/iothub/fake-device-twin.testing';
 import { deleteDeviceHandler, type DeleteDeviceDeps } from './delete-device';
 import { defaultDevicesDeps } from './devices-http';
@@ -123,7 +124,6 @@ function device(overrides: Partial<Device> = {}): Device {
     name: 'Backyard Smoker',
     model: 'MeatGeek V1',
     isActive: true,
-    connectionStatus: 'unknown',
     ...overrides,
   };
 }
@@ -260,8 +260,24 @@ describe('HAR-20 devices routes — shared contract', () => {
       expect(underscoreKeys(response.jsonBody)).toEqual([]);
       expect(Number(header(response, REQUEST_CHARGE_HEADER))).toBeGreaterThan(0);
     });
+
+    it('HAR-143: never answers with connectionStatus, even for a document stored with it', async () => {
+      const { fake, deps } = setup();
+      fake.seed({ ...device(), connectionStatus: 'online' } as Device);
+      const { ctx } = context();
+
+      const response = await handler(request(valid()), ctx, deps);
+
+      expect(response.status).toBeLessThan(300);
+      expect(JSON.stringify(response.jsonBody ?? null)).not.toContain('connectionStatus');
+      // POST /devices writes a new document: it carries no connectionStatus.
+      expect(fake.stored('grill-9') ?? {}).not.toHaveProperty('connectionStatus');
+    });
   });
 });
+
+/** HAR-143: what a device whose twin could not be read reports. */
+const UNKNOWN = { state: 'unknown', lastActivityAt: null } as const;
 
 describe('GET /devices', () => {
   it('returns 200 { devices } for the caller only', async () => {
@@ -275,9 +291,116 @@ describe('GET /devices', () => {
 
     expect(response.status).toBe(200);
     expect(response.jsonBody).toEqual({
-      devices: [device(), device({ id: 'grill-2', name: 'Patio' })],
+      devices: [
+        { ...device(), connection: UNKNOWN },
+        { ...device({ id: 'grill-2', name: 'Patio' }), connection: UNKNOWN },
+      ],
     });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(QUERY_CHARGE));
+  });
+
+  it('HAR-143: maps each twin to connected / disconnected and its lastActivityTime', async () => {
+    const { fake, deps, twins } = setup();
+    fake.seed(device({ id: 'grill-1', name: 'A' }));
+    fake.seed(device({ id: 'grill-2', name: 'B' }));
+    twins.addDevice('grill-1').setConnection('grill-1', {
+      connectionState: 'Connected',
+      lastActivityTime: '2026-11-20T12:34:56.1234567Z',
+    });
+    twins.addDevice('grill-2').setConnection('grill-2', {
+      connectionState: 'Disconnected',
+      lastActivityTime: '2026-11-19T08:00:00Z',
+    });
+    const { ctx } = context();
+
+    const response = await getDevicesHandler(request(), ctx, deps);
+
+    expect(response.status).toBe(200);
+    const { devices } = response.jsonBody as { devices: Device[] };
+    expect(devices.map(d => [d.id, d.connection])).toEqual([
+      ['grill-1', { state: 'connected', lastActivityAt: '2026-11-20T12:34:56.123Z' }],
+      ['grill-2', { state: 'disconnected', lastActivityAt: '2026-11-19T08:00:00.000Z' }],
+    ]);
+  });
+
+  it('HAR-143: a device IoT Hub has never heard from (0001-01-01) has lastActivityAt null', async () => {
+    const { fake, deps, twins } = setup();
+    fake.seed(device());
+    twins.addDevice('grill-1').setConnection('grill-1', {
+      connectionState: 'Disconnected',
+      lastActivityTime: '0001-01-01T00:00:00Z',
+    });
+
+    const response = await getDevicesHandler(request(), context().ctx, deps);
+
+    const { devices } = response.jsonBody as { devices: Device[] };
+    expect(devices[0].connection).toEqual({ state: 'disconnected', lastActivityAt: null });
+  });
+
+  it('HAR-143: a twin 404 or a twin failure makes that device unknown, and the list still answers 200', async () => {
+    const { fake, deps, twins } = setup();
+    fake.seed(device({ id: 'grill-1', name: 'A' })); // no twin: 404
+    fake.seed(device({ id: 'grill-2', name: 'B' })); // the read fails
+    fake.seed(device({ id: 'grill-3', name: 'C' })); // the read times out (no status)
+    fake.seed(device({ id: 'grill-4', name: 'D' }));
+    twins.addDevice('grill-2');
+    twins.addDevice('grill-3');
+    twins.addDevice('grill-4').setConnection('grill-4', {
+      connectionState: 'Connected',
+      lastActivityTime: '2026-11-20T12:00:00Z',
+    });
+    const getTwin = twins.getTwin.bind(twins);
+    jest.spyOn(twins, 'getTwin').mockImplementation(async id => {
+      if (id === 'grill-2') throw new DeviceTwinError('get_twin', 500);
+      if (id === 'grill-3') throw new DeviceTwinError('get_twin');
+      return getTwin(id);
+    });
+    const { ctx, logs, errors } = context();
+
+    const response = await getDevicesHandler(request(), ctx, deps);
+
+    expect(response.status).toBe(200);
+    const { devices } = response.jsonBody as { devices: Device[] };
+    expect(devices.map(d => [d.id, d.connection])).toEqual([
+      ['grill-1', UNKNOWN],
+      ['grill-2', UNKNOWN],
+      ['grill-3', UNKNOWN],
+      ['grill-4', { state: 'connected', lastActivityAt: '2026-11-20T12:00:00.000Z' }],
+    ]);
+    expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(QUERY_CHARGE));
+    // Counts only: no device id reaches the log.
+    const logged = [...logs, ...errors].join('\n');
+    expect(logged).toContain(
+      'getDevices connections connected=1 disconnected=0 unknown=0 no_twin=1 failed=2'
+    );
+    for (const id of ['grill-1', 'grill-2', 'grill-3', 'grill-4']) {
+      expect(logged).not.toContain(id);
+    }
+  });
+
+  it('HAR-143: an unconfigured hub makes every device unknown, and the list still answers 200', async () => {
+    const { fake, deps } = setup();
+    fake.seed(device());
+    deps.getDeviceTwin = () => {
+      throw new DeviceTwinError('configuration');
+    };
+
+    const response = await getDevicesHandler(request(), context().ctx, deps);
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toEqual({ devices: [{ ...device(), connection: UNKNOWN }] });
+  });
+
+  it('HAR-143: never returns connectionStatus, even from a document stored with it', async () => {
+    const { fake, deps } = setup();
+    fake.seed({ ...device(), connectionStatus: 'unknown' } as Device);
+
+    const response = await getDevicesHandler(request(), context().ctx, deps);
+
+    const { devices } = response.jsonBody as { devices: Device[] };
+    expect(devices).toHaveLength(1);
+    expect(devices[0]).not.toHaveProperty('connectionStatus');
+    expect(JSON.stringify(response.jsonBody)).not.toContain('connectionStatus');
   });
 
   it('takes identity only from the principal: ?userId= and x-user-id for another user are ignored', async () => {
@@ -328,7 +451,6 @@ describe('POST /devices', () => {
       model: 'MeatGeek V2',
       location: 'Deck',
       isActive: true,
-      connectionStatus: 'unknown',
     });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(QUERY_CHARGE + WRITE_CHARGE));
     expect(fake.calls.map(c => c.operation)).toEqual(['query', 'create']);
@@ -348,9 +470,14 @@ describe('POST /devices', () => {
 
     expect(response.status).toBe(201);
     expect(fake.stored('grill-9')).toBeDefined();
-    // The production register seam (HAR-136: the test seam also carries
-    // DELETE's cook lock and twin hub, neither of which is SignalR).
-    expect(Object.keys(defaultDevicesDeps).sort()).toEqual(['getRepository', 'resolvePrincipal']);
+    // The production devices seam (HAR-143: the twin hub, which the GETs read
+    // connections from; the test seam also carries DELETE's cook lock).
+    // Neither is SignalR.
+    expect(Object.keys(defaultDevicesDeps).sort()).toEqual([
+      'getDeviceTwin',
+      'getRepository',
+      'resolvePrincipal',
+    ]);
     expect(Object.keys(deps).filter(key => /signalr/i.test(key))).toEqual([]);
     expect(warnings).toEqual([]);
   });
@@ -503,8 +630,61 @@ describe('GET /devices/{id}', () => {
     const response = await getDeviceHandler(request({ params: { id: 'grill-1' } }), ctx, deps);
 
     expect(response.status).toBe(200);
-    expect(response.jsonBody).toEqual(device());
+    expect(response.jsonBody).toEqual({ ...device(), connection: UNKNOWN });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(READ_CHARGE));
+  });
+
+  it('HAR-143: carries the connection read from the device twin', async () => {
+    const { fake, deps, twins } = setup();
+    fake.seed(device());
+    twins.addDevice('grill-1').setConnection('grill-1', {
+      connectionState: 'Connected',
+      lastActivityTime: '2026-11-20T12:00:00Z',
+    });
+
+    const response = await getDeviceHandler(
+      request({ params: { id: 'grill-1' } }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.jsonBody as Device).connection).toEqual({
+      state: 'connected',
+      lastActivityAt: '2026-11-20T12:00:00.000Z',
+    });
+    expect(twins.gets).toEqual(['grill-1']);
+  });
+
+  it('HAR-143: a twin failure makes the device unknown and still answers 200', async () => {
+    const { fake, deps, twins } = setup();
+    fake.seed({ ...device(), connectionStatus: 'online' } as Device);
+    twins.addDevice('grill-1');
+    twins.failNext('get_twin', 503);
+    const { ctx, logs } = context();
+
+    const response = await getDeviceHandler(request({ params: { id: 'grill-1' } }), ctx, deps);
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toEqual({ ...device(), connection: UNKNOWN });
+    expect(JSON.stringify(response.jsonBody)).not.toContain('connectionStatus');
+    expect(logs.join('\n')).toContain('getDevice connection');
+    expect(logs.join('\n')).not.toContain('grill-1');
+  });
+
+  it('HAR-143: reads no twin for a device the caller does not own', async () => {
+    const { fake, deps, twins } = setup();
+    fake.seed(device({ id: 'theirs', userId: OTHER_USER_ID }));
+    twins.addDevice('theirs');
+
+    const response = await getDeviceHandler(
+      request({ params: { id: 'theirs' } }),
+      context().ctx,
+      deps
+    );
+
+    expect(response.status).toBe(404);
+    expect(twins.gets).toEqual([]);
   });
 
   it('answers 404 for a foreign device, identical to an unknown one', async () => {

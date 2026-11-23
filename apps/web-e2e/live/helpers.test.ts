@@ -5,6 +5,7 @@ import {
   ClaimCodeError,
   DEFAULT_WEB_BASE_URL,
   DPS_REQUIRED_VARIABLES,
+  LAST_HEARD_TEXT,
   LiveEnvError,
   REQUIRED_VARIABLES,
   checkDeployedSha,
@@ -724,5 +725,26 @@ describe('livePanelConnection (step 5)', () => {
     expect(livePanelConnection(null, null)).toBe('not connected (data-state none, badge "")');
     expect(livePanelConnection('stale', 'No reading for')).toMatch(/^not connected/);
     expect(livePanelConnection('stale', 'Offline')).toMatch(/^not connected/);
+  });
+});
+
+describe('LAST_HEARD_TEXT (HAR-143, step 8)', () => {
+  it.each([
+    'Connected · last heard 0 s ago',
+    'Connected · last heard 12 s ago',
+    'Offline · last heard 3 min 4 s ago',
+    'Offline · last heard 26 h 0 min ago',
+  ])('matches %s', text => {
+    expect(text).toMatch(LAST_HEARD_TEXT);
+  });
+
+  it.each([
+    'Connected',
+    'Offline · never heard from',
+    'Status unknown',
+    'Offline · last heard ago',
+    'Online · last heard 12 s ago',
+  ])('does not match %s', text => {
+    expect(text).not.toMatch(LAST_HEARD_TEXT);
   });
 });

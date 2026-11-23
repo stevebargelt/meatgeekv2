@@ -97,7 +97,6 @@ export const BRISKET_BOX: Device = {
   model: 'MeatGeek V1',
   location: 'Backyard',
   isActive: true,
-  connectionStatus: 'online',
 };
 
 export const OFFSET: Device = {

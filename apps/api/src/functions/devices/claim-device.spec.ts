@@ -188,7 +188,6 @@ function storedDevice(overrides: Partial<Device>): Device {
     name: 'Stored',
     model: 'MeatGeek',
     isActive: true,
-    connectionStatus: 'unknown',
     ...overrides,
   };
 }
@@ -215,7 +214,6 @@ describe('POST /devices/claim — success', () => {
       name: 'Backyard Smoker',
       model: 'MeatGeek',
       isActive: true,
-      connectionStatus: 'unknown',
       claimedAt: NOW.toISOString(),
     });
     expect(header(response, REQUEST_CHARGE_HEADER)).toBe(String(QUERY_CHARGE + WRITE_CHARGE));
@@ -235,6 +233,9 @@ describe('POST /devices/claim — success', () => {
       claimClaimantHash: MY_HASH,
     });
     expect(fake.stored(DEVICE_ID)).toMatchObject({ userId: USER_ID, claimedAt: NOW.toISOString() });
+    // HAR-143: connection state is read live from IoT Hub, never stored.
+    expect(fake.stored(DEVICE_ID)).not.toHaveProperty('connectionStatus');
+    expect(fake.stored(DEVICE_ID)).not.toHaveProperty('connection');
 
     expect(telemetry.spans).toHaveLength(1);
     expect(telemetry.spans[0].ended).toBe(true);
