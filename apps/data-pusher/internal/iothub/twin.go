@@ -101,8 +101,7 @@ type Twin struct {
 // reportedPatch is the body the device publishes after applying desired state.
 // All three fields are always sent; nil ids go out as null.
 //
-// The claim fields are sent only with WithClaim; connection-string mode never
-// sends them.
+// The claim fields are sent only with WithClaim (dpsmode.NewClient sets it).
 type reportedPatch struct {
 	ActiveCookID          *string `json:"activeCookId"`
 	CorrelationID         *string `json:"correlationId"`

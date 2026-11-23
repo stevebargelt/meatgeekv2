@@ -12,6 +12,8 @@ import (
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock/clocktest"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/dpsmode"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/identity"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub/iothubtest"
 
@@ -32,15 +34,22 @@ func twinMain(t *testing.T, b *iothubtest.Broker, clk clock.Clock, args ...strin
 	var stdout, stderr bytes.Buffer
 	code := Main(context.Background(), Env{
 		Args:   args,
-		Getenv: func(k string) string { return map[string]string{EnvConnectionString: validConn}[k] },
+		Getenv: func(k string) string { return validEnv[k] },
 		Stdout: &stdout,
 		Stderr: &stderr,
-		NewClient: func(string) (Client, error) {
+		NewClient: func(dpsmode.Config, clock.Clock, ...iothub.Option) (Client, error) {
 			t.Fatal("--twin must use NewTwinClient")
 			return nil, nil
 		},
-		NewTwinClient: func(cs string, opts ...iothub.Option) (TwinClient, error) {
-			return iothub.NewAzureClient(cs, append(opts, iothub.WithBrokerURL(b.URL()))...)
+		// The Pi's X.509 client and twin code against the fake hub. It
+		// carries no claim (dpsmode.NewClient adds one; claim_test covers it),
+		// so the twin line holds only the cook.
+		NewTwinClient: func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error) {
+			_, cert, err := identity.Ensure(t.TempDir(), cfg.DeviceID, clk)
+			if err != nil {
+				return nil, err
+			}
+			return iothub.NewX509Client("hub-dev.azure-devices.net", cfg.DeviceID, cert, append(opts, iothub.WithBrokerURL(b.URL()))...)
 		},
 		Tracer: otel.Tracer("simdevice-twin-test"),
 		Clock:  clk,
@@ -159,9 +168,6 @@ func TestTwin_NoTwinResponseExitsNonZero(t *testing.T) {
 	}
 	if res.stdout != "" {
 		t.Errorf("stdout must be empty; got %q", res.stdout)
-	}
-	if strings.Contains(res.stderr, fakeKey) {
-		t.Errorf("key leaked: %q", res.stderr)
 	}
 	if n := len(b.Telemetry()); n != 0 {
 		t.Errorf("sent %d readings after a twin timeout", n)

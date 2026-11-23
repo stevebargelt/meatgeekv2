@@ -50,9 +50,8 @@ model {
           Polls the controller, queues readings on disk and publishes them to IoT Hub.
           Learns its active cook from the IoT Hub device twin over the same MQTT connection
           (HAR-58); it has no SignalR client and makes no REST API call.
-          Runs in DPS mode (`MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_STATE_DIR`:
-          its own X.509 identity, enrolled by `enrol-device.sh`) or connection-string mode
-          (`IOTHUB_CONNECTION_STRING`); a Pi set up by `onboard-pi.sh` uses DPS mode. Also reads
+          Runs only in DPS mode (`MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_STATE_DIR`:
+          its own X.509 identity, enrolled by `enrol-device.sh`, as `onboard-pi.sh` sets it up). Also reads
           `OTEL_EXPORTER_OTLP_ENDPOINT`, `DEVICE_URL`, `POLL_INTERVAL`, `QUEUE_DIR` and
           `COOKSESSION_STATE_PATH`.
         '''
@@ -66,13 +65,13 @@ model {
           description 'Segment files on disk (QUEUE_DIR), so readings survive a restart or an outage.'
         }
         iot = component 'iothub client' {
-          technology 'MQTT on 8883 (paho), device SAS, QoS 1'
+          technology 'MQTT on 8883 (paho), device X.509 certificate, QoS 1'
           description '''
             `internal/publish` builds each message and `internal/iothub` sends it. Properties on
             every message: `messageId`, `$.ct=application/json`, `$.ce=utf-8`, `correlation.id`
             (cook-scoped) and `traceparent` (per message, from the `publisher.publish` span).
-            Renews its SAS token five minutes before expiry. The dev simulated device sends
-            through this same code.
+            Authenticates with the device's own X.509 certificate (no password, no token to
+            renew). The dev simulated device sends through this same code.
           '''
         }
         twin = component 'twin client' {
@@ -587,9 +586,10 @@ model {
         A job in Deploy Dev App: live probes against the deployed API with an app-only token,
         logged in under OIDC as the dev app-publish identity. There are three standing simulated
         devices: `<sim>` and `<sim>-chart`, which this job ensures, and `<sim>-web`, which the
-        web-acceptance job ensures (`<sim>` is `meatgeek-dev-simulated-smoker`). It fetches each
-        connection string per run, masks it (the string and its key) and hands it to `simdevice`
-        only through an env var (`SIMDEVICE_CONNECTION_STRING`, `SIMDEVICE_CHART_CONNECTION_STRING`).
+        web-acceptance job ensures (`<sim>` is `meatgeek-dev-simulated-smoker`). Each run gives each
+        device a new X.509 identity in a fresh state dir and enrols its certificate in DPS; `simdevice`
+        gets the device only through env vars (`MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`,
+        `MEATGEEK_STATE_DIR`), and no device key leaves the state dir.
         It copies every `METRIC` line into the run summary. The proofs live in
         `apps/api/acceptance/proofs/` and run in file-name order: the two telemetry proofs round
         trip first, and the chart proof after both. Every real-time wait in the live suite goes

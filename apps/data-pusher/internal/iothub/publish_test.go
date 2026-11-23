@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 
@@ -65,15 +65,32 @@ func (c stallingClient) Publish(topic string, qos byte, retained bool, payload i
 // stallTelemetryOn returns a withMQTTClient option whose clients stall
 // telemetry publishes on the given connections until release closes.
 func stallTelemetryOn(release <-chan struct{}, s *stalls, conns ...int) Option {
+	return withMQTTClient(stallingFactory(release, s, conns...))
+}
+
+// stallingFactory is stallTelemetryOn's paho client factory.
+func stallingFactory(release <-chan struct{}, s *stalls, conns ...int) func(*mqtt.ClientOptions) mqtt.Client {
 	var n int // ensureConnectedLocked calls the factory under c.mu
-	return withMQTTClient(func(o *mqtt.ClientOptions) mqtt.Client {
+	return func(o *mqtt.ClientOptions) mqtt.Client {
 		n++
 		real := mqtt.NewClient(o)
 		if !slices.Contains(conns, n) {
 			return real
 		}
 		return stallingClient{Client: real, conn: n, release: release, stalls: s}
-	})
+	}
+}
+
+// staleClient is a paho client that reports its connection closed once stale
+// is set, while the connection is in fact still up and its lost signal has not
+// fired: the next connect replaces it, under c.mu, as a dropped one would be.
+type staleClient struct {
+	mqtt.Client
+	stale *atomic.Bool
+}
+
+func (c staleClient) IsConnectionOpen() bool {
+	return !c.stale.Load() && c.Client.IsConnectionOpen()
 }
 
 // awaitPublished waits for a PublishTelemetry running on its own goroutine to
@@ -145,11 +162,6 @@ func TestPublishTelemetry_BlockedInPublishDoesNotHoldUpReconnectOrTwin(t *testin
 	if !slices.Contains(b.TwinGets(), 2) {
 		t.Fatalf("no twin GET on connection 2: %v", b.TwinGets())
 	}
-	// supervise got through c.mu after the backoff: it now waits for the new
-	// connection's SAS refresh (55 min with the default 1h token).
-	await.Until(t, "supervise waiting on the new connection's SAS refresh", func() bool {
-		return slices.ContainsFunc(clk.Pending(), func(d time.Duration) bool { return d > time.Hour/2 })
-	}, func() any { return clk.Pending() }, clk)
 	// The publish's retry is in paho on the new connection, and its first
 	// attempt is still in paho on the old one: nothing has been released.
 	stalled.await(t, 2)
@@ -169,17 +181,27 @@ func TestPublishTelemetry_BlockedInPublishDoesNotHoldUpReconnectOrTwin(t *testin
 	awaitOldConnectionClosed(t, b)
 }
 
-// HAR-114: the retry of a publish whose connection supervise has already
-// replaced goes out on the new connection and leaves it up. The SAS refresh
-// replaces connection 1 while the publish is stuck in paho on it; dropping
-// "the current connection" before the retry would close connection 2.
+// HAR-114: the retry of a publish whose connection has already been replaced
+// goes out on the new connection and leaves it up. A second publish replaces
+// connection 1 (it reports itself closed) under c.mu while the first is stuck
+// in paho on it; dropping "the current connection" before the first one's
+// retry would close connection 2.
 func TestPublishTelemetry_RetryDoesNotDropTheReplacementConnection(t *testing.T) {
 	b := iothubtest.NewBroker(t)
 	release := make(chan struct{})
 	defer close(release)
 	var stalled stalls
-	// A 3s token is refreshed halfway (1.5s before expiry).
-	c, clk := startTwinClient(t, b, &memState{}, WithSASTokenTTL(3*time.Second), stallTelemetryOn(release, &stalled, 1))
+	var stale atomic.Bool
+	newClient := stallingFactory(release, &stalled, 1)
+	first := true // ensureConnectedLocked calls the factory under c.mu
+	c, _ := startTwinClient(t, b, &memState{}, withMQTTClient(func(o *mqtt.ClientOptions) mqtt.Client {
+		cl := newClient(o)
+		if first {
+			first = false
+			return staleClient{Client: cl, stale: &stale}
+		}
+		return cl
+	}))
 
 	published := make(chan error, 1)
 	go func() {
@@ -187,14 +209,22 @@ func TestPublishTelemetry_RetryDoesNotDropTheReplacementConnection(t *testing.T)
 	}()
 	stalled.await(t, 1)
 
-	// supervise drops connection 1 and dials connection 2 under c.mu; the
-	// publish wakes on connection 1's lost signal and retries after that.
-	advanceWhenPending(t, clk, 1500*time.Millisecond, "the SAS refresh timer")
-	if err := awaitPublished(t, published, "after the SAS refresh"); err != nil {
+	// The second publish drops connection 1 and dials connection 2 under
+	// c.mu; the first wakes on connection 1's lost signal and retries after
+	// that.
+	stale.Store(true)
+	if err := c.PublishTelemetry(await.Context(t), []byte(`{"x":2}`), map[string]string{MessageIDPropertyName: "m2"}); err != nil {
+		t.Fatalf("second PublishTelemetry: %v", err)
+	}
+	if err := awaitPublished(t, published, "after the replacement"); err != nil {
 		t.Fatalf("PublishTelemetry: %v", err)
 	}
-	if conn := awaitTelemetry(t, b); conn != 2 {
-		t.Errorf("telemetry came in on connection %d, want 2", conn)
+	await.Until(t, "both messages at the hub", func() bool { return len(b.Telemetry()) == 2 },
+		func() any { return b.Telemetry() }, b)
+	for _, tel := range b.Telemetry() {
+		if tel.Conn != 2 {
+			t.Errorf("message %s came in on connection %d, want 2", tel.Properties.Get(MessageIDPropertyName), tel.Conn)
+		}
 	}
 	if n := b.Connections(); n != 2 {
 		t.Errorf("connections = %d, want 2 (the retry must not drop the replacement)", n)

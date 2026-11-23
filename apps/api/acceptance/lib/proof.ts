@@ -108,10 +108,10 @@ export interface SimDeviceOptions {
   /** Kill the run after this long. Default 120 s, plenty for a few readings;
    *  a long top-up (HAR-45) passes its own. */
   readonly timeoutMs?: number;
-  /** HAR-84: which standing device to send as. `'chart'` uses the chart
-   *  device's credential and throws if it is not configured
-   *  (`chartDeviceId` is undefined). Default the simulated device.
-   *  HAR-140: or a fresh device, in DPS mode from its own state dir. */
+  /** HAR-84: which standing device to send as. `'chart'` is the chart
+   *  device, and throws if it is not configured (`chartDeviceId` is
+   *  undefined). Default the simulated device.
+   *  HAR-140: or a fresh device, from its own state dir. */
   readonly device?: DeviceRef;
 }
 
@@ -153,14 +153,9 @@ export interface AcceptanceApi {
   /**
    * HAR-140: `simdevice claim-code` for a DPS-mode device (../lib/claim-code).
    * The line holds the claim code, a secret until it is used: the runner logs
-   * that it ran, never what it printed. Throws for a device that is not in
-   * DPS mode.
+   * that it ran, never what it printed.
    */
   readClaimCode(device: DeviceRef): Promise<ClaimCodeLine | NoClaimYet>;
-  /** HAR-140: whether `device` runs in DPS mode, and so can show a claim
-   *  code. A fresh device always does; a standing one when the run was given
-   *  its state dir and the DPS ID scope. */
-  inDpsMode(device: DeviceRef): boolean;
   /**
    * HAR-140: run one of the device scripts (`enrol-device.sh`,
    * `delete-device.sh`, `revoke-device.sh`) with `args`, as the job's `az` login. The runner adds

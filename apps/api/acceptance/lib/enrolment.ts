@@ -313,17 +313,14 @@ const standingCodes = new Map<string, string>();
  * across runs, are bounded by `claimedAt` (HAR-136), and the chart device
  * keeps an active cook, so a release would be `409 COOK_ACTIVE`.
  *
- * - DPS mode (CI). The workflow gives each standing device a fresh state dir
- *   every run, so it shows a new unclaimed code. The run's first claim of the
- *   device runs {@link prepareClaim} and `POST /devices/claim`: `201` when the
- *   owner did not hold it, `200` when the owner did (the stored device, and
- *   its `claimedAt`, unchanged). Each later group claims it again with the
- *   same code, held in memory: `200`, the same caller again. A device whose
- *   code shows `claimed` (a local state dir reused from an earlier run) must
- *   already be the caller's: `GET /devices/{id}` `200`.
- * - Connection-string mode (local runs only). The device has no claim code to
- *   show, so it cannot be claimed here. It must already be the caller's:
- *   `GET /devices/{id}` `200`.
+ * The workflow gives each standing device a fresh state dir every run, so it
+ * shows a new unclaimed code. The run's first claim of the device runs
+ * {@link prepareClaim} and `POST /devices/claim`: `201` when the owner did not
+ * hold it, `200` when the owner did (the stored device, and its `claimedAt`,
+ * unchanged). Each later group claims it again with the same code, held in
+ * memory: `200`, the same caller again. A device whose code shows `claimed` (a
+ * local state dir reused from an earlier run) must already be the caller's:
+ * `GET /devices/{id}` `200`.
  */
 export async function claimStandingDevice(
   api: AcceptanceApi,
@@ -331,14 +328,6 @@ export async function claimStandingDevice(
   body: ClaimBody
 ): Promise<void> {
   const deviceId = deviceIdOf(api, which);
-  if (!api.inDpsMode(which)) {
-    await expectHeld(
-      api,
-      deviceId,
-      "in connection-string mode a standing device shows no claim code, so it must already be the caller's"
-    );
-    return;
-  }
   const key = `${api.runId} ${deviceId}`;
   const known = standingCodes.get(key);
   if (known !== undefined) {

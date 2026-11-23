@@ -15,11 +15,14 @@ import (
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub/iothubtest"
 )
 
-const testConnStr = "HostName=test-hub.azure-devices.net;DeviceId=dev1;SharedAccessKey=ZmFrZS1rZXktZG8tbm90LXVzZS0xMjM0NTY3ODkw"
+// The twin tests' device: its hub and id.
+const (
+	testHub      = "test-hub.azure-devices.net"
+	testDeviceID = "dev1"
+)
 
-// The twin tests run the client on a fake clock: no backoff, refresh or
-// timeout fires unless a test advances the clock past it. The start is a whole
-// second so SAS expiries (whole seconds) land exactly on start+TTL.
+// The twin tests run the client on a fake clock: no backoff or timeout fires
+// unless a test advances the clock past it.
 var testClockStart = time.Unix(1_700_000_000, 0)
 
 // testBackoff is the reconnect backoff (min = max, so every redial waits
@@ -80,9 +83,9 @@ func startTwinClient(t *testing.T, b *iothubtest.Broker, state CookState, opts .
 		WithClock(clk),
 		withReconnectBackoff(testBackoff, testBackoff),
 	}, opts...)
-	c, err := NewAzureClient(testConnStr, opts...)
+	c, err := NewX509Client(testHub, testDeviceID, deviceCert(t, testDeviceID), opts...)
 	if err != nil {
-		t.Fatalf("NewAzureClient: %v", err)
+		t.Fatalf("NewX509Client: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	c.Start(t.Context())
@@ -93,7 +96,7 @@ func startTwinClient(t *testing.T, b *iothubtest.Broker, state CookState, opts .
 }
 
 // advanceWhenPending waits until the client has a timer of duration d
-// pending on clk (a backoff or refresh it has reached), then advances clk
+// pending on clk (a backoff or timeout it has reached), then advances clk
 // past it.
 func advanceWhenPending(t *testing.T, clk *clocktest.Fake, d time.Duration, what string) {
 	t.Helper()
@@ -254,38 +257,8 @@ func TestTwin_VersionGapTriggersFullGet(t *testing.T) {
 	}
 }
 
-// The SAS-refresh reconnect re-subscribes (CleanSession) and re-reads the
-// twin, picking up a change it was not sent.
-func TestTwin_SASRefreshReconnectResubscribesAndRereads(t *testing.T) {
-	b := iothubtest.NewBroker(t)
-	st := &memState{}
-	// A 3s token is refreshed halfway (1.5s before expiry).
-	_, clk := startTwinClient(t, b, st, WithSASTokenTTL(3*time.Second))
-	v := b.SetDesiredQuietly(map[string]any{"activeCookId": "c-after-refresh"})
-
-	advanceWhenPending(t, clk, 1500*time.Millisecond, "the SAS refresh timer")
-	await.Until(t, "the SAS refresh reconnect", func() bool { return b.Connections() >= 2 },
-		func() any { return b.Connections() }, b)
-	awaitState(t, st, "the re-read after the refresh", applied{"c-after-refresh", "<nil>", v})
-
-	subs := b.Subscriptions(2)
-	for _, want := range []string{"$iothub/twin/res/#", "$iothub/twin/PATCH/properties/desired/#"} {
-		if !slices.Contains(subs, want) {
-			t.Errorf("connection 2 subscriptions %v missing %q", subs, want)
-		}
-	}
-	if !slices.Contains(b.TwinGets(), 2) {
-		t.Errorf("no twin GET on connection 2: %v", b.TwinGets())
-	}
-	// The refreshed connection gets patches.
-	v = b.SetDesired(map[string]any{"correlationId": "r-live"})
-	awaitReport(t, b, "the patch on the refreshed connection", "c-after-refresh", "r-live", v)
-	if m := b.MaxConcurrentConnections(); m != 1 {
-		t.Errorf("max concurrent connections = %d, want 1", m)
-	}
-}
-
-// After a dropped connection Start reconnects on its own and re-reads.
+// After a dropped connection Start reconnects on its own, re-subscribes
+// (CleanSession) and re-reads the twin, picking up a change it was not sent.
 func TestTwin_DroppedConnectionReconnectsAndRereads(t *testing.T) {
 	b := iothubtest.NewBroker(t)
 	st := &memState{}
@@ -298,6 +271,19 @@ func TestTwin_DroppedConnectionReconnectsAndRereads(t *testing.T) {
 	await.Until(t, "a reconnect", func() bool { return b.Connections() > n }, func() any { return b.Connections() }, b)
 	awaitState(t, st, "the re-read after the drop", applied{"c-offline", "<nil>", v})
 	awaitReport(t, b, "the report after the drop", "c-offline", nil, v)
+
+	subs := b.Subscriptions(2)
+	for _, want := range []string{"$iothub/twin/res/#", "$iothub/twin/PATCH/properties/desired/#"} {
+		if !slices.Contains(subs, want) {
+			t.Errorf("connection 2 subscriptions %v missing %q", subs, want)
+		}
+	}
+	if !slices.Contains(b.TwinGets(), 2) {
+		t.Errorf("no twin GET on connection 2: %v", b.TwinGets())
+	}
+	// The new connection gets patches.
+	v = b.SetDesired(map[string]any{"correlationId": "r-live"})
+	awaitReport(t, b, "the patch on the new connection", "c-offline", "r-live", v)
 }
 
 // A failed report is logged and retried on the next connect.
@@ -348,10 +334,10 @@ func TestWaitTwinSynced_TimesOutWithLastError(t *testing.T) {
 	b := iothubtest.NewBroker(t)
 	b.SetUnresponsive(true)
 	clk := clocktest.New(testClockStart)
-	c, err := NewAzureClient(testConnStr, WithBrokerURL(b.URL()), WithCookTwin(&memState{}),
-		WithTwinTimeout(twinTimeout), WithClock(clk))
+	c, err := NewX509Client(testHub, testDeviceID, deviceCert(t, testDeviceID), WithBrokerURL(b.URL()),
+		WithCookTwin(&memState{}), WithTwinTimeout(twinTimeout), WithClock(clk))
 	if err != nil {
-		t.Fatalf("NewAzureClient: %v", err)
+		t.Fatalf("NewX509Client: %v", err)
 	}
 	defer c.Close()
 	var (

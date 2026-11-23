@@ -61,9 +61,10 @@ COSMOSDB__accountEndpoint=your-cosmos-account-endpoint
 COSMOSDB_DATABASE_NAME=your-cosmos-database-name
 COSMOSDB_COOKS_CONTAINER_NAME=your-cosmos-cooks-container-name
 
-# IoT Hub Configuration
-IOTHUB_CONNECTION_STRING=your-iothub-connection-string
-DEVICE_CONNECTION_STRING=your-device-connection-string
+# IoT Hub: no connection string here. A device (the Pi's pusher, or simdevice
+# for dev) connects only in DPS mode, as its own X.509 identity:
+# MEATGEEK_DPS_ID_SCOPE, MEATGEEK_DEVICE_ID and MEATGEEK_STATE_DIR. See
+# apps/data-pusher/README.md ("DPS mode") and docs/devices/runbook.md.
 
 # SignalR Configuration
 SIGNALR_CONNECTION_STRING=your-signalr-connection-string

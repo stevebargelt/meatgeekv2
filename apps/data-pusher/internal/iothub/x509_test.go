@@ -90,8 +90,7 @@ func TestX509Client_OptionsHaveNoPasswordAndCarryTheCertificate(t *testing.T) {
 }
 
 // An X.509 connection has no token to expire: hours later the client still
-// counts the same connection as good, where a SAS client would redial with a
-// fresh token.
+// counts the same connection as good and does not redial.
 func TestX509Client_NoTokenRefresh(t *testing.T) {
 	broker := iothubtest.NewBroker(t)
 	clk := clocktest.New(time.Unix(1_700_000_000, 0))
@@ -106,10 +105,7 @@ func TestX509Client_NoTokenRefresh(t *testing.T) {
 	if err := c.ensureConnectedLocked(); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if !c.sasExpiry.IsZero() {
-		t.Errorf("an X.509 connection has a SAS expiry %v", c.sasExpiry)
-	}
-	clk.Advance(2 * defaultSASTokenTTL)
+	clk.Advance(2 * time.Hour)
 	if err := c.ensureConnectedLocked(); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
@@ -246,8 +242,5 @@ func TestNewX509Client_Validation(t *testing.T) {
 	}
 	if _, err := NewX509Client("hub", "dev-1", tls.Certificate{}); err == nil {
 		t.Error("accepted no certificate")
-	}
-	if _, err := NewAzureClient(testConnStr, WithHubResolver(func(context.Context, bool) (string, error) { return "", nil })); err == nil {
-		t.Error("a SAS client accepted a hub resolver")
 	}
 }

@@ -85,12 +85,11 @@ func TestMain_DPSTwinMintsAClaimCodeAndANewOneAfterARelease(t *testing.T) {
 			Getenv: func(k string) string { return env[k] },
 			Stdout: &stdout,
 			Stderr: &stderr,
-			NewDPSClient: func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error) {
+			NewTwinClient: func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error) {
 				return dpsmode.NewClient(cfg, clk, nil, append(opts, iothub.WithBrokerURL(broker.URL()))...)
 			},
-			NewTwinClient: AzureTwinClientFactory,
-			Tracer:        otel.Tracer("simdevice-claim-test"),
-			Clock:         clk,
+			Tracer: otel.Tracer("simdevice-claim-test"),
+			Clock:  clk,
 		})
 		if code != ExitOK {
 			t.Fatalf("simdevice --twin --count 0: exit %d; stderr=%q", code, stderr.String())

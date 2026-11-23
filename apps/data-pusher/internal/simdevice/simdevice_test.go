@@ -15,6 +15,7 @@ import (
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/await"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock/clocktest"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/dpsmode"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/telemetry"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/wire"
@@ -23,11 +24,17 @@ import (
 )
 
 const (
-	fakeKey     = "ZmFrZS1rZXktZG8tbm90LXVzZS0xMjM0NTY3ODkw"
-	validConn   = "HostName=hub-dev.azure-devices.net;DeviceId=sim-device-1;SharedAccessKey=" + fakeKey
 	timeLayout  = "2006-01-02T15:04:05.000Z07:00"
 	traceparent = "traceparent"
 )
+
+// validEnv configures the DPS-mode device sim-device-1.
+var validEnv = map[string]string{dpsmode.EnvIDScope: "0ne00ABCDEF", dpsmode.EnvDeviceID: "sim-device-1"}
+
+// fixedClient is a ClientFactory that returns c.
+func fixedClient(c Client) ClientFactory {
+	return func(dpsmode.Config, clock.Clock, ...iothub.Option) (Client, error) { return c, nil }
+}
 
 // clockStart is where every fake clock in these tests starts.
 var clockStart = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -49,7 +56,7 @@ func runMain(t *testing.T, args []string, env map[string]string, newClient Clien
 
 	mock := iothub.NewMockClient()
 	if newClient == nil {
-		newClient = func(string) (Client, error) { return mock, nil }
+		newClient = fixedClient(mock)
 	}
 	var stdout, stderr bytes.Buffer
 	code := Main(context.Background(), Env{
@@ -105,10 +112,10 @@ func startMain(t *testing.T, clk clock.Clock, cli Client, args ...string) *runni
 		var stdout, stderr bytes.Buffer
 		code := Main(context.Background(), Env{
 			Args:      args,
-			Getenv:    func(k string) string { return map[string]string{EnvConnectionString: validConn}[k] },
+			Getenv:    func(k string) string { return validEnv[k] },
 			Stdout:    &stdout,
 			Stderr:    &stderr,
-			NewClient: func(string) (Client, error) { return cli, nil },
+			NewClient: fixedClient(cli),
 			Tracer:    otel.Tracer("simdevice-test"),
 			Clock:     clk,
 		})
@@ -142,7 +149,7 @@ func pendingIs(clk *clocktest.Fake, want ...time.Duration) func() bool {
 }
 
 func TestMain_CountThreeAgainstMockClient(t *testing.T) {
-	res := runMain(t, []string{"--count", "3"}, map[string]string{EnvConnectionString: validConn}, nil)
+	res := runMain(t, []string{"--count", "3"}, validEnv, nil)
 	if res.code != ExitOK {
 		t.Fatalf("exit = %d, want 0; stderr=%q", res.code, res.stderr)
 	}
@@ -219,13 +226,10 @@ func TestMain_CountThreeAgainstMockClient(t *testing.T) {
 	if len(traces) != 3 {
 		t.Errorf("each reading must ride its own trace; got %d distinct trace ids", len(traces))
 	}
-	if strings.Contains(res.stdout+res.stderr, fakeKey) {
-		t.Error("the key leaked into output")
-	}
 }
 
 func TestMain_DefaultCountIsOne(t *testing.T) {
-	res := runMain(t, nil, map[string]string{EnvConnectionString: validConn}, nil)
+	res := runMain(t, nil, validEnv, nil)
 	if res.code != ExitOK || len(res.mock.Calls()) != 1 || strings.Count(res.stdout, "\n") != 1 {
 		t.Fatalf("exit=%d calls=%d stdout=%q stderr=%q", res.code, len(res.mock.Calls()), res.stdout, res.stderr)
 	}
@@ -261,46 +265,23 @@ func TestMain_IntervalSpacesSends(t *testing.T) {
 	}
 }
 
-func TestMain_MissingConnectionString(t *testing.T) {
-	res := runMain(t, []string{"--count", "1"}, map[string]string{}, nil)
-	if res.code == ExitOK {
-		t.Fatal("missing connection string must exit non-zero")
+// DPS mode is the only mode: without an ID scope simdevice refuses, naming it
+// and the runbook.
+func TestMain_MissingIDScope(t *testing.T) {
+	res := runMain(t, []string{"--count", "1"}, map[string]string{dpsmode.EnvDeviceID: "sim-device-1"}, nil)
+	if res.code != ExitUsage {
+		t.Fatalf("missing ID scope: exit %d, want %d", res.code, ExitUsage)
 	}
-	if !strings.Contains(res.stderr, EnvConnectionString) {
-		t.Errorf("stderr must name %s; got %q", EnvConnectionString, res.stderr)
+	for _, want := range []string{dpsmode.EnvIDScope, "docs/devices/runbook.md"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr must name %s; got %q", want, res.stderr)
+		}
 	}
 	if res.stdout != "" {
 		t.Errorf("stdout must be empty; got %q", res.stdout)
 	}
 	if len(res.mock.Calls()) != 0 {
 		t.Error("nothing may be published without a credential")
-	}
-}
-
-func TestMain_MalformedConnectionStringDoesNotLeak(t *testing.T) {
-	for _, bad := range []string{
-		"SharedAccessKey=" + fakeKey,                                // no HostName
-		"HostName=hub.azure-devices.net;SharedAccessKey=" + fakeKey, // no DeviceId
-		"HostName=hub.azure-devices.net;SharedAccessKeyName=iothubowner;SharedAccessKey=" + fakeKey,
-		"garbage " + fakeKey + " more garbage",
-	} {
-		res := runMain(t, nil, map[string]string{EnvConnectionString: bad}, nil)
-		if res.code == ExitOK {
-			t.Errorf("malformed %q: exit 0, want non-zero", bad)
-		}
-		out := res.stdout + res.stderr
-		if strings.Contains(out, fakeKey) {
-			t.Errorf("malformed input: the fake key leaked into output %q", out)
-		}
-		if strings.Contains(out, bad) {
-			t.Errorf("malformed input: the input string leaked into output %q", out)
-		}
-		if !strings.Contains(res.stderr, EnvConnectionString) {
-			t.Errorf("stderr should name %s; got %q", EnvConnectionString, res.stderr)
-		}
-		if res.stdout != "" {
-			t.Errorf("stdout must be empty; got %q", res.stdout)
-		}
 	}
 }
 
@@ -314,23 +295,18 @@ func (f failingClient) PublishTelemetryAsync(context.Context, []byte, map[string
 }
 func (failingClient) Close() error { return nil }
 
-func TestMain_SendFailureExitsNonZeroAndRedacts(t *testing.T) {
-	// A worst-case client error that embeds the credential: the redactor must
-	// still keep it off stderr.
-	cli := failingClient{err: errors.New("connect failed using " + validConn)}
-	res := runMain(t, []string{"--count", "2"}, map[string]string{EnvConnectionString: validConn},
-		func(string) (Client, error) { return cli, nil })
+func TestMain_SendFailureExitsNonZero(t *testing.T) {
+	cli := failingClient{err: errors.New("connect failed")}
+	res := runMain(t, []string{"--count", "2"}, validEnv,
+		fixedClient(cli))
 	if res.code != ExitSendFailed {
 		t.Fatalf("exit = %d, want %d", res.code, ExitSendFailed)
 	}
 	if res.stdout != "" {
 		t.Errorf("no line may be printed for an unsent message; stdout=%q", res.stdout)
 	}
-	if strings.Contains(res.stderr, fakeKey) || strings.Contains(res.stderr, validConn) {
-		t.Errorf("credential leaked into stderr: %q", res.stderr)
-	}
-	if !strings.Contains(res.stderr, "[REDACTED]") {
-		t.Errorf("expected redaction marker in stderr: %q", res.stderr)
+	if !strings.Contains(res.stderr, "connect failed") {
+		t.Errorf("stderr should carry the client's error: %q", res.stderr)
 	}
 }
 
@@ -341,18 +317,15 @@ func TestMain_BadFlags(t *testing.T) {
 		{"--interval", "soon"},
 		{"--inflight", "0"},
 		{"--inflight", "-3"},
-		{"--connection-string", validConn},
-		{validConn},
+		{"--connection-string", "HostName=h;DeviceId=d"},
+		{"HostName=h;DeviceId=d"},
 	} {
-		res := runMain(t, args, map[string]string{EnvConnectionString: validConn}, nil)
+		res := runMain(t, args, validEnv, nil)
 		if res.code != ExitUsage {
 			t.Errorf("args %q: exit = %d, want %d", args, res.code, ExitUsage)
 		}
 		if len(res.mock.Calls()) != 0 {
 			t.Errorf("args %q: published despite bad usage", args)
-		}
-		if strings.Contains(res.stdout+res.stderr, fakeKey) {
-			t.Errorf("args %q: key leaked into output", args)
 		}
 	}
 }
@@ -365,10 +338,10 @@ func TestMain_StrictlyIncreasingTimestampsWithFrozenClock(t *testing.T) {
 	var stdout bytes.Buffer
 	code := Main(context.Background(), Env{
 		Args:      []string{"--count", "3"},
-		Getenv:    func(k string) string { return map[string]string{EnvConnectionString: validConn}[k] },
+		Getenv:    func(k string) string { return validEnv[k] },
 		Stdout:    &stdout,
 		Stderr:    &bytes.Buffer{},
-		NewClient: func(string) (Client, error) { return mock, nil },
+		NewClient: fixedClient(mock),
 		Now:       func() time.Time { return frozen },
 	})
 	if code != ExitOK {
@@ -544,8 +517,8 @@ func distinctIDs(lines []Sent) map[string]bool {
 
 func runWith(t *testing.T, cli Client, args ...string) runResult {
 	t.Helper()
-	return runMain(t, args, map[string]string{EnvConnectionString: validConn},
-		func(string) (Client, error) { return cli, nil })
+	return runMain(t, args, validEnv,
+		fixedClient(cli))
 }
 
 // (a) --inflight 1, the default, keeps the old send: one blocking publish at a
@@ -735,23 +708,20 @@ func TestMain_AckFailingTwiceExits1(t *testing.T) {
 	if !strings.Contains(res.stderr, "send reading 5 of 100") || !strings.Contains(res.stderr, "acknowledged") {
 		t.Errorf("stderr should name the failed reading and the acknowledged count: %q", res.stderr)
 	}
-	if strings.Contains(res.stderr, fakeKey) {
-		t.Error("the key leaked into stderr")
-	}
 }
 
-func TestMain_PipelinedSendFailureExitsNonZeroAndRedacts(t *testing.T) {
-	cli := failingClient{err: errors.New("connect failed using " + validConn)}
-	res := runMain(t, []string{"--count", "5", "--inflight", "4"}, map[string]string{EnvConnectionString: validConn},
-		func(string) (Client, error) { return cli, nil })
+func TestMain_PipelinedSendFailureExitsNonZero(t *testing.T) {
+	cli := failingClient{err: errors.New("connect failed")}
+	res := runMain(t, []string{"--count", "5", "--inflight", "4"}, validEnv,
+		fixedClient(cli))
 	if res.code != ExitSendFailed {
 		t.Fatalf("exit = %d, want %d", res.code, ExitSendFailed)
 	}
 	if res.stdout != "" {
 		t.Errorf("no line may be printed for an unacknowledged message; stdout=%q", res.stdout)
 	}
-	if strings.Contains(res.stderr, fakeKey) || strings.Contains(res.stderr, validConn) {
-		t.Errorf("credential leaked into stderr: %q", res.stderr)
+	if !strings.Contains(res.stderr, "connect failed") {
+		t.Errorf("stderr should carry the client's error: %q", res.stderr)
 	}
 }
 
@@ -770,10 +740,10 @@ func TestMain_StartStepStampsSyntheticTimestamps(t *testing.T) {
 			code := Main(context.Background(), Env{
 				Args: []string{"--count", "6", "--inflight", inflight,
 					"--start", "2026-11-01T06:00:00.000Z", "--step", "5s"},
-				Getenv:    func(k string) string { return map[string]string{EnvConnectionString: validConn}[k] },
+				Getenv:    func(k string) string { return validEnv[k] },
 				Stdout:    &stdout,
 				Stderr:    &stderr,
-				NewClient: func(string) (Client, error) { return mock, nil },
+				NewClient: fixedClient(mock),
 				Tracer:    otel.Tracer("simdevice-test"),
 				Now:       func() time.Time { return frozen },
 			})
@@ -842,7 +812,7 @@ func TestMain_StartStepUsageErrors(t *testing.T) {
 		{"--start", "yesterday", "--step", "5s"},
 		{"--start", "2026-11-01", "--step", "5s"},
 	} {
-		res := runMain(t, args, map[string]string{EnvConnectionString: validConn}, nil)
+		res := runMain(t, args, validEnv, nil)
 		if res.code != ExitUsage {
 			t.Errorf("args %q: exit = %d, want %d; stderr=%q", args, res.code, ExitUsage, res.stderr)
 		}
@@ -855,7 +825,7 @@ func TestMain_StartStepUsageErrors(t *testing.T) {
 func TestMain_GrillSetsEveryReadingsGrillTemp(t *testing.T) {
 	for _, extra := range [][]string{nil, {"--inflight", "3"}} {
 		args := append([]string{"--count", "4", "--grill", "317.4"}, extra...)
-		res := runMain(t, args, map[string]string{EnvConnectionString: validConn}, nil)
+		res := runMain(t, args, validEnv, nil)
 		if res.code != ExitOK {
 			t.Fatalf("args %q: exit = %d; stderr=%q", args, res.code, res.stderr)
 		}
@@ -879,7 +849,7 @@ func TestMain_GrillSetsEveryReadingsGrillTemp(t *testing.T) {
 }
 
 func TestMain_WithoutGrillKeepsTheSyntheticCurve(t *testing.T) {
-	res := runMain(t, []string{"--count", "2"}, map[string]string{EnvConnectionString: validConn}, nil)
+	res := runMain(t, []string{"--count", "2"}, validEnv, nil)
 	if res.code != ExitOK {
 		t.Fatalf("exit = %d; stderr=%q", res.code, res.stderr)
 	}
@@ -901,7 +871,7 @@ func TestMain_GrillUsageErrors(t *testing.T) {
 		{"--grill", "NaN"},
 		{"--grill", "+Inf"},
 	} {
-		res := runMain(t, args, map[string]string{EnvConnectionString: validConn}, nil)
+		res := runMain(t, args, validEnv, nil)
 		if res.code != ExitUsage {
 			t.Errorf("args %q: exit = %d, want %d", args, res.code, ExitUsage)
 		}

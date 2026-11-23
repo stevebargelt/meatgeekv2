@@ -124,7 +124,7 @@ Every proof below also checks each response against the OpenAPI contract,
 |                                     | the same with `&offset=0`                                                                                                                                                                                                                        | `400` with `error: VALIDATION_ERROR` (HAR-75: history pages by continuation token only); no RU header                                                                                                                                                                                                                                                                                                  |
 |                                     | `GET /temperatures/history?deviceId=acceptance-temp-unowned-<runId>`                                                                                                                                                                             | `404` with `error: DEVICE_NOT_FOUND`                                                                                                                                                                                                                                                                                                                                                                   |
 |                                     | always, even after a failed step: `DELETE /devices/{id}` for `acceptance-temp-<runId>`, `delete-device.sh --device-id <id> --only-prefix acceptance-`, remove its state dir (HAR-85, HAR-140)                                                    | `204` (`204` or `404` if the claim's `201` never came back); `delete-device.sh` exits `0`                                                                                                                                                                                                                                                                                                              |
-| `telemetry-roundtrip.proof.ts`      | `POST /devices/claim` for the simulated device (`ACCEPTANCE_SIM_DEVICE_ID`) as `Simulated smoker (acceptance)`, with its own claim code (HAR-140). In connection-string mode, `GET /devices/{id}` instead                                        | `201` the run's first claim when the owner did not hold it, `200` when it did and for each later group; connection-string mode: `200` (already the caller's), `404` fails                                                                                                                                                                                                                              |
+| `telemetry-roundtrip.proof.ts`      | `POST /devices/claim` for the simulated device (`ACCEPTANCE_SIM_DEVICE_ID`) as `Simulated smoker (acceptance)`, with its own claim code (HAR-140)                                                                                                | `201` the run's first claim when the owner did not hold it, `200` when it did and for each later group                                                                                                                                                                                                                                                                                                 |
 |                                     | `simdevice --count 1` (one reading through IoT Hub, as the simulated device)                                                                                                                                                                     | exit `0` and exactly one JSON line on stdout, with a `timestamp` and `sentAt`                                                                                                                                                                                                                                                                                                                          |
 |                                     | `GET /temperatures/current/<simulated device>`, every 1 s for at most 120 s                                                                                                                                                                      | a `200` whose `timestamp` is the sent one (`404 NO_READINGS` or an older reading: poll again); `deviceId` is the device, `grillTemp` a number, no `_` key; prints `METRIC roundtrip-ms`                                                                                                                                                                                                                |
 |                                     | `GET /temperatures/history?deviceId=<simulated device>&startTime=<sentAt − 5 min>`                                                                                                                                                               | `200`; the sent reading is in `readings` (paging with `continuationToken` while `hasMore`), with the same field checks                                                                                                                                                                                                                                                                                 |
@@ -134,8 +134,8 @@ Every proof below also checks each response against the OpenAPI contract,
 |                                     | the same walk again                                                                                                                                                                                                                              | at least 8,640 readings, and the last page's RU ≤ 1.5 × the first page's; prints `METRIC history-readings`, `history-pages`, `history-ru-first-page`, `history-ru-last-page`                                                                                                                                                                                                                           |
 | `users.proof.ts`                    | `PUT /users/me` with a run-unique `name` and `acceptance@example.invalid`                                                                                                                                                                        | `200` or `201` (the profile persists between runs); body is an api-interfaces `User` with the name and email sent and a `<tid>:<oid>` id                                                                                                                                                                                                                                                               |
 |                                     | `GET /users/me`                                                                                                                                                                                                                                  | `200`; this run's name reads back, with the same `id` and `createdAt` as the PUT returned                                                                                                                                                                                                                                                                                                              |
-| `volume-cook-chart.proof.ts`        | checks the chart device is configured (`ACCEPTANCE_CHART_DEVICE_ID`, `SIMDEVICE_CHART_CONNECTION_STRING`)                                                                                                                                        | both set, else it fails naming both                                                                                                                                                                                                                                                                                                                                                                    |
-|                                     | `POST /devices/claim` for the chart device with its own claim code (HAR-140); never released. In connection-string mode, `GET /devices/{id}` instead                                                                                             | `201` when the owner did not hold it, `200` when it did; connection-string mode: `200`                                                                                                                                                                                                                                                                                                                 |
+| `volume-cook-chart.proof.ts`        | checks the chart device is configured (`ACCEPTANCE_CHART_DEVICE_ID`, `ACCEPTANCE_CHART_STATE_DIR`)                                                                                                                                               | both set, else it fails naming both                                                                                                                                                                                                                                                                                                                                                                    |
+|                                     | `POST /devices/claim` for the chart device with its own claim code (HAR-140); never released                                                                                                                                                     | `201` when the owner did not hold it, `200` when it did                                                                                                                                                                                                                                                                                                                                                |
 |                                     | `GET /cooks?deviceId=<chart device>&status=active`, then `POST /cooks` (`acceptance standing chart cook`, `brisket`, fresh UUID) only when none is active                                                                                        | `200`; `201` and an `active` cook. The cook is never stopped                                                                                                                                                                                                                                                                                                                                           |
 |                                     | `GET /cooks/{cookId}/chart` for the standing cook                                                                                                                                                                                                | `200`, the cook's chart; checks whether it covers the cook's 12 h (see below)                                                                                                                                                                                                                                                                                                                          |
 |                                     | `simdevice --count 8640 --start <cook startTime> --step 5s --inflight 32 --interval 50ms` as the chart device, only when not covered                                                                                                             | exit `0`, 8,640 JSON lines stamped `startTime + i × 5 s`; prints `METRIC chart-topup-sent` (`0` when none was needed)                                                                                                                                                                                                                                                                                  |
@@ -260,8 +260,8 @@ the owner decided on HAR-140:
 - The chart device's cook is never stopped, so its release would be
   `409 COOK_ACTIVE`.
 
-In CI each standing device runs in DPS mode from a state dir the workflow made
-fresh this run, so it shows a new, unclaimed code. The run's first group that
+Each standing device runs in DPS mode (the only mode, HAR-146). In CI its state
+dir is one the workflow made fresh this run, so it shows a new, unclaimed code. The run's first group that
 needs the device syncs its twin, reads the code and claims it. The answer is
 `201` when the owner did not hold the device, and `200` when it did: the stored
 device is returned unchanged, `claimedAt` included. Every later group claims
@@ -270,10 +270,7 @@ The answer is `200`, the same caller again. A device whose state dir shows its
 code already `claimed` (a local state dir reused from an earlier run) must
 already be the caller's: `GET /devices/{id}` `200`.
 
-In connection-string mode (local runs only), a standing device shows no claim
-code, so it cannot be claimed. Each group only checks that the caller already
-holds it (`GET /devices/{id}` `200`; `404` fails). The history
-window opens five minutes before `sentAt`: the routes window on the hub's
+The history window opens five minutes before `sentAt`: the routes window on the hub's
 enqueued time, which is never before the send.
 
 `telemetry-volume.proof.ts` (HAR-45, MG-79's last deferred criterion; HAR-75)
@@ -514,9 +511,9 @@ simdevice was the last thing it ran). Secrets are never printed: the suite logs
 no request or response headers or bodies (only a bare upper-case `error` code
 from an error body), never prints simdevice's stdout or stderr raw (stdout is
 parsed as JSON lines; of stderr only the first line is reported, on failure),
-and masks in every line, as a second guard, both bearer tokens, the
-`SIMDEVICE_CONNECTION_STRING` and `SIMDEVICE_CHART_CONNECTION_STRING` values,
-and each one's `SharedAccessKey` value.
+and masks in every line, as a second guard, both bearer tokens and anything
+shaped like a claim code. No device key passes through the runner: each
+device's key stays in its state dir (HAR-146).
 
 ### Contract validation
 
@@ -694,26 +691,20 @@ and deletes one it finds anything in before the upload step runs (see
 
 ## Running it locally against dev
 
-The suite takes six inputs, all from the environment. If any is missing it
-fails at once and names the variable; it never skips silently. The simulated
-device can be given to it in one of two ways: by connection string (the old
-mode, below, which the next HAR-130 issues remove), or in
-[DPS mode](#dps-mode-har-138), as the device's own certificate, the way a real
-Pi enrols. CI uses DPS mode since HAR-139, and its three standing devices
-(`meatgeek-dev-simulated-smoker`, `-chart` and `-web`) now have X.509 hub
-identities with no key, so the connection-string commands below work only for
-a SAS device of your own.
+The suite takes its inputs from the environment. If a required one is missing
+it fails at once and names the variable; it never skips silently. simdevice
+runs only in [DPS mode](#dps-mode-har-138), as the device's own certificate,
+the way a real Pi enrols (HAR-146): there is no device key to fetch.
 
 | Variable                       | Value                                                                                                  |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
 | `ACCEPTANCE_BASE_URL`          | The API root, including `/api`, e.g. `https://<function-app-host>/api`                                 |
 | `ACCEPTANCE_BEARER_TOKEN`      | An Entra access token for the API audience                                                             |
 | `ACCEPTANCE_PEER_BEARER_TOKEN` | A token for the same audience as a second caller who owns no devices (HAR-67)                          |
-| `SIMDEVICE_CONNECTION_STRING`  | The simulated device's IoT Hub connection string. Only the runner reads it; simdevice inherits it      |
+| `ACCEPTANCE_DPS_ID_SCOPE`      | The dev DPS's ID scope                                                                                 |
 | `ACCEPTANCE_SIM_DEVICE_ID`     | The simulated device's id, `meatgeek-dev-simulated-smoker` in dev                                      |
+| `ACCEPTANCE_SIM_STATE_DIR`     | The simulated device's state dir, made by `simdevice identity init` ([DPS mode](#dps-mode-har-138))    |
 | `ACCEPTANCE_SIMDEVICE_BIN`     | Path to the built `simdevice` binary, e.g. `$PWD/apps/data-pusher/dist/simdevice` (absolute is safest) |
-
-Connection-string mode (old; the next HAR-130 issues remove it):
 
 ```bash
 az login   # once, as a user the dev tenant knows
@@ -738,41 +729,24 @@ export ACCEPTANCE_PEER_BEARER_TOKEN=$(AZURE_CONFIG_DIR="$HOME/.azure-acceptance-
 make -C apps/data-pusher build
 export ACCEPTANCE_SIMDEVICE_BIN="$PWD/apps/data-pusher/dist/simdevice"
 export ACCEPTANCE_SIM_DEVICE_ID=meatgeek-dev-simulated-smoker
-
-# The device credential, straight into the environment. Needs the azure-iot
-# extension (az extension add --name azure-iot) and IoT Hub Registry
-# Contributor on the dev hub for your az login.
-HUB_HOST=$(az iot hub list -g meatgeek-v2-dev-rg --query '[0].properties.hostName' -o tsv)
-export SIMDEVICE_CONNECTION_STRING=$(az iot hub device-identity connection-string show \
-  --hub-name "$HUB_HOST" --device-id "$ACCEPTANCE_SIM_DEVICE_ID" --auth-type login \
-  --query connectionString -o tsv)
-
-# Optional (HAR-84): the chart device, for the cook-chart proof.
-export ACCEPTANCE_CHART_DEVICE_ID="${ACCEPTANCE_SIM_DEVICE_ID}-chart"
-export SIMDEVICE_CHART_CONNECTION_STRING=$(az iot hub device-identity connection-string show \
-  --hub-name "$HUB_HOST" --device-id "$ACCEPTANCE_CHART_DEVICE_ID" --auth-type login \
-  --query connectionString -o tsv)
+# The device's own identity, enrolled once: see "DPS mode (HAR-138)" below.
+export ACCEPTANCE_SIM_STATE_DIR="$HOME/.meatgeek-acceptance/$ACCEPTANCE_SIM_DEVICE_ID"
+export ACCEPTANCE_DPS_ID_SCOPE=$(az iot dps list -g meatgeek-v2-dev-rg \
+  --query '[0].properties.idScope' -o tsv)
 
 npx nx run api:acceptance
 ```
 
-Never paste the connection string into a file (`.env`, a script, a ticket):
-it is a live device key. Keep it in your shell's environment and let it go
-with the shell. `--auth-type login` makes `az` use your Entra role on the hub
-(`IoT Hub Registry Contributor`) rather than hub keys; without that role the
-fetch fails and the run stops at once, naming `SIMDEVICE_CONNECTION_STRING`.
-The device must already exist; the CI job creates it if it does not (see
-[CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)), so in practice it
-does.
-
 The token is a delegated token for the `access_as_user` scope on the dev API
 registration, which the dev Function App's Easy Auth accepts (see
 [Authentication](../api/authentication.md)). Cooks written by the run land in
-**your** user's partition. So does the simulated device's registration: if the
-CI identity already owns `meatgeek-dev-simulated-smoker`, the round-trip's first
-step fails for you (`409` then `404`), which is that proof working as designed.
-Point `ACCEPTANCE_SIM_DEVICE_ID` and the connection string at a device of your
-own to run it by hand.
+**your** user's partition. So does the simulated device's claim: if the CI
+identity holds `meatgeek-dev-simulated-smoker`, the claim fails for you
+(`403 CLAIM_REFUSED`), which is that proof working as designed. CI also enrols
+a new certificate for each of its standing devices every run
+([In CI](#in-ci-har-139)), which replaces yours. Point
+`ACCEPTANCE_SIM_DEVICE_ID` and its state dir at a device of your own to run it
+by hand.
 
 In CI the caller is the dev app-publish identity instead: the `acceptance` job
 mints an app-only token for `<audience>/.default`, so its cooks land in that
@@ -783,37 +757,36 @@ the `development` environment, set by bootstrap, HAR-61) and hands the suite a
 second masked app-only token as `ACCEPTANCE_PEER_BEARER_TOKEN`, after checking
 that its `appid`/`azp` claim is the peer's and not app-publish's (HAR-65). The
 isolation proof (HAR-67) sends as it. The same job builds simdevice, gives each
-simulated device its own X.509 identity enrolled in DPS, and runs the suite in
-DPS mode (see [In CI](#in-ci-har-139) and
+simulated device its own X.509 identity enrolled in DPS, and runs the suite
+(see [In CI](#in-ci-har-139) and
 [CI/CD](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)). The proof results and the RU-per-route table
 also go to the workflow run's summary page. The target is never cached by Nx, so every invocation
 calls the live system.
 
 ### DPS mode (HAR-138)
 
-In DPS mode simdevice is the device, with its own X.509 identity in a state
-dir, enrolled in the dev Device Provisioning Service (HAR-131); there is no
-device key to fetch. Each device gets its own state dir. The runner chooses the
-mode per device:
+simdevice is the device, with its own X.509 identity in a state dir, enrolled
+in the dev Device Provisioning Service (HAR-131); there is no device key to
+fetch. Each device gets its own state dir. Since HAR-146 this is the only mode:
+the runner has no connection-string inputs.
 
 | Variable                     | Value                                                                                              |
 | ---------------------------- | -------------------------------------------------------------------------------------------------- |
-| `ACCEPTANCE_DPS_ID_SCOPE`    | The dev DPS's ID scope. Needed for any device in DPS mode                                          |
+| `ACCEPTANCE_DPS_ID_SCOPE`    | The dev DPS's ID scope. Required                                                                   |
 | `ACCEPTANCE_DPS_ENDPOINT`    | Optional. The DPS global endpoint; simdevice defaults to `global.azure-devices-provisioning.net`   |
-| `ACCEPTANCE_SIM_STATE_DIR`   | The simulated device's state dir. In place of `SIMDEVICE_CONNECTION_STRING`                        |
-| `ACCEPTANCE_CHART_STATE_DIR` | Optional: the chart device's state dir, in place of `SIMDEVICE_CHART_CONNECTION_STRING`            |
-| `ACCEPTANCE_WEB_STATE_DIR`   | The [browser proof](#inputs)'s device's, in place of `SIMDEVICE_WEB_CONNECTION_STRING`             |
+| `ACCEPTANCE_SIM_STATE_DIR`   | The simulated device's state dir. Required                                                         |
+| `ACCEPTANCE_CHART_STATE_DIR` | Optional: the [chart device](#the-chart-device-har-84)'s state dir                                 |
+| `ACCEPTANCE_WEB_STATE_DIR`   | The [browser proof](#inputs)'s device's state dir                                                  |
 | `ACCEPTANCE_DPS_HOST`        | HAR-140: the DPS service host, `<dps_name>.azure-devices-provisioning.net`, for the device scripts |
 | `ACCEPTANCE_IOT_HUB_HOST`    | HAR-140: the IoT hub host (`iot_hub_hostname`), for the device scripts                             |
 
-- A device whose state dir is set, with `ACCEPTANCE_DPS_ID_SCOPE`, runs in DPS
-  mode: simdevice gets `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID` (the
+- Each simdevice run gets `MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID` (the
   device's id variable), `MEATGEEK_STATE_DIR` and, if set,
-  `MEATGEEK_DPS_ENDPOINT`, and no `SIMDEVICE_CONNECTION_STRING`.
-- A device with a connection string and no state dir runs as before.
-- A device given both, or a state dir without `ACCEPTANCE_DPS_ID_SCOPE`, stops
-  the run before any proof, naming the variables (never their values).
-- One device can be in DPS mode and another not.
+  `MEATGEEK_DPS_ENDPOINT`, and no other device's inputs. No `SIMDEVICE_*`
+  variable from the runner's own environment reaches it.
+- A missing required input stops the run before any proof, naming the
+  variable (never its value). The chart device's id and state dir go
+  together: one without the other stops the run, naming both.
 
 Create each device's identity once, enrol its certificate with your own
 `az login`, then export the variables. `enrol-device.sh` uses `--auth-type key`
@@ -835,13 +808,11 @@ apps/data-pusher/deploy/enrol-device.sh --device-id "$ACCEPTANCE_SIM_DEVICE_ID" 
 
 export ACCEPTANCE_DPS_ID_SCOPE=$(az iot dps list -g meatgeek-v2-dev-rg \
   --query '[0].properties.idScope' -o tsv)
-unset SIMDEVICE_CONNECTION_STRING   # one mode per device
 
 # Optional: the chart device, the same way.
 export ACCEPTANCE_CHART_DEVICE_ID="${ACCEPTANCE_SIM_DEVICE_ID}-chart"
 export ACCEPTANCE_CHART_STATE_DIR="$HOME/.meatgeek-acceptance/$ACCEPTANCE_CHART_DEVICE_ID"
 # ... identity init and enrol-device.sh for it, as above ...
-unset SIMDEVICE_CHART_CONNECTION_STRING
 
 npx nx run api:acceptance   # with the base URL and the two tokens, as above
 ```
@@ -862,7 +833,7 @@ stdout.
 ### In CI (HAR-139)
 
 CI's simulated devices get their identity the way the owner's Pi does. No hub
-identity is created for them and no connection string is read. The
+identity is created for them and no device key is read. The
 `acceptance` job's "Enrol the simulated devices through DPS" step does this
 for `<simulated_device_id>` and `<simulated_device_id>-chart`. The
 `web-acceptance` job's "Enrol the web device through DPS" step does the same
@@ -905,7 +876,7 @@ the script makes no ARM call (see
 The suite step then sets `ACCEPTANCE_DPS_ID_SCOPE` (Terraform output
 `dps_id_scope`), `ACCEPTANCE_SIM_STATE_DIR` and `ACCEPTANCE_CHART_STATE_DIR`
 to those state dirs. The browser proof's step sets `ACCEPTANCE_WEB_STATE_DIR`
-the same way. No `SIMDEVICE_*CONNECTION_STRING` variable is set. The
+the same way. The
 registration in step 4 is a real-time wait ([its row](#real-time-waits)); the
 suite's simdevice runs reuse the assignment it cached in the state dir.
 
@@ -935,17 +906,17 @@ neither: one without the other stops the run at once, naming both. The cook-char
 proof (HAR-87, `volume-cook-chart.proof.ts`) needs them: without them it fails
 at its first step, naming both, and sends nothing.
 
-| Variable                            | Value                                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `ACCEPTANCE_CHART_DEVICE_ID`        | The chart device's id, `meatgeek-dev-simulated-smoker-chart` in dev                               |
-| `SIMDEVICE_CHART_CONNECTION_STRING` | The chart device's IoT Hub connection string. Only the runner reads it, and masks it as the first |
+| Variable                     | Value                                                               |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `ACCEPTANCE_CHART_DEVICE_ID` | The chart device's id, `meatgeek-dev-simulated-smoker-chart` in dev |
+| `ACCEPTANCE_CHART_STATE_DIR` | The chart device's state dir ([DPS mode](#dps-mode-har-138))        |
 
 A proof reads the id as `api.chartDeviceId` (`undefined` when the run was not
 given it) and sends as the device with
 `api.runSimDevice(args, { device: 'chart' })`. The runner hands that simdevice
-run the chart credential as its `SIMDEVICE_CONNECTION_STRING`; no simdevice run
-gets the credential of the device it is not sending as. Without the variables,
-a chart run fails as `simdevice (chart) → not started`.
+run the chart device's DPS variables; no simdevice run gets the inputs of a
+device it is not sending as. Without the variables, a chart run fails as
+`simdevice (chart) → not started`.
 
 ## Live browser proof
 
@@ -983,9 +954,7 @@ at the end, so every run starts with the device unclaimed:
    device be listed. On a `403` the step asks `DELETE /devices/{id}` (with the
    page's token) whether another user owns the device
    (`403 DEVICE_NOT_OWNED`) or nobody does (`404`), and names which; the device is
-   not the acceptance user's, so that request changes nothing. Claiming needs
-   DPS mode: with `SIMDEVICE_WEB_CONNECTION_STRING` the step fails, naming the
-   variables to set instead.
+   not the acceptance user's, so that request changes nothing.
 5. **Start a cook** through the UI, named `acceptance web <run id>` (the
    GitHub run id, or a UTC timestamp locally). Its page opens and the live
    panel is connected: `waiting`, `live`, or `stale` with a "No reading for …"
@@ -1046,27 +1015,24 @@ All from the environment. Global setup checks them before a browser starts: a
 missing one fails the run at once, naming every missing variable, never a
 value.
 
-| Variable                          | Value                                                                                                               |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `WEB_BASE_URL`                    | The web app's origin. Optional, default `https://meatgeekv2-web.vercel.app`                                         |
-| `EXPECTED_WEB_SHA`                | The full 40-character commit production must serve (or contain), usually the merge commit                           |
-| `ACCEPTANCE_USER_UPN`             | The acceptance user's sign-in name, in the dev tenant                                                               |
-| `ACCEPTANCE_USER_PASSWORD`        | Its password                                                                                                        |
-| `ACCEPTANCE_USER_TOTP_SECRET`     | Its authenticator-app secret (base32; spaces, dashes, lower case and `=` padding are accepted)                      |
-| `ACCEPTANCE_WEB_DEVICE_ID`        | The IoT Hub device the proof claims and sends as (`<simulated device id>-web`). Unclaimed, or the acceptance user's |
-| `SIMDEVICE_WEB_CONNECTION_STRING` | That device's connection string. Only simdevice's own environment gets it, as `SIMDEVICE_CONNECTION_STRING`         |
-| `ACCEPTANCE_SIMDEVICE_BIN`        | Path to the built `simdevice`, the same binary the API suite uses                                                   |
+| Variable                      | Value                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `WEB_BASE_URL`                | The web app's origin. Optional, default `https://meatgeekv2-web.vercel.app`                                         |
+| `EXPECTED_WEB_SHA`            | The full 40-character commit production must serve (or contain), usually the merge commit                           |
+| `ACCEPTANCE_USER_UPN`         | The acceptance user's sign-in name, in the dev tenant                                                               |
+| `ACCEPTANCE_USER_PASSWORD`    | Its password                                                                                                        |
+| `ACCEPTANCE_USER_TOTP_SECRET` | Its authenticator-app secret (base32; spaces, dashes, lower case and `=` padding are accepted)                      |
+| `ACCEPTANCE_WEB_DEVICE_ID`    | The IoT Hub device the proof claims and sends as (`<simulated device id>-web`). Unclaimed, or the acceptance user's |
+| `ACCEPTANCE_WEB_STATE_DIR`    | That device's state dir ([DPS mode](#dps-mode-har-138)). Only simdevice's own environment gets it                   |
+| `ACCEPTANCE_DPS_ID_SCOPE`     | The dev DPS's ID scope                                                                                              |
+| `ACCEPTANCE_SIMDEVICE_BIN`    | Path to the built `simdevice`, the same binary the API suite uses                                                   |
 
-HAR-138: in [DPS mode](#dps-mode-har-138) set `ACCEPTANCE_WEB_STATE_DIR` and
-`ACCEPTANCE_DPS_ID_SCOPE` (and optionally `ACCEPTANCE_DPS_ENDPOINT`) instead of
-`SIMDEVICE_WEB_CONNECTION_STRING`, which is then not required. Setting the
-connection string and the state dir together stops the proof before a browser
-starts, naming both. HAR-141: the claim (step 4) needs DPS mode, because only
-there does the device mint a claim code; with the connection string the proof
-signs in and then fails at step 4.
+`ACCEPTANCE_DPS_ENDPOINT` is optional, as for the API suite. simdevice runs in
+DPS mode, the only mode (HAR-146), which is also where the device mints the
+claim code step 4 needs (HAR-141).
 
 The proof writes none of the password, the TOTP secret or code, the claim
-code, the connection string or any token anywhere. Playwright's trace, video,
+code or any token anywhere. Playwright's trace, video,
 HTML report, failure page snapshot (`error-context.md`) and automatic
 screenshot are all off for it (`apps/web-e2e/playwright.live.config.ts`),
 because the sign-in pages show the UPN and what was typed, and the claim form
@@ -1148,7 +1114,7 @@ read -rs ACCEPTANCE_USER_PASSWORD && export ACCEPTANCE_USER_PASSWORD
 read -rs ACCEPTANCE_USER_TOTP_SECRET && export ACCEPTANCE_USER_TOTP_SECRET
 export ACCEPTANCE_WEB_DEVICE_ID=meatgeek-dev-simulated-smoker-web
 export ACCEPTANCE_SIMDEVICE_BIN="$PWD/apps/data-pusher/dist/simdevice"
-# DPS mode: the state dir of a device enrolled as in "DPS mode (HAR-138)" above.
+# The state dir of a device enrolled as in "DPS mode (HAR-138)" above.
 export ACCEPTANCE_WEB_STATE_DIR="$HOME/.meatgeek-acceptance/$ACCEPTANCE_WEB_DEVICE_ID"
 export ACCEPTANCE_DPS_ID_SCOPE=...       # the dev DPS's ID scope
 

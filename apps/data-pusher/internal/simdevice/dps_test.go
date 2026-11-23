@@ -44,7 +44,7 @@ func TestMain_DPSModeRegistersAndSendsAsTheDevice(t *testing.T) {
 			Getenv: func(k string) string { return env[k] },
 			Stdout: &stdout,
 			Stderr: &stderr,
-			NewDPSClient: func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (TwinClient, error) {
+			NewClient: func(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.Option) (Client, error) {
 				return dpsmode.NewClient(cfg, clk, []provision.Option{provision.WithRootCAs(dps.RootCAs())},
 					append(opts, iothub.WithBrokerURL(broker.URL()))...)
 			},
@@ -86,10 +86,6 @@ func TestMain_DPSModeConfigErrors(t *testing.T) {
 		env  map[string]string
 		want []string
 	}{
-		"both modes": {
-			env:  map[string]string{EnvConnectionString: validConn, dpsmode.EnvIDScope: "0ne00ABCDEF", dpsmode.EnvDeviceID: "sim-1"},
-			want: []string{"set only one", EnvConnectionString, dpsmode.EnvIDScope},
-		},
 		"no device id": {
 			env:  map[string]string{dpsmode.EnvIDScope: "0ne00ABCDEF"},
 			want: []string{dpsmode.EnvDeviceID},
@@ -105,9 +101,6 @@ func TestMain_DPSModeConfigErrors(t *testing.T) {
 				if !strings.Contains(res.stderr, w) {
 					t.Errorf("stderr %q should name %q", res.stderr, w)
 				}
-			}
-			if strings.Contains(res.stderr, fakeKey) {
-				t.Error("stderr leaks the key")
 			}
 			if len(res.mock.Calls()) != 0 {
 				t.Error("sent despite the configuration error")

@@ -47,9 +47,7 @@ that would otherwise never finish, so it cannot turn a slow pass into a failure.
 
   ```go
   clk := clocktest.New(time.Unix(1_700_000_000, 0))
-  client, err := iothub.NewAzureClient(twinTestConnStr,
-      iothub.WithBrokerURL(broker.URL()),
-      iothub.WithClock(clk))
+  client, err := newIoTHubClient(cfg, sess, clk, nil, iothub.WithBrokerURL(broker.URL()))
   // ...
   broker.DropConnections()
   await.Until(t, "the reconnect backoff after the drop",

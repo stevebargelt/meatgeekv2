@@ -76,42 +76,36 @@ func TestConfig_DPSModeNeedsADeviceID(t *testing.T) {
 	}
 }
 
-func TestConfig_LegacyModeWithOnlyTheConnectionString(t *testing.T) {
-	cfg := loadConfig(nil, envOf(map[string]string{"IOTHUB_CONNECTION_STRING": twinTestConnStr}))
-	mode, err := cfg.iotMode()
-	if err != nil || mode != modeConnectionString {
-		t.Fatalf("mode = %v, %v; want connection-string mode", mode, err)
-	}
-	if cfg.IoTHubConnStr != twinTestConnStr {
-		t.Error("connection string not read")
-	}
-}
-
-func TestConfig_RefusesBothModes(t *testing.T) {
-	cfg := loadConfig(nil, envOf(map[string]string{
-		"IOTHUB_CONNECTION_STRING": twinTestConnStr,
-		dpsmode.EnvIDScope:         "0ne00ABCDEF",
-		dpsmode.EnvDeviceID:        "meatgeek-pi-7",
-	}))
+// Without --mock-iot the ID scope is required: DPS mode is the only way the
+// pusher connects. The refusal names the variable and the runbook, and run
+// refuses before it connects to anything.
+func TestConfig_RefusesNoIDScope(t *testing.T) {
+	cfg := loadConfig(nil, envOf(map[string]string{dpsmode.EnvDeviceID: "meatgeek-pi-7"}))
 	_, err := cfg.iotMode()
-	if !errors.Is(err, errBothModes) || !strings.Contains(err.Error(), "set only one") {
-		t.Fatalf("err = %v, want the refusal to run with both", err)
+	if !errors.Is(err, errNoIDScope) {
+		t.Fatalf("err = %v, want the refusal without an ID scope", err)
 	}
-	if strings.Contains(err.Error(), twinTestConnStr) {
-		t.Error("the refusal leaks the connection string")
+	for _, want := range []string{dpsmode.EnvIDScope, "docs/devices/runbook.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err %q should name %q", err, want)
+		}
 	}
-	// run refuses before it opens anything.
 	cfg.CookSessionStatePath = t.TempDir() + "/cooksession.json"
-	if err := run(context.Background(), cfg, nil); !errors.Is(err, errBothModes) {
+	if err := run(context.Background(), cfg, nil); !errors.Is(err, errNoIDScope) {
 		t.Errorf("run = %v, want the refusal", err)
 	}
 }
 
-func TestConfig_RefusesNeitherMode(t *testing.T) {
-	cfg := loadConfig(nil, envOf(nil))
-	if _, err := cfg.iotMode(); err == nil {
-		t.Fatal("no IoT Hub configuration accepted")
+// The --iothub-connection-string flag is gone: passing it is a usage error.
+func TestConfig_NoConnectionStringFlag(t *testing.T) {
+	code, _, stderr := runPusher(t, "--iothub-connection-string=x")
+	if code != 2 || !strings.Contains(string(stderr), "flag provided but not defined: -iothub-connection-string") {
+		t.Fatalf("exit %d, stderr %q; want 2 and the undefined-flag error", code, stderr)
 	}
+}
+
+func TestConfig_MockNeedsNoIDScope(t *testing.T) {
+	cfg := loadConfig(nil, envOf(nil))
 	cfg.MockIoT = true
 	if mode, err := cfg.iotMode(); err != nil || mode != modeMock {
 		t.Errorf("--mock-iot: mode = %v, %v", mode, err)
@@ -140,11 +134,10 @@ func TestDPSMode_NotAuthorisedReregistersExactlyOnce(t *testing.T) {
 		dpsmode.EnvEndpoint: dps.Endpoint(),
 		dpsmode.EnvStateDir: state,
 	}))
-	mode, err := cfg.iotMode()
-	if err != nil {
+	if _, err := cfg.iotMode(); err != nil {
 		t.Fatal(err)
 	}
-	client, err := newIoTHubClient(cfg, mode, cooksession.NewMemory(), clk,
+	client, err := newIoTHubClient(cfg, cooksession.NewMemory(), clk,
 		[]provision.Option{provision.WithRootCAs(dps.RootCAs())},
 		iothub.WithBrokerURL(broker.URL()))
 	if err != nil {

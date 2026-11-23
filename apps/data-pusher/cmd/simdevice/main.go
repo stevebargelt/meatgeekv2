@@ -2,9 +2,9 @@
 // one device, through the same payload/property builders and MQTT client the
 // data-pusher uses on the Pi. With --twin it first reads the device twin
 // through the Pi's twin code and stamps the applied cook on its readings. The
-// device credential is read only from $SIMDEVICE_CONNECTION_STRING, or, in DPS
-// mode ($MEATGEEK_DPS_ID_SCOPE, $MEATGEEK_DEVICE_ID), is the device's own X.509
-// identity under $MEATGEEK_STATE_DIR. `simdevice identity init` prints that
+// device connects in DPS mode ($MEATGEEK_DPS_ID_SCOPE, $MEATGEEK_DEVICE_ID)
+// with its own X.509 identity under $MEATGEEK_STATE_DIR; there is no other
+// mode. `simdevice identity init` prints that
 // identity's certificate. See apps/data-pusher/README.md.
 package main
 
@@ -52,7 +52,6 @@ func run() int {
 		Stderr:        os.Stderr,
 		NewClient:     simdevice.AzureClientFactory,
 		NewTwinClient: simdevice.AzureTwinClientFactory,
-		NewDPSClient:  simdevice.AzureDPSClientFactory,
 		Tracer:        otel.Tracer("meatgeek-simdevice"),
 	})
 }

@@ -179,12 +179,12 @@ export default defineProofs('cook chart', () => {
 
   return [
     {
-      name: 'the chart device is configured (ACCEPTANCE_CHART_DEVICE_ID, SIMDEVICE_CHART_CONNECTION_STRING)',
+      name: 'the chart device is configured (ACCEPTANCE_CHART_DEVICE_ID, ACCEPTANCE_CHART_STATE_DIR)',
       async run(api: AcceptanceApi) {
         // The runner stops the run when only one is set (HAR-84); here neither is.
         if (api.chartDeviceId === undefined) {
           throw new ProofFailure(
-            'ACCEPTANCE_CHART_DEVICE_ID and SIMDEVICE_CHART_CONNECTION_STRING are not set; ' +
+            'ACCEPTANCE_CHART_DEVICE_ID and ACCEPTANCE_CHART_STATE_DIR are not set; ' +
               'the cook-chart proof needs the chart device'
           );
         }

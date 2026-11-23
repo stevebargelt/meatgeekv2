@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/clock"
+	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/dpsmode"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/iothub"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/publish"
 	"github.com/stevebargelt/meatgeekv2/apps/data-pusher/internal/queue"
@@ -83,7 +85,7 @@ func TestPusherAndSimdeviceMessagesMatchForEveryInflight(t *testing.T) {
 	tracer := otel.Tracer("parity-test")
 
 	const deviceID = "meatgeek3"
-	conn := "HostName=hub-dev.azure-devices.net;DeviceId=" + deviceID + ";SharedAccessKey=ZmFrZS1rZXk="
+	env := map[string]string{dpsmode.EnvIDScope: "0ne00ABCDEF", dpsmode.EnvDeviceID: deviceID}
 	start := time.Date(2026, 11, 19, 10, 30, 15, 123_000_000, time.UTC)
 	// simdevice's i-th reading (0-based): SyntheticStatus(i), seq i+1, and with
 	// a frozen clock a timestamp i ms after it.
@@ -105,13 +107,15 @@ func TestPusherAndSimdeviceMessagesMatchForEveryInflight(t *testing.T) {
 			mock := iothub.NewMockClient()
 			var stdout, stderr bytes.Buffer
 			code := simdevice.Main(context.Background(), simdevice.Env{
-				Args:      []string{"--count", "8", "--inflight", fmt.Sprint(inflight)},
-				Getenv:    func(k string) string { return map[string]string{simdevice.EnvConnectionString: conn}[k] },
-				Stdout:    &stdout,
-				Stderr:    &stderr,
-				NewClient: func(string) (simdevice.Client, error) { return mock, nil },
-				Tracer:    tracer,
-				Now:       func() time.Time { return start },
+				Args:   []string{"--count", "8", "--inflight", fmt.Sprint(inflight)},
+				Getenv: func(k string) string { return env[k] },
+				Stdout: &stdout,
+				Stderr: &stderr,
+				NewClient: func(dpsmode.Config, clock.Clock, ...iothub.Option) (simdevice.Client, error) {
+					return mock, nil
+				},
+				Tracer: tracer,
+				Now:    func() time.Time { return start },
 			})
 			if code != simdevice.ExitOK {
 				t.Fatalf("exit = %d; stderr=%q", code, stderr.String())
