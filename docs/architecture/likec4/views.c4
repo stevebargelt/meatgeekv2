@@ -343,8 +343,8 @@ views {
       unless the last page of a walk costs at most 1.5 x the first.
     '''
 
-    delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices (meatgeek-dev-simulated-smoker)' {
-      notes 'Register or 409: 201 if new; 409 `DEVICE_CONFLICT` if already registered, then `GET /devices/{id}` must answer 200.'
+    delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices/claim (meatgeek-dev-simulated-smoker)' {
+      notes 'HAR-140: claimed with the claim code the device minted (`simdevice claim-code`), once per run and never released: 201 if the caller did not hold it, 200 if it did (`claimedAt` unchanged); later groups claim again with the same code and get 200.'
     }
     delivery.acceptance.roundtrip -> delivery.simdevice 'simdevice --count 1'
     delivery.simdevice -> meatgeek.cloud.ingest.iothub 'one reading, MQTT QoS 1' {

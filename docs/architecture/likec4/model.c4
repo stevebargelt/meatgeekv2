@@ -696,7 +696,7 @@ model {
       principal is known.
     '''
   }
-  delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices: 201, or 409 then GET /devices/{id}'
+  delivery.acceptance.roundtrip -> meatgeek.cloud.api.devices 'POST /devices/claim with the claim code the device minted: 201, or 200 on a retry'
   delivery.acceptance.roundtrip -> meatgeek.cloud.api.temperatures 'GET /temperatures/current/{id}, then history'
   delivery.acceptance.volume -> meatgeek.cloud.api.temperatures 'GET /temperatures/history: two walks by continuation token'
   delivery.acceptance.chart -> meatgeek.cloud.api.cooks 'GET /cooks/{cookId}/chart'
