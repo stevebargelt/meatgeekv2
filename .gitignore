@@ -263,3 +263,13 @@ temp/
 
 # watchman temp cookies
 .watchman-cookie-*
+
+# iOS app (apps/ios, HAR-158). Signing.local.xcconfig holds a developer's own
+# Apple team id for device builds and is never committed; the rest is Xcode and
+# SwiftPM build/user state.
+apps/ios/Config/Signing.local.xcconfig
+xcuserdata/
+DerivedData/
+*.xcresult
+.build/
+.swiftpm/

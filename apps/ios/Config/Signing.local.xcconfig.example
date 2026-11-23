@@ -1,0 +1,10 @@
+// Copy this file to Signing.local.xcconfig (same folder) to build for a
+// physical iPhone. Signing.local.xcconfig is gitignored: never commit it.
+// Base.xcconfig includes it last, so these values apply to every target.
+//
+// Your team id is the 10-character id at
+// https://developer.apple.com/account -> Membership details, or in Xcode
+// under Settings -> Accounts -> your team.
+
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+CODE_SIGN_STYLE = Automatic

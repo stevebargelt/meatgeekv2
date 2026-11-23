@@ -12,12 +12,12 @@ Observability in MeatGeek V2 runs in **three lanes**. Two of the three lanes are
 | --- | --- | --- | --- |
 | **1. Server + Device (OTel)** | `data-pusher` (Go), `device-controller` (Go), `api` Azure Functions (TypeScript) | **OpenTelemetry** — OTel Go SDK on the two Go services; `@azure/monitor-opentelemetry` distribution on the Functions app | **Azure Application Insights** — the Functions app exports through the `@azure/monitor-opentelemetry` (Azure Monitor) exporter; the two Go services export **OTLP → OTel Collector (`otlphttp` exporter + `azure_auth` extension with an explicit `https://monitor.azure.com/.default` scope, authenticating via a user-assigned Container App managed identity) → Azure Monitor native OTLP ingestion (DCE + `azapi` DCR) → App Insights** (App Insights does not accept raw OTLP, so the collector is the required translation hop; this native-OTLP forwarding leg is **authored + static-validated, not operational** — see Bucket A/C caveats and MG-34) |
 | **2. React web (exemption #1)** | Web dashboard (React) | **Application Insights JavaScript SDK** (`@microsoft/applicationinsights-web`) — *not* OTel | **Azure Application Insights** |
-| **3. Native iOS (exemption #2)** | Mobile app (native iOS, Swift; planned, not built) | **Sentry** (Sentry Cocoa SDK, `sentry-cocoa`) — *not* OTel, *not* App Insights | **Sentry** |
+| **3. Native iOS (exemption #2)** | Mobile app (native iOS, Swift; so far a skeleton in `apps/ios`) | **Sentry** (Sentry Cocoa SDK, `sentry-cocoa`) — *not* OTel, *not* App Insights | **Sentry** |
 
 Why the exemptions:
 
 - **React web → App Insights JS SDK.** The App Insights JS SDK gives page-view, AJAX-dependency, and browser-exception correlation out of the box and lands in the same App Insights resource as the backend, so a web request and the Function it calls already correlate without a bridge. Wrapping the browser in generic OTel would add work and lose the first-party page instrumentation.
-- **Native iOS → Sentry.** Mobile crash and app-hang grouping, release health, and symbolicated native stack traces are Sentry's core competency and have no equivalent in App Insights. iOS telemetry therefore lands in **Sentry**, a separate backend. The iOS app is planned and not built; it shares only the OpenAPI contract with the web app.
+- **Native iOS → Sentry.** Mobile crash and app-hang grouping, release health, and symbolicated native stack traces are Sentry's core competency and have no equivalent in App Insights. iOS telemetry therefore lands in **Sentry**, a separate backend. The iOS app is so far a skeleton in `apps/ios` (HAR-158) with no Sentry SDK yet; it shares only the OpenAPI contract with the web app.
 
 Lanes 1 and 2 share one Application Insights resource, so backend and web correlate natively. Lane 3 (Sentry) is a **separate backend by design** — see [Sentry vs Application Insights: Ownership Boundary](#sentry-vs-application-insights-ownership-boundary) and the [Trace-ID Copy-Paste Join Workflow](#trace-id-copy-paste-join-workflow-mobile--backend) for how mobile↔backend debugging crosses that boundary.
 
@@ -701,7 +701,7 @@ Step by step (once both prerequisites above have shipped):
 
 ## Sentry (iOS lane)
 
-Sentry is the observability backend for the **native iOS (Swift)** mobile app only. This lane is a **Phase 1 architecture-establishment** effort under MG-6 (Sentry Developer **free tier, $0**); the client SDK **implementation** is a later phase (ticket #7). The iOS app itself is planned and not built; the React Native app this lane first targeted was removed in HAR-71. This section documents what is **designable now** — the `traceparent` injection contract that makes the mobile↔backend join above work — and explicitly fences off what requires an **operator decision**.
+Sentry is the observability backend for the **native iOS (Swift)** mobile app only. This lane is a **Phase 1 architecture-establishment** effort under MG-6 (Sentry Developer **free tier, $0**); the client SDK **implementation** is a later phase (ticket #7). The iOS app itself is so far a skeleton in `apps/ios` (HAR-158) with no Sentry SDK; the React Native app this lane first targeted was removed in HAR-71. This section documents what is **designable now** — the `traceparent` injection contract that makes the mobile↔backend join above work — and explicitly fences off what requires an **operator decision**.
 
 ### Designable now — `traceparent` injection contract
 

@@ -1,0 +1,35 @@
+{
+  "configurations" : [
+    {
+      "id" : "E84D9DD0-CAF6-4153-BC83-63EDCD288143",
+      "name" : "Default",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:MeatGeek.xcodeproj",
+      "identifier" : "A1000000000000000000000C",
+      "name" : "MeatGeek"
+    }
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:MeatGeekKit",
+        "identifier" : "MeatGeekKitTests",
+        "name" : "MeatGeekKitTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:MeatGeek.xcodeproj",
+        "identifier" : "A1000000000000000000000D",
+        "name" : "MeatGeekUITests"
+      }
+    }
+  ],
+  "version" : 1
+}
