@@ -68,6 +68,7 @@ meatgeekv2/
 ├── apps/                           # Deployable applications
 │   ├── api/                       # Azure Functions API (TypeScript)
 │   ├── web/                       # React web application
+│   ├── ios/                       # Native iOS app (Swift, Xcode; not an Nx project)
 │   ├── device-controller/         # Enhanced Raspberry Pi controller (Go)
 │   ├── data-pusher/              # IoT Hub integration service (Go)
 │   ├── device-simulator/         # Development and testing tool
@@ -94,7 +95,7 @@ meatgeekv2/
 | Data Pusher | Go | IoT Hub integration service | ✅ New |
 | Azure Functions | TypeScript | Serverless API and data processing | ✅ New |
 | Web App | React | User interface | ✅ Foundation |
-| iOS App | Swift (native) | Mobile client; shares only the OpenAPI contract with the web app | 📋 Planned, not built |
+| iOS App | Swift (native) | Mobile client in [`apps/ios`](apps/ios/README.md); shares only the OpenAPI contract with the web app | 🚧 Skeleton |
 | Infrastructure | Terraform | Cloud resource management | 🔄 In Progress |
 
 ## 🔧 Development Commands

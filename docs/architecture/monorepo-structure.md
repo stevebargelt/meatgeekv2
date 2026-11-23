@@ -54,11 +54,11 @@ apps/api/
 └── project.json                # NX project configuration
 ```
 
-#### 2. Mobile Application (planned, not built)
+#### 2. Mobile Application (`apps/ios/`, skeleton)
 **Purpose**: Mobile interface for BBQ monitoring  
 **Technology**: Native iOS app in Swift  
 
-The mobile client will be a native iOS (Swift) app. It is planned and not built, and it is not an Nx project in this workspace. Because it is Swift, it shares no TypeScript code with the web app: the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`.
+The mobile client is a native iOS (Swift) app in `apps/ios`. So far it is a skeleton in `apps/ios` (HAR-158) that builds and tests in the simulator and shows only a placeholder screen. It is not an Nx project in this workspace: it builds with Xcode, from `MeatGeek.xcodeproj` and the local Swift package `MeatGeekKit`, which holds its logic. See [`apps/ios/README.md`](../../apps/ios/README.md). Because it is Swift, it shares no TypeScript code with the web app: the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`.
 
 #### 3. Web Application (`apps/web/`)
 **Purpose**: The live client: sign in, devices, cooks, a live panel by push and a chart of the whole cook  

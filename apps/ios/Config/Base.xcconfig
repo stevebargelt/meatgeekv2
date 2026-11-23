@@ -1,0 +1,72 @@
+// Base.xcconfig — build settings shared by every target and configuration.
+//
+// The project's Debug and Release configurations are based on Debug.xcconfig
+// and Release.xcconfig, which both include this file. Target-specific settings
+// (bundle id, Info.plist keys, test host) live in the targets in
+// MeatGeek.xcodeproj. Nothing here identifies an Apple account: no
+// development team id, certificate or provisioning profile is ever committed.
+
+// Platform: iPhone only, iOS 18 and later.
+SDKROOT = iphoneos
+SUPPORTED_PLATFORMS = iphoneos iphonesimulator
+TARGETED_DEVICE_FAMILY = 1
+IPHONEOS_DEPLOYMENT_TARGET = 18.0
+SUPPORTS_MACCATALYST = NO
+SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO
+SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO
+
+// Language: Swift 6 language mode with complete concurrency checking.
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+SWIFT_EMIT_LOC_STRINGS = YES
+LOCALIZATION_PREFERS_STRING_CATALOGS = YES
+
+// Versioning. The app shows these through MeatGeekKit's AppVersion.
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+// Build hygiene.
+ENABLE_USER_SCRIPT_SANDBOXING = YES
+ENABLE_STRICT_OBJC_MSGSEND = YES
+ALWAYS_SEARCH_USER_PATHS = NO
+CLANG_ENABLE_MODULES = YES
+CLANG_ENABLE_OBJC_ARC = YES
+CLANG_ANALYZER_NONNULL = YES
+CLANG_CXX_LANGUAGE_STANDARD = gnu++20
+GCC_C_LANGUAGE_STANDARD = gnu17
+CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES
+CLANG_WARN_BOOL_CONVERSION = YES
+CLANG_WARN_COMMA = YES
+CLANG_WARN_CONSTANT_CONVERSION = YES
+CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES
+CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR
+CLANG_WARN_DOCUMENTATION_COMMENTS = YES
+CLANG_WARN_EMPTY_BODY = YES
+CLANG_WARN_ENUM_CONVERSION = YES
+CLANG_WARN_INFINITE_RECURSION = YES
+CLANG_WARN_INT_CONVERSION = YES
+CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES
+CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES
+CLANG_WARN_OBJC_LITERAL_CONVERSION = YES
+CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR
+CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES
+CLANG_WARN_RANGE_LOOP_ANALYSIS = YES
+CLANG_WARN_STRICT_PROTOTYPES = YES
+CLANG_WARN_SUSPICIOUS_MOVE = YES
+CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE
+CLANG_WARN_UNREACHABLE_CODE = YES
+CLANG_WARN__DUPLICATE_METHOD_MATCH = YES
+GCC_NO_COMMON_BLOCKS = YES
+GCC_WARN_64_TO_32_BIT_CONVERSION = YES
+GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR
+GCC_WARN_UNDECLARED_SELECTOR = YES
+GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE
+GCC_WARN_UNUSED_FUNCTION = YES
+GCC_WARN_UNUSED_VARIABLE = YES
+COPY_PHASE_STRIP = NO
+
+// Signing for a physical device. Copy Signing.local.xcconfig.example to
+// Signing.local.xcconfig (gitignored) and set your own team id there.
+// The file is optional: simulator builds need no signing. Keep this include
+// last so the local file overrides anything above.
+#include? "Signing.local.xcconfig"

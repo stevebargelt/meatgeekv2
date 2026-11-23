@@ -40,7 +40,7 @@ These jobs run on every push and pull request and gate merges into `main` (see [
 
 ### Why the TypeScript build matrix is `api` + `web` only
 
-`build-typescript` compiles only the apps that NX builds with `@nx/js:tsc`/bundlers — `api` (Azure Functions) and `web` (React/Vite). Those are the workspace's only TypeScript apps. The mobile client will be a native iOS (Swift) app; it is planned and not built, it is not an Nx project, and it shares only the OpenAPI contract with the web app, so it has no leg in either matrix.
+`build-typescript` compiles only the apps that NX builds with `@nx/js:tsc`/bundlers — `api` (Azure Functions) and `web` (React/Vite). Those are the workspace's only TypeScript apps. The mobile client is a native iOS (Swift) app in `apps/ios`, so far a skeleton; it is not an Nx project, CI does not build it yet, and it shares only the OpenAPI contract with the web app, so it has no leg in either matrix.
 
 Adding a new buildable TypeScript app? Add it to the `build-typescript` matrix and to the `lint-and-test` matrix.
 

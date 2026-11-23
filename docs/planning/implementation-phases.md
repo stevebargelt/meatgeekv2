@@ -166,9 +166,9 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
 
 ### Week 10-12: Core Mobile Features
 
-#### Native iOS Application (Swift, planned, not built)
+#### Native iOS Application (Swift, skeleton in `apps/ios`)
 
-The mobile client is a native iOS app in Swift. It is not an Nx project and shares no TypeScript code with the web app; the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`, from which the iOS app generates its Swift API client.
+The mobile client is a native iOS app in Swift. HAR-158 created its skeleton in `apps/ios` (Xcode project, `MeatGeekKit` package, unit and UI tests); the features below are goal HAR-157. It is not an Nx project and shares no TypeScript code with the web app; the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`, from which the iOS app generates its Swift API client.
 
 - [ ] **Navigation and Layout**
   - SwiftUI navigation with bottom tabs

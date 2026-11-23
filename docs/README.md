@@ -39,7 +39,7 @@ A comprehensive BBQ temperature monitoring and cook management system built with
 - **[Device runbook](devices/runbook.md)** - Onboard a Raspberry Pi with one command, then claim, release or revoke it
 - **[Device Controller](applications/device-controller.md)** - Raspberry Pi Go application for temperature monitoring
 - **[Data Pusher](applications/data-pusher.md)** - IoT Hub integration service and local buffering
-- **Mobile App** - Native iOS (Swift) app, planned and not built; it shares only the OpenAPI contract with the web app
+- **Mobile App** - Native iOS (Swift) app in [`apps/ios`](../apps/ios/README.md), so far a skeleton in `apps/ios` (HAR-158) that builds and tests in the simulator and shows only a placeholder screen; it shares only the OpenAPI contract with the web app
 - **[Web App](applications/web-app.md)** - React web application
 
 ### Data Models & Business Logic
@@ -65,7 +65,7 @@ MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time a
 - **Azure Cloud Services** for scalable, serverless architecture
 - **Terraform** for infrastructure as code
 - **OpenTelemetry** for end-to-end observability
-- **React** for the web client, and a native iOS (Swift) client that is planned and not built
+- **React** for the web client, and a native iOS (Swift) client that is so far a skeleton (`apps/ios`)
 
 ## 🔄 Data Flow Summary
 
@@ -79,7 +79,7 @@ The device controller reads the RTD sensors, and the data pusher stamps each rea
 | Data Pusher | Go | IoT Hub integration service | 🔄 New |
 | Azure Functions | TypeScript | Serverless API and data processing | 🔄 New |
 | Web App | React | User interface | 🔄 New |
-| iOS App | Swift (native) | Mobile client; shares only the OpenAPI contract with the web app | 📋 Planned, not built |
+| iOS App | Swift (native) | Mobile client in [`apps/ios`](../apps/ios/README.md); shares only the OpenAPI contract with the web app | 🚧 Skeleton |
 | Infrastructure | Terraform | Cloud resource management | 🔄 New |
 
 ## 🚀 Getting Started
