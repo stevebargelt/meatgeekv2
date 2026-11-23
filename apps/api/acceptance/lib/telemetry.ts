@@ -1,5 +1,5 @@
-import { claimStandingDevice } from './enrolment';
-import type { AcceptanceApi, SimDeviceRun } from './proof';
+import { claimStandingDevice, deviceIdOf } from './enrolment';
+import type { AcceptanceApi, DeviceRef, SimDeviceRun } from './proof';
 import { ProofFailure } from './proof';
 
 /**
@@ -42,10 +42,15 @@ export async function registerSimulatedDevice(api: AcceptanceApi): Promise<void>
 }
 
 /**
- * Fail unless `message`, one stdout line of simdevice, is a reading sent as the
- * simulated device with a date `timestamp` and `sentAt`; return those two.
+ * Fail unless `message`, one stdout line of simdevice, is a reading sent as
+ * `deviceId` (default the simulated device) with a date `timestamp` and
+ * `sentAt`; return those two.
  */
-export function parseSentReading(api: AcceptanceApi, message: unknown): SentReading {
+export function parseSentReading(
+  api: AcceptanceApi,
+  message: unknown,
+  deviceId: string = api.simulatedDeviceId
+): SentReading {
   const line = message as Record<string, unknown> | null;
   const timestamp = line?.['timestamp'];
   const sentAt = line?.['sentAt'];
@@ -55,9 +60,9 @@ export function parseSentReading(api: AcceptanceApi, message: unknown): SentRead
         `${JSON.stringify(sentAt)}; both must be dates`
     );
   }
-  if (line?.['deviceId'] !== api.simulatedDeviceId) {
+  if (line?.['deviceId'] !== deviceId) {
     throw new ProofFailure(
-      `simdevice sent as ${JSON.stringify(line?.['deviceId'])}, not ${api.simulatedDeviceId}`
+      `simdevice sent as ${JSON.stringify(line?.['deviceId'])}, not ${deviceId}`
     );
   }
   return { timestamp, sentAt };
@@ -77,13 +82,19 @@ export function expectSimDeviceExit0(run: SimDeviceRun): void {
 }
 
 /**
- * Send one reading as the simulated device (`simdevice --count 1`) and return
- * what its one stdout line reports. Fails unless simdevice exits 0 and prints
- * exactly one JSON line, for the simulated device, with a date `timestamp` and
- * `sentAt`.
+ * Send one reading as `device` (`simdevice --count 1`; default the simulated
+ * device; HAR-142: or a fresh one) and return what its one stdout line
+ * reports. Fails unless simdevice exits 0 and prints exactly one JSON line,
+ * for that device, with a date `timestamp` and `sentAt`.
  */
-export async function sendOneReading(api: AcceptanceApi): Promise<SentReading> {
-  const run = await api.runSimDevice(['--count', '1']);
+export async function sendOneReading(
+  api: AcceptanceApi,
+  device: DeviceRef = 'simulated'
+): Promise<SentReading> {
+  const run = await api.runSimDevice(
+    ['--count', '1'],
+    device === 'simulated' ? undefined : { device }
+  );
   expectSimDeviceExit0(run);
   if (run.messages.length !== 1 || run.unparsedLines > 0) {
     throw new ProofFailure(
@@ -91,5 +102,5 @@ export async function sendOneReading(api: AcceptanceApi): Promise<SentReading> {
         `${run.unparsedLines} other line(s) on stdout, expected exactly one JSON line`
     );
   }
-  return parseSentReading(api, run.messages[0]);
+  return parseSentReading(api, run.messages[0], deviceIdOf(api, device));
 }

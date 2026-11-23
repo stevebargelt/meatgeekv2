@@ -72,6 +72,10 @@ export interface SimDeviceRun {
   readonly unparsedLines: number;
   /** The first non-empty stderr line, with the device credential masked. */
   readonly stderrFirstLine: string | undefined;
+  /** HAR-142: the last non-empty stderr line, masked the same way. simdevice
+   *  logs to stderr as it goes and writes its own failure line last, so this
+   *  is the line that says why it failed. */
+  readonly stderrLastLine?: string;
   /** HAR-120: set when the runner killed the run for outlasting its time
    *  limit (`exitCode` is then `null`): the limit, in ms. */
   readonly killedAfterMs?: number;
@@ -101,8 +105,9 @@ export interface SimDeviceOptions {
   readonly device?: DeviceRef;
 }
 
-/** HAR-140: the device scripts in apps/data-pusher/deploy the suite runs. */
-export type DeviceScript = 'enrol-device.sh' | 'delete-device.sh';
+/** HAR-140: the device scripts in apps/data-pusher/deploy the suite runs.
+ *  HAR-142: and revoke-device.sh, for the revoke proof. */
+export type DeviceScript = 'enrol-device.sh' | 'delete-device.sh' | 'revoke-device.sh';
 
 /** The outcome of one device-script run. As with simdevice, nothing here is
  *  raw output: stdout is reduced to its first line (the script's one result
@@ -148,7 +153,7 @@ export interface AcceptanceApi {
   inDpsMode(device: DeviceRef): boolean;
   /**
    * HAR-140: run one of the device scripts (`enrol-device.sh`,
-   * `delete-device.sh`) with `args`, as the job's `az` login. The runner adds
+   * `delete-device.sh`, `revoke-device.sh`) with `args`, as the job's `az` login. The runner adds
    * `--auth-type login --dps <ACCEPTANCE_DPS_HOST> --hub
    * <ACCEPTANCE_IOT_HUB_HOST>` and throws when either host is not set.
    * Resolves on exit whatever the exit code.
