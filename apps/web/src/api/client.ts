@@ -9,7 +9,7 @@ import type { TokenGetter } from '../auth/token';
  */
 export type ApiClient = Client<paths>;
 export type Device = components['schemas']['Device'];
-export type RegisterDeviceRequest = components['schemas']['RegisterDeviceRequest'];
+export type ClaimDeviceRequest = components['schemas']['ClaimDeviceRequest'];
 export type Cook = components['schemas']['Cook'];
 export type CookStatus = components['schemas']['CookStatus'];
 export type StartCookRequest = components['schemas']['StartCookRequest'];

@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Response } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Response } from '@playwright/test';
 import {
   distinctiveGrillF,
   grillText,
@@ -9,20 +9,22 @@ import {
 } from './helpers';
 import { expectLivePanelConnected } from './live-panel';
 import { signInWithMicrosoft } from './microsoft-sign-in';
-import { startSimDevice, type SimDeviceRun } from './simdevice';
+import { readClaimCode, startSimDevice, type SimDeviceRun } from './simdevice';
 
 /**
  * The live browser proof (HAR-99): on the production web app, the acceptance
- * user signs in through Microsoft's real pages with a TOTP code, starts a cook
- * on the web device, sees a reading simdevice pushes through IoT Hub and
- * SignalR, and stops the cook. See "Live browser proof" in
+ * user signs in through Microsoft's real pages with a TOTP code, claims the
+ * web device with the code it reports (HAR-141), starts a cook on it, sees a
+ * reading simdevice pushes through IoT Hub and SignalR, stops the cook and
+ * releases the device. See "Live browser proof" in
  * docs/development/live-acceptance.md.
  *
- * Nothing secret is written out: no password, TOTP secret or code,
- * connection string or token. Trace, video and Playwright's own failure
+ * Nothing secret is written out: no password, TOTP secret or code, claim
+ * code, connection string or token. Trace, video and Playwright's own failure
  * screenshot and page snapshot are off (playwright.live.config.ts); this file
  * takes a screenshot on failure only once sign-in has finished, because the
- * sign-in pages show the UPN and what was typed.
+ * sign-in pages show the UPN and what was typed, and never on the claim page,
+ * whose form can hold the claim code.
  */
 
 const DEVICE_NAME = 'Web acceptance smoker';
@@ -31,9 +33,13 @@ const DEVICE_NAME = 'Web acceptance smoker';
  * docs/development/live-acceptance.md, with the runs it was measured on.
  */
 const PUSH_TIMEOUT_MS = 60_000;
-/** The app-side waits after sign-in: the header, GET /devices, GET /cooks, a register. */
+/** The app-side waits after sign-in: the header, GET /devices, GET /cooks, a claim, a release. */
 const APP_TIMEOUT_MS = 30_000;
 const APP_TIMEOUT_S = APP_TIMEOUT_MS / 1000;
+/** simdevice's own bound on the twin sync before the claim (`--twin --timeout`). */
+const TWIN_SYNC_TIMEOUT = '60s';
+/** The claim page: its form can hold the claim code, so no screenshot is taken there. */
+const CLAIM_PATH = '/devices/claim';
 
 /** One line of the run's log. Only METRIC lines and plain notes, never a value from env. */
 const log = (line: string) => console.log(line);
@@ -59,8 +65,14 @@ test.beforeAll(() => {
 
 test.afterEach(async ({ page }, testInfo) => {
   if (testInfo.status === testInfo.expectedStatus || !signedIn || page.isClosed()) return;
-  // After sign-in only: the app's pages show no typed secret.
-  if (new URL(page.url()).origin !== env.webBaseUrl) return;
+  // After sign-in only: the app's pages show no typed secret, except the claim
+  // page, whose form can still hold the claim code.
+  const at = new URL(page.url());
+  if (at.origin !== env.webBaseUrl) return;
+  if (at.pathname === CLAIM_PATH) {
+    log('No failure screenshot: the claim page can show the claim code');
+    return;
+  }
   // HAR-101: to a file in the test's output dir, which CI uploads. An
   // attachment given as a `body` is held in memory only, and the list
   // reporter never writes it out.
@@ -101,12 +113,14 @@ class ApiWatch {
   }
 }
 
-test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', async ({
+test('live: sign in with TOTP, claim the device, start a cook, see a pushed reading, stop it, release the device', async ({
   page,
 }, testInfo) => {
   const appOrigin = env.webBaseUrl;
   let cookId: string | undefined;
   let cookStopped = false;
+  /** This run claimed the device and has not released it yet. */
+  let claimed = false;
   let sim: SimDeviceRun | undefined;
   let api: ApiWatch | undefined;
   let apiBaseUrl = '';
@@ -169,38 +183,14 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
       .getByRole('row')
       .filter({ has: page.locator('code').getByText(env.deviceId, { exact: true }) });
 
-    let device: DeviceSummary | undefined;
-    await test.step('3. the web device is registered', async () => {
+    await test.step('3. clean slate: release the device if an earlier run left it claimed', async () => {
       const listed = ((await watch.devices?.json()) as { devices: DeviceSummary[] }).devices;
-      if (listed.some(device => device.id === env.deviceId)) {
-        log(`Device ${env.deviceId} is already registered`);
-      } else {
-        const form = page.getByRole('form', { name: 'Register a device' });
-        await form.getByLabel('Device ID').fill(env.deviceId);
-        await form.getByLabel('Name', { exact: true }).fill(DEVICE_NAME);
-        await form.getByLabel('Model').fill('simdevice');
-        const registered = page
-          .waitForResponse(
-            r => r.request().method() === 'POST' && r.url() === `${apiBaseUrl}/devices`,
-            { timeout: APP_TIMEOUT_MS }
-          )
-          .catch(() => {
-            throw new Error(
-              `POST /devices (registering ${env.deviceId}) did not answer within ${APP_TIMEOUT_S} s`
-            );
-          });
-        await form.getByRole('button', { name: 'Register' }).click();
-        const status = (await registered).status();
-        expect(status, `registering ${env.deviceId} answered ${status}, expected 201`).toBe(201);
-        log(`Registered device ${env.deviceId}`);
+      if (!listed.some(d => d.id === env.deviceId)) {
+        log(`Device ${env.deviceId} is not the acceptance user's: nothing to release`);
+        return;
       }
-      await expect(row, `${env.deviceId} is not on the devices page`).toBeVisible();
-      // Read now: Chromium may drop a response body once the page moves on.
-      const devices = ((await watch.devices?.json()) as { devices: DeviceSummary[] }).devices;
-      device = devices.find(d => d.id === env.deviceId);
-    });
-
-    await test.step('4. clean slate: stop a cook left running on the device', async () => {
+      log(`Device ${env.deviceId} is still the acceptance user's from an earlier run`);
+      // Release answers 409 COOK_ACTIVE while a cook runs: stop a leftover first.
       await expect
         .poll(() => watch.activeCooks?.status(), {
           message: `GET /cooks?status=active did not answer 200 within ${APP_TIMEOUT_S} s`,
@@ -209,16 +199,91 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
         .toBe(200);
       const active = ((await watch.activeCooks?.json()) as { cooks: CookSummary[] }).cooks;
       const leftover = active.find(cook => cook.deviceId === env.deviceId);
-      if (!leftover) return;
-      log(`Stopping cook ${leftover.id}, left running on ${env.deviceId}`);
-      await row.getByRole('link', { name: /^Cooking: / }).click();
-      await expect(page).toHaveURL(`${appOrigin}/cooks/${encodeURIComponent(leftover.id)}`);
-      await stopThroughUi(page);
-      await page
-        .getByRole('navigation', { name: 'Main' })
-        .getByRole('link', { name: 'Devices' })
-        .click();
-      await expect(row.getByRole('button', { name: 'Start cook' })).toBeVisible();
+      if (leftover) {
+        log(`Stopping cook ${leftover.id}, left running on ${env.deviceId}`);
+        await row.getByRole('link', { name: /^Cooking: / }).click();
+        await expect(page).toHaveURL(`${appOrigin}/cooks/${encodeURIComponent(leftover.id)}`);
+        await stopThroughUi(page);
+        await openDevicesPage(page);
+      }
+      await releaseThroughUi(page, row, apiBaseUrl, env.deviceId);
+      log(`Released device ${env.deviceId}`);
+    });
+
+    let device: DeviceSummary | undefined;
+    await test.step('4. claim the web device with its code', async () => {
+      const credential = env.simdevice;
+      if (credential.mode !== 'dps') {
+        throw new Error(
+          'Claiming the web device needs simdevice in DPS mode, where the device mints its ' +
+            'claim code: set ACCEPTANCE_WEB_STATE_DIR and ACCEPTANCE_DPS_ID_SCOPE in place of ' +
+            'SIMDEVICE_WEB_CONNECTION_STRING'
+        );
+      }
+      // A full twin sync: a device released since its last sync (step 3, or
+      // an earlier run's end) sees the new claim generation and mints a code.
+      const sync = startSimDevice(env.simdeviceBin, credential, [
+        '--twin',
+        '--count',
+        '0',
+        '--timeout',
+        TWIN_SYNC_TIMEOUT,
+      ]);
+      sim = sync;
+      const synced = await sync.exit;
+      expect(synced.code, `the twin sync failed: ${simError(synced).message}`).toBe(0);
+
+      // A secret until used: never logged, never in an expect's message.
+      const read = await readClaimCode(env.simdeviceBin, credential.stateDir);
+      if (read.state !== 'unclaimed' || read.claimCode === undefined) {
+        throw new Error(
+          `simdevice claim-code reports ${read.state} for ${env.deviceId} after a twin sync, so ` +
+            'there is no code to claim with. ' +
+            (read.state === 'claimed'
+              ? 'Its code was used and the device not released, yet it is not on the ' +
+                "acceptance user's devices page: another user holds it. Release it as that user."
+              : 'Expected unclaimed, with a code.')
+        );
+      }
+      const claimCode = read.claimCode;
+
+      await page.goto(`${appOrigin}${CLAIM_PATH}?deviceId=${encodeURIComponent(env.deviceId)}`);
+      const form = page.getByRole('form', { name: 'Claim a device' });
+      await expect(
+        form.getByLabel('Device ID'),
+        'the claim page did not take ?deviceId='
+      ).toHaveValue(env.deviceId);
+      await form.getByLabel('Claim code').fill(claimCode);
+      await form.getByLabel('Name', { exact: true }).fill(DEVICE_NAME);
+      const answered = page
+        .waitForResponse(
+          r => r.request().method() === 'POST' && r.url() === `${apiBaseUrl}/devices/claim`,
+          { timeout: APP_TIMEOUT_MS }
+        )
+        .catch(() => {
+          throw new Error(
+            `POST /devices/claim (claiming ${env.deviceId}) did not answer within ${APP_TIMEOUT_S} s`
+          );
+        });
+      await form.getByRole('button', { name: 'Claim device' }).click();
+      const status = (await answered).status();
+      if (status === 403) {
+        throw new Error(
+          `POST /devices/claim refused ${env.deviceId} (403) with the code the device just ` +
+            `reported: ${await whyRefused(apiBaseUrl, env.deviceId, watch.bearer)}`
+        );
+      }
+      expect(status, `claiming ${env.deviceId} answered ${status}, expected 201`).toBe(201);
+      claimed = true;
+      log(`Claimed device ${env.deviceId}`);
+
+      await expect(page, 'a successful claim did not open the devices page').toHaveURL(
+        `${appOrigin}/`
+      );
+      await expect(row, `${env.deviceId} is not on the devices page after the claim`).toBeVisible();
+      // Read now: Chromium may drop a response body once the page moves on.
+      const devices = ((await watch.devices?.json()) as { devices: DeviceSummary[] }).devices;
+      device = devices.find(d => d.id === env.deviceId);
     });
 
     const cookName = `acceptance web ${env.runId}`;
@@ -302,15 +367,117 @@ test('live: sign in with TOTP, start a cook, see a pushed reading, stop it', asy
       cookStopped = true;
       await expect(panel, 'the live panel is still on screen after the stop').toHaveCount(0);
     });
+
+    await test.step('8. release the device', async () => {
+      await openDevicesPage(page);
+      await releaseThroughUi(page, row, apiBaseUrl, env.deviceId);
+      claimed = false;
+      log(`Released device ${env.deviceId}`);
+    });
   } finally {
     sim?.kill();
     if (cookId && !cookStopped) {
-      await test.step('8. cleanup: stop the cook through the API', async () => {
+      await test.step('9. cleanup: stop the cook through the API', async () => {
         await stopThroughApi(apiBaseUrl, cookId as string, api?.bearer);
+      });
+    }
+    if (claimed) {
+      await test.step('9. cleanup: release the device through the API', async () => {
+        await releaseThroughApi(apiBaseUrl, env.deviceId, api?.bearer);
       });
     }
   }
 });
+
+/** Back to the devices page through the nav. */
+async function openDevicesPage(page: Page) {
+  await page
+    .getByRole('navigation', { name: 'Main' })
+    .getByRole('link', { name: 'Devices' })
+    .click();
+  await expect(page).toHaveURL(`${env.webBaseUrl}/`);
+}
+
+/**
+ * Release the device on the devices page, with its confirm step: DELETE
+ * /devices/{id} must answer 204 and the row leave the list.
+ */
+async function releaseThroughUi(page: Page, row: Locator, apiBaseUrl: string, deviceId: string) {
+  await row.getByRole('button', { name: 'Release' }).click();
+  const confirm = page.getByRole('group', { name: /^Confirm release of / });
+  const url = `${apiBaseUrl}/devices/${encodeURIComponent(deviceId)}`;
+  const answered = page
+    .waitForResponse(r => r.request().method() === 'DELETE' && r.url() === url, {
+      timeout: APP_TIMEOUT_MS,
+    })
+    .catch(() => {
+      throw new Error(
+        `DELETE /devices/${deviceId} (releasing it) did not answer within ${APP_TIMEOUT_S} s`
+      );
+    });
+  await confirm.getByRole('button', { name: 'Yes, release' }).click();
+  const status = (await answered).status();
+  expect(status, `releasing ${deviceId} answered ${status}, expected 204`).toBe(204);
+  await expect(row, `${deviceId} is still on the devices page after the release`).toHaveCount(0);
+}
+
+/**
+ * Why a claim was refused, for the failure message. Every refusal is the same
+ * 403, so ask DELETE /devices/{id}, which tells another user's device (403
+ * DEVICE_NOT_OWNED) from one nobody holds (404). The device is not this
+ * user's (it was not on their page), so the DELETE changes nothing. Only the
+ * status and error code are used.
+ */
+async function whyRefused(
+  apiBaseUrl: string,
+  deviceId: string,
+  bearer: string | undefined
+): Promise<string> {
+  const unsure = 'the code may not match, or the device may belong to another user';
+  if (!bearer) return unsure;
+  try {
+    const response = await fetch(`${apiBaseUrl}/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'DELETE',
+      headers: { authorization: bearer },
+    });
+    const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+    if (response.status === 403 && body.error === 'DEVICE_NOT_OWNED') {
+      return (
+        'it belongs to another user (DELETE /devices/{id} answers 403 DEVICE_NOT_OWNED). ' +
+        'Release it as that user.'
+      );
+    }
+    if (response.status === 404) {
+      return 'nobody holds it (DELETE /devices/{id} answers 404), so the API refused the code itself';
+    }
+    return `${unsure} (DELETE /devices/{id} answered ${response.status})`;
+  } catch (error) {
+    return `${unsure} (DELETE /devices/{id} failed: ${(error as Error).name})`;
+  }
+}
+
+/**
+ * Release a device this run claimed and could not release on screen, with
+ * the token the page itself sent. Only the status is logged. A device left
+ * claimed is released by the next run's step 3 all the same.
+ */
+async function releaseThroughApi(apiBaseUrl: string, deviceId: string, bearer: string | undefined) {
+  if (!apiBaseUrl || !bearer) {
+    log(
+      `Cleanup: device ${deviceId} may still be claimed; the page sent no token to release it with`
+    );
+    return;
+  }
+  try {
+    const response = await fetch(`${apiBaseUrl}/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'DELETE',
+      headers: { authorization: bearer },
+    });
+    log(`Cleanup: DELETE /devices/${deviceId} answered ${response.status}`);
+  } catch (error) {
+    log(`Cleanup: DELETE /devices/${deviceId} failed: ${(error as Error).name}`);
+  }
+}
 
 /** Stop the cook on screen with its confirm step; it then shows completed. */
 async function stopThroughUi(page: Page) {
