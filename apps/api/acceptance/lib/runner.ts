@@ -546,6 +546,10 @@ export async function runAcceptance(options: RunOptions): Promise<RunResult> {
       return line;
     },
 
+    inDpsMode(device: DeviceRef): boolean {
+      return credentialOf(device).mode === 'dps';
+    },
+
     async runDeviceScript(script: DeviceScript, args: readonly string[]): Promise<DeviceScriptRun> {
       lastRequest = undefined;
       lastExec = { label: script };

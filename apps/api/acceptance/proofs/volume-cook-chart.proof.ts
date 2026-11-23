@@ -4,12 +4,11 @@ import type {
   Cook,
   CookChart,
   CookListResponse,
-  Device,
-  RegisterDeviceRequest,
   StartCookRequest,
 } from '@meatgeekv2/api-interfaces';
 
 import { clock } from '../lib/clock';
+import { claimStandingDevice } from '../lib/enrolment';
 import type { AcceptanceApi, AcceptanceResponse } from '../lib/proof';
 import { defineProofs, ProofFailure } from '../lib/proof';
 import { topupTimeLimitMs, VOLUME } from './telemetry-volume.proof';
@@ -29,8 +28,9 @@ import { topupTimeLimitMs, VOLUME } from './telemetry-volume.proof';
  * (`simdevice --start <startTime> --step 5s`), whenever they are sent.
  *
  *   1. the chart device is configured (both variables are set);
- *   2. the chart device is registered to the caller: `GET /devices/{id}`, and
- *      `POST /devices` on a 404. Its registration is left alone after that;
+ *   2. (HAR-140) the chart device is claimed for the caller with its own claim
+ *      code (`POST /devices/claim`, 201 or 200; `claimStandingDevice` in
+ *      ../lib/enrolment), and never released;
  *   3. the standing cook is found with `GET /cooks?deviceId=<chart>&status=
  *      active`; with none, `POST /cooks` starts one;
  *   4. the chart is loaded and checked for coverage ({@link chartCoverage});
@@ -192,36 +192,17 @@ export default defineProofs('cook chart', () => {
       },
     },
     {
-      name: 'GET /devices/{id} finds the chart device registered to the caller (POST /devices on 404)',
+      name: 'POST /devices/claim claims the chart device for the caller with its own claim code',
       async run(api: AcceptanceApi) {
-        const id = chartDevice();
-        const found = await api.request<Device>({
-          method: 'GET',
-          path: `/devices/${encodeURIComponent(id)}`,
-          route: '/devices/{id}',
-        });
-        if (found.status !== 404) {
-          api.expectStatus(found, 200);
-          deviceReady = true;
-          return;
-        }
-        const device: RegisterDeviceRequest = {
-          deviceId: id,
+        chartDevice();
+        // HAR-140: claimed once per run (200 when the caller already holds it,
+        // which keeps its claimedAt and so the cook's rollups in view), never
+        // released: its standing cook would make a release 409 COOK_ACTIVE.
+        await claimStandingDevice(api, 'chart', {
           name: 'Acceptance chart device',
           model: 'simdevice',
           location: 'CI',
-        };
-        const registered = await api.request<Device>({
-          method: 'POST',
-          path: '/devices',
-          body: device,
         });
-        api.expectStatus(registered, 201);
-        api.check(
-          registered,
-          registered.body?.id === id,
-          `device.id ${registered.body?.id} is not the id sent`
-        );
         deviceReady = true;
       },
     },
@@ -230,7 +211,7 @@ export default defineProofs('cook chart', () => {
       async run(api: AcceptanceApi) {
         const id = chartDevice();
         if (!deviceReady) {
-          throw new Error('the chart device was not registered by an earlier proof');
+          throw new Error('the chart device was not claimed by an earlier proof');
         }
         const query = new URLSearchParams({ deviceId: id, status: 'active' });
         const listed = await api.request<CookListResponse>({

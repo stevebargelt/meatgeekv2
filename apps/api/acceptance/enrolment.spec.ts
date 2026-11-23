@@ -1,6 +1,7 @@
 import type { ClaimCodeLine, NoClaimYet } from './lib/claim-code';
 import {
   claimDevice,
+  claimStandingDevice,
   cleanupFreshDevice,
   enrolFreshDevice,
   FreshDevice,
@@ -48,6 +49,8 @@ interface Script {
   claimCode?: (device: DeviceRef) => ClaimCodeLine | NoClaimYet;
   deviceScript?: (script: DeviceScript, args: readonly string[]) => DeviceScriptRun;
   request?: (options: RequestOptions) => { status: number; body?: unknown; charge?: number };
+  dpsMode?: boolean;
+  runId?: string;
 }
 
 /** A fake api that records every call as one line, in order. */
@@ -56,7 +59,7 @@ function fakeApi(script: Script = {}) {
   const bodies: unknown[] = [];
   const name = (device: DeviceRef) => (typeof device === 'string' ? device : device.deviceId);
   const api: AcceptanceApi = {
-    runId: RUN_ID,
+    runId: script.runId ?? RUN_ID,
     simulatedDeviceId: 'meatgeek-dev-simulated-smoker',
     chartDeviceId: 'meatgeek-dev-simulated-smoker-chart',
     contract: { checkHubMessage: () => undefined } as unknown as AcceptanceApi['contract'],
@@ -81,6 +84,7 @@ function fakeApi(script: Script = {}) {
         }
       );
     },
+    inDpsMode: () => script.dpsMode ?? true,
     async runDeviceScript(which: DeviceScript, args: readonly string[]) {
       calls.push(`${which} ${args.join(' ')}`);
       if (script.deviceScript) return script.deviceScript(which, args);
@@ -399,5 +403,80 @@ describe('cleanupFreshDevice', () => {
       `delete-device.sh for ${DEVICE_ID} exited 4, expected 0: refusing`
     );
     expect(removed).toEqual([DIR]);
+  });
+});
+
+describe('claimStandingDevice', () => {
+  const SIM = 'meatgeek-dev-simulated-smoker';
+  const held = (o: RequestOptions) =>
+    o.method === 'GET' ? { status: 200, body: { id: SIM } } : { status: 200, body: { id: SIM } };
+
+  it('claims once per run with the code it shows, then again with the same code and no read', async () => {
+    const { api, calls, bodies } = fakeApi({ runId: `standing-1`, request: held });
+    await claimStandingDevice(api, 'simulated', { name: 'Sim' });
+    await claimStandingDevice(api, 'simulated', { name: 'Sim' });
+    expect(calls).toEqual([
+      'simdevice[simulated] --twin --count 0 --timeout 2m',
+      'claim-code[simulated]',
+      'POST /devices/claim',
+      'POST /devices/claim',
+    ]);
+    expect(bodies).toEqual([
+      { name: 'Sim', deviceId: SIM, claimCode: CODE },
+      { name: 'Sim', deviceId: SIM, claimCode: CODE },
+    ]);
+  });
+
+  it('a later claim in the run must be 200, the same caller again', async () => {
+    let n = 0;
+    const { api } = fakeApi({
+      runId: `standing-2`,
+      request: () => ({ status: n++ === 0 ? 200 : 201, body: { id: SIM } }),
+    });
+    await claimStandingDevice(api, 'simulated', { name: 'Sim' });
+    await expect(claimStandingDevice(api, 'simulated', { name: 'Sim' })).rejects.toThrow(
+      'expected 200, got 201'
+    );
+  });
+
+  it('in connection-string mode only checks the caller holds it', async () => {
+    const { api, calls } = fakeApi({ runId: `standing-3`, dpsMode: false, request: held });
+    await claimStandingDevice(api, 'simulated', { name: 'Sim' });
+    expect(calls).toEqual([`GET /devices/${SIM}`]);
+  });
+
+  it('in connection-string mode fails when the caller does not hold it', async () => {
+    const { api } = fakeApi({
+      runId: `standing-4`,
+      dpsMode: false,
+      request: () => ({ status: 404 }),
+    });
+    await expect(claimStandingDevice(api, 'simulated', { name: 'Sim' })).rejects.toThrow(
+      `${SIM} is not the caller's (expected 200, got 404); in connection-string mode`
+    );
+  });
+
+  it('a code already claimed (a reused state dir) needs the caller to hold the device', async () => {
+    const { api, calls } = fakeApi({
+      runId: `standing-5`,
+      claimCode: () => ({ deviceId: SIM, state: 'claimed' }),
+      request: held,
+    });
+    await claimStandingDevice(api, 'simulated', { name: 'Sim' });
+    expect(calls).toEqual([
+      'simdevice[simulated] --twin --count 0 --timeout 2m',
+      'claim-code[simulated]',
+      `GET /devices/${SIM}`,
+    ]);
+  });
+
+  it('an expired code fails', async () => {
+    const { api } = fakeApi({
+      runId: `standing-6`,
+      claimCode: () => ({ deviceId: SIM, state: 'expired' }),
+    });
+    await expect(claimStandingDevice(api, 'simulated', { name: 'Sim' })).rejects.toThrow(
+      'claim code is expired, not unclaimed'
+    );
   });
 });

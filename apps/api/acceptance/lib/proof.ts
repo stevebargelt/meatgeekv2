@@ -142,6 +142,10 @@ export interface AcceptanceApi {
    * DPS mode.
    */
   readClaimCode(device: DeviceRef): Promise<ClaimCodeLine | NoClaimYet>;
+  /** HAR-140: whether `device` runs in DPS mode, and so can show a claim
+   *  code. A fresh device always does; a standing one when the run was given
+   *  its state dir and the DPS ID scope. */
+  inDpsMode(device: DeviceRef): boolean;
   /**
    * HAR-140: run one of the device scripts (`enrol-device.sh`,
    * `delete-device.sh`) with `args`, as the job's `az` login. The runner adds

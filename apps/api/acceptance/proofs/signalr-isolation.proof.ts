@@ -274,7 +274,7 @@ export default defineProofs('signalr isolation', () => {
 
   return [
     {
-      name: 'POST /devices registers the simulated device to the owner',
+      name: 'POST /devices/claim claims the simulated device for the owner',
       async run(api: AcceptanceApi) {
         await registerSimulatedDevice(api);
         registered = true;

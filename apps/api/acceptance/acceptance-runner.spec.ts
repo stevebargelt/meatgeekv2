@@ -304,7 +304,8 @@ interface StubOptions {
   /** The body `timestamp` the stub serves for the sent reading, when it is
    *  spelled differently from the one the fake simdevice prints. */
   readonly simServedTimestamp?: string;
-  /** The simulated device is registered to someone else: POST is 409, GET 404. */
+  /** The simulated device is registered to someone else: the owner does not
+   *  hold it (GET 404), and a claim is refused. */
   readonly simOwnedByOther?: boolean;
   /** HAR-45: readings the simulated device's volume starts with. Default
    *  `VOLUME.target`, so no top-up is needed. */
@@ -521,6 +522,19 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       connectionStatus: 'unknown',
     });
   }
+  // HAR-140: the owner holds the standing simulated device, as in dev, unless
+  // someone else does. In connection-string mode it shows no claim code, so
+  // the suite only checks it is held; in DPS mode it is claimed again.
+  if (!options.simOwnedByOther) {
+    devices.set(SIM_DEVICE, {
+      id: SIM_DEVICE,
+      userId: 'stub-tenant:stub-user',
+      name: 'Simulated smoker (acceptance)',
+      model: 'simdevice',
+      isActive: true,
+      connectionStatus: 'unknown',
+    });
+  }
   for (const deviceId of options.activeCookAtStartOn ?? []) {
     cooks.push({
       id: randomUUID(),
@@ -535,7 +549,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   // HAR-140: the fresh devices' fake DPS enrollments and hub identities, and
   // the claim code each one shows (minted when it registers, dropped when it
   // is released, as a release raises the claim generation).
-  const enrolledIds = new Set<string>();
+  const enrolledIds = new Set<string>([SIM_DEVICE, CHART_DEVICE]);
   const hubIds = new Set<string>();
   const claimCodes = new Map<string, { code: string; consumedBy?: string }>();
   const mintedCodes: string[] = [];
@@ -1585,7 +1599,10 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     chartRegistered: () => devices.has(CHART_DEVICE),
     deviceIds: () => [...devices.keys()].sort(),
     scriptRuns,
-    enrolledIds: () => [...new Set([...enrolledIds, ...hubIds])].sort(),
+    enrolledIds: () =>
+      [...new Set([...enrolledIds, ...hubIds])]
+        .filter(id => id !== SIM_DEVICE && id !== CHART_DEVICE)
+        .sort(),
     mintedCodes,
     sendTimes,
     settled,
@@ -1659,8 +1676,19 @@ const line = o => process.stdout.write(JSON.stringify(o) + '\\n');
 let sentAt = ${JSON.stringify(new Date(FakeClock.EPOCH).toISOString())};
 const reading = timestamp => ({ messageId: 'f'.repeat(64), deviceId: ${JSON.stringify(SIM_DEVICE)}, timestamp, sentAt });
 const args = process.argv.slice(2).join(' ');
-const handedOver = conn === ${JSON.stringify(SIM_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.argv.some(a => a.includes(key));
-const chartHandedOver = conn === ${JSON.stringify(CHART_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.env.SIMDEVICE_CHART_CONNECTION_STRING && !process.argv.some(a => a.includes(key));
+// HAR-140: DPS mode, the device named by MEATGEEK_DEVICE_ID with its own state
+// dir (made by identity init, or by the test for a standing device).
+const dpsDevice = process.env.MEATGEEK_DEVICE_ID || '';
+const dpsStored = (() => {
+  try {
+    return JSON.parse(require('fs').readFileSync(require('path').join(process.env.MEATGEEK_STATE_DIR || '', 'identity.json'), 'utf8')).deviceId;
+  } catch {
+    return undefined;
+  }
+})();
+const dpsHandedOver = dpsDevice !== '' && dpsStored === dpsDevice && conn === '' && !!process.env.MEATGEEK_DPS_ID_SCOPE && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.env.SIMDEVICE_CHART_CONNECTION_STRING;
+const handedOver = (conn === ${JSON.stringify(SIM_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.argv.some(a => a.includes(key))) || (dpsHandedOver && dpsDevice === ${JSON.stringify(SIM_DEVICE)});
+const chartHandedOver = (conn === ${JSON.stringify(CHART_CONNECTION_STRING)} && !process.env.ACCEPTANCE_BEARER_TOKEN && !process.env.SIMDEVICE_CHART_CONNECTION_STRING && !process.argv.some(a => a.includes(key))) || (dpsHandedOver && dpsDevice === ${JSON.stringify(CHART_DEVICE)});
 // HAR-87: a chart top-up, stamped start + i × step.
 const chartTopup = /^--count ([1-9][0-9]*) --start ([^ ]+) --step ([1-9][0-9]*)s --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
 const topup = /^--count ([1-9][0-9]*) --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
@@ -1699,15 +1727,8 @@ if (argv[0] === 'claim-code' && argv[1] === '--state-dir' && argv.length === 3) 
   fs.writeFileSync(pathJoin(dir, 'device.crt'), FAKE_PEM);
   fs.writeFileSync(pathJoin(dir, 'identity.json'), JSON.stringify({ deviceId: id }));
   process.stdout.write(FAKE_PEM);
-} else if (freshId.startsWith('acceptance-')) {
-  let stored;
-  try {
-    stored = JSON.parse(fs.readFileSync(pathJoin(process.env.MEATGEEK_STATE_DIR || '', 'identity.json'), 'utf8')).deviceId;
-  } catch {}
-  if (
-    args !== '--twin --count 0 --timeout 2m' || stored !== freshId || !process.env.MEATGEEK_DPS_ID_SCOPE ||
-    process.env.SIMDEVICE_CONNECTION_STRING || process.env.ACCEPTANCE_BEARER_TOKEN
-  ) {
+} else if (freshId.startsWith('acceptance-') || (dpsDevice !== '' && args === '--twin --count 0 --timeout 2m')) {
+  if (args !== '--twin --count 0 --timeout 2m' || !dpsHandedOver) {
     process.stderr.write('fake simdevice: bad DPS hand-over: ' + args + '\\n');
     process.exit(2);
   }
@@ -1868,6 +1889,26 @@ const dpsEnv = {
 /** The fake device scripts of the current stub run, handed to the runner. */
 let deviceScriptsDir: string | undefined;
 
+/**
+ * HAR-140: the standing devices in DPS mode, as CI runs them: each with a
+ * state dir (as the workflow's `identity init` leaves it) and no connection
+ * string. A standing device can then show a claim code.
+ */
+function standingDpsEnv(mode: FakeMode = 'ok'): Record<string, string> {
+  const stateDir = (id: string) => {
+    const dir = mkdtempSync(join(fakeDir, 'state-'));
+    writeFileSync(join(dir, 'identity.json'), JSON.stringify({ deviceId: id }));
+    return dir;
+  };
+  return {
+    ACCEPTANCE_SIM_DEVICE_ID: SIM_DEVICE,
+    ACCEPTANCE_SIM_STATE_DIR: stateDir(SIM_DEVICE),
+    ACCEPTANCE_CHART_DEVICE_ID: CHART_DEVICE,
+    ACCEPTANCE_CHART_STATE_DIR: stateDir(CHART_DEVICE),
+    ACCEPTANCE_SIMDEVICE_BIN: writeFakeSimdevice(mode),
+  };
+}
+
 /** The HAR-44 variables, with the fake simdevice in `mode`. */
 function simEnv(mode: FakeMode = 'ok'): Record<string, string> {
   return {
@@ -1883,7 +1924,8 @@ let stub: Stub | undefined;
 async function runAgainstStub(
   options: StubOptions = {},
   mode: FakeMode = 'ok',
-  groups?: readonly ProofGroup[]
+  groups?: readonly ProofGroup[],
+  standing: 'connection-string' | 'dps' = 'connection-string'
 ): Promise<Run> {
   stub = await startStub(options);
   deviceScriptsDir = writeFakeDeviceScripts();
@@ -1892,8 +1934,7 @@ async function runAgainstStub(
       ACCEPTANCE_BASE_URL: stub.baseUrl,
       ACCEPTANCE_BEARER_TOKEN: TOKEN,
       ACCEPTANCE_PEER_BEARER_TOKEN: PEER_TOKEN,
-      ...simEnv(mode),
-      ...chartEnv,
+      ...(standing === 'dps' ? standingDpsEnv(mode) : { ...simEnv(mode), ...chartEnv }),
       ...dpsEnv,
     },
     groups
@@ -1949,8 +1990,8 @@ function escape(text: string): string {
 const ROUTES: CookRoute[] = ['POST /cooks', 'GET /cooks', 'POST /cooks/{cookId}/stop'];
 const COOK_ITEM_ROUTE: CookItemRoute = 'GET /cooks/{cookId}';
 const COOK_CHART_ROUTE: CookChartRoute = 'GET /cooks/{cookId}/chart';
+// HAR-140: no proof sends POST /devices any more; the stub still serves it.
 const DEVICE_ROUTES: DeviceRoute[] = [
-  'POST /devices',
   'POST /devices/claim',
   'GET /devices/{id}',
   'GET /devices',
@@ -2210,25 +2251,20 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ? ['device sweep ›', 'devices ›']
       : route === 'DELETE /devices/{id}'
         ? ['cooks lifecycle ›', 'devices ›', 'devices ›', 'temperatures ›']
-        : route === 'POST /devices'
-          ? [
-              'device twin ›',
-              'signalr isolation ›',
-              'signalr live temperature ›',
-              'telemetry round-trip ›',
-            ]
-          : route === 'POST /devices/claim'
-            ? ['cooks lifecycle ›', 'devices ›', 'temperatures ›']
-            : route === 'GET /devices/{id}'
-              ? [
-                  'devices ›',
-                  'signalr isolation ›',
-                  'signalr live temperature ›',
-                  'telemetry round-trip ›',
-                  // HAR-87: it checks the chart device is registered.
-                  'cook chart ›',
-                ]
-              : ['devices ›'];
+        : route === 'POST /devices/claim'
+          ? ['cooks lifecycle ›', 'devices ›', 'temperatures ›']
+          : route === 'GET /devices/{id}'
+            ? [
+                'devices ›',
+                // HAR-140: in connection-string mode a standing device shows
+                // no claim code, so each of its groups checks the caller holds it.
+                'device twin ›',
+                'signalr isolation ›',
+                'signalr live temperature ›',
+                'telemetry round-trip ›',
+                'cook chart ›',
+              ]
+            : ['devices ›'];
 
   it.each(DEVICE_ROUTES)(
     '(b) exits non-zero and names %s when it returns a wrong status',
@@ -2492,8 +2528,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.output).not.toContain('BEGIN CERTIFICATE');
     expect(result.output).not.toContain('PRIVATE KEY');
     expect(result.output).not.toContain('"claimCode"');
-    // The standing chart device is there from the start, and is not swept.
-    expect(result.output).toMatch(/^METRIC acceptance-devices-before 1$/m);
+    // The standing simulated and chart devices are there from the start, and
+    // are not swept.
+    expect(result.output).toMatch(/^METRIC acceptance-devices-before 2$/m);
     expect(result.output).toMatch(/^METRIC acceptance-devices-swept 0$/m);
   });
 
@@ -2509,14 +2546,36 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(result.failures).toEqual([]);
     // The sweep runs before any other group: its deletes come first.
     expect(deviceDeletes().slice(0, left.length)).toEqual(left.map(id => ({ id, as: 'owner' })));
-    expect(result.output).toMatch(/^METRIC acceptance-devices-before 6$/m);
+    expect(result.output).toMatch(/^METRIC acceptance-devices-before 7$/m);
     expect(result.output).toMatch(/^METRIC acceptance-devices-swept 4$/m);
-    expect(result.output).toMatch(/^METRIC acceptance-devices-after 2$/m);
-    expect(
-      result.lines.indexOf(
-        'RUN  device sweep › DELETE /devices/{id} for every acceptance-* device an earlier run left'
-      )
-    ).toBeLessThan(result.lines.findIndex(line => line.startsWith('RUN  cooks lifecycle ›')));
+    expect(result.output).toMatch(/^METRIC acceptance-devices-after 3$/m);
+    const sweepStarts = result.lines.indexOf(
+      'RUN  device sweep › DELETE /devices/{id} and delete-device.sh for every acceptance-* device an earlier run left'
+    );
+    expect(sweepStarts).toBeGreaterThanOrEqual(0);
+    expect(sweepStarts).toBeLessThan(
+      result.lines.findIndex(line => line.startsWith('RUN  cooks lifecycle ›'))
+    );
+    // HAR-140: each one is handed to delete-device.sh after its release;
+    // none of them ever had an enrollment.
+    expect(stub!.scriptRuns.slice(0, left.length)).toEqual(
+      left.map(id => ({
+        script: 'delete-device.sh',
+        args: [
+          '--device-id',
+          id,
+          '--only-prefix',
+          'acceptance-',
+          '--auth-type',
+          'login',
+          '--dps',
+          DPS_HOST,
+          '--hub',
+          HUB_HOST,
+        ],
+      }))
+    );
+    left.forEach(id => expect(result.output).toContain(`already deleted ${id}`));
     // A device that is not an acceptance device stays, as do the standing ones.
     expect(stub!.deviceIds()).toEqual(['backyard-smoker', SIM_DEVICE, CHART_DEVICE].sort());
   });
@@ -2584,7 +2643,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(stub.scriptRuns.map(r => r.args[r.args.indexOf('--device-id') + 1])).toEqual([
       'acceptance-old-run',
     ]);
-    expect(stub.deviceIds()).toEqual([...standing].sort());
+    expect(stub.deviceIds()).toEqual([...standing, SIM_DEVICE].sort());
   });
 
   it('(b) HAR-85: a failed step still deletes the device its group registered', async () => {
@@ -2979,6 +3038,35 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(stub!.requests.some(r => r.authorization === `Bearer ${TOKEN}`)).toBe(true);
   });
 
+  it('HAR-140: in DPS mode every device is claimed with its own code, the standing ones once per run', async () => {
+    const result = await runAgainstStub({}, 'ok', undefined, 'dps');
+
+    expect(result.failures).toEqual([]);
+    const claims = result.lines
+      .filter(line => /^\s+POST\s+\/devices\/claim\s+\d{3}\s+\d+ ms/.test(line))
+      .map(line => /\s(\d{3})\s/.exec(line)?.[1]);
+    // In file order: the three fresh devices are new (201: cooks lifecycle,
+    // devices, temperatures); the owner already held the simulated device
+    // (200, device twin), and its later groups claim it again with the same
+    // code (200: isolation, live temperature, round trip); the chart device
+    // was held too (200).
+    expect(claims).toEqual(['201', '200', '201', '200', '200', '200', '201', '200']);
+    expect(stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/devices')).toEqual(
+      []
+    );
+    // The simulated device's code is read once: its first claim; later
+    // groups reuse it without another twin sync or read.
+    const readsOf = (label: string) =>
+      result.lines.filter(line => new RegExp(`^\\s+EXEC\\s+${label} claim-code\\s`).test(line));
+    expect(readsOf('simdevice')).toHaveLength(1);
+    expect(readsOf('simdevice \\(chart\\)')).toHaveLength(1);
+    expect(stub!.mintedCodes.length).toBeGreaterThanOrEqual(5);
+    for (const code of stub!.mintedCodes) expect(result.output).not.toContain(code);
+    expect(result.output).not.toContain('"claimCode"');
+    // Neither standing device is released.
+    expect(stub!.deviceIds()).toEqual([SIM_DEVICE, CHART_DEVICE].sort());
+  });
+
   it('starts each run with a fresh synthetic device, so reruns never collide', async () => {
     stub = await startStub();
     const env = {
@@ -3005,12 +3093,13 @@ describe('live acceptance runner (against an in-process stub)', () => {
     });
 
     expect([first.exitCode, second.exitCode]).toEqual([0, 0]);
-    // HAR-44: the standing simulated device is reused, not re-registered: the
-    // second run's POST is 409 and the GET that follows proves it is the caller's.
-    expect(lines.some(line => /^\s+POST\s+\/devices\s+409\s/.test(line))).toBe(true);
+    // HAR-44: the standing simulated device is reused, never registered again.
+    // HAR-140: in connection-string mode it shows no claim code, so the GET
+    // proves it is the caller's; nothing calls POST /devices.
     expect(lines.some(line => /^\s+GET\s+\/devices\/\{id\}\s+200\s/.test(line))).toBe(true);
+    expect(lines.some(line => /^\s+POST\s+\/devices\s/.test(line))).toBe(false);
     expect(lines).toContain(
-      'PASS telemetry round-trip › POST /devices registers the simulated device to the caller'
+      'PASS telemetry round-trip › POST /devices/claim claims the simulated device for the caller'
     );
   });
 });
@@ -3026,7 +3115,7 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     expect(result.failures).toEqual([]);
     expect(result.exitCode).toBe(0);
     for (const step of [
-      'POST /devices registers the simulated device to the caller',
+      'POST /devices/claim claims the simulated device for the caller',
       'simdevice --count 1 sends one reading through IoT Hub',
       'GET /temperatures/current/{deviceId} returns the sent reading',
       'GET /temperatures/history holds the sent reading',
@@ -3174,15 +3263,15 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
     }
   );
 
-  it('(f) fails when the simulated device is registered to someone else (409 then 404)', async () => {
+  it('(f) fails when the simulated device is registered to someone else (GET 404)', async () => {
     const result = await runAgainstStub({ simOwnedByOther: true });
 
     expect(result.exitCode).not.toBe(0);
     const failures = telemetryFailures(result);
     expect(failures).toHaveLength(1);
-    expect(failures[0]).toContain('POST /devices registers the simulated device to the caller');
+    expect(failures[0]).toContain('POST /devices/claim claims the simulated device for the caller');
     expect(failures[0]).toContain('GET /devices/{id} → 404');
-    expect(failures[0]).toContain('not to the caller');
+    expect(failures[0]).toContain("is not the caller's (expected 200, got 404)");
     // simdevice was never run for someone else's device.
     // HAR-140: the fresh devices run simdevice as themselves; the simulated
     // device never runs.
@@ -3193,7 +3282,7 @@ describe('telemetry round-trip (HAR-44, against the stub and a fake simdevice)',
 describe('signalr live temperature (HAR-63, against the stub and a fake simdevice)', () => {
   const GROUP = 'signalr live temperature ›';
   const STEPS = [
-    'POST /devices registers the simulated device to the caller',
+    'POST /devices/claim claims the simulated device for the caller',
     'POST /negotiate returns 200 and a SignalR client listening for temperature connects',
     'simdevice --count 1 sends one reading through IoT Hub',
     'the sent reading arrives on target temperature, with enqueuedTimeUtc and no other field',
@@ -3303,7 +3392,7 @@ describe('signalr live temperature (HAR-63, against the stub and a fake simdevic
 describe('device twin (HAR-68, against the stub and a fake simdevice)', () => {
   const GROUP = 'device twin ›';
   const STEPS = [
-    'POST /devices registers the simulated device to the owner',
+    'POST /devices/claim claims the simulated device for the owner',
     'any cook already active on the simulated device is stopped',
     'POST /cooks with X-Request-ID acceptance-twin-<runId> starts a cook on the simulated device: 201',
     'simdevice --twin --count 1 reconnects: the twin carries the cook and the device reports it applied',
@@ -3431,7 +3520,7 @@ describe('device twin (HAR-68, against the stub and a fake simdevice)', () => {
 describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', () => {
   const GROUP = 'signalr isolation ›';
   const STEPS = [
-    'POST /devices registers the simulated device to the owner',
+    'POST /devices/claim claims the simulated device for the owner',
     'the owner negotiates and connects, listening for temperature, cook_started and cook_stopped',
     'the peer: POST /negotiate?deviceId=<simulated device> returns 200 and its client connects',
     'the peer: GET /temperatures/current/<simulated device> is 404 DEVICE_NOT_FOUND',
@@ -4016,7 +4105,7 @@ describe('cook chart (HAR-87, against the stub and a fake simdevice)', () => {
   const GROUP = 'cook chart ›';
   const STEPS = [
     'the chart device is configured (ACCEPTANCE_CHART_DEVICE_ID, SIMDEVICE_CHART_CONNECTION_STRING)',
-    'GET /devices/{id} finds the chart device registered to the caller (POST /devices on 404)',
+    'POST /devices/claim claims the chart device for the caller with its own claim code',
     'GET /cooks?deviceId=<chart>&status=active finds the standing cook (POST /cooks starts one when there is none)',
     "GET /cooks/{cookId}/chart: is the standing cook's 12 h covered",
     'simdevice tops the chart device up to 12 h of readings from the cook start when it is not',
@@ -4028,7 +4117,10 @@ describe('cook chart (HAR-87, against the stub and a fake simdevice)', () => {
   const chartRequests = (method: string, path: RegExp) =>
     stub!.requests.filter(r => r.method === method && path.test(r.path));
   /** One run of the cook-chart group alone. */
-  const runChart = (options: StubOptions = {}) => runAgainstStub(options, 'ok', [chartGroup]);
+  const runChart = (
+    options: StubOptions = {},
+    standing: 'connection-string' | 'dps' = 'connection-string'
+  ) => runAgainstStub(options, 'ok', [chartGroup], standing);
   /** The stub's chart in 60 s buckets: start minute to last reading's minute. */
   const pointsFor = (startTime: string) => {
     const start = Date.parse(startTime);
@@ -4036,14 +4128,17 @@ describe('cook chart (HAR-87, against the stub and a fake simdevice)', () => {
     return Math.floor((last - Math.floor(start / 60_000) * 60_000) / 60_000) + 1;
   };
 
-  it('(a) with no standing cook: registers the device, starts a cook, tops it up once and measures', async () => {
-    const result = await runChart({ chartCook: 'none' });
+  it('(a) with no standing cook: claims the device, starts a cook, tops it up once and measures', async () => {
+    // HAR-140: in DPS mode, as in CI, so the device shows a claim code.
+    const result = await runChart({ chartCook: 'none' }, 'dps');
 
     expect(result.failures).toEqual([]);
     STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
-    // Registered on the 404, and the cook started with the standing name.
-    expect(chartRequests('GET', new RegExp(`^/api/devices/${CHART_DEVICE}$`))).toHaveLength(1);
-    expect(chartRequests('POST', /^\/api\/devices$/)).toHaveLength(1);
+    // Claimed with its own code (201: nobody held it), and the cook started
+    // with the standing name. Nothing is registered with POST /devices.
+    expect(chartRequests('POST', /^\/api\/devices\/claim$/)).toHaveLength(1);
+    expect(result.lines.some(line => /^\s+POST\s+\/devices\/claim\s+201\s/.test(line))).toBe(true);
+    expect(chartRequests('POST', /^\/api\/devices$/)).toHaveLength(0);
     expect(stub!.chartRegistered()).toBe(true);
     expect(chartRequests('POST', /^\/api\/cooks$/)).toHaveLength(1);
     const cooks = stub!.chartCooks();
@@ -4122,7 +4217,7 @@ describe('cook chart (HAR-87, against the stub and a fake simdevice)', () => {
   });
 
   it('(b) the whole suite passes on a first run (no standing cook yet)', async () => {
-    const result = await runAgainstStub({ chartCook: 'none' });
+    const result = await runAgainstStub({ chartCook: 'none' }, 'ok', undefined, 'dps');
 
     expect(result.failures).toEqual([]);
     expect(stub!.chartTopups).toHaveLength(1);

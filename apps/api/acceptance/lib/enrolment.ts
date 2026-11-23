@@ -272,6 +272,91 @@ export async function postClaim(
   return response;
 }
 
+/**
+ * The claim code each standing device was claimed with in a run, by
+ * `<runId> <deviceId>`, so the run's later groups can claim it again with the
+ * same code. Kept in memory only, never written or logged.
+ */
+const standingCodes = new Map<string, string>();
+
+/**
+ * HAR-140: make a standing device (the simulated or the chart device) the
+ * owner's with its own claim code. It is claimed once per run and never
+ * released: its history and rollups, which the volume and chart proofs rely on
+ * across runs, are bounded by `claimedAt` (HAR-136), and the chart device
+ * keeps an active cook, so a release would be `409 COOK_ACTIVE`.
+ *
+ * - DPS mode (CI). The workflow gives each standing device a fresh state dir
+ *   every run, so it shows a new unclaimed code. The run's first claim of the
+ *   device runs {@link prepareClaim} and `POST /devices/claim`: `201` when the
+ *   owner did not hold it, `200` when the owner did (the stored device, and
+ *   its `claimedAt`, unchanged). Each later group claims it again with the
+ *   same code, held in memory: `200`, the same caller again. A device whose
+ *   code shows `claimed` (a local state dir reused from an earlier run) must
+ *   already be the caller's: `GET /devices/{id}` `200`.
+ * - Connection-string mode (local runs only). The device has no claim code to
+ *   show, so it cannot be claimed here. It must already be the caller's:
+ *   `GET /devices/{id}` `200`.
+ */
+export async function claimStandingDevice(
+  api: AcceptanceApi,
+  which: 'simulated' | 'chart',
+  body: ClaimBody
+): Promise<void> {
+  const deviceId = deviceIdOf(api, which);
+  if (!api.inDpsMode(which)) {
+    await expectHeld(
+      api,
+      deviceId,
+      "in connection-string mode a standing device shows no claim code, so it must already be the caller's"
+    );
+    return;
+  }
+  const key = `${api.runId} ${deviceId}`;
+  const known = standingCodes.get(key);
+  if (known !== undefined) {
+    const again = await postClaim(api, deviceId, known, body);
+    api.expectStatus(again, 200);
+    return;
+  }
+  await syncTwin(api, which);
+  const line = await api.readClaimCode(which);
+  if (line.state === 'claimed') {
+    await expectHeld(
+      api,
+      deviceId,
+      "its state dir shows its code already claimed, so it must be the caller's"
+    );
+    return;
+  }
+  if (line.state !== 'unclaimed' || line.claimCode === undefined || line.deviceId !== deviceId) {
+    throw new ProofFailure(
+      line.state === 'no-claim-yet'
+        ? `${deviceId} has not minted a claim code (simdevice claim-code exit 3 after a twin sync)`
+        : line.deviceId !== deviceId
+          ? `simdevice claim-code read device ${line.deviceId}, not ${deviceId}`
+          : `${deviceId}'s claim code is ${line.state}, not unclaimed: it cannot be claimed with it`
+    );
+  }
+  await postClaim(api, deviceId, line.claimCode, body);
+  standingCodes.set(key, line.claimCode);
+}
+
+/** `GET /devices/{id}` must be `200` with the device: the caller holds it. */
+async function expectHeld(api: AcceptanceApi, deviceId: string, why: string): Promise<void> {
+  const owned = await api.request<Device>({
+    method: 'GET',
+    path: `/devices/${encodeURIComponent(deviceId)}`,
+    route: '/devices/{id}',
+  });
+  api.check(
+    owned,
+    owned.status === 200,
+    `${deviceId} is not the caller's (expected 200, got ${owned.status}); ${why}`
+  );
+  api.check(owned, owned.body?.id === deviceId, `device.id is not ${deviceId}`);
+}
+
 /** What a group's cleanup step needs to know about its fresh device. */
 export interface FreshDeviceState {
   /** Set once the state dir exists ({@link enrolFreshDevice}'s `track`). */
