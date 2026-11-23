@@ -198,6 +198,59 @@ replaced` in its output) without being asked.
 See [`apps/data-pusher/deploy/README.md`](../../apps/data-pusher/deploy/README.md)
 for `enrol-device.sh` and `revoke-device.sh` in detail.
 
+## Measuring latency
+
+Two round trips can be read from data that is always there (HAR-150). Neither
+depends on App Insights sampling.
+
+**A cook started in the web app reaching the Pi.** When the pusher applies a
+cook change it logs the time the API wrote it to the twin and how long it took
+to arrive:
+
+```sh
+journalctl -u meatgeek-pusher --no-pager | grep applyLagMs
+```
+
+```text
+... msg="iothub twin: applied and reported desired properties" appliedDesiredVersion=7 applyLagMs=840 cookId=… desiredUpdatedAt="2026-11-23T18:02:11.1234567Z" source=patch
+```
+
+- `desiredUpdatedAt` is IoT Hub's `$metadata.<property>.$lastUpdated` for the
+  cook property that changed: when the API wrote it.
+- `applyLagMs` is the Pi's clock when the change arrived, minus
+  `desiredUpdatedAt`. It assumes the Pi's clock is right (NTP).
+- `source=patch`: the change arrived while connected. `source=get`: the Pi read
+  it from the whole twin on connect, so the lag includes any time it was
+  offline.
+- No `applyLagMs` on the line means IoT Hub sent no `$metadata` for the change,
+  or no cook property changed (a claim-only change, or a reconnect with the
+  same cook).
+
+**A reading on the Pi reaching the owner.** The API records two histograms for
+every reading it pushes to an owner, in Application Insights `customMetrics`:
+
+- `meatgeek.reading.hub_lag_ms`: IoT Hub's enqueued time minus the reading's
+  own timestamp (device → hub);
+- `meatgeek.reading.push_lag_ms`: the push time minus the reading's timestamp
+  (device → hub → API → SignalR).
+
+```sh
+az monitor app-insights query -g meatgeek-v2-dev-rg --app meatgeek-v2-dev-appinsights \
+  --analytics-query "customMetrics
+| where name startswith 'meatgeek.reading'
+| summarize readings = sum(valueCount), avgMs = sum(valueSum) / sum(valueCount),
+            minMs = min(valueMin), maxMs = max(valueMax)
+    by name, bin(timestamp, 1m)
+| order by timestamp desc"
+```
+
+The exporter sends one aggregate per metric per minute (count, sum, min, max),
+not one row per reading, so there are no true per-reading percentiles: read the
+mean and the worst case per minute. Rows with `customDimensions.negative ==
+true` are readings stamped ahead of the API's clock (device clock skew),
+recorded as 0. The metrics carry no device or user, so this is every device's
+readings together; run it while only the Pi is cooking.
+
 ## Troubleshooting
 
 On the Pi:

@@ -1,4 +1,5 @@
 import type { InvocationContext } from '@azure/functions';
+import { metrics, ValueType, type Attributes, type Meter } from '@opentelemetry/api';
 
 import { getDevicesRepository } from '../../shared/cosmos/devices-repository';
 import { toTemperatureReading } from '../../shared/cosmos/temperatures-repository';
@@ -44,6 +45,18 @@ import {
  * and counted. Nothing here throws on a bad event: a throw fails the whole batch,
  * and the host would replay it, good readings included. The one log line per
  * batch carries counts only — no device ids, no bodies.
+ *
+ * LATENCY (HAR-150). For each reading pushed to an owner, two OpenTelemetry
+ * histograms are recorded (see {@link recordReadingLatency}):
+ * - `meatgeek.reading.push_lag_ms`: the push time minus the reading's own
+ *   timestamp (the device clock, as {@link toTemperatureReading} maps it);
+ * - `meatgeek.reading.hub_lag_ms`: the hub-stamped `iothub-enqueuedtime` minus
+ *   the reading's timestamp.
+ * Together they split device→hub time from hub→push time. Metrics are
+ * pre-aggregated by the exporter and never sampled, unlike requests and traces.
+ * They carry no device or user attribute; the only attribute is
+ * `negative: true` on a reading stamped after the time it is compared with
+ * (clock skew), recorded as 0.
  */
 
 /** The event hub IoT Hub's realtime route writes to. Terraform-owned name. */
@@ -107,6 +120,8 @@ function storedEnqueuedTime(value: unknown): unknown {
 interface LiveReading {
   readonly deviceId: string;
   readonly payload: LiveTemperaturePayload;
+  /** The hub-stamped `iothub-enqueuedtime`, when the event carries a valid one. */
+  readonly iothubEnqueuedTime?: string;
 }
 
 /** One batch element as a live reading, or `null` to skip it. */
@@ -140,22 +155,84 @@ function toLiveReading(
   if (enqueued === undefined) {
     return null;
   }
-  return { deviceId, payload: { ...reading, enqueuedTimeUtc: enqueued } };
+  return {
+    deviceId,
+    payload: { ...reading, enqueuedTimeUtc: enqueued },
+    iothubEnqueuedTime: toIsoString(systemProperties[IOTHUB_ENQUEUED_TIME]),
+  };
 }
 
 function arrayOrEmpty(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-/** Injection seam: production reads owners from the devices container; tests
- *  pass a fake. Called once per distinct device in a batch. */
+/** Push lag: push time minus the reading's timestamp. Source-fixed name. */
+export const PUSH_LAG_METRIC = 'meatgeek.reading.push_lag_ms';
+/** Hub lag: `iothub-enqueuedtime` minus the reading's timestamp. Source-fixed name. */
+export const HUB_LAG_METRIC = 'meatgeek.reading.hub_lag_ms';
+
+/** Injection seam: production reads owners from the devices container, the
+ *  wall clock and the global meter; tests pass a fake lookup, a fixed clock and
+ *  a recording meter. `ownerOf` is called once per distinct device in a batch. */
 export interface BroadcastTemperatureDeps {
   ownerOf(deviceId: string): Promise<string | undefined>;
+  /** The push time the lag is measured to. */
+  now(): Date;
+  readonly meter: Meter;
 }
 
 export const defaultBroadcastTemperatureDeps: BroadcastTemperatureDeps = {
   ownerOf: async deviceId => (await getDevicesRepository().getDeviceOwner(deviceId)).userId,
+  now: () => new Date(),
+  // Read at call time, not at import: the metrics API has no proxy provider, so
+  // a meter taken before useAzureMonitor registers the global one stays a no-op.
+  get meter() {
+    return metrics.getMeter('meatgeek-api');
+  },
 };
+
+/** `later - earlier` in whole ms, clamped to 0 with `negative: true` when the
+ *  reading is stamped after the time it is compared with. */
+function lag(laterMs: number, earlierMs: number): { value: number; attributes: Attributes } {
+  const diff = Math.round(laterMs - earlierMs);
+  return diff < 0 ? { value: 0, attributes: { negative: true } } : { value: diff, attributes: {} };
+}
+
+/** Record both lags for the readings pushed to an owner. Never throws: a bad
+ *  timestamp or a failing meter costs the measurement, not the push. */
+function recordReadingLatency(
+  readings: readonly LiveReading[],
+  pushedAt: Date,
+  meter: Meter
+): void {
+  try {
+    const pushLag = meter.createHistogram(PUSH_LAG_METRIC, {
+      description: 'Time from the reading timestamp (device clock) to its push to the owner',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    });
+    const hubLag = meter.createHistogram(HUB_LAG_METRIC, {
+      description: 'Time from the reading timestamp (device clock) to IoT Hub enqueuing it',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    });
+    const pushedMs = pushedAt.getTime();
+    for (const { payload, iothubEnqueuedTime } of readings) {
+      const readingMs = Date.parse(payload.timestamp);
+      if (Number.isNaN(readingMs)) {
+        continue;
+      }
+      const push = lag(pushedMs, readingMs);
+      pushLag.record(push.value, push.attributes);
+      if (iothubEnqueuedTime !== undefined) {
+        const hub = lag(Date.parse(iothubEnqueuedTime), readingMs);
+        hubLag.record(hub.value, hub.attributes);
+      }
+    }
+  } catch {
+    // Measurement only; never fail the batch.
+  }
+}
 
 /** Each distinct device's owner: a string, `undefined` (no owner), or `null`
  *  when the read failed. Reads run in parallel and never throw. */
@@ -212,20 +289,23 @@ export async function broadcastTemperatureHandler(
     deps
   );
   const messages: SignalRTemperatureMessage[] = [];
+  const pushed: LiveReading[] = [];
   let unowned = 0;
   let lookupFailed = 0;
-  for (const { deviceId, payload } of readings) {
-    const owner = owners.get(deviceId);
+  for (const reading of readings) {
+    const owner = owners.get(reading.deviceId);
     if (owner === null) {
       lookupFailed += 1;
     } else if (owner === undefined) {
       unowned += 1;
     } else {
-      messages.push({ target: TEMPERATURE, userId: owner, arguments: [payload] });
+      messages.push({ target: TEMPERATURE, userId: owner, arguments: [reading.payload] });
+      pushed.push(reading);
     }
   }
 
   context.extraOutputs.set(signalROutput, messages);
+  recordReadingLatency(pushed, deps.now(), deps.meter);
   context.log(
     `broadcastTemperature sent=${messages.length} skipped=${skipped}` +
       ` unowned=${unowned} lookupFailed=${lookupFailed}`

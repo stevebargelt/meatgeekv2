@@ -20,6 +20,7 @@ import SwaggerParser from '@apidevtools/swagger-parser';
 import Ajv, { type ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
 import type { InvocationContext } from '@azure/functions';
+import { createNoopMeter } from '@opentelemetry/api';
 import { ERROR_CODES, type Cook } from '@meatgeekv2/api-interfaces';
 import type { OpenAPIV3 } from 'openapi-types';
 
@@ -380,7 +381,11 @@ describe('(d) SignalR: the messages the API builds match their x-signalr schemas
   }
 
   /** HAR-81: the push is addressed to the device's owner; no Cosmos here. */
-  const ownerDeps = { ownerOf: async () => 'tid-1:oid-owner' };
+  const ownerDeps = {
+    ownerOf: async () => 'tid-1:oid-owner',
+    now: () => new Date('2026-11-20T18:04:06.000Z'),
+    meter: createNoopMeter(),
+  };
 
   function broadcastContext(): {
     context: InvocationContext;

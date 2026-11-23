@@ -360,7 +360,26 @@ export const broadcastTemperature: EventHubHandler = async (messages, context) =
 
 ## Metrics Strategy
 
-### **Custom Metrics**
+### **Shipped metrics**
+
+Recorded by the `api` Functions app through the global OpenTelemetry meter
+(`meatgeek-api`) and exported by the Azure Monitor distro to `customMetrics`.
+Metrics are pre-aggregated (one count/sum/min/max row per metric, attribute set
+and minute) and are never sampled: the distro's `samplingRatio: 0.5` is a trace
+sampler only, and the exporter stamps every metric envelope `sampleRate: 100`.
+
+| Metric | Unit | Recorded by | Value | Attributes |
+|---|---|---|---|---|
+| `meatgeek.reading.push_lag_ms` | ms | `broadcastTemperature`, per reading pushed to an owner (HAR-150) | push time − the reading's timestamp (device clock) | none, or `negative: true` when the reading is ahead of the push time (recorded as 0) |
+| `meatgeek.reading.hub_lag_ms` | ms | `broadcastTemperature`, per reading pushed to an owner that carries `iothub-enqueuedtime` (HAR-150) | `iothub-enqueuedtime` − the reading's timestamp | none, or `negative: true` when the reading is ahead of the hub time (recorded as 0) |
+
+Like the broadcaster's log line (MG-73 / HAR-60), these carry no device, user or
+cook attribute. The query to read them is in
+[the device runbook](../devices/runbook.md#measuring-latency). The pusher's
+side of the cook round trip is a log field, not a metric: `applyLagMs` on the
+"applied and reported desired properties" line.
+
+### **Custom Metrics (target design)**
 
 ```typescript
 // libs/tracing/src/lib/metrics.ts
