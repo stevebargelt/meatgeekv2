@@ -98,7 +98,7 @@ if [[ $PHASE == start ]]; then
   [[ "$ID_SCOPE" =~ ^[A-Za-z0-9]{1,64}$ ]] || die "$EXIT_USAGE" "--id-scope '$ID_SCOPE' is not a DPS ID scope"
 fi
 
-if [[ -z "$ROOT" && $EUID -ne 0 ]]; then
+if [[ -z "$ROOT" && "$(id -u)" -ne 0 ]]; then
   die 1 "run as root (sudo bash $0 ...)"
 fi
 
