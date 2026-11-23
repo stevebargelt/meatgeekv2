@@ -76,7 +76,7 @@ import type { ChildProcess, Spawn } from './lib/spawn';
 import { realSpawn, setSpawn } from './lib/spawn';
 import sweepGroup from './proofs/acceptance-device-sweep.proof';
 import claimGroup from './proofs/device-claim.proof';
-import devicesGroup, { CLOCK_SKEW_MS, LAST_ACTIVITY_POLL } from './proofs/devices.proof';
+import devicesGroup, { CLOCK_SKEW_MS } from './proofs/devices.proof';
 import releaseGroup, { RELEASE_WAIT } from './proofs/device-release.proof';
 import revokeGroup, { REVOKED_SEND_KILL_MS } from './proofs/device-revoke.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
@@ -290,13 +290,11 @@ const RS = '\u001e';
 interface StubOptions {
   /**
    * HAR-143: how the fake hub publishes a device's last activity, which it
-   * records when the device registers or sends. `lagMs`: `lastActivityAt`
-   * stays null until this much fake time has passed (IoT Hub's eventual
-   * consistency). `never`: it stays null. `offsetMs`: the recorded time is
-   * moved by this much (negative: the hub's clock is behind).
+   * records when the device registers or sends. `never`: `lastActivityAt`
+   * stays null. `offsetMs`: the recorded time is moved by this much
+   * (negative: the hub's clock is behind).
    */
   readonly lastActivity?: {
-    readonly lagMs?: number;
     readonly never?: boolean;
     readonly offsetMs?: number;
   };
@@ -617,10 +615,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
   const heardAt = new Map<string, number>();
   const withConnection = (device: StubDevice) => {
     const at = heardAt.get(device.id);
-    const published =
-      at !== undefined &&
-      !options.lastActivity?.never &&
-      fakeClock.now() >= at + (options.lastActivity?.lagMs ?? 0);
+    const published = at !== undefined && !options.lastActivity?.never;
     return {
       ...device,
       connection: {
@@ -3642,24 +3637,15 @@ describe('devices: the live connection (HAR-143, against the stub)', () => {
     'devices › always: acceptance-device-<runId> is released and its enrollment and hub identity deleted';
   const runDevices = (options: StubOptions = {}) => runAgainstStub(options, 'ok', [devicesGroup]);
 
-  it('(a) passes at once when the hub has published the activity; prints METRIC last-activity-wait-ms 0', async () => {
+  it('(a) passes on one read: no poll, no wait, no metric', async () => {
+    const sleptBefore = fakeClock.slept.length;
     const result = await runDevices();
 
     expect(result.failures).toEqual([]);
     expect(result.exitCode).toBe(0);
     expect(result.lines).toContain(`PASS ${STEP}`);
-    expect(result.lines).toContain('METRIC last-activity-wait-ms 0');
-    expect(fakeClock.slept.filter(ms => ms === LAST_ACTIVITY_POLL.intervalMs)).toEqual([]);
-  });
-
-  it('(a) polls every 5 s until the hub publishes it (eventual consistency)', async () => {
-    const result = await runDevices({ lastActivity: { lagMs: 30_000 } });
-
-    expect(result.failures).toEqual([]);
-    expect(result.lines).toContain(`PASS ${STEP}`);
-    const metric = result.lines.find(line => line.startsWith('METRIC last-activity-wait-ms '));
-    expect(Number(metric?.split(' ')[2])).toBeGreaterThanOrEqual(30_000);
-    expect(Number(metric?.split(' ')[2])).toBeLessThan(30_000 + LAST_ACTIVITY_POLL.intervalMs);
+    expect(result.lines.some(line => line.startsWith('METRIC last-activity-wait-ms'))).toBe(false);
+    expect(fakeClock.slept.length).toBe(sleptBefore);
   });
 
   it('(a) accepts a hub clock up to 5 min behind the runner', async () => {
@@ -3669,18 +3655,16 @@ describe('devices: the live connection (HAR-143, against the stub)', () => {
     expect(result.lines).toContain(`PASS ${STEP}`);
   });
 
-  it('(b) fails naming the 10 min cap when lastActivityAt stays null, and still cleans up', async () => {
+  it('(b) fails at once when lastActivityAt is null, and still cleans up', async () => {
     const result = await runDevices({ lastActivity: { never: true } });
 
     expect(result.exitCode).not.toBe(0);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0]).toContain(`FAIL ${STEP}`);
     expect(result.failures[0]).toContain(
-      'GET /devices/{id} → 200: device.connection.lastActivityAt was still null after the ' +
-        '10 min cap; last state unknown'
+      'GET /devices/{id} → 200: device.connection.lastActivityAt is null right after the ' +
+        'device reported its claim code to its twin; state unknown'
     );
-    expect(LAST_ACTIVITY_POLL).toEqual({ intervalMs: 5_000, capMs: 600_000 });
-    expect(fakeClock.slept.filter(ms => ms === LAST_ACTIVITY_POLL.intervalMs)).toHaveLength(120);
     expect(result.lines).toContain(`PASS ${CLEANUP}`);
   });
 

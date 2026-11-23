@@ -32,9 +32,12 @@ export interface Device {
 export type DeviceConnectionState = 'connected' | 'disconnected' | 'unknown';
 
 /**
- * HAR-143: a device's connection, from its IoT Hub twin's top-level
- * `connectionState` and `lastActivityTime`. `unknown` with `lastActivityAt:
- * null` when the twin could not be read (no twin, a failure, a timeout).
+ * HAR-143: a device's connection, from its IoT Hub twin: `state` from the
+ * top-level `connectionState`; `lastActivityAt` the later of the top-level
+ * `lastActivityTime` and the device's last reported-properties write
+ * (`properties.reported.$metadata.$lastUpdated`). `unknown` with
+ * `lastActivityAt: null` when the twin could not be read (no twin, a failure,
+ * a timeout).
  */
 export interface DeviceConnection {
   state: DeviceConnectionState;

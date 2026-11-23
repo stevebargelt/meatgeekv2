@@ -8,7 +8,8 @@ import {
 
 /**
  * HAR-143 (goal HAR-130) — whether each device is connected and when IoT Hub
- * last heard from it, read live from the device's twin. `GET /devices` and
+ * last heard from it, read live from the device's twin (see
+ * {@link connectionFromTwin} for which twin times count). `GET /devices` and
  * `GET /devices/{id}` attach it as `connection`; it is never stored.
  *
  * One twin GET per device (never an IoT Hub query, which needs a role the API
@@ -27,9 +28,24 @@ export const UNKNOWN_CONNECTION: DeviceConnection = Object.freeze({
   lastActivityAt: null,
 }) as DeviceConnection;
 
-/** The twin's connection fields as a {@link DeviceConnection}. */
+/**
+ * The twin's connection fields as a {@link DeviceConnection}.
+ *
+ * `lastActivityAt` is the later of two times the twin carries, both set only
+ * by something the device itself did:
+ *   - the top-level `lastActivityTime`, IoT Hub's own record of the device's
+ *     last message. On this hub it does not move when an MQTT device connects
+ *     and syncs its twin, and after telemetry it lags by minutes (HAR-143,
+ *     Deploy Dev App run 45146229868: still unset 10 min after a fresh device's
+ *     twin sync);
+ *   - `properties.reported.$metadata.$lastUpdated`, when the device last
+ *     wrote its reported properties. Only the device can write them, IoT Hub
+ *     stamps the time as it accepts the write, and a direct twin GET returns it
+ *     at once. The device reports on every connect (its claim code) and after
+ *     each desired-property change.
+ */
 export function connectionFromTwin(
-  twin: Pick<DeviceTwin, 'connectionState' | 'lastActivityTime'>
+  twin: Partial<Pick<DeviceTwin, 'connectionState' | 'lastActivityTime' | 'reported'>>
 ): DeviceConnection {
   return {
     state:
@@ -38,21 +54,41 @@ export function connectionFromTwin(
         : twin.connectionState === 'Disconnected'
           ? 'disconnected'
           : 'unknown',
-    lastActivityAt: lastActivityAt(twin.lastActivityTime),
+    lastActivityAt: latest(
+      hubTime(twin.lastActivityTime),
+      hubTime(reportedLastUpdated(twin.reported))
+    ),
   };
 }
 
+/** `properties.reported.$metadata.$lastUpdated`, when it is a string. */
+function reportedLastUpdated(
+  reported: Readonly<Record<string, unknown>> | undefined
+): string | undefined {
+  const metadata = reported?.['$metadata'];
+  if (metadata === null || typeof metadata !== 'object') return undefined;
+  const at = (metadata as Record<string, unknown>)['$lastUpdated'];
+  return typeof at === 'string' ? at : undefined;
+}
+
 /**
- * `lastActivityTime` as millisecond ISO-8601 UTC. IoT Hub sends
- * `0001-01-01T00:00:00Z` for a device it has never heard from; that, a missing
- * value and anything unparseable are `null`.
+ * A twin time as millisecond ISO-8601 UTC. IoT Hub sends
+ * `0001-01-01T00:00:00Z` for "never"; that, a missing value and anything
+ * unparseable are `null`.
  */
-function lastActivityAt(raw: string | undefined): string | null {
+function hubTime(raw: string | undefined): string | null {
   if (raw === undefined) return null;
   const ms = Date.parse(raw);
   if (Number.isNaN(ms)) return null;
   const date = new Date(ms);
   return date.getUTCFullYear() <= 1 ? null : date.toISOString();
+}
+
+/** The later of two ISO-8601 UTC times, either of which may be `null`. */
+function latest(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Date.parse(a) >= Date.parse(b) ? a : b;
 }
 
 /** How one device's twin read went; logged as counts only. */

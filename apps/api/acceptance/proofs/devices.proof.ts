@@ -13,7 +13,7 @@ import {
   enrolFreshDevice,
   FreshDevice,
 } from '../lib/enrolment';
-import { defineProofs, ProofFailure } from '../lib/proof';
+import { defineProofs } from '../lib/proof';
 
 /**
  * HAR-20 (MG-80) — a device claimed through the deployed API is a real Cosmos
@@ -38,12 +38,14 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  *
  * HAR-143: no response carries the removed stored status field. The two GETs carry
  * `connection`, read live from the device's IoT Hub twin, and the other routes
- * leave it out. After the claim, `GET /devices/{id}` is polled until
- * `connection.lastActivityAt` is set: the fresh device connected to IoT Hub to
- * sync its twin, so the hub has heard from it, but Microsoft documents
- * `lastActivityTime` as eventually consistent. It must not be before the
- * proof's start, less {@link CLOCK_SKEW_MS}. `state` may be either value:
- * simdevice disconnects after each run.
+ * leave it out. After the claim, one `GET /devices/{id}` must show
+ * `connection.lastActivityAt` set, and not before the proof's start less
+ * {@link CLOCK_SKEW_MS}: the fresh device reported its claim code to its twin
+ * before the claim, and the API counts the device's last reported-properties
+ * write, which IoT Hub stamps as it accepts it. (The twin's own
+ * `lastActivityTime` was still unset 10 min after such a sync in Deploy Dev App
+ * run 45146229868, so the proof does not wait for it.) `state` may be either
+ * value: simdevice disconnects after each run.
  */
 
 const CONNECTION_STATES: ReadonlyArray<DeviceConnection['state']> = [
@@ -54,17 +56,6 @@ const CONNECTION_STATES: ReadonlyArray<DeviceConnection['state']> = [
 
 /** How far the hub's clock may be behind the runner's (HAR-143). */
 export const CLOCK_SKEW_MS = 5 * 60_000;
-
-/**
- * Poll pacing for `connection.lastActivityAt` to be set, on the injected clock
- * (../lib/clock). Microsoft documents the twin's `lastActivityTime` as
- * eventually consistent, possibly 5 to 10 minutes behind; the cap is the top of
- * that range.
- */
-export const LAST_ACTIVITY_POLL: { readonly intervalMs: number; readonly capMs: number } = {
-  intervalMs: 5_000,
-  capMs: 10 * 60_000,
-};
 
 /**
  * Fail unless `value` is shaped like an api-interfaces Device, without the
@@ -193,44 +184,26 @@ export default defineProofs('devices', () => {
           throw new Error('the proof start was not recorded by an earlier proof');
         }
         const earliest = startedAt - CLOCK_SKEW_MS;
-        const pollFrom = clock().now();
-        const deadline = pollFrom + LAST_ACTIVITY_POLL.capMs;
-        let last: AcceptanceResponse<Device>;
-
-        for (;;) {
-          const response = await getById(api, deviceId);
-          const arrivedAt = clock().now();
-          last = response;
-          api.expectStatus(response, 200);
-          const { connection } = expectDevice(api, response, response.body, 'required');
-          const at = connection!.lastActivityAt;
-          if (at !== null) {
-            api.check(
-              response,
-              Date.parse(at) >= earliest,
-              `device.connection.lastActivityAt ${at} is before the proof's start ` +
-                `${new Date(startedAt).toISOString()} less ${CLOCK_SKEW_MS / 60_000} min`
-            );
-            api.check(
-              response,
-              connection!.state !== 'unknown',
-              'device.connection.state is unknown, but lastActivityAt is set'
-            );
-            api.metric('last-activity-wait-ms', arrivedAt - pollFrom);
-            return;
-          }
-          // IoT Hub has not published the activity yet: keep polling.
-          if (arrivedAt + LAST_ACTIVITY_POLL.intervalMs > deadline) {
-            break;
-          }
-          await clock().sleep(LAST_ACTIVITY_POLL.intervalMs);
-        }
-
-        throw new ProofFailure(
-          `device.connection.lastActivityAt was still null after the ` +
-            `${LAST_ACTIVITY_POLL.capMs / 60_000} min cap; last state ` +
-            `${String(last.body?.connection?.state)}`,
-          last
+        const response = await getById(api, deviceId);
+        api.expectStatus(response, 200);
+        const { connection } = expectDevice(api, response, response.body, 'required');
+        const at = connection!.lastActivityAt;
+        api.check(
+          response,
+          at !== null,
+          `device.connection.lastActivityAt is null right after the device reported its ` +
+            `claim code to its twin; state ${String(connection!.state)}`
+        );
+        api.check(
+          response,
+          Date.parse(at!) >= earliest,
+          `device.connection.lastActivityAt ${at} is before the proof's start ` +
+            `${new Date(startedAt).toISOString()} less ${CLOCK_SKEW_MS / 60_000} min`
+        );
+        api.check(
+          response,
+          connection!.state !== 'unknown',
+          'device.connection.state is unknown, but lastActivityAt is set'
         );
       },
     },
