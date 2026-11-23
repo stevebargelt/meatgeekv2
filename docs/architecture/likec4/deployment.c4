@@ -4,13 +4,17 @@ deployment {
 
     host pi 'Raspberry Pi' {
       technology 'linux/arm64, one per smoker'
-      description 'Binaries cross-compiled with nx build-arm and copied over SSH (make deploy-to-pi).'
+      description 'Debian trixie arm64. apps/data-pusher/deploy/onboard-pi.sh, run from a laptop, cross-compiles both binaries, copies them over SSH, installs both as systemd units running as the meatgeek user, and enrols the device in DPS. A re-run is how a newer build reaches the Pi (docs/devices/runbook.md).'
       controller = instanceOf meatgeek.edge.controller
       pusher = instanceOf meatgeek.edge.pusher {
         description '''
-          env: `IOTHUB_CONNECTION_STRING`, `OTEL_EXPORTER_OTLP_ENDPOINT`. Queue at
-          `/var/lib/meatgeek-pusher/queue`, cook state (written only by the device twin client)
-          at `cooksession.DefaultStatePath` (`/var/lib/meatgeek-pusher/cooksession.json`).
+          DPS mode. `/etc/meatgeek-pusher/env` (0640, root:meatgeek) holds `MEATGEEK_DPS_ID_SCOPE`,
+          `MEATGEEK_DEVICE_ID`, `MEATGEEK_STATE_DIR=/var/lib/meatgeek-pusher` and
+          `DEVICE_URL=http://localhost:3000`; no connection string and no secret. The device's
+          key, certificate, DPS assignment and claim code live under `/var/lib/meatgeek-pusher`
+          (0700). Queue at `/var/lib/meatgeek-pusher/queue`, cook state (written only by the
+          device twin client) at `cooksession.DefaultStatePath`
+          (`/var/lib/meatgeek-pusher/cooksession.json`).
         '''
       }
     }

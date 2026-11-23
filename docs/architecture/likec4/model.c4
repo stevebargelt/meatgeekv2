@@ -50,8 +50,11 @@ model {
           Polls the controller, queues readings on disk and publishes them to IoT Hub.
           Learns its active cook from the IoT Hub device twin over the same MQTT connection
           (HAR-58); it has no SignalR client and makes no REST API call.
-          Configured by env vars `IOTHUB_CONNECTION_STRING` and `OTEL_EXPORTER_OTLP_ENDPOINT`
-          (plus `DEVICE_URL`, `POLL_INTERVAL`, `QUEUE_DIR`, `COOKSESSION_STATE_PATH`).
+          Runs in DPS mode (`MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`, `MEATGEEK_STATE_DIR`:
+          its own X.509 identity, enrolled by `enrol-device.sh`) or connection-string mode
+          (`IOTHUB_CONNECTION_STRING`); a Pi set up by `onboard-pi.sh` uses DPS mode. Also reads
+          `OTEL_EXPORTER_OTLP_ENDPOINT`, `DEVICE_URL`, `POLL_INTERVAL`, `QUEUE_DIR` and
+          `COOKSESSION_STATE_PATH`.
         '''
         link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/data-pusher 'Source'
 
@@ -661,12 +664,12 @@ model {
   }
 
   // Device software updates. Today: by hand. Not built: over the air.
-  operator -> meatgeek.edge.pusher 'make deploy-to-pi' {
-    technology 'scp, then systemd restart, over SSH'
-    description 'The only way a new build reaches a Pi today. One device at a time, from a machine that can reach it.'
+  operator -> meatgeek.edge.pusher 'onboard-pi.sh' {
+    technology 'build on the laptop, scp, sudo install and systemd restart, over SSH'
+    description 'How a Pi is set up and how a new build reaches it today: apps/data-pusher/deploy/onboard-pi.sh, re-run after pulling a newer main (docs/devices/runbook.md). One device at a time, from a machine that can reach it.'
   }
-  operator -> meatgeek.edge.controller 'make deploy-to-pi' {
-    technology 'scp, then systemd restart, over SSH'
+  operator -> meatgeek.edge.controller 'onboard-pi.sh' {
+    technology 'build on the laptop, scp, sudo install and systemd restart, over SSH'
   }
   delivery.ci -[planned]-> meatgeek.cloud.deviceupdate 'publishes signed packages' {
     #notBuilt

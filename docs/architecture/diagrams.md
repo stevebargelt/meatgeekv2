@@ -83,7 +83,7 @@ graph TB
   Pitmaster -. "`cooks on`" .-> Smoker
   Team -. "`pull requests`" .-> Delivery
   Delivery -. "`[...]`" .-> Entra
-  Operator -. "`make deploy-to-pi`" .-> Meatgeek.Edge
+  Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge
   Smoker -. "`RTD sensor readings`" .-> Meatgeek.Edge
   Delivery -. "`[...]`" .-> Meatgeek.Cloud
   Meatgeek.Edge -. "`[...]`" .-> Meatgeek.Cloud
@@ -167,8 +167,8 @@ graph TB
 to main, serves production`" .-> Meatgeek.Web
   Meatgeek.Web -. "`auth code + PKCE
 (MSAL), no secret`" .-> Entra
-  Operator -. "`make deploy-to-pi`" .-> Meatgeek.Edge.Controller
-  Operator -. "`make deploy-to-pi`" .-> Meatgeek.Edge.Pusher
+  Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge.Controller
+  Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge.Pusher
   Smoker -. "`RTD sensor readings`" .-> Meatgeek.Edge.Controller
   Meatgeek.Edge.Pusher -. "`GET get_status, every 5 s`" .-> Meatgeek.Edge.Controller
   Meatgeek.Edge.Updater -. "`installs, restarts`" .-> Meatgeek.Edge.Controller
@@ -368,7 +368,7 @@ graph TB
     MeatgeekCloud.IngestIothub@{ shape: rectangle, label: "IoT Hub" }
     MeatgeekCloud.ObservabilityCollector@{ shape: rectangle, label: "OTLP collector" }
   end
-  Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Controller
+  Operator -. "`onboard-pi.sh`" .-> MeatgeekEdge.Controller
   Smoker -. "`RTD sensor readings`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Updater -. "`installs, restarts`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Pusher.Collector -. "`GET get_status, every 5 s`" .-> MeatgeekEdge.Controller
@@ -388,7 +388,7 @@ $.ct=application/json, $.ce=utf-
   MeatgeekCloud.IngestIothub -. "`desired properties`" .-> MeatgeekEdge.Pusher.Twin
   MeatgeekEdge.Controller -. "`OTLP/HTTP`" .-> MeatgeekCloud.ObservabilityCollector
   MeatgeekEdge.Pusher.Tracing -. "`OTLP/HTTP`" .-> MeatgeekCloud.ObservabilityCollector
-  Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Pusher
+  Operator -. "`onboard-pi.sh`" .-> MeatgeekEdge.Pusher
   MeatgeekEdge.Updater -. "`installs, restarts`" .-> MeatgeekEdge.Pusher
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Smoker,MeatgeekEdge.Updater muted
@@ -721,9 +721,9 @@ graph TB
   MeatgeekCloudData -. "`change feed (leases)`" .-> MeatgeekCloudApi
   MeatgeekCloudApi -. "`[...]`" .-> MeatgeekCloudData
   MeatgeekCloudApi -. "`[...]`" .-> MeatgeekCloudRealtime
-  Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Pusher
+  Operator -. "`onboard-pi.sh`" .-> MeatgeekEdge.Pusher
   MeatgeekEdge.Pusher -. "`OTLP/HTTP`" .-> MeatgeekCloudObservability.Collector
-  Operator -. "`make deploy-to-pi`" .-> MeatgeekEdge.Controller
+  Operator -. "`onboard-pi.sh`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Pusher -. "`GET get_status, every 5 s`" .-> MeatgeekEdge.Controller
   MeatgeekEdge.Controller -. "`OTLP/HTTP`" .-> MeatgeekCloudObservability.Collector
   MeatgeekCloudApi -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
@@ -1323,8 +1323,8 @@ graph TB
       end
     end
   end
-  Operator -. "`make deploy-to-pi`" .-> Meatgeek.Edge.Controller
-  Operator -. "`make deploy-to-pi`" .-> Meatgeek.Edge.Pusher
+  Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge.Controller
+  Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge.Pusher
   Meatgeek.Edge.Updater -. "`installs, restarts`" .-> Meatgeek.Edge.Controller
   Meatgeek.Edge.Updater -. "`installs, restarts`" .-> Meatgeek.Edge.Pusher
   Delivery.Ci -. "`publishes signed packages`" .-> Meatgeek.Cloud.Deviceupdate
