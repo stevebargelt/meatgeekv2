@@ -167,8 +167,26 @@ This device controller is designed to work with the new V2 system through:
 
 ## Temperature Data Structure
 
-get_status's `result` string, decoded (from the golden file). A NaN reading is
-`null`; a probe that never read is `0`.
+get_status's `result` string, decoded (from the golden file). A probe with no
+reading is `null`; `0` is a real 0 °F reading.
+
+### When a probe has a reading
+
+Every 10 ms the loop samples each probe's resistance (an ADC result `<= 0`
+records `0`); every 5 s `internal/rtd.Evaluate` turns the probe's window of
+samples into a temperature. The window gives a temperature only when **every**
+sample is non-zero and within the resistance range of a Pt1000 between
+−40 °F and 800 °F (about 842.7 Ω to 2,562.4 Ω, computed from the same
+Callendar–Van Dusen coefficients the conversion uses). The average is then
+converted and the probe's `tempCorrection` added; a corrected value outside
+−40…800 °F is also no reading.
+
+Otherwise the probe has **no reading** for that window: NaN internally, `null`
+in get_status, `unplg` on the LCD. The previous value is never kept, so a probe
+unplugged mid-cook stops reporting at the next window. This is what keeps a
+floating (unplugged) input, which samples as a mix of zeros and tens of kΩ,
+from showing as thousands of degrees (HAR-151). Before the first window every
+probe is `null`.
 
 ```json
 {

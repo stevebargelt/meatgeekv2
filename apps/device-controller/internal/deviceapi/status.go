@@ -7,9 +7,10 @@ import (
 	"time"
 )
 
-// Temps is the five RTD readings, in Fahrenheit. A NaN or Inf reading is
-// served as JSON null (see MarshalJSON); an unplugged probe whose reading
-// never moved off zero is served as 0.
+// Temps is the five RTD readings, in Fahrenheit. A probe with no reading
+// (unplugged, faulty, or not yet sampled) is NaN, served as JSON null (see
+// MarshalJSON); internal/rtd decides what is a reading (HAR-151). 0 is a real
+// 0 °F reading, not "unplugged".
 type Temps struct {
 	GrillTemp  float64 `json:"grillTemp"`
 	Probe1Temp float64 `json:"probe1Temp"`

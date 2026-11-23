@@ -66,8 +66,8 @@ func TestContract_ControllerGetStatusGolden_MapsToReading(t *testing.T) {
 	assertTemp(t, "grill", reading.GrillTemp, float64Ptr(64.4))
 	assertTemp(t, "probe1", reading.Probe1Temp, float64Ptr(66.2))
 	assertTemp(t, "probe2", reading.Probe2Temp, float64Ptr(65.9))
-	// An unplugged probe the controller serves as 0 stays 0 (cleanProbe
-	// keeps a real zero); a NaN the controller serves as null is absent.
+	// A probe reading 0 °F stays 0 (in range; cleanProbe keeps a real zero);
+	// a probe with no reading, served as null, is absent.
 	assertTemp(t, "probe3", reading.Probe3Temp, float64Ptr(0))
 	assertTemp(t, "probe4", reading.Probe4Temp, nil)
 }

@@ -441,7 +441,10 @@ func newIoTHubClient(config Config, sess iothub.CookState, clk clock.Clock, prov
 // taken at enqueue time, so both always come from the same applied twin
 // version, and is written to q.
 func runEnqueuer(ctx context.Context, samples <-chan collector.Sample, sess *cooksession.Store, q *queue.Queue, deviceID string, tracer trace.Tracer) {
+	var outOfRangeTotal uint64
 	for sample := range samples {
+		logOutOfRange(sample.Status.Temps, &outOfRangeTotal)
+
 		// CONTINUE the per-reading trace that began at poll time (see
 		// startReadingSpan): the collector captured its `collector.poll`
 		// span's traceparent onto the Sample and injected the SAME context
@@ -474,6 +477,25 @@ func runEnqueuer(ctx context.Context, samples <-chan collector.Sample, sess *coo
 		readingSpan.End()
 	}
 	logrus.Info("enqueuer: samples channel closed, exiting")
+}
+
+// logOutOfRange counts the grill and probe temperatures in one poll that the
+// mapper publishes as "no reading" because they are outside the plausible
+// range (wire.OutOfRangeFields, HAR-151), and logs them in ONE line per poll:
+// `out_of_range` with the field names, this poll's count and the running
+// total. Never the values: they are noise, and a field name is what the
+// owner needs to find the unplugged or faulty probe.
+func logOutOfRange(temps wire.V1Temps, total *uint64) {
+	fields := wire.OutOfRangeFields(temps)
+	if len(fields) == 0 {
+		return
+	}
+	*total += uint64(len(fields))
+	logrus.WithFields(logrus.Fields{
+		"fields": fields,
+		"count":  len(fields),
+		"total":  *total,
+	}).Warn("out_of_range")
 }
 
 // buildQueueRecord renders one collected reading into the queue record the
