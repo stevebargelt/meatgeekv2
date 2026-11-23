@@ -1,4 +1,3 @@
-import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { readdirSync } from 'fs';
 import { join } from 'path';
@@ -34,6 +33,7 @@ import {
   SIM_DEVICE_INPUTS,
   simDeviceEnv,
 } from './simdevice-env';
+import { spawnProcess } from './spawn';
 
 /**
  * HAR-11 — the live acceptance runner. Runs every proof group found in
@@ -253,7 +253,7 @@ function spawnChild(
   return new Promise((resolve, reject) => {
     const started = clock().monotonic();
     // stdio is piped, never inherited: nothing the child prints reaches the log raw.
-    const child = spawn(bin, [...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnProcess(bin, args, env);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));

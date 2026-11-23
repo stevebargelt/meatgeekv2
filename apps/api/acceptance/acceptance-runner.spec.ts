@@ -40,11 +40,21 @@
  * scripts, and its 30 s kill fires only on the fake clock.
  */
 import { randomUUID } from 'crypto';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { EventEmitter, once } from 'events';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import { AddressInfo } from 'net';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { basename, dirname, join } from 'path';
+import { PassThrough } from 'stream';
 
 import { REQUEST_CHARGE_HEADER } from '../src/shared/cosmos/request-charge';
 import { DEFAULT_USER_PREFERENCES } from '../src/shared/cosmos/users-repository';
@@ -62,6 +72,8 @@ import {
   startConnection,
   within,
 } from './lib/signalr';
+import type { ChildProcess, Spawn } from './lib/spawn';
+import { realSpawn, setSpawn } from './lib/spawn';
 import sweepGroup from './proofs/acceptance-device-sweep.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
@@ -1843,6 +1855,7 @@ if (handledFresh) {
  */
 function writeFakeDeviceScripts(hang?: 'enrol-device.sh' | 'delete-device.sh'): string {
   const dir = mkdtempSync(join(fakeDir, 'scripts-'));
+  if (hang) hangingScriptDirs.add(dir);
   for (const script of ['enrol-device.sh', 'delete-device.sh']) {
     const path = join(dir, script);
     writeFileSync(
@@ -1875,6 +1888,202 @@ fetch(${JSON.stringify(stub ? `${stub.baseUrl}/__scripts/run` : '')}, {
     chmodSync(path, 0o755);
   }
   return dir;
+}
+
+/** HAR-140: fake device-script dirs with a script that never exits. Those
+ *  always run as real children, so the runner's kill is what ends them. */
+const hangingScriptDirs = new Set<string>();
+
+/**
+ * HAR-140: when false, every child the runner starts is a real process.
+ * {@link inProcessSpawn} is the default; a test of the hand-over itself sets
+ * this to false.
+ */
+let inProcessChildren = true;
+
+const FAKE_PEM = '-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0\n-----END CERTIFICATE-----\n';
+
+/**
+ * A child process that runs `work` in this process: what `work` writes goes to
+ * its stdout and stderr, and the number it returns is its exit code.
+ */
+function inProcessChild(
+  work: (out: (text: string) => void, err: (text: string) => void) => Promise<number>
+): ChildProcess {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(new EventEmitter(), { stdout, stderr, kill: () => false });
+  // A microtask, so the caller's listeners are attached first.
+  void Promise.resolve().then(async () => {
+    let code: number;
+    try {
+      code = await work(
+        text => stdout.write(text),
+        text => stderr.write(text)
+      );
+    } catch (error) {
+      stderr.write(`in-process fake: ${(error as Error).message}\n`);
+      code = 1;
+    }
+    const ended = Promise.all([once(stdout, 'end'), once(stderr, 'end')]);
+    stdout.end();
+    stderr.end();
+    await ended;
+    child.emit('close', code);
+  });
+  return child as unknown as ChildProcess;
+}
+
+/**
+ * HAR-140: the fresh-device steps, answered in this process. A full suite run
+ * makes about 18 of these child processes (three fresh devices, six steps
+ * each), and the self-test runs the suite well over a hundred times, so
+ * starting real ones made this file four times slower.
+ *
+ * Each branch does what the matching branch of the fake scripts
+ * ({@link writeFakeSimdevice}, {@link writeFakeDeviceScripts}) does, with the
+ * same checks of the arguments and environment the runner hands over, and
+ * against the same stub routes. The two must agree. The DPS-mode test sets
+ * {@link inProcessChildren} to false and runs the real ones. Anything else
+ * (sends, top-ups, twin reconnects, a hanging script) is a real child.
+ */
+const inProcessSpawn: Spawn = (bin, args, env) => {
+  const fresh =
+    inProcessChildren && stub ? freshDeviceStep(bin, args, env, stub.baseUrl) : undefined;
+  return fresh ? inProcessChild(fresh) : realSpawn(bin, args, env);
+};
+
+type ChildWork = (out: (text: string) => void, err: (text: string) => void) => Promise<number>;
+
+function freshDeviceStep(
+  bin: string,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  stubBase: string
+): ChildWork | undefined {
+  const script = basename(bin);
+  if (
+    (script === 'enrol-device.sh' || script === 'delete-device.sh') &&
+    dirname(bin).startsWith(fakeDir) &&
+    !hangingScriptDirs.has(dirname(bin))
+  ) {
+    return async (out, err) => {
+      const get = (flag: string) => {
+        const i = argv.indexOf(flag);
+        return i < 0 ? undefined : argv[i + 1];
+      };
+      const fail = (code: number, message: string) => {
+        err(`${script}: ${message}\n`);
+        return code;
+      };
+      if (
+        get('--auth-type') !== 'login' ||
+        get('--dps') !== DPS_HOST ||
+        get('--hub') !== HUB_HOST
+      ) {
+        return fail(2, `bad hand-over: ${argv.join(' ')}`);
+      }
+      if (
+        env['ACCEPTANCE_BEARER_TOKEN'] ||
+        env['ACCEPTANCE_PEER_BEARER_TOKEN'] ||
+        env['SIMDEVICE_CONNECTION_STRING'] ||
+        env['MEATGEEK_STATE_DIR']
+      ) {
+        return fail(2, 'handed a secret');
+      }
+      const id = get('--device-id');
+      if (!id) return fail(2, '--device-id is required');
+      if (script === 'enrol-device.sh' && !existsSync(get('--certificate') ?? '')) {
+        return fail(2, 'cannot read the certificate');
+      }
+      if (script === 'delete-device.sh') {
+        const prefix = get('--only-prefix');
+        if (!prefix) return fail(2, '--only-prefix is required');
+        if (!id.startsWith(prefix)) return fail(4, `refusing to delete device ${id}`);
+      }
+      const response = await fetch(`${stubBase}/__scripts/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ script, args: argv }),
+      });
+      out(`${((await response.json()) as { line: string }).line}\n`);
+      return 0;
+    };
+  }
+  if (!basename(bin).startsWith('simdevice-') || dirname(bin) !== fakeDir) {
+    return undefined;
+  }
+  const args = argv.join(' ');
+  const line = (out: (text: string) => void, value: unknown) => out(`${JSON.stringify(value)}\n`);
+  const freshId = env['MEATGEEK_DEVICE_ID'] ?? '';
+  if (argv[0] === 'claim-code' && argv[1] === '--state-dir' && argv.length === 3) {
+    return async (out, err) => {
+      let id: string;
+      try {
+        id = JSON.parse(readFileSync(join(argv[2], 'identity.json'), 'utf8')).deviceId;
+      } catch {
+        err('claim-code: no identity in the state dir\n');
+        return 1;
+      }
+      const response = await fetch(
+        `${stubBase}/__simdevice/claim-state?deviceId=${encodeURIComponent(id)}`
+      );
+      if (response.status === 404) return 3;
+      line(out, await response.json());
+      return 0;
+    };
+  }
+  if (argv[0] === 'identity' && argv[1] === 'init') {
+    return async (out, err) => {
+      const id = argv[argv.indexOf('--device-id') + 1];
+      const dir = argv[argv.indexOf('--state-dir') + 1];
+      if (id !== freshId || dir !== env['MEATGEEK_STATE_DIR']) {
+        err('fake simdevice: identity init for another device\n');
+        return 2;
+      }
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'device.key'), 'fake private key');
+      writeFileSync(join(dir, 'device.crt'), FAKE_PEM);
+      writeFileSync(join(dir, 'identity.json'), JSON.stringify({ deviceId: id }));
+      out(FAKE_PEM);
+      return 0;
+    };
+  }
+  const register = '--twin --count 0 --timeout 2m';
+  if (freshId.startsWith('acceptance-') || (freshId !== '' && args === register)) {
+    return async (out, err) => {
+      let stored: string | undefined;
+      try {
+        stored = JSON.parse(
+          readFileSync(join(env['MEATGEEK_STATE_DIR'] ?? '', 'identity.json'), 'utf8')
+        ).deviceId;
+      } catch {
+        stored = undefined;
+      }
+      const handedOver =
+        stored === freshId &&
+        !env['SIMDEVICE_CONNECTION_STRING'] &&
+        !!env['MEATGEEK_DPS_ID_SCOPE'] &&
+        !env['ACCEPTANCE_BEARER_TOKEN'] &&
+        !env['SIMDEVICE_CHART_CONNECTION_STRING'];
+      if (args !== register || !handedOver) {
+        err(`fake simdevice: bad DPS hand-over: ${args}\n`);
+        return 2;
+      }
+      const response = await fetch(`${stubBase}/__simdevice/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: freshId }),
+      });
+      if (!response.ok) {
+        err('dps: registration refused: the device is not enrolled\n');
+        return 1;
+      }
+      line(out, { event: 'twin', desired: {}, reported: {} });
+      return 0;
+    };
+  }
+  return undefined;
 }
 
 /** HAR-140: the fake services' host names the runner hands the scripts. */
@@ -1964,9 +2173,13 @@ afterAll(() => {
   rmSync(fakeDir, { recursive: true, force: true });
 });
 
+let restoreSpawn: (() => void) | undefined;
+
 beforeEach(() => {
   fakeClock = new FakeClock();
   restoreClock = setClock(fakeClock);
+  inProcessChildren = true;
+  restoreSpawn = setSpawn(inProcessSpawn);
 });
 
 afterEach(async () => {
@@ -1975,6 +2188,8 @@ afterEach(async () => {
   deviceScriptsDir = undefined;
   restoreClock?.();
   restoreClock = undefined;
+  restoreSpawn?.();
+  restoreSpawn = undefined;
 });
 
 /** The RU summary row for a route, e.g. `  POST /cooks   1   11.43   11.43`. */
@@ -3039,6 +3254,9 @@ describe('live acceptance runner (against an in-process stub)', () => {
   });
 
   it('HAR-140: in DPS mode every device is claimed with its own code, the standing ones once per run', async () => {
+    // Real children throughout: the fake scripts check what the runner hands
+    // a real process (its arguments, its environment, an executable path).
+    inProcessChildren = false;
     const result = await runAgainstStub({}, 'ok', undefined, 'dps');
 
     expect(result.failures).toEqual([]);

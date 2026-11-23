@@ -1,6 +1,5 @@
-import { spawn } from 'child_process';
-
 import { clock } from './clock';
+import { spawnProcess } from './spawn';
 
 /**
  * HAR-138 (goal HAR-130) — reading a DPS-mode device's claim code (HAR-134)
@@ -106,9 +105,9 @@ function parseLine(stdout: string): ClaimCodeLine | undefined {
  */
 export function readClaimCode(bin: string, stateDir: string): Promise<ClaimCodeLine | NoClaimYet> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['claim-code', '--state-dir', stateDir], {
-      env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '' },
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const child = spawnProcess(bin, ['claim-code', '--state-dir', stateDir], {
+      PATH: process.env['PATH'] ?? '',
+      HOME: process.env['HOME'] ?? '',
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
