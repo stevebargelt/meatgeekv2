@@ -16,7 +16,15 @@ import {
  * TWIN CONTRACT (implemented on the device; do not change)
  *   desired.activeCookId   string, or absent
  *   desired.correlationId  string, or absent
+ *   desired.cookUpdatedAt  RFC 3339 UTC string: when the API wrote the two
+ *                          above (HAR-152)
  * Absent is sent as `null`, which IoT Hub turns into a deleted property.
+ *
+ * Every cook PATCH, a start's and a stop's alike, stamps `cookUpdatedAt` from
+ * the injected clock just before it is sent. The device logs its apply lag
+ * against it (`applyLagMs`): a desired patch IoT Hub delivers over MQTT carries
+ * only the changed properties and `$version`, never `$metadata`, so the hub's
+ * own `$lastUpdated` reaches the device only on a full twin GET.
  *
  * ONE ATTEMPT
  *   1. GET the twin and keep its etag.
@@ -95,6 +103,8 @@ export type SyncDeviceTwin = (
 export interface DeviceTwinSyncDeps {
   readonly twin: DeviceTwinPort;
   readonly cooks: ActiveCookReader;
+  /** The clock that stamps `cookUpdatedAt` on each PATCH. */
+  readonly now: () => Date;
 }
 
 /** The cook properties of the twin's current desired state. */
@@ -181,6 +191,7 @@ export async function syncDeviceTwinWith(
     const patch: DesiredPatch = {
       activeCookId: target.activeCookId,
       correlationId: target.correlationId,
+      cookUpdatedAt: deps.now().toISOString(),
     };
     try {
       await deps.twin.patchDesired(deviceId, patch, twin.etag);
@@ -208,14 +219,14 @@ export async function syncDeviceTwinWith(
 
 /**
  * The sync the deployed app uses: the shared twin client and the adapter-backed
- * cooks repository, both resolved at call time so importing a handler has no
+ * cooks repository, both resolved at call time, and the real clock so importing a handler has no
  * side effect (the Cosmos adapter and the twin client are both lazy). A missing
  * hostname surfaces as `iothub_configuration_failed`.
  */
 export const syncDeviceTwin: SyncDeviceTwin = async (userId, deviceId, correlationId) => {
   let deps: DeviceTwinSyncDeps;
   try {
-    deps = { twin: getDeviceTwinClient(), cooks: getCooksRepository() };
+    deps = { twin: getDeviceTwinClient(), cooks: getCooksRepository(), now: () => new Date() };
   } catch (error) {
     throw new DeviceTwinSyncError(
       error instanceof DeviceTwinError ? error.code : 'device_twin_sync_unconfigured',

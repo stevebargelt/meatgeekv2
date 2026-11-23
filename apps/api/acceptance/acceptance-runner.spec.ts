@@ -276,6 +276,8 @@ const SIGNALR_CLIENT_TOKEN = 'stub-signalr-client-token-7d1e';
 const PEER_SIGNALR_CLIENT_TOKEN = 'stub-signalr-peer-token-3a90';
 /** HAR-68: the body `timestamp` of the reading a fake `simdevice --twin --count 1` sends. */
 const TWIN_TIMESTAMP = '2026-11-19T16:45:12.340Z';
+/** HAR-152: the apply lag the fake `simdevice --twin` reports for a cook start. */
+const TWIN_APPLY_LAG_MS = 840;
 /** HAR-68: the fixed reason the stub's 503 DEVICE_TWIN_UPDATE_FAILED carries. */
 const TWIN_FAILURE_REASON = 'iothub_patch_twin_status_500';
 /** HAR-67: the active cook an earlier run left on the simulated device. */
@@ -364,7 +366,7 @@ interface StubOptions {
   /** HAR-68: what the fake `simdevice --twin` prints wrong: `desired-cook`, a
    *  desired activeCookId that is not the active cook; `reported-version`, a
    *  reported appliedDesiredVersion one behind desired.$version. */
-  readonly twinFault?: 'desired-cook' | 'reported-version';
+  readonly twinFault?: 'desired-cook' | 'reported-version' | 'no-apply-lag' | 'negative-apply-lag';
   /** HAR-77: answer this route without the X-Request-ID header. */
   readonly omitRequestIdOn?: StubRoute;
   /** HAR-77: rewrite the body of this route's 2xx answer. */
@@ -1098,12 +1100,25 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           appliedDesiredVersion:
             options.twinFault === 'reported-version' ? twin.version - 1 : twin.version,
         };
+        // HAR-152: simdevice starts with no cook, so its first sync measures
+        // an apply lag (from desired.cookUpdatedAt) only when desired has one.
+        const applyLagMs =
+          twin.desired.activeCookId === null || options.twinFault === 'no-apply-lag'
+            ? undefined
+            : options.twinFault === 'negative-apply-lag'
+              ? -40
+              : TWIN_APPLY_LAG_MS;
         if (args.join(' ').includes('--count 1') && !options.twinReadingNeverRouted) {
           twinReading = { timestamp: TWIN_TIMESTAMP, cookId: reported.activeCookId };
         }
         response.writeHead(200, { 'Content-Type': 'application/json' });
         response.end(
-          JSON.stringify({ desired, reported, now: new Date(fakeClock.now()).toISOString() })
+          JSON.stringify({
+            desired,
+            reported,
+            applyLagMs,
+            now: new Date(fakeClock.now()).toISOString(),
+          })
         );
         return;
       }
@@ -1931,9 +1946,9 @@ if (handledFresh) {
     body: JSON.stringify({ args: process.argv.slice(2) }),
   })
     .then(r => r.json())
-    .then(({ desired, reported, now }) => {
+    .then(({ desired, reported, applyLagMs, now }) => {
       sentAt = now;
-      line({ event: 'twin', desired, reported });
+      line({ event: 'twin', desired, reported, ...(applyLagMs === undefined ? {} : { applyLagMs }) });
       if (twin[1] === '1') line(reading(${JSON.stringify(TWIN_TIMESTAMP)}));
     }, () => {
       process.stderr.write('fake simdevice: no twin response\\n');
@@ -4154,10 +4169,20 @@ describe('device twin (HAR-68, against the stub and a fake simdevice)', () => {
 
     expect(result.failures).toEqual([]);
     expect(result.exitCode).toBe(0);
-    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    STEPS.forEach((step, i) =>
+      expect(result.lines).toContain(
+        // HAR-152: the cook start's PASS line carries the device's apply lag.
+        i === 3
+          ? `PASS ${GROUP} ${step} — applyLagMs ${TWIN_APPLY_LAG_MS}`
+          : `PASS ${GROUP} ${step}`
+      )
+    );
     const metrics = result.lines.filter(line => line.startsWith('METRIC twin-apply-ms '));
     expect(metrics).toHaveLength(1);
     expect(metrics[0]).toMatch(/^METRIC twin-apply-ms \d+$/);
+    expect(result.lines.filter(line => line.startsWith('METRIC twin-device-apply-lag-ms'))).toEqual(
+      [`METRIC twin-device-apply-lag-ms ${TWIN_APPLY_LAG_MS}`]
+    );
     // The start carried the run's X-Request-ID, which became the correlation id.
     const starts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
     expect(starts).toEqual([
@@ -4200,6 +4225,25 @@ describe('device twin (HAR-68, against the stub and a fake simdevice)', () => {
       'reported.appliedDesiredVersion is 1, not desired.$version 2: the device did not ' +
         'report applying the current desired state'
     );
+  });
+
+  it('(b) HAR-152: fails when the twin line has no applyLagMs, and still stops the cook', async () => {
+    const result = await runTwin({ twinFault: 'no-apply-lag' });
+
+    expectFailedAt(
+      result,
+      3,
+      "simdevice → exit 0: applyLagMs is absent, not a non-negative integer: the device did not measure the cook's apply lag from desired.cookUpdatedAt"
+    );
+    expect(result.lines.some(line => line.startsWith('METRIC twin-device-apply-lag-ms'))).toBe(
+      false
+    );
+  });
+
+  it('(b) HAR-152: fails when the twin line has a negative applyLagMs, and still stops the cook', async () => {
+    const result = await runTwin({ twinFault: 'negative-apply-lag' });
+
+    expectFailedAt(result, 3, 'simdevice → exit 0: applyLagMs is -40, not a non-negative integer');
   });
 
   it('(b) fails on a 503 DEVICE_TWIN_UPDATE_FAILED start, printing its reason, and still stops the saved cook', async () => {

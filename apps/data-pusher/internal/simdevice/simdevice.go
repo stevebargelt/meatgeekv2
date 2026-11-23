@@ -76,6 +76,7 @@ type TwinClient interface {
 	Start(ctx context.Context)
 	WaitTwinSynced(ctx context.Context) error
 	GetTwin(ctx context.Context) (iothub.Twin, error)
+	SyncedApplyLag() (desiredUpdatedAt time.Time, lag time.Duration, ok bool)
 }
 
 // TwinClientFactory builds a twin-enabled client for the DPS-mode device cfg.
@@ -90,10 +91,18 @@ func AzureTwinClientFactory(cfg dpsmode.Config, clk clock.Clock, opts ...iothub.
 }
 
 // TwinLine is the stdout line --twin prints after reading the twin back.
+//
+// DesiredUpdatedAt and ApplyLagMs are the apply lag the twin code measured on
+// the sync it applied (HAR-152), the same two fields the Pi logs: when the API
+// wrote the cook (RFC 3339, UTC) and how many milliseconds later the device
+// received it. Both are omitted when that sync changed no cook or carried no
+// write time.
 type TwinLine struct {
-	Event    string              `json:"event"` // always "twin"
-	Desired  iothub.TwinDesired  `json:"desired"`
-	Reported iothub.TwinReported `json:"reported"`
+	Event            string              `json:"event"` // always "twin"
+	Desired          iothub.TwinDesired  `json:"desired"`
+	Reported         iothub.TwinReported `json:"reported"`
+	DesiredUpdatedAt string              `json:"desiredUpdatedAt,omitempty"`
+	ApplyLagMs       *int64              `json:"applyLagMs,omitempty"`
 }
 
 // Sent is one stdout line: the identifiers of a message that IoT Hub accepted.
@@ -342,7 +351,8 @@ func Main(ctx context.Context, env Env) int {
 
 // readTwin is --twin's twin phase: connect, let the twin code GET the twin,
 // apply its desired cook to the client's CookState and report it, then GET
-// the twin again and print it as one TwinLine. All of it must finish within timeout.
+// the twin again and print it as one TwinLine, with the apply lag the first
+// sync measured. All of it must finish within timeout.
 func readTwin(ctx context.Context, tc TwinClient, clk clock.Clock, timeout time.Duration, enc *json.Encoder, fail func(code int, format string, a ...any) int) int {
 	tctx, cancel := clock.WithTimeout(ctx, clk, timeout)
 	defer cancel()
@@ -354,7 +364,13 @@ func readTwin(ctx context.Context, tc TwinClient, clk clock.Clock, timeout time.
 	if err != nil {
 		return fail(ExitSendFailed, "no twin response from IoT Hub within %s on the second GET: %v", timeout, err)
 	}
-	if err := enc.Encode(TwinLine{Event: "twin", Desired: tw.Desired, Reported: tw.Reported}); err != nil {
+	line := TwinLine{Event: "twin", Desired: tw.Desired, Reported: tw.Reported}
+	if at, lag, ok := tc.SyncedApplyLag(); ok {
+		ms := lag.Milliseconds()
+		line.DesiredUpdatedAt = at.UTC().Format(time.RFC3339Nano)
+		line.ApplyLagMs = &ms
+	}
+	if err := enc.Encode(line); err != nil {
 		return fail(ExitSendFailed, "write stdout: %v", err)
 	}
 	return ExitOK

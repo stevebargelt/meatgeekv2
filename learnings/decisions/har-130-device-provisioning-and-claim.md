@@ -104,6 +104,14 @@ the code.
 **Twin properties.** Flat strings, like `activeCookId` / `correlationId`.
 Existing cook properties are untouched.
 
+_HAR-152 added one cook property:_ desired `cookUpdatedAt` (RFC 3339 UTC),
+which the API stamps from its clock on every cook PATCH, start and stop, in the
+same patch as `activeCookId` / `correlationId`. The device logs its apply lag
+(`applyLagMs`) against it. IoT Hub's `$metadata.<property>.$lastUpdated` could
+not serve: a desired patch delivered over MQTT carries only the changed
+properties and `$version`, never `$metadata`, so a live cook change brought no
+write time. See [the device runbook](../../docs/devices/runbook.md#measuring-latency).
+
 - reported (device-written): `claimCodeHash`, `claimExpiresAt` (ISO-8601 UTC),
   `claimGeneration` (decimal string)
 - desired (API-written): `claimGeneration` (decimal string; absent means

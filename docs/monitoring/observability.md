@@ -377,7 +377,8 @@ Like the broadcaster's log line (MG-73 / HAR-60), these carry no device, user or
 cook attribute. The query to read them is in
 [the device runbook](../devices/runbook.md#measuring-latency). The pusher's
 side of the cook round trip is a log field, not a metric: `applyLagMs` on the
-"applied and reported desired properties" line.
+"applied and reported desired properties" line, measured from the desired
+`cookUpdatedAt` the API stamps on every cook PATCH (HAR-152).
 
 ### **Custom Metrics (target design)**
 

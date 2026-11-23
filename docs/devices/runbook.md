@@ -212,19 +212,34 @@ journalctl -u meatgeek-pusher --no-pager | grep applyLagMs
 ```
 
 ```text
-... msg="iothub twin: applied and reported desired properties" appliedDesiredVersion=7 applyLagMs=840 cookId=… desiredUpdatedAt="2026-11-23T18:02:11.1234567Z" source=patch
+... msg="iothub twin: applied and reported desired properties" appliedDesiredVersion=7 applyLagMs=840 cookId=… desiredUpdatedAt="2026-11-23T18:02:11.123Z" source=patch
 ```
 
-- `desiredUpdatedAt` is IoT Hub's `$metadata.<property>.$lastUpdated` for the
-  cook property that changed: when the API wrote it.
+- `desiredUpdatedAt` is the twin's desired `cookUpdatedAt`: the API's clock
+  just before it sent the PATCH that set or cleared the cook (HAR-152). Every
+  cook start and stop stamps it, in the same PATCH as `activeCookId` and
+  `correlationId`.
+- Why not IoT Hub's own `$metadata.<property>.$lastUpdated` (HAR-150's first
+  source)? A desired patch IoT Hub delivers over MQTT carries only the changed
+  properties and `$version`, never `$metadata`; only a full twin GET does. So
+  a live cook change had no write time and logged no lag. The pusher still
+  falls back to `$metadata` when a twin has no `cookUpdatedAt` (one the API
+  wrote before HAR-152), which only helps on `source=get`.
 - `applyLagMs` is the Pi's clock when the change arrived, minus
-  `desiredUpdatedAt`. It assumes the Pi's clock is right (NTP).
+  `desiredUpdatedAt`. It compares two clocks, the API's and the Pi's, so it
+  assumes both are right (NTP); a few ms of skew either way is noise.
 - `source=patch`: the change arrived while connected. `source=get`: the Pi read
   it from the whole twin on connect, so the lag includes any time it was
   offline.
-- No `applyLagMs` on the line means IoT Hub sent no `$metadata` for the change,
-  or no cook property changed (a claim-only change, or a reconnect with the
-  same cook).
+- No `applyLagMs` on the line means the twin carried no write time for the
+  change (no `cookUpdatedAt` and, on a patch, never any `$metadata`), or no
+  cook property changed (a claim-only change, or a reconnect with the same
+  cook).
+- The live `device twin` proof checks this on every deploy: its simulated
+  device prints the same measurement on its twin line, and the proof's PASS
+  line for the cook start ends `— applyLagMs <n>` (also
+  `METRIC twin-device-apply-lag-ms`). That run is a reconnect (`source=get`),
+  so it includes the seconds between the start and simdevice connecting.
 
 **A reading on the Pi reaching the owner.** The API records two histograms for
 every reading it pushes to an owner, in Application Insights `customMetrics`:

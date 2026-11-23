@@ -37,7 +37,10 @@ import {
  *      DEVICE_TWIN_UPDATE_FAILED fails, printing its fixed `reason`);
  *   4. `simdevice --twin --count 1`: desired and reported carry the cook and the
  *      correlation id, and `reported.appliedDesiredVersion` is
- *      `desired.$version`. `METRIC twin-apply-ms`: the 201 to simdevice's exit;
+ *      `desired.$version`. `METRIC twin-apply-ms`: the 201 to simdevice's exit.
+ *      HAR-152: the twin line's `applyLagMs`, the device's own measure from
+ *      the API's `cookUpdatedAt` stamp to its GET, is a non-negative integer;
+ *      it is printed on the PASS line and as `METRIC twin-device-apply-lag-ms`;
  *   5. `GET /temperatures/current/{deviceId}` is polled until it returns the
  *      reading just sent (by timestamp, as an instant); its `cookId` is the cook;
  *   6. `POST /cooks/{cookId}/stop` is 200;
@@ -63,6 +66,8 @@ const fixedCode = (value: unknown): string | undefined =>
   typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : undefined;
 
 interface TwinLine {
+  /** HAR-152: ms from the API's `cookUpdatedAt` to the device applying it. */
+  readonly applyLagMs?: unknown;
   readonly desired: {
     readonly activeCookId?: unknown;
     readonly correlationId?: unknown;
@@ -252,10 +257,18 @@ export default defineProofs('device twin', () => {
           `reported.correlationId is ${show(twin.reported.correlationId)}, not ${correlationId}`
         );
         startVersion = expectAppliedVersion(twin);
+        const lag = twin.applyLagMs;
+        expectTwin(
+          typeof lag === 'number' && Number.isInteger(lag) && lag >= 0,
+          `applyLagMs is ${show(lag)}, not a non-negative integer: the device did not measure ` +
+            "the cook's apply lag from desired.cookUpdatedAt"
+        );
         sent = reading;
         if (startedAt !== undefined) {
           api.metric('twin-apply-ms', exitedAt - startedAt);
         }
+        api.metric('twin-device-apply-lag-ms', lag);
+        return `applyLagMs ${lag}`;
       },
     },
     {
