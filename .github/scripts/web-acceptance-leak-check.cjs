@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The HAR-44-style leak check for app-deploy-dev.yml's `web-acceptance` job,
-// and (HAR-169) its `ios-acceptance` job.
+// and (HAR-169) ios-live-proof.yml's `ios-acceptance` job.
 //
 //   node .github/scripts/web-acceptance-leak-check.cjs <proof-log> [<diagnostic-glob>]
 //

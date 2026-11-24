@@ -127,7 +127,7 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 
 The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows this path, and [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/) follows it into the browser and the iOS app.
 
-**Measured live delay** (single dev samples): reading to browser, `METRIC web-push-ms 510` (run 44837747351, the `web-acceptance` job); tap on Start to a pushed reading in the iOS app in a simulator, `METRIC ios-push-ms 10918` (run 45429145737, the `ios-acceptance` job; it includes starting the cook); send to an acceptance-proof client on a cold start, `METRIC signalr-delivery-ms 18424` (run 44673261258).
+**Measured live delay** (single dev samples): reading to browser, `METRIC web-push-ms 510` (run 44837747351, the `web-acceptance` job); tap on Start to a pushed reading in the iOS app in a simulator, `METRIC ios-push-ms 10918` (run 45429145737, the live iOS proof's `ios-acceptance` job, then in Deploy Dev App, now the daily `ios-live-proof.yml`; it includes starting the cook); send to an acceptance-proof client on a cold start, `METRIC signalr-delivery-ms 18424` (run 44673261258).
 
 **What is sent** (`apps/api/src/functions/signalr/broadcast-temperature.ts`):
 - One message per event: target `temperature`, `userId` = the `userId` stored on the device, one argument — the `TemperatureReading` plus `enqueuedTimeUtc` (the Event Hub enqueued time, ISO 8601).

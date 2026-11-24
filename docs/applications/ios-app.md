@@ -13,8 +13,9 @@ two share only the OpenAPI contract in `libs/api-specs/spec`.
 It was built by goal HAR-157 (HAR-158 to HAR-169). It runs against the **dev**
 API only, and it is **not distributed**: there is no TestFlight or App Store
 build (see [TestFlight](#testflight)). It runs in the simulator or on a
-developer's own iPhone from Xcode. Every pull request tests it in CI, and every
-dev deploy proves it live against dev in a simulator (`ios-acceptance`).
+developer's own iPhone from Xcode. Every pull request tests it in CI, and a
+daily scheduled workflow proves it live against dev in a simulator
+(`ios-live-proof.yml`); that proof is not a deploy gate (HAR-170).
 
 The detailed developer guide, with every model, state and copy rule, is
 [`apps/ios/README.md`](../../apps/ios/README.md). This page is the overview.
@@ -181,12 +182,13 @@ inputs, the steps and what is and is not logged.
 
 ## CI
 
-| Job              | Workflow             | When                                                                                              | What                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ---------------- | -------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ios`            | `ci.yml`             | Every pull request and push to `main`, no path filter                                             | `macos-26`, Xcode 26.6, iPhone 17 simulator: `xcodebuild test` of the `MeatGeek` scheme; fails if `MeatGeekKitTests`, `MeatGeekLiveTests`, `MeatGeekMSALTests` or `MeatGeekUITests` ran no tests or if `MeatGeekLiveUITests` ran; then compiles `MeatGeekLiveUITests` without running it. Simulator signing only (no team, no certificate), no secret, `contents: read`. $0: the repository is public. Uploads `ios-xcresult` (7 days) |
-| `ios-acceptance` | `app-deploy-dev.yml` | Every dev deploy, after `web-acceptance` (never alongside it: both sign in as the same TOTP user) | Enrols `<sim>-ios` through DPS, runs the live proof, prints `METRIC ios-push-ms` (10918 in run 45429145737), runs the leak check over the raw log, and uploads the `ios-acceptance-screenshots` artifact (30 days, on success too)                                                                                                                                                                                                     |
+| Job              | Workflow             | When                                                                                                                                                                                                   | What                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ios`            | `ci.yml`             | Every pull request and push to `main`, no path filter                                                                                                                                                  | `macos-26`, Xcode 26.6, iPhone 17 simulator: `xcodebuild test` of the `MeatGeek` scheme; fails if `MeatGeekKitTests`, `MeatGeekLiveTests`, `MeatGeekMSALTests` or `MeatGeekUITests` ran no tests or if `MeatGeekLiveUITests` ran; then compiles `MeatGeekLiveUITests` without running it. Simulator signing only (no team, no certificate), no secret, `contents: read`. $0: the repository is public. Uploads `ios-xcresult` (7 days) |
+| `ios-acceptance` | `ios-live-proof.yml` | Once a day (09:17 UTC) and on `workflow_dispatch` from `main`; never alongside Deploy Dev App's `web-acceptance` (both sign in as the same TOTP user). **Not a deploy gate**: a failure blocks nothing | Builds the app from `main`'s tip, enrols `<sim>-ios` through DPS, runs the live proof against whatever dev serves, prints `METRIC ios-push-ms` (10918 in run 45429145737), runs the leak check over the raw log, and uploads the `ios-acceptance-screenshots` artifact (30 days, on success too)                                                                                                                                       |
 
-See [CI/CD: iOS job](../development/ci-cd.md#ios-job-har-160) and
+See [CI/CD: iOS job](../development/ci-cd.md#ios-job-har-160),
+[CI/CD: Live iOS proof](../development/ci-cd.md#live-ios-proof-har-169-har-170) and
 [Live iOS proof](../development/live-acceptance.md#live-ios-proof).
 
 ## TestFlight

@@ -723,7 +723,7 @@ clock (`testAPollLooksAgainAfterALookThatRanPastTheDeadline`,
 "Measured" is the rehearsals this was built on (HAR-169): the app-side steps
 on UI test mode's stub, and the runner end to end in a fresh simulator with a
 fake simdevice, signing in as far as Microsoft's answer to the UPN. The first
-green `ios-acceptance` runs on `main` are the first measurements against dev;
+green runs of the iOS proof against dev are the first measurements there;
 until they are added here, each bound is sized on the web proof's measured
 waits for the same thing.
 
@@ -743,7 +743,7 @@ waits for the same thing.
 | `run-live-proof.sh:TWIN_SYNC_TIMEOUT` (simdevice `--timeout`)              | `simdevice --twin --count 0` before the claim code is read: the twin's GETs and the claim report                                                                                                                                                                     | 60 s                                          | As the web proof's `TWIN_SYNC_TIMEOUT`: one MQTT connection and a twin round trip, the device already registered by the job's enrol step                                                                                                                                                                                                               |
 | `run-live-proof.sh:FIRST_READING_BOUND_S`                                  | simdevice's first sent reading, before the test starts; checked every 1 s                                                                                                                                                                                            | 60 s                                          | One DPS-mode connection with the cached assignment and one send. Seconds in practice                                                                                                                                                                                                                                                                   |
 | `run-live-proof.sh:SEND_COUNT`, `SEND_INTERVAL`                            | (not a wait) how long simdevice sends: 900 readings, 2 s apart                                                                                                                                                                                                       | 30 min at most; stopped when the runner exits | Longer than the job, so the readings never stop before the test does; the runner's exit trap stops simdevice whatever happened                                                                                                                                                                                                                         |
-| `app-deploy-dev.yml` `ios-acceptance` `timeout-minutes`                    | the whole job                                                                                                                                                                                                                                                        | 45 min                                        | A cold build of the app and its packages on `macos-26` (most of the job: `ci.yml`'s `ios` job, which builds and runs 7 UI tests, took 19 min on 2026-11-24), the simulator, and the test's 15 min allowance                                                                                                                                            |
+| `ios-live-proof.yml` `ios-acceptance` `timeout-minutes`                    | the whole job                                                                                                                                                                                                                                                        | 45 min                                        | A cold build of the app and its packages on `macos-26` (most of the job: `ci.yml`'s `ios` job, which builds and runs 7 UI tests, took 19 min on 2026-11-24), the simulator, and the test's 15 min allowance                                                                                                                                            |
 
 ## Running it locally against dev
 
@@ -1050,7 +1050,10 @@ It runs after every dev deploy, as the `web-acceptance` job in
 `.github/workflows/app-deploy-dev.yml` (HAR-101; see
 [CI/CD → Dev app deploy and live acceptance](ci-cd.md#dev-app-deploy-and-live-acceptance-mg-36)),
 in parallel with the API suite's `acceptance` job, with `EXPECTED_WEB_SHA` set
-to the deployed commit. The job enrols the device `<simulated_device_id>-web`
+to the deployed commit. It never runs at the same time as the
+[live iOS proof](#live-ios-proof), which signs in as the same user: the two
+jobs share the concurrency group `acceptance-user-totp`, so if the daily iOS
+proof is running, the web proof waits for it. The job enrols the device `<simulated_device_id>-web`
 through DPS and runs the proof's simdevice in DPS mode with
 `ACCEPTANCE_WEB_STATE_DIR` ([In CI](#in-ci-har-139)), and takes the acceptance
 user's UPN from the
@@ -1221,10 +1224,25 @@ machine's clock.
 ## Live iOS proof
 
 The browser proof above proves the web app. The live iOS proof (HAR-169, goal
-HAR-157) proves the **iOS app** the same way, on every dev deploy: the real
-app (`apps/ios`, not its UI test mode), built for an iPhone simulator,
-against the dev API. It is the `ios-acceptance` job in
-`.github/workflows/app-deploy-dev.yml`; the test is
+HAR-157) proves the **iOS app** the same way: the real
+app (`apps/ios`, not its UI test mode), built for an iPhone simulator from
+`main`'s tip, against whatever the dev API is serving. It is the
+`ios-acceptance` job of `.github/workflows/ios-live-proof.yml`, which runs
+**once a day** (09:17 UTC, `cron: '17 9 * * *'`) and on `workflow_dispatch`
+from `main` (see
+[CI/CD → Live iOS proof](ci-cd.md#live-ios-proof-har-169-har-170)).
+
+**It is not a deploy gate (HAR-170).** A failure of it never blocks a dev
+deploy or turns Deploy Dev App red; a deploy is proven by the API suite and
+the browser proof. Until HAR-170 it ran after every dev deploy, and it failed
+4 of its 5 runs on `main`, each at a different point of Microsoft's sign-in,
+on a runner where one XCUITest query took 47 s. It still never runs alongside
+the browser proof: both sign in as the same TOTP user, so its job and
+`web-acceptance` share the concurrency group `acceptance-user-totp`, and
+whichever starts second waits. A red daily run is read from its run summary
+and its `ios-acceptance-screenshots` artifact; nothing else waits on it.
+
+The test is
 `apps/ios/MeatGeekLiveUITests/LiveProofUITests.swift`, in its own test plan,
 `apps/ios/Live.xctestplan`, which the `MeatGeek` scheme does not run by
 default, so `ci.yml`'s `ios` job only compiles it (and fails if the default

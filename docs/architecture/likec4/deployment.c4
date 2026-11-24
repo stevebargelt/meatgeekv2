@@ -54,12 +54,12 @@ deployment {
         description 'Playwright with Chromium against the production web app on Vercel, signed in as the TOTP acceptance user.'
       }
       simdevice = instanceOf delivery.simdevice {
-        description 'Built per run from apps/data-pusher. Sends as one of the four standing devices: <sim> and <sim>-chart (acceptance job), <sim>-web (web-acceptance job), <sim>-ios (iOS acceptance job, on the macOS runner). Each run gives each device a new X.509 identity in a fresh state dir and enrols its certificate in DPS; no device key leaves the state dir.'
+        description 'Built per run from apps/data-pusher. Sends as one of the four standing devices: <sim> and <sim>-chart (acceptance job), <sim>-web (web-acceptance job), <sim>-ios (iOS Live Proof, on the macOS runner). Each run gives each device a new X.509 identity in a fresh state dir and enrols its certificate in DPS; no device key leaves the state dir.'
       }
     }
 
     runner macRunner 'GitHub Actions macOS runner' {
-      technology 'macos-26, Xcode 26.6; Deploy Dev App ios-acceptance job, environment development'
+      technology 'macos-26, Xcode 26.6; iOS Live Proof (ios-live-proof.yml, daily) ios-acceptance job, environment development'
       description 'Logs in under OIDC as the same dev app-publish identity, only to enrol and register <sim>-ios; the proof calls the API through the app, as the acceptance user. Builds its own simdevice.'
       iosAcceptance = instanceOf delivery.iosAcceptance
       simulator = instanceOf meatgeek.mobile {
@@ -84,7 +84,7 @@ deployment {
 views {
   deployment view devDeployment {
     title 'Deployment: dev'
-    description 'What runs where. The web app is served by Vercel (production, built from main) and calls the dev API. The iOS app is not distributed: it runs on the iPhone of a developer, from Xcode, and in a simulator on the macOS runner for the ios-acceptance proof. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance jobs.'
+    description 'What runs where. The web app is served by Vercel (production, built from main) and calls the dev API. The iOS app is not distributed: it runs on the iPhone of a developer, from Xcode, and in a simulator on the macOS runner for the daily live iOS proof. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance jobs.'
     include dev.**
   }
 }
