@@ -61,9 +61,17 @@ Only `.go`, `.ts`, `.tsx`, `.mjs`, `.js`, `.cjs` and `.sh` files are scanned.
 **Out of scope by path** (`outOfScope` in `exceptions.json`, each with its
 reason): the live suites, which wait on a real cloud by design
 (`apps/api/acceptance/live.acceptance.ts`, `apps/api/acceptance/proofs/**`,
-`apps/api/acceptance/lib/**`, and `apps/web-e2e/live/**` except its `*.test.ts`
-files, which are non-live and stay in scope), and the guard's own fixtures. An
-out-of-scope path that matches no tracked file is stale and fails the check.
+`apps/api/acceptance/lib/**`, `apps/web-e2e/live/**` except its `*.test.ts`
+files, which are non-live and stay in scope, and `apps/ios/MeatGeekLiveUITests/**`,
+the live iOS proof), and the guard's own fixtures. An out-of-scope path that
+matches no tracked file is stale and fails the check.
+
+The guard has no Swift rules (the language list above), so no iOS test is
+scanned today, and the live iOS entry (HAR-169) skips no scanned file yet. It
+names the live target alone, so if Swift rules are added, `MeatGeekUITests`
+and MeatGeekKit's tests are in scope and only the live proof is not; the
+`live` case fixture (`test/fixtures/cases/live/apps/ios/`) proves a file beside
+the live target is still a hit.
 
 ## Rules
 

@@ -14,6 +14,12 @@ name: Deploy Dev App
 #                        TOTP acceptance user, sees a reading pushed by
 #                        simdevice as <simulated_device_id>-web. The app-publish
 #                        login only manages that device in IoT Hub.
+#            ios-acceptance  (HAR-169, after web-acceptance, never alongside it:
+#                        both sign in as the acceptance user with TOTP) the live
+#                        iOS proof, apps/ios/scripts/run-live-proof.sh on macOS:
+#                        the real iOS app in a simulator, signed in as the
+#                        acceptance user, sees a reading pushed by simdevice as
+#                        <simulated_device_id>-ios.
 #
 # Chaining after the infra apply, not after CI, means the infrastructure for a
 # commit (including the Easy Auth caller list the acceptance job depends on) is
@@ -35,8 +41,8 @@ on:
   workflow_dispatch:
 
 # id-token: write  — azure/login and terraform mint an OIDC token for the dev
-#                    app-publish identity (development environment, in all
-#                    three jobs); the acceptance suite step mints one more for
+#                    app-publish identity (development environment, in every
+#                    job); the acceptance suite step mints one more for
 #                    the zero-role acceptance peer identity (HAR-61/HAR-65).
 # contents: read   — checkout and the main-tip lookups.
 # actions: read    — look up the commit's CI/CD Pipeline runs.
@@ -813,3 +819,260 @@ jobs:
             dist/.playwright/web-e2e-live/test-results/**/sign-in-diagnostic.txt
           if-no-files-found: ignore
           retention-days: 7
+
+  # HAR-169 (goal HAR-157): the live iOS proof, the web proof's twin. The real
+  # app (apps/ios), built for an iPhone simulator, signs in as the acceptance
+  # user through Microsoft's real pages with a TOTP code, claims the iOS
+  # device <simulated_device_id>-ios with the code it reports, starts a cook
+  # on it, sees a reading simdevice pushed, stops the cook and releases the
+  # device (apps/ios/MeatGeekLiveUITests, run by
+  # apps/ios/scripts/run-live-proof.sh).
+  #
+  # AFTER web-acceptance, pass or fail, never alongside it: both sign in as the
+  # same acceptance user with a TOTP code, and Microsoft refuses a code that
+  # was already used. Skipped when the deploy job published nothing, and when
+  # the run was cancelled.
+  ios-acceptance:
+    needs: [deploy, web-acceptance]
+    if: ${{ !cancelled() && needs.deploy.outputs.deployed == 'true' }}
+    runs-on: macos-26
+    # The app's first build (packages, the OpenAPI generator) is most of it.
+    timeout-minutes: 45
+    environment: development
+    env:
+      XCODE_APP: /Applications/Xcode_26.6.app
+    steps:
+      - name: Checkout the deployed commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.deploy.outputs.sha }}
+          persist-credentials: false
+
+      # As ci.yml's ios job.
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+
+      # The leak check needs otplib, from the lockfile.
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Enable corepack (use packageManager-pinned npm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      # simdevice (HAR-40) sends the readings the app must show.
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/data-pusher/go.mod
+          cache-dependency-path: apps/data-pusher/go.sum
+
+      - name: Build simdevice
+        run: |
+          set -euo pipefail
+          make -C apps/data-pusher build
+          test -x apps/data-pusher/dist/simdevice
+
+      # As ci.yml's ios job, keyed on the committed Package.resolved.
+      - name: Cache SwiftPM checkouts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ${{ runner.temp }}/DerivedData/SourcePackages
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/ios/**/Package.resolved') }}
+
+      # Only to manage the iOS device in IoT Hub and DPS: the proof calls the
+      # API as the acceptance user, through the app, not as this identity.
+      - name: Azure login (OIDC — dev app-publish identity)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Pinned, never latest. Gives `az iot hub device-identity` and
+      # `az iot dps enrollment`, which enrol-device.sh calls.
+      - name: Install the azure-iot CLI extension
+        run: az extension add --name azure-iot --version 1.0.0 --yes
+
+      # The fourth standing device, <simulated_device_id>-ios, the proof's own:
+      # the same migration, `identity init`, enrol-device.sh and registration,
+      # with the same flags and reasons, as web-acceptance's step for -web
+      # (HAR-139). The proof claims it through the app; this only gives it its
+      # identity.
+      - name: Enrol the iOS device through DPS
+        env:
+          HUB: ${{ needs.deploy.outputs.iot_hub_hostname }}
+          DPS_HOST: ${{ needs.deploy.outputs.dps_name }}.azure-devices-provisioning.net
+          DEVICE: ${{ needs.deploy.outputs.simulated_device_id }}-ios
+          MEATGEEK_DPS_ID_SCOPE: ${{ needs.deploy.outputs.dps_id_scope }}
+        run: |
+          set -euo pipefail
+          err="$RUNNER_TEMP/ios-device-auth.err" rc=0
+          auth="$(az iot hub device-identity show --hub-name "$HUB" --device-id "$DEVICE" \
+            --auth-type login --query authentication.type -o tsv 2>"$err")" || rc=$?
+          if [ "$rc" -eq 0 ] && [ "$auth" = "sas" ]; then
+            az iot hub device-identity delete --hub-name "$HUB" --device-id "$DEVICE" \
+              --auth-type login -o none >/dev/null
+            echo "migrated $DEVICE"
+          elif [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || grep -q 'DeviceNotFound' "$err"; then
+            echo "ok $DEVICE"
+          else
+            echo "az iot hub device-identity show for device $DEVICE failed (exit $rc), and not because the device is missing:" >&2
+            cat "$err" >&2
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/devices/$DEVICE"
+          mkdir -p "$RUNNER_TEMP/devices"
+          apps/data-pusher/dist/simdevice identity init --device-id "$DEVICE" \
+            --state-dir "$dir" > "$dir.pem"
+          apps/data-pusher/deploy/enrol-device.sh --device-id "$DEVICE" \
+            --certificate "$dir.pem" --auth-type login \
+            --dps "$DPS_HOST" --hub "$HUB"
+          if MEATGEEK_DEVICE_ID="$DEVICE" MEATGEEK_STATE_DIR="$dir" \
+            apps/data-pusher/dist/simdevice --twin --count 0 --timeout 2m >/dev/null 2>"$dir.register.log"; then
+            echo "registered $DEVICE"
+          else
+            echo "simdevice could not register device $DEVICE with DPS:" >&2
+            cat "$dir.register.log" >&2
+            exit 1
+          fi
+
+      # The runner reads the claim code, makes a throwaway simulator, builds,
+      # sends readings in the background for the length of the test and stops
+      # them on exit. The password and TOTP secret are repository secrets,
+      # which GitHub masks; the runner hands them to xcodebuild only as
+      # TEST_RUNNER_* variables, never on a command line. Its raw output goes
+      # to a file, NOT to this log: an XCTest failure can print a screen's
+      # elements, and a TOTP code or claim code is not something GitHub masks.
+      # Only the PASS/FAIL/SKIP, METRIC and runner lines are printed here; the
+      # whole log is printed further down once the leak check has passed it.
+      - name: Run the live iOS proof
+        env:
+          ACCEPTANCE_USER_UPN: ${{ vars.ACCEPTANCE_USER_UPN }}
+          ACCEPTANCE_USER_PASSWORD: ${{ secrets.ACCEPTANCE_USER_PASSWORD }}
+          ACCEPTANCE_USER_TOTP_SECRET: ${{ secrets.ACCEPTANCE_USER_TOTP_SECRET }}
+          ACCEPTANCE_IOS_DEVICE_ID: ${{ needs.deploy.outputs.simulated_device_id }}-ios
+          ACCEPTANCE_DPS_ID_SCOPE: ${{ needs.deploy.outputs.dps_id_scope }}
+        run: |
+          set -euo pipefail
+          export ACCEPTANCE_IOS_STATE_DIR="$RUNNER_TEMP/devices/$ACCEPTANCE_IOS_DEVICE_ID"
+          export ACCEPTANCE_SIMDEVICE_BIN="$GITHUB_WORKSPACE/apps/data-pusher/dist/simdevice"
+          export ACCEPTANCE_RUN_ID="$GITHUB_RUN_ID"
+          export IOS_LIVE_RESULT_BUNDLE="$RUNNER_TEMP/ios-acceptance.xcresult"
+          export IOS_LIVE_DERIVED_DATA="$RUNNER_TEMP/DerivedData"
+          LOG="$RUNNER_TEMP/ios-acceptance.log"
+          rc=0
+          apps/ios/scripts/run-live-proof.sh > "$LOG" 2>&1 || rc=$?
+          grep -E '^(PASS|FAIL|SKIP) |^METRIC |^run-live-proof: |^ *Executed [0-9]+ tests?' "$LOG" || true
+          exit "$rc"
+
+      # Proof step results and the METRIC line, also in the run summary.
+      - name: Write the iOS acceptance summary
+        if: always()
+        env:
+          SHA: ${{ needs.deploy.outputs.sha }}
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/ios-acceptance.log"
+          {
+            echo "## Live iOS proof — the app in the simulator, against dev"
+            echo
+            echo "Commit \`$SHA\`"
+            echo
+            if [ -s "$LOG" ]; then
+              echo '```'
+              # PASS/FAIL/SKIP lines (MeatGeekLiveUITests/LiveDriver.swift,
+              # LiveSteps) and `METRIC ios-push-ms <n>`.
+              grep -E '^(PASS|FAIL|SKIP) |^METRIC ' "$LOG" || true
+              echo '```'
+            else
+              echo "The proof produced no output; see the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Only the screenshots the proof itself takes, by name: 1-devices-tab,
+      # 2-cook-pushed-reading (the proof), 3-cook-ended, and failure (only
+      # once signed in, never of the claim form). XCTest also attaches text
+      # dumps of the screen's elements, which can hold a field's value; those
+      # are never copied out of the result bundle, and the bundle is never
+      # uploaded. On success the pushed-reading screenshot must be there.
+      - name: Export the proof's screenshots
+        if: always()
+        env:
+          PROOF_OUTCOME: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          BUNDLE="$RUNNER_TEMP/ios-acceptance.xcresult"
+          OUT="$RUNNER_TEMP/ios-acceptance-screenshots"
+          mkdir -p "$OUT"
+          if [ ! -d "$BUNDLE" ]; then
+            echo "No result bundle: the proof did not get as far as testing."
+            exit 0
+          fi
+          ALL="$(mktemp -d)"
+          xcrun xcresulttool export attachments --path "$BUNDLE" --output-path "$ALL" >/dev/null
+          /usr/bin/python3 -I - "$ALL" "$OUT" <<'PY'
+          import json, os, re, shutil, sys
+          src, out = sys.argv[1], sys.argv[2]
+          names = ("1-devices-tab", "2-cook-pushed-reading", "3-cook-ended", "failure")
+          for test in json.load(open(os.path.join(src, "manifest.json"))):
+              for a in test.get("attachments", []):
+                  name = re.sub(r"_\d+_[0-9A-F-]{36}\.png$", "", a.get("suggestedHumanReadableName", ""))
+                  if name in names and a["exportedFileName"].endswith(".png"):
+                      shutil.copyfile(os.path.join(src, a["exportedFileName"]), os.path.join(out, name + ".png"))
+                      print(f"screenshot: {name}.png")
+          PY
+          rm -rf "$ALL"
+          if [ "$PROOF_OUTCOME" = "success" ] && [ ! -f "$OUT/2-cook-pushed-reading.png" ]; then
+            echo "The proof passed but its pushed-reading screenshot is not in the result bundle." >&2
+            exit 1
+          fi
+
+      # The HAR-44-style leak check (.github/scripts/web-acceptance-leak-check.cjs)
+      # over the runner's raw output (before GitHub's masking, so a masked
+      # secret is still caught): no connection-string key field, password,
+      # TOTP secret, TOTP code from any 30 s window the job can have run in,
+      # claim code, PEM private key block or JSON claim-code value. Line
+      # numbers only. It runs BEFORE the upload and the log below; exit 0 is
+      # clean, 1 a finding, 2 a check that could not finish. `checked` is set
+      # only on 0 or 1, and the upload needs it; the log is printed only on 0.
+      - name: Check the proof's output for leaked secrets
+        id: leak-check
+        if: always()
+        env:
+          ACCEPTANCE_USER_PASSWORD: ${{ secrets.ACCEPTANCE_USER_PASSWORD }}
+          ACCEPTANCE_USER_TOTP_SECRET: ${{ secrets.ACCEPTANCE_USER_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          rc=0
+          node .github/scripts/web-acceptance-leak-check.cjs "$RUNNER_TEMP/ios-acceptance.log" || rc=$?
+          if [ "$rc" -le 1 ]; then
+            echo "checked=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$rc"
+
+      - name: Print the proof's full output (the leak check found nothing in it)
+        if: always() && steps.leak-check.outcome == 'success'
+        run: |
+          LOG="$RUNNER_TEMP/ios-acceptance.log"
+          if [ -f "$LOG" ]; then cat "$LOG"; else echo "No output: the proof did not run."; fi
+
+      # On success too: goal HAR-157 needs the screenshots. Screenshots only
+      # (see the export step), and only once the leak check has finished.
+      - name: Upload the proof's screenshots
+        if: always() && steps.leak-check.outputs.checked == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-acceptance-screenshots
+          path: ${{ runner.temp }}/ios-acceptance-screenshots/*.png
+          if-no-files-found: warn
+          retention-days: 30

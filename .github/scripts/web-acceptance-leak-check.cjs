@@ -1,7 +1,11 @@
 #!/usr/bin/env node
-// The HAR-44-style leak check for app-deploy-dev.yml's `web-acceptance` job.
+// The HAR-44-style leak check for app-deploy-dev.yml's `web-acceptance` job,
+// and (HAR-169) its `ios-acceptance` job.
 //
-//   node .github/scripts/web-acceptance-leak-check.cjs <proof-log> <diagnostic-glob>
+//   node .github/scripts/web-acceptance-leak-check.cjs <proof-log> [<diagnostic-glob>]
+//
+// The iOS job gives the log only: it uploads no text file, so it has no
+// diagnostic to check (its screenshots are images, chosen by name).
 //
 // Scans the proof's raw output (the file tee wrote, before GitHub's masking,
 // so a masked secret is still caught) and every file the glob matches (the
@@ -139,10 +143,12 @@ function run({
   const clean = new Set();
   let code = 0;
   try {
-    diagnostics = fs
-      .globSync(diagnosticGlob, { cwd })
-      .map(rel => path.resolve(cwd, rel))
-      .sort();
+    diagnostics = diagnosticGlob
+      ? fs
+          .globSync(diagnosticGlob, { cwd })
+          .map(rel => path.resolve(cwd, rel))
+          .sort()
+      : [];
     const { scans, notes } = buildScans({ password, totpSecret, now });
     for (const note of notes) log(`leak check: ${note}`);
 
@@ -172,7 +178,11 @@ function run({
       );
     }
 
-    log(`leak check: sign-in diagnostics: ${diagnostics.length} matching ${diagnosticGlob}`);
+    if (diagnosticGlob) {
+      log(`leak check: sign-in diagnostics: ${diagnostics.length} matching ${diagnosticGlob}`);
+    } else {
+      log('leak check: no diagnostic glob given: the log is all there is to check');
+    }
     for (const file of diagnostics) {
       const label = path.relative(cwd, file);
       if (check(label, file)) {
@@ -207,8 +217,8 @@ function run({
 }
 
 function main(argv) {
-  if (argv.length !== 2) {
-    console.error('usage: web-acceptance-leak-check.cjs <proof-log> <diagnostic-glob>');
+  if (argv.length < 1 || argv.length > 2) {
+    console.error('usage: web-acceptance-leak-check.cjs <proof-log> [<diagnostic-glob>]');
     return 2;
   }
   return run({

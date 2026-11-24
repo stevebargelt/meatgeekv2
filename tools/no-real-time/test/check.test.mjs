@@ -120,6 +120,7 @@ test('the live paths are skipped; the non-live *.test.ts beside the live proof i
       'apps/api/acceptance/proofs/**',
       'apps/api/acceptance/lib/**',
       'apps/web-e2e/live/**',
+      'apps/ios/MeatGeekLiveUITests/**',
     ]
   );
   withTempFile({ outOfScope: live, exceptions: [] }, file => {
@@ -128,11 +129,16 @@ test('the live paths are skipped; the non-live *.test.ts beside the live proof i
     const hits = r.stdout.split('\n').filter(l => HIT_LINE.test(l));
     assert.deepEqual(
       hits.map(l => l.split(':').slice(0, 3).join(':')),
-      ['apps/web-e2e/live/helpers.test.ts:3: js-timer']
+      [
+        'apps/ios/MeatGeekUITests/helpers.test.sh:3: sh-sleep',
+        'apps/web-e2e/live/helpers.test.ts:3: js-timer',
+      ]
     );
-    // devices.spec.ts, clock.test.ts, browser-proof.spec.ts, global-setup.test.mjs
-    // (live.acceptance.ts is not a test file by name, so it was never in scope).
-    assert.match(r.stdout, /4 out of scope by path$/m);
+    // devices.spec.ts, clock.test.ts, browser-proof.spec.ts, global-setup.test.mjs,
+    // and (HAR-169) the live iOS target's live-proof.test.sh. live.acceptance.ts
+    // is not a test file by name, so it was never in scope. The iOS UI tests
+    // beside the live target stay in scope: their sleep is a hit.
+    assert.match(r.stdout, /5 out of scope by path$/m);
   });
 });
 

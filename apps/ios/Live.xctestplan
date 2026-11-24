@@ -1,0 +1,35 @@
+{
+  "configurations" : [
+    {
+      "id" : "3C1E7A52-9B0D-4F57-8E6A-1D2B4C5E6F70",
+      "name" : "Live",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "defaultTestExecutionTimeAllowance" : 900,
+    "maximumTestExecutionTimeAllowance" : 900,
+    "preferredScreenCaptureFormat" : "screenshots",
+    "systemAttachmentLifetime" : "keepNever",
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:MeatGeek.xcodeproj",
+      "identifier" : "A1000000000000000000000C",
+      "name" : "MeatGeek"
+    },
+    "testTimeoutsEnabled" : true,
+    "uiTestingScreenshotsLifetime" : "keepNever",
+    "userAttachmentLifetime" : "keepAlways"
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:MeatGeek.xcodeproj",
+        "identifier" : "A1000000000000000000002C",
+        "name" : "MeatGeekLiveUITests"
+      }
+    }
+  ],
+  "version" : 1
+}
