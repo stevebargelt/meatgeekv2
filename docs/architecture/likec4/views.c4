@@ -118,13 +118,14 @@ views {
       (`test-repeat.yml`) runs on pull requests only: each affected non-live suite 50 times in a
       row, its emulator suite on `windows-2025`; it starts nothing and is not a required check.
       CI also runs `ios` on `macos-26`: the iOS app's unit and UI tests in a simulator against
-      the in-process stub. A green CI run on main starts the apply, then the deploy and its
-      three acceptance jobs: `acceptance` and `web-acceptance` in parallel, then
-      `ios-acceptance` after `web-acceptance`, because both sign in as the same TOTP user. When
-      a web-acceptance sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`,
-      the leak check runs over it, and the run uploads the `web-acceptance-diagnostics` artifact.
-      The iOS proof runs the same leak check over its raw log before it uploads
-      `ios-acceptance-screenshots`.
+      the in-process stub. A green CI run on main starts the apply, then the deploy and its two
+      acceptance jobs, `acceptance` and `web-acceptance`, in parallel. When a web-acceptance
+      sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`, the leak check
+      runs over it, and the run uploads the `web-acceptance-diagnostics` artifact. The iOS Live
+      Proof is not in that path (HAR-170): it runs on its own, once a day and on demand, against
+      whatever dev is serving, and a failure of it blocks no deploy. It never runs at the same
+      time as `web-acceptance` (both sign in as the same TOTP user; one concurrency group). It
+      runs the same leak check over its raw log before it uploads `ios-acceptance-screenshots`.
     '''
     include *
     include acceptance.*
@@ -222,7 +223,7 @@ views {
       and SignalR-Client-Swift: the same requests, the same backfill after every connect and
       reconnect, the same `waiting`, `live` and `stale` states. It also stops the connection
       when the app leaves the foreground and negotiates again on return. Proven live by the
-      `ios-acceptance` job, in a simulator: `METRIC ios-push-ms` 10918 (run 45429145737), from
+      daily iOS Live Proof, in a simulator: `METRIC ios-push-ms` 10918 (run 45429145737), from
       the tap on Start to the pushed reading on screen, so it includes the cook start.
     '''
 
@@ -399,7 +400,7 @@ views {
 
   dynamic view mergeToDeploy {
     title 'Flow: a merge reaches dev'
-    description 'What happens after the Reviewer merges a pull request. Vercel builds the web app from the same push, in parallel with the Azure path.'
+    description 'What happens after the Reviewer merges a pull request. Vercel builds the web app from the same push, in parallel with the Azure path. The live iOS proof is not in this path: it is its own workflow, run once a day, and does not gate a deploy (HAR-170).'
 
     parallel {
       team -> delivery.ci 'merge to main' {
@@ -430,13 +431,6 @@ views {
     }
     delivery.webAcceptance -> meatgeek.web 'Playwright, production' {
       notes 'Waits for `/version.json` to show this commit or a descendant (`METRIC web-deploy-wait-s`), signs in on the Microsoft pages as the test user, starts a cook on `<sim>-web` and sees a pushed reading (`METRIC web-push-ms`).'
-      navigateTo watchCook
-    }
-    delivery.webAcceptance -> delivery.iosAcceptance 'finished' {
-      notes 'Never at the same time as `web-acceptance`: both sign in as the same TOTP acceptance user.'
-    }
-    delivery.iosAcceptance -> meatgeek.mobile 'XCUITest, simulator' {
-      notes 'Enrols `<sim>-ios` through DPS, builds the real app for a throwaway simulator, signs in on the Microsoft pages as the test user, claims `<sim>-ios`, starts a cook, sees a pushed reading (`METRIC ios-push-ms`), stops it and releases the device.'
       navigateTo watchCook
     }
   }

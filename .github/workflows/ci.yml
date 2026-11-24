@@ -409,7 +409,7 @@ jobs:
 
       - name: Build the live UI tests (compile only, never run)
         # HAR-169: MeatGeekLiveUITests, the live iOS proof, runs only from the
-        # Live test plan, in app-deploy-dev.yml's ios-acceptance job, against
+        # Live test plan, in ios-live-proof.yml's ios-acceptance job, against
         # dev and with the acceptance user's secrets. Here it is compiled, so a
         # change that breaks it fails the PR; nothing here runs it.
         run: |

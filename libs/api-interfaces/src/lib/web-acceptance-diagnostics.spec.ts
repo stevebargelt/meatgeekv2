@@ -495,15 +495,80 @@ describe('web-acceptance-leak-check.cjs TOTP windows, on a fixed clock', () => {
 });
 
 /**
- * HAR-169: the `ios-acceptance` job (the live iOS proof) runs after the web
- * proof, never alongside it (both sign in as the acceptance user with TOTP),
- * checks the runner's raw log before anything is uploaded or printed, and
- * uploads only the proof's own screenshots, on success too.
+ * HAR-169: the `ios-acceptance` job (the live iOS proof) checks the runner's
+ * raw log before anything is uploaded or printed, and uploads only the proof's
+ * own screenshots, on success too.
+ *
+ * HAR-170: it is no longer part of Deploy Dev App. It is its own workflow,
+ * ios-live-proof.yml, run daily and on demand from main, so a failure of it
+ * never blocks a deploy. It still never runs alongside the web proof (both
+ * sign in as the acceptance user with TOTP): the two jobs share a job-level
+ * concurrency group, and each workflow admits one run at a time, so the group
+ * never holds two pending jobs and neither proof cancels the other.
  */
-describe('app-deploy-dev.yml ios-acceptance: after the web proof, leak check, then upload (HAR-169)', () => {
-  const job = (WF.jobs as Record<string, { needs?: string[]; if?: string; steps?: WfStep[] }>)[
-    'ios-acceptance'
-  ];
+interface ConcurrencyJob {
+  needs?: string | string[];
+  if?: string;
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+  steps?: WfStep[];
+}
+const IOS_WORKFLOW = path.join(REPO_ROOT, '.github', 'workflows', 'ios-live-proof.yml');
+const IOS_WF = yaml.load(fs.readFileSync(IOS_WORKFLOW, 'utf8')) as {
+  on: Record<string, unknown>;
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+  jobs: Record<string, ConcurrencyJob>;
+};
+const DEPLOY_WF = WF as unknown as {
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+  jobs: Record<string, ConcurrencyJob>;
+};
+
+describe('ios-live-proof.yml: off the deploy gate, never alongside the web proof (HAR-170)', () => {
+  it('Deploy Dev App has no iOS proof job any more', () => {
+    expect(Object.keys(DEPLOY_WF.jobs).sort()).toEqual(['acceptance', 'deploy', 'web-acceptance']);
+  });
+
+  it('runs on a daily schedule and on demand, nothing else', () => {
+    expect(Object.keys(IOS_WF.on).sort()).toEqual(['schedule', 'workflow_dispatch']);
+    const schedule = IOS_WF.on['schedule'] as { cron: string }[];
+    expect(schedule).toHaveLength(1);
+    // minute hour * * *: once a day.
+    expect(schedule[0].cron).toMatch(/^\d{1,2} \d{1,2} \* \* \*$/);
+  });
+
+  it('refuses any ref but main before it reads state or touches a secret', () => {
+    const resolve = IOS_WF.jobs['resolve'];
+    const first = resolve?.steps?.[0];
+    expect(first?.run).toContain('if [ "$REF" != "refs/heads/main" ]; then');
+    expect(first?.env?.['REF']).toBe('${{ github.ref }}');
+    expect(IOS_WF.jobs['ios-acceptance']?.needs).toBe('resolve');
+  });
+
+  it('shares one job-level group with the web proof, and never cancels either', () => {
+    const ios = IOS_WF.jobs['ios-acceptance']?.concurrency;
+    const web = DEPLOY_WF.jobs['web-acceptance']?.concurrency;
+    expect(ios).toEqual({ group: 'acceptance-user-totp', 'cancel-in-progress': false });
+    expect(web).toEqual(ios);
+    // Each workflow admits one run at a time, so the shared group holds at most
+    // one web and one iOS job: one runs, the other waits, none is replaced.
+    expect(IOS_WF.concurrency).toEqual({ group: 'ios-live-proof', 'cancel-in-progress': false });
+    expect(DEPLOY_WF.concurrency?.['cancel-in-progress']).toBe(false);
+    expect(DEPLOY_WF.concurrency?.group).toBe('app-deploy-dev-development');
+    expect(IOS_WF.concurrency?.group).not.toBe(DEPLOY_WF.concurrency?.group);
+    // No other job in either workflow joins the group.
+    const members = [
+      ...Object.entries(DEPLOY_WF.jobs).map(([k, j]) => [`deploy:${k}`, j] as const),
+      ...Object.entries(IOS_WF.jobs).map(([k, j]) => [`ios:${k}`, j] as const),
+    ]
+      .filter(([, j]) => j.concurrency?.group === 'acceptance-user-totp')
+      .map(([k]) => k)
+      .sort();
+    expect(members).toEqual(['deploy:web-acceptance', 'ios:ios-acceptance']);
+  });
+});
+
+describe('ios-live-proof.yml ios-acceptance: leak check, then upload (HAR-169)', () => {
+  const job = IOS_WF.jobs['ios-acceptance'];
   const steps = job?.steps ?? [];
   const index = (pred: (s: WfStep) => boolean, what: string) => {
     const found = steps.flatMap((s, i) => (pred(s) ? [i] : []));
@@ -517,11 +582,6 @@ describe('app-deploy-dev.yml ios-acceptance: after the web proof, leak check, th
   const LEAK_IOS = index(s => s.id === 'leak-check', 'leak-check');
   const PRINT = index(s => (s.run ?? '').includes('cat "$LOG"'), 'print-log');
   const UPLOAD_IOS = index(s => (s.uses ?? '').startsWith('actions/upload-artifact@'), 'upload');
-
-  it('runs after deploy and web-acceptance, whatever the web proof did, unless cancelled', () => {
-    expect(job?.needs).toEqual(['deploy', 'web-acceptance']);
-    expect(job?.if).toBe("${{ !cancelled() && needs.deploy.outputs.deployed == 'true' }}");
-  });
 
   it('keeps the raw log out of the job log: the runner writes to a file, not tee', () => {
     const run = steps[RUN].run ?? '';

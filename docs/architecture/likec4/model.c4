@@ -387,7 +387,7 @@ model {
           receives the reading and its `cook_started` and `cook_stopped`). The web app's live panel
           is a live client in production: the web-acceptance proof sees a pushed reading in the
           browser (`METRIC web-push-ms` 510, run 44837747351). The iOS app's live panel is a live
-          client too: the ios-acceptance proof sees a pushed reading in the app in a simulator
+          client too: the live iOS proof sees a pushed reading in the app in a simulator
           (`METRIC ios-push-ms` 10918, run 45429145737). The device holds no SignalR connection.
         '''
       }
@@ -445,7 +445,8 @@ model {
         release; HAR-165); a Cooks tab (list with device and status filters and paging, start
         from a device, open, stop; HAR-166); a cook screen with a live panel by push (HAR-167)
         and a chart of the whole cook (HAR-168). Built and tested in CI on `macos-26`, and
-        proven against dev on every deploy by `ios-acceptance` (HAR-169). Not distributed (no
+        proven against dev once a day by the iOS Live Proof workflow (HAR-169, HAR-170), which
+        does not gate a deploy. Not distributed (no
         TestFlight): it runs in the simulator or on a developer's iPhone from Xcode. Its config
         (API base URL, tenant, client id, scope) is compiled in from
         `apps/ios/Config/Dev.xcconfig`, dev only.
@@ -719,7 +720,7 @@ model {
       description 'Started by a green CI run on main. A run for a superseded commit succeeds without applying.'
     }
     deploy = workflow 'Deploy Dev App' {
-      description 'Started by a successful apply. Publishes the API bundle for the commit that was applied, then runs the acceptance and web-acceptance jobs in parallel, and the iOS acceptance job after web-acceptance.'
+      description 'Started by a successful apply. Publishes the API bundle for the commit that was applied, then runs the acceptance and web-acceptance jobs in parallel. The live iOS proof is not one of its jobs (HAR-170).'
     }
     acceptance = workflow 'Acceptance' {
       technology 'nx run api:acceptance, environment development'
@@ -727,7 +728,7 @@ model {
         A job in Deploy Dev App: live probes against the deployed API with an app-only token,
         logged in under OIDC as the dev app-publish identity. There are four standing simulated
         devices: `<sim>` and `<sim>-chart`, which this job ensures, `<sim>-web`, which the
-        web-acceptance job ensures, and `<sim>-ios`, which the iOS acceptance job ensures (`<sim>`
+        web-acceptance job ensures, and `<sim>-ios`, which the iOS Live Proof workflow ensures (`<sim>`
         is `meatgeek-dev-simulated-smoker`). Each run gives each
         device a new X.509 identity in a fresh state dir and enrols its certificate in DPS; `simdevice`
         gets the device only through env vars (`MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`,
@@ -761,7 +762,8 @@ model {
       technology 'nx e2e-live web-e2e, environment development'
       description '''
         A job in Deploy Dev App, in parallel with `acceptance`: the live browser proof against the
-        production web app. It waits for `/version.json` to show the deployed commit (or a
+        production web app. Never at the same time as the iOS Live Proof's job: both sign in as
+        the same TOTP user, so the two jobs share the concurrency group `acceptance-user-totp`. It waits for `/version.json` to show the deployed commit (or a
         descendant), signs in on Microsoft's real pages as `ACCEPTANCE_USER_UPN` (password +
         TOTP), claims `<sim>-web` through the claim screen with the code the device minted,
         starts a cook, sees a reading pushed by `simdevice` in the live panel, stops the cook, and
@@ -777,14 +779,18 @@ model {
       '''
     }
 
-    iosAcceptance = workflow 'iOS acceptance' {
+    iosAcceptance = workflow 'iOS Live Proof' {
       #live
-      technology 'apps/ios/scripts/run-live-proof.sh, Live.xctestplan, macos-26, environment development'
+      technology '.github/workflows/ios-live-proof.yml, apps/ios/scripts/run-live-proof.sh, Live.xctestplan, macos-26, environment development'
       description '''
-        The `ios-acceptance` job in Deploy Dev App (HAR-169): the live iOS proof. It runs on
-        `macos-26` with Xcode 26.6 after `web-acceptance`, never at the same time, because both
-        sign in as the same TOTP acceptance user. It enrols `<sim>-ios` through DPS, then builds
-        the real app (not its UI test mode) for a throwaway iPhone simulator and runs
+        The live iOS proof (HAR-169), its own workflow since HAR-170: once a day (09:17 UTC) and
+        on `workflow_dispatch` from `main`, against whatever dev is serving. It is not in the
+        merge-to-deploy path and a failure of it blocks no deploy. Its `ios-acceptance` job runs on
+        `macos-26` with Xcode 26.6, never at the same time as Deploy Dev App's `web-acceptance`
+        (both sign in as the same TOTP acceptance user; they share the concurrency group
+        `acceptance-user-totp`). It reads the dev hub and DPS from Terraform state, enrols
+        `<sim>-ios` through DPS, then builds the real app from `main`'s tip (not its UI test mode)
+        for a throwaway iPhone simulator and runs
         `MeatGeekLiveUITests` (`LiveProofUITests.swift`) while `simdevice` sends a reading every
         2 s. In the app it signs in on Microsoft's real pages as `ACCEPTANCE_USER_UPN` (password +
         TOTP, pasted, never typed), claims `<sim>-ios` with the code the device minted, starts a
@@ -810,7 +816,7 @@ model {
         `simdevice.publish`), as the Pi's readings carry. Unlike the Pi, it sends no
         `correlation.id` and no cook id: it has no cook. Readings carry the wall-clock time unless
         `--start/--step` stamps synthetic timestamps (reading i at start + i x step). Built and
-        spawned per run by the acceptance, web-acceptance and iOS acceptance jobs. Its credential is an X.509 key
+        spawned per run by the acceptance and web-acceptance jobs and the iOS Live Proof. Its credential is an X.509 key
         and certificate it makes per run in a fresh state dir (`simdevice identity init`), whose
         certificate the job enrols in DPS; simdevice gets only `MEATGEEK_DPS_ID_SCOPE`,
         `MEATGEEK_DEVICE_ID` and `MEATGEEK_STATE_DIR`. The key never leaves the state dir: it is
@@ -824,8 +830,6 @@ model {
     apply -[event]-> deploy 'workflow_run'
     deploy -> acceptance 'needs: deploy'
     deploy -> webAcceptance 'needs: deploy'
-    deploy -> iosAcceptance 'needs: deploy'
-    webAcceptance -> iosAcceptance 'needs: web-acceptance (runs after it)'
     acceptance.roundtrip -> simdevice 'spawns: --count 1'
     acceptance.volume -> simdevice 'spawns: top-up to 8,640 readings'
     acceptance.chart -> simdevice 'spawns as <sim>-chart, --start/--step'

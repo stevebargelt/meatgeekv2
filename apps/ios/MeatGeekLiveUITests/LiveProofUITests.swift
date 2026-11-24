@@ -289,33 +289,32 @@ final class Proof {
         let badge = app.staticTexts[ID.liveBadge]
         let grill = app.staticTexts[ID.liveChannel("grill")]
         let probe1 = app.staticTexts[ID.liveChannel("probe1")]
-        let deadline = startedAt.addingTimeInterval(LiveBound.push)
         var first: String?
-        while true {
-            if badge.exists, badge.value as? String == "live", grill.exists, !grill.label.hasSuffix("—") {
-                let shown = "\(grill.label); \(probe1.exists ? probe1.label : "Probe 1, —")"
-                if first == nil {
-                    first = shown
-                    log("The cook screen is live, showing \(shown)")
-                } else if shown != first {
-                    let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
-                    log("The cook screen shows a newer reading, \(shown): pushed while it was open")
-                    log("METRIC ios-push-ms \(ms)")
-                    Live.screenshot(app, "2-cook-pushed-reading")
-                    return
-                }
+        let pushed = LivePoll.find(by: startedAt.addingTimeInterval(LiveBound.push)) { () -> Int? in
+            guard badge.exists, badge.value as? String == "live", grill.exists, !grill.label.hasSuffix("—") else {
+                return nil
             }
-            if Date() > deadline {
-                let state = badge.exists ? "\(badge.label) (\(badge.value as? String ?? "?"))" : "no live panel"
-                let seen = grill.exists ? grill.label : "no grill"
-                throw LiveFailure(
-                    "the cook screen did not show a pushed reading within \(Int(LiveBound.push)) s of Start "
-                        + "(badge \(state), \(seen))"
-                        + (first.map { "; it showed \($0) and no newer reading arrived" } ?? "")
-                )
+            let shown = "\(grill.label); \(probe1.exists ? probe1.label : "Probe 1, —")"
+            guard let earlier = first else {
+                first = shown
+                log("The cook screen is live, showing \(shown)")
+                return nil
             }
-            Thread.sleep(forTimeInterval: LiveBound.poll)
+            guard shown != earlier else { return nil }
+            log("The cook screen shows a newer reading, \(shown): pushed while it was open")
+            return Int(Date().timeIntervalSince(startedAt) * 1000)
         }
+        guard let ms = pushed else {
+            let state = badge.exists ? "\(badge.label) (\(badge.value as? String ?? "?"))" : "no live panel"
+            let seen = grill.exists ? grill.label : "no grill"
+            throw LiveFailure(
+                "the cook screen did not show a pushed reading within \(Int(LiveBound.push)) s of Start "
+                    + "(badge \(state), \(seen))"
+                    + (first.map { "; it showed \($0) and no newer reading arrived" } ?? "")
+            )
+        }
+        log("METRIC ios-push-ms \(ms)")
+        Live.screenshot(app, "2-cook-pushed-reading")
     }
 
     /// Stop cook, confirmed, on the open cook's screen: it shows Completed.
