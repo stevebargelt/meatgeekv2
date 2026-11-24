@@ -17,7 +17,7 @@ model {
   }
 
   entra = external 'Microsoft Entra ID' {
-    description 'Issues the access tokens that the API accepts: user tokens (access_as_user) to the web app by auth code + PKCE, and app-only tokens to the acceptance suite.'
+    description 'Issues the access tokens that the API accepts: user tokens (access_as_user) to the web app and the iOS app by auth code + PKCE, and app-only tokens to the acceptance suite.'
   }
 
   vercel = external 'Vercel' {
@@ -231,7 +231,15 @@ model {
 
         easyauth = component 'Easy Auth' {
           technology 'App Service Authentication, default-deny'
-          description 'requireAuthentication with Return401: validates the Entra token at the platform edge before any function runs, and injects X-MS-CLIENT-PRINCIPAL. Every function is anonymous at the Functions runtime on purpose.'
+          description '''
+            requireAuthentication with Return401: validates the Entra token at the platform edge
+            before any function runs, and injects X-MS-CLIENT-PRINCIPAL. Every function is anonymous
+            at the Functions runtime on purpose. It accepts tokens only from the client applications
+            in `functions_auth_allowed_client_app_ids`; dev has five: the Azure CLI public client,
+            the app-publish identity, the acceptance peer identity, the web SPA
+            `meatgeek-v2-dev-web` (HAR-82) and the iOS public client `meatgeek-v2-dev-ios`
+            (HAR-159, HAR-163).
+          '''
         }
         principal = component 'principal' {
           description 'The only source of the caller identity: tid:oid from the injected header. Fails closed (401, no default user).'
@@ -378,8 +386,9 @@ model {
           44673261258) and `signalr isolation` (a non-owner receives nothing, while the owner
           receives the reading and its `cook_started` and `cook_stopped`). The web app's live panel
           is a live client in production: the web-acceptance proof sees a pushed reading in the
-          browser (`METRIC web-push-ms` 510, run 44837747351). The device holds no SignalR
-          connection.
+          browser (`METRIC web-push-ms` 510, run 44837747351). The iOS app's live panel is a live
+          client too: the ios-acceptance proof sees a pushed reading in the app in a simulator
+          (`METRIC ios-push-ms` 10918, run 45429145737). The device holds no SignalR connection.
         '''
       }
 
@@ -427,13 +436,59 @@ model {
     }
 
     mobile = mobileapp 'iOS app' {
-      #decided
-      technology 'Swift (native iOS)'
+      #live
+      technology 'Swift 6, SwiftUI, iOS 18.0+; MSAL for iOS 2.18.1 (auth code + PKCE, system browser); swift-openapi-generator client from libs/api-specs/spec; SignalR-Client-Swift 1.2.1; Swift Charts'
       description '''
-        Decided by the owner on 2026-11-19 as the next goal, and not built: nothing for it is on
-        `main`. It shares only the OpenAPI contract with the web app and will generate its client
-        with swift-openapi-generator. The earlier mobile app was removed in HAR-73.
+        Sign in with Entra (MSAL in the system browser, tokens in MSAL's keychain cache, no
+        secret; registration `meatgeek-v2-dev-ios`, HAR-159, HAR-162); a Devices tab (each
+        device's connection and last heard, claim with the code the device shows, rename,
+        release; HAR-165); a Cooks tab (list with device and status filters and paging, start
+        from a device, open, stop; HAR-166); a cook screen with a live panel by push (HAR-167)
+        and a chart of the whole cook (HAR-168). Built and tested in CI on `macos-26`, and
+        proven against dev on every deploy by `ios-acceptance` (HAR-169). Not distributed (no
+        TestFlight): it runs in the simulator or on a developer's iPhone from Xcode. Its config
+        (API base URL, tenant, client id, scope) is compiled in from
+        `apps/ios/Config/Dev.xcconfig`, dev only.
       '''
+      link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/ios 'Source'
+
+      shell = component 'shell' {
+        technology 'MSAL for iOS, swift-openapi-runtime (URLSession transport)'
+        description '''
+          `AppConfig` reads and checks the four compiled-in settings; `SessionModel` signs in
+          through `MSALTokenProvider` (`acquireTokenSilent`, interactive in the system browser
+          when MSAL asks) and restores a cached account at launch. `APIClientFactory` builds the
+          one generated client, whose `BearerTokenMiddleware` adds `Authorization: Bearer
+          <token>` to every call. Screens call it through `SessionModel.perform`: a 401 ends the
+          session ("Your session ended. Sign in again.").
+        '''
+      }
+      devices = component 'devices' {
+        description 'Devices tab (`DevicesModel`): GET /devices with one GET /cooks?status=active for the list, rename (PATCH /devices/{id}) and release (DELETE /devices/{id}). A device is added only by claim (`ClaimDeviceModel`, POST /devices/claim) with the code it shows.'
+      }
+      cooks = component 'cooks' {
+        description 'Cooks tab: the list (`CooksModel`, GET /cooks with deviceId and status filters, "Load more" by continuation token), the start sheet (`StartCookModel`, POST /cooks with an id made once per form, so a retry is idempotent), the cook screen (`CookDetailModel`, GET /cooks/{cookId}) and stop (POST /cooks/{cookId}/stop).'
+      }
+      livePanel = component 'live panel' {
+        technology 'SignalR-Client-Swift 1.2.1 (MeatGeekLive)'
+        description '''
+          `LiveConnection` and `LivePanelModel`: POST /negotiate, then one hub connection with
+          automatic reconnect; when that gives up and the connection closes, it negotiates again
+          after 2, 5, 10, then every 30 s. After every start and reconnect it backfills from
+          `GET /temperatures/current/{deviceId}`. States: `waiting` (no reading yet), `live`, and
+          `stale` (no reading for 3 x the device `pollingInterval`, or reconnecting). Connected
+          only while the cook screen shows and the app is in the foreground: it stops in the
+          background and negotiates again on return.
+        '''
+      }
+      chart = component 'chart' {
+        technology 'Swift Charts'
+        description '`CookChartModel` and `ChartSeries`: GET /cooks/{cookId}/chart, one average line per channel with a min/max band, from the server-side rollups. Readings pushed to the live panel are appended to it (at most 2,000).'
+      }
+
+      livePanel -> chart 'pushed readings'
+      cooks -> livePanel 'the cook device'
+      cooks -> chart 'the cook'
     }
     web = webapp 'Web app' {
       #live
@@ -514,6 +569,9 @@ model {
     }
     cloud.realtime -> web.livePanel 'temperature, cook_stopped' {
       technology 'WebSockets, @microsoft/signalr'
+    }
+    cloud.realtime -> mobile.livePanel 'temperature, cook_stopped' {
+      technology 'WebSockets, SignalR-Client-Swift'
     }
 
     // The active cook is device state, carried by the IoT Hub device twin (HAR-58, HAR-66).
@@ -602,16 +660,20 @@ model {
     web.livePanel -> cloud.api.temperatures 'GET /temperatures/current/{deviceId} (backfill)'
     web.chart -> cloud.api.cooks 'GET /cooks/{cookId}/chart'
 
-    // iOS app: decided, not built.
-    mobile -[decided]-> cloud.api 'REST' {
-      #decided
+    // iOS app: live against dev, run from Xcode, not distributed (goal HAR-157).
+    mobile -> cloud.api 'REST, user access token (access_as_user)' {
+      technology 'HTTPS, swift-openapi-generator client'
+      description 'Every call carries the user access token; Easy Auth validates it before any function runs.'
     }
-    mobile -[decided]-> cloud.api.negotiate 'negotiate' {
-      #decided
+    mobile.devices -> cloud.api.devices 'GET /devices; POST /devices/claim; PATCH, DELETE /devices/{id}'
+    mobile.cooks -> cloud.api.cooks 'GET, POST /cooks; GET /cooks/{cookId}; POST /cooks/{cookId}/stop'
+    mobile.shell -> entra 'auth code + PKCE (MSAL, system browser), no secret'
+    mobile.livePanel -> cloud.api.negotiate 'POST /negotiate'
+    mobile.livePanel -> cloud.realtime 'connects as the signed-in user' {
+      technology 'WebSockets, SignalR-Client-Swift'
     }
-    cloud.realtime -[decided]-> mobile 'live temperatures, cook events' {
-      #decided
-    }
+    mobile.livePanel -> cloud.api.temperatures 'GET /temperatures/current/{deviceId} (backfill)'
+    mobile.chart -> cloud.api.cooks 'GET /cooks/{cookId}/chart'
   }
 
   delivery = system 'Delivery pipeline' {
@@ -619,7 +681,9 @@ model {
 
     ci = workflow 'CI/CD Pipeline' {
       description '''
-        On every pull request and push to main: lint and test; the Cosmos emulator tests on the
+        On every pull request and push to main: lint and test (including `nx test api-specs`,
+        which fails when the iOS app's committed OpenAPI bundle has drifted from
+        `libs/api-specs/spec`, HAR-161); the Cosmos emulator tests on the
         Windows-native emulator (`api-cosmos-emulator` on `windows-2025`, emulator 2.14.28,
         `PartitionCount=10`; the Linux emulator image crashes natively under load, HAR-113);
         builds, Terraform validation and the security scan; `no-real-time-guard`:
@@ -627,8 +691,13 @@ model {
         wall-clock read, a per-wait deadline, a fixed port, or a `| grep -q` under pipefail, with
         a reviewed exception list (HAR-127, HAR-128); and `web-e2e`: Playwright drives the web
         app's main path against the built app, with Entra, the API and SignalR faked at the
-        network edge, so it needs no secret and no environment (`contents: read` only). Never
-        receives a device credential.
+        network edge, so it needs no secret and no environment (`contents: read` only); and `ios`
+        (HAR-160, HAR-169): on `macos-26` with Xcode 26.6, `xcodebuild test` of the `MeatGeek`
+        scheme in an iPhone simulator, MeatGeekKitTests and MeatGeekLiveTests (Swift Testing) and
+        MeatGeekUITests (XCUITest) against the in-process stub API, then a build-only of
+        MeatGeekLiveUITests (the live proof, which never runs here); no signing, no secret,
+        `contents: read`, and $0 because the repository is public. Never receives a device
+        credential.
       '''
     }
     testRepeat = workflow 'Test repeat' {
@@ -649,15 +718,16 @@ model {
       description 'Started by a green CI run on main. A run for a superseded commit succeeds without applying.'
     }
     deploy = workflow 'Deploy Dev App' {
-      description 'Started by a successful apply. Publishes the API bundle for the commit that was applied, then runs the acceptance and web-acceptance jobs in parallel.'
+      description 'Started by a successful apply. Publishes the API bundle for the commit that was applied, then runs the acceptance and web-acceptance jobs in parallel, and the iOS acceptance job after web-acceptance.'
     }
     acceptance = workflow 'Acceptance' {
       technology 'nx run api:acceptance, environment development'
       description '''
         A job in Deploy Dev App: live probes against the deployed API with an app-only token,
-        logged in under OIDC as the dev app-publish identity. There are three standing simulated
-        devices: `<sim>` and `<sim>-chart`, which this job ensures, and `<sim>-web`, which the
-        web-acceptance job ensures (`<sim>` is `meatgeek-dev-simulated-smoker`). Each run gives each
+        logged in under OIDC as the dev app-publish identity. There are four standing simulated
+        devices: `<sim>` and `<sim>-chart`, which this job ensures, `<sim>-web`, which the
+        web-acceptance job ensures, and `<sim>-ios`, which the iOS acceptance job ensures (`<sim>`
+        is `meatgeek-dev-simulated-smoker`). Each run gives each
         device a new X.509 identity in a fresh state dir and enrols its certificate in DPS; `simdevice`
         gets the device only through env vars (`MEATGEEK_DPS_ID_SCOPE`, `MEATGEEK_DEVICE_ID`,
         `MEATGEEK_STATE_DIR`), and no device key leaves the state dir.
@@ -706,12 +776,32 @@ model {
       '''
     }
 
+    iosAcceptance = workflow 'iOS acceptance' {
+      #live
+      technology 'apps/ios/scripts/run-live-proof.sh, Live.xctestplan, macos-26, environment development'
+      description '''
+        The `ios-acceptance` job in Deploy Dev App (HAR-169): the live iOS proof. It runs on
+        `macos-26` with Xcode 26.6 after `web-acceptance`, never at the same time, because both
+        sign in as the same TOTP acceptance user. It enrols `<sim>-ios` through DPS, then builds
+        the real app (not its UI test mode) for a throwaway iPhone simulator and runs
+        `MeatGeekLiveUITests` (`LiveProofUITests.swift`) while `simdevice` sends a reading every
+        2 s. In the app it signs in on Microsoft's real pages as `ACCEPTANCE_USER_UPN` (password +
+        TOTP, pasted, never typed), claims `<sim>-ios` with the code the device minted, starts a
+        cook, sees a reading pushed over SignalR in the live panel, stops the cook and releases
+        the device. Prints `METRIC ios-push-ms` (10918 in run 45429145737, from the tap on Start
+        to the pushed reading). The leak check runs over the raw log before anything is
+        uploaded; the `ios-acceptance-screenshots` artifact (named screenshots only, never the
+        result bundle) is kept 30 days, on success too.
+      '''
+      link https://github.com/stevebargelt/meatgeekv2/tree/main/apps/ios/MeatGeekLiveUITests 'Source'
+    }
+
     simdevice = app 'simdevice' {
       #live
       technology 'Go, apps/data-pusher/cmd/simdevice'
       description '''
-        A software IoT Hub device for dev. It sends synthetic readings as any of the three standing
-        devices (`<sim>` = `meatgeek-dev-simulated-smoker`, `<sim>-chart`, `<sim>-web`) through
+        A software IoT Hub device for dev. It sends synthetic readings as any of the four standing
+        devices (`<sim>` = `meatgeek-dev-simulated-smoker`, `<sim>-chart`, `<sim>-web`, `<sim>-ios`) through
         the data-pusher's own `internal/publish` and
         `internal/iothub` code: MQTT on 8883 with its own X.509 client certificate (no
         password), QoS 1, with `messageId`,
@@ -719,7 +809,7 @@ model {
         `simdevice.publish`), as the Pi's readings carry. Unlike the Pi, it sends no
         `correlation.id` and no cook id: it has no cook. Readings carry the wall-clock time unless
         `--start/--step` stamps synthetic timestamps (reading i at start + i x step). Built and
-        spawned per run by the acceptance and web-acceptance jobs. Its credential is an X.509 key
+        spawned per run by the acceptance, web-acceptance and iOS acceptance jobs. Its credential is an X.509 key
         and certificate it makes per run in a fresh state dir (`simdevice identity init`), whose
         certificate the job enrols in DPS; simdevice gets only `MEATGEEK_DPS_ID_SCOPE`,
         `MEATGEEK_DEVICE_ID` and `MEATGEEK_STATE_DIR`. The key never leaves the state dir: it is
@@ -733,10 +823,13 @@ model {
     apply -[event]-> deploy 'workflow_run'
     deploy -> acceptance 'needs: deploy'
     deploy -> webAcceptance 'needs: deploy'
+    deploy -> iosAcceptance 'needs: deploy'
+    webAcceptance -> iosAcceptance 'needs: web-acceptance (runs after it)'
     acceptance.roundtrip -> simdevice 'spawns: --count 1'
     acceptance.volume -> simdevice 'spawns: top-up to 8,640 readings'
     acceptance.chart -> simdevice 'spawns as <sim>-chart, --start/--step'
     webAcceptance -> simdevice 'spawns as <sim>-web'
+    iosAcceptance -> simdevice 'spawns as <sim>-ios'
   }
 
   // Device software updates. Today: by hand. Not built: over the air.
@@ -769,7 +862,7 @@ model {
   }
 
   // Simulated device (dev acceptance).
-  delivery.simdevice -[event]-> meatgeek.cloud.ingest.iothub 'telemetry as <sim>, <sim>-chart or <sim>-web: messageId, $.ct=application/json, $.ce=utf-8, traceparent' {
+  delivery.simdevice -[event]-> meatgeek.cloud.ingest.iothub 'telemetry as <sim>, <sim>-chart, <sim>-web or <sim>-ios: messageId, $.ct=application/json, $.ce=utf-8, traceparent' {
     technology 'MQTT 8883, X.509 client certificate, QoS 1'
     description 'Built by the internal/publish builders of the data-pusher over the same internal/iothub transport, so messageId, $.ct, $.ce and traceparent match the readings of the Pi. No correlation.id and no cook id: simdevice passes an empty correlation and a nil cook id.'
   }
@@ -804,8 +897,10 @@ model {
   pitmaster -> meatgeek.web 'claims a device with its claim code, releases it' {
     #live
   }
-  pitmaster -[decided]-> meatgeek.mobile 'monitors a cook' {
-    #decided
+  // One edge, not two as for the web app: a second parallel pitmaster -> mobile edge makes
+  // Graphviz fail to lay out the `system` view (likec4 1.61.0: "triangulation failed").
+  pitmaster -> meatgeek.mobile 'watches a cook live, reviews cooks' {
+    description 'Also claims a device with its claim code, and releases it, as in the web app.'
   }
   smoker -> meatgeek.edge.controller 'RTD sensor readings'
   meatgeek.cloud.api.easyauth -> entra 'validates access tokens'
@@ -819,6 +914,11 @@ model {
   delivery.webAcceptance -> meatgeek.web 'Playwright, production'
   delivery.webAcceptance -> entra 'signs in as the test user'
   delivery.webAcceptance -> meatgeek.cloud.ingest.iothub 'enrol <sim>-web through DPS (enrol-device.sh), register it with simdevice' {
+    technology 'enrol-device.sh (az iot dps, --auth-type login, OIDC); simdevice X.509 over DPS'
+  }
+  delivery.iosAcceptance -> meatgeek.mobile 'XCUITest, simulator'
+  delivery.iosAcceptance -> entra 'signs in as the test user'
+  delivery.iosAcceptance -> meatgeek.cloud.ingest.iothub 'enrol <sim>-ios through DPS (enrol-device.sh), register it with simdevice' {
     technology 'enrol-device.sh (az iot dps, --auth-type login, OIDC); simdevice X.509 over DPS'
   }
   meatgeek.cloud.observability.actionGroup -> operator 'alert email'

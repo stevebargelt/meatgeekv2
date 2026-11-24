@@ -49,7 +49,7 @@ It then runs `xcodebuild test -scheme MeatGeek` with `CODE_SIGNING_ALLOWED=NO`, 
 
 ### Why the TypeScript build matrix is `api` + `web` only
 
-`build-typescript` compiles only the apps that NX builds with `@nx/js:tsc`/bundlers — `api` (Azure Functions) and `web` (React/Vite). Those are the workspace's only TypeScript apps. The mobile client is a native iOS (Swift) app in `apps/ios`, so far a skeleton; it is not an Nx project (the `ios` job builds and tests it with `xcodebuild`, see [iOS job](#ios-job-har-160)), and it shares only the OpenAPI contract with the web app, so it has no leg in either matrix.
+`build-typescript` compiles only the apps that NX builds with `@nx/js:tsc`/bundlers — `api` (Azure Functions) and `web` (React/Vite). Those are the workspace's only TypeScript apps. The mobile client is a native iOS (Swift) app in `apps/ios` (see [iOS app](../applications/ios-app.md)); it is not an Nx project (the `ios` job builds and tests it with `xcodebuild`, see [iOS job](#ios-job-har-160)), and it shares only the OpenAPI contract with the web app, so it has no leg in either matrix.
 
 Adding a new buildable TypeScript app? Add it to the `build-typescript` matrix and to the `lint-and-test` matrix.
 

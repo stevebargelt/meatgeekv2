@@ -1,5 +1,10 @@
 # MeatGeek iOS app
 
+For the overview (what the app does, its architecture, CI and the live proof,
+config and auth, and what TestFlight would need), see
+[iOS app](../../docs/applications/ios-app.md). This README is the developer
+guide.
+
 The native iPhone client for MeatGeek: Swift 6, SwiftUI, iOS 18 and later,
 iPhone only. It builds and tests in the simulator (HAR-158), calls the API
 through a client generated from the OpenAPI contract (HAR-161, see
@@ -22,7 +27,8 @@ This is not an Nx project. `nx` does not build or test it; use Xcode or
 ```
 apps/ios/
 ├── MeatGeek.xcodeproj        # The app project (shared scheme: MeatGeek)
-├── MeatGeek.xctestplan       # Test plan: MeatGeekKitTests + MeatGeekUITests
+├── MeatGeek.xctestplan       # Test plan: MeatGeekKitTests, MeatGeekLiveTests, MeatGeekUITests
+├── Live.xctestplan           # Test plan: MeatGeekLiveUITests, the live proof against dev
 ├── Config/                   # Build settings (xcconfig), see Signing below
 │   ├── Base.xcconfig         # Shared by every target and configuration
 │   ├── Debug.xcconfig
@@ -32,6 +38,8 @@ apps/ios/
 │   └── Signing.local.xcconfig.example
 ├── MeatGeek/                 # App target: a thin SwiftUI shell
 ├── MeatGeekUITests/          # UI tests (XCTest/XCUITest)
+├── MeatGeekLiveUITests/      # The live iOS proof (XCUITest), see Run the tests
+├── scripts/run-live-proof.sh # Runs the live proof (CI's ios-acceptance job)
 └── MeatGeekKit/              # Local Swift package: all the app's logic
     ├── Sources/MeatGeekAPI/      # Generated API client: openapi.yaml + generator config
     ├── Sources/MeatGeekKit/      # Config, session, screen models, token provider protocol, stub API
@@ -75,6 +83,7 @@ apps/ios/
 |---|---|---|
 | `MeatGeek` | iOS app, display name "MeatGeek", portrait and landscape | `com.meatgeek.ios` |
 | `MeatGeekUITests` | UI tests | `com.meatgeek.ios.uitests` |
+| `MeatGeekLiveUITests` | UI tests: the live iOS proof, in `Live.xctestplan` only | `com.meatgeek.ios.liveuitests` |
 | `MeatGeekKit` | Swift package library, `platforms: [.iOS(.v18)]`, Swift 6 mode | |
 | `MeatGeekAPI` | Swift package target in MeatGeekKit: the generated API client | |
 | `MeatGeekMSAL` | Swift package library in MeatGeekKit: `MSALTokenProvider`; the app links it, the tests do not | |
@@ -156,6 +165,13 @@ The UI tests launch the app in [UI test mode](#ui-test-mode), so they never
 touch MSAL or the network. One of them reads the built app's Info.plist, whose
 path the test plan passes in as `MEATGEEK_APP_INFOPLIST`; run the UI tests
 through the scheme (its test plan), not on their own.
+
+The live iOS proof, `MeatGeekLiveUITests`, is not in the `MeatGeek` test plan:
+it runs the real app against dev, signed in as the acceptance user, from its
+own plan `Live.xctestplan`, through `scripts/run-live-proof.sh` (HAR-169).
+CI's `ios` job only compiles it; Deploy Dev App's `ios-acceptance` job runs it
+on every dev deploy. To run it by hand, see
+[Live iOS proof](../../docs/development/live-acceptance.md#live-ios-proof).
 
 ## API client
 

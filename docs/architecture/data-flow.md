@@ -8,7 +8,7 @@ MeatGeek V2 uses a **parallel processing architecture** where temperature teleme
 
 The [`ingest`](https://stevebargelt.github.io/meatgeekv2/#/view/ingest/) and [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) views show this flow: IoT Hub routes each message both directly to Cosmos DB (storage) and to an Event Hub (real-time).
 
-The real-time leg (Event Hub → Function → SignalR) is **on `main` since HAR-60**: `broadcastTemperature` in `apps/api` consumes the Event Hub and pushes each reading to the device owner's SignalR user (`userId`, HAR-81). No app connects to SignalR yet; the acceptance proofs are the only live client.
+The real-time leg (Event Hub → Function → SignalR) is **on `main` since HAR-60**: `broadcastTemperature` in `apps/api` consumes the Event Hub and pushes each reading to the device owner's SignalR user (`userId`, HAR-81). Its live clients are the web app's live panel (HAR-71), the iOS app's live panel (HAR-167) and the acceptance proofs.
 
 ## Detailed Data Flow
 
@@ -123,11 +123,11 @@ The API only reads this container. A reading's device is `SystemProperties["ioth
 
 ### 4. Real-time Path Details
 
-**On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's owner through the SignalR output binding on `temperatureHub`, addressed by `userId` (HAR-81). The web app's live panel receives it in production (HAR-71). No message goes to a SignalR group.
+**On `main` since HAR-60:** `broadcastTemperature`, an Event Hub trigger on `temperature-data` (consumer group `api-broadcast`, `cardinality: 'many'`, identity-based `IOTHUB_EVENTS` connection), sends each reading to its device's owner through the SignalR output binding on `temperatureHub`, addressed by `userId` (HAR-81). The web app's live panel receives it in production (HAR-71), and so does the iOS app's cook screen (HAR-167). No message goes to a SignalR group.
 
-The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows this path, and [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/) follows it into the browser.
+The [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view shows this path, and [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/) follows it into the browser and the iOS app.
 
-**Measured live delay** (single dev samples): reading to browser, `METRIC web-push-ms 510` (run 44837747351, the `web-acceptance` job); send to an acceptance-proof client on a cold start, `METRIC signalr-delivery-ms 18424` (run 44673261258).
+**Measured live delay** (single dev samples): reading to browser, `METRIC web-push-ms 510` (run 44837747351, the `web-acceptance` job); tap on Start to a pushed reading in the iOS app in a simulator, `METRIC ios-push-ms 10918` (run 45429145737, the `ios-acceptance` job; it includes starting the cook); send to an acceptance-proof client on a cold start, `METRIC signalr-delivery-ms 18424` (run 44673261258).
 
 **What is sent** (`apps/api/src/functions/signalr/broadcast-temperature.ts`):
 - One message per event: target `temperature`, `userId` = the `userId` stored on the device, one argument — the `TemperatureReading` plus `enqueuedTimeUtc` (the Event Hub enqueued time, ISO 8601).
@@ -156,7 +156,7 @@ Before a device sends anything it is enrolled in the Device Provisioning Service
 The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) view shows this sequence.
 
 **Sequence**:
-1. A client (the web app's start form, or an acceptance proof) calls `POST /cooks` with a `deviceId`. The web app sends a client-generated cook id, one per intent, so a retried submit starts the cook once
+1. A client (the web app's start form, the iOS app's start sheet, or an acceptance proof) calls `POST /cooks` with a `deviceId`. Both apps send a client-generated cook id, one per intent, so a retried submit starts the cook once
 2. The API resolves the caller from the Easy Auth principal, `"<tid>:<oid>"`
 3. The API point-reads the device in the `devices` container. A device owned by someone else, or not claimed by anyone, gets **403 `DEVICE_NOT_OWNED`**: no write, no SignalR event
 4. For an owned device, the API creates the cook record in the `cooks` container, partitioned on the caller's `userId`:
@@ -234,7 +234,7 @@ For an owned device the API marks the cook completed, clears the device twin's d
 
 ### Latency
 - **Storage**: ~1.2 s from send to readable through the API, measured in dev by `apps/api/acceptance/proofs/telemetry-roundtrip.proof.ts` (`METRIC roundtrip-ms`): 1211 ms (run 44603121177) and 1235 ms (run 44612029684). It times one `simdevice` reading from send, through IoT Hub's `cosmos-storage-route`, until `GET /temperatures/current/{deviceId}` returns it. Single dev samples, not targets; each `Deploy Dev App` run's summary carries the current value.
-- **Real-time push**: ~18.4 s from send to a SignalR client, measured in dev by `apps/api/acceptance/proofs/signalr-live-temperature.proof.ts` (`METRIC signalr-delivery-ms`): 18424 ms (run 44673261258). It times one `simdevice` reading from send, through the Event Hub and `broadcastTemperature`, until the owner's SignalR client receives it. A single dev sample, not a target. No app receives the pushes yet.
+- **Real-time push**: ~18.4 s from send to a SignalR client, measured in dev by `apps/api/acceptance/proofs/signalr-live-temperature.proof.ts` (`METRIC signalr-delivery-ms`): 18424 ms (run 44673261258). It times one `simdevice` reading from send, through the Event Hub and `broadcastTemperature`, until the owner's SignalR client receives it. A single dev sample, not a target, and a cold start. The apps receive the pushes too: `METRIC web-push-ms 510` in the browser and `METRIC ios-push-ms 10918` in the iOS app (measured from the tap on Start).
 
 ### History read cost
 Before HAR-75, history paged by `OFFSET` and every request also paid a `COUNT(1)` over the device's partition for `total`. Measured in dev by `apps/api/acceptance/proofs/telemetry-volume.proof.ts` (run 44612029684) on the simulated device holding 8700 readings:

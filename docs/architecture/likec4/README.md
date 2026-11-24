@@ -232,6 +232,7 @@ detail on a step, and `navigateTo <viewId>` to link a step to another view
 (for example from a current-state flow to its `Target` counterpart). A flow that
 contains any decided or not-built step is a `Target` flow; the current-state flow
 next to it stops where today's code stops and says so in its description
-(see `telemetry` in `views.c4`, which stops at SignalR because no app connects yet).
+(for example, `telemetry` in `views.c4` ends at the apps' live panels; a probe alert
+would be added only in `probeAlertTarget`).
 
 After any change, run `npm run check` and look at the result in the preview.

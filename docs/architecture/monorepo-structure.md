@@ -54,11 +54,11 @@ apps/api/
 └── project.json                # NX project configuration
 ```
 
-#### 2. Mobile Application (`apps/ios/`, skeleton)
+#### 2. Mobile Application (`apps/ios/`, live against dev)
 **Purpose**: Mobile interface for BBQ monitoring  
 **Technology**: Native iOS app in Swift  
 
-The mobile client is a native iOS (Swift) app in `apps/ios`. So far it is a skeleton in `apps/ios` (HAR-158) that builds and tests in the simulator, with Entra sign-in through MSAL (HAR-162) a Devices tab that lists, claims, renames and releases devices (HAR-165), and a Cooks tab that lists, starts, opens and stops cooks (HAR-166). It is not an Nx project in this workspace: it builds with Xcode, from `MeatGeek.xcodeproj` and the local Swift package `MeatGeekKit`, which holds its logic. CI's `ios` job builds it and runs its unit and UI tests on a macOS runner on every pull request and push (HAR-160, see [CI/CD](../development/ci-cd.md#ios-job-har-160)). See [`apps/ios/README.md`](../../apps/ios/README.md). Because it is Swift, it shares no TypeScript code with the web app: the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`.
+The mobile client is a native iOS (Swift) app in `apps/ios` (HAR-158), live against dev and run from Xcode (not distributed): Entra sign-in through MSAL (HAR-162), a Devices tab that lists, claims, renames and releases devices (HAR-165), a Cooks tab that lists, starts, opens and stops cooks (HAR-166), a live panel by push (HAR-167) and a chart of the whole cook (HAR-168). It is not an Nx project in this workspace: it builds with Xcode, from `MeatGeek.xcodeproj` and the local Swift package `MeatGeekKit`, which holds its logic. CI's `ios` job builds it and runs its unit and UI tests on a macOS runner on every pull request and push (HAR-160, see [CI/CD](../development/ci-cd.md#ios-job-har-160)), and Deploy Dev App's `ios-acceptance` job proves it against dev on every deploy (HAR-169). See [iOS app](../applications/ios-app.md) and [`apps/ios/README.md`](../../apps/ios/README.md). Because it is Swift, it shares no TypeScript code with the web app: the only thing the two clients share is the OpenAPI contract in `libs/api-specs/spec`.
 
 #### 3. Web Application (`apps/web/`)
 **Purpose**: The live client: sign in, devices, cooks, a live panel by push and a chart of the whole cook  

@@ -223,7 +223,7 @@ make build-arm
 ```
 
 ### Mobile Application
-The mobile client is a native iOS (Swift) app in `apps/ios`, so far a skeleton. It is not an Nx project, so there are no `nx` commands for it: build and test it with Xcode or `xcodebuild` as in [`apps/ios/README.md`](../../apps/ios/README.md). It shares only the OpenAPI contract in `libs/api-specs/spec` with the web app.
+The mobile client is a native iOS (Swift) app in `apps/ios` (see [iOS app](../applications/ios-app.md)). It is not an Nx project, so there are no `nx` commands for it: build and test it with Xcode or `xcodebuild` as in [`apps/ios/README.md`](../../apps/ios/README.md). The one Nx target that touches it is `npx nx run api-specs:bundle-ios`, which writes its OpenAPI bundle (and `npx nx test api-specs` fails when that bundle is stale). It shares only the OpenAPI contract in `libs/api-specs/spec` with the web app.
 
 ## Infrastructure Management
 

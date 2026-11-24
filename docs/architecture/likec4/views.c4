@@ -22,7 +22,7 @@ views {
 
   view index {
     title 'MeatGeek V2: landscape'
-    description 'Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. The web app is live on Vercel; sky dashed is the iOS app, decided and not built. Click a box to go down a level.'
+    description 'Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). Nothing is decided and unbuilt; grey dotted is not built, with no decision. Click a box to go down a level.'
     include *
     include meatgeek.edge, meatgeek.cloud, meatgeek.mobile, meatgeek.web
     include vercel
@@ -30,7 +30,7 @@ views {
 
   view system of meatgeek {
     title 'MeatGeek V2: containers'
-    description 'Everything that runs. Sky dashed is decided and not built: the iOS app. Grey dotted is not built, with no decision.'
+    description 'Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). Nothing is decided and unbuilt; grey dotted is not built, with no decision.'
     include *
     include edge.*, cloud.*, cloud.ingest.*, cloud.observability.*
     include pitmaster, smoker, entra, vercel
@@ -50,7 +50,7 @@ views {
     include ingest.*, observability.*
     include api.cooks, api.negotiate, api.broadcast, api.rollup, data.temperatureRollups
     include meatgeek.edge, meatgeek.edge.pusher.twin, meatgeek.mobile, meatgeek.web, entra
-    include meatgeek.web.livePanel, meatgeek.web.chart
+    include meatgeek.web.livePanel, meatgeek.web.chart, meatgeek.mobile.livePanel, meatgeek.mobile.chart
     include delivery.simdevice, operator
   }
 
@@ -114,16 +114,21 @@ views {
     description '''
       Pull requests feed two workflows. CI/CD Pipeline runs on every pull request and push to
       main: lint and test, the Cosmos emulator tests on `windows-2025`, builds, Terraform
-      validation, the security scan, the `no-real-time` guard and `web-e2e`. Test repeat
+      validation, the security scan, the `no-real-time` guard, `web-e2e` and `ios`. Test repeat
       (`test-repeat.yml`) runs on pull requests only: each affected non-live suite 50 times in a
       row, its emulator suite on `windows-2025`; it starts nothing and is not a required check.
-      A green CI run on main starts the apply, then the deploy and its two acceptance jobs. When
+      CI also runs `ios` on `macos-26`: the iOS app's unit and UI tests in a simulator against
+      the in-process stub. A green CI run on main starts the apply, then the deploy and its
+      three acceptance jobs: `acceptance` and `web-acceptance` in parallel, then
+      `ios-acceptance` after `web-acceptance`, because both sign in as the same TOTP user. When
       a web-acceptance sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`,
       the leak check runs over it, and the run uploads the `web-acceptance-diagnostics` artifact.
+      The iOS proof runs the same leak check over its raw log before it uploads
+      `ios-acceptance-screenshots`.
     '''
     include *
     include acceptance.*
-    include team, meatgeek, meatgeek.web, entra, vercel
+    include team, meatgeek, meatgeek.web, meatgeek.mobile, entra, vercel
   }
 
   view deviceUpdates {
@@ -211,6 +216,14 @@ views {
       pushed reading to the live panel and the chart. Proven live by Deploy Dev App's
       `web-acceptance` job, signed in as the acceptance test user: `METRIC web-push-ms` 510
       (run 44837747351).
+
+      The iOS app's cook screen takes the same steps through its own components
+      (`mobile.cooks`, `mobile.chart`, `mobile.livePanel`, `mobile.shell`), with MSAL for iOS
+      and SignalR-Client-Swift: the same requests, the same backfill after every connect and
+      reconnect, the same `waiting`, `live` and `stale` states. It also stops the connection
+      when the app leaves the foreground and negotiates again on return. Proven live by the
+      `ios-acceptance` job, in a simulator: `METRIC ios-push-ms` 10918 (run 45429145737), from
+      the tap on Start to the pushed reading on screen, so it includes the cook start.
     '''
 
     pitmaster -> meatgeek.web.cooks 'open /cooks/:id'
@@ -256,7 +269,7 @@ views {
       when it next connects. `cook_started` goes to the owning user's SignalR connections, not
       to the Pi (MG-30). Sign-in (Easy Auth, then the principal) and the ownership check run
       first, as in the `api` view. Stopping a cook follows the same path: the twin's desired
-      cook is cleared and `cook_stopped` goes to the owner, whose web live panel consumes it.
+      cook is cleared and `cook_stopped` goes to the owner, whose web and iOS live panels consume it.
     '''
 
     meatgeek.web.cooks -> meatgeek.cloud.api.cooks 'POST /cooks' {
@@ -265,7 +278,8 @@ views {
         web app's start form sends a client-generated id, one per intent, so a retried submit
         starts the cook once. The ownership check is one point read on `devices`: a foreign or
         unclaimed device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live
-        callers are the web app and the acceptance proofs.
+        callers are the web app, the iOS app (the same id-per-intent rule) and the acceptance
+        proofs.
       '''
     }
     meatgeek.cloud.api.cooks -> meatgeek.cloud.data.cooks 'cook and device lock' {
@@ -416,6 +430,13 @@ views {
     }
     delivery.webAcceptance -> meatgeek.web 'Playwright, production' {
       notes 'Waits for `/version.json` to show this commit or a descendant (`METRIC web-deploy-wait-s`), signs in on the Microsoft pages as the test user, starts a cook on `<sim>-web` and sees a pushed reading (`METRIC web-push-ms`).'
+      navigateTo watchCook
+    }
+    delivery.webAcceptance -> delivery.iosAcceptance 'finished' {
+      notes 'Never at the same time as `web-acceptance`: both sign in as the same TOTP acceptance user.'
+    }
+    delivery.iosAcceptance -> meatgeek.mobile 'XCUITest, simulator' {
+      notes 'Enrols `<sim>-ios` through DPS, builds the real app for a throwaway simulator, signs in on the Microsoft pages as the test user, claims `<sim>-ios`, starts a cook, sees a pushed reading (`METRIC ios-push-ms`), stops it and releases the device.'
       navigateTo watchCook
     }
   }

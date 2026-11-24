@@ -8,7 +8,7 @@ MeatGeek V2 is a comprehensive cloud-based BBQ temperature monitoring and cook m
 
 - **Collect temperature data** from the existing device controller
 - **Store data** in Azure CosmosDB for scalability and global distribution
-- **Provide client apps**: a React web app, and a native iOS (Swift) app that is so far a skeleton
+- **Provide client apps**: a React web app on Vercel, and a native iOS (Swift) app that runs against dev from Xcode (not distributed)
 - **Manage cooking sessions** with historical data tracking and analytics
 - **Enable real-time monitoring** with live temperature updates
 - **Replace NewRelic** with Azure-native monitoring and observability
@@ -73,11 +73,11 @@ The existing Go-based device controller provides a solid foundation:
 | **Data Ingestion** | Azure IoT Hub | Device-to-cloud telemetry |
 | **Processing** | Azure Functions | Serverless data processing |
 | **Storage** | CosmosDB | NoSQL document storage |
-| **Real-time** | SignalR (Serverless) | Live temperatures and cook events pushed to clients (on `main` since HAR-60; the web app's live panel receives them; see [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/)) |
+| **Real-time** | SignalR (Serverless) | Live temperatures and cook events pushed to clients (on `main` since HAR-60; the web app's and the iOS app's live panels receive them; see [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/)) |
 | **Device state** | IoT Hub device twin | The active cook, in desired properties; the Pi reports what it applied (HAR-58, HAR-66; see [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/)) |
 | **API** | Azure Functions | REST API with OpenAPI specs |
 | **Web** | React 18, Vite, on Vercel | Live at `https://meatgeekv2-web.vercel.app`: devices, cooks, a live panel by push and a chart of the whole cook |
-| **Mobile** | Swift (native iOS) | In `apps/ios` (HAR-158): sign-in (HAR-162), the Devices tab (HAR-165) and the Cooks tab (HAR-166); shares only the OpenAPI contract with the web app |
+| **Mobile** | Swift 6, SwiftUI (native iOS) | Live against dev, run from Xcode, not distributed: sign-in (HAR-162), the Devices tab (HAR-165), the Cooks tab (HAR-166), a live panel by push (HAR-167) and a chart of the whole cook (HAR-168); proven on every dev deploy by `ios-acceptance` (HAR-169). Shares only the OpenAPI contract with the web app. See [iOS app](../applications/ios-app.md) |
 | **Infrastructure** | Terraform | Infrastructure as Code |
 | **Monitoring** | Azure Monitor + OTEL | Observability and tracing |
 
@@ -85,7 +85,7 @@ The existing Go-based device controller provides a solid foundation:
 
 What runs today is the [`system` view](https://stevebargelt.github.io/meatgeekv2/#/view/system/) of the architecture site; the [`telemetry` view](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) follows one reading from the RTD sensors through the data pusher and IoT Hub's `cosmos-storage-route` into Cosmos DB, and on through `broadcastTemperature` to SignalR, and the [`cookStart` view](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) shows how a cook reaches the Pi through the device twin. The same views render on GitHub in [Architecture Diagrams](diagrams.md).
 
-The Event Hub → Functions → SignalR broadcast path is **live end to end**: IoT Hub routes to the Event Hub (HAR-60), the API's `broadcastTemperature` consumes it and pushes each reading to its device owner's SignalR user (HAR-81), and the web app's live panel shows it. The web app calls the REST API and SignalR in production (HAR-71); the [`watchCook` view](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/) follows it. Deploy Dev App's `web-acceptance` job proves it live in a real browser: a pushed reading reached the page in 510 ms (`METRIC web-push-ms 510`, run 44837747351). The acceptance proofs are SignalR clients too; their first measurement, 18.4 s (`METRIC signalr-delivery-ms 18424`, run 44673261258), was a cold start. The native iOS app has sign-in, a Devices tab and a Cooks tab (`apps/ios`, HAR-158, HAR-162, HAR-165, HAR-166); it has no live temperatures yet. The Pi holds no SignalR connection: it learns its cook from the device twin. Both decisions are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
+The Event Hub → Functions → SignalR broadcast path is **live end to end**: IoT Hub routes to the Event Hub (HAR-60), the API's `broadcastTemperature` consumes it and pushes each reading to its device owner's SignalR user (HAR-81), and the web app's live panel shows it. The web app calls the REST API and SignalR in production (HAR-71); the [`watchCook` view](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/) follows it. Deploy Dev App's `web-acceptance` job proves it live in a real browser: a pushed reading reached the page in 510 ms (`METRIC web-push-ms 510`, run 44837747351). The acceptance proofs are SignalR clients too; their first measurement, 18.4 s (`METRIC signalr-delivery-ms 18424`, run 44673261258), was a cold start. The native iOS app (`apps/ios`) is a second live client: its cook screen negotiates, connects as the signed-in user and shows pushed readings (HAR-167), and Deploy Dev App's `ios-acceptance` job proves it in a simulator against dev on every deploy (HAR-169): `METRIC ios-push-ms 10918` (run 45429145737), measured from the tap on Start, so it includes starting the cook, where the web's 510 ms starts at the reading. The Pi holds no SignalR connection: it learns its cook from the device twin. Both decisions are recorded in [`learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md`](../../learnings/decisions/har-55-device-twin-cook-state-and-signalr-push.md).
 
 ### Core Components
 
@@ -109,7 +109,7 @@ The Event Hub → Functions → SignalR broadcast path is **live end to end**: I
 
 #### 3. Client Applications
 - **Web App (React, live)**: On Vercel production at `https://meatgeekv2-web.vercel.app`, built from `main`. Entra sign-in (MSAL, auth code + PKCE); claim a device with its code, list, rename and release devices, and see whether each is connected; start and stop a cook; list cooks; a cook's page with a live panel by push and a chart of the whole cook from the rollups
-- **Mobile App (native iOS, Swift)**: A skeleton in `apps/ios` (HAR-158) that builds and tests in the simulator. It signs in with Entra through MSAL (HAR-162) and calls `GET /users/me`, but cannot sign anyone in until the iOS client id is in its config. It shares no code with the web app; the two clients share only the OpenAPI contract in `libs/api-specs/spec`
+- **Mobile App (native iOS, Swift, live against dev)**: `apps/ios` (HAR-158). Entra sign-in through MSAL in the system browser with the dev registration `meatgeek-v2-dev-ios` (HAR-159, HAR-162, HAR-164), which Easy Auth accepts (HAR-163); a Devices tab to list, claim, rename and release devices (HAR-165); a Cooks tab to list, start, open and stop cooks (HAR-166); a cook screen with a live panel by push (HAR-167) and a Swift Charts chart of the whole cook (HAR-168). CI's `ios` job tests it on every pull request, and `ios-acceptance` proves it against dev on every deploy (HAR-169). It is not distributed (no TestFlight): it runs in the simulator or on a developer's iPhone from Xcode. It shares no code with the web app; the two clients share only the OpenAPI contract in `libs/api-specs/spec`. See [iOS app](../applications/ios-app.md)
 - **Shared Libraries**: TypeScript libraries the web app and API use for consistent API integration
 
 ## Key Design Decisions
@@ -151,7 +151,7 @@ The Event Hub → Functions → SignalR broadcast path is **live end to end**: I
 - **Sub-second latency** from sensor reading to client display
 - **99.9% uptime** for temperature monitoring
 - **10-second recovery** from network outages
-- **Clients**: the web app today; native iOS a skeleton, no features yet
+- **Clients**: the web app (production on Vercel) and the native iOS app (live against dev, run from Xcode, not distributed)
 
 ### What the web app does today
 - **Live readings** pushed to the cook's page, with a `stale` state when the device goes quiet
