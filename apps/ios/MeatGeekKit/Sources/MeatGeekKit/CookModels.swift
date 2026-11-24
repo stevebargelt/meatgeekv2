@@ -120,8 +120,8 @@ public final class StartCookModel {
     }
 }
 
-/// One cook: its fields, Stop while it is active, and the live panel of an
-/// active cook. Mirrors apps/web/src/cooks/cook-detail-page.tsx.
+/// One cook: its fields, Stop while it is active, the live panel of an
+/// active cook, and the chart. Mirrors apps/web/src/cooks/cook-detail-page.tsx.
 @MainActor
 @Observable
 public final class CookDetailModel {
@@ -157,6 +157,10 @@ public final class CookDetailModel {
     /// services (`CooksModel.live`). A `cook_stopped` for this cook ends it
     /// and shows the cook as it stopped.
     public private(set) var live: LivePanelModel?
+    /// The cook's chart, once the cook has loaded: shown for active and
+    /// ended cooks, reloaded when the cook's status changes, with the live
+    /// panel's pushed readings appended.
+    public private(set) var chart: CookChartModel?
 
     @ObservationIgnored private let cooks: CooksModel
     @ObservationIgnored private var started = false
@@ -274,6 +278,14 @@ public final class CookDetailModel {
     /// cook, none once it has ended.
     private func show(_ cook: Cook) {
         state = .loaded(cook)
+        if chart == nil {
+            let devices = cooks.devices
+            let deviceID = cook.deviceId
+            chart = CookChartModel(cookID: cook.id, session: cooks.session) {
+                devices.device(id: deviceID)?.configuration?.temperatureUnit ?? .fahrenheit
+            }
+        }
+        chart?.cookStatus(cook.status)
         if cook.status == .active {
             guard live == nil, let services = cooks.live else { return }
             let devices = cooks.devices
@@ -284,7 +296,8 @@ public final class CookDetailModel {
                 device: { devices.device(id: deviceID) },
                 services: services,
                 now: cooks.now,
-                onCookStopped: { [weak self] stopped in self?.cookStopped(stopped) }
+                onCookStopped: { [weak self] stopped in self?.cookStopped(stopped) },
+                onReading: { [weak self] message in self?.chart?.append(message) }
             )
             live?.setAppActive(appActive)
             if visible { live?.appear() }

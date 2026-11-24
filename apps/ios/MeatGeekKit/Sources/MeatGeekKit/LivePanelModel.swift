@@ -137,6 +137,7 @@ public final class LivePanelModel {
     /// The clock a reading's age is measured on.
     @ObservationIgnored public let now: @Sendable () -> Date
     @ObservationIgnored private let onCookStopped: @MainActor (Cook) -> Void
+    @ObservationIgnored private let onReading: @MainActor (TemperatureMessage) -> Void
     @ObservationIgnored private var connection: LiveConnection?
     @ObservationIgnored private var visible = false
     @ObservationIgnored private var appActive = true
@@ -150,13 +151,17 @@ public final class LivePanelModel {
     ///   - device: the cook's device, for its unit and polling interval; nil
     ///     until the devices are read.
     ///   - onCookStopped: called once with the stopped cook.
+    ///   - onReading: called with each pushed `temperature` message the
+    ///     panel accepts (the cook's device's), as the web's `onReading`:
+    ///     the chart appends them. Backfilled readings are not passed on.
     public init(
         cook: Cook,
         session: SessionModel,
         device: @escaping @MainActor () -> Device?,
         services: LiveServices,
         now: @escaping @Sendable () -> Date,
-        onCookStopped: @escaping @MainActor (Cook) -> Void = { _ in }
+        onCookStopped: @escaping @MainActor (Cook) -> Void = { _ in },
+        onReading: @escaping @MainActor (TemperatureMessage) -> Void = { _ in }
     ) {
         self.cookID = cook.id
         self.deviceID = cook.deviceId
@@ -165,6 +170,7 @@ public final class LivePanelModel {
         self.services = services
         self.now = now
         self.onCookStopped = onCookStopped
+        self.onReading = onReading
     }
 
     /// The UI test mode controls, when the app runs on the stub.
@@ -224,8 +230,9 @@ public final class LivePanelModel {
                     Task { await self.backfill() }
                 },
                 onTemperature: { [weak self] message in
-                    guard message.deviceId == deviceID else { return }
-                    self?.show(LiveReading(message))
+                    guard let self, message.deviceId == deviceID else { return }
+                    self.show(LiveReading(message))
+                    self.onReading(message)
                 },
                 onCookStopped: { [weak self] message in
                     guard let self, message.payload.id == cookID, self.stoppedCook == nil else { return }
