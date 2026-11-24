@@ -713,6 +713,15 @@ green `ios-acceptance` runs on `main` are the first measurements against dev;
 until they are added here, each bound is sized on the web proof's measured
 waits for the same thing.
 
+A bound is checked only after a look that started once it was up
+(`Live.firstOf`, and the pasted-value wait in `Live.paste`). On a CI simulator
+one look, an accessibility snapshot for each outcome, can take 15 s or more.
+A step that failed as soon as a look ended after its deadline failed on a
+screen read before the deadline: `Deploy Dev App` run 45476412767 (HAR-171)
+failed "Microsoft's UPN page … within 30 s" with the page already on screen.
+A failure says how many looks the step made and how long the longest took, so
+a slow page and a slow look can be told apart.
+
 | Where (file:symbol)                                                        | What it waits for                                                                                                                                                                                                                                                    | Bound                                         | Why that long                                                                                                                                                                                                                                                                                                                                         |
 | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Live.xctestplan` (`defaultTestExecutionTimeAllowance`, `maximum…`)        | the whole test: XCTest's hang guard                                                                                                                                                                                                                                  | 900 s                                         | The sum of the bounds below on the slowest path is about 7 min. Under the job's 45 min, which also holds the app's build (most of the job)                                                                                                                                                                                                            |
@@ -1401,7 +1410,9 @@ the keyboard's Return. Copy is used only where nothing else tells the page
 apart: **No** on "Stay signed in?", and an element labelled "verification
 code" or "another way" on the method pages; the system alert's **Continue**
 and the edit menu's **Paste** are Apple's. A step that does not find its page
-fails with `<step>: none of <what it looked for> within 30 s`; before
+fails with `<step>: none of <what it looked for> within 30 s (<n> looks, the
+longest <s> s)`, and only after a look that started once the 30 s were up
+(on a CI simulator one look can take 15 s or more); before
 Microsoft's UPN page (the tap on **Sign in with Microsoft**, the alert, the
 sheet) it adds `; on screen: <the app's state; any system alert; the
 sheet>`, from `SignInScreen` in `MicrosoftSignIn.swift`, and keeps a `failure`

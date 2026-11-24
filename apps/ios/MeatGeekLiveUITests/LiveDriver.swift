@@ -34,6 +34,17 @@ enum LiveBound {
     static let poll: TimeInterval = 0.25
 }
 
+/// The time the proof's polls read and how they pause between looks: the
+/// real clock in the proof, a fake one in `LiveOfflineTests`.
+struct LiveClock {
+    let now: () -> Date
+    let pause: (TimeInterval) -> Void
+
+    static var system: LiveClock {
+        LiveClock(now: { Date() }, pause: { Thread.sleep(forTimeInterval: $0) })
+    }
+}
+
 /// A failed step of the live proof. Its message names what was awaited, never
 /// a value that was typed or pasted.
 struct LiveFailure: LocalizedError, CustomStringConvertible {
@@ -96,22 +107,37 @@ enum Live {
 
     /// Polls `outcomes` in order every `LiveBound.poll` until one holds, for
     /// at most `bound`, and returns its key. Throws naming `step` and every key,
-    /// and what `onScreen` says is on screen (only where nothing on screen can
-    /// be an input).
+    /// how many looks it made and the longest, and what `onScreen` says is on
+    /// screen (only where nothing on screen can be an input).
+    ///
+    /// It fails only after a look that started once `bound` was up, so it
+    /// fails only when nothing held at the deadline. On a CI simulator one look
+    /// (an accessibility snapshot per outcome) can take 15 s or more. A look
+    /// that started before the deadline and ended after it shows the screen as
+    /// it was before the deadline. `Deploy Dev App` run 45476412767 (HAR-171)
+    /// failed that way, with Microsoft's UPN page already on screen.
     static func firstOf<K: Sendable>(
-        _ step: String, bound: TimeInterval, _ outcomes: [(K, () -> Bool)], onScreen: (() -> String)? = nil
+        _ step: String, bound: TimeInterval, _ outcomes: [(K, () -> Bool)], onScreen: (() -> String)? = nil,
+        clock: LiveClock = .system
     ) throws -> K {
-        let deadline = Date().addingTimeInterval(bound)
+        let deadline = clock.now().addingTimeInterval(bound)
+        var looks = 0
+        var longest: TimeInterval = 0
         while true {
+            let lookStarted = clock.now()
+            let last = lookStarted >= deadline
             for (key, holds) in outcomes where holds() {
                 return key
             }
-            guard Date() < deadline else {
+            looks += 1
+            longest = max(longest, clock.now().timeIntervalSince(lookStarted))
+            if last {
                 let keys = outcomes.map { "\($0.0)" }.joined(separator: ", ")
                 let seen = onScreen.map { "; on screen: \($0())" } ?? ""
-                throw LiveFailure("\(step): none of \(keys) within \(Int(bound)) s\(seen)")
+                let pace = String(format: "%d looks, the longest %.1f s", looks, longest)
+                throw LiveFailure("\(step): none of \(keys) within \(Int(bound)) s (\(pace))\(seen)")
             }
-            Thread.sleep(forTimeInterval: LiveBound.poll)
+            clock.pause(LiveBound.poll)
         }
     }
 
@@ -141,9 +167,13 @@ enum Live {
             _ = paste.waitForExistence(timeout: LiveBound.pasteRetap)
         }
         paste.tap()
+        // As in `firstOf`: it fails only after a look that started once the
+        // bound was up.
         let held = Date().addingTimeInterval(LiveBound.pasted)
-        while !holds(field.value, secret, shown: shown) {
-            guard Date() < held else {
+        while true {
+            let last = Date() >= held
+            if holds(field.value, secret, shown: shown) { return }
+            if last {
                 let empty = isEmpty(field.value, placeholder: field.placeholderValue)
                 throw LiveFailure(
                     "\(what) did not hold the pasted value within \(Int(LiveBound.pasted)) s of Paste "
