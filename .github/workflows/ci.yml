@@ -277,6 +277,133 @@ jobs:
           path: dist/.playwright/web-e2e
           retention-days: 7
 
+  # HAR-160 (goal HAR-157) — builds the iOS app (apps/ios, HAR-158) and runs
+  # its shared `MeatGeek` scheme's tests in the simulator: MeatGeekKitTests
+  # (unit, Swift Testing) and MeatGeekUITests (XCUITest). No signing, no secret,
+  # no OIDC, no environment, `contents: read` only, so it runs on fork pull
+  # requests too.
+  #
+  # Independent of `setup` and deliberately without a path filter: the goal
+  # requires it on every pull request, and a skipped job would look green.
+  #
+  # macos-26 is the arm64 image. Its Xcodes and simulators are listed in
+  # https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md;
+  # when that list drops XCODE_APP or IOS_SIMULATOR, change both here and in
+  # apps/ios/README.md.
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      XCODE_APP: /Applications/Xcode_26.6.app
+      IOS_SIMULATOR: iPhone 17
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+
+      - name: Pick the simulator
+        # The named iPhone on the iOS runtime that matches the selected Xcode's
+        # simulator SDK (what `OS=latest` means locally). Fails, listing what
+        # the image has, rather than falling back to another device or runtime.
+        id: simulator
+        run: |
+          sdk="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          runtime="$(xcrun simctl list runtimes -j | jq -r --arg sdk "$sdk" '
+            [.runtimes[] | select(.platform == "iOS" and .isAvailable
+               and (.version == $sdk or (.version | startswith($sdk + "."))))]
+            | first | .identifier // empty')"
+          if [ -z "$runtime" ]; then
+            echo "::error::No available iOS $sdk simulator runtime for $(xcodebuild -version | head -1). Installed runtimes:"
+            xcrun simctl list runtimes
+            exit 1
+          fi
+          udid="$(xcrun simctl list devices available -j | jq -r --arg rt "$runtime" --arg name "$IOS_SIMULATOR" '
+            [.devices[$rt][]? | select(.name == $name)] | first | .udid // empty')"
+          if [ -z "$udid" ]; then
+            echo "::error::No available '$IOS_SIMULATOR' simulator on $runtime. Available devices:"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Simulator: $IOS_SIMULATOR, iOS $sdk ($runtime), id $udid"
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Boot the simulator
+        # Boots it and returns once the device reports boot finished. Left to
+        # xcodebuild, the boot overlaps the UI test, and SpringBoard can refuse
+        # the app launch ("denied by service delegate (SBMainWorkspace)") while
+        # it is still starting up: seen on this job's third PR run.
+        run: xcrun simctl bootstatus "${{ steps.simulator.outputs.udid }}" -b
+
+      - name: Cache SwiftPM checkouts
+        # Only once the project resolves a remote package and so has a
+        # Package.resolved; MeatGeekKit is local and needs no checkout.
+        if: hashFiles('apps/ios/**/Package.resolved') != ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ${{ runner.temp }}/DerivedData/SourcePackages
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/ios/**/Package.resolved') }}
+
+      - name: Build and test (MeatGeek scheme)
+        id: test
+        run: |
+          xcodebuild test \
+            -project apps/ios/MeatGeek.xcodeproj \
+            -scheme MeatGeek \
+            -destination "id=${{ steps.simulator.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/MeatGeek.xcresult" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Check both test targets ran
+        # A scheme or test plan edit that drops a target would otherwise still
+        # pass. Writes each target's count and result to the run summary.
+        if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
+        run: |
+          if [ ! -d "$RUNNER_TEMP/MeatGeek.xcresult" ]; then
+            echo "::error::No result bundle at $RUNNER_TEMP/MeatGeek.xcresult: xcodebuild did not get as far as testing."
+            exit 1
+          fi
+          xcrun xcresulttool get test-results tests --path "$RUNNER_TEMP/MeatGeek.xcresult" --compact > "$RUNNER_TEMP/tests.json"
+          counts="$(jq -r '
+            [.testNodes[] | .. | objects
+              | select(.nodeType == "Unit test bundle" or .nodeType == "UI test bundle")
+              | "\(.name)\t\(.nodeType)\t\([.. | objects | select(.nodeType == "Test Case")] | length)\t\(.result)"]
+            | .[]' "$RUNNER_TEMP/tests.json")"
+          {
+            echo '### iOS tests'
+            echo
+            echo '| Target | Kind | Tests | Result |'
+            echo '|---|---|---|---|'
+            printf '%s\n' "$counts" | awk -F'\t' 'NF == 4 { printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4 }'
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$counts"
+          code=0
+          for target in MeatGeekKitTests MeatGeekUITests; do
+            n="$(printf '%s\n' "$counts" | awk -F'\t' -v t="$target" '$1 == t { print $3 }')"
+            if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+              echo "::error::$target ran no tests."
+              code=1
+            fi
+          done
+          exit "$code"
+
+      - name: Upload the test result bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcresult
+          path: ${{ runner.temp }}/MeatGeek.xcresult
+          if-no-files-found: warn
+          retention-days: 7
+
   build-typescript:
     runs-on: ubuntu-latest
     needs: setup
