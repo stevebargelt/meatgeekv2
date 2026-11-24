@@ -117,7 +117,7 @@ final class MeatGeekUITests: XCTestCase {
             "api://348570b2-44e5-41a6-ad15-2a7032366130/access_as_user"
         )
         XCTAssertEqual(info["MeatGeekTenantID"] as? String, "7466b411-ac2e-49a0-b5d5-b1e866d26bac")
-        // Empty until bootstrap has created the iOS registration (a later issue fills it).
-        XCTAssertEqual(info["MeatGeekClientID"] as? String, "")
+        // The client id, and that the whole config parses to ready, are checked
+        // by BuiltAppConfigTests in MeatGeekKitTests through AppConfig.parse.
     }
 }
