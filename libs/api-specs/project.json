@@ -26,6 +26,12 @@
     "test": {
       "executor": "@nx/jest:jest",
       "outputs": ["{workspaceRoot}/coverage/{projectRoot}"],
+      "inputs": [
+        "default",
+        "^production",
+        "{workspaceRoot}/jest.preset.js",
+        "{workspaceRoot}/apps/ios/MeatGeekKit/Sources/MeatGeekAPI/openapi.yaml"
+      ],
       "options": {
         "jestConfig": "libs/api-specs/jest.config.ts",
         "passWithNoTests": true
@@ -58,6 +64,13 @@
       ],
       "outputs": ["{projectRoot}/src/generated"],
       "cache": true
+    },
+    "bundle-ios": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node libs/api-specs/scripts/bundle-for-ios.ts",
+        "cwd": "."
+      }
     }
   },
   "tags": ["type:lib", "scope:shared"]

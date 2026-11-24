@@ -4,9 +4,20 @@ The OpenAPI 3.0 contract for the MeatGeek V2 API: every HTTP route `apps/api`
 serves and every SignalR message it sends, and nothing else.
 
 The web client and the mobile client share nothing with the API but this
-contract. The mobile client is a native iOS (Swift) app, so far a skeleton in
-`apps/ios`. The contract is kept true by a drift check that runs on every pull
-request (below).
+contract. The mobile client is a native iOS (Swift) app in `apps/ios`. The
+contract is kept true by a drift check that runs on every pull request
+(below).
+
+## Consumers
+
+| Consumer | How it reads the spec | What fails when they part |
+|---|---|---|
+| `apps/api` | Not generated; the drift check compares it with the spec | `nx test api` (below) |
+| `apps/web` | `openapi-typescript` types, built on demand (`nx generate-types api-specs`) | `web:typecheck` / `web:build` |
+| `apps/ios` | One-file bundle committed at `apps/ios/MeatGeekKit/Sources/MeatGeekAPI/openapi.yaml`, written by `nx run api-specs:bundle-ios`; `swift-openapi-generator` generates the Swift client from it on each build | `nx test api-specs` while the bundle is stale; the iOS build once re-bundled |
+
+After any change under `spec/`, run `npx nx run api-specs:bundle-ios` and
+commit the updated bundle in the same pull request.
 
 ## Layout
 
@@ -48,6 +59,16 @@ spec-only change re-runs it rather than hitting the Nx cache.
 `nx test api-specs` runs the spec-only checks in `contract-tests/` (see that
 README). CI's `lint-and-test` matrix runs it on every pull request (HAR-107).
 
+### The iOS bundle check
+
+`contract-tests/ios-bundle.spec.ts`, in `nx test api-specs`, bundles the spec
+in memory and fails when the committed
+`apps/ios/MeatGeekKit/Sources/MeatGeekAPI/openapi.yaml` differs, naming the
+first differing line and the fix: `npx nx run api-specs:bundle-ios`. The
+`test` target lists that file as an input, so a change to either side re-runs
+it. Once re-bundled, the iOS build regenerates the Swift types from it, and
+app code that no longer fits fails to compile in CI's `ios` job (HAR-161).
+
 ## NX targets
 
 | Target | What it does |
@@ -57,6 +78,7 @@ README). CI's `lint-and-test` matrix runs it on every pull request (HAR-107).
 | `nx test api-specs` | Jest: `contract-tests/*.spec.ts` (spec validation, TS round-trip). Run in CI. |
 | `nx validate-spec api-specs` | Validates `spec/openapi.yaml` with `@apidevtools/swagger-parser` |
 | `nx generate-types api-specs` | Emits `src/generated/types.d.ts` from the spec via `openapi-typescript` |
+| `nx run api-specs:bundle-ios` | Bundles the spec into one file for the iOS client (`scripts/bundle-for-ios.ts`); deterministic, so a second run changes nothing |
 
 `@apidevtools/swagger-parser` is a library with no command-line tool, so
 `npx @apidevtools/swagger-parser validate ...` does not work; use

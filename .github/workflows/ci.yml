@@ -341,8 +341,8 @@ jobs:
         run: xcrun simctl bootstatus "${{ steps.simulator.outputs.udid }}" -b
 
       - name: Cache SwiftPM checkouts
-        # Only once the project resolves a remote package and so has a
-        # Package.resolved; MeatGeekKit is local and needs no checkout.
+        # Keyed on the committed Package.resolved (HAR-161: the
+        # swift-openapi-* packages). Skipped if the project has none.
         if: hashFiles('apps/ios/**/Package.resolved') != ''
         uses: actions/cache@v4
         with:
@@ -353,6 +353,10 @@ jobs:
 
       - name: Build and test (MeatGeek scheme)
         id: test
+        # -skipPackagePluginValidation: MeatGeekKit's MeatGeekAPI target runs
+        # the swift-openapi-generator build plugin (HAR-161), and xcodebuild
+        # otherwise refuses an unapproved plugin ("Validate plug-in
+        # OpenAPIGenerator", exit 65). The plugin is pinned in Package.resolved.
         run: |
           xcodebuild test \
             -project apps/ios/MeatGeek.xcodeproj \
@@ -360,6 +364,7 @@ jobs:
             -destination "id=${{ steps.simulator.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -resultBundlePath "$RUNNER_TEMP/MeatGeek.xcresult" \
+            -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Check both test targets ran

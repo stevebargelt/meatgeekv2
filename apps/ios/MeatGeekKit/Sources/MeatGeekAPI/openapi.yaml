@@ -1,0 +1,3201 @@
+# GENERATED FILE - DO NOT EDIT.
+#
+# Bundled from libs/api-specs/spec/openapi.yaml by
+# libs/api-specs/scripts/bundle-for-ios.ts. Change the spec under
+# libs/api-specs/spec/ and run `npx nx run api-specs:bundle-ios`.
+# `npx nx test api-specs` fails when this file is out of date.
+#
+# swift-openapi-generator (the MeatGeekAPI target's build plugin) generates
+# the iOS API client from it on every build. Two things the generator cannot
+# read are rewritten: $refs that do not point at #/components/<kind>/<name>
+# are inlined, and `not: {enum: [0]}` (a "greater than 0" bound) is dropped.
+openapi: 3.0.3
+info:
+  title: MeatGeek V2 API
+  version: 0.2.0
+  description: |
+    The contract between the MeatGeek V2 API and its clients. It describes
+    exactly the HTTP routes `apps/api/src/main.ts` registers and the SignalR
+    messages the API sends, and nothing else.
+
+    ## Drift check
+
+    `npx nx test api` runs `apps/api/src/contract/contract.spec.ts` on every
+    pull request. It fails when a route registered in `main.ts` is missing
+    here or an operation here has no route, when an operation lacks the
+    bearer security or a `401`, when this document does not validate, or when
+    a SignalR message the API builds does not match its `x-signalr` schema.
+
+    ## Authentication
+
+    Every route sits behind App Service Authentication (Easy Auth). Send an
+    Entra ID access token for the API's audience as `Authorization: Bearer`.
+    Easy Auth validates it before any function runs and answers `401` itself
+    when it is missing or invalid; a handler that runs without a usable
+    principal answers `401 UNAUTHENTICATED`. The caller's identity is always
+    the token's tenant id and object id, `"<tid>:<oid>"`; no route takes a
+    user id.
+
+    ## Errors
+
+    Error bodies are flat: `{error, message, requestId}`, where `error` is an
+    `ErrorCode`, plus the extra fields a variant names (`activeCookId`,
+    `cookId`, `reason`). The `401` body carries `reason` in place of
+    `message`.
+
+    ## SignalR
+
+    The top-level `x-signalr` extension names the hub, the route that
+    negotiates a connection to it, and the messages it carries. Each key under
+    `messages` is a SignalR target (`connection.on('<key>', ...)`) and points
+    to the schema of that target's single argument.
+  contact:
+    name: MeatGeek V2 team
+  license:
+    name: UNLICENSED
+servers:
+  - url: http://localhost:7071/api
+    description: Local Azure Functions Core Tools. Every route is under /api.
+security:
+  - bearerAuth: []
+tags:
+  - name: cooks
+    description: Start, stop, read and list the caller's cooks.
+  - name: temperatures
+    description: The latest and historical readings of the caller's devices.
+  - name: devices
+    description: Claim, register and manage the caller's devices.
+  - name: users
+    description: The authenticated caller's own profile.
+  - name: recipes
+    description: The authenticated caller's private recipes.
+  - name: signalr
+    description: Negotiate a SignalR connection for live readings and cook events.
+  - name: health
+    description: Health of the API's own dependencies.
+paths:
+  /cooks:
+    get:
+      operationId: listCooks
+      summary: List the caller's cooks
+      description: |
+        Returns one page of the authenticated caller's cooks as a
+        CookListResponse: a bare cook array under `cooks` with `limit`,
+        `hasMore` and `continuationToken`. Newest first; paged by continuation
+        token, never offset. Each cook carries only Cook contract fields.
+
+        Filters (MG-87): `deviceId` and `status` narrow the list and combine
+        with AND, so `?deviceId=<id>&status=active` returns only the caller's
+        active cook on that device. Neither can widen the query beyond the
+        caller's own cooks. An invalid filter is 400 VALIDATION_ERROR before any
+        read.
+
+        There is no `userId` parameter: a `userId` in the query is ignored.
+
+        Every response carries X-Request-ID: the caller's `X-Request-ID` when
+        sent, else the invocation id (HAR-75).
+      tags:
+        - cooks
+      parameters:
+        - name: deviceId
+          in: query
+          required: false
+          description: |
+            Only cooks on this device. Opaque; 1 to 128 characters, otherwise
+            400 VALIDATION_ERROR. The device is not checked for ownership: the
+            list is always the caller's own cooks.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: status
+          in: query
+          required: false
+          description: Only cooks in this status; any other value is 400 VALIDATION_ERROR.
+          schema:
+            $ref: '#/components/schemas/CookStatus'
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Page size. Default 20. A value above 100 is clamped to 100; a
+            fraction is rounded down. A value that is not a positive number uses
+            the default rather than failing. The response's `limit` is the size
+            applied.
+          schema:
+            type: integer
+            default: 20
+        - name: continuationToken
+          in: query
+          required: false
+          description: |
+            Opaque cursor from the previous page's `continuationToken`. Omit for
+            the first page. A token Cosmos does not accept fails the read (500).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One page of the caller's cooks (possibly empty).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CookListResponse'
+        '400':
+          description: |
+            VALIDATION_ERROR: `status` is not a CookStatus, or `deviceId` is
+            empty or longer than 128 characters. No read is issued, so there is
+            no x-meatgeek-request-charge.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          description: |
+            INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
+            failure. Carries x-meatgeek-request-charge when the Cosmos calls made
+            before the failure, or the failing call, reported a charge. Carries
+            X-Request-ID (the caller's, else the invocation id) since HAR-75; the
+            body's `requestId` is the invocation id.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      operationId: startCook
+      summary: Start a cook
+      description: |
+        Creates a cook in `active` status and returns the persisted Cook
+        directly (NOT wrapped in ApiResponse).
+
+        Retry-safe (MG-84). The client generates the cook `id` (a UUID) once
+        per start intent and resends the same request on every retry:
+          - 201: the cook was created; `cook_started` is emitted once.
+          - 200: a cook with this id already exists with the same body (a
+            retry or a concurrent duplicate). The stored cook is returned and
+            nothing is emitted.
+          - 422 COOK_ID_REUSED: the id exists with a different body.
+          - 409 COOK_ALREADY_ACTIVE: the device already has an active cook for
+            this user. One active cook per user and device; since only the
+            device's owner can start a cook on it (below), that is in effect one
+            active cook per device. Stop it first.
+          - 400 VALIDATION_ERROR (HAR-75): the body is not valid JSON, is
+            `null` or is not an object; it has a field StartCookRequest does
+            not list; or a field breaks its rule (see StartCookRequest). The
+            message names the field. No Cosmos call is made.
+          - 403 DEVICE_NOT_OWNED (HAR-26, MG-88): `deviceId` is not a device the
+            caller registered. Checked with one point read on the devices
+            container after validation and before any write: no cook, no device
+            lock, no `cook_started`. A device registered to someone else and an
+            unregistered device get the same body, so the answer does not reveal
+            whether another user owns the id.
+          - 503 DEVICE_TWIN_UPDATE_FAILED (HAR-66): see below.
+          - 500 INTERNAL_SERVER_ERROR: a Cosmos failure.
+
+        Device twin (HAR-66). After a 201, and after a 200 replay, the API sets
+        the device's IoT Hub twin desired properties from Cosmos under its
+        managed identity: `activeCookId` is the device's active cook and
+        `correlationId` is this request's `X-Request-ID` (else the invocation
+        id), or the twin's existing one when it already names that cook. No
+        twin call is made on 400, 401, 403, 409, 422 or 500. A device with no
+        IoT Hub identity has no twin, and the normal status is returned. If the
+        twin update fails the cook stays created and the answer is 503;
+        resending the same request replays (200) and retries the twin update.
+        `cook_started` is still emitted when this call created the cook.
+
+        Every response carries X-Request-ID: the caller's `X-Request-ID` when
+        sent, else the invocation id (HAR-75). The same value is the twin's
+        and the `cook_started` message's correlation id. The body's
+        `requestId` is the invocation id.
+      tags:
+        - cooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartCookRequest'
+      responses:
+        '200':
+          description: |
+            Replay. A cook with this id already exists with the same body; it is
+            returned unchanged and no `cook_started` is emitted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cook'
+        '201':
+          description: Cook created.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cook'
+        '400':
+          description: |
+            VALIDATION_ERROR: the body is not a JSON object (invalid JSON,
+            `null`, an array), has an unknown field, or breaks a field rule;
+            `message` names the field. No Cosmos call is made, so there is no
+            x-meatgeek-request-charge.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            DEVICE_NOT_OWNED. The device is not registered to the caller (it
+            belongs to someone else, or nobody registered it; the body is the same
+            either way). Nothing was written and nothing was emitted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            COOK_ALREADY_ACTIVE. The device already has an active cook for this
+            user; `activeCookId` names it. Nothing was written.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CookAlreadyActiveError'
+        '422':
+          description: |
+            COOK_ID_REUSED. A cook with this id exists with a different body.
+            Nothing was written.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: |
+            INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
+            failure. Carries x-meatgeek-request-charge when the Cosmos calls made
+            before the failure, or the failing call, reported a charge. Carries
+            X-Request-ID (the caller's, else the invocation id) since HAR-75; the
+            body's `requestId` is the invocation id.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: |
+            DEVICE_TWIN_UPDATE_FAILED. The cook was created (or already existed
+            with the same body) but the device twin was not updated. `cookId`
+            names the cook; `reason` is a fixed code. Resend the same request.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTwinUpdateFailedError'
+  /cooks/{cookId}:
+    get:
+      operationId: getCook
+      summary: Get one of the caller's cooks
+      description: |
+        Returns the caller's cook `{cookId}` as a bare Cook (NOT wrapped in
+        ApiResponse), projected onto the Cook contract fields only (HAR-75).
+
+        One point read of (caller, `{cookId}`) in the cooks container, which is
+        partitioned on the caller's user id. A cook that does not exist and a
+        cook that belongs to another user are the same 404 NOT_FOUND: another
+        user's cook is in another partition and is never read. The device lock
+        documents that share the partition (ids `active-device:<deviceId>`) are
+        not cooks and are 404 too. No device ownership read is made.
+
+        Every response carries X-Request-ID: the caller's `X-Request-ID` when
+        sent, else the invocation id. Every response that reached Cosmos, the
+        404 included, carries x-meatgeek-request-charge.
+      tags:
+        - cooks
+      parameters:
+        - name: cookId
+          in: path
+          required: true
+          description: |
+            Id of the cook. Opaque (cooks started before MG-84 have
+            `cook-<epoch-ms>` ids); 1-128 characters, otherwise 400.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      responses:
+        '200':
+          description: The cook.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cook'
+        '400':
+          description: |
+            VALIDATION_ERROR: `{cookId}` is empty or longer than 128
+            characters. No Cosmos call is made.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: |
+            NOT_FOUND: no cook with this id in the caller's partition. Absent,
+            another user's, and a device lock id all answer the same.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /cooks/{cookId}/chart:
+    get:
+      operationId: getCookChart
+      summary: Chart of one of the caller's cooks
+      description: |
+        Returns the caller's cook `{cookId}` as at most 720 chart points (HAR-86),
+        read from the per-device, per-hour rollup documents the
+        `rollupTemperatures` change-feed trigger writes, never from the raw
+        readings.
+
+        Ownership: one point read of (caller, `{cookId}`) in the cooks
+        container, exactly as GET /cooks/{cookId}. Absent, another user's, and a
+        device lock id (`active-device:<deviceId>`) are the same 404 NOT_FOUND.
+
+        Window: a cook with an `endTime` covers `[startTime, endTime)` on its
+        device. An active cook covers every reading from `startTime` on, with no
+        upper bound. It is a time window, not a `cookId` tag match. Readings are
+        kept per minute, so the minute containing `startTime` is included whole.
+
+        Bounded by `claimedAt` (HAR-136): when the caller owns the device and
+        claimed it through POST /devices/claim, the window starts no earlier
+        than the first whole minute at or after the device's `claimedAt`, so
+        readings from before the claim never reach the chart (a minute that
+        straddles `claimedAt` is left out). This costs one point read of the
+        device. A device without `claimedAt` (registered through POST
+        /devices), or one the caller no longer owns, keeps the cook's window.
+
+        Buckets: `bucketSeconds` is the smallest of 60, 120, 300, 600, 900,
+        1800, 3600, 7200, 14400 and 21600 that keeps the window at 720 buckets
+        or fewer. The span runs from the window's first minute (the start of
+        `startTime`'s minute, or the claim bound's first minute) to
+        `endTime`, or, for an active cook, to the later of now and the end of
+        the last minute with data. Bucket `k` starts at that first minute plus
+        `k × bucketSeconds`. A window longer than 180 days overflows even 6 h
+        buckets; only the newest 720 are then returned. Each channel of a point is the `min`, `max` and
+        `avg` of that channel's readings in the bucket. Buckets with no reading
+        and channels with no reading are left out, so `points` may be empty.
+
+        The change feed is at-least-once: a batch redelivered after a host
+        crash is counted twice, which can lean one minute's `avg`; `min` and
+        `max` are exact. The chart can lag the newest reading by about 30 s.
+
+        Every response carries X-Request-ID. Every response that reached
+        Cosmos carries x-meatgeek-request-charge: the sum of the cook point
+        read, the device point read and every page of the rollup query.
+      tags:
+        - cooks
+      parameters:
+        - name: cookId
+          in: path
+          required: true
+          description: Id of the cook. Opaque; 1-128 characters, otherwise 400.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      responses:
+        '200':
+          description: The cook's chart.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CookChart'
+        '400':
+          description: |
+            VALIDATION_ERROR: `{cookId}` is empty or longer than 128
+            characters. No Cosmos call is made.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: |
+            NOT_FOUND: no cook with this id in the caller's partition. Absent,
+            another user's, and a device lock id all answer the same.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: |
+            INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
+            failure. Carries x-meatgeek-request-charge when the Cosmos calls made
+            before the failure, or the failing call, reported a charge. Carries
+            X-Request-ID (the caller's, else the invocation id) since HAR-75; the
+            body's `requestId` is the invocation id.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /cooks/{cookId}/stop:
+    post:
+      operationId: stopCook
+      summary: Stop a cook
+      description: |
+        Moves the caller's cook `{cookId}` to `completed`, sets `endTime` to
+        now, and emits `cook_stopped` to the caller. Mirrors
+        apps/api/src/functions/cooks/stop-cook.ts:
+          - The request has no body; the handler never reads one. The device is
+            the one stored on the cook.
+          - The cook is point-read in the caller's partition. Absent there
+            (never started, or another user's) is 404 NOT_FOUND.
+          - HAR-26 (MG-83): the stored cook's device must be registered to the
+            caller. If it belongs to someone else, or is not registered, the
+            answer is 403 DEVICE_NOT_OWNED with no write and no
+            `cook_stopped`.
+          - Otherwise the stop is written and 200 returns the completed Cook
+            directly (NOT wrapped in ApiResponse). `cook_stopped` carries the
+            persisted cook (MG-31) and is emitted only by the call that made the
+            transition; stopping an already-completed cook returns it again with
+            200 and emits nothing.
+          - HAR-66: after the stop is written, transitioned or not, the device's
+            IoT Hub twin desired properties are set from Cosmos under the API's
+            managed identity: `activeCookId` and `correlationId` are removed
+            when the device has no active cook. No twin call is made on 400,
+            401, 403, 404 or 500. A device with no IoT Hub identity has no twin,
+            and the normal status is returned. If the twin update fails the cook
+            stays completed and the answer is 503 DEVICE_TWIN_UPDATE_FAILED;
+            resending the stop retries the twin update.
+      tags:
+        - cooks
+      parameters:
+        - name: cookId
+          in: path
+          required: true
+          description: |
+            Id of the cook to stop. Opaque (cooks started before MG-84 have
+            `cook-<epoch-ms>` ids). An id that is only whitespace is 400.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cook now completed (or already was).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cook'
+        '400':
+          description: |
+            VALIDATION_ERROR: `{cookId}` is blank. No Cosmos call is made.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            DEVICE_NOT_OWNED. The device is not registered to the caller (it
+            belongs to someone else, or nobody registered it; the body is the same
+            either way). Nothing was written and nothing was emitted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: NOT_FOUND. No cook with this id in the caller's partition.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          description: |
+            DEVICE_TWIN_UPDATE_FAILED. The cook is completed but the device twin
+            was not updated. `cookId` names the cook; `reason` is a fixed code.
+            Resend the stop.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTwinUpdateFailedError'
+  /negotiate:
+    post:
+      operationId: negotiate
+      summary: SignalR negotiate, scoped to the caller
+      description: |
+        SignalR handshake (HAR-57 / MG-30). It takes no parameters and no body:
+        the caller is the Easy Auth principal, and the connection's SignalR user
+        id is the principal's `userId` (`"<tid>:<oid>"`). The handler returns a
+        60-minute client access token minted for that user id through the
+        SignalR data-plane REST API, and makes no other call: it reads no
+        devices and manages no groups (HAR-81). Every message is sent to a user
+        id: `temperature` to the reading's device owner, `cook_started` and
+        `cook_stopped` to the cook's owner.
+
+        A `deviceId` query parameter, which earlier versions required, is
+        ignored. The response body is the bare connection info (NOT wrapped in
+        ApiResponse).
+      tags:
+        - signalr
+      responses:
+        '200':
+          description: SignalR connection info for the client to open its connection.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalRConnectionInfo'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '503':
+          description: |
+            SIGNALR_UNAVAILABLE with fixed text: minting the token failed or
+            SignalR is not configured. `reason` is a fixed code naming the failed
+            operation and status (HAR-59), e.g.
+            `signalr_generate_token_status_429`. Neither the body nor the log
+            names the endpoint, a user id or a token.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalRUnavailableError'
+  /temperatures/current/{deviceId}:
+    get:
+      operationId: getCurrentTemperatures
+      summary: Get the latest temperature reading for a device the caller owns
+      description: |
+        Returns the most recent TemperatureReading for a device the
+        authenticated caller owns, as a BARE TemperatureReading (NOT wrapped in
+        ApiResponse).
+
+        Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
+        The device must be the caller's (claimed with POST /devices/claim); a device
+        that does not exist and one owned by someone else both answer
+        404 DEVICE_NOT_FOUND with the same body.
+
+        Readings are the documents IoT Hub routes into the `temperatures`
+        container (partitioned on /deviceId). The newest is chosen by the hub's
+        `iothub-enqueuedtime`, with one single-partition query.
+
+        Bounded by `claimedAt` (HAR-136): for a device claimed through POST
+        /devices/claim, only a reading enqueued at or after the device's
+        `claimedAt` counts, so readings from before the caller's claim (the
+        device unclaimed, or another owner's) never reach the caller. The bound
+        is in the query. No reading at or after `claimedAt` is the same 404
+        NO_READINGS as no reading at all. A device without `claimedAt`
+        (registered through POST /devices before HAR-145 removed it) is not
+        bounded.
+
+        Trust rule (MG-73): the reading's `deviceId` is the hub-authenticated
+        `SystemProperties["iothub-connection-device-id"]`, never the
+        device-supplied `Body.deviceId`. A stored document whose hub identity is
+        not this device, or whose body is not a JSON object, is skipped.
+        `timestamp` is the device's `Body.timestamp` when it parses as a date,
+        else the hub's enqueued time. A temperature that is not a finite number
+        is omitted.
+
+        Every response that reached Cosmos, the 404s included, carries
+        x-meatgeek-request-charge: the device ownership read plus the readings
+        query. A 401 or 400 is answered before any Cosmos call and carries none.
+      tags:
+        - temperatures
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          description: |
+            The device id: 1-128 characters of A-Z, a-z, 0-9, ".", "_", ":" or
+            "-" (the device id rule). Anything else is 400.
+          schema:
+            type: string
+            pattern: ^[A-Za-z0-9._:-]{1,128}$
+      responses:
+        '200':
+          description: Latest reading for the device.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemperatureReading'
+        '400':
+          description: |
+            VALIDATION_ERROR: the deviceId is not a valid device id. Answered
+            before any Cosmos call.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: |
+            DEVICE_NOT_FOUND: no such device, or it belongs to someone else (the
+            two are indistinguishable on purpose).
+            NO_READINGS: the caller owns the device, but no reading for it has
+            been stored (for a claimed device: none at or after `claimedAt`).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /temperatures/history:
+    get:
+      operationId: getTemperatureHistory
+      summary: A page of the stored readings for a device the caller owns
+      description: |
+        Returns one page of TemperatureReading rows for a device the
+        authenticated caller owns, as a TemperatureHistoryResponse
+        `{ readings, limit, hasMore, continuationToken? }`.
+
+        Identity comes only from the Easy Auth principal (X-MS-CLIENT-PRINCIPAL).
+        The device must be the caller's (claimed with POST /devices/claim); a device
+        that does not exist and one owned by someone else both answer
+        404 DEVICE_NOT_FOUND with the same body. An owned device with no
+        readings answers 200 with `{ readings: [], limit, hasMore: false }`
+        and no `continuationToken`.
+
+        Readings are the documents IoT Hub routes into the `temperatures`
+        container (partitioned on /deviceId), read with one single-partition
+        query per page.
+
+        Window and order: `startTime` (inclusive) and `endTime` (exclusive)
+        bound the hub's `iothub-enqueuedtime`, the time IoT Hub RECEIVED the
+        message, never the device-supplied `Body.timestamp`. Readings are in
+        ascending enqueued-time order (oldest first). Each reading's
+        `timestamp` is still the device's `Body.timestamp` when it parses as a
+        date, else the enqueued time, so a reading near a bound can carry a
+        `timestamp` just outside the window.
+
+        Bounded by `claimedAt` (HAR-136): for a device claimed through POST
+        /devices/claim, the effective `startTime` is the later of the requested
+        one (or none) and the device's `claimedAt`, inside the query, so
+        readings from before the caller's claim never reach the caller and
+        paging stays right. A window that ends before `claimedAt` is an empty
+        page. A device without `claimedAt` (registered through POST /devices
+        before HAR-145 removed it) is not bounded.
+
+        Trust rule (MG-73): a reading's `deviceId` is the hub-authenticated
+        `SystemProperties["iothub-connection-device-id"]`, never
+        `Body.deviceId`. A stored document whose hub identity is not this
+        device, or whose body is not a JSON object, is not returned. A
+        temperature that is not a finite number is omitted.
+
+        Paging (HAR-75): by continuation token, never offset. An offset page
+        re-charged every skipped document and `total` needed a separate COUNT,
+        so neither exists. Each page is `limit` documents (Cosmos
+        `maxItemCount`) from where the previous page's `continuationToken`
+        left off, so a deep page costs what the first one does. `hasMore` is
+        true exactly when `continuationToken` is present; send it back
+        unchanged, with the same filter, for the next page. A matching
+        document that cannot be mapped (no usable timestamp) is skipped, and
+        Cosmos may return a short or empty page before the end, so a page can
+        hold fewer than `limit` readings while `hasMore` is true. `offset` is
+        refused with 400.
+
+        Every response carries X-Request-ID: the caller's when sent, else the
+        invocation id. Every response that reached Cosmos, the 404 included,
+        carries x-meatgeek-request-charge: the device ownership read plus, for
+        a 200 or a refused token, the page query. A 401, and a 400 for a query
+        parameter, is answered before any Cosmos call and carries none.
+      tags:
+        - temperatures
+      parameters:
+        - name: deviceId
+          in: query
+          required: true
+          description: |
+            Device whose readings to return: 1-128 characters of A-Z, a-z, 0-9,
+            ".", "_", ":" or "-" (the device id rule). Missing or anything
+            else is 400.
+          schema:
+            type: string
+            pattern: ^[A-Za-z0-9._:-]{1,128}$
+        - name: cookId
+          in: query
+          required: false
+          description: |
+            STRICT TAG-MATCH semantics: when present, only readings whose
+            `cookId` field equals this value are returned. This is NOT a
+            time-window shorthand — readings that fall inside the cook's
+            start/end interval but lack the cookId tag (e.g., reading
+            recorded before the cook session was created) are EXCLUDED.
+
+            The strict semantic is load-bearing for ticket #1 (CosmosDB
+            partitioning); do not silently relax it without coordination
+            with the API team.
+
+            1-128 characters. Not checked against the cooks container.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: startTime
+          in: query
+          required: false
+          description: |
+            ISO-8601 lower bound (inclusive) on the hub's enqueued time. Must be
+            before `endTime` when both are given. Raised to the device's
+            `claimedAt` when it is earlier (HAR-136). The handler accepts any value
+            JavaScript's `Date` parses and normalises it to UTC; anything else
+            is 400.
+          schema:
+            type: string
+            format: date-time
+        - name: endTime
+          in: query
+          required: false
+          description: |
+            ISO-8601 upper bound (exclusive) on the hub's enqueued time. Parsed
+            like `startTime`.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Default 100. A non-integer or a value outside 1-1000 is 400.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: continuationToken
+          in: query
+          required: false
+          description: |
+            Opaque cursor from the previous page's `continuationToken`. Omit
+            for the first page. Empty, or a token Cosmos does not accept
+            (garbled, truncated, or from another query), is 400
+            VALIDATION_ERROR.
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: |
+            A page of readings, oldest enqueued time first. Empty, with
+            `hasMore: false` and no `continuationToken`, for an owned device
+            with no matching readings.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemperatureHistoryResponse'
+        '400':
+          description: |
+            VALIDATION_ERROR, before any Cosmos call: a missing or invalid
+            deviceId, an empty or over-long cookId, a startTime or endTime that
+            is not a date, a startTime not before endTime, a limit that is not
+            an integer from 1 to 1000, an empty continuationToken, or any
+            `offset` (the message names it; page with continuationToken).
+
+            VALIDATION_ERROR after the ownership read: a continuationToken
+            Cosmos refuses. This one carries x-meatgeek-request-charge.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: |
+            DEVICE_NOT_FOUND: no such device, or it belongs to someone else (the
+            two are indistinguishable on purpose).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /devices:
+    get:
+      operationId: getDevices
+      summary: List the caller's devices
+      description: |
+        Returns every device the authenticated caller owns, sorted by name,
+        wrapped under a `devices` key (NOT a bare array, NOT ApiResponse).
+        A `userId` query parameter or `x-user-id` header is ignored.
+
+        HAR-143: every device carries `connection`, read from its IoT Hub twin
+        with one GET per device, at most 8 at a time. A device whose twin
+        cannot be read is `unknown`; that never fails the list.
+
+        HAR-145: there is no POST /devices, so no such operation. A device is
+        owned only by claiming it with POST /devices/claim.
+      tags:
+        - devices
+      responses:
+        '200':
+          description: The caller's devices (possibly none).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /devices/claim:
+    post:
+      operationId: claimDevice
+      summary: Claim a device with the claim code it shows
+      description: |
+        HAR-130. Claims the device for the caller, who proves they hold it with
+        the claim code the device itself generated and shows. The device keeps
+        the code and reports only its hash in its IoT Hub twin's reported
+        properties, which only the device can write; the API never stores the
+        code. See learnings/decisions/har-130-device-provisioning-and-claim.md.
+
+        The API reads the twin and refuses unless the reported hash matches the
+        code sent, the code has not expired, and the reported claim generation
+        equals the desired one. It then records the code as consumed by the
+        caller in the twin's desired properties with a conditional (If-Match)
+        patch, which makes a code single-use when two claimants race, and only
+        then creates the device document (never upsert), stamped with
+        `claimedAt`.
+
+        A retry by the same caller is safe: after a partial failure it
+        completes the claim (201), and after a full one it returns the stored
+        device (200).
+
+        Every refusal is the same 403 body, whatever the reason (no such
+        device, wrong code, expired, already claimed by someone else, owned by
+        someone else), and carries no request-charge header, so the answer
+        gives no hint which check failed.
+      tags:
+        - devices
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimDeviceRequest'
+      responses:
+        '200':
+          description: |
+            A retry: the caller had already claimed this device. The stored
+            device is returned unchanged (its stored name, not the one sent).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '201':
+          description: The claimed device, now the caller's.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/DeviceValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            CLAIM_REFUSED with the fixed message "Device could not be claimed
+            with that code", for every refusal. No request-charge header.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            DEVICE_CONFLICT: the caller already has another device with this
+            name. The claim code stays consumed by the caller, so the same
+            request with another name succeeds.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          description: |
+            DEVICE_TWIN_UPDATE_FAILED: the device twin could not be read or
+            patched. Nothing was stored; retry the same request.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceClaimTwinFailedError'
+  /devices/{id}:
+    get:
+      operationId: getDevice
+      summary: Get one of the caller's devices
+      description: |
+        Returns the Device with id=`{id}` as a bare object. A device that does
+        not exist and one owned by someone else both answer 404, so the
+        response does not reveal that another user's device exists.
+
+        HAR-143: the device carries `connection`, read from its IoT Hub twin.
+        A twin that cannot be read gives `unknown`; that never fails the
+        request.
+      tags:
+        - devices
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdPath'
+      responses:
+        '200':
+          description: The device.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/DeviceNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    patch:
+      operationId: updateDevice
+      summary: Change a device's name, location, or configuration
+      description: |
+        Partial update. `configuration` merges field by field over the stored
+        configuration (`alertSettings` one level deeper), so send only the
+        fields you want to change. The write is conditioned on the version
+        read (If-Match); if the device changed in between, the answer is
+        409 CONCURRENT_UPDATE and the client should read it again and retry.
+      tags:
+        - devices
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDeviceRequest'
+      responses:
+        '200':
+          description: The updated device.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/DeviceValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/DeviceNotFound'
+        '409':
+          description: |
+            DEVICE_CONFLICT: the caller already has another device with the new
+            name. CONCURRENT_UPDATE: the device changed between the read and the
+            write.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      operationId: deleteDevice
+      summary: Release one of the caller's devices
+      description: |
+        Releases the device (HAR-136, goal HAR-130;
+        learnings/decisions/har-130-device-provisioning-and-claim.md). Once
+        released it can be claimed again (POST /devices/claim), but only with a
+        fresh claim code: the code it was claimed with is refused for ever.
+
+        In order:
+
+        1. Ownership: one point read. 404 DEVICE_NOT_FOUND for an id nobody
+           registered, 403 DEVICE_NOT_OWNED for someone else's device.
+        2. 409 COOK_ACTIVE while the caller has an active cook on the device
+           (the MG-84 lock, a point read). Stop the cook first; nothing is
+           changed.
+        3. The device twin: desired `claimGeneration` becomes its value + 1
+           (absent counts as "0", so the first release writes "1") and
+           `claimClaimantHash` is removed, under `If-Match`; a 412 re-reads once
+           and retries. `claimConsumedCodeHash` is kept, so the old code stays
+           consumed. The device sees the new generation and mints a new code. A
+           device with no IoT Hub identity (registered through POST /devices
+           before HAR-145) has no twin, and this step is skipped. Any other twin failure is 503
+           DEVICE_TWIN_UPDATE_FAILED and the device is not released, so a retry
+           is safe.
+        4. The device document is deleted. No body on success.
+
+        Only the device goes. Its cooks stay in the caller's history (GET
+        /cooks still lists them), and its readings expire on the temperatures
+        container's TTL (7 days in dev, 90 in prod). A later owner sees only
+        readings from their own `claimedAt` on.
+
+        Unlike GET and PATCH, which answer 404 for both, DELETE tells a device
+        someone else owns (403 DEVICE_NOT_OWNED) from one nobody registered
+        (404 DEVICE_NOT_FOUND), as the cook routes' 403 does.
+      tags:
+        - devices
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdPath'
+      responses:
+        '204':
+          description: Released. The device document is deleted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            DEVICE_NOT_OWNED: the device is registered to someone else. Nothing
+            was deleted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: |
+            DEVICE_NOT_FOUND: no device has this id (or it was deleted already).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            COOK_ACTIVE: the caller has an active cook on this device. The
+            message is fixed: "Stop the active cook before releasing this
+            device". Nothing was changed.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          description: |
+            DEVICE_TWIN_UPDATE_FAILED: the device twin could not be read or
+            patched. The device was not released (its document is kept); retry
+            the same request.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceClaimTwinFailedError'
+  /users/me:
+    description: |
+      The authenticated caller's own profile. The user id is `"<tid>:<oid>"`:
+      the Entra tenant id and object id from the token Easy Auth validated. An
+      object id is unique only within its tenant, so the id is meaningful only
+      within that tenant. It is also the profile document's Cosmos id and
+      partition key, so every operation is a point read or write. Email is
+      contact data and is not unique across users.
+    get:
+      operationId: getUserProfile
+      summary: Get the caller's profile
+      description: |
+        Returns the caller's User. `devices` is read from the devices the caller
+        owns. 404 USER_NOT_FOUND until the first PUT /users/me.
+      tags:
+        - users
+      responses:
+        '200':
+          description: The caller's profile.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: USER_NOT_FOUND — the caller has no profile yet.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    put:
+      operationId: putUserProfile
+      summary: Create or replace the caller's profile
+      description: |
+        With no profile yet, creates one (201): `createdAt` is now and
+        `preferences` is deep-merged over the defaults. Otherwise replaces it
+        (200), keeping `createdAt` and deep-merging `preferences` over the
+        stored ones; plain objects merge key by key, scalars and arrays
+        replace. The replace is conditioned on the version read (If-Match): if
+        the profile changed in between, the answer is 409 CONCURRENT_UPDATE and
+        the client should read it again and retry.
+      tags:
+        - users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutUserProfileRequest'
+      responses:
+        '200':
+          description: The profile existed and was replaced.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '201':
+          description: The profile was created.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: |
+            VALIDATION_ERROR: the body is not valid JSON, carries `id`, `userId`
+            or another unknown field, or breaks a field rule. Answered before
+            any Cosmos call.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          description: |
+            CONCURRENT_UPDATE: the profile changed between the read and the
+            write.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /recipes:
+    get:
+      operationId: listRecipes
+      summary: List the caller's recipes
+      description: |
+        Returns the caller's recipes, newest `updatedAt` first, wrapped under a
+        `recipes` key. One single-partition query. `meatType` narrows the list;
+        an unknown value is 400 VALIDATION_ERROR.
+      tags:
+        - recipes
+      parameters:
+        - name: meatType
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/RecipeMeatType'
+      responses:
+        '200':
+          description: The caller's recipes (possibly none).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipeListResponse'
+        '400':
+          $ref: '#/components/responses/RecipeValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      operationId: createRecipe
+      summary: Create a recipe
+      description: |
+        Creates a recipe owned by the caller. The server sets `id` (a new UUID),
+        `userId`, `createdAt` and `updatedAt`. Because the id is
+        server-generated there is no idempotent replay: every successful POST
+        creates a new recipe.
+      tags:
+        - recipes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecipeRequest'
+      responses:
+        '201':
+          description: The created recipe.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recipe'
+        '400':
+          $ref: '#/components/responses/RecipeValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /recipes/{id}:
+    get:
+      operationId: getRecipe
+      summary: Get one of the caller's recipes
+      description: |
+        Returns the Recipe with id=`{id}` as a bare object, from one point read
+        in the caller's partition.
+      tags:
+        - recipes
+      parameters:
+        - $ref: '#/components/parameters/RecipeIdPath'
+      responses:
+        '200':
+          description: The recipe.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recipe'
+        '400':
+          $ref: '#/components/responses/RecipeValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/RecipeNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    patch:
+      operationId: updateRecipe
+      summary: Change one of the caller's recipes
+      description: |
+        Partial update: each field sent replaces the stored value whole;
+        `updatedAt` is bumped. The write is conditioned on the version read
+        (If-Match); if the recipe changed in between, the answer is 409
+        CONCURRENT_UPDATE and the client should read it again and retry.
+      tags:
+        - recipes
+      parameters:
+        - $ref: '#/components/parameters/RecipeIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRecipeRequest'
+      responses:
+        '200':
+          description: The updated recipe.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recipe'
+        '400':
+          $ref: '#/components/responses/RecipeValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/RecipeNotFound'
+        '409':
+          description: |
+            CONCURRENT_UPDATE: the recipe changed between the read and the write.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      operationId: deleteRecipe
+      summary: Delete one of the caller's recipes
+      description: One point delete in the caller's partition. No body on success.
+      tags:
+        - recipes
+      parameters:
+        - $ref: '#/components/parameters/RecipeIdPath'
+      responses:
+        '204':
+          description: Deleted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+        '400':
+          $ref: '#/components/responses/RecipeValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/RecipeNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /health/cosmos:
+    get:
+      operationId: getCosmosHealth
+      summary: Check the API's own path to Cosmos
+      description: |
+        Runs two read-only metadata reads through the same shared Cosmos adapter
+        every handler uses: the configured database, then the cooks container.
+        Both must answer for 200. Nothing is created or written.
+
+        The handler does not read the caller's principal: authentication is App
+        Service Authentication's, which answers 401 before the function runs.
+        The body never names the account, database or container, and never
+        carries a dependency's error text.
+      tags:
+        - health
+      responses:
+        '200':
+          description: Healthy. `status` is `healthy`; there is no `error`.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CosmosHealthResponse'
+        '401':
+          $ref: '#/components/responses/PlatformUnauthenticated'
+        '503':
+          description: |
+            Unhealthy. `status` is `unhealthy`; `error` is a missing setting's
+            code or `cosmos_probe_failed`, with `probeStatusCode` when the
+            dependency reported a numeric status.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CosmosHealthResponse'
+x-signalr:
+  hub: temperatureHub
+  negotiate: /negotiate
+  messages:
+    temperature:
+      $ref: '#/components/schemas/TemperatureMessage'
+    cook_started:
+      $ref: '#/components/schemas/CookStartedMessage'
+    cook_stopped:
+      $ref: '#/components/schemas/CookStoppedMessage'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        An Entra ID access token whose audience is the API. App Service
+        Authentication (Easy Auth) validates it before any function runs and
+        passes the validated principal to the handler as
+        `X-MS-CLIENT-PRINCIPAL`.
+  headers:
+    X-Request-ID:
+      description: |
+        Correlation handle for the call. Handlers echo the caller's
+        `X-Request-ID` request header when it is sent and otherwise use the
+        Functions invocation id. GET /health/cosmos always sends the invocation
+        id. An error body's `requestId` is the invocation id (the shared 401 body
+        carries the same value as this header). Every response that declares it
+        sends it; the live acceptance run checks that (HAR-77). The shared 401
+        does not declare it: App Service Authentication's own 401 lacks it.
+      schema:
+        type: string
+    RequestCharge:
+      description: |
+        Cosmos request charge (RU) of the call, as a decimal number exactly as
+        Cosmos reported it (HAR-11). Sent whenever the call reached Cosmos and a
+        charge is known, summed over every Cosmos call the request made. Absent
+        when no Cosmos call was made (a 401, or a 400 answered before any read).
+      schema:
+        type: string
+        example: '7.42'
+  parameters:
+    DeviceIdPath:
+      name: id
+      in: path
+      required: true
+      description: |
+        The device id (also its Cosmos partition key). The route does not check
+        its shape: an id that is not one of the caller's devices answers 404.
+      schema:
+        type: string
+    RecipeIdPath:
+      name: id
+      in: path
+      required: true
+      description: The recipe id, a UUID. Anything else is 400 with no Cosmos call.
+      schema:
+        type: string
+        format: uuid
+        pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+  responses:
+    Unauthenticated:
+      description: |
+        UNAUTHENTICATED. Two layers answer 401:
+          - App Service Authentication (Easy Auth) answers 401 itself, before any
+            function runs, when the bearer token is missing or is not a valid
+            Entra access token for the API audience. That response is the
+            platform's, with no body from this API.
+          - The handler answers 401 with the body below when the request reached
+            it without a usable Easy Auth principal (`X-MS-CLIENT-PRINCIPAL`
+            missing, unparseable, or without `oid`/`tid` claims). No Cosmos call
+            is made, so there is no x-meatgeek-request-charge header.
+        X-Request-ID is not declared here because only the handler's 401 sends
+        it (equal to the body's `requestId`). The platform's 401, which is the
+        one a missing or invalid token gets in a deployment, has neither the
+        header nor a body (HAR-77: the live acceptance run checks every declared
+        X-Request-ID is present).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UnauthenticatedError'
+    PlatformUnauthenticated:
+      description: |
+        App Service Authentication (Easy Auth) answers 401 itself, before the
+        function runs, when the bearer token is missing or is not a valid Entra
+        access token for the API audience. The handler behind this route does not
+        read the principal, so this API never sends a 401 body of its own here.
+    ServerError:
+      description: |
+        INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
+        failure. Carries x-meatgeek-request-charge when the Cosmos calls made
+        before the failure, or the failing call, reported a charge.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+        x-meatgeek-request-charge:
+          $ref: '#/components/headers/RequestCharge'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    DeviceValidationError:
+      description: |
+        VALIDATION_ERROR: the body is not valid JSON, is not an object, has an
+        unknown field, or breaks a field rule. Answered before any Cosmos call.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    DeviceNotFound:
+      description: |
+        NOT_FOUND: no such device, or it belongs to someone else (the two are
+        indistinguishable on purpose).
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+        x-meatgeek-request-charge:
+          $ref: '#/components/headers/RequestCharge'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RecipeValidationError:
+      description: |
+        VALIDATION_ERROR: the body is not valid JSON, is not an object, carries a
+        server-owned (`id`, `userId`, `createdAt`, `updatedAt`) or unknown field,
+        breaks a field rule, or is an empty patch; or the `{id}` is not a UUID; or
+        the `meatType` filter is unknown. Answered before any Cosmos call.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RecipeNotFound:
+      description: |
+        RECIPE_NOT_FOUND: no such recipe in the caller's partition. Another user's
+        recipe answers exactly the same.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+        x-meatgeek-request-charge:
+          $ref: '#/components/headers/RequestCharge'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    ErrorCode:
+      type: string
+      description: |
+        Stable, machine-readable error code. Clients should branch on this.
+        Every code the API emits, and nothing else.
+      enum:
+        - VALIDATION_ERROR
+        - UNAUTHENTICATED
+        - NOT_FOUND
+        - DEVICE_NOT_FOUND
+        - DEVICE_NOT_OWNED
+        - DEVICE_CONFLICT
+        - CLAIM_REFUSED
+        - CONCURRENT_UPDATE
+        - COOK_ALREADY_ACTIVE
+        - COOK_ACTIVE
+        - COOK_ID_REUSED
+        - NO_READINGS
+        - USER_NOT_FOUND
+        - RECIPE_NOT_FOUND
+        - DEVICE_TWIN_UPDATE_FAILED
+        - SIGNALR_UNAVAILABLE
+        - INTERNAL_SERVER_ERROR
+    ErrorResponse:
+      type: object
+      description: |
+        The error body every handler returns, except the variants below that add
+        fields. `requestId` is the Functions invocation id.
+      required:
+        - error
+        - message
+        - requestId
+      additionalProperties: false
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: Human-readable diagnostic message. Not stable across releases.
+        requestId:
+          type: string
+          description: The Functions invocation id. Quote it when reporting a problem.
+    UnauthenticatedError:
+      type: object
+      description: |
+        401 body when the request reached the handler without a usable Easy Auth
+        principal (X-MS-CLIENT-PRINCIPAL missing, unparseable, or without oid/tid
+        claims). Built by unauthenticatedResponse in
+        apps/api/src/shared/auth/principal.ts. `reason` is a fixed code; it never
+        carries identity material. There is no `message`.
+      required:
+        - error
+        - reason
+        - requestId
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+        reason:
+          type: string
+          enum:
+            - principal_header_missing
+            - principal_header_unparseable
+            - principal_object_id_missing
+            - principal_tenant_id_missing
+        requestId:
+          type: string
+    CookAlreadyActiveError:
+      type: object
+      description: |
+        409 body for POST /cooks when the device already has an active cook for
+        this user (MG-84: one active cook per user and device; with HAR-26's
+        ownership check only the device's owner can start a cook on it, so this
+        is in effect one active cook per device). `activeCookId` is the cook
+        holding the device; stop it before starting another.
+      required:
+        - error
+        - message
+        - requestId
+        - activeCookId
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum:
+            - COOK_ALREADY_ACTIVE
+        message:
+          type: string
+        requestId:
+          type: string
+        activeCookId:
+          type: string
+    SignalRUnavailableError:
+      type: object
+      description: |
+        503 body for POST /negotiate when a SignalR data-plane REST call failed or
+        SignalR is not configured (HAR-59). Built by negotiateHandler in
+        apps/api/src/functions/signalr/negotiate.ts. `reason` is a fixed code that
+        names the failed operation and, when the service answered, its HTTP status
+        (`signalr_<operation>_status_<n>`), else `signalr_<operation>_failed`, or
+        `signalr_failure` for any other error. It never carries the endpoint, a
+        user id, a group, a token or the underlying error text.
+      required:
+        - error
+        - message
+        - reason
+        - requestId
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum:
+            - SIGNALR_UNAVAILABLE
+        message:
+          type: string
+        reason:
+          type: string
+          pattern: ^signalr_(failure|[a-z_]+_(failed|status_[0-9]{3}))$
+          example: signalr_generate_token_status_429
+        requestId:
+          type: string
+    DeviceTwinUpdateFailedError:
+      type: object
+      description: |
+        503 body for POST /cooks and POST /cooks/{cookId}/stop when the cook was
+        written to Cosmos but the device twin's desired properties could not be
+        brought in line with it (HAR-66). The cook stays committed; retrying the
+        same request (same cook id, or the same stop) converges. `cookId` is the
+        cook that was written. `reason` is a fixed code: an IoT Hub failure as
+        `iothub_<operation>_status_<n>` or `iothub_<operation>_failed`
+        (operations `configuration`, `credential`, `get_twin`, `patch_twin`;
+        `iothub_patch_twin_status_412` when every attempt lost the etag race),
+        `iothub_failure`, `cosmos_active_cook_read_failed`,
+        `device_twin_sync_contended`, `device_twin_sync_unconfigured` or
+        `device_twin_sync_failed`. It never carries the hub host, a device id, a
+        token or the underlying error text.
+      required:
+        - error
+        - message
+        - cookId
+        - reason
+        - requestId
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum:
+            - DEVICE_TWIN_UPDATE_FAILED
+        message:
+          type: string
+        cookId:
+          type: string
+        reason:
+          type: string
+          pattern: ^(iothub_(failure|[a-z_]+_(failed|status_[0-9]{3}))|cosmos_active_cook_read_failed|device_twin_sync_(contended|unconfigured|failed))$
+          example: iothub_patch_twin_status_412
+        requestId:
+          type: string
+    DeviceClaimTwinFailedError:
+      type: object
+      description: |
+        503 body for POST /devices/claim when the device twin could not be read
+        or its desired properties could not be patched (HAR-130). Nothing was
+        stored, so retrying the same request with the same code is safe.
+        DELETE /devices/{id} (release, HAR-136) answers the same body when its
+        twin step fails; the device document is not deleted then, so retrying
+        the release is safe too. `reason`
+        is a fixed code: `iothub_<operation>_status_<n>` or
+        `iothub_<operation>_failed` (operations `configuration`, `credential`,
+        `get_twin`, `patch_twin`; `iothub_patch_twin_status_412` when the patch
+        lost the etag race twice), or `iothub_failure`. It never carries the hub
+        host, a device id, the claim code, a hash, a token or the underlying
+        error text.
+      required:
+        - error
+        - message
+        - reason
+        - requestId
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum:
+            - DEVICE_TWIN_UPDATE_FAILED
+        message:
+          type: string
+        reason:
+          type: string
+          pattern: ^iothub_(failure|[a-z_]+_(failed|status_[0-9]{3}))$
+          example: iothub_get_twin_status_503
+        requestId:
+          type: string
+    CosmosHealthResponse:
+      type: object
+      description: |
+        Body of GET /health/cosmos (apps/api/src/functions/health/cosmos-health.ts).
+        An allowlisted projection: it never names the account, database or
+        container, and never carries a dependency's error text.
+      required:
+        - status
+        - responseTime
+        - requestId
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum:
+            - healthy
+            - unhealthy
+        responseTime:
+          type: number
+          minimum: 0
+          description: Milliseconds the probe took.
+        error:
+          type: string
+          description: |
+            Present only when unhealthy. A fixed code: the name of a missing Cosmos
+            setting (the shared adapter's CosmosConfigError code), or
+            `cosmos_probe_failed`.
+          example: cosmos_probe_failed
+        probeStatusCode:
+          type: integer
+          description: |
+            The numeric status Cosmos or the credential reported, when it reported
+            one: 404 means the configured database or container is absent, 403 the
+            identity lacks its data-plane role, 401 the token was refused.
+        requestId:
+          type: string
+          description: The Functions invocation id.
+    TemperatureUnit:
+      type: string
+      description: User-facing temperature unit.
+      enum:
+        - fahrenheit
+        - celsius
+    DeviceConnectionState:
+      type: string
+      description: |
+        HAR-143: a device's IoT Hub connection as its twin reports it
+        (`Connected` / `Disconnected`); `unknown` when the twin could not be
+        read. Named enum (not anonymous union) so Go codegen produces a typed
+        constant set.
+      enum:
+        - connected
+        - disconnected
+        - unknown
+    ISODateTime:
+      type: string
+      format: date-time
+      description: ISO-8601 timestamp, UTC. Matches `new Date().toISOString()` output.
+    CookStatus:
+      type: string
+      description: |
+        Cook session lifecycle state. Named enum — generators (oapi-codegen, etc.)
+        must produce a typed constant set, not map[string]interface{}.
+      enum:
+        - planning
+        - active
+        - paused
+        - completed
+        - cancelled
+    TargetTemperatures:
+      type: object
+      description: |
+        Per-probe setpoint group. All members optional — a cook may target the
+        grill only, or any subset of probes.
+      additionalProperties: false
+      properties:
+        grill:
+          type: number
+          format: double
+          minimum: -50
+          maximum: 1000
+          description: Grill chamber setpoint, degrees F.
+        probe1:
+          type: number
+          format: double
+          minimum: -50
+          maximum: 1000
+        probe2:
+          type: number
+          format: double
+          minimum: -50
+          maximum: 1000
+        probe3:
+          type: number
+          format: double
+          minimum: -50
+          maximum: 1000
+        probe4:
+          type: number
+          format: double
+          minimum: -50
+          maximum: 1000
+    Cook:
+      type: object
+      description: |
+        Cook session, as GET /cooks (array items), GET /cooks/{cookId}, POST /cooks and
+        POST /cooks/{cookId}/stop return it and as the cook_started and
+        cook_stopped SignalR messages carry it. The repository projects every
+        stored cook onto exactly these fields (toCook in
+        apps/api/src/shared/cosmos/cooks-repository.ts). Cooks started through
+        POST /cooks always carry `meatType`; older cooks may not.
+      required:
+        - id
+        - userId
+        - deviceId
+        - name
+        - status
+        - startTime
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: |
+            Cook session id. Since MG-84 this is the UUID the client sent as
+            `StartCookRequest.id`. Cooks created earlier keep their
+            `cook-<epoch-ms>` ids; treat the id as an opaque string.
+        userId:
+          type: string
+        deviceId:
+          type: string
+        name:
+          type: string
+          description: Trimmed on start; never blank for a cook started through POST /cooks.
+        status:
+          $ref: '#/components/schemas/CookStatus'
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+        meatType:
+          type: string
+          description: |
+            Type of meat (brisket, pork, chicken, ...), free text. Required on
+            POST /cooks; absent on cooks stored before it was.
+        weight:
+          type: number
+          format: double
+          minimum: 0
+          description: Pre-cook weight in pounds.
+        targetTemps:
+          $ref: '#/components/schemas/TargetTemperatures'
+        actualDuration:
+          type: number
+          format: double
+          description: Total cook duration in hours.
+        maxTemps:
+          $ref: '#/components/schemas/TargetTemperatures'
+        notes:
+          type: string
+        photos:
+          type: array
+          items:
+            type: string
+            format: uri
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        isPublic:
+          type: boolean
+    StartCookTargetTemperatures:
+      type: object
+      description: |
+        The `targetTemps` POST /cooks accepts (HAR-75): any subset of the grill
+        and the four probes, each a finite number from 0 to 1000 degrees F. Any
+        other key, or a value out of range, is 400 VALIDATION_ERROR naming it.
+      additionalProperties: false
+      properties:
+        grill:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+          description: Grill chamber setpoint, degrees F.
+        probe1:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        probe2:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        probe3:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        probe4:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+    StartCookRequest:
+      type: object
+      description: |
+        Body for POST /cooks. Every field has a rule (HAR-75,
+        apps/api/src/functions/cooks/cook-requests.ts); a body that is not a JSON
+        object (invalid JSON, `null`, an array), has a field not listed here, or
+        breaks a field rule is 400 VALIDATION_ERROR with a message naming the
+        field. `name` and `meatType` are stored trimmed; `weight`, `targetTemps`
+        and `notes` are stored as sent when present.
+      required:
+        - id
+        - name
+        - deviceId
+        - meatType
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Client-generated cook id and the idempotency key for the start.
+            Generate it once per start intent (e.g. `crypto.randomUUID()`) and
+            send the same id, with the same body, on every retry. A repeat
+            returns the original cook with 200 and emits no second
+            `cook_started`; the same id with a different body returns 422
+            COOK_ID_REUSED.
+          pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        name:
+          type: string
+          minLength: 1
+          pattern: \S
+          description: 1-100 characters after trimming. Stored trimmed.
+        deviceId:
+          type: string
+          minLength: 1
+          description: |
+            A device the caller owns (claimed with POST /devices/claim). Any other value is
+            403 DEVICE_NOT_OWNED.
+        meatType:
+          type: string
+          minLength: 1
+          pattern: \S
+          description: 1-100 characters after trimming. Stored trimmed.
+        weight:
+          type: number
+          format: double
+          exclusiveMinimum: true
+          minimum: 0
+          maximum: 1000
+          description: Pre-cook weight in pounds, greater than 0 and at most 1000.
+        targetTemps:
+          $ref: '#/components/schemas/StartCookTargetTemperatures'
+        notes:
+          type: string
+          maxLength: 2000
+    CookListResponse:
+      type: object
+      description: |
+        Response envelope for GET /cooks. Matches CookListResponse in
+        libs/api-interfaces/src/lib/cook.ts: bare cook array under `cooks` plus
+        continuation-token pagination (NOT wrapped in ApiResponse). There is no
+        `total` and no `offset`: cooks are a single-partition Cosmos query, where
+        an offset re-charges skipped documents and a total needs a separate COUNT.
+      required:
+        - cooks
+        - limit
+        - hasMore
+      additionalProperties: false
+      properties:
+        cooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Cook'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: The page size actually applied, after the API's clamp.
+        hasMore:
+          type: boolean
+        continuationToken:
+          type: string
+          description: |
+            Opaque cursor for the next page. Present exactly when `hasMore` is
+            true; send it back unchanged as the `continuationToken` query param.
+    CookChartChannel:
+      type: object
+      description: |
+        One channel of one chart point: the readings of that channel in the
+        bucket. `avg` is the sum of the readings over their count.
+      required:
+        - min
+        - max
+        - avg
+      additionalProperties: false
+      properties:
+        min:
+          type: number
+          format: double
+        max:
+          type: number
+          format: double
+        avg:
+          type: number
+          format: double
+    CookChartPoint:
+      type: object
+      description: |
+        One bucket of a CookChart. A channel with no reading in the bucket is
+        absent.
+      required:
+        - t
+      additionalProperties: false
+      properties:
+        t:
+          type: string
+          format: date-time
+          description: Bucket start (UTC).
+        grill:
+          $ref: '#/components/schemas/CookChartChannel'
+        probe1:
+          $ref: '#/components/schemas/CookChartChannel'
+        probe2:
+          $ref: '#/components/schemas/CookChartChannel'
+        probe3:
+          $ref: '#/components/schemas/CookChartChannel'
+        probe4:
+          $ref: '#/components/schemas/CookChartChannel'
+    CookChart:
+      type: object
+      description: |
+        Response of GET /cooks/{cookId}/chart (HAR-86). Matches CookChart in
+        libs/api-interfaces/src/lib/cook.ts. Built from the per-device, per-hour
+        rollup documents, never from raw readings.
+      required:
+        - cookId
+        - deviceId
+        - startTime
+        - bucketSeconds
+        - points
+      additionalProperties: false
+      properties:
+        cookId:
+          type: string
+        deviceId:
+          type: string
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+          description: Present when the cook has ended; the window is then `[startTime, endTime)`.
+        bucketSeconds:
+          type: integer
+          enum:
+            - 60
+            - 120
+            - 300
+            - 600
+            - 900
+            - 1800
+            - 3600
+            - 7200
+            - 14400
+            - 21600
+        points:
+          type: array
+          maxItems: 720
+          description: Buckets with at least one reading, oldest first. May be empty.
+          items:
+            $ref: '#/components/schemas/CookChartPoint'
+    TemperatureReading:
+      type: object
+      description: |
+        One sensor sample from one device, as toTemperatureReading maps a stored
+        IoT Hub document. `deviceId` is the hub-authenticated device identity
+        (MG-73). A temperature the device did not send, or sent as something other
+        than a finite number, is omitted, never null. GET /temperatures/current
+        returns this shape directly as the 200 body.
+      required:
+        - deviceId
+        - timestamp
+      additionalProperties: false
+      properties:
+        deviceId:
+          type: string
+        timestamp:
+          type: string
+          description: |
+            The device's `Body.timestamp` exactly as sent when it parses as a date
+            (devices send ISO-8601), else the hub's enqueued time.
+          example: '2026-11-20T18:04:05.123Z'
+        cookId:
+          type: string
+          minLength: 1
+          description: |
+            Cook session this reading belongs to, when the device tagged it.
+            Strict tag-match semantics: see the GET /temperatures/history `cookId`
+            query parameter.
+        grillTemp:
+          type: number
+          format: double
+          description: Grill chamber reading in degrees F, as the device sent it.
+        probe1Temp:
+          type: number
+          format: double
+        probe2Temp:
+          type: number
+          format: double
+        probe3Temp:
+          type: number
+          format: double
+        probe4Temp:
+          type: number
+          format: double
+    TemperatureHistoryResponse:
+      type: object
+      description: |
+        Response for GET /temperatures/history (HAR-35). See
+        paths/temperatures.yaml for the strict cookId tag-match contract and the
+        enqueued-time window and ordering.
+      required:
+        - readings
+        - limit
+        - hasMore
+      additionalProperties: false
+      properties:
+        readings:
+          type: array
+          items:
+            $ref: '#/components/schemas/TemperatureReading'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: The `limit` applied (the query value, default 100).
+        hasMore:
+          type: boolean
+          description: True exactly when `continuationToken` is present.
+        continuationToken:
+          type: string
+          description: |
+            Opaque cursor for the next page (HAR-75). Present exactly when
+            `hasMore` is true; send it back unchanged as the `continuationToken`
+            query parameter, with the same filter. There is no `total` and no
+            `offset`.
+    Device:
+      type: object
+      description: |
+        A registered BBQ controller (e.g., MeatGeek V1 'meatgeek3'). Matches
+        the Device interface in libs/api-interfaces/src/lib/device.ts.
+      required:
+        - id
+        - userId
+        - name
+        - model
+        - isActive
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Device hardware id (e.g., 'meatgeek3'). Also the Cosmos partition key.
+          pattern: ^[A-Za-z0-9._:-]{1,128}$
+        userId:
+          type: string
+          description: |
+            Owner: the authenticated caller's `<tenantId>:<objectId>`, set by the
+            server from the Easy Auth principal. Never taken from a request.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique among one owner's devices.
+        model:
+          type: string
+          description: Hardware model string (e.g., 'MeatGeek V1').
+        location:
+          type: string
+          description: Free-text location label (e.g., 'Austin, TX').
+        lastSeen:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp of the most recent heartbeat.
+        isActive:
+          type: boolean
+        configuration:
+          $ref: '#/components/schemas/DeviceConfiguration'
+        firmware:
+          type: object
+          additionalProperties: false
+          required:
+            - version
+            - updateAvailable
+          properties:
+            version:
+              type: string
+            updateAvailable:
+              type: boolean
+        claimedAt:
+          type: string
+          format: date-time
+          description: |
+            HAR-130: when the owner claimed the device with its claim code
+            (ISO-8601 UTC). Absent on a device registered through POST /devices
+            before HAR-145 removed that route.
+        connection:
+          $ref: '#/components/schemas/DeviceConnection'
+    DeviceConfiguration:
+      type: object
+      description: |
+        Per-device tunable settings, including probe-correction offsets that
+        are added to raw thermistor readings before the API returns them.
+      additionalProperties: false
+      properties:
+        grillProbeCorrection:
+          type: number
+          format: double
+          description: Offset °F applied to grill probe.
+        probe1Correction:
+          type: number
+          format: double
+        probe2Correction:
+          type: number
+          format: double
+        probe3Correction:
+          type: number
+          format: double
+        probe4Correction:
+          type: number
+          format: double
+        temperatureUnit:
+          $ref: '#/components/schemas/TemperatureUnit'
+        pollingInterval:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: Telemetry sample period in seconds.
+        alertSettings:
+          type: object
+          additionalProperties: false
+          required:
+            - highTempThreshold
+            - lowTempThreshold
+            - enableSounds
+            - enablePushNotifications
+          properties:
+            highTempThreshold:
+              type: number
+              format: double
+            lowTempThreshold:
+              type: number
+              format: double
+            enableSounds:
+              type: boolean
+            enablePushNotifications:
+              type: boolean
+    DeviceConnection:
+      type: object
+      description: |
+        HAR-143 (goal HAR-130): whether the device is connected to IoT Hub and
+        when the hub last heard from it, read live from the device's twin and
+        never stored: `state` from the top-level `connectionState`;
+        `lastActivityAt` the later of the top-level `lastActivityTime` and
+        `properties.reported.$metadata.$lastUpdated` (the device's last
+        reported-properties write), both set only by the device's own activity.
+        GET /devices and GET /devices/{id} always include it on every device;
+        the other routes that return a Device leave it out. A twin that could
+        not be read (no twin, a failure, a timeout) gives
+        `{ state: unknown, lastActivityAt: null }` and never fails the request.
+      required:
+        - state
+        - lastActivityAt
+      additionalProperties: false
+      properties:
+        state:
+          $ref: '#/components/schemas/DeviceConnectionState'
+        lastActivityAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            When IoT Hub last heard from the device (ISO-8601 UTC, millisecond
+            precision). `null` when it never has (IoT Hub's
+            `0001-01-01T00:00:00Z`) or the twin could not be read.
+    DeviceListResponse:
+      type: object
+      description: |
+        Response envelope for GET /devices: the array is wrapped under a
+        `devices` key rather than returned bare (see
+        apps/api/src/functions/devices/get-devices.ts).
+      required:
+        - devices
+      additionalProperties: false
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/Device'
+    DeviceConfigurationPatch:
+      type: object
+      description: |
+        A partial DeviceConfiguration, as sent to POST /devices/claim and PATCH
+        /devices/{id}. Every field is optional, `alertSettings` included, and each
+        one sent replaces only that field. On a claim, required DeviceConfiguration
+        fields left out are filled from DEFAULT_DEVICE_CONFIGURATION
+        (fahrenheit, 30 s polling, thresholds 0, sounds and push off). Unknown
+        fields are rejected with 400.
+      additionalProperties: false
+      properties:
+        grillProbeCorrection:
+          type: number
+          format: double
+        probe1Correction:
+          type: number
+          format: double
+        probe2Correction:
+          type: number
+          format: double
+        probe3Correction:
+          type: number
+          format: double
+        probe4Correction:
+          type: number
+          format: double
+        temperatureUnit:
+          $ref: '#/components/schemas/TemperatureUnit'
+        pollingInterval:
+          type: integer
+          minimum: 1
+          maximum: 3600
+        alertSettings:
+          type: object
+          additionalProperties: false
+          properties:
+            highTempThreshold:
+              type: number
+              format: double
+            lowTempThreshold:
+              type: number
+              format: double
+            enableSounds:
+              type: boolean
+            enablePushNotifications:
+              type: boolean
+    ClaimDeviceRequest:
+      type: object
+      description: |
+        Body for POST /devices/claim (HAR-130). The owner is the authenticated
+        caller; a body `userId` (or any other unlisted field) is rejected with
+        400. `model` may be left out; the device is then stored with "MeatGeek".
+        Since HAR-145 this is the only way a device gets an owner.
+      required:
+        - deviceId
+        - claimCode
+        - name
+      additionalProperties: false
+      properties:
+        deviceId:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{1,128}$
+        claimCode:
+          type: string
+          description: |
+            The code the device shows, `XXXX-XXXX-XXXX`: 12 Crockford base32
+            symbols (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`). Case, hyphens and ASCII
+            whitespace do not matter, and `O` reads as `0`, `I` and `L` as `1`.
+            Anything that is not then exactly 12 such symbols is a 400.
+          example: 7K3M-9QXR-2HTV
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Trimmed; must not be blank.
+        model:
+          type: string
+          minLength: 1
+          maxLength: 100
+          default: MeatGeek
+        location:
+          type: string
+          minLength: 1
+          maxLength: 200
+        configuration:
+          $ref: '#/components/schemas/DeviceConfigurationPatch'
+    UpdateDeviceRequest:
+      type: object
+      description: |
+        Body for PATCH /devices/{id}. All fields optional, at least one required.
+        `configuration` merges field by field over the stored configuration.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        location:
+          type: string
+          minLength: 1
+          maxLength: 200
+        configuration:
+          $ref: '#/components/schemas/DeviceConfigurationPatch'
+    User:
+      type: object
+      description: |
+        The authenticated caller's profile. `id` is the caller's Entra identity,
+        `"<tenantId>:<objectId>"`; `devices` is not stored on the profile but read
+        from the devices the caller owns on every request.
+      required:
+        - id
+        - email
+        - name
+        - preferences
+        - devices
+        - createdAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: |
+            `"<tenantId>:<objectId>"` from the Easy Auth principal. Also the Cosmos
+            partition key. Meaningful only within that Entra tenant.
+        email:
+          type: string
+          maxLength: 254
+          description: Contact address. Not unique across users.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        preferences:
+          $ref: '#/components/schemas/UserPreferences'
+        devices:
+          type: array
+          description: Ids of the devices the caller owns, sorted by device name.
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: Set when the profile is first created; never changed.
+    UserPreferences:
+      type: object
+      description: |
+        The caller's settings. On create, the supplied preferences are
+        deep-merged over DEFAULT_USER_PREFERENCES
+        (apps/api/src/shared/cosmos/users-repository.ts), so every field below is
+        present. Stored keys outside this schema are kept and returned.
+      required:
+        - temperatureUnit
+        - timeZone
+        - notifications
+        - defaultTargetTemps
+        - privacy
+        - display
+      properties:
+        temperatureUnit:
+          type: string
+          enum:
+            - fahrenheit
+            - celsius
+        timeZone:
+          type: string
+          description: IANA time zone name. Defaults to `UTC`.
+        notifications:
+          $ref: '#/components/schemas/NotificationPreferences'
+        defaultTargetTemps:
+          type: object
+          description: Target temperatures keyed by meat type.
+          additionalProperties:
+            type: object
+            required:
+              - grill
+              - meat
+            properties:
+              grill:
+                type: number
+              meat:
+                type: number
+        privacy:
+          type: object
+          required:
+            - shareData
+            - publicProfile
+            - allowAnalytics
+          properties:
+            shareData:
+              type: boolean
+            publicProfile:
+              type: boolean
+            allowAnalytics:
+              type: boolean
+        display:
+          type: object
+          required:
+            - theme
+            - compactMode
+            - showAdvancedMetrics
+          properties:
+            theme:
+              type: string
+              enum:
+                - light
+                - dark
+                - auto
+            compactMode:
+              type: boolean
+            showAdvancedMetrics:
+              type: boolean
+    NotificationPreferences:
+      type: object
+      required:
+        - tempAlerts
+        - cookComplete
+        - deviceOffline
+        - weeklyReports
+        - productUpdates
+        - pushNotifications
+        - email
+        - sms
+      properties:
+        tempAlerts:
+          type: boolean
+        cookComplete:
+          type: boolean
+        deviceOffline:
+          type: boolean
+        weeklyReports:
+          type: boolean
+        productUpdates:
+          type: boolean
+        pushNotifications:
+          type: object
+          required:
+            - enabled
+            - sound
+            - vibration
+            - quietHours
+          properties:
+            enabled:
+              type: boolean
+            sound:
+              type: boolean
+            vibration:
+              type: boolean
+            quietHours:
+              type: object
+              required:
+                - enabled
+                - startTime
+                - endTime
+              properties:
+                enabled:
+                  type: boolean
+                startTime:
+                  type: string
+                  description: HH:MM
+                endTime:
+                  type: string
+                  description: HH:MM
+        email:
+          type: object
+          required:
+            - enabled
+            - frequency
+          properties:
+            enabled:
+              type: boolean
+            frequency:
+              type: string
+              enum:
+                - immediate
+                - hourly
+                - daily
+        sms:
+          type: object
+          required:
+            - enabled
+          properties:
+            enabled:
+              type: boolean
+            phoneNumber:
+              type: string
+    PutUserProfileRequest:
+      type: object
+      description: |
+        Body for PUT /users/me. Identity is never part of the body: a body
+        carrying `id` or `userId`, or any other unlisted field, is rejected with
+        400 VALIDATION_ERROR.
+      required:
+        - name
+        - email
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Trimmed; must not be blank.
+        email:
+          type: string
+          maxLength: 254
+          pattern: ^[^\s@]+@[^\s@]+\.[^\s@]+$
+          description: Trimmed. Not checked for uniqueness.
+        preferences:
+          type: object
+          description: |
+            Any part of UserPreferences. Deep-merged over the stored preferences
+            (or DEFAULT_USER_PREFERENCES on create): plain objects merge key by
+            key; scalars and arrays replace. Must be an object if present.
+          additionalProperties: true
+    RecipeMeatType:
+      type: string
+      enum:
+        - beef
+        - pork
+        - chicken
+        - fish
+        - vegetarian
+        - other
+    RecipeCookMethod:
+      type: string
+      enum:
+        - smoke
+        - grill
+        - roast
+        - braise
+    Recipe:
+      type: object
+      description: |
+        A recipe owned by the authenticated caller. Stored in the `recipes`
+        container, partitioned on `userId`.
+      required:
+        - id
+        - userId
+        - name
+        - meatType
+        - createdAt
+        - updatedAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Server-generated on create.
+        userId:
+          type: string
+          description: |
+            Owner: the authenticated caller's `<tenantId>:<objectId>`, set by the
+            server from the Easy Auth principal. Never taken from a request.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        meatType:
+          $ref: '#/components/schemas/RecipeMeatType'
+        cookMethod:
+          $ref: '#/components/schemas/RecipeCookMethod'
+        targetTemps:
+          $ref: '#/components/schemas/TargetTemperatures'
+        estimatedDuration:
+          type: number
+          minimum: 0
+          description: Hours, greater than 0.
+        instructions:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 50
+        createdAt:
+          $ref: '#/components/schemas/ISODateTime'
+        updatedAt:
+          $ref: '#/components/schemas/ISODateTime'
+    RecipeListResponse:
+      type: object
+      description: GET /recipes — the caller's recipes, newest `updatedAt` first.
+      required:
+        - recipes
+      additionalProperties: false
+      properties:
+        recipes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recipe'
+    CreateRecipeRequest:
+      type: object
+      description: |
+        Body for POST /recipes. Strings are trimmed. `id`, `userId`, `createdAt`
+        and `updatedAt` are set by the server: a body carrying any of them, or
+        any other unlisted field, is rejected with 400 VALIDATION_ERROR.
+      required:
+        - name
+        - meatType
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed; must not be blank.
+        description:
+          type: string
+          maxLength: 2000
+        meatType:
+          $ref: '#/components/schemas/RecipeMeatType'
+        cookMethod:
+          $ref: '#/components/schemas/RecipeCookMethod'
+        targetTemps:
+          $ref: '#/components/schemas/TargetTemperatures'
+        estimatedDuration:
+          type: number
+          minimum: 0
+          description: Hours, greater than 0.
+        instructions:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 50
+    UpdateRecipeRequest:
+      type: object
+      description: |
+        Body for PATCH /recipes/{id}: any of the CreateRecipeRequest fields, at
+        least one. Each field sent replaces the stored value whole (including
+        `targetTemps`); fields not sent are kept. The same server-owned and
+        unknown fields are rejected.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        meatType:
+          $ref: '#/components/schemas/RecipeMeatType'
+        cookMethod:
+          $ref: '#/components/schemas/RecipeCookMethod'
+        targetTemps:
+          $ref: '#/components/schemas/TargetTemperatures'
+        estimatedDuration:
+          type: number
+          minimum: 0
+          description: Hours, greater than 0.
+        instructions:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 50
+    SignalRConnectionInfo:
+      type: object
+      description: |
+        SignalR connection info returned by POST /negotiate
+        (apps/api/src/functions/signalr/negotiate.ts). `url` is
+        `{serviceUri}/client/?hub=temperatureHub`; `accessToken` is minted for the
+        caller's `userId`. The client uses both to open its connection.
+      required:
+        - url
+        - accessToken
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Absolute endpoint the client connects to.
+        accessToken:
+          type: string
+          description: |
+            Client access token, valid for 60 minutes. Negotiate again for a new
+            one.
+    CorrelationContext:
+      type: object
+      description: |
+        Trace correlation block. `id` is the X-Request-ID of the HTTP request that
+        caused the event when the caller sent one, else that request's Functions
+        invocation id.
+      required:
+        - id
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+    TemperatureMessage:
+      type: object
+      description: |
+        SignalR target `temperature`. A live reading, sent to the SignalR user id
+        stored as the device's owner, so it reaches that owner's connections only
+        (HAR-81). A reading from a device with no owner is not sent. The fields are exactly a
+        TemperatureReading (what GET /temperatures/current would return for the
+        same IoT Hub message) plus `enqueuedTimeUtc`. Events that cannot be mapped
+        to a reading are dropped, not sent.
+      required:
+        - deviceId
+        - timestamp
+        - enqueuedTimeUtc
+      additionalProperties: false
+      properties:
+        deviceId:
+          type: string
+        timestamp:
+          type: string
+          description: |
+            The device's `Body.timestamp` exactly as sent when it parses as a date
+            (devices send ISO-8601), else the hub's enqueued time.
+          example: '2026-11-20T18:04:05.123Z'
+        cookId:
+          type: string
+          minLength: 1
+          description: |
+            Cook session this reading belongs to, when the device tagged it.
+            Strict tag-match semantics: see the GET /temperatures/history `cookId`
+            query parameter.
+        grillTemp:
+          type: number
+          format: double
+          description: Grill chamber reading in degrees F, as the device sent it.
+        probe1Temp:
+          type: number
+          format: double
+        probe2Temp:
+          type: number
+          format: double
+        probe3Temp:
+          type: number
+          format: double
+        probe4Temp:
+          type: number
+          format: double
+        enqueuedTimeUtc:
+          type: string
+          format: date-time
+          description: |
+            When Event Hubs enqueued the message, as UTC ISO-8601, so a client can
+            measure delivery delay.
+    CookStartedMessage:
+      type: object
+      description: |
+        SignalR target `cook_started`. Sent to the cook's owner (SignalR user id
+        `"<tid>:<oid>"`) once, by the POST /cooks call that created the cook (201,
+        or a 503 after the cook was created). A replay (200) sends nothing.
+        `payload` is the persisted cook, in status `active`.
+      required:
+        - type
+        - timestamp
+        - messageId
+        - deviceId
+        - userId
+        - cookId
+        - correlation
+        - payload
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum:
+            - cook_started
+        timestamp:
+          type: string
+          format: date-time
+          description: When the message was built.
+        messageId:
+          type: string
+          format: uuid
+          description: Random UUID per message, for client-side de-duplication.
+        deviceId:
+          type: string
+          description: The cook's device.
+        userId:
+          type: string
+          description: The cook's owner.
+        cookId:
+          type: string
+          description: The device's active cook, which is `payload.id`.
+        correlation:
+          $ref: '#/components/schemas/CorrelationContext'
+        payload:
+          $ref: '#/components/schemas/Cook'
+    CookStoppedMessage:
+      type: object
+      description: |
+        SignalR target `cook_stopped`. Sent to the cook's owner once, by the
+        POST /cooks/{cookId}/stop call that moved the cook to `completed`. Stopping
+        an already-completed cook sends nothing. There is no envelope `cookId`:
+        the device has no active cook after a stop, and the stopped cook is
+        `payload.id`. `payload` is the persisted cook, in status `completed`.
+      required:
+        - type
+        - timestamp
+        - messageId
+        - deviceId
+        - userId
+        - correlation
+        - payload
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum:
+            - cook_stopped
+        timestamp:
+          type: string
+          format: date-time
+          description: When the message was built.
+        messageId:
+          type: string
+          format: uuid
+          description: Random UUID per message, for client-side de-duplication.
+        deviceId:
+          type: string
+          description: The cook's device.
+        userId:
+          type: string
+          description: The cook's owner.
+        correlation:
+          $ref: '#/components/schemas/CorrelationContext'
+        payload:
+          $ref: '#/components/schemas/Cook'

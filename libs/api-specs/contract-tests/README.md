@@ -1,6 +1,7 @@
 # Contract tests — `libs/api-specs`
 
-Spec-only checks. They read `spec/openapi.yaml` and nothing else.
+Spec-only checks. They read `spec/openapi.yaml` and, for the iOS bundle
+check, the bundle committed under `apps/ios`.
 
 The check that the spec matches the API is not here: it is
 `apps/api/src/contract/contract.spec.ts`, run by `npx nx test api` on every
@@ -11,6 +12,7 @@ below, in CI and locally.
 |---|---|---|
 | `spec-validates.spec.ts` | Jest: the spec validates and dereferences, operationIds are unique, cook events require `correlation.id`, no `NOT YET IMPLEMENTED` text | `nx test api-specs` (CI and local) |
 | `round-trip.spec.ts` | Jest: `openapi-typescript` generates types from the spec, and sample `StartCookRequest`, `Cook` and `Device` values compile against them | `nx test api-specs` (CI and local) |
+| `ios-bundle.spec.ts` | Jest: the committed iOS bundle (`apps/ios/MeatGeekKit/Sources/MeatGeekAPI/openapi.yaml`) equals a fresh bundle of the spec; the bundle validates, has only `#/components/<kind>/<name>` refs and includes the SignalR message schemas; bundling twice gives the same text | `nx test api-specs` (CI and local) |
 | `oapi-codegen-smoke.sh` | **Not a test.** A manual codegen tool: runs the `oapi-codegen` Docker image and writes Go for you to inspect. It asserts nothing | Manual only |
 
 The Jest specs have no external prerequisites. The shell script needs Docker.
