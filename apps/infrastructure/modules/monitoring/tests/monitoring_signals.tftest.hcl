@@ -325,3 +325,125 @@ run "subscription_budget_returns_when_operator_opts_in" {
     error_message = "the opted-in subscription budget must still target the subscription id it is given"
   }
 }
+
+# HAR-174 — the daily-cap log search alerts on the workspace.
+#
+# Rule 1 fires on the cap event row in _LogOperation (Operation is free of
+# ingestion charges, so the row still lands after the cap). Its query filters on
+# Detail only: the docs disagree on the event's Category (LogManagement vs
+# Ingestion), so a Category filter could miss it.
+run "ingestion_cap_reached_log_alert" {
+  command = plan
+
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.name == "meatgeek-v2-dev-ingestion-cap-reached"
+    error_message = "ingestion_cap_reached name must be <prefix>-ingestion-cap-reached"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.scopes == tolist([var.log_analytics_workspace_id])
+    error_message = "ingestion_cap_reached must be scoped to the Log Analytics workspace id, and to nothing else"
+  }
+  assert {
+    condition     = strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.criteria).query, "_LogOperation") && strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.criteria).query, "OverQuota")
+    error_message = "ingestion_cap_reached query must read _LogOperation and match OverQuota"
+  }
+  # NEGATIVE — no Category filter (docs disagree on LogManagement vs Ingestion).
+  assert {
+    condition     = !strcontains(lower(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.criteria).query), "category")
+    error_message = "ingestion_cap_reached query must NOT filter on Category (the docs disagree on its value)"
+  }
+  assert {
+    condition     = one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.criteria).time_aggregation_method == "Count" && one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.criteria).operator == "GreaterThan" && one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.criteria).threshold == 0
+    error_message = "ingestion_cap_reached criteria must be Count of rows / GreaterThan / 0"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.evaluation_frequency == "PT15M" && azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.window_duration == "PT30M"
+    error_message = "ingestion_cap_reached must evaluate every PT15M over a PT30M window"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.severity == 1
+    error_message = "ingestion_cap_reached severity must be 1"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.auto_mitigation_enabled == false && azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.mute_actions_after_alert_duration == "PT1H"
+    error_message = "ingestion_cap_reached must be stateless with actions muted for PT1H (one email per cap event)"
+  }
+  assert {
+    condition     = length(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.action) == 1 && length(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.action).action_groups) == 1
+    error_message = "ingestion_cap_reached must notify exactly one action group (an alert nobody receives is not a control)"
+  }
+}
+
+# Rule 2 warns when billable ingestion over a trailing 24 hours passes a percent
+# of the cap. Usage.Quantity is MB: threshold = cap_gb * 1000 * pct / 100.
+run "ingestion_near_cap_log_alert" {
+  command = plan
+
+  variables {
+    ingestion_cap_gb = 2
+  }
+
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.name == "meatgeek-v2-dev-ingestion-near-cap"
+    error_message = "ingestion_near_cap name must be <prefix>-ingestion-near-cap"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.scopes == tolist([var.log_analytics_workspace_id])
+    error_message = "ingestion_near_cap must be scoped to the Log Analytics workspace id, and to nothing else"
+  }
+  assert {
+    condition     = strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).query, "Usage") && strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).query, "IsBillable") && strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).query, "BillableMB")
+    error_message = "ingestion_near_cap query must sum billable Usage into BillableMB"
+  }
+  assert {
+    condition     = one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).time_aggregation_method == "Total" && one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).metric_measure_column == "BillableMB" && one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).operator == "GreaterThan"
+    error_message = "ingestion_near_cap criteria must be Total of BillableMB / GreaterThan"
+  }
+  # 2 GB cap at the default 80% = 1600 MB.
+  assert {
+    condition     = one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).threshold == 1600
+    error_message = "ingestion_near_cap threshold must be 1600 MB for a 2 GB cap at the default 80%"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.evaluation_frequency == "PT1H" && azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.window_duration == "P1D"
+    error_message = "ingestion_near_cap must evaluate every PT1H over a trailing P1D window"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.severity == 2
+    error_message = "ingestion_near_cap severity must be 2"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.auto_mitigation_enabled == true
+    error_message = "ingestion_near_cap must be stateful (auto_mitigation_enabled = true): one email on crossing, one on falling back"
+  }
+  assert {
+    condition     = length(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.action) == 1 && length(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.action).action_groups) == 1
+    error_message = "ingestion_near_cap must notify exactly one action group (an alert nobody receives is not a control)"
+  }
+}
+
+# The warning percent is a real input: 50% of a 2 GB cap = 1000 MB.
+run "ingestion_near_cap_threshold_follows_warning_percent" {
+  command = plan
+
+  variables {
+    ingestion_cap_gb          = 2
+    ingestion_warning_percent = 50
+  }
+
+  assert {
+    condition     = one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.criteria).threshold == 1000
+    error_message = "ingestion_near_cap threshold must be 1000 MB for a 2 GB cap at 50%"
+  }
+}
+
+# The warning percent is validated to 1–99.
+run "ingestion_warning_percent_rejects_100" {
+  command = plan
+
+  variables {
+    ingestion_warning_percent = 100
+  }
+
+  expect_failures = [var.ingestion_warning_percent]
+}

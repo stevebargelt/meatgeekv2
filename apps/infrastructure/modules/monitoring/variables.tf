@@ -90,6 +90,17 @@ variable "ingestion_cap_gb" {
   default     = 2
 }
 
+variable "ingestion_warning_percent" {
+  description = "Percent of ingestion_cap_gb at which the ingestion-near-cap log alert warns (billable ingestion over a trailing 24 hours)"
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.ingestion_warning_percent >= 1 && var.ingestion_warning_percent <= 99
+    error_message = "ingestion_warning_percent must be between 1 and 99."
+  }
+}
+
 variable "tags" {
   description = "Tags to apply to resources"
   type        = map(string)

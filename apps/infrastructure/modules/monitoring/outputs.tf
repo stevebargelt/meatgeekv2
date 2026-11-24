@@ -38,6 +38,14 @@ output "alert_ids" {
   }
 }
 
+output "log_alert_ids" {
+  description = "Map of log search (scheduled query) alert IDs by alert shorthand"
+  value = {
+    ingestion_cap_reached = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.id
+    ingestion_near_cap    = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.id
+  }
+}
+
 output "workbook_id" {
   description = "ID of the observability workbook stub (content lands in #6)"
   value       = azurerm_application_insights_workbook.main.id

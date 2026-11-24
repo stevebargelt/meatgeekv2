@@ -293,6 +293,117 @@ resource "azurerm_monitor_metric_alert" "ingestion_cap_reached" {
   tags = var.tags
 }
 
+# -----------------------------------------------------------------------------
+# HAR-174 — daily-cap alerts as log search rules on the workspace.
+#
+# These two rules replace the Heartbeat metric alert above, which cannot fire:
+# nothing in this system sends heartbeats. (That rule is removed in a follow-up
+# issue, because a destroy stops the unattended dev apply.)
+#
+# Does the old rule's concern apply here — that a log query in the same
+# workspace goes blind once the cap stops ingestion? No, for both rules:
+#
+#   * The cap stops billable data only. https://learn.microsoft.com/en-us/azure/azure-monitor/logs/daily-cap:
+#     the cap works by "stopping collection of billable log data for tables in
+#     the Analytics or Basic table plans".
+#   * Both tables these rules read are not billable.
+#     https://learn.microsoft.com/en-us/azure/azure-monitor/logs/cost-logs
+#     ("Excluded tables"): "Some tables are free from data ingestion charges
+#     altogether, including, for example, AzureActivity, Heartbeat, Usage, and
+#     Operation." `_LogOperation` reads the Operation table.
+#   * Microsoft's own documented cap alert is a log search on this table
+#     (daily-cap page, "Alert when daily cap is reached"):
+#     `_LogOperation | where Category =~ "Ingestion" | where Detail contains "OverQuota"`.
+#
+# What the docs do NOT say outright: no page states in so many words that the
+# cap event row itself is ingested after the cap is reached. The three points
+# above are why we rely on it; the documented alert would not work otherwise.
+# -----------------------------------------------------------------------------
+
+# Rule 1 — the cap was reached and ingestion has stopped.
+#
+# Microsoft's query also filters `Category =~ "Ingestion"`. We drop that filter on
+# purpose, because the docs disagree on the category:
+#   * daily-cap page: "an operation event is sent to the *Operation* table under
+#     the **LogManagement** category."
+#   * https://learn.microsoft.com/en-us/azure/azure-monitor/logs/monitor-workspace
+#     lists it under Category "Ingestion" with Detail "Data collection stopped
+#     due to daily limit of free data reached. Ingestion status = OverQuota".
+# Filtering on Detail alone matches either.
+#
+# Evaluated every 15 minutes over a 30-minute window: the overlap covers the
+# ingestion latency of the event row. 15 minutes costs a third of Microsoft's
+# 5-minute example, and the delay does not matter for an outage that lasts until
+# the next daily reset. Stateless (auto_mitigation off) with actions muted for an
+# hour, so a cap event sends one email rather than one per evaluation that still
+# sees the row.
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "ingestion_cap_reached" {
+  name                = "${var.resource_prefix}-ingestion-cap-reached"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  scopes              = [var.log_analytics_workspace_id]
+  description         = "Workspace ${var.log_analytics_workspace_name} reached its daily ingestion cap of ${var.ingestion_cap_gb} GB. Azure has stopped storing logs and telemetry (App Insights, Function App logs, diagnostic logs) until the workspace's daily reset hour, and everything sent until then is lost. Find which tables grew with: Usage | where IsBillable | summarize sum(Quantity) by DataType. Then fix the source. Raising the cap costs money and is the owner's decision."
+  severity            = 1
+
+  evaluation_frequency              = "PT15M"
+  window_duration                   = "PT30M"
+  auto_mitigation_enabled           = false
+  mute_actions_after_alert_duration = "PT1H"
+
+  criteria {
+    query                   = "_LogOperation | where Detail contains \"OverQuota\""
+    time_aggregation_method = "Count"
+    operator                = "GreaterThan"
+    threshold               = 0
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.main.id]
+  }
+
+  tags = var.tags
+}
+
+# Rule 2 — billable ingestion is near the cap.
+#
+# Sums billable MB over a trailing 24 hours, checked hourly. `Usage.Quantity` is
+# in MB (Microsoft's queries divide by 1000 for GB), so the threshold is
+# cap_gb * 1000 * pct / 100: 1600 MB for the dev cap of 2 GB at 80%.
+#
+# The cap's own day starts at a per-workspace reset hour that "can't be
+# configured" (daily-cap page) and that Terraform does not expose, so a trailing
+# 24 hours is the honest proxy for "today's" ingestion.
+#
+# Usage is also free of ingestion charges (same cost-logs sentence above), so
+# this rule keeps working at the cap too. Stateful (auto_mitigation on): one email
+# when it crosses, one when it falls back.
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "ingestion_near_cap" {
+  name                = "${var.resource_prefix}-ingestion-near-cap"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  scopes              = [var.log_analytics_workspace_id]
+  description         = "Billable ingestion into workspace ${var.log_analytics_workspace_name} over the last 24 hours passed ${var.ingestion_warning_percent}% of the ${var.ingestion_cap_gb} GB daily cap. If it keeps growing, the cap will stop ingestion and logs will be lost until the daily reset. The cap's day starts at a reset hour Azure picks per workspace, so this rule measures a trailing 24 hours instead. Find which tables grew with: Usage | where IsBillable | summarize sum(Quantity) by DataType."
+  severity            = 2
+
+  evaluation_frequency    = "PT1H"
+  window_duration         = "P1D"
+  auto_mitigation_enabled = true
+
+  criteria {
+    query                   = "Usage | where IsBillable == true | summarize BillableMB = sum(Quantity)"
+    time_aggregation_method = "Total"
+    metric_measure_column   = "BillableMB"
+    operator                = "GreaterThan"
+    threshold               = var.ingestion_cap_gb * 1000 * var.ingestion_warning_percent / 100
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.main.id]
+  }
+
+  tags = var.tags
+}
+
 # Secondary subscription-scope budget — warning before the $200 Azure credit
 # is exhausted. Resource-group budget (above) is the primary; this one catches
 # any spend that lands outside the meatgeek-{env}-rg group.
