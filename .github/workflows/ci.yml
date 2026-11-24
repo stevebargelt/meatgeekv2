@@ -502,6 +502,8 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      # app-deploy-dev.yml restores this cache (same key and paths) to build
+      # simdevice with no network: change both together.
       - name: Cache Go modules
         uses: actions/cache@v3
         with:

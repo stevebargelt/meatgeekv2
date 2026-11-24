@@ -319,11 +319,39 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: apps/data-pusher/go.mod
-          cache-dependency-path: apps/data-pusher/go.sum
+          # No cache of its own. The runner makes this workflow's cache
+          # read-only (ACTIONS_CACHE_MODE=read), so setup-go never saved one
+          # and every job downloaded every module from proxy.golang.org on
+          # every deploy; one proxy stream error failed run 45465463113
+          # (HAR-170). The modules come from CI's cache, restored next.
+          cache: false
 
+      # The Go cache ci.yml's build-go job saves on main for this commit's
+      # go.sum files (it built and tested data-pusher, simdevice included,
+      # before this run could start). Same key and paths as there, so the same
+      # cache version; the version has no OS in it, so ios-acceptance on macOS
+      # restores it too. Keep both in step with ci.yml's "Cache Go modules".
+      - name: Restore the Go module cache from CI
+        id: gocache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: Linux-go-${{ hashFiles('**/go.sum') }}
+
+      # With CI's cache, no network: GOPROXY=off. Without it (CI's cache for
+      # this go.sum evicted or not saved), a warning and the old download.
       - name: Build simdevice
+        env:
+          GO_CACHE_HIT: ${{ steps.gocache.outputs.cache-hit }}
         run: |
           set -euo pipefail
+          if [ "$GO_CACHE_HIT" = "true" ]; then
+            export GOPROXY=off
+          else
+            echo "::warning title=simdevice::No Go module cache from ci.yml's build-go for this go.sum: downloading every module from proxy.golang.org."
+          fi
           make -C apps/data-pusher build
           test -x apps/data-pusher/dist/simdevice
 
@@ -637,11 +665,28 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: apps/data-pusher/go.mod
-          cache-dependency-path: apps/data-pusher/go.sum
+          # As the acceptance job: modules from CI's cache, not the proxy.
+          cache: false
+
+      - name: Restore the Go module cache from CI
+        id: gocache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: Linux-go-${{ hashFiles('**/go.sum') }}
 
       - name: Build simdevice
+        env:
+          GO_CACHE_HIT: ${{ steps.gocache.outputs.cache-hit }}
         run: |
           set -euo pipefail
+          if [ "$GO_CACHE_HIT" = "true" ]; then
+            export GOPROXY=off
+          else
+            echo "::warning title=simdevice::No Go module cache from ci.yml's build-go for this go.sum: downloading every module from proxy.golang.org."
+          fi
           make -C apps/data-pusher build
           test -x apps/data-pusher/dist/simdevice
 
@@ -872,11 +917,28 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: apps/data-pusher/go.mod
-          cache-dependency-path: apps/data-pusher/go.sum
+          # As the acceptance job: modules from CI's cache, not the proxy.
+          cache: false
+
+      - name: Restore the Go module cache from CI
+        id: gocache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: Linux-go-${{ hashFiles('**/go.sum') }}
 
       - name: Build simdevice
+        env:
+          GO_CACHE_HIT: ${{ steps.gocache.outputs.cache-hit }}
         run: |
           set -euo pipefail
+          if [ "$GO_CACHE_HIT" = "true" ]; then
+            export GOPROXY=off
+          else
+            echo "::warning title=simdevice::No Go module cache from ci.yml's build-go for this go.sum: downloading every module from proxy.golang.org."
+          fi
           make -C apps/data-pusher build
           test -x apps/data-pusher/dist/simdevice
 

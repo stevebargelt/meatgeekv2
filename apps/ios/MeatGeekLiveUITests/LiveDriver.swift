@@ -30,7 +30,7 @@ enum LiveBound {
     /// `totpMargin` + `totpSlack`).
     static let totpMargin: TimeInterval = 5
     static let totpSlack: TimeInterval = 0.25
-    /// How often a poll (`firstOf`, the pushed-reading watch) looks again.
+    /// How often `LivePoll` looks again, in every wait of the proof.
     static let poll: TimeInterval = 0.25
 }
 
@@ -68,18 +68,57 @@ final class LiveSteps {
     }
 }
 
+/// The one poll every wait of the live proof goes through: `Live.waitFor`,
+/// `waitGone`, `waitLabel`, `firstOf`, `paste` and the pushed-reading watch.
+///
+/// A bound is for the thing awaited (Microsoft's page, the app, the API), not
+/// for XCUITest's own queries. One look can take tens of seconds on CI: an
+/// existence query hung 30.5 s while Microsoft's page was replaced
+/// mid-navigation (Deploy Dev App 45465463113). So a wait fails only after a
+/// look that **started** at or after its deadline found nothing: a look that
+/// began before the deadline and ran past it is never the last one. Each
+/// wait therefore takes at most its bound, plus one poll interval, plus one
+/// look. It is never retried and the bound is never raised.
+enum LivePoll {
+    /// Calls `look` every `every` until it returns a value, and returns that
+    /// value; nil once a look that started at or after `deadline` returned
+    /// nil. `now` and `sleep` are the real clock; LiveOfflineTests passes a
+    /// fake one.
+    static func find<T>(
+        by deadline: Date, every: TimeInterval = LiveBound.poll,
+        now: () -> Date = { Date() }, sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        look: () throws -> T?
+    ) rethrows -> T? {
+        while true {
+            let started = now()
+            if let found = try look() { return found }
+            if started >= deadline { return nil }
+            sleep(every)
+        }
+    }
+
+    /// `find` for a condition: whether `holds` became true by `deadline`.
+    static func holds(
+        by deadline: Date, every: TimeInterval = LiveBound.poll,
+        now: () -> Date = { Date() }, sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        _ holds: () throws -> Bool
+    ) rethrows -> Bool {
+        try find(by: deadline, every: every, now: now, sleep: sleep) { try holds() ? true : nil } ?? false
+    }
+}
+
 @MainActor
 enum Live {
     /// Waits up to `bound` for `element` to exist; throws naming `what`.
     static func waitFor(_ element: XCUIElement, _ what: String, bound: TimeInterval = LiveBound.app) throws {
-        guard element.waitForExistence(timeout: bound) else {
+        guard LivePoll.holds(by: Date().addingTimeInterval(bound), { element.exists }) else {
             throw LiveFailure("\(what) did not appear within \(Int(bound)) s")
         }
     }
 
     /// Waits up to `bound` for `element` to be gone; throws naming `what`.
     static func waitGone(_ element: XCUIElement, _ what: String, bound: TimeInterval = LiveBound.app) throws {
-        guard element.waitForNonExistence(timeout: bound) else {
+        guard LivePoll.holds(by: Date().addingTimeInterval(bound), { !element.exists }) else {
             throw LiveFailure("\(what) was still there after \(Int(bound)) s")
         }
     }
@@ -87,32 +126,28 @@ enum Live {
     /// Waits up to `bound` for `element`'s label to be `label`. Only for
     /// elements that hold no secret: a failure quotes the label it saw.
     static func waitLabel(_ element: XCUIElement, _ label: String, _ what: String, bound: TimeInterval = LiveBound.app) throws {
-        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: element)
-        guard XCTWaiter().wait(for: [expectation], timeout: bound) == .completed else {
+        guard LivePoll.holds(by: Date().addingTimeInterval(bound), { element.exists && element.label == label }) else {
             let seen = element.exists ? "\"\(element.label)\"" : "nothing"
             throw LiveFailure("\(what) did not become \"\(label)\" within \(Int(bound)) s (it shows \(seen))")
         }
     }
 
-    /// Polls `outcomes` in order every `LiveBound.poll` until one holds, for
-    /// at most `bound`, and returns its key. Throws naming `step` and every key,
-    /// and what `onScreen` says is on screen (only where nothing on screen can
-    /// be an input).
+    /// Looks at `outcomes` in order every `LiveBound.poll` until one holds,
+    /// for `bound` (`LivePoll`), and returns its key. Throws naming `step` and
+    /// every key, and what `onScreen` says is on screen (only where nothing on
+    /// screen can be an input).
     static func firstOf<K: Sendable>(
         _ step: String, bound: TimeInterval, _ outcomes: [(K, () -> Bool)], onScreen: (() -> String)? = nil
     ) throws -> K {
-        let deadline = Date().addingTimeInterval(bound)
-        while true {
-            for (key, holds) in outcomes where holds() {
-                return key
-            }
-            guard Date() < deadline else {
-                let keys = outcomes.map { "\($0.0)" }.joined(separator: ", ")
-                let seen = onScreen.map { "; on screen: \($0())" } ?? ""
-                throw LiveFailure("\(step): none of \(keys) within \(Int(bound)) s\(seen)")
-            }
-            Thread.sleep(forTimeInterval: LiveBound.poll)
+        let found = LivePoll.find(by: Date().addingTimeInterval(bound)) {
+            outcomes.first { $0.1() }?.0
         }
+        guard let found else {
+            let keys = outcomes.map { "\($0.0)" }.joined(separator: ", ")
+            let seen = onScreen.map { "; on screen: \($0())" } ?? ""
+            throw LiveFailure("\(step): none of \(keys) within \(Int(bound)) s\(seen)")
+        }
+        return found
     }
 
     /// Puts `secret` into `field` by the edit menu's Paste, never by typing:
@@ -132,25 +167,23 @@ enum Live {
         UIPasteboard.general.string = secret
         defer { UIPasteboard.general.items = [] }
         let paste = app.menuItems["Paste"]
-        let deadline = Date().addingTimeInterval(LiveBound.pasteMenu)
-        while !paste.exists {
-            guard Date() < deadline else {
-                throw LiveFailure("the Paste menu did not appear on \(what) within \(Int(LiveBound.pasteMenu)) s")
-            }
+        // One look: is Paste there? If not, tap the field and give the menu
+        // `pasteRetap` to show.
+        let menu = LivePoll.holds(by: Date().addingTimeInterval(LiveBound.pasteMenu), every: 0) {
+            if paste.exists { return true }
             field.tap()
-            _ = paste.waitForExistence(timeout: LiveBound.pasteRetap)
+            return paste.waitForExistence(timeout: LiveBound.pasteRetap)
+        }
+        guard menu else {
+            throw LiveFailure("the Paste menu did not appear on \(what) within \(Int(LiveBound.pasteMenu)) s")
         }
         paste.tap()
-        let held = Date().addingTimeInterval(LiveBound.pasted)
-        while !holds(field.value, secret, shown: shown) {
-            guard Date() < held else {
-                let empty = isEmpty(field.value, placeholder: field.placeholderValue)
-                throw LiveFailure(
-                    "\(what) did not hold the pasted value within \(Int(LiveBound.pasted)) s of Paste "
-                        + (empty ? "(it is empty)" : "(it holds something else)")
-                )
-            }
-            Thread.sleep(forTimeInterval: LiveBound.poll)
+        guard LivePoll.holds(by: Date().addingTimeInterval(LiveBound.pasted), { holds(field.value, secret, shown: shown) }) else {
+            let empty = isEmpty(field.value, placeholder: field.placeholderValue)
+            throw LiveFailure(
+                "\(what) did not hold the pasted value within \(Int(LiveBound.pasted)) s of Paste "
+                    + (empty ? "(it is empty)" : "(it holds something else)")
+            )
         }
     }
 
