@@ -1,0 +1,27 @@
+// Dev.xcconfig — the dev environment's sign-in and API settings.
+//
+// Included by Base.xcconfig, so every configuration (Debug and Release) uses
+// these until a prod config exists. Config/MeatGeek-Info.plist puts each one in
+// the app's Info.plist, where MeatGeekKit's AppConfig reads and checks it.
+//
+// None of these is a secret: they are the same public values as
+// apps/web/public/config.json (a client id, a tenant id, a scope, a URL).
+//
+// xcconfig reads `//` as the start of a comment, even inside a value, so each
+// `//` below is written `/$()/` ($() expands to nothing).
+
+// The API, including the /api prefix.
+MEATGEEK_API_BASE_URL = https:/$()/meatgeek-v2-dev-func-259d4bf5b628.azurewebsites.net/api
+
+// Entra tenant; the authority is https://login.microsoftonline.com/<tenant id>.
+MEATGEEK_TENANT_ID = 7466b411-ac2e-49a0-b5d5-b1e866d26bac
+
+// The iOS public-client app registration (redirect URI msauth.com.meatgeek.ios://auth).
+// Empty until bootstrap.sh has created it: the app then shows "Sign-in is not
+// configured". After bootstrap, the value is the DEV_IOS_CLIENT_ID variable on
+// the repository's `development` environment
+// (`gh variable get DEV_IOS_CLIENT_ID --env development`).
+MEATGEEK_CLIENT_ID =
+
+// The API's delegated scope the app asks for.
+MEATGEEK_API_SCOPE = api:/$()/348570b2-44e5-41a6-ad15-2a7032366130/access_as_user

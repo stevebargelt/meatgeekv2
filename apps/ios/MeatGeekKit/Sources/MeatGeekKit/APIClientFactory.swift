@@ -35,6 +35,22 @@ public enum APIClientFactory {
             middlewares: [BearerTokenMiddleware(accessToken: accessToken)]
         )
     }
+
+    /// A client whose bearer token comes from `tokenProvider.accessToken()`.
+    /// When the provider throws `TokenProviderError.signInRequired`, the call
+    /// throws a `ClientError` wrapping it and sends nothing;
+    /// `SessionModel.perform(_:)` turns that into a signed-out session.
+    public static func makeClient(
+        baseURL: URL,
+        tokenProvider: any TokenProvider,
+        transport: any ClientTransport = URLSessionTransport()
+    ) -> Client {
+        makeClient(
+            baseURL: baseURL,
+            accessToken: { try await tokenProvider.accessToken() },
+            transport: transport
+        )
+    }
 }
 
 extension APIClientFactory {

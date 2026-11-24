@@ -65,6 +65,9 @@ GCC_WARN_UNUSED_FUNCTION = YES
 GCC_WARN_UNUSED_VARIABLE = YES
 COPY_PHASE_STRIP = NO
 
+// Sign-in and API settings for the dev environment (HAR-162).
+#include "Dev.xcconfig"
+
 // Signing for a physical device. Copy Signing.local.xcconfig.example to
 // Signing.local.xcconfig (gitignored) and set your own team id there.
 // The file is optional: simulator builds need no signing. Keep this include
