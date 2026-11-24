@@ -34,7 +34,10 @@ final class MeatGeekUITests: XCTestCase {
         static let cookDetailStatus = "cookDetail.status"
         static let cookDetailEnded = "cookDetail.ended"
         static let cookDetailStop = "cookDetail.stop"
-        static let cookDetailChartPlaceholder = "cookDetail.chartPlaceholder"
+        static let chart = "chart.chart"
+        static let chartNotAvailable = "chart.notAvailable"
+        static let chartError = "chart.error"
+        static let chartRetry = "chart.retry"
         static let liveBadge = "live.badge"
         static func liveChannel(_ channel: String) -> String { "live.channel.\(channel)" }
         static let liveTestMenu = "live.test.menu"
@@ -60,6 +63,10 @@ final class MeatGeekUITests: XCTestCase {
         /// `StubCooks`: the newest of its seeded completed cooks.
         static let newestSeededCookID = "seeded-cook-1"
         static let newestSeededCookName = "Seeded cook 1"
+        /// `StubCooks.noChartCookID`: its chart is 404.
+        static let noChartCookID = "seeded-cook-2"
+        /// `StubCooks.failsOnceCookID`: its first chart request is 500.
+        static let failsOnceCookID = "seeded-cook-3"
     }
 
     /// `StubAPI.uiTestUserName`: the name `GET /users/me` returns in UI test mode.
@@ -140,6 +147,27 @@ final class MeatGeekUITests: XCTestCase {
     func scrollUntilExists(_ app: XCUIApplication, _ element: XCUIElement, _ what: String) {
         while !element.exists {
             app.swipeUp()
+        }
+        XCTAssertTrue(element.exists, "\(what) never appeared")
+    }
+
+    /// Waits for the chart's accessibility value (`ChartSeries.summary`:
+    /// channels, point count, latest values) to match `predicate`, bounded
+    /// like `waitUntilExists`.
+    @MainActor
+    func waitUntilChart(_ app: XCUIApplication, _ predicate: String, _ what: String) {
+        let chart = app.descendants(matching: .any)[ID.chart]
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: predicate), object: chart)
+        let result = XCTWaiter().wait(for: [expectation], timeout: 24 * 60 * 60)
+        XCTAssertEqual(result, .completed, "\(what): the chart never matched \(predicate): \(chart.exists ? String(describing: chart.value) : "no chart")")
+    }
+
+    /// Scrolls the screen down (back towards the top) until `element`
+    /// exists. No deadline of its own, like `waitUntilExists`.
+    @MainActor
+    func scrollDownUntilExists(_ app: XCUIApplication, _ element: XCUIElement, _ what: String) {
+        while !element.exists {
+            app.swipeDown()
         }
         XCTAssertTrue(element.exists, "\(what) never appeared")
     }
@@ -285,8 +313,11 @@ final class MeatGeekUITests: XCTestCase {
 
     /// Cooks, the main path: the Cooks tab lists the seeded history → Devices
     /// → Start cook on a device with a name and a probe target → its detail
-    /// shows it active → the device row says it is cooking → the Cooks tab
-    /// lists it on top → open it → Stop, confirmed → it is completed.
+    /// shows it active, a pushed reading in the live panel and a point for it
+    /// on the chart → the device row says it is cooking → the Cooks tab lists
+    /// it on top → an ended seeded cook's chart shows its bucketed series →
+    /// open the new cook → Stop, confirmed → it is completed and its chart is
+    /// read again.
     @MainActor
     func testStartCookListOpenStop() throws {
         let app = launchInTestMode()
@@ -336,6 +367,15 @@ final class MeatGeekUITests: XCTestCase {
         waitUntilLabel(badge, "Live", "the live badge")
         screenshot(app, "4-live-panel-live")
 
+        // Below the live panel, the chart: the stub's chart of an active cook
+        // is empty, so what it draws is the pushed reading, one point.
+        let chart = app.descendants(matching: .any)[ID.chart]
+        waitUntilExists(chart, "the chart")
+        XCTAssertEqual(chart.label, "Temperature chart")
+        waitUntilChart(
+            app, "value == 'Grill, Probe 1; 1 point; latest Grill 225 °F, Probe 1 150 °F'", "the pushed point"
+        )
+
         // The connection drops and automatic reconnect gives up: the panel
         // says so and keeps the last reading until it negotiates again.
         liveTestHook(app, ID.liveTestDrop)
@@ -345,6 +385,10 @@ final class MeatGeekUITests: XCTestCase {
         liveTestHook(app, ID.liveTestReconnect)
         waitUntilLabel(grill, "Grill, 226 °F", "a reading on the new connection")
         waitUntilLabel(badge, "Live", "the live badge after recovering")
+        waitUntilChart(
+            app, "value == 'Grill, Probe 1; 2 points; latest Grill 226 °F, Probe 1 151 °F'", "the second pushed point"
+        )
+        screenshot(app, "7-chart-active-cook")
 
         // Three minutes with no reading: stale, saying for how long.
         liveTestHook(app, ID.liveTestAdvanceClock)
@@ -354,11 +398,10 @@ final class MeatGeekUITests: XCTestCase {
         waitUntilExists(stale, "the stale badge")
         screenshot(app, "6-live-panel-stale")
 
-        // Below the live panel: the cook's fields, then the chart's place.
+        // Below the live panel and the chart: the cook's fields.
         let target = app.staticTexts["Probe 1 target, 203 °F"]
         scrollUntilExists(app, target, "the probe 1 target")
         screenshot(app, "3-active-cook-detail")
-        scrollUntilExists(app, app.staticTexts[ID.cookDetailChartPlaceholder], "the chart's place")
 
         // Back on the device list, the device is cooking it.
         app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -381,13 +424,32 @@ final class MeatGeekUITests: XCTestCase {
         ).firstMatch
         waitUntilExists(listed, "the new cook on the Cooks tab")
         screenshot(app, "1-cooks-list")
+
+        // An ended seeded cook: its chart is the stored series, 6 h of
+        // one-minute buckets with probe 2 unplugged for two stretches.
+        app.staticTexts[ID.cookName(Stub.newestSeededCookID)].tap()
+        waitUntilChart(
+            app, "value BEGINSWITH 'Grill, Probe 1, Probe 2; 360 points; latest Grill '", "the seeded cook's buckets"
+        )
+        // Touch and hold it where probe 2 has a gap (2:00 to 2:45 of 6 h): a
+        // rule and each channel's value there, which stay after the finger lifts.
+        app.descendants(matching: .any)[ID.chart]
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.5)).press(forDuration: 1)
+        screenshot(app, "8-chart-ended-cook-selection")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        waitUntilExists(listed, "the Cooks tab again")
         listed.tap()
 
         let openedStatus = app.staticTexts[ID.cookDetailStatus]
         waitUntilExists(openedStatus, "the cook's detail screen from the list")
         XCTAssertEqual(openedStatus.label, "Status, Active")
+        // This screen's own push (the fourth hub start, 228 °F), one point.
+        waitUntilChart(
+            app, "value == 'Grill, Probe 1; 1 point; latest Grill 228 °F, Probe 1 153 °F'", "this screen's pushed point"
+        )
 
-        // Stop, with confirmation.
+        // Stop, with confirmation: below the chart and the fields.
+        scrollUntilExists(app, app.buttons[ID.cookDetailStop], "Stop cook")
         app.buttons[ID.cookDetailStop].tap()
         // iOS lists a confirmation dialog's button twice in the accessibility
         // tree; either one confirms.
@@ -399,6 +461,48 @@ final class MeatGeekUITests: XCTestCase {
         waitUntilLabel(app.staticTexts[ID.cookDetailStatus], "Status, Completed", "the cook's status")
         XCTAssertTrue(app.staticTexts[ID.cookDetailEnded].exists, "the end time is not shown")
         XCTAssertFalse(app.buttons[ID.cookDetailStop].exists, "Stop is still offered")
+
+        // Completed: the chart is read again, and is now the stored series:
+        // the stub buckets the four pushes by minute (225 and 226 at 18:00,
+        // 227 and 228 after the clock moved 3 min). The pushed point falls
+        // inside the last bucket, so it is not drawn twice.
+        let stoppedChart = app.descendants(matching: .any)[ID.chart]
+        scrollDownUntilExists(app, stoppedChart, "the chart")
+        // All of it, below the navigation bar, for the screenshot.
+        while stoppedChart.frame.minY < app.navigationBars.firstMatch.frame.maxY {
+            app.swipeDown()
+        }
+        waitUntilChart(
+            app, "value == 'Grill, Probe 1; 2 points; latest Grill 227.5 °F, Probe 1 152.5 °F'", "the reloaded chart"
+        )
+        screenshot(app, "9-chart-after-stop")
+    }
+
+    /// The chart's other states on the stub: a cook with no chart says so; a
+    /// failed read shows the problem, and Retry reads it again.
+    @MainActor
+    func testChartNotAvailableAndRetry() throws {
+        let app = launchInTestMode()
+        signIn(app)
+
+        let noChart = app.staticTexts[ID.cookName(Stub.noChartCookID)]
+        waitUntilExists(noChart, "the seeded cook with no chart")
+        noChart.tap()
+        let notAvailable = app.staticTexts[ID.chartNotAvailable]
+        waitUntilExists(notAvailable, "Chart not available")
+        XCTAssertEqual(notAvailable.label, "Chart not available")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+
+        let failsOnce = app.staticTexts[ID.cookName(Stub.failsOnceCookID)]
+        waitUntilExists(failsOnce, "the seeded cook whose chart fails once")
+        failsOnce.tap()
+        let problem = app.staticTexts[ID.chartError]
+        waitUntilExists(problem, "the chart's problem")
+        XCTAssertTrue(problem.label.contains("Internal server error"), "unexpected problem: \(problem.label)")
+        screenshot(app, "chart-error")
+        app.buttons[ID.chartRetry].tap()
+        waitUntilChart(app, "value BEGINSWITH 'Grill, Probe 1, Probe 2; 360 points;'", "the chart after Retry")
+        XCTAssertFalse(app.staticTexts[ID.chartError].exists, "the problem is still shown")
     }
 
     /// Another client stops the cook while its screen is open: `cook_stopped`

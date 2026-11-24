@@ -10,7 +10,8 @@ the list with filters and paging, start, stop, a cook's detail) and
 [Devices](#devices) (HAR-165: each device's connection, claim, rename and
 release), with the user's name and Sign out in the account menu. An active
 cook's screen shows its [live temperatures](#live-temperatures), pushed over
-SignalR (HAR-167); goal HAR-157 adds the chart next. The web app in
+SignalR (HAR-167), and every cook's screen draws the whole cook as a
+[chart](#cook-chart) (HAR-168). The web app in
 [`apps/web`](../web) is the reference for how those behave.
 
 This is not an Nx project. `nx` does not build or test it; use Xcode or
@@ -47,8 +48,9 @@ apps/ios/
   provider and API. Screen state is `@Observable`, `@MainActor` models:
   `RootModel` (name and version), `SessionModel` (sign-in), `ProfileModel`
   (the account menu's name), the devices models (see [Devices](#devices)),
-  the cooks models (see [Cooks](#cooks)) and `LivePanelModel` (see
-  [Live temperatures](#live-temperatures)).
+  the cooks models (see [Cooks](#cooks)), `LivePanelModel` (see
+  [Live temperatures](#live-temperatures)) and `CookChartModel` (see
+  [Cook chart](#cook-chart)).
 - **Adding a file needs no project edit.** `MeatGeek/` and `MeatGeekUITests/`
   are synchronized folders: drop a Swift file (or an asset) into the folder and
   it is part of the target. `project.pbxproj` only changes when you add a
@@ -63,7 +65,9 @@ apps/ios/
   for the API client, Microsoft's MSAL for iOS
   (`microsoft-authentication-library-for-objc`, a binary package) for
   sign-in, and `SignalR-Client-Swift` (MIT, pure Swift) for the live
-  temperatures. The generator, runtime, MSAL and SignalR packages are pinned exactly in
+  temperatures. The chart is Apple's Swift Charts (`import Charts`, in the
+  app target only); there is no third-party chart package. The generator,
+  runtime, MSAL and SignalR packages are pinned exactly in
   `MeatGeekKit/Package.swift`; every resolved version is in the committed
   `MeatGeek.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
 
@@ -344,6 +348,16 @@ The cook routes are served by `StubCooks`, an actor over the same devices:
   again is a 200 replay; another user's device is 403.
 - `POST /cooks/{id}/stop` completes it, ended at the clock.
   `GET /cooks/{id}` (and stop) for an unknown id is 404.
+- `GET /cooks/{id}/chart`: a seeded cook's 6 h as 360 one-minute buckets of
+  grill, probe 1 and probe 2, with probe 2 missing from the first 10 minutes
+  and from 2:00 to 2:45 (a gap in its line). `seeded-cook-2`
+  (`StubCooks.noChartCookID`) is 404; `seeded-cook-3`
+  (`StubCooks.failsOnceCookID`) answers 500 the first time and 200 after, so
+  Retry can be seen. A started cook's chart has no points while it is active
+  (the pushed readings append on screen); once stopped, it is the readings
+  `StubLive` pushed for its device, in one-minute buckets up to the end of
+  the minute it ended in (the stub's clock stands still, so a cook can end in
+  the instant of its last reading).
 
 `StubAPI` has one handler per operation, `<operationId>Handler`; an unset one
 throws `StubAPI.NotStubbed`. To give a new screen data in UI test mode, set
@@ -415,8 +429,8 @@ The Cooks tab, the first tab (HAR-166), ports the web app's cooks pages
   cook** asks first (`confirmationDialog`, "Yes, stop cook"), then
   `POST /cooks/{id}/stop`; the stopped cook replaces the shown one. A 503
   says the device was not told and offers Retry. An active cook shows its
-  [live temperatures](#live-temperatures) on top. A section marks where the
-  chart will go; it is not built yet.
+  [live temperatures](#live-temperatures) on top, then its
+  [chart](#cook-chart); an ended cook starts with the chart.
 - **One source of truth**: a started or stopped cook goes through
   `CooksModel.apply(_:)`, which updates the list (on top, in place, or out
   when it no longer matches the filters) and the devices' active cooks, so the
@@ -427,9 +441,10 @@ A 401 from any cook call signs the session out, as for devices. The logic is
 unit tested in `CooksTests.swift`; the views are `MeatGeek/CooksView.swift`.
 `MeatGeekUITests.testStartCookListOpenStop` drives the main path on the stub:
 start a cook from a device, see it active, open it from the device row and
-from the Cooks tab, stop it, with the live panel's path in between (see
-[Live temperatures](#live-temperatures)). It keeps screenshots (cooks list,
-start form, active cook, and the live panel live, reconnecting and stale) in
+from the Cooks tab, stop it, with the live panel's path and the chart's in
+between (see [Live temperatures](#live-temperatures) and
+[Cook chart](#cook-chart)). It keeps screenshots (cooks list, start form,
+active cook, the live panel live, reconnecting and stale, and the charts) in
 the result bundle; `xcrun xcresulttool export attachments --path <bundle>
 --output-path <dir>` writes them out.
 
@@ -485,6 +500,50 @@ Reconnect now, Advance clock 3 min (the reading goes stale), and Send
 cook_stopped (stops the cook as another client would).
 `testStartCookListOpenStop` drives push → drop → "Reconnecting…" → reconnect →
 a new reading → stale; `testCookStoppedEndsTheLiveCook` drives `cook_stopped`.
+
+## Cook chart
+
+Every cook's screen draws the whole cook from the API's reduced series,
+`GET /cooks/{cookId}/chart`, with Swift Charts (HAR-168). It ports the web
+app's `apps/web/src/cooks/chart-series.ts`, `cook-chart.tsx` and
+`cook-chart-view.tsx`: behaviour and copy.
+
+- **Series** (`ChartSeries`, MeatGeekKit, a pure function of the generated
+  `CookChart` and `TemperatureMessage` types): one row per server bucket at
+  its start (`avg`, `min` → `lo`, `max` → `hi` per channel), then each pushed
+  reading at or after the last bucket's end (`t + bucketSeconds`) as one row
+  (`avg = lo = hi`), oldest first, at most 2,000 (the newest kept). Values
+  are in the device's unit, converted and rounded as the live panel does.
+  `channels` is the channels with a value in some row, in Grill, Probe 1–4
+  order. A channel missing from a row is a gap, never zero: `segments(of:)`
+  splits its line there.
+- **States** (`CookChartModel`): "Loading chart…", "Chart not available" on
+  404, the API's problem with **Retry** on any other failure, "No readings
+  yet" when there are no rows, else the chart. It loads once the cook is
+  known and again when the cook's status changes (after Stop or
+  `cook_stopped`), keeping the old chart until the new one answers; an
+  overtaken load is dropped. A 401 ends the session.
+- **Live rows**: the readings come from the screen's one hub connection:
+  `LivePanelModel` hands every `temperature` message it accepts (the cook's
+  device's) to `onReading`, as the web's `onReading` does, and the chart keeps
+  the last 2,000. Backfilled readings are not drawn.
+- **View** (`MeatGeek/CookChartView.swift`): per channel a min–max band
+  (`AreaPlot`, 15 % of the channel's colour) and an average line (`LinePlot`),
+  broken at gaps; a lone point is marked (`PointPlot`). A legend, a time
+  x-axis, a y-axis labelled °F or °C. Touch and hold (`chartXSelection`)
+  selects the nearest time: a rule and a callout with each channel's value
+  there (and the bucket's range), which stay after the finger lifts. The
+  colours are fixed per channel, the web chart's (the dataviz palette's
+  categorical slots 1–5), each with a dark-mode step, checked with the
+  palette validator. VoiceOver reads it as "Temperature chart" with the
+  channels, the number of points and each channel's latest value.
+
+The logic is unit tested in `ChartTests.swift` (MeatGeekKitTests): every case
+of `chart-series.spec.ts`, the model's states, the cook screen's wiring and
+the stub's chart route. `testStartCookListOpenStop` checks the chart's
+accessibility value at each step of the main path (a pushed point on an
+active cook, a seeded cook's buckets, the reload after Stop);
+`testChartNotAvailableAndRetry` drives the 404 and Retry.
 
 ## Signing for a physical iPhone
 

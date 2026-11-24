@@ -88,7 +88,12 @@ enum AccessibilityID {
     static let cookDetailEnded = "cookDetail.ended"
     static let cookDetailStop = "cookDetail.stop"
     static let cookDetailStopProblem = "cookDetail.stopProblem"
-    static let cookDetailChartPlaceholder = "cookDetail.chartPlaceholder"
+    static let chart = "chart.chart"
+    static let chartLoading = "chart.loading"
+    static let chartNotAvailable = "chart.notAvailable"
+    static let chartError = "chart.error"
+    static let chartRetry = "chart.retry"
+    static let chartEmpty = "chart.empty"
     static let liveBadge = "live.badge"
     static func liveChannel(_ channel: String) -> String { "live.channel.\(channel)" }
     static let liveReadingTime = "live.readingTime"
