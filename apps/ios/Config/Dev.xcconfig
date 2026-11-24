@@ -16,12 +16,12 @@ MEATGEEK_API_BASE_URL = https:/$()/meatgeek-v2-dev-func-259d4bf5b628.azurewebsit
 // Entra tenant; the authority is https://login.microsoftonline.com/<tenant id>.
 MEATGEEK_TENANT_ID = 7466b411-ac2e-49a0-b5d5-b1e866d26bac
 
-// The iOS public-client app registration (redirect URI msauth.com.meatgeek.ios://auth).
-// Empty until bootstrap.sh has created it: the app then shows "Sign-in is not
-// configured". After bootstrap, the value is the DEV_IOS_CLIENT_ID variable on
-// the repository's `development` environment
-// (`gh variable get DEV_IOS_CLIENT_ID --env development`).
-MEATGEEK_CLIENT_ID =
+// The iOS public-client app registration `meatgeek-v2-dev-ios` (redirect URI
+// msauth.com.meatgeek.ios://auth), created by bootstrap.sh. This is the
+// DEV_IOS_CLIENT_ID variable on the repository's `development` environment
+// (`gh variable get DEV_IOS_CLIENT_ID --env development`). If the registration
+// is recreated, update it here. Empty, the app shows "Sign-in is not configured".
+MEATGEEK_CLIENT_ID = b422c945-cb04-4d97-a816-3f20eb54176b
 
 // The API's delegated scope the app asks for.
 MEATGEEK_API_SCOPE = api:/$()/348570b2-44e5-41a6-ad15-2a7032366130/access_as_user

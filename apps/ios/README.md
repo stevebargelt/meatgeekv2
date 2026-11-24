@@ -4,10 +4,10 @@ The native iPhone client for MeatGeek: Swift 6, SwiftUI, iOS 18 and later,
 iPhone only. It builds and tests in the simulator (HAR-158), calls the API
 through a client generated from the OpenAPI contract (HAR-161, see
 [API client](#api-client)), and signs users in with Entra in the system
-browser (HAR-162, see [Sign-in](#sign-in)). Signed in, it shows a placeholder
-home with the user's name from `GET /users/me`. Until the iOS client id is in
-the config, it shows "Sign-in is not configured" instead. Goal HAR-157 adds
-devices, cooks, the live screen and the chart. The web app in
+browser (HAR-162, see [Sign-in](#sign-in)) with the dev iOS registration's
+client id (HAR-164). Signed in, it shows a placeholder home with the user's
+name from `GET /users/me`. Goal HAR-157 adds devices, cooks, the live screen
+and the chart. The web app in
 [`apps/web`](../web) is the reference for how those behave.
 
 This is not an Nx project. `nx` does not build or test it; use Xcode or
@@ -233,26 +233,33 @@ reads and checks them, listing every problem it finds (like the web app's
 |---|---|---|
 | `MEATGEEK_API_BASE_URL` | `MeatGeekAPIBaseURL` | The API, with `/api`: the dev Function App |
 | `MEATGEEK_TENANT_ID` | `MeatGeekTenantID` | The Entra tenant; the authority is `https://login.microsoftonline.com/<tenant id>` |
-| `MEATGEEK_CLIENT_ID` | `MeatGeekClientID` | The iOS public-client registration. **Empty for now** |
+| `MEATGEEK_CLIENT_ID` | `MeatGeekClientID` | The iOS public-client registration `meatgeek-v2-dev-ios`: `b422c945-cb04-4d97-a816-3f20eb54176b` |
 | `MEATGEEK_API_SCOPE` | `MeatGeekAPIScope` | `api://348570b2-…/access_as_user`; MSAL adds `openid`, `profile` and `offline_access` |
 
 An xcconfig reads `//` as the start of a comment, even inside a value, so the
 URL and the scope are written `https:/$()/…` and `api:/$()/…` (`$()` expands
-to nothing). A UI test checks the values in the built app's Info.plist.
+to nothing). The unit test `BuiltAppConfigTests` (MeatGeekKitTests) reads the
+built app's Info.plist and checks that `AppConfig.parse` returns `ready` with
+these values; a UI test checks the URL schemes. Both find the Info.plist
+through `MEATGEEK_APP_INFOPLIST`, which the test plan sets, so run them
+through the scheme.
 
 **The client id.** `bootstrap.sh` (HAR-159) creates the iOS registration
-(redirect URI `msauth.com.meatgeek.ios://auth`) and publishes its client id
-as the `DEV_IOS_CLIENT_ID` variable on the repository's `development`
-environment:
+`meatgeek-v2-dev-ios` (redirect URI `msauth.com.meatgeek.ios://auth`) and
+publishes its client id as the `DEV_IOS_CLIENT_ID` variable on the
+repository's `development` environment:
 
 ```sh
 gh variable get DEV_IOS_CLIENT_ID --env development
 ```
 
-That value goes in `MEATGEEK_CLIENT_ID`. Until it does, the app starts on
-"Sign-in is not configured" and never creates MSAL. The API also has to accept
-the app's tokens (Easy Auth's allowed client applications), which bootstrap
-lists as a follow-up; a later issue does both.
+`MEATGEEK_CLIENT_ID` in `Config/Dev.xcconfig` is that value (HAR-164). It is a
+public client id, not a secret, like `clientId` in `apps/web/public/config.json`.
+**If the registration is recreated or replaced, its client id changes: update
+`MEATGEEK_CLIENT_ID` and the expected value in `BuiltAppConfigTests`.** The dev
+API accepts the app's tokens because the same id is in Easy Auth's allowed
+client applications (HAR-163). With an empty client id the app starts on
+"Sign-in is not configured" and never creates MSAL.
 
 ### How it works
 
@@ -292,7 +299,9 @@ test mode.
 Launched with the environment variable `MEATGEEK_UI_TEST=1`, the app uses
 `FakeTokenProvider` and `StubAPI.uiTest()` (MeatGeekKit), an in-process
 implementation of the generated `APIProtocol`, instead of MSAL and the real
-client. Sign-in always succeeds, and `GET /users/me` returns "Pat Pitmaster".
+client, whatever the client id in the config (`AppComposition` checks UI test
+mode before it reads the config). Sign-in always succeeds, and
+`GET /users/me` returns "Pat Pitmaster".
 `MEATGEEK_UI_TEST_NOT_CONFIGURED=1` starts on the not-configured screen.
 
 `StubAPI` has one handler per operation, `<operationId>Handler`; an unset one
