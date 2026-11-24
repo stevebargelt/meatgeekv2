@@ -18,6 +18,10 @@
       "reason": "The live browser proof: it waits on a real cloud and a real sign-in by design. Its *.test.ts files are non-live Jest tests and stay in scope."
     },
     {
+      "path": "apps/ios/MeatGeekLiveUITests/**",
+      "reason": "The live iOS proof (HAR-169): it waits on a real cloud, a real sign-in and pushed readings by design; each bound is a row of 'The iOS proof's waits' in docs/development/live-acceptance.md. Only this target: MeatGeekUITests and MeatGeekKit's tests stay in scope."
+    },
+    {
       "path": "tools/no-real-time/test/fixtures/**",
       "reason": "The guard's own fixtures: each violating fixture breaks a rule on purpose, so the guard's tests can see it fail."
     }

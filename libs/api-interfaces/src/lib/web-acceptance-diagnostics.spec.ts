@@ -493,3 +493,120 @@ describe('web-acceptance-leak-check.cjs TOTP windows, on a fixed clock', () => {
     expect(out).not.toContain('1!!!');
   });
 });
+
+/**
+ * HAR-169: the `ios-acceptance` job (the live iOS proof) runs after the web
+ * proof, never alongside it (both sign in as the acceptance user with TOTP),
+ * checks the runner's raw log before anything is uploaded or printed, and
+ * uploads only the proof's own screenshots, on success too.
+ */
+describe('app-deploy-dev.yml ios-acceptance: after the web proof, leak check, then upload (HAR-169)', () => {
+  const job = (WF.jobs as Record<string, { needs?: string[]; if?: string; steps?: WfStep[] }>)[
+    'ios-acceptance'
+  ];
+  const steps = job?.steps ?? [];
+  const index = (pred: (s: WfStep) => boolean, what: string) => {
+    const found = steps.flatMap((s, i) => (pred(s) ? [i] : []));
+    if (found.length !== 1) {
+      throw new Error(`expected exactly one ${what} step in ios-acceptance, found ${found.length}`);
+    }
+    return found[0];
+  };
+  const RUN = index(s => (s.run ?? '').includes('apps/ios/scripts/run-live-proof.sh'), 'runner');
+  const EXPORT = index(s => (s.run ?? '').includes('xcresulttool export attachments'), 'export');
+  const LEAK_IOS = index(s => s.id === 'leak-check', 'leak-check');
+  const PRINT = index(s => (s.run ?? '').includes('cat "$LOG"'), 'print-log');
+  const UPLOAD_IOS = index(s => (s.uses ?? '').startsWith('actions/upload-artifact@'), 'upload');
+
+  it('runs after deploy and web-acceptance, whatever the web proof did, unless cancelled', () => {
+    expect(job?.needs).toEqual(['deploy', 'web-acceptance']);
+    expect(job?.if).toBe("${{ !cancelled() && needs.deploy.outputs.deployed == 'true' }}");
+  });
+
+  it('keeps the raw log out of the job log: the runner writes to a file, not tee', () => {
+    const run = steps[RUN].run ?? '';
+    expect(run).toContain('> "$LOG" 2>&1');
+    expect(run).not.toContain('tee');
+    expect(run).toContain('LOG="$RUNNER_TEMP/ios-acceptance.log"');
+  });
+
+  it('checks that log, then prints it only if clean, and uploads only after the check', () => {
+    const leak = steps[LEAK_IOS];
+    expect(leak.if).toBe('always()');
+    expect(leak.run).toContain(
+      'node .github/scripts/web-acceptance-leak-check.cjs "$RUNNER_TEMP/ios-acceptance.log"'
+    );
+    expect(Object.keys(leak.env ?? {}).sort()).toEqual([
+      'ACCEPTANCE_USER_PASSWORD',
+      'ACCEPTANCE_USER_TOTP_SECRET',
+    ]);
+    expect(EXPORT).toBeLessThan(LEAK_IOS);
+    expect(LEAK_IOS).toBeLessThan(PRINT);
+    expect(LEAK_IOS).toBeLessThan(UPLOAD_IOS);
+    expect(steps[PRINT].if).toBe("always() && steps.leak-check.outcome == 'success'");
+  });
+
+  it('uploads the named screenshots only, on success too, for 30 days', () => {
+    const upload = steps[UPLOAD_IOS];
+    expect(upload.if).toBe("always() && steps.leak-check.outputs.checked == 'true'");
+    expect(upload.with?.['name']).toBe('ios-acceptance-screenshots');
+    expect(pathLines(upload)).toEqual(['${{ runner.temp }}/ios-acceptance-screenshots/*.png']);
+    expect(upload.with?.['retention-days']).toBe(30);
+    // The export copies the proof's own screenshots out by name; the result
+    // bundle, which holds XCTest's text dumps of the screen, is never uploaded.
+    const exported = steps[EXPORT].run ?? '';
+    for (const name of ['1-devices-tab', '2-cook-pushed-reading', '3-cook-ended', 'failure']) {
+      expect(exported).toContain(`"${name}"`);
+    }
+    expect(steps.filter(s => (s.uses ?? '').startsWith('actions/upload-artifact@'))).toHaveLength(
+      1
+    );
+  });
+
+  it('passes the secrets to the runner by environment only', () => {
+    const run = steps[RUN];
+    expect(run.env?.['ACCEPTANCE_USER_PASSWORD']).toBe('${{ secrets.ACCEPTANCE_USER_PASSWORD }}');
+    expect(run.env?.['ACCEPTANCE_USER_TOTP_SECRET']).toBe(
+      '${{ secrets.ACCEPTANCE_USER_TOTP_SECRET }}'
+    );
+    expect(run.run).not.toContain('secrets.');
+  });
+});
+
+describe('web-acceptance-leak-check.cjs with a log only (HAR-169)', () => {
+  const env = {
+    ACCEPTANCE_USER_PASSWORD: FAKE_PASSWORD,
+    ACCEPTANCE_USER_TOTP_SECRET: FAKE_TOTP_SECRET,
+  };
+  const logOnly = () =>
+    spawnSync(process.execPath, [SCRIPT, path.join(root, 'ios-acceptance.log')], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { PATH: process.env['PATH'] ?? '', ...env },
+    });
+
+  it('passes a clean log and says there is nothing else to check', () => {
+    fs.writeFileSync(
+      path.join(root, 'ios-acceptance.log'),
+      'PASS 1. sign in\nMETRIC ios-push-ms 4200\n'
+    );
+    const r = logOnly();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('leak check: proof log: passed (3 lines)');
+    expect(r.stdout).toContain('leak check: no diagnostic glob given');
+  });
+
+  it('finds a password and a claim code in the log, printing neither', () => {
+    fs.writeFileSync(
+      path.join(root, 'ios-acceptance.log'),
+      `PASS 0. inputs\nvalue: ${FAKE_PASSWORD}\nTextField, value: ABCD-EFGH-JKMN\n`
+    );
+    const r = logOnly();
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(
+      'leak check: proof log: FAILED: claim code on line(s) 3; password on line(s) 2'
+    );
+    expect(r.stdout + r.stderr).not.toContain(FAKE_PASSWORD);
+    expect(r.stdout + r.stderr).not.toContain('ABCD-EFGH-JKMN');
+  });
+});

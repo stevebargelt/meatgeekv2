@@ -577,7 +577,9 @@ The live suite waits on a real cloud, so some of its waits are on real time.
 This table is every one of them in `live.acceptance.ts`, `proofs/*.proof.ts`
 and `lib/*`, with its bound and why the bound is that long. The browser proof
 (`apps/web-e2e`) has its own table, with the same columns, in
-[The browser proof's waits](#the-browser-proofs-waits).
+[The browser proof's waits](#the-browser-proofs-waits), and so does the iOS
+proof (`apps/ios/MeatGeekLiveUITests`), in
+[The iOS proof's waits](#the-ios-proofs-waits).
 
 The rules (HAR-106, HAR-120):
 
@@ -691,6 +693,40 @@ artifact with the screenshot, only after the job's leak check has passed on
 it: the check scans every diagnostic for the same secrets as the proof's log,
 and deletes one it finds anything in before the upload step runs (see
 [Secrets in the CI log](#secrets-in-the-ci-log)).
+
+### The iOS proof's waits
+
+The [live iOS proof](#live-ios-proof) (`apps/ios/MeatGeekLiveUITests`, run by
+`apps/ios/scripts/run-live-proof.sh`) waits on Microsoft's sign-in pages, the
+app, the dev API and simdevice, with the same columns. Every bound is a
+constant in `LiveBound` (`MeatGeekLiveUITests/LiveDriver.swift`) or at the top
+of the runner script. The app's other tests (`MeatGeekKitTests`,
+`MeatGeekUITests`) have none of these: they run on fakes and wait with no
+deadline of their own (apps/ios/README.md, "Run the tests").
+`tools/no-real-time` leaves only `apps/ios/MeatGeekLiveUITests/**` out of
+scope for this; it has no Swift rules yet (see its README).
+
+"Measured" is the rehearsals this was built on (HAR-169): the app-side steps
+on UI test mode's stub, and the runner end to end in a fresh simulator with a
+fake simdevice, signing in as far as Microsoft's answer to the UPN. The first
+green `ios-acceptance` runs on `main` are the first measurements against dev;
+until they are added here, each bound is sized on the web proof's measured
+waits for the same thing.
+
+| Where (file:symbol)                                                        | What it waits for                                                                                                                                                                                  | Bound                                         | Why that long                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Live.xctestplan` (`defaultTestExecutionTimeAllowance`, `maximum…`)        | the whole test: XCTest's hang guard                                                                                                                                                                | 900 s                                         | The sum of the bounds below on the slowest path is about 7 min. Under the job's 45 min, which also holds the app's build (most of the job)                                                                                                               |
+| `LiveBound.app` (launch `firstOf`)                                         | the app's first screen: Sign in with Microsoft, the signed-in tabs (an account left from an earlier run), or the app's sign-in error                                                               | 30 s                                          | The app's own launch, with no network call before it. Measured: 2.8 s, launch included                                                                                                                                                                   |
+| `LiveBound.consent` (`firstOf`)                                            | after **Sign in with Microsoft**, the system "“MeatGeek” Wants to Use “login.microsoftonline.com” to Sign In" alert, or Microsoft's UPN page                                                       | 30 s                                          | The system alert, then Microsoft's first page load. Measured: the alert 2.1 s after the tap, the UPN page 4.1 s after **Continue**                                                                                                                       |
+| `LiveBound.signInStep` (`firstOf`, each)                                   | the password page (or Microsoft's error on the UPN page); the second factor, "Stay signed in?" or the app; the code's result; the app back after Microsoft's last page                             | 30 s each                                     | As the web proof's `STEP_TIMEOUT_MS`: its UPN and password pages took 1.6–3.7 s together over 18 passing runs. Measured here: Microsoft's answer to an unknown UPN in 14.6 s from launch, alert and page load included                                   |
+| `LiveBound.pasteMenu`, `pasteRetap` (`Live.paste`)                         | the edit menu's **Paste** after a tap on a field, tapping again every 2 s                                                                                                                          | 10 s, re-tapped every 2 s                     | Measured: it shows after the first or second tap, within 4 s, on Microsoft's fields and the app's claim code field                                                                                                                                       |
+| `LiveBound.totpMargin`, `totpSlack` (`MicrosoftSignIn.enterCode`)          | the next 30 s TOTP window, when the current one has under 5 s left                                                                                                                                 | at most 5.25 s, a fixed wait                  | A code pasted in its last seconds can expire before Microsoft checks it, as in the web proof. It notes `Waiting <s> s for the next TOTP window`                                                                                                          |
+| `LiveBound.app` (Devices list, claim, device screen, start, stop, release) | the Devices tab's list (or its error); the claim form closing with the device listed (or the claim's error); Start cook; the new cook's screen `Status, Active`; `Status, Completed`; the row gone | 30 s each                                     | One screen and one API call, a dev Function App cold start (about 10 s) included, as the web proof's `APP_TIMEOUT_MS`. Measured on the stub: the whole claim step 11.6 s, start 9.3 s, stop 4.2 s, release 7.1 s (mostly XCUITest typing and animations) |
+| `LiveBound.push`, `LiveBound.poll` (`Proof.pushedReading`)                 | from the tap on **Start** to the cook screen showing a reading newer than the first it showed, the badge `live` and the grill not "—"; read every 0.25 s                                           | 90 s                                          | The cook screen opening, negotiate and the SignalR start (the web proof allows 30 s), then one push (the web proof measured 0.4–19.7 s from send to screen), then up to one 2 s send interval. Each measurement is the run's `METRIC ios-push-ms`        |
+| `run-live-proof.sh:TWIN_SYNC_TIMEOUT` (simdevice `--timeout`)              | `simdevice --twin --count 0` before the claim code is read: the twin's GETs and the claim report                                                                                                   | 60 s                                          | As the web proof's `TWIN_SYNC_TIMEOUT`: one MQTT connection and a twin round trip, the device already registered by the job's enrol step                                                                                                                 |
+| `run-live-proof.sh:FIRST_READING_BOUND_S`                                  | simdevice's first sent reading, before the test starts; checked every 1 s                                                                                                                          | 60 s                                          | One DPS-mode connection with the cached assignment and one send. Seconds in practice                                                                                                                                                                     |
+| `run-live-proof.sh:SEND_COUNT`, `SEND_INTERVAL`                            | (not a wait) how long simdevice sends: 900 readings, 2 s apart                                                                                                                                     | 30 min at most; stopped when the runner exits | Longer than the job, so the readings never stop before the test does; the runner's exit trap stops simdevice whatever happened                                                                                                                           |
+| `app-deploy-dev.yml` `ios-acceptance` `timeout-minutes`                    | the whole job                                                                                                                                                                                      | 45 min                                        | A cold build of the app and its packages on `macos-26` (most of the job: `ci.yml`'s `ios` job, which builds and runs 7 UI tests, took 19 min on 2026-11-24), the simulator, and the test's 15 min allowance                                              |
 
 ## Running it locally against dev
 
@@ -1164,6 +1200,206 @@ selectors such as `input[name="passwd"]` match that same helper. A failure
 that names the password (`Microsoft rejected the password`), the TOTP code or
 an unknown UPN is the account, not the page: check the secrets and this
 machine's clock.
+
+## Live iOS proof
+
+The browser proof above proves the web app. The live iOS proof (HAR-169, goal
+HAR-157) proves the **iOS app** the same way, on every dev deploy: the real
+app (`apps/ios`, not its UI test mode), built for an iPhone simulator,
+against the dev API. It is the `ios-acceptance` job in
+`.github/workflows/app-deploy-dev.yml`; the test is
+`apps/ios/MeatGeekLiveUITests/LiveProofUITests.swift`, in its own test plan,
+`apps/ios/Live.xctestplan`, which the `MeatGeek` scheme does not run by
+default, so `ci.yml`'s `ios` job only compiles it (and fails if the default
+plan ever runs it).
+
+`apps/ios/scripts/run-live-proof.sh` runs it:
+
+1. **The claim code.** `simdevice --twin --count 0` syncs the iOS device's
+   twin (so a device released since its last sync mints a fresh code), then
+   `simdevice claim-code` reads it. `unclaimed` passes the code to the test;
+   `claimed` (an earlier run stopped before releasing the device) passes
+   `already-claimed`.
+2. **A throwaway simulator**: an iPhone 17 on the iOS runtime matching
+   Xcode's simulator SDK, created for the run and deleted when the runner
+   exits, so no MSAL account or Microsoft cookie outlives it.
+3. **The build** (`xcodebuild build-for-testing -testPlan Live`), signed
+   "to run locally" as Xcode signs every simulator build: the app keeps its
+   tokens in MSAL's keychain cache, which a build with
+   `CODE_SIGNING_ALLOWED=NO` cannot reach. No team id is involved.
+4. **Readings.** simdevice sends the device's synthetic readings in DPS mode,
+   one every 2 s, in the background for the length of the test; the runner
+   waits for the first before it starts the test, and its exit trap stops
+   simdevice whatever happened. Probe 1 climbs 0.5 °F a reading, so every
+   reading reads differently on screen.
+5. **The test** (`xcodebuild test-without-building -testPlan Live`). The
+   plan's offline tests run first (`LiveOfflineTests`: the TOTP port against
+   RFC 6238's vectors, the input check), then the proof, which prints one
+   `PASS`, `FAIL` or `SKIP` line per step: 0. **inputs**: every missing one is named, and the test fails (it never
+   skips);
+   1. **sign in** with **Sign in with Microsoft**: the system "wants to use
+      login.microsoftonline.com to sign in" alert (**Continue**), then
+      Microsoft's real pages in the system browser sheet: UPN, password, a
+      TOTP code computed in the test (RFC 6238, SHA-1, 30 s, 6 digits; the
+      next window when under 5 s are left), choosing the authenticator-app
+      code if Microsoft asks which method, then **No** on "Stay signed in?".
+      Signed in means the app's tabs. If Microsoft asks for no second factor,
+      the run notes it and carries on;
+   2. **the Devices tab** lists the acceptance user's devices. If the device is
+      on it already, step 3 is skipped (`SKIP`); if the runner said
+      `already-claimed` and it is not, another user holds it, and the step
+      fails saying so;
+   3. **claim** it with **+**: the device ID, the claim code and the name
+      `iOS acceptance smoker`; the device is listed;
+   4. **start a cook** from the device's screen, named `acceptance ios <run
+id>`, meat type Brisket, grill target 225 °F (a cook an earlier run left
+      running is stopped first); its screen opens, `Status, Active`;
+   5. **a pushed reading**: within 90 s of **Start**, the live panel's badge is
+      `live`, the grill is not "—", and it then shows a reading newer than the
+      first it showed. The panel reads `GET /temperatures/current` once, when
+      it connects, so a newer reading on the open screen is one SignalR
+      pushed. The time from the tap on Start to that reading is
+      `METRIC ios-push-ms <n>`;
+   6. **stop** the cook, confirmed: `Status, Completed`;
+   7. **release** the device from its screen, confirmed: it leaves the list.
+
+So every run that passes leaves the device unclaimed with no active cook. A
+run that fails part way can leave the device claimed, or a cook running; the
+next run's steps 2 and 4 take it from there.
+
+### Inputs
+
+The runner's, from the environment (the same names as the web proof's where
+they mean the same thing). It names every missing one and exits 2.
+
+| Variable                      | Value                                                                                                             |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `ACCEPTANCE_USER_UPN`         | The acceptance user's sign-in name                                                                                |
+| `ACCEPTANCE_USER_PASSWORD`    | Its password                                                                                                      |
+| `ACCEPTANCE_USER_TOTP_SECRET` | Its authenticator-app secret (base32; spaces, dashes, lower case and `=` padding are accepted)                    |
+| `ACCEPTANCE_IOS_DEVICE_ID`    | The device the proof claims and sends as (`<simulated device id>-ios` in CI). Unclaimed, or the acceptance user's |
+| `ACCEPTANCE_IOS_STATE_DIR`    | That device's simdevice state dir ([DPS mode](#dps-mode-har-138))                                                 |
+| `ACCEPTANCE_DPS_ID_SCOPE`     | The dev DPS's ID scope                                                                                            |
+| `ACCEPTANCE_SIMDEVICE_BIN`    | Path to the built `simdevice` (on the Mac: `make -C apps/data-pusher build`)                                      |
+
+Optional: `ACCEPTANCE_DPS_ENDPOINT`; `ACCEPTANCE_RUN_ID` (names the cook;
+default a UTC timestamp); `IOS_SIMULATOR` (default `iPhone 17`);
+`IOS_LIVE_RESULT_BUNDLE` (default `./ios-live-proof.xcresult`, which must not
+exist); `IOS_LIVE_DERIVED_DATA` (default under `$TMPDIR`).
+
+The test's own inputs are `MEATGEEK_LIVE_UPN`, `MEATGEEK_LIVE_PASSWORD`,
+`MEATGEEK_LIVE_TOTP_SECRET`, `MEATGEEK_LIVE_DEVICE_ID`,
+`MEATGEEK_LIVE_CLAIM_CODE` (a code, or `already-claimed`) and the optional
+`MEATGEEK_LIVE_RUN_ID`. `xcodebuild` hands every variable named
+`TEST_RUNNER_<NAME>` in its own environment to the test runner as `<NAME>`;
+the runner exports `TEST_RUNNER_MEATGEEK_LIVE_*` in a subshell that only
+runs `xcodebuild`. The app gets none of them: it is launched with its own
+environment, and talks to the dev API with the acceptance user's token.
+
+### Running it by hand
+
+On a Mac with Xcode 26.6, Go and the device already enrolled
+([DPS mode](#dps-mode-har-138)), from the repository root, in your shell only
+(never in a file):
+
+```bash
+make -C apps/data-pusher build           # builds dist/simdevice
+
+export ACCEPTANCE_USER_UPN=...           # from wherever the team keeps the acceptance user
+read -rs ACCEPTANCE_USER_PASSWORD && export ACCEPTANCE_USER_PASSWORD
+read -rs ACCEPTANCE_USER_TOTP_SECRET && export ACCEPTANCE_USER_TOTP_SECRET
+export ACCEPTANCE_IOS_DEVICE_ID=meatgeek-dev-simulated-smoker-ios
+export ACCEPTANCE_IOS_STATE_DIR="$HOME/.meatgeek-acceptance/$ACCEPTANCE_IOS_DEVICE_ID"
+export ACCEPTANCE_DPS_ID_SCOPE=...       # the dev DPS's ID scope
+export ACCEPTANCE_SIMDEVICE_BIN="$PWD/apps/data-pusher/dist/simdevice"
+
+apps/ios/scripts/run-live-proof.sh
+```
+
+It prints everything `xcodebuild` prints, as the job's raw log is; nothing in
+it should be a secret, but read it before you paste it anywhere. The
+screenshots are in the result bundle:
+`xcrun xcresulttool export attachments --path ios-live-proof.xcresult --output-path <dir>`.
+Run against the device CI uses, the next CI run carries on from whatever this
+run left (steps 2 and 4). While it runs, the simulator's pasteboard briefly
+holds each secret the test pastes (below); if Simulator.app is open with
+**Automatically Sync Pasteboard** on, so does your Mac's, until the test
+empties it again.
+
+To see the input check fail without any of this, run the plan on its own:
+
+```bash
+xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek -testPlan Live \
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' -skipPackagePluginValidation
+```
+
+The offline tests pass and the proof fails with `FAIL 0. inputs (0.0 s): The
+live iOS proof cannot run: missing: MEATGEEK_LIVE_UPN, MEATGEEK_LIVE_PASSWORD,
+MEATGEEK_LIVE_TOTP_SECRET, MEATGEEK_LIVE_DEVICE_ID, MEATGEEK_LIVE_CLAIM_CODE (…)`.
+
+### What is uploaded, and what is never written
+
+- **Screenshots**, as `XCTAttachment`s kept on success too, and only these,
+  taken only once sign-in has finished (Microsoft's pages show the UPN) and
+  never of the claim form (it shows the claim code): `1-devices-tab` (the
+  device on the Devices tab), `2-cook-pushed-reading` (the proof: the cook
+  screen live with the pushed reading), `3-cook-ended`, and, when a step
+  fails past sign-in and the claim form is not open, `failure`. The job
+  exports them by name from the result bundle and uploads them as the
+  `ios-acceptance-screenshots` artifact, kept 30 days, on success too (the
+  goal needs them). On success the job fails if `2-cook-pushed-reading` is
+  missing. Nothing else leaves the runner: not the result bundle, and not the
+  text dumps of the screen's elements XCTest attaches to it on its own (they
+  can hold a field's value). The test plan keeps no automatic screenshot
+  (`systemAttachmentLifetime` and `uiTestingScreenshotsLifetime` are
+  `keepNever`). A chart screenshot joins them once the cook screen has its
+  chart (HAR-168).
+- **Never typed.** XCTest writes every `typeText` value into the xcodebuild
+  log (`Type '<text>' into …`). The UPN, the password, the TOTP code and the
+  claim code are put on the simulator's pasteboard and pasted with the edit
+  menu's **Paste** instead, which logs only `Tap "Paste" MenuItem`; the
+  pasteboard is emptied straight after. Nothing reads a secret field back.
+  Typed, and so in the log: the device ID, the device and cook names, the
+  meat type and the grill target.
+- **Never on a command line.** The password, TOTP secret and claim code reach
+  `xcodebuild` only as exported `TEST_RUNNER_*` variables, and the claim code
+  is read from simdevice's output into a variable. simdevice gets `PATH`,
+  `HOME` and its `MEATGEEK_*` variables only; its own output stays in a
+  temporary directory the runner deletes, and only its stderr's first line is
+  printed, with anything shaped like a claim code masked.
+- **The job's log** shows only the `PASS`/`FAIL`/`SKIP`, `METRIC` and runner
+  lines while the proof runs; the raw output goes to a file. The job's leak
+  check (`.github/scripts/web-acceptance-leak-check.cjs`, as in
+  [Secrets in the CI log](#secrets-in-the-ci-log), given the log only) scans
+  that raw file for the password, the TOTP secret, every TOTP code of the
+  job's time span, anything shaped like a claim code, a PEM private key or a
+  JSON `claimCode`. It runs before the upload, which needs it to have
+  finished, and the full raw log is printed to the job only if it found
+  nothing.
+
+The run summary gets the `PASS`/`FAIL`/`SKIP` lines and `METRIC ios-push-ms`.
+
+### When Microsoft changes its sign-in pages (iOS)
+
+In the system browser sheet the pages' element ids are not visible to
+XCUITest, so `MeatGeekLiveUITests/MicrosoftSignIn.swift` tells the pages apart
+by what is on them: the UPN page by its one text field, the password page by
+its secure text field, the code page by a text field with no secure one after
+the password, Microsoft's errors by text inside its `role="alert"` container
+(on every page, empty until an error). Each field is pasted and submitted with
+the keyboard's Return. Copy is used only where nothing else tells the page
+apart: **No** on "Stay signed in?", and an element labelled "verification
+code" or "another way" on the method pages; the system alert's **Continue**
+and the edit menu's **Paste** are Apple's. A step that does not find its page
+fails with `<step>: none of <what it looked for> within 30 s`; one where
+Microsoft showed an error quotes it (Microsoft does not echo what was
+typed). There is no sign-in diagnostic file: the iOS job uploads no text.
+
+To fix it, sign in by hand in the simulator (the app's **Sign in with
+Microsoft**, as the acceptance user), and look at the page with Xcode's
+Accessibility Inspector, or print `app.webViews.firstMatch.debugDescription`
+from a scratch UI test (never in the proof itself: it prints field values).
+Update the queries at the top of `MicrosoftSignIn`.
 
 ## How it is built
 
