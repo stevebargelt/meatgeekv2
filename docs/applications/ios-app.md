@@ -31,10 +31,11 @@ Screen state is `@Observable`, `@MainActor` models.
 | `MeatGeek`            | iOS app (`com.meatgeek.ios`)              | The views (`DevicesView`, `CooksView`, `LivePanelView`, `CookChartView`, sign-in) and `AppComposition`. The chart uses Apple's Swift Charts           |
 | `MeatGeekKit`         | Swift package library                     | `AppConfig`, `SessionModel`, `APIClientFactory`, the screen models, `LiveConnection`, `ChartSeries`, and the in-process stub API used in UI test mode |
 | `MeatGeekAPI`         | Swift package target                      | The API client, generated on every build by the `swift-openapi-generator` build plugin from the committed bundle `openapi.yaml`                       |
-| `MeatGeekMSAL`        | Swift package library                     | `MSALTokenProvider`: the only code that links MSAL for iOS (2.18.1). The app links it; the tests do not                                               |
+| `MeatGeekMSAL`        | Swift package library                     | `MSALTokenProvider`: the only code that links MSAL for iOS (2.18.1). The app links it; of the tests, only `MeatGeekMSALTests` uses it                 |
 | `MeatGeekLive`        | Swift package library                     | `SignalRLiveHub`: the only code that links `SignalR-Client-Swift` (1.2.1). The app links it; `MeatGeekKitTests` does not                              |
 | `MeatGeekKitTests`    | Swift package tests (Swift Testing)       | Unit tests of every model, with fakes and a virtual clock                                                                                             |
 | `MeatGeekLiveTests`   | Swift package tests (Swift Testing)       | Decodes a real `temperature` frame through the SignalR client's JSON hub protocol                                                                     |
+| `MeatGeekMSALTests`   | XCTest, hosted in the app                 | `MSALTokenProvider` against the real MSAL: creating it turns the Authenticator broker off (HAR-171)                                                   |
 | `MeatGeekUITests`     | XCUITest (`com.meatgeek.ios.uitests`)     | The main paths, driven against the in-process stub API                                                                                                |
 | `MeatGeekLiveUITests` | XCUITest (`com.meatgeek.ios.liveuitests`) | The live iOS proof against dev, in its own test plan `Live.xctestplan`; CI only compiles it                                                           |
 
@@ -84,7 +85,12 @@ There is one configuration, dev; Debug and Release both use it.
   publishes its client id as the `DEV_IOS_CLIENT_ID` variable on the
   `development` environment. `MEATGEEK_CLIENT_ID` is that value (HAR-164).
 - **Sign-in.** MSAL for iOS, authorization code + PKCE, in the system browser
-  (`ASWebAuthenticationSession`), no secret (HAR-162). Tokens live only in
+  (`ASWebAuthenticationSession`), no secret (HAR-162). It never opens
+  Microsoft Authenticator, even when installed: `MSALTokenProvider` sets
+  `MSALGlobalConfig.brokerAvailability = .none` before creating MSAL, so the
+  Info.plist has the `msauth.com.meatgeek.ios` redirect scheme and no
+  `msauthv2`/`msauthv3` query schemes, which MSAL needs only for the broker
+  (HAR-171). Tokens live only in
   MSAL's keychain cache, under the app's own keychain group, so a device build
   needs no keychain entitlement. Every API call gets its token from
   `acquireTokenSilent`, and `BearerTokenMiddleware` adds
@@ -148,11 +154,14 @@ types fails to compile.
 ```sh
 xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek \
   -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
-  -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO
+  -skipPackagePluginValidation
 ```
 
 This runs the `MeatGeek` test plan: `MeatGeekKitTests` and `MeatGeekLiveTests`
-(Swift Testing) and `MeatGeekUITests` (XCUITest). The UI tests launch the app
+(Swift Testing), `MeatGeekMSALTests` (XCTest, in the app, against the real
+MSAL) and `MeatGeekUITests` (XCUITest). It needs Xcode's default simulator
+signing, so do not add `CODE_SIGNING_ALLOWED=NO`: MSAL's keychain cache needs
+the build's entitlements. The UI tests launch the app
 in UI test mode (`MEATGEEK_UI_TEST=1`): a fake token provider and `StubAPI`, an
 in-process implementation of the generated client with seeded devices, cooks,
 charts and pushed readings, on a fixed clock. They touch neither MSAL nor the
@@ -172,10 +181,10 @@ inputs, the steps and what is and is not logged.
 
 ## CI
 
-| Job              | Workflow             | When                                                                                              | What                                                                                                                                                                                                                                                                                                                                                   |
-| ---------------- | -------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ios`            | `ci.yml`             | Every pull request and push to `main`, no path filter                                             | `macos-26`, Xcode 26.6, iPhone 17 simulator: `xcodebuild test` of the `MeatGeek` scheme; fails if `MeatGeekKitTests` or `MeatGeekUITests` ran no tests or if `MeatGeekLiveUITests` ran; then compiles `MeatGeekLiveUITests` without running it. No signing, no secret, `contents: read`. $0: the repository is public. Uploads `ios-xcresult` (7 days) |
-| `ios-acceptance` | `app-deploy-dev.yml` | Every dev deploy, after `web-acceptance` (never alongside it: both sign in as the same TOTP user) | Enrols `<sim>-ios` through DPS, runs the live proof, prints `METRIC ios-push-ms` (10918 in run 45429145737), runs the leak check over the raw log, and uploads the `ios-acceptance-screenshots` artifact (30 days, on success too)                                                                                                                     |
+| Job              | Workflow             | When                                                                                              | What                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------- | -------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ios`            | `ci.yml`             | Every pull request and push to `main`, no path filter                                             | `macos-26`, Xcode 26.6, iPhone 17 simulator: `xcodebuild test` of the `MeatGeek` scheme; fails if `MeatGeekKitTests`, `MeatGeekLiveTests`, `MeatGeekMSALTests` or `MeatGeekUITests` ran no tests or if `MeatGeekLiveUITests` ran; then compiles `MeatGeekLiveUITests` without running it. Simulator signing only (no team, no certificate), no secret, `contents: read`. $0: the repository is public. Uploads `ios-xcresult` (7 days) |
+| `ios-acceptance` | `app-deploy-dev.yml` | Every dev deploy, after `web-acceptance` (never alongside it: both sign in as the same TOTP user) | Enrols `<sim>-ios` through DPS, runs the live proof, prints `METRIC ios-push-ms` (10918 in run 45429145737), runs the leak check over the raw log, and uploads the `ios-acceptance-screenshots` artifact (30 days, on success too)                                                                                                                                                                                                     |
 
 See [CI/CD: iOS job](../development/ci-cd.md#ios-job-har-160) and
 [Live iOS proof](../development/live-acceptance.md#live-ios-proof).
