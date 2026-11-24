@@ -5,10 +5,11 @@ iPhone only. It builds and tests in the simulator (HAR-158), calls the API
 through a client generated from the OpenAPI contract (HAR-161, see
 [API client](#api-client)), and signs users in with Entra in the system
 browser (HAR-162, see [Sign-in](#sign-in)) with the dev iOS registration's
-client id (HAR-164). Signed in, it shows the [Devices](#devices) tab (HAR-165):
-the list with each device's connection, claim, rename and release, with the
-user's name and Sign out in the account menu. Goal HAR-157 adds cooks, the
-live screen and the chart. The web app in
+client id (HAR-164). Signed in, it shows two tabs, [Cooks](#cooks) (HAR-166:
+the list with filters and paging, start, stop, a cook's detail) and
+[Devices](#devices) (HAR-165: each device's connection, claim, rename and
+release), with the user's name and Sign out in the account menu. Goal HAR-157
+adds the live temperatures and the chart next. The web app in
 [`apps/web`](../web) is the reference for how those behave.
 
 This is not an Nx project. `nx` does not build or test it; use Xcode or
@@ -42,7 +43,8 @@ apps/ios/
   `@main` entry point and `AppComposition`, which picks the session's token
   provider and API. Screen state is `@Observable`, `@MainActor` models:
   `RootModel` (name and version), `SessionModel` (sign-in), `ProfileModel`
-  (the account menu's name), and the devices models (see [Devices](#devices)).
+  (the account menu's name), the devices models (see [Devices](#devices)) and
+  the cooks models (see [Cooks](#cooks)).
 - **Adding a file needs no project edit.** `MeatGeek/` and `MeatGeekUITests/`
   are synchronized folders: drop a Swift file (or an asset) into the folder and
   it is part of the target. `project.pbxproj` only changes when you add a
@@ -316,10 +318,24 @@ devices in memory:
 
 Claiming `sim-device-3` with code `ABCD-EFGH-JKLM` (any case, spaces or
 hyphens) adds it, connected and last heard 3 s before the clock; any other
-device or code is 403. Rename and release change the list; `GET /cooks`
-returns no cooks. The clock is injected: in UI test mode both the stub and the
-screens read `UITestMode.fixedNow` (2026-11-22T18:00:00Z), so "last heard"
-text is the same on every run.
+device or code is 403. Rename and release change the list. The clock is
+injected: in UI test mode both the stubs and the screens read
+`UITestMode.fixedNow` (2026-11-22T18:00:00Z), so "last heard" and elapsed
+text are the same on every run.
+
+The cook routes are served by `StubCooks`, an actor over the same devices:
+
+- 24 seeded completed cooks, "Seeded cook 1" (`seeded-cook-1`, a day before
+  the clock) to "Seeded cook 24", alternating `sim-device-1` and
+  `sim-device-2`, so the list has two pages of 20.
+- `GET /cooks`: newest first, `limit` (default 20, at most 100), `deviceId`
+  and `status` filters, and a `continuationToken` for the next page.
+- `POST /cooks` on a device the user has makes an active cook started at the
+  clock, which the devices' active-cook lookup then returns. A second start on
+  that device is 409 `COOK_ALREADY_ACTIVE` with its id; the same id and body
+  again is a 200 replay; another user's device is 403.
+- `POST /cooks/{id}/stop` completes it, ended at the clock.
+  `GET /cooks/{id}` (and stop) for an unknown id is 404.
 
 `StubAPI` has one handler per operation, `<operationId>Handler`; an unset one
 throws `StubAPI.NotStubbed`. To give a new screen data in UI test mode, set
@@ -359,6 +375,52 @@ The logic is in `DevicesModel`, `ClaimDeviceModel` and `RenameDeviceModel`
 (`MeatGeek/DevicesView.swift`, `DeviceFormViews.swift`) only bind to them.
 `MeatGeekUITests.testDevicesClaimRenameRelease` drives the whole path on the
 stub.
+
+## Cooks
+
+The Cooks tab, the first tab (HAR-166), ports the web app's cooks pages
+(`apps/web/src/cooks`): their behaviour and copy, not their layout.
+
+- **List** (`CooksModel`): name, device name, status and start time, newest
+  first, 20 at a time (`GET /cooks?limit=20`). "Load more" sends the last
+  page's `continuationToken` and appends; if it fails the list stays and the
+  problem shows under it. The toolbar's filter menu sets the device and the
+  status (Active, Completed), which go to the API as `deviceId` and `status`
+  and restart at page one; a page that arrives for an old filter is dropped.
+  Pull to refresh restarts at page one. Empty: "You have no cooks yet. Start
+  one from a device on the Devices tab." or, filtered, "No cooks match these
+  filters."
+- **Start** (`StartCookModel`): from a device's detail screen ("Start cook"),
+  its row's leading swipe or its context menu, hidden while the device has an
+  active cook. A sheet with name, meat type, weight and the five targets,
+  checked as the web checks them (`CookValidation`: `validateStartCook` and
+  `toStartCookRequest`, blank fields left out). The cook id is made once per
+  form and sent on every submit and retry: the API's idempotency key. On 201
+  or 200 the sheet closes and the cook's detail opens. A 409
+  `COOK_ALREADY_ACTIVE` says "This device already has an active cook." with a
+  button that opens it; a 503 `DEVICE_TWIN_UPDATE_FAILED` says the cook was
+  saved but the device was not told, with Retry (same id and body) and Open
+  the cook. Other refusals keep the API's message.
+- **Detail** (`CookDetailModel`): status, meat type, device, start, end (or the
+  elapsed time while active, `H:MM:SS` on the injected clock), weight, the
+  targets the cook has, notes; "This cook was not found" on a 404. **Stop
+  cook** asks first (`confirmationDialog`, "Yes, stop cook"), then
+  `POST /cooks/{id}/stop`; the stopped cook replaces the shown one. A 503
+  says the device was not told and offers Retry. A section marks where the
+  live temperatures and the chart will go; they are not built yet.
+- **One source of truth**: a started or stopped cook goes through
+  `CooksModel.apply(_:)`, which updates the list (on top, in place, or out
+  when it no longer matches the filters) and the devices' active cooks, so the
+  device row's "Cooking: <name>" (a link to the cook) and Start cook follow
+  without a re-read.
+
+A 401 from any cook call signs the session out, as for devices. The logic is
+unit tested in `CooksTests.swift`; the views are `MeatGeek/CooksView.swift`.
+`MeatGeekUITests.testStartCookListOpenStop` drives the main path on the stub:
+start a cook from a device, see it active, open it from the device row and
+from the Cooks tab, stop it. It keeps three screenshots (cooks list, start
+form, active cook) in the result bundle; `xcrun xcresulttool export
+attachments --path <bundle> --output-path <dir>` writes them out.
 
 ## Signing for a physical iPhone
 

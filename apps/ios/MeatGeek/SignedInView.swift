@@ -1,23 +1,31 @@
 import MeatGeekKit
 import SwiftUI
 
-/// Signed in: the app's tabs. Devices is the only one so far; the cooks
-/// issue adds Cooks. Each tab's navigation bar carries the account menu.
+/// Signed in: the app's tabs, Cooks then Devices. Each tab's navigation bar
+/// carries the account menu. The tabs share one devices model and one cooks
+/// model, so a cook started on the Devices tab is on the Cooks tab too.
 struct SignedInView: View {
     let session: SessionModel
     @State private var profile: ProfileModel
     @State private var devices: DevicesModel
+    @State private var cooks: CooksModel
 
     init(session: SessionModel, now: @escaping @Sendable () -> Date) {
         self.session = session
+        let devices = DevicesModel(session: session, now: now)
         _profile = State(initialValue: ProfileModel(session: session))
-        _devices = State(initialValue: DevicesModel(session: session, now: now))
+        _devices = State(initialValue: devices)
+        _cooks = State(initialValue: CooksModel(devices: devices, now: now))
     }
 
     var body: some View {
         TabView {
+            Tab("Cooks", systemImage: "list.bullet.rectangle") {
+                CooksView(model: cooks, profile: profile, session: session)
+            }
+            .accessibilityIdentifier(AccessibilityID.cooksTab)
             Tab("Devices", systemImage: "flame") {
-                DevicesView(model: devices, profile: profile, session: session)
+                DevicesView(model: devices, cooks: cooks, profile: profile, session: session)
             }
             .accessibilityIdentifier(AccessibilityID.devicesTab)
         }

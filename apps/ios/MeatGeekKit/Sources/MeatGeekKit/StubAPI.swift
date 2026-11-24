@@ -153,9 +153,9 @@ extension StubAPI {
     public static let uiTestUserName = "Pat Pitmaster"
 
     /// The stub the app runs on in UI test mode: `GET /users/me` answers
-    /// `uiTestUserName`; the device routes are served by a `StubDevices`
-    /// whose timestamps come from `now`; `GET /cooks` lists no cooks. Every
-    /// other operation is not stubbed yet.
+    /// `uiTestUserName`; the device routes are served by a `StubDevices` and
+    /// the cook routes (list, start, get, stop) by a `StubCooks`, both with
+    /// timestamps from `now`. Every other operation is not stubbed yet.
     public static func uiTest(now: @escaping @Sendable () -> Date = { UITestMode.fixedNow }) -> StubAPI {
         var api = StubAPI()
         api.getUserProfileHandler = { _ in .ok(.init(body: .json(try user(name: uiTestUserName)))) }
@@ -164,9 +164,11 @@ extension StubAPI {
         api.claimDeviceHandler = { input in await devices.claim(input) }
         api.updateDeviceHandler = { input in await devices.update(input) }
         api.deleteDeviceHandler = { input in await devices.release(input) }
-        api.listCooksHandler = { input in
-            .ok(.init(body: .json(.init(cooks: [], limit: input.query.limit ?? 20, hasMore: false))))
-        }
+        let cooks = StubCooks(now: now, devices: devices)
+        api.listCooksHandler = { input in await cooks.list(input) }
+        api.startCookHandler = { input in await cooks.start(input) }
+        api.getCookHandler = { input in await cooks.get(input) }
+        api.stopCookHandler = { input in await cooks.stop(input) }
         return api
     }
 

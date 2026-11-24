@@ -27,6 +27,19 @@ final class MeatGeekUITests: XCTestCase {
         static let claimSubmit = "claim.submit"
         static let renameName = "rename.name"
         static let renameSave = "rename.save"
+        static let detailStartCook = "deviceDetail.startCook"
+        static func deviceCooking(_ id: String) -> String { "device.cooking.\(id)" }
+        static func cookName(_ id: String) -> String { "cook.name.\(id)" }
+        static let cooksLoadMore = "cooks.loadMore"
+        static let cookDetailStatus = "cookDetail.status"
+        static let cookDetailEnded = "cookDetail.ended"
+        static let cookDetailStop = "cookDetail.stop"
+        static let cookDetailLivePlaceholder = "cookDetail.livePlaceholder"
+        static let confirmStop = "stop.confirm"
+        static let startName = "startCook.name"
+        static let startMeatType = "startCook.meatType"
+        static func startTarget(_ key: String) -> String { "startCook.target.\(key)" }
+        static let startSubmit = "startCook.submit"
     }
 
     /// The devices `StubDevices` (MeatGeekKit) serves in UI test mode.
@@ -37,6 +50,9 @@ final class MeatGeekUITests: XCTestCase {
         static let neverHeardName = "Garage Kettle"
         static let claimableID = "sim-device-3"
         static let claimCode = "ABCD-EFGH-JKLM"
+        /// `StubCooks`: the newest of its seeded completed cooks.
+        static let newestSeededCookID = "seeded-cook-1"
+        static let newestSeededCookName = "Seeded cook 1"
     }
 
     /// `StubAPI.uiTestUserName`: the name `GET /users/me` returns in UI test mode.
@@ -80,7 +96,34 @@ final class MeatGeekUITests: XCTestCase {
         XCTAssertEqual(result, .completed, "\(what) never became \(value): \(element.value ?? "nil")")
     }
 
-    /// Signs in on the fakes and waits for the devices list.
+    /// Waits for `element`'s label to be `label`, bounded like `waitUntilExists`.
+    @MainActor
+    func waitUntilLabel(_ element: XCUIElement, _ label: String, _ what: String) {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", label), object: element
+        )
+        let result = XCTWaiter().wait(for: [expectation], timeout: 24 * 60 * 60)
+        XCTAssertEqual(result, .completed, "\(what) never became \(label): \(element.label)")
+    }
+
+    /// Keeps a screenshot of the app in the test's result bundle, under `name`.
+    @MainActor
+    func screenshot(_ app: XCUIApplication, _ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Opens a tab by its title.
+    @MainActor
+    func openTab(_ app: XCUIApplication, _ title: String) {
+        let tab = app.tabBars.buttons[title]
+        waitUntilExists(tab, "the \(title) tab")
+        tab.tap()
+    }
+
+    /// Signs in on the fakes and waits for the signed-in tabs.
     @MainActor
     func signIn(_ app: XCUIApplication) {
         let signIn = app.buttons[ID.signIn]
@@ -136,6 +179,7 @@ final class MeatGeekUITests: XCTestCase {
     func testDevicesClaimRenameRelease() throws {
         let app = launchInTestMode()
         signIn(app)
+        openTab(app, "Devices")
 
         // The list, with "last heard" aged on UI test mode's fixed clock.
         let connected = app.staticTexts[ID.deviceConnection(Stub.connectedID)]
@@ -208,6 +252,92 @@ final class MeatGeekUITests: XCTestCase {
         waitUntilExists(app.buttons[ID.deviceRow(Stub.connectedID)], "the list after the release")
         waitUntilGone(app.buttons[ID.deviceRow(Stub.claimableID)], "the released device's row")
         XCTAssertTrue(app.buttons[ID.deviceRow(Stub.neverHeardID)].exists)
+    }
+
+    /// Cooks, the main path: the Cooks tab lists the seeded history → Devices
+    /// → Start cook on a device with a name and a probe target → its detail
+    /// shows it active → the device row says it is cooking → the Cooks tab
+    /// lists it on top → open it → Stop, confirmed → it is completed.
+    @MainActor
+    func testStartCookListOpenStop() throws {
+        let app = launchInTestMode()
+        signIn(app)
+
+        // Cooks is the first tab: the seeded history, one page and "Load more".
+        let seeded = app.staticTexts[ID.cookName(Stub.newestSeededCookID)]
+        waitUntilExists(seeded, "the seeded cooks on the Cooks tab")
+        XCTAssertEqual(seeded.label, Stub.newestSeededCookName)
+
+        // Start a cook from the device's detail screen.
+        openTab(app, "Devices")
+        let row = app.buttons[ID.deviceRow(Stub.connectedID)]
+        waitUntilExists(row, "the connected device's row")
+        row.tap()
+        let start = app.buttons[ID.detailStartCook]
+        waitUntilExists(start, "Start cook on the device detail screen")
+        start.tap()
+
+        let name = app.textFields[ID.startName]
+        waitUntilExists(name, "the start cook form")
+        name.tap()
+        name.typeText("UI Test Brisket")
+        let meatType = app.textFields[ID.startMeatType]
+        meatType.tap()
+        meatType.typeText("beef")
+        let probe1 = app.textFields[ID.startTarget("probe1")]
+        probe1.tap()
+        probe1.typeText("203")
+        screenshot(app, "2-start-cook-form")
+        app.buttons[ID.startSubmit].tap()
+
+        // The new cook's detail, active, with its target.
+        let status = app.staticTexts[ID.cookDetailStatus]
+        waitUntilExists(status, "the new cook's detail screen")
+        // LabeledContent reads as one element: "<label>, <value>".
+        XCTAssertEqual(status.label, "Status, Active")
+        XCTAssertTrue(app.staticTexts["Probe 1 target, 203 °F"].exists, "the probe 1 target is not shown")
+        XCTAssertTrue(app.staticTexts[ID.cookDetailLivePlaceholder].exists, "the live panel's place is not marked")
+        screenshot(app, "3-active-cook-detail")
+
+        // Back on the device list, the device is cooking it.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let cooking = app.buttons[ID.deviceCooking(Stub.connectedID)]
+        waitUntilExists(cooking, "Cooking: on the device row")
+        XCTAssertEqual(cooking.label, "Cooking: UI Test Brisket")
+        // It opens the cook, not the device.
+        cooking.tap()
+        let fromRow = app.staticTexts[ID.cookDetailStatus]
+        waitUntilExists(fromRow, "the cook's detail screen from the device row")
+        XCTAssertEqual(fromRow.label, "Status, Active")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        waitUntilExists(app.buttons[ID.deviceCooking(Stub.connectedID)], "the device list again")
+
+        // The Cooks tab lists it first; open it there.
+        openTab(app, "Cooks")
+        let listed = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH 'cook.row.' AND label CONTAINS 'UI Test Brisket'")
+        ).firstMatch
+        waitUntilExists(listed, "the new cook on the Cooks tab")
+        screenshot(app, "1-cooks-list")
+        listed.tap()
+
+        let openedStatus = app.staticTexts[ID.cookDetailStatus]
+        waitUntilExists(openedStatus, "the cook's detail screen from the list")
+        XCTAssertEqual(openedStatus.label, "Status, Active")
+
+        // Stop, with confirmation.
+        app.buttons[ID.cookDetailStop].tap()
+        // iOS lists a confirmation dialog's button twice in the accessibility
+        // tree; either one confirms.
+        let confirm = app.buttons.matching(identifier: ID.confirmStop).firstMatch
+        waitUntilExists(confirm, "the stop confirmation")
+        XCTAssertEqual(confirm.label, "Yes, stop cook")
+        confirm.tap()
+
+        waitUntilLabel(app.staticTexts[ID.cookDetailStatus], "Status, Completed", "the cook's status")
+        XCTAssertTrue(app.staticTexts[ID.cookDetailEnded].exists, "the end time is not shown")
+        XCTAssertFalse(app.buttons[ID.cookDetailStop].exists, "Stop is still offered")
     }
 
     @MainActor
