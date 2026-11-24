@@ -7,8 +7,9 @@ import type { OpenAPIV3 } from 'openapi-types';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const SwaggerParser: typeof import('@apidevtools/swagger-parser') = require('@apidevtools/swagger-parser');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { bundleForIos, IOS_BUNDLE_PATH, RUN_COMMAND } = require('../scripts/bundle-for-ios') as {
+const { bundleForIos, stripUnsupportedNot, IOS_BUNDLE_PATH, RUN_COMMAND } = require('../scripts/bundle-for-ios') as {
   bundleForIos: () => Promise<string>;
+  stripUnsupportedNot: (document: unknown) => unknown;
   IOS_BUNDLE_PATH: string;
   RUN_COMMAND: string;
 };
@@ -70,5 +71,40 @@ describe('iOS API client bundle', () => {
 
   it('bundles the same text twice', async () => {
     expect(await bundleForIos()).toBe(expected);
+  });
+});
+
+// swift-openapi-generator drops any schema that uses `not` (with only a build
+// warning), so the bundle removes the one harmless pattern and fails on every
+// other `not` keyword.
+describe('bundle-for-ios `not` guard', () => {
+  const schemas = (schemas: Record<string, unknown>) => ({ components: { schemas } });
+
+  it('drops `not: {enum: [0]}` on a number', () => {
+    const input = schemas({ R: { type: 'number', minimum: 0, not: { enum: [0] } } });
+    expect(stripUnsupportedNot(input)).toEqual(schemas({ R: { type: 'number', minimum: 0 } }));
+  });
+
+  it.each([
+    ['a schema with no type', { allOf: [{ type: 'object' }], not: { required: ['legacy'] } }],
+    ['an object schema', { type: 'object', not: { required: ['legacy'] } }],
+    ['a string schema', { type: 'string', not: { enum: [''] } }],
+    ['a number schema with another `not`', { type: 'number', not: { enum: [1] } }],
+    ['a nested property schema', { type: 'object', properties: { a: { not: { type: 'null' } } } }],
+  ])('fails on `not` in %s', (_name, schema) => {
+    expect(() => stripUnsupportedNot(schemas({ S: schema }))).toThrow(
+      /unsupported `not` at #\/components\/schemas\/S/,
+    );
+  });
+
+  it('keeps a property, schema or example value named `not`', () => {
+    const input = schemas({
+      not: {
+        type: 'object',
+        properties: { not: { type: 'boolean' } },
+        example: { not: { enum: [0] } },
+      },
+    });
+    expect(stripUnsupportedNot(input)).toEqual(input);
   });
 });

@@ -117,26 +117,57 @@ function isNumberNotZero(node: Record<string, Json>): boolean {
   );
 }
 
+// Keys whose value is a map from names to objects, not a schema or other
+// OpenAPI object: a key inside one of these (a property called `not`, say) is
+// a name, not a keyword.
+const NAME_MAP_KEYS = new Set([
+  'properties',
+  'patternProperties',
+  'schemas',
+  'responses',
+  'parameters',
+  'requestBodies',
+  'headers',
+  'securitySchemes',
+  'links',
+  'callbacks',
+  'paths',
+  'content',
+  'encoding',
+  'variables',
+]);
+
+// Keys whose value is example or literal data, not a schema: a `not` key in
+// one of these is data, and the generator does not read it as a schema.
+function isDataKey(key: string): boolean {
+  return ['example', 'examples', 'enum', 'default'].includes(key) || key.startsWith('x-');
+}
+
 function stripUnsupportedNot(document: Json): Json {
-  const visit = (node: Json, where: string): Json => {
-    if (Array.isArray(node)) return node.map((item, index) => visit(item, `${where}/${index}`));
+  const visit = (node: Json, where: string, keysAreNames: boolean): Json => {
+    if (Array.isArray(node)) return node.map((item, index) => visit(item, `${where}/${index}`, false));
     if (node === null || typeof node !== 'object') return node;
     const out: Record<string, Json> = {};
     for (const [key, value] of Object.entries(node)) {
-      if (key === 'not' && typeof node['type'] === 'string') {
+      const at = `${where}/${key}`;
+      if (keysAreNames) {
+        out[key] = visit(value, at, false);
+        continue;
+      }
+      if (key === 'not') {
         if (!isNumberNotZero(node)) {
           throw new Error(
-            `bundle-for-ios: unsupported \`not\` at ${where}: swift-openapi-generator drops it; ` +
+            `bundle-for-ios: unsupported \`not\` at ${at}: swift-openapi-generator drops it; ` +
               'see stripUnsupportedNot in libs/api-specs/scripts/bundle-for-ios.ts',
           );
         }
         continue;
       }
-      out[key] = visit(value, `${where}/${key}`);
+      out[key] = isDataKey(key) ? value : visit(value, at, NAME_MAP_KEYS.has(key));
     }
     return out;
   };
-  return visit(document, '#');
+  return visit(document, '#', false);
 }
 
 /** The bundled document, as the exact text written to IOS_BUNDLE_PATH. */
@@ -158,7 +189,7 @@ async function main(): Promise<void> {
   console.log(`Wrote ${path.relative(REPO_ROOT, IOS_BUNDLE_PATH)}`);
 }
 
-module.exports = { bundleForIos, IOS_BUNDLE_PATH, RUN_COMMAND };
+module.exports = { bundleForIos, stripUnsupportedNot, IOS_BUNDLE_PATH, RUN_COMMAND };
 
 if (require.main === module) {
   main().catch((error: unknown) => {

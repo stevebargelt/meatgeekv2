@@ -1,6 +1,6 @@
 # swift-openapi-generator config for the MeatGeekAPI target (build plugin).
 # The spec it reads, openapi.yaml next to this file, is generated: see
-# libs/api-specs/scripts/bundle-for-ios.js.
+# libs/api-specs/scripts/bundle-for-ios.ts.
 generate:
   - types
   - client
