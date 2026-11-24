@@ -84,6 +84,10 @@ Change `main.ts` and the spec in the same pull request:
    item, and mount it under `openapi.yaml#/paths`.
 3. Run `npx nx test api`. It names any route or operation that is out of
    line, and any operation missing `bearerAuth` or a `401`.
+4. Run `npx nx run api-specs:bundle-ios` and commit the updated iOS bundle
+   (`apps/ios/MeatGeekKit/Sources/MeatGeekAPI/openapi.yaml`). `npx nx test
+   api-specs` fails until you do. This applies to any change under `spec/`,
+   descriptions included.
 
 ## Changing a SignalR message
 
