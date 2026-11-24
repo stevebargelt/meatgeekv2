@@ -915,7 +915,8 @@ registration` prints `DEV_IOS_CLIENT_ID` beside `DEV_WEB_CLIENT_ID`. The
 Function App's Easy Auth `allowed_applications`
 (`functions_auth_allowed_client_app_ids` in `environments/dev.tfvars`) must
 include `DEV_IOS_CLIENT_ID`, or the API rejects the app's tokens. Bootstrap
-does not edit that file; a follow-up issue adds the id once it exists.
+does not edit that file; the dev id (`b422c945-cb04-4d97-a816-3f20eb54176b`)
+is in `environments/dev.tfvars` as caller 5 (HAR-163).
 
 ---
 

@@ -145,7 +145,7 @@ functions_auth_allowed_audiences = ["api://348570b2-44e5-41a6-ad15-2a7032366130"
 
 # allowed_applications = the CALLING client(s) Easy Auth accepts (validates the
 # token's appid/azp), NOT the API registration. A token from any OTHER client is
-# rejected. Dev has four callers:
+# rejected. Dev has five callers:
 #
 # 1. The Azure CLI PUBLIC client (04b07795-8ddb-461a-bbee-02f9e1bf7b46): by-hand
 #    smoke tests and acceptance runs with a DELEGATED token from
@@ -172,11 +172,20 @@ functions_auth_allowed_audiences = ["api://348570b2-44e5-41a6-ad15-2a7032366130"
 #    PUBLIC SPA client (auth code + PKCE, no client secret). The bootstrap
 #    pre-authorizes it for access_as_user on the dev API registration
 #    (preAuthorizedApplications), which is why sign-in shows no consent prompt.
+# 5. The dev iOS app (`meatgeek-v2-dev-ios`, the `development` environment's
+#    DEV_IOS_CLIENT_ID, HAR-159): the native iOS app signs the pitmaster in
+#    with MSAL in the system browser and calls the API with a DELEGATED user
+#    token for "<App ID URI>/access_as_user". It is a PUBLIC native client
+#    (auth code + PKCE, redirect msauth.com.meatgeek.ios://auth, no client
+#    secret). The bootstrap pre-authorizes it for access_as_user on the dev API
+#    registration (preAuthorizedApplications), which is why sign-in shows no
+#    consent prompt.
 functions_auth_allowed_client_app_ids = [
   "04b07795-8ddb-461a-bbee-02f9e1bf7b46", # Azure CLI public client
   "8426e178-a4f6-49f8-868a-f070a4ae397f", # dev app-publish identity (AZURE_APP_DEPLOY_CLIENT_ID)
   "62d55e23-b8e8-412f-bcd5-147674ec53bd", # dev acceptance peer identity (AZURE_ACCEPTANCE_PEER_CLIENT_ID), zero Azure roles, second caller for the HAR-55 cross-user proof (HAR-61)
   "508bb3be-30f9-4b03-8d95-93e086de85e1", # dev web SPA meatgeek-v2-dev-web (DEV_WEB_CLIENT_ID), HAR-82, delegated user tokens, pre-authorized for access_as_user
+  "b422c945-cb04-4d97-a816-3f20eb54176b", # dev iOS public client meatgeek-v2-dev-ios (DEV_IOS_CLIENT_ID), HAR-159, delegated user tokens, pre-authorized for access_as_user
 ]
 
 # App-deployment identity → Function App publish role (MG-24 item 4).
