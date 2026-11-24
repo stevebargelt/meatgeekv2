@@ -97,8 +97,13 @@ public final class CooksModel {
 
     /// The next page, with the last page's continuation token, appended. A
     /// failure keeps the list and says why in `moreProblem`.
+    ///
+    /// The page goes onto the list as it is when the page arrives, not as it
+    /// was when it was asked for, so a cook `apply(_:)` started or stopped
+    /// meanwhile stays. A cook already listed (e.g. one `apply(_:)` put on
+    /// top) is not listed twice.
     public func loadMore() async {
-        guard case .loaded(let cooks, let token, true) = list, !loadingMore else { return }
+        guard case .loaded(_, let token, true) = list, !loadingMore else { return }
         let mine = generation
         loadingMore = true
         moreProblem = nil
@@ -107,7 +112,10 @@ public final class CooksModel {
         loadingMore = false
         switch page {
         case .page(let page):
-            list = .loaded(cooks: cooks + page.cooks, continuationToken: page.continuationToken, hasMore: page.hasMore)
+            let current = cooks
+            let listed = Set(current.map(\.id))
+            let added = page.cooks.filter { !listed.contains($0.id) }
+            list = .loaded(cooks: current + added, continuationToken: page.continuationToken, hasMore: page.hasMore)
         case .problem(let problem):
             moreProblem = problem
         case .sessionEnded:

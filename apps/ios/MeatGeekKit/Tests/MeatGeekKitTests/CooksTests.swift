@@ -360,6 +360,38 @@ struct CooksModelTests {
         #expect(model.cooks.map(\.id) == ["kettle-only"])
     }
 
+    @Test("a cook started or stopped while Load more waits stays when the page arrives, and is not listed twice")
+    func applyDuringLoadMore() async {
+        let gate = Gate()
+        let running = F.cook("running", status: .active)
+        let started = F.cook("new", device: "kettle", status: .active, name: "Pork butt", started: fixedNow)
+        let (_, devices, model) = await F.models(F.api(active: [running]) { query in
+            guard query.continuationToken == "t1" else { return F.page([running, F.cook("p1")], token: "t1") }
+            await gate.pass()
+            // The new cook shifted the server's pages, so page two repeats p1.
+            return F.page([F.cook("p1"), F.cook("p2")])
+        })
+        await model.start()
+        let more = Task { await model.loadMore() }
+        await gate.waitUntilEntered()
+
+        var stopped = running
+        stopped.status = .completed
+        stopped.endTime = fixedNow
+        model.apply(stopped)
+        model.apply(started)
+        gate.open()
+        await more.value
+
+        #expect(model.cooks.map(\.id) == ["new", "running", "p1", "p2"])
+        #expect(model.cooks.first == started)
+        #expect(model.cooks[1] == stopped)
+        #expect(!model.hasMore)
+        #expect(!model.loadingMore)
+        #expect(devices.activeCook(for: DeviceFixtures.box) == nil)
+        #expect(devices.activeCook(for: DeviceFixtures.kettle) == started)
+    }
+
     @Test("the device filter's choices: the devices, plus a filtered one that is not among them")
     func deviceOptions() async {
         let (_, _, model) = await F.models(F.api())
