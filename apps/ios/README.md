@@ -40,7 +40,7 @@ apps/ios/
 ├── MeatGeekUITests/          # UI tests (XCTest/XCUITest)
 ├── MeatGeekMSALTests/        # MSALTokenProvider against the real MSAL (XCTest, hosted in the app)
 ├── MeatGeekLiveUITests/      # The live iOS proof (XCUITest), see Run the tests
-├── scripts/run-live-proof.sh # Runs the live proof (CI's ios-acceptance job)
+├── scripts/run-live-proof.sh # Runs the live proof (ios-live-proof.yml, daily)
 └── MeatGeekKit/              # Local Swift package: all the app's logic
     ├── Sources/MeatGeekAPI/      # Generated API client: openapi.yaml + generator config
     ├── Sources/MeatGeekKit/      # Config, session, screen models, token provider protocol, stub API
@@ -173,8 +173,9 @@ through the scheme (its test plan), not on their own.
 The live iOS proof, `MeatGeekLiveUITests`, is not in the `MeatGeek` test plan:
 it runs the real app against dev, signed in as the acceptance user, from its
 own plan `Live.xctestplan`, through `scripts/run-live-proof.sh` (HAR-169).
-CI's `ios` job only compiles it; Deploy Dev App's `ios-acceptance` job runs it
-on every dev deploy. To run it by hand, see
+CI's `ios` job only compiles it; the `iOS Live Proof` workflow
+(`.github/workflows/ios-live-proof.yml`) runs it once a day and on demand,
+against dev, and its result does not block a deploy. To run it by hand, see
 [Live iOS proof](../../docs/development/live-acceptance.md#live-ios-proof).
 
 ## API client

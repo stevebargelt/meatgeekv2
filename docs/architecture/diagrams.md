@@ -797,13 +797,14 @@ validation, the security scan, the `no-real-time` guard, `web-e2e` and `ios`. Te
 (`test-repeat.yml`) runs on pull requests only: each affected non-live suite 50 times in a
 row, its emulator suite on `windows-2025`; it starts nothing and is not a required check.
 CI also runs `ios` on `macos-26`: the iOS app's unit and UI tests in a simulator against
-the in-process stub. A green CI run on main starts the apply, then the deploy and its
-three acceptance jobs: `acceptance` and `web-acceptance` in parallel, then
-`ios-acceptance` after `web-acceptance`, because both sign in as the same TOTP user. When
-a web-acceptance sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`,
-the leak check runs over it, and the run uploads the `web-acceptance-diagnostics` artifact.
-The iOS proof runs the same leak check over its raw log before it uploads
-`ios-acceptance-screenshots`.
+the in-process stub. A green CI run on main starts the apply, then the deploy and its two
+acceptance jobs, `acceptance` and `web-acceptance`, in parallel. When a web-acceptance
+sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`, the leak check
+runs over it, and the run uploads the `web-acceptance-diagnostics` artifact. The iOS Live
+Proof is not in that path (HAR-170): it runs on its own, once a day and on demand, against
+whatever dev is serving, and a failure of it blocks no deploy. It never runs at the same
+time as `web-acceptance` (both sign in as the same TOTP user; one concurrency group). It
+runs the same leak check over its raw log before it uploads `ios-acceptance-screenshots`.
 
 View `pipeline` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/pipeline/
 
@@ -821,10 +822,10 @@ graph TB
     end
     Delivery.Ci@{ shape: rectangle, label: "CI/CD Pipeline" }
     Delivery.TestRepeat@{ shape: rectangle, label: "Test repeat" }
+    Delivery.IosAcceptance@{ shape: rectangle, label: "iOS Live Proof" }
     Delivery.Apply@{ shape: rectangle, label: "Apply Dev Infrastructure" }
     Delivery.Deploy@{ shape: rectangle, label: "Deploy Dev App" }
     Delivery.WebAcceptance@{ shape: rectangle, label: "Web acceptance" }
-    Delivery.IosAcceptance@{ shape: rectangle, label: "iOS acceptance" }
     Delivery.Simdevice@{ shape: rectangle, label: "simdevice" }
   end
   Vercel@{ shape: rectangle, label: "Vercel" }
@@ -838,9 +839,6 @@ graph TB
   Delivery.Ci -. "`workflow_run, main only`" .-> Delivery.Apply
   Delivery.Apply -. "`workflow_run`" .-> Delivery.Deploy
   Delivery.Deploy -. "`needs: deploy`" .-> Delivery.WebAcceptance
-  Delivery.Deploy -. "`needs: deploy`" .-> Delivery.IosAcceptance
-  Delivery.WebAcceptance -. "`needs: web-acceptance
-(runs after it)`" .-> Delivery.IosAcceptance
   Delivery.WebAcceptance -. "`spawns as <sim>-web`" .-> Delivery.Simdevice
   Delivery.IosAcceptance -. "`spawns as <sim>-ios`" .-> Delivery.Simdevice
   Delivery.WebAcceptance -. "`signs in as the test user`" .-> Entra
@@ -865,8 +863,8 @@ to main, serves production`" .-> Meatgeek.Web
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery.Acceptance.Roundtrip,Delivery.Acceptance.Volume,Delivery.Acceptance.Chart,Delivery.Simdevice,Meatgeek.Web,Meatgeek.Mobile primary
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
-  class Delivery.Ci,Delivery.TestRepeat,Delivery.Apply,Delivery.Deploy,Delivery.WebAcceptance,Delivery.IosAcceptance slate
-  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21 stroke:#8D8D8D,stroke-dasharray:8 4
+  class Delivery.Ci,Delivery.TestRepeat,Delivery.IosAcceptance,Delivery.Apply,Delivery.Deploy,Delivery.WebAcceptance slate
+  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,3 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -876,7 +874,7 @@ to main, serves production`" .-> Meatgeek.Web
 
 ## Deployment: dev
 
-What runs where. The web app is served by Vercel (production, built from main) and calls the dev API. The iOS app is not distributed: it runs on the iPhone of a developer, from Xcode, and in a simulator on the macOS runner for the ios-acceptance proof. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance jobs.
+What runs where. The web app is served by Vercel (production, built from main) and calls the dev API. The iOS app is not distributed: it runs on the iPhone of a developer, from Xcode, and in a simulator on the macOS runner for the daily live iOS proof. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance jobs.
 
 View `devDeployment` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/devDeployment/
 
@@ -889,14 +887,14 @@ graph TB
     DevPi.Pusher@{ shape: rectangle, label: "data-pusher" }
     DevPi.Controller@{ shape: rectangle, label: "device-controller" }
   end
+  subgraph DevMacRunner["`GitHub Actions macOS runner`"]
+    DevMacRunner.IosAcceptance@{ shape: rectangle, label: "iOS Live Proof" }
+    DevMacRunner.Simulator@{ shape: rounded, label: "iOS app (simulator)" }
+  end
   subgraph DevCi["`GitHub Actions runner`"]
     DevCi.Acceptance@{ shape: rectangle, label: "Acceptance" }
     DevCi.WebAcceptance@{ shape: rectangle, label: "Web acceptance" }
     DevCi.Simdevice@{ shape: rectangle, label: "simdevice" }
-  end
-  subgraph DevMacRunner["`GitHub Actions macOS runner`"]
-    DevMacRunner.IosAcceptance@{ shape: rectangle, label: "iOS acceptance" }
-    DevMacRunner.Simulator@{ shape: rounded, label: "iOS app (simulator)" }
   end
   subgraph DevVercelHost["`Vercel`"]
     DevVercelHost.Web@{ shape: rounded, label: "Web app" }
@@ -963,8 +961,6 @@ register it with simdevice`" .-> DevRg.Iothub
   DevMacRunner.Simulator -. "`connects as the signed-in user`" .-> DevRg.Signalr
   DevVercelHost.Web -. "`connects as the signed-in user`" .-> DevRg.Signalr
   DevCi.Acceptance -. "`app-only token (OIDC)`" .-> DevIdentity.Entra
-  DevCi.WebAcceptance -. "`needs: web-acceptance
-(runs after it)`" .-> DevMacRunner.IosAcceptance
   DevCi.WebAcceptance -. "`Playwright, production`" .-> DevVercelHost.Web
   DevCi.WebAcceptance -. "`signs in as the test user`" .-> DevIdentity.Entra
   DevMacRunner.IosAcceptance -. "`spawns as <sim>-ios`" .-> DevCi.Simdevice
@@ -974,16 +970,16 @@ system browser), no secret`" .-> DevIdentity.Entra
   DevVercelHost.Web -. "`auth code + PKCE
 (MSAL), no secret`" .-> DevIdentity.Entra
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class DevPi.Pusher,DevPi.Controller,DevVercelHost.Web,DevMacRunner.Simulator,DevCi.Simdevice,DevRg.Api primary
+  class DevPi.Pusher,DevPi.Controller,DevMacRunner.Simulator,DevCi.Simdevice,DevVercelHost.Web,DevRg.Api primary
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
-  class DevCi.Acceptance,DevCi.WebAcceptance,DevMacRunner.IosAcceptance slate
+  class DevMacRunner.IosAcceptance,DevCi.Acceptance,DevCi.WebAcceptance slate
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class DevRg.Dps,DevRg.Workbook,DevRg.Iothub,DevRg.Signalr,DevRg.Appinsights,DevRg.Eventhub,DevRg.Logs indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class DevRg.Cosmos green
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class DevIdentity.Entra muted
-  linkStyle 0,3,4,5,7,9,10,12,13,14,15,16,17,18,20,21,22,23,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,7,9,10,12,13,14,15,16,17,18,20,21,22,23,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 1,2,6,8,11,19,24 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -1083,7 +1079,7 @@ The iOS app's cook screen takes the same steps through its own components
 and SignalR-Client-Swift: the same requests, the same backfill after every connect and
 reconnect, the same `waiting`, `live` and `stale` states. It also stops the connection
 when the app leaves the foreground and negotiates again on return. Proven live by the
-`ios-acceptance` job, in a simulator: `METRIC ios-push-ms` 10918 (run 45429145737), from
+daily iOS Live Proof, in a simulator: `METRIC ios-push-ms` 10918 (run 45429145737), from
 the tap on Start to the pushed reading on screen, so it includes the cook start.
 
 View `watchCook` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/
@@ -1258,7 +1254,7 @@ Steps:
 
 ## Flow: a merge reaches dev
 
-What happens after the Reviewer merges a pull request. Vercel builds the web app from the same push, in parallel with the Azure path.
+What happens after the Reviewer merges a pull request. Vercel builds the web app from the same push, in parallel with the Azure path. The live iOS proof is not in this path: it is its own workflow, run once a day, and does not gate a deploy (HAR-170).
 
 View `mergeToDeploy` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/mergeToDeploy/
 
@@ -1278,8 +1274,6 @@ graph LR
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   DeliverySimdevice@{ shape: rectangle, label: "simdevice" }
   DeliveryWebAcceptance@{ shape: rectangle, label: "Web acceptance" }
-  DeliveryIosAcceptance@{ shape: rectangle, label: "iOS acceptance" }
-  MeatgeekMobile@{ shape: rounded, label: "iOS app" }
   Team -. "`merge to main`" .-> DeliveryCi
   Vercel -. "`builds main, serves production`" .-> MeatgeekWeb
   DeliveryCi -. "`green on main`" .-> DeliveryApply
@@ -1292,15 +1286,13 @@ graph LR
   DeliveryAcceptance -. "`spawns simdevice`" .-> DeliverySimdevice
   DeliveryDeploy -. "`deployed = true`" .-> DeliveryWebAcceptance
   DeliveryWebAcceptance -. "`Playwright, production`" .-> MeatgeekWeb
-  DeliveryWebAcceptance -. "`finished`" .-> DeliveryIosAcceptance
-  DeliveryIosAcceptance -. "`XCUITest, simulator`" .-> MeatgeekMobile
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
-  class DeliveryCi,DeliveryApply,DeliveryDeploy,DeliveryAcceptance,DeliveryWebAcceptance,DeliveryIosAcceptance slate
+  class DeliveryCi,DeliveryApply,DeliveryDeploy,DeliveryAcceptance,DeliveryWebAcceptance slate
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Vercel,Entra muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekWeb,MeatgeekCloud,DeliverySimdevice,MeatgeekMobile primary
-  linkStyle 0,1,3,5,6,7,8,9,10,11,12,13 stroke:#8D8D8D,stroke-dasharray:8 4
+  class MeatgeekWeb,MeatgeekCloud,DeliverySimdevice primary
+  linkStyle 0,1,3,5,6,7,8,9,10,11 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,4 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -1318,8 +1310,6 @@ Steps:
 - **9.** Acceptance → simdevice: spawns simdevice. Live telemetry round trip and volume proofs through IoT Hub. (Opens `telemetryProof`.)
 - **10.** Deploy Dev App → Web acceptance: deployed = true. In parallel with `acceptance`.
 - **11.** Web acceptance → Web app: Playwright, production. Waits for `/version.json` to show this commit or a descendant (`METRIC web-deploy-wait-s`), signs in on the Microsoft pages as the test user, starts a cook on `<sim>-web` and sees a pushed reading (`METRIC web-push-ms`). (Opens `watchCook`.)
-- **12.** Web acceptance → iOS acceptance: finished. Never at the same time as `web-acceptance`: both sign in as the same TOTP acceptance user.
-- **13.** iOS acceptance → iOS app: XCUITest, simulator. Enrols `<sim>-ios` through DPS, builds the real app for a throwaway simulator, signs in on the Microsoft pages as the test user, claims `<sim>-ios`, starts a cook, sees a pushed reading (`METRIC ios-push-ms`), stops it and releases the device. (Opens `watchCook`.)
 
 ## Flow: live telemetry proof (dev acceptance)
 

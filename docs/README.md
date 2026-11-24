@@ -39,7 +39,7 @@ A comprehensive BBQ temperature monitoring and cook management system built with
 - **[Device runbook](devices/runbook.md)** - Onboard a Raspberry Pi with one command, then claim, release or revoke it
 - **[Device Controller](applications/device-controller.md)** - Raspberry Pi Go application for temperature monitoring
 - **[Data Pusher](applications/data-pusher.md)** - IoT Hub integration service and local buffering
-- **[iOS App](applications/ios-app.md)** - Native iOS (Swift) app in [`apps/ios`](../apps/ios/README.md), live against dev and run from Xcode (not distributed): Entra sign-in (HAR-162), a Devices tab to list, claim, rename and release devices (HAR-165), a Cooks tab to list, start, open and stop cooks (HAR-166), a live panel by push (HAR-167) and a chart of the whole cook (HAR-168), proven on every dev deploy by `ios-acceptance` (HAR-169); it shares only the OpenAPI contract with the web app
+- **[iOS App](applications/ios-app.md)** - Native iOS (Swift) app in [`apps/ios`](../apps/ios/README.md), live against dev and run from Xcode (not distributed): Entra sign-in (HAR-162), a Devices tab to list, claim, rename and release devices (HAR-165), a Cooks tab to list, start, open and stop cooks (HAR-166), a live panel by push (HAR-167) and a chart of the whole cook (HAR-168), proven against dev once a day by the iOS Live Proof workflow, which does not gate a deploy (HAR-169, HAR-170); it shares only the OpenAPI contract with the web app
 - **[Web App](applications/web-app.md)** - React web application
 
 ### Data Models & Business Logic

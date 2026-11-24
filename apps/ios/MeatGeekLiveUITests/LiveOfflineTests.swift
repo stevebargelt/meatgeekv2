@@ -116,6 +116,66 @@ final class LiveOfflineTests: XCTestCase {
         XCTAssertFalse(already.runID.isEmpty)
     }
 
+    /// A fake clock for `LivePoll`: time moves only when a look or a sleep
+    /// moves it.
+    final class FakeClock {
+        var now = Date(timeIntervalSince1970: 0)
+        var seconds: TimeInterval { now.timeIntervalSince1970 }
+        func advance(_ by: TimeInterval) { now = now.addingTimeInterval(by) }
+    }
+
+    /// Deploy Dev App 45465463113: one sweep of the "second factor" outcomes
+    /// took 47 s, as XCUITest hung on a page being replaced. The look that
+    /// started before the 30 s deadline is not the last: the next one, on the
+    /// settled page, finds it.
+    func testAPollLooksAgainAfterALookThatRanPastTheDeadline() {
+        let clock = FakeClock()
+        var looks: [TimeInterval] = []
+        let found = LivePoll.find(by: Date(timeIntervalSince1970: 30), now: { clock.now }, sleep: clock.advance) { () -> String? in
+            looks.append(clock.seconds)
+            if looks.count == 1 {
+                clock.advance(47)
+                return nil
+            }
+            return "stay signed in"
+        }
+        XCTAssertEqual(found, "stay signed in")
+        XCTAssertEqual(looks, [0, 47.25])
+    }
+
+    /// It fails only after a look that started at or after the deadline found
+    /// nothing, and looks no more after that.
+    func testAPollFailsAfterOneLookStartedAtTheDeadline() {
+        let clock = FakeClock()
+        var looks: [TimeInterval] = []
+        let slow: Int? = LivePoll.find(by: Date(timeIntervalSince1970: 30), now: { clock.now }, sleep: clock.advance) {
+            looks.append(clock.seconds)
+            clock.advance(47)
+            return nil
+        }
+        XCTAssertNil(slow)
+        XCTAssertEqual(looks, [0, 47.25])
+
+        let fast = FakeClock()
+        var fastLooks: [TimeInterval] = []
+        let held = LivePoll.holds(by: Date(timeIntervalSince1970: 1), now: { fast.now }, sleep: fast.advance) {
+            fastLooks.append(fast.seconds)
+            return false
+        }
+        XCTAssertFalse(held)
+        XCTAssertEqual(fastLooks, [0, 0.25, 0.5, 0.75, 1], "every 0.25 s, the last at the deadline")
+    }
+
+    func testAPollReturnsAtTheFirstLookThatFindsWithoutSleeping() {
+        let clock = FakeClock()
+        var slept = 0
+        let held = LivePoll.holds(by: Date(timeIntervalSince1970: 30), now: { clock.now }, sleep: { _ in slept += 1 }) {
+            true
+        }
+        XCTAssertTrue(held)
+        XCTAssertEqual(slept, 0)
+    }
+
     /// A sign-in that does not reach Microsoft's first page says which of the
     /// app's states it was stuck in, so a red run names the cause.
     func testSignInScreenSaysWhereSignInStopped() {
@@ -149,55 +209,6 @@ final class LiveOfflineTests: XCTestCase {
         XCTAssertEqual(page.summary, "none of the app's sign-in screens; no system alert; a sign-in sheet with a text field")
     }
 
-    /// `Deploy Dev App` run 45476412767 (HAR-171): Microsoft's UPN page was
-    /// there when the step's failure looked at the screen, but the last look
-    /// counted had started before the 30 s were up and, on the CI simulator,
-    /// ended after. Here the page shows at 29 s and each look takes 15 s.
-    @MainActor
-    func testAStepFindsAPageThatIsThereByTheDeadlineThoughEachLookIsSlow() throws {
-        let fake = FakeClock()
-        let page: () -> Bool = {
-            let shown = fake.seconds >= 29
-            fake.seconds += 15
-            return shown
-        }
-        let found = try Live.firstOf("Microsoft's UPN page", bound: 30, [("the UPN page", page)], clock: fake.clock)
-        XCTAssertEqual(found, "the UPN page")
-    }
-
-    @MainActor
-    func testAStepFailsOnlyAfterALookThatStartedOnceTheBoundWasUp() {
-        let fake = FakeClock()
-        var lookedAt: [TimeInterval] = []
-        let page: () -> Bool = {
-            lookedAt.append(fake.seconds)
-            fake.seconds += 15
-            return false
-        }
-        XCTAssertThrowsError(
-            try Live.firstOf("Microsoft's UPN page", bound: 30, [("the UPN page", page)], onScreen: { "no sign-in sheet" }, clock: fake.clock)
-        ) { error in
-            XCTAssertEqual(
-                "\(error)",
-                "Microsoft's UPN page: none of the UPN page within 30 s (3 looks, the longest 15.0 s); on screen: no sign-in sheet"
-            )
-        }
-        XCTAssertEqual(lookedAt, [0, 15.25, 30.5])
-    }
-
-    @MainActor
-    func testAStepReturnsTheFirstOutcomeThatHoldsInOrder() throws {
-        // Looks take no time here; both later outcomes hold from 2 s.
-        let fake = FakeClock()
-        let found = try Live.firstOf("sign-in consent", bound: 30, [
-            ("the system sign-in alert", { false }),
-            ("Microsoft's UPN page", { fake.seconds >= 2 }),
-            ("the app's sign-in error", { fake.seconds >= 2 }),
-        ], clock: fake.clock)
-        XCTAssertEqual(found, "Microsoft's UPN page")
-        XCTAssertEqual(fake.seconds, 2, "polled every LiveBound.poll until the page showed")
-    }
-
     static let complete = [
         "MEATGEEK_LIVE_UPN": "someone@example.test",
         "MEATGEEK_LIVE_PASSWORD": "not-a-real-password",
@@ -206,14 +217,4 @@ final class LiveOfflineTests: XCTestCase {
         "MEATGEEK_LIVE_CLAIM_CODE": "ABCD-EFGH-JKMN",
         "MEATGEEK_LIVE_RUN_ID": "42",
     ]
-}
-
-/// A clock that moves only when a look moves it or a poll pauses.
-@MainActor
-private final class FakeClock {
-    var seconds: TimeInterval = 0
-
-    var clock: LiveClock {
-        LiveClock(now: { Date(timeIntervalSince1970: self.seconds) }, pause: { self.seconds += $0 })
-    }
 }
