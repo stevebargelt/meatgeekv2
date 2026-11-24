@@ -333,6 +333,13 @@ jobs:
           echo "Simulator: $IOS_SIMULATOR, iOS $sdk ($runtime), id $udid"
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
 
+      - name: Boot the simulator
+        # Boots it and returns once the device reports boot finished. Left to
+        # xcodebuild, the boot overlaps the UI test, and SpringBoard can refuse
+        # the app launch ("denied by service delegate (SBMainWorkspace)") while
+        # it is still starting up: seen on this job's third PR run.
+        run: xcrun simctl bootstatus "${{ steps.simulator.outputs.udid }}" -b
+
       - name: Cache SwiftPM checkouts
         # Only once the project resolves a remote package and so has a
         # Package.resolved; MeatGeekKit is local and needs no checkout.
