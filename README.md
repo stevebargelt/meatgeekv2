@@ -50,7 +50,7 @@ MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time a
 - **Terraform** - Infrastructure as Code
 - **OpenTelemetry** - End-to-end observability
 - **React** - Web client application
-- **Swift** - Native iOS client, so far a skeleton in [`apps/ios`](apps/ios/README.md)
+- **Swift** - Native iOS client in [`apps/ios`](apps/ios/README.md), live against dev from Xcode (not distributed); see [iOS app](docs/applications/ios-app.md)
 - **Go** - High-performance device services
 - **TypeScript** - Type-safe development across all layers
 
@@ -95,7 +95,7 @@ meatgeekv2/
 | Data Pusher | Go | IoT Hub integration service | ✅ New |
 | Azure Functions | TypeScript | Serverless API and data processing | ✅ New |
 | Web App | React | User interface | ✅ Foundation |
-| iOS App | Swift (native) | Mobile client in [`apps/ios`](apps/ios/README.md); shares only the OpenAPI contract with the web app | 🚧 Skeleton |
+| iOS App | Swift (native) | Mobile client in [`apps/ios`](apps/ios/README.md); shares only the OpenAPI contract with the web app | ✅ Live (dev) |
 | Infrastructure | Terraform | Cloud resource management | 🔄 In Progress |
 
 ## 🔧 Development Commands
@@ -178,7 +178,7 @@ Comprehensive documentation is available in the `/docs` directory:
 ### Current (Phase 0)
 - **Monorepo Architecture**: Unified development with NX
 - **Type Safety**: Comprehensive TypeScript interfaces
-- **Platforms**: React (web) + Go (device); a native iOS (Swift) app, so far a skeleton in `apps/ios`
+- **Platforms**: React (web) + Go (device) + a native iOS (Swift) app in `apps/ios`, live against dev
 - **Modern Tooling**: ESLint, Prettier, Jest configured
 - **Development Ready**: Hot reloading, testing, linting all set up
 

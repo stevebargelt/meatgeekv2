@@ -39,7 +39,7 @@ A comprehensive BBQ temperature monitoring and cook management system built with
 - **[Device runbook](devices/runbook.md)** - Onboard a Raspberry Pi with one command, then claim, release or revoke it
 - **[Device Controller](applications/device-controller.md)** - Raspberry Pi Go application for temperature monitoring
 - **[Data Pusher](applications/data-pusher.md)** - IoT Hub integration service and local buffering
-- **Mobile App** - Native iOS (Swift) app in [`apps/ios`](../apps/ios/README.md), so far a skeleton in `apps/ios` (HAR-158) that builds and tests in the simulator and has Entra sign-in (HAR-162) a Devices tab to list, claim, rename and release devices (HAR-165), and a Cooks tab to list, start, open and stop cooks (HAR-166); it shares only the OpenAPI contract with the web app
+- **[iOS App](applications/ios-app.md)** - Native iOS (Swift) app in [`apps/ios`](../apps/ios/README.md), live against dev and run from Xcode (not distributed): Entra sign-in (HAR-162), a Devices tab to list, claim, rename and release devices (HAR-165), a Cooks tab to list, start, open and stop cooks (HAR-166), a live panel by push (HAR-167) and a chart of the whole cook (HAR-168), proven on every dev deploy by `ios-acceptance` (HAR-169); it shares only the OpenAPI contract with the web app
 - **[Web App](applications/web-app.md)** - React web application
 
 ### Data Models & Business Logic
@@ -65,7 +65,7 @@ MeatGeek V2 is a modern IoT system that monitors BBQ temperatures in real-time a
 - **Azure Cloud Services** for scalable, serverless architecture
 - **Terraform** for infrastructure as code
 - **OpenTelemetry** for end-to-end observability
-- **React** for the web client, and a native iOS (Swift) client that is so far a skeleton (`apps/ios`)
+- **React** for the web client, and a native iOS (Swift) client (`apps/ios`), live against dev
 
 ## 🔄 Data Flow Summary
 
@@ -79,7 +79,7 @@ The device controller reads the RTD sensors, and the data pusher stamps each rea
 | Data Pusher | Go | IoT Hub integration service | 🔄 New |
 | Azure Functions | TypeScript | Serverless API and data processing | 🔄 New |
 | Web App | React | User interface | 🔄 New |
-| iOS App | Swift (native) | Mobile client in [`apps/ios`](../apps/ios/README.md); shares only the OpenAPI contract with the web app | 🚧 Skeleton |
+| iOS App | Swift (native) | Mobile client in [`apps/ios`](../apps/ios/README.md); shares only the OpenAPI contract with the web app | ✅ Live (dev) |
 | Infrastructure | Terraform | Cloud resource management | 🔄 New |
 
 ## 🚀 Getting Started

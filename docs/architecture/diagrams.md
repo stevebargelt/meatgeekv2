@@ -58,7 +58,7 @@ render those dashed or faded, but its flows describe only what runs today.
 
 ## MeatGeek V2: landscape
 
-Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. The web app is live on Vercel; sky dashed is the iOS app, decided and not built. Click a box to go down a level.
+Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). Nothing is decided and unbuilt; grey dotted is not built, with no decision. Click a box to go down a level.
 
 View `index` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/index/
 
@@ -91,8 +91,11 @@ graph TB
   Meatgeek.Cloud -. "`[...]`" .-> Operator
   Meatgeek.Cloud -. "`validates access tokens`" .-> Entra
   Meatgeek.Cloud -. "`[...]`" .-> Meatgeek.Edge
-  Pitmaster -. "`monitors a cook`" .-> Meatgeek.Mobile
-  Meatgeek.Cloud -. "`live temperatures, cook events`" .-> Meatgeek.Mobile
+  Pitmaster -. "`watches a cook live, reviews cooks`" .-> Meatgeek.Mobile
+  Delivery -. "`XCUITest, simulator`" .-> Meatgeek.Mobile
+  Meatgeek.Cloud -. "`temperature, cook_stopped`" .-> Meatgeek.Mobile
+  Meatgeek.Mobile -. "`auth code + PKCE (MSAL,
+system browser), no secret`" .-> Entra
   Meatgeek.Mobile -. "`[...]`" .-> Meatgeek.Cloud
   Pitmaster -. "`[...]`" .-> Meatgeek.Web
   Vercel -. "`builds apps/web on every push
@@ -106,17 +109,14 @@ to main, serves production`" .-> Meatgeek.Web
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Vercel,Smoker,Entra muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery,Meatgeek.Edge,Meatgeek.Cloud,Meatgeek.Web primary
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class Meatgeek.Mobile sky
-  linkStyle 0,1,2,3,4,5,6,7,8,9,14,15,16,17,18,19,20 stroke:#8D8D8D,stroke-dasharray:8 4
+  class Delivery,Meatgeek.Edge,Meatgeek.Cloud,Meatgeek.Mobile,Meatgeek.Web primary
+  linkStyle 0,1,2,3,4,5,6,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 10 stroke:#8D8D8D
-  linkStyle 11,12,13 stroke:#0ea5e9,stroke-dasharray:8 4
 ```
 
 ## MeatGeek V2: containers
 
-Everything that runs. Sky dashed is decided and not built: the iOS app. Grey dotted is not built, with no decision.
+Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). Nothing is decided and unbuilt; grey dotted is not built, with no decision.
 
 View `system` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/system/
 
@@ -163,10 +163,12 @@ graph TB
   Smoker@{ shape: rectangle, label: "Pellet smoker" }
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
-  Pitmaster -. "`monitors a cook`" .-> Meatgeek.Mobile
+  Pitmaster -. "`watches a cook live, reviews cooks`" .-> Meatgeek.Mobile
   Pitmaster -. "`[...]`" .-> Meatgeek.Web
   Vercel -. "`builds apps/web on every push
 to main, serves production`" .-> Meatgeek.Web
+  Meatgeek.Mobile -. "`auth code + PKCE (MSAL,
+system browser), no secret`" .-> Entra
   Meatgeek.Web -. "`auth code + PKCE
 (MSAL), no secret`" .-> Entra
   Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge.Controller
@@ -175,12 +177,14 @@ to main, serves production`" .-> Meatgeek.Web
   Meatgeek.Edge.Pusher -. "`GET get_status, every 5 s`" .-> Meatgeek.Edge.Controller
   Meatgeek.Edge.Updater -. "`installs, restarts`" .-> Meatgeek.Edge.Controller
   Meatgeek.Edge.Updater -. "`installs, restarts`" .-> Meatgeek.Edge.Pusher
-  Meatgeek.Mobile -. "`REST`" .-> Meatgeek.Cloud.Api
+  Meatgeek.Mobile -. "`REST, user access
+token (access_as_user)`" .-> Meatgeek.Cloud.Api
+  Meatgeek.Mobile -. "`connects as the signed-in user`" .-> Meatgeek.Cloud.Realtime
   Meatgeek.Web -. "`REST, user access
 token (access_as_user)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Web -. "`connects as the signed-in user`" .-> Meatgeek.Cloud.Realtime
   Meatgeek.Cloud.Api -. "`validates access tokens`" .-> Entra
-  Meatgeek.Cloud.Realtime -. "`live temperatures, cook events`" .-> Meatgeek.Mobile
+  Meatgeek.Cloud.Realtime -. "`temperature, cook_stopped`" .-> Meatgeek.Mobile
   Meatgeek.Cloud.Realtime -. "`temperature, cook_stopped`" .-> Meatgeek.Web
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Data
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Realtime
@@ -219,26 +223,23 @@ identity (X.509 thumbprint)`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Cloud.Observability.MetricAlerts -. "`four metric alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
   Meatgeek.Cloud.Observability.ActivityAlerts -. "`three activity-log alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
   Pitmaster -. "`cooks on`" .-> Smoker
-  Delivery.Simdevice -. "`telemetry as <sim>, <sim>-
-chart or <sim>-web: messageId,
-$.ct=application/json, $.ce=utf-
-8, traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
+  Delivery.Simdevice -. "`telemetry as <sim>, <sim>-chart,
+<sim>-web or <sim>-ios:
+messageId, $.ct=application/json,
+$.ce=utf-8, traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Vercel,Smoker,Meatgeek.Edge.Updater,Meatgeek.Cloud.Deviceupdate,Entra muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class Meatgeek.Cloud.Ingest.Eventhub,Meatgeek.Cloud.Observability.Budgets,Meatgeek.Cloud.Observability.ActivityAlerts,Meatgeek.Cloud.Observability.ActionGroup,Meatgeek.Cloud.Realtime,Meatgeek.Cloud.Ingest.Dps,Meatgeek.Cloud.Ingest.Iothub,Meatgeek.Cloud.Observability.Workbook,Meatgeek.Cloud.Observability.Appinsights,Meatgeek.Cloud.Observability.Logs,Meatgeek.Cloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery.Simdevice,Meatgeek.Web,Meatgeek.Edge.Pusher,Meatgeek.Edge.Controller,Meatgeek.Cloud.Api primary
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class Meatgeek.Mobile sky
+  class Delivery.Simdevice,Meatgeek.Mobile,Meatgeek.Web,Meatgeek.Edge.Pusher,Meatgeek.Edge.Controller,Meatgeek.Cloud.Api primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class Meatgeek.Cloud.Data green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class Meatgeek.Cloud.Observability.Collector amber
-  linkStyle 0,10,14 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,2,3,4,5,6,7,11,12,13,15,16,19,21,24,25,30,33,34,35,36,37,38,39,40,41,42,43,44,46,47,48,49 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 8,9,22,23,26,31,32,45 stroke:#8D8D8D
-  linkStyle 17,18,20,27,28,29,50 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,11,12,13,14,15,16,17,18,21,23,26,27,32,35,36,37,38,39,40,41,42,43,44,45,46,48,49,50,51 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 9,10,24,25,28,33,34,47 stroke:#8D8D8D
+  linkStyle 19,20,22,29,30,31,52 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## MeatGeek cloud (Azure)
@@ -264,9 +265,9 @@ graph TB
     end
     subgraph MeatgeekCloud.Api["`Functions API`"]
       MeatgeekCloud.Api.Rollup@{ shape: rectangle, label: "rollupTemperatures" }
+      MeatgeekCloud.Api.Negotiate@{ shape: rectangle, label: "negotiate" }
       MeatgeekCloud.Api.Cooks@{ shape: rectangle, label: "cooks" }
       MeatgeekCloud.Api.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
-      MeatgeekCloud.Api.Negotiate@{ shape: rectangle, label: "negotiate" }
     end
     subgraph MeatgeekCloud.Data["`Cosmos DB`"]
       MeatgeekCloud.Data.TemperatureRollups@{ shape: cylinder, label: "temperature-rollups" }
@@ -286,12 +287,14 @@ graph TB
   subgraph MeatgeekEdge["`MeatGeek device`"]
     MeatgeekEdge.PusherTwin@{ shape: rectangle, label: "twin client" }
   end
-  MeatgeekMobile@{ shape: rounded, label: "iOS app" }
   subgraph MeatgeekWeb["`Web app`"]
     MeatgeekWeb.LivePanel@{ shape: rectangle, label: "live panel" }
     MeatgeekWeb.Chart@{ shape: rectangle, label: "chart" }
   end
-  MeatgeekCloud.Realtime -. "`live temperatures, cook events`" .-> MeatgeekMobile
+  subgraph MeatgeekMobile["`iOS app`"]
+    MeatgeekMobile.LivePanel@{ shape: rectangle, label: "live panel" }
+    MeatgeekMobile.Chart@{ shape: rectangle, label: "chart" }
+  end
   Operator -. "`enrol-device.sh / revoke-device.sh`" .-> MeatgeekCloud.Ingest.Dps
   MeatgeekCloud.Deviceupdate -. "`deployment to a device group`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Ingest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloud.Ingest.Eventhub
@@ -312,7 +315,6 @@ identity (X.509 thumbprint)`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Api.Cooks -. "`cook_started, cook_stopped
 to the owning userId`" .-> MeatgeekCloud.Realtime
   MeatgeekCloud.Api.Cooks -. "`set twin desired properties`" .-> MeatgeekCloud.Ingest.Iothub
-  MeatgeekMobile -. "`negotiate`" .-> MeatgeekCloud.Api.Negotiate
   MeatgeekCloud.Api.Negotiate -. "`mint client token for the caller`" .-> MeatgeekCloud.Realtime
   MeatgeekCloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloud.Api.Broadcast
   MeatgeekCloud.Api.Broadcast -. "`each reading, to its device owner`" .-> MeatgeekCloud.Realtime
@@ -324,10 +326,15 @@ to the owning userId`" .-> MeatgeekCloud.Realtime
   MeatgeekWeb.LivePanel -. "`POST /negotiate`" .-> MeatgeekCloud.Api.Negotiate
   MeatgeekWeb.LivePanel -. "`pushed readings`" .-> MeatgeekWeb.Chart
   MeatgeekWeb.Chart -. "`GET /cooks/{cookId}/chart`" .-> MeatgeekCloud.Api.Cooks
-  Delivery.Simdevice -. "`telemetry as <sim>, <sim>-
-chart or <sim>-web: messageId,
-$.ct=application/json, $.ce=utf-
-8, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
+  MeatgeekCloud.Realtime -. "`temperature, cook_stopped`" .-> MeatgeekMobile.LivePanel
+  MeatgeekMobile.LivePanel -. "`connects as the signed-in user`" .-> MeatgeekCloud.Realtime
+  MeatgeekMobile.LivePanel -. "`POST /negotiate`" .-> MeatgeekCloud.Api.Negotiate
+  MeatgeekMobile.LivePanel -. "`pushed readings`" .-> MeatgeekMobile.Chart
+  MeatgeekMobile.Chart -. "`GET /cooks/{cookId}/chart`" .-> MeatgeekCloud.Api.Cooks
+  Delivery.Simdevice -. "`telemetry as <sim>, <sim>-chart,
+<sim>-web or <sim>-ios:
+messageId, $.ct=application/json,
+$.ce=utf-8, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Api -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`cosmos-429-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
@@ -336,17 +343,14 @@ $.ct=application/json, $.ce=utf-
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.ActionGroup,MeatgeekCloud.Ingest.Dps,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekCloud.Api.Negotiate,MeatgeekWeb.Chart primary
+  class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekMobile.LivePanel,MeatgeekWeb.Chart,MeatgeekMobile.Chart primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data.TemperatureRollups green
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekMobile sky
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.Observability.Collector amber
-  linkStyle 0,19 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,4,5,6,7,8,9,10,11,12,14,15,16,18,20,22,23,24,25,26,27,28,29,30,32,33,34 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,13 stroke:#8D8D8D
-  linkStyle 3,17,21,31 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,6,7,8,9,10,11,13,14,15,17,18,20,21,22,23,24,25,26,27,28,29,30,31,32,33,35,36,37 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 1,12 stroke:#8D8D8D
+  linkStyle 2,16,19,34 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -482,7 +486,14 @@ claim code the device minted:
 201, or 200 on a retry`" .-> MeatgeekCloudApi.Devices
   Delivery -. "`[...]`" .-> MeatgeekCloudApi.Temperatures
   Delivery -. "`POST /negotiate (signalr proofs)`" .-> MeatgeekCloudApi.Negotiate
-  MeatgeekMobile -. "`negotiate`" .-> MeatgeekCloudApi.Negotiate
+  MeatgeekMobile -. "`[...]`" .-> MeatgeekCloudApi.Cooks
+  MeatgeekMobile -. "`GET /devices; POST
+/devices/claim; PATCH,
+DELETE /devices/{id}`" .-> MeatgeekCloudApi.Devices
+  MeatgeekMobile -. "`GET
+/temperatures/current/{deviceId}
+(backfill)`" .-> MeatgeekCloudApi.Temperatures
+  MeatgeekMobile -. "`POST /negotiate`" .-> MeatgeekCloudApi.Negotiate
   MeatgeekWeb -. "`[...]`" .-> MeatgeekCloudApi.Cooks
   MeatgeekWeb -. "`GET /devices; POST
 /devices/claim; PATCH,
@@ -527,10 +538,13 @@ update, release (delete)`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Repos -. "`chart query; partition = deviceId`" .-> MeatgeekCloudData.TemperatureRollups
   MeatgeekCloudData.Temperatures -. "`change feed (leases)`" .-> MeatgeekCloudApi.Rollup
   Delivery -. "`connects as a SignalR client`" .-> MeatgeekCloudRealtime
+  MeatgeekMobile -. "`connects as the signed-in user`" .-> MeatgeekCloudRealtime
   MeatgeekWeb -. "`connects as the signed-in user`" .-> MeatgeekCloudRealtime
-  MeatgeekCloudRealtime -. "`live temperatures, cook events`" .-> MeatgeekMobile
+  MeatgeekCloudRealtime -. "`temperature, cook_stopped`" .-> MeatgeekMobile
   MeatgeekCloudRealtime -. "`temperature, cook_stopped`" .-> MeatgeekWeb
   Delivery -. "`[...]`" .-> Entra
+  MeatgeekMobile -. "`auth code + PKCE (MSAL,
+system browser), no secret`" .-> Entra
   MeatgeekWeb -. "`auth code + PKCE
 (MSAL), no secret`" .-> Entra
   MeatgeekCloudApi.Otel -. "`traces, logs (samplingRatio
@@ -548,18 +562,15 @@ sets desired claim properties`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`desired properties`" .-> MeatgeekEdgePusherTwin
   MeatgeekEdgePusherTwin -. "`reported properties`" .-> MeatgeekCloudIngest.Iothub
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery,MeatgeekWeb,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Rollup,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekEdgePusherTwin,MeatgeekCloudApi.Broadcast,MeatgeekCloudApi.Repos primary
-  classDef sky fill:#0284c7,stroke:#0369a1,color:#f0f9ff
-  class MeatgeekMobile sky
+  class Delivery,MeatgeekMobile,MeatgeekWeb,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Rollup,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekEdgePusherTwin,MeatgeekCloudApi.Broadcast,MeatgeekCloudApi.Repos primary
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudObservability.Appinsights,MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.TemperatureRollups,MeatgeekCloudData.Leases,MeatgeekCloudData.Devices,MeatgeekCloudData.Temperatures,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,2,3,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,29,30,31,32,33,34,35,36,37,39,40,42,43,44,45,47,48,52,53 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 4,41 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 26,38,46,49,50,51 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,30,31,32,33,34,35,36,37,38,39,40,42,43,44,45,46,47,48,49,50,52,53,57,58 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 29,41,51,54,55,56 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Cosmos DB
@@ -613,10 +624,10 @@ update, release (delete)`" .-> MeatgeekCloudData.Devices
   MeatgeekCloudApi.Rollup -. "`change-feed checkpoints`" .-> MeatgeekCloudData.Leases
   MeatgeekCloudIngest.Iothub -. "`desired properties`" .-> MeatgeekEdgePusher
   MeatgeekEdgePusher -. "`[...]`" .-> MeatgeekCloudIngest.Iothub
-  DeliverySimdevice -. "`telemetry as <sim>, <sim>-
-chart or <sim>-web: messageId,
-$.ct=application/json, $.ce=utf-
-8, traceparent`" .-> MeatgeekCloudIngest.Iothub
+  DeliverySimdevice -. "`telemetry as <sim>, <sim>-chart,
+<sim>-web or <sim>-ios:
+messageId, $.ct=application/json,
+$.ce=utf-8, traceparent`" .-> MeatgeekCloudIngest.Iothub
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class DeliverySimdevice,MeatgeekCloudApi.Repos,MeatgeekCloudApi.Ownership,MeatgeekEdgePusher,MeatgeekCloudApi.Rollup primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
@@ -674,10 +685,10 @@ with the device certificate)`" .-> MeatgeekCloudIngest.Dps
   MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Broadcast
   MeatgeekCloudApi.Broadcast -. "`each reading, to its device owner`" .-> MeatgeekCloudRealtime
   MeatgeekCloudRealtime -. "`[...]`" .-> MeatgeekCloudObservability
-  Delivery.Simdevice -. "`telemetry as <sim>, <sim>-
-chart or <sim>-web: messageId,
-$.ct=application/json, $.ce=utf-
-8, traceparent`" .-> MeatgeekCloudIngest.Iothub
+  Delivery.Simdevice -. "`telemetry as <sim>, <sim>-chart,
+<sim>-web or <sim>-ios:
+messageId, $.ct=application/json,
+$.ce=utf-8, traceparent`" .-> MeatgeekCloudIngest.Iothub
   Delivery.Acceptance -. "`enrol each simulated device
 through DPS (enrol-device.sh),
 register it with simdevice`" .-> MeatgeekCloudIngest.Iothub
@@ -782,12 +793,17 @@ graph TB
 
 Pull requests feed two workflows. CI/CD Pipeline runs on every pull request and push to
 main: lint and test, the Cosmos emulator tests on `windows-2025`, builds, Terraform
-validation, the security scan, the `no-real-time` guard and `web-e2e`. Test repeat
+validation, the security scan, the `no-real-time` guard, `web-e2e` and `ios`. Test repeat
 (`test-repeat.yml`) runs on pull requests only: each affected non-live suite 50 times in a
 row, its emulator suite on `windows-2025`; it starts nothing and is not a required check.
-A green CI run on main starts the apply, then the deploy and its two acceptance jobs. When
+CI also runs `ios` on `macos-26`: the iOS app's unit and UI tests in a simulator against
+the in-process stub. A green CI run on main starts the apply, then the deploy and its
+three acceptance jobs: `acceptance` and `web-acceptance` in parallel, then
+`ios-acceptance` after `web-acceptance`, because both sign in as the same TOTP user. When
 a web-acceptance sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`,
 the leak check runs over it, and the run uploads the `web-acceptance-diagnostics` artifact.
+The iOS proof runs the same leak check over its raw log before it uploads
+`ios-acceptance-screenshots`.
 
 View `pipeline` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/pipeline/
 
@@ -808,11 +824,13 @@ graph TB
     Delivery.Apply@{ shape: rectangle, label: "Apply Dev Infrastructure" }
     Delivery.Deploy@{ shape: rectangle, label: "Deploy Dev App" }
     Delivery.WebAcceptance@{ shape: rectangle, label: "Web acceptance" }
+    Delivery.IosAcceptance@{ shape: rectangle, label: "iOS acceptance" }
     Delivery.Simdevice@{ shape: rectangle, label: "simdevice" }
   end
   Vercel@{ shape: rectangle, label: "Vercel" }
   subgraph Meatgeek["`MeatGeek V2`"]
     Meatgeek.Web@{ shape: rounded, label: "Web app" }
+    Meatgeek.Mobile@{ shape: rounded, label: "iOS app" }
   end
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   Team -. "`pull requests`" .-> Delivery.Ci
@@ -820,8 +838,13 @@ graph TB
   Delivery.Ci -. "`workflow_run, main only`" .-> Delivery.Apply
   Delivery.Apply -. "`workflow_run`" .-> Delivery.Deploy
   Delivery.Deploy -. "`needs: deploy`" .-> Delivery.WebAcceptance
+  Delivery.Deploy -. "`needs: deploy`" .-> Delivery.IosAcceptance
+  Delivery.WebAcceptance -. "`needs: web-acceptance
+(runs after it)`" .-> Delivery.IosAcceptance
   Delivery.WebAcceptance -. "`spawns as <sim>-web`" .-> Delivery.Simdevice
+  Delivery.IosAcceptance -. "`spawns as <sim>-ios`" .-> Delivery.Simdevice
   Delivery.WebAcceptance -. "`signs in as the test user`" .-> Entra
+  Delivery.IosAcceptance -. "`signs in as the test user`" .-> Entra
   Delivery.Acceptance.Roundtrip -. "`spawns: --count 1`" .-> Delivery.Simdevice
   Delivery.Acceptance.Volume -. "`spawns: top-up to 8,640 readings`" .-> Delivery.Simdevice
   Delivery.Acceptance.Chart -. "`spawns as <sim>-
@@ -829,6 +852,9 @@ chart, --start/--step`" .-> Delivery.Simdevice
   Delivery.WebAcceptance -. "`Playwright, production`" .-> Meatgeek.Web
   Meatgeek.Web -. "`auth code + PKCE
 (MSAL), no secret`" .-> Entra
+  Delivery.IosAcceptance -. "`XCUITest, simulator`" .-> Meatgeek.Mobile
+  Meatgeek.Mobile -. "`auth code + PKCE (MSAL,
+system browser), no secret`" .-> Entra
   Vercel -. "`builds apps/web on every push
 to main, serves production`" .-> Meatgeek.Web
   Delivery.Deploy -. "`needs: deploy`" .-> Delivery.Acceptance
@@ -837,10 +863,10 @@ to main, serves production`" .-> Meatgeek.Web
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Vercel,Entra muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery.Acceptance.Roundtrip,Delivery.Acceptance.Volume,Delivery.Acceptance.Chart,Delivery.Simdevice,Meatgeek.Web primary
+  class Delivery.Acceptance.Roundtrip,Delivery.Acceptance.Volume,Delivery.Acceptance.Chart,Delivery.Simdevice,Meatgeek.Web,Meatgeek.Mobile primary
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
-  class Delivery.Ci,Delivery.TestRepeat,Delivery.Apply,Delivery.Deploy,Delivery.WebAcceptance slate
-  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15 stroke:#8D8D8D,stroke-dasharray:8 4
+  class Delivery.Ci,Delivery.TestRepeat,Delivery.Apply,Delivery.Deploy,Delivery.WebAcceptance,Delivery.IosAcceptance slate
+  linkStyle 0,1,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,3 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -850,7 +876,7 @@ to main, serves production`" .-> Meatgeek.Web
 
 ## Deployment: dev
 
-What runs where. The web app is served by Vercel (production, built from main) and calls the dev API. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance jobs.
+What runs where. The web app is served by Vercel (production, built from main) and calls the dev API. The iOS app is not distributed: it runs on the iPhone of a developer, from Xcode, and in a simulator on the macOS runner for the ios-acceptance proof. The OTLP collector is not deployed (enable_native_otlp = false); the simulated device runs only on the CI runner, in the dev acceptance jobs.
 
 View `devDeployment` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/devDeployment/
 
@@ -867,6 +893,10 @@ graph TB
     DevCi.Acceptance@{ shape: rectangle, label: "Acceptance" }
     DevCi.WebAcceptance@{ shape: rectangle, label: "Web acceptance" }
     DevCi.Simdevice@{ shape: rectangle, label: "simdevice" }
+  end
+  subgraph DevMacRunner["`GitHub Actions macOS runner`"]
+    DevMacRunner.IosAcceptance@{ shape: rectangle, label: "iOS acceptance" }
+    DevMacRunner.Simulator@{ shape: rounded, label: "iOS app (simulator)" }
   end
   subgraph DevVercelHost["`Vercel`"]
     DevVercelHost.Web@{ shape: rounded, label: "Web app" }
@@ -905,6 +935,7 @@ identity (X.509 thumbprint)`" .-> DevRg.Iothub
   DevRg.Workbook -. "`queries`" .-> DevRg.Appinsights
   DevCi.Acceptance -. "`[...]`" .-> DevCi.Simdevice
   DevCi.WebAcceptance -. "`spawns as <sim>-web`" .-> DevCi.Simdevice
+  DevMacRunner.IosAcceptance -. "`XCUITest, simulator`" .-> DevMacRunner.Simulator
   DevPi.Pusher -. "`[...]`" .-> DevRg.Iothub
   DevPi.Pusher -. "`register (HTTPS, mutual TLS
 with the device certificate)`" .-> DevRg.Dps
@@ -915,33 +946,45 @@ register it with simdevice`" .-> DevRg.Iothub
   DevCi.WebAcceptance -. "`enrol <sim>-web through
 DPS (enrol-device.sh),
 register it with simdevice`" .-> DevRg.Iothub
-  DevCi.Simdevice -. "`telemetry as <sim>, <sim>-
-chart or <sim>-web: messageId,
-$.ct=application/json, $.ce=utf-
-8, traceparent`" .-> DevRg.Iothub
+  DevCi.Simdevice -. "`telemetry as <sim>, <sim>-chart,
+<sim>-web or <sim>-ios:
+messageId, $.ct=application/json,
+$.ce=utf-8, traceparent`" .-> DevRg.Iothub
+  DevMacRunner.IosAcceptance -. "`enrol <sim>-ios through
+DPS (enrol-device.sh),
+register it with simdevice`" .-> DevRg.Iothub
   DevRg.Api -. "`validates access tokens`" .-> DevIdentity.Entra
   DevCi.Acceptance -. "`[...]`" .-> DevRg.Api
+  DevMacRunner.Simulator -. "`[...]`" .-> DevRg.Api
   DevVercelHost.Web -. "`[...]`" .-> DevRg.Api
+  DevRg.Signalr -. "`temperature, cook_stopped`" .-> DevMacRunner.Simulator
   DevRg.Signalr -. "`temperature, cook_stopped`" .-> DevVercelHost.Web
   DevCi.Acceptance -. "`connects as a SignalR client`" .-> DevRg.Signalr
+  DevMacRunner.Simulator -. "`connects as the signed-in user`" .-> DevRg.Signalr
   DevVercelHost.Web -. "`connects as the signed-in user`" .-> DevRg.Signalr
   DevCi.Acceptance -. "`app-only token (OIDC)`" .-> DevIdentity.Entra
+  DevCi.WebAcceptance -. "`needs: web-acceptance
+(runs after it)`" .-> DevMacRunner.IosAcceptance
   DevCi.WebAcceptance -. "`Playwright, production`" .-> DevVercelHost.Web
   DevCi.WebAcceptance -. "`signs in as the test user`" .-> DevIdentity.Entra
+  DevMacRunner.IosAcceptance -. "`spawns as <sim>-ios`" .-> DevCi.Simdevice
+  DevMacRunner.IosAcceptance -. "`signs in as the test user`" .-> DevIdentity.Entra
+  DevMacRunner.Simulator -. "`auth code + PKCE (MSAL,
+system browser), no secret`" .-> DevIdentity.Entra
   DevVercelHost.Web -. "`auth code + PKCE
 (MSAL), no secret`" .-> DevIdentity.Entra
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class DevPi.Pusher,DevPi.Controller,DevCi.Simdevice,DevVercelHost.Web,DevRg.Api primary
+  class DevPi.Pusher,DevPi.Controller,DevVercelHost.Web,DevMacRunner.Simulator,DevCi.Simdevice,DevRg.Api primary
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
-  class DevCi.Acceptance,DevCi.WebAcceptance slate
+  class DevCi.Acceptance,DevCi.WebAcceptance,DevMacRunner.IosAcceptance slate
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class DevRg.Dps,DevRg.Workbook,DevRg.Iothub,DevRg.Signalr,DevRg.Appinsights,DevRg.Eventhub,DevRg.Logs indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class DevRg.Cosmos green
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class DevIdentity.Entra muted
-  linkStyle 0,3,4,5,7,9,10,12,13,14,15,16,17,19,20,21,22,24,25,26,27,28,29,30,31,32,33 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,2,6,8,11,18,23 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,7,9,10,12,13,14,15,16,17,18,20,21,22,23,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 1,2,6,8,11,19,24 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -1035,6 +1078,14 @@ pushed reading to the live panel and the chart. Proven live by Deploy Dev App's
 `web-acceptance` job, signed in as the acceptance test user: `METRIC web-push-ms` 510
 (run 44837747351).
 
+The iOS app's cook screen takes the same steps through its own components
+(`mobile.cooks`, `mobile.chart`, `mobile.livePanel`, `mobile.shell`), with MSAL for iOS
+and SignalR-Client-Swift: the same requests, the same backfill after every connect and
+reconnect, the same `waiting`, `live` and `stale` states. It also stops the connection
+when the app leaves the foreground and negotiates again on return. Proven live by the
+`ios-acceptance` job, in a simulator: `METRIC ios-push-ms` 10918 (run 45429145737), from
+the tap on Start to the pushed reading on screen, so it includes the cook start.
+
 View `watchCook` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/
 
 ```mermaid
@@ -1115,7 +1166,7 @@ device twin's desired properties to Cosmos, and the Pi applies them and reports 
 when it next connects. `cook_started` goes to the owning user's SignalR connections, not
 to the Pi (MG-30). Sign-in (Easy Auth, then the principal) and the ownership check run
 first, as in the `api` view. Stopping a cook follows the same path: the twin's desired
-cook is cleared and `cook_stopped` goes to the owner, whose web live panel consumes it.
+cook is cleared and `cook_stopped` goes to the owner, whose web and iOS live panels consume it.
 
 View `cookStart` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/
 
@@ -1151,7 +1202,7 @@ correlationId, cookUpdatedAt`" .-> MeatgeekCloudIngestIothub
 
 Steps:
 
-- **1.** cooks (`meatgeek.web.cooks`) → cooks (`meatgeek.cloud.api.cooks`): POST /cooks. Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The web app's start form sends a client-generated id, one per intent, so a retried submit starts the cook once. The ownership check is one point read on `devices`: a foreign or unclaimed device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live callers are the web app and the acceptance proofs.
+- **1.** cooks (`meatgeek.web.cooks`) → cooks (`meatgeek.cloud.api.cooks`): POST /cooks. Through Easy Auth and the principal (`userId = tid:oid`; a missing header is 401). The web app's start form sends a client-generated id, one per intent, so a retried submit starts the cook once. The ownership check is one point read on `devices`: a foreign or unclaimed device gets 403 `DEVICE_NOT_OWNED`, with no write and no event. The live callers are the web app, the iOS app (the same id-per-intent rule) and the acceptance proofs.
 - **2.** cooks (`meatgeek.cloud.api.cooks`) → cooks (`meatgeek.cloud.data.cooks`): cook and device lock. One transactional batch in the caller partition: the cook and its device lock commit together, so a device holds at most one active cook (MG-84).
 - **3.** cooks (`meatgeek.cloud.api.cooks`) → IoT Hub: set desired: activeCookId, correlationId, cookUpdatedAt. After the write, synced to the device lock under the twin etag (`If-Match`): GET the twin, read the active cook from Cosmos, PATCH only if they differ, then re-read. Every cook PATCH stamps `cookUpdatedAt`, the API's write time (HAR-152). Managed identity with `IoT Hub Twin Contributor`. A failed sync answers 503 `DEVICE_TWIN_UPDATE_FAILED`; the cook stays written and a retry of the same request heals the twin.
 - **4.** IoT Hub → twin client: desired properties. Delivered on connect (a full GET) or on change (a patch), so an offline Pi catches up. Patches apply in `$version` order. The twin client logs `applyLagMs`, the time from desired `cookUpdatedAt` to the apply (HAR-150, HAR-152); on a full GET it falls back to the twin's `$metadata`, which an MQTT patch never carries.
@@ -1227,6 +1278,8 @@ graph LR
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   DeliverySimdevice@{ shape: rectangle, label: "simdevice" }
   DeliveryWebAcceptance@{ shape: rectangle, label: "Web acceptance" }
+  DeliveryIosAcceptance@{ shape: rectangle, label: "iOS acceptance" }
+  MeatgeekMobile@{ shape: rounded, label: "iOS app" }
   Team -. "`merge to main`" .-> DeliveryCi
   Vercel -. "`builds main, serves production`" .-> MeatgeekWeb
   DeliveryCi -. "`green on main`" .-> DeliveryApply
@@ -1239,13 +1292,15 @@ graph LR
   DeliveryAcceptance -. "`spawns simdevice`" .-> DeliverySimdevice
   DeliveryDeploy -. "`deployed = true`" .-> DeliveryWebAcceptance
   DeliveryWebAcceptance -. "`Playwright, production`" .-> MeatgeekWeb
+  DeliveryWebAcceptance -. "`finished`" .-> DeliveryIosAcceptance
+  DeliveryIosAcceptance -. "`XCUITest, simulator`" .-> MeatgeekMobile
   classDef slate fill:#64748b,stroke:#475569,color:#f8fafc
-  class DeliveryCi,DeliveryApply,DeliveryDeploy,DeliveryAcceptance,DeliveryWebAcceptance slate
+  class DeliveryCi,DeliveryApply,DeliveryDeploy,DeliveryAcceptance,DeliveryWebAcceptance,DeliveryIosAcceptance slate
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Vercel,Entra muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekWeb,MeatgeekCloud,DeliverySimdevice primary
-  linkStyle 0,1,3,5,6,7,8,9,10,11 stroke:#8D8D8D,stroke-dasharray:8 4
+  class MeatgeekWeb,MeatgeekCloud,DeliverySimdevice,MeatgeekMobile primary
+  linkStyle 0,1,3,5,6,7,8,9,10,11,12,13 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,4 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -1263,6 +1318,8 @@ Steps:
 - **9.** Acceptance → simdevice: spawns simdevice. Live telemetry round trip and volume proofs through IoT Hub. (Opens `telemetryProof`.)
 - **10.** Deploy Dev App → Web acceptance: deployed = true. In parallel with `acceptance`.
 - **11.** Web acceptance → Web app: Playwright, production. Waits for `/version.json` to show this commit or a descendant (`METRIC web-deploy-wait-s`), signs in on the Microsoft pages as the test user, starts a cook on `<sim>-web` and sees a pushed reading (`METRIC web-push-ms`). (Opens `watchCook`.)
+- **12.** Web acceptance → iOS acceptance: finished. Never at the same time as `web-acceptance`: both sign in as the same TOTP acceptance user.
+- **13.** iOS acceptance → iOS app: XCUITest, simulator. Enrols `<sim>-ios` through DPS, builds the real app for a throwaway simulator, signs in on the Microsoft pages as the test user, claims `<sim>-ios`, starts a cook, sees a pushed reading (`METRIC ios-push-ms`), stops it and releases the device. (Opens `watchCook`.)
 
 ## Flow: live telemetry proof (dev acceptance)
 
