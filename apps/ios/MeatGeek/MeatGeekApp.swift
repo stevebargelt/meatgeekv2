@@ -13,9 +13,10 @@ struct MeatGeekApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(root: root, session: app.session, now: app.now, live: app.live)
-                // A redirect back from Microsoft Authenticator. With the
-                // system browser (ASWebAuthenticationSession) MSAL gets the
-                // redirect itself and this is not called.
+                // MSAL's own URLs, if any. Sign-in uses the system browser
+                // (ASWebAuthenticationSession), which hands MSAL its redirect
+                // itself, and never the Authenticator broker (HAR-171), so
+                // this is not expected to be called.
                 .onOpenURL { url in MSALTokenProvider.handle(url: url) }
                 .task { await app.session.restore() }
         }
