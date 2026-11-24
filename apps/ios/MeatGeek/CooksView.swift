@@ -184,8 +184,8 @@ struct CookRow: View {
     }
 }
 
-/// One cook's fields, Stop and the live readings while it is active, and the
-/// space the chart will take.
+/// One cook: the live readings while it is active, its chart, its fields,
+/// and Stop while it is active.
 struct CookDetailView: View {
     @State var model: CookDetailModel
     @State private var confirmingStop = false
@@ -253,6 +253,11 @@ struct CookDetailView: View {
                 LivePanelView(model: live)
             }
 
+            // Then the whole cook as a chart, active or ended.
+            if let chart = model.chart {
+                CookChartSection(model: chart)
+            }
+
             Section {
                 LabeledContent("Status") {
                     Text(CookText.status(cook.status))
@@ -285,13 +290,6 @@ struct CookDetailView: View {
 
             if cook.status == .active {
                 stopSection
-            }
-
-            // Placeholder, on purpose: the chart (the next issue) goes here.
-            Section("Chart") {
-                Text("The cook's chart will show here.")
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier(AccessibilityID.cookDetailChartPlaceholder)
             }
         }
         .refreshable { await model.reload() }

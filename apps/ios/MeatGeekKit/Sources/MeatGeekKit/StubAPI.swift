@@ -154,7 +154,7 @@ extension StubAPI {
 
     /// The stub the app runs on in UI test mode: `GET /users/me` answers
     /// `uiTestUserName`; the device routes are served by a `StubDevices` and
-    /// the cook routes (list, start, get, stop) by a `StubCooks`, both with
+    /// the cook routes (list, start, get, stop, chart) by a `StubCooks`, both with
     /// timestamps from `now`. Every other operation is not stubbed (the app
     /// runs on `uiTestWithLive(clock:)`, which adds the live routes).
     public static func uiTest(now: @escaping @Sendable () -> Date = { UITestMode.fixedNow }) -> StubAPI {
@@ -189,6 +189,7 @@ extension StubAPI {
         api.startCookHandler = { input in await cooks.start(input) }
         api.getCookHandler = { input in await cooks.get(input) }
         api.stopCookHandler = { input in await cooks.stop(input) }
+        api.getCookChartHandler = { input in await cooks.chart(input) }
         return (api, cooks)
     }
 

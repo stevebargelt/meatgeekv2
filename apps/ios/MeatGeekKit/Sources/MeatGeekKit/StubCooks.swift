@@ -16,6 +16,12 @@ public import MeatGeekAPI
 ///   is a 200 replay;
 /// - `POST /cooks/{id}/stop` completes it; `GET /cooks/{id}` for an unknown
 ///   id is 404.
+/// - `GET /cooks/{id}/chart`: a seeded cook's 6 h in 1-minute buckets (grill,
+///   probe 1, and probe 2 with gaps: unplugged for its first 10 minutes and
+///   from 2:00 to 2:45); `noChartCookID` is 404; `failsOnceCookID` answers
+///   500 the first time, so Retry can be seen. A started cook's chart is
+///   empty while it is active (the live readings append on screen) and, once
+///   stopped, buckets the readings `StubLive` pushed for its device.
 ///
 /// Every timestamp comes from `now`.
 public actor StubCooks {
@@ -23,6 +29,12 @@ public actor StubCooks {
     /// The newest seeded cook, on `StubDevices.connectedID`.
     public static let newestSeededName = "Seeded cook 1"
     static let maxLimit = 100
+    /// A seeded cook the chart route answers 404 for: "Chart not available".
+    public static let noChartCookID = "seeded-cook-2"
+    /// A seeded cook whose first chart request answers 500; later ones 200.
+    public static let failsOnceCookID = "seeded-cook-3"
+    /// A seeded cook's chart buckets.
+    public static let seededBucketSeconds = CookChart.BucketSecondsPayload._60
 
     private let now: @Sendable () -> Date
     private let devices: StubDevices
@@ -30,6 +42,9 @@ public actor StubCooks {
     private var cooks: [Cook]
     /// Each started cook's request, to tell a replay from a reused id.
     private var requests: [String: Components.Schemas.StartCookRequest] = [:]
+    /// The readings pushed for each device, for a stopped cook's chart.
+    private var readings: [String: [(at: Date, message: TemperatureMessage)]] = [:]
+    private var chartFailed = false
 
     public init(now: @escaping @Sendable () -> Date, devices: StubDevices) {
         self.now = now
@@ -134,6 +149,89 @@ public actor StubCooks {
             cooks[index].endTime = now()
         }
         return .ok(.init(body: .json(cooks[index])))
+    }
+
+    /// `GET /cooks/{cookId}/chart`.
+    public func chart(_ input: Operations.GetCookChart.Input) -> Operations.GetCookChart.Output {
+        let id = input.path.cookId
+        guard let cook = cooks.first(where: { $0.id == id }), id != Self.noChartCookID else {
+            return .notFound(.init(body: .json(error(.notFound, "Cook not found"))))
+        }
+        if id == Self.failsOnceCookID, !chartFailed {
+            chartFailed = true
+            return .internalServerError(.init(body: .json(error(.internalServerError, "Internal server error"))))
+        }
+        let points: [Components.Schemas.CookChartPoint]
+        if id.hasPrefix("seeded-cook-") {
+            points = Self.seededPoints(from: cook.startTime)
+        } else if cook.status == .active {
+            points = []
+        } else {
+            points = bucketed(cook)
+        }
+        return .ok(.init(body: .json(CookChart(
+            cookId: cook.id,
+            deviceId: cook.deviceId,
+            startTime: cook.startTime,
+            endTime: cook.endTime,
+            bucketSeconds: Self.seededBucketSeconds,
+            points: points
+        ))))
+    }
+
+    /// A reading `StubLive` pushed.
+    public func record(_ message: TemperatureMessage, at: Date) {
+        readings[message.deviceId, default: []].append((at, message))
+    }
+
+    /// A seeded cook's 360 one-minute buckets: grill around 225 °F, probe 1
+    /// rising towards 200 °F, probe 2 rising more slowly with two gaps.
+    static func seededPoints(from start: Date) -> [Components.Schemas.CookChartPoint] {
+        func channel(_ avg: Double, spread: Double) -> Components.Schemas.CookChartChannel {
+            func round(_ value: Double) -> Double { (value * 10).rounded() / 10 }
+            return .init(min: round(avg - spread), max: round(avg + spread), avg: round(avg))
+        }
+        return (0..<360).map { minute in
+            let m = Double(minute)
+            let probe2Unplugged = minute < 10 || (120..<165).contains(minute)
+            return .init(
+                t: start.addingTimeInterval(m * 60),
+                grill: channel(225 + 10 * sin(m / 20), spread: 4),
+                probe1: channel(40 + 160 * (1 - exp(-m / 120)), spread: 0.5),
+                probe2: probe2Unplugged ? nil : channel(38 + 150 * (1 - exp(-m / 150)), spread: 0.5)
+            )
+        }
+    }
+
+    /// The readings pushed for `cook`'s device from its start to the end of
+    /// the minute it ended in, in one-minute buckets from the start of the
+    /// first minute. (The API stops at `endTime` itself; UI test mode's clock
+    /// stands still, so a cook can end in the very instant of its readings.)
+    private func bucketed(_ cook: Cook) -> [Components.Schemas.CookChartPoint] {
+        let bucket = TimeInterval(Self.seededBucketSeconds.rawValue)
+        let first = (cook.startTime.timeIntervalSince1970 / bucket).rounded(.down) * bucket
+        let end = cook.endTime.map {
+            Date(timeIntervalSince1970: (($0.timeIntervalSince1970 / bucket).rounded(.down) + 1) * bucket)
+        } ?? .distantFuture
+        var buckets: [Int: [TemperatureMessage]] = [:]
+        for (at, message) in readings[cook.deviceId] ?? [] where at >= cook.startTime && at < end {
+            buckets[Int(((at.timeIntervalSince1970 - first) / bucket).rounded(.down)), default: []].append(message)
+        }
+        func channel(_ values: [Double]) -> Components.Schemas.CookChartChannel? {
+            guard let low = values.min(), let high = values.max() else { return nil }
+            return .init(min: low, max: high, avg: values.reduce(0, +) / Double(values.count))
+        }
+        return buckets.keys.sorted().map { k in
+            let messages = buckets[k] ?? []
+            return .init(
+                t: Date(timeIntervalSince1970: first + Double(k) * bucket),
+                grill: channel(messages.compactMap(\.grillTemp)),
+                probe1: channel(messages.compactMap(\.probe1Temp)),
+                probe2: channel(messages.compactMap(\.probe2Temp)),
+                probe3: channel(messages.compactMap(\.probe3Temp)),
+                probe4: channel(messages.compactMap(\.probe4Temp))
+            )
+        }
     }
 
     /// The devices that have an active cook: where `StubLive` pushes readings.

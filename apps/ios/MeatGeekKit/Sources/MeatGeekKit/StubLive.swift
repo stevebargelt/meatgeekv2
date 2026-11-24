@@ -163,6 +163,7 @@ public final class StubLive {
             let message = TemperatureMessage(
                 deviceId: deviceID, timestamp: timestamp, grillTemp: grill, probe1Temp: probe1, enqueuedTimeUtc: at
             )
+            await cooks.record(message, at: at)
             for hub in open { hub.emit(message) }
         }
     }
