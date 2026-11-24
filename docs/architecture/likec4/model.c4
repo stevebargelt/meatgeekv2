@@ -692,12 +692,13 @@ model {
         a reviewed exception list (HAR-127, HAR-128); and `web-e2e`: Playwright drives the web
         app's main path against the built app, with Entra, the API and SignalR faked at the
         network edge, so it needs no secret and no environment (`contents: read` only); and `ios`
-        (HAR-160, HAR-169): on `macos-26` with Xcode 26.6, `xcodebuild test` of the `MeatGeek`
-        scheme in an iPhone simulator, MeatGeekKitTests and MeatGeekLiveTests (Swift Testing) and
-        MeatGeekUITests (XCUITest) against the in-process stub API, then a build-only of
-        MeatGeekLiveUITests (the live proof, which never runs here); no signing, no secret,
-        `contents: read`, and $0 because the repository is public. Never receives a device
-        credential.
+        (HAR-160, HAR-169, HAR-171): on `macos-26` with Xcode 26.6, `xcodebuild test` of the
+        `MeatGeek` scheme in an iPhone simulator, MeatGeekKitTests and MeatGeekLiveTests (Swift
+        Testing), MeatGeekMSALTests (XCTest, hosted in the app, real MSAL) and MeatGeekUITests
+        (XCUITest) against the in-process stub API, then a build-only of MeatGeekLiveUITests (the
+        live proof, which never runs here); simulator signing only (no team, no certificate), no
+        secret, `contents: read`, and $0 because the repository is public. Never receives a
+        device credential.
       '''
     }
     testRepeat = workflow 'Test repeat' {
