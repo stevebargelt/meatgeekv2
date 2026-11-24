@@ -1,7 +1,8 @@
 # Monitoring Module for MeatGeek V2
 #
 # Phase 1 observability layer: action group + budgets + diagnostic settings +
-# 5 platform-metric alerts + workbook stub. The 5 custom-metric alerts
+# 3 platform-metric alerts + 2 daily-ingestion-cap log search alerts + workbook
+# stub. The 5 custom-metric alerts
 # (device-disconnected, real-time error rate, storage p95 latency,
 # temp-out-of-safe-range, cook-idle) intentionally land in ticket #6 alongside
 # the StandardDimensions emitter — wiring them now produces always-green
@@ -177,7 +178,8 @@ resource "azurerm_monitor_diagnostic_setting" "signalr" {
 }
 
 # -----------------------------------------------------------------------------
-# 5 platform-metric alerts wired to the existing action group.
+# 3 platform-metric alerts wired to the existing action group. The daily
+# ingestion cap is watched by the two log search alerts further down.
 # Custom-metric alerts (device-disconnected, real-time error rate,
 # storage p95 latency, temp-out-of-safe-range, cook-idle) are deferred to #6.
 # -----------------------------------------------------------------------------
@@ -263,45 +265,18 @@ resource "azurerm_monitor_metric_alert" "signalr_connection_failure_rate" {
   tags = var.tags
 }
 
-# Ingestion-cap-reached alert: MUST be a platform metric alert on the workspace
-# resource, NOT a KQL log-search alert. Reason: a log-search query against the
-# workspace becomes self-referential when the cap is reached — ingestion stops,
-# so the query that watches for the cap also stops returning data, masking the
-# very condition it is supposed to detect. Heartbeat absence is used as the
-# signal: when ingestion is capped, heartbeats stop arriving in the workspace.
-resource "azurerm_monitor_metric_alert" "ingestion_cap_reached" {
-  name                = "${var.resource_prefix}-ingestion-cap-reached"
-  resource_group_name = var.resource_group_name
-  scopes              = [var.log_analytics_workspace_id]
-  description         = "Workspace '${var.log_analytics_workspace_name}' ingestion stopped — likely daily cap reached (cap=${var.ingestion_cap_gb} GB/day)"
-  severity            = 1
-  frequency           = "PT5M"
-  window_size         = "PT15M"
-
-  criteria {
-    metric_namespace = "Microsoft.OperationalInsights/workspaces"
-    metric_name      = "Heartbeat"
-    aggregation      = "Count"
-    operator         = "LessThanOrEqual"
-    threshold        = 0
-  }
-
-  action {
-    action_group_id = azurerm_monitor_action_group.main.id
-  }
-
-  tags = var.tags
-}
-
 # -----------------------------------------------------------------------------
 # HAR-174 — daily-cap alerts as log search rules on the workspace.
 #
-# These two rules replace the Heartbeat metric alert above, which cannot fire:
-# nothing in this system sends heartbeats. (That rule is removed in a follow-up
-# issue, because a destroy stops the unattended dev apply.)
+# These two rules replaced a platform metric alert on the workspace that could
+# not fire: it waited for a heartbeat metric that nothing in this system sends
+# (removed in HAR-175). That rule was a metric alert rather than a log search on
+# purpose, for one concern: a log query against the workspace it watches could
+# become self-referential, because once the cap stops ingestion the query that
+# looks for the cap might stop returning data and mask the very condition it is
+# supposed to detect.
 #
-# Does the old rule's concern apply here — that a log query in the same
-# workspace goes blind once the cap stops ingestion? No, for both rules:
+# Does that concern apply to these rules? No, for both:
 #
 #   * The cap stops billable data only. https://learn.microsoft.com/en-us/azure/azure-monitor/logs/daily-cap:
 #     the cap works by "stopping collection of billable log data for tables in
@@ -309,7 +284,7 @@ resource "azurerm_monitor_metric_alert" "ingestion_cap_reached" {
 #   * Both tables these rules read are not billable.
 #     https://learn.microsoft.com/en-us/azure/azure-monitor/logs/cost-logs
 #     ("Excluded tables"): "Some tables are free from data ingestion charges
-#     altogether, including, for example, AzureActivity, Heartbeat, Usage, and
+#     altogether, including, for example, AzureActivity, [...], Usage, and
 #     Operation." `_LogOperation` reads the Operation table.
 #   * Microsoft's own documented cap alert is a log search on this table
 #     (daily-cap page, "Alert when daily cap is reached"):

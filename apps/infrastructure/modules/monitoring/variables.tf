@@ -26,7 +26,7 @@ variable "log_analytics_workspace_id" {
 }
 
 variable "log_analytics_workspace_name" {
-  description = "Log Analytics Workspace name (used by the ingestion-cap metric alert dimension)"
+  description = "Log Analytics Workspace name (named in the descriptions of the ingestion-cap-reached and ingestion-near-cap log search alerts)"
   type        = string
 }
 
@@ -85,7 +85,7 @@ variable "manage_subscription_budget" {
 }
 
 variable "ingestion_cap_gb" {
-  description = "Daily ingestion cap (GB/day) configured on the Log Analytics workspace; used as the alert threshold for ingestion-cap-reached"
+  description = "Daily ingestion cap (GB/day) configured on the Log Analytics workspace; feeds the ingestion-near-cap log search alert threshold and both ingestion-cap log search alert descriptions"
   type        = number
   default     = 2
 }

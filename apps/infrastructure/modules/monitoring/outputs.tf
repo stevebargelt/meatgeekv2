@@ -34,7 +34,6 @@ output "alert_ids" {
     function_failure_rate           = azurerm_monitor_metric_alert.function_failure_rate.id
     cosmos_429_rate                 = azurerm_monitor_metric_alert.cosmos_429_rate.id
     signalr_connection_failure_rate = azurerm_monitor_metric_alert.signalr_connection_failure_rate.id
-    ingestion_cap_reached           = azurerm_monitor_metric_alert.ingestion_cap_reached.id
   }
 }
 

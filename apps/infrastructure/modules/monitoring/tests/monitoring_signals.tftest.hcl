@@ -447,3 +447,41 @@ run "ingestion_warning_percent_rejects_100" {
 
   expect_failures = [var.ingestion_warning_percent]
 }
+
+# HAR-175 — the old ingestion-cap metric alert waited for a heartbeat metric that
+# nothing in this system sends, so it could never fire. The two log search alerts
+# above replaced it. Fail if a metric alert on that signal comes back, or if
+# alert_ids still exposes the removed rule.
+#
+# Terraform tests cannot enumerate resources by type, so the module's .tf sources
+# are scanned as text (case-insensitive) to catch any metric alert, including a
+# new one; the three known metric alerts are also checked by value.
+run "no_heartbeat_metric_alert" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for f in fileset(path.module, "*.tf") :
+      length(regexall("(?i)metric_name\\s*=\\s*\"heartbeat\"", file("${path.module}/${f}"))) == 0
+    ])
+    error_message = "No azurerm_monitor_metric_alert in the monitoring module may use a heartbeat metric: nothing sends one, so the alert can never fire (HAR-175)"
+  }
+  assert {
+    condition = alltrue([
+      for c in concat(
+        azurerm_monitor_metric_alert.function_failure_rate.criteria,
+        azurerm_monitor_metric_alert.cosmos_429_rate.criteria,
+        azurerm_monitor_metric_alert.signalr_connection_failure_rate.criteria,
+      ) : lower(c.metric_name) != "heartbeat"
+    ])
+    error_message = "No metric alert may use a heartbeat metric (HAR-175)"
+  }
+  assert {
+    condition     = !contains(keys(output.alert_ids), "ingestion_cap_reached")
+    error_message = "alert_ids must not have an ingestion_cap_reached key: the metric alert was removed; the cap alert is in log_alert_ids (HAR-175)"
+  }
+  assert {
+    condition     = toset(keys(output.alert_ids)) == toset(["function_failure_rate", "cosmos_429_rate", "signalr_connection_failure_rate"])
+    error_message = "alert_ids must list exactly the three platform metric alerts"
+  }
+}
