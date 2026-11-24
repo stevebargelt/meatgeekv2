@@ -20,7 +20,8 @@ import XCTest
 /// | An error             | text inside Microsoft's `role="alert"` container                 |
 ///
 /// Each field is filled by `Live.paste`, never typed, and submitted with the
-/// keyboard's Return, so no button copy is needed until "Stay signed in?".
+/// keyboard's Return once it holds the value, so no button copy is needed
+/// until "Stay signed in?".
 /// See "When Microsoft changes its sign-in pages" in
 /// docs/development/live-acceptance.md (Live iOS proof).
 @MainActor
@@ -74,7 +75,7 @@ struct MicrosoftSignIn {
         }
 
         // Password
-        try Live.paste(inputs.password, into: secureField, of: app, "the password field")
+        try Live.paste(inputs.password, into: secureField, of: app, "the password field", shown: .bullets)
         app.typeText("\n")
         var next = try Live.firstOf("second factor", bound: LiveBound.signInStep, [
             ("the app", { signedIn.exists }),
