@@ -2,8 +2,8 @@ import XCTest
 
 /// Microsoft's real sign-in pages, in the app's system browser sheet
 /// (ASWebAuthenticationSession, which XCUITest sees as web views inside the
-/// app), from the system "wants to use … to sign in" alert to the app's
-/// signed-in screen.
+/// app), from the tap on Sign in with Microsoft (`openSheet()`) to the app's
+/// signed-in screen (`run()`).
 ///
 /// The web content does not expose Microsoft's element ids (`#i0116` and the
 /// rest, which apps/web-e2e/live/microsoft-sign-in.ts uses), so the pages are
@@ -50,20 +50,91 @@ struct MicrosoftSignIn {
         errorText.exists ? ": Microsoft says \"\(errorText.label)\"" : ""
     }
 
-    func run() throws {
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    /// The app's signed-out and "Signing in…" screens (`AccessibilityID` in
+    /// MeatGeek/RootView.swift).
+    private var signInButton: XCUIElement { app.buttons["signedOut.signIn"] }
+    private var signingIn: XCUIElement { app.descendants(matching: .any)["root.signingIn"] }
+    private var appError: XCUIElement { app.staticTexts["signedOut.error"] }
+    private var springboard: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.springboard") }
+
+    /// From the tap on Sign in with Microsoft to Microsoft's first page, by
+    /// what the app shows at each point, not by one window over the end
+    /// result:
+    ///
+    /// 1. The tap is taken: the app shows "Signing in…" (MSAL is starting), or
+    ///    is already past it.
+    /// 2. MSAL's own outcome: the system "wants to use … to sign in" alert,
+    ///    Microsoft's UPN page, the app's sign-in error, or the signed-out
+    ///    screen again (MSAL reported the sign-in cancelled).
+    /// 3. After Continue on the alert: Microsoft's UPN page, or the same two
+    ///    app outcomes.
+    ///
+    /// Nothing has been pasted yet, so a failure here says what is on screen
+    /// (`SignInScreen`), and the proof keeps a screenshot of it.
+    func openSheet() throws {
         let allow = springboard.alerts.buttons["Continue"]
-        let first = try Live.firstOf("sign-in consent", bound: LiveBound.consent, [
+        let started = Date()
+        let mustDecide: [(String, () -> Bool)] = [
             ("the system sign-in alert", { allow.exists }),
             ("Microsoft's UPN page", { textField.exists }),
-        ])
+            ("the app's sign-in error", { appError.exists }),
+        ]
+        let taken = try Live.firstOf(
+            "sign-in start (the tap on Sign in with Microsoft)", bound: LiveBound.app,
+            [("the app's Signing in…", { signingIn.exists })] + mustDecide, onScreen: screen
+        )
+        note("Sign-in started: \(taken) after \(LiveSteps.seconds(since: started)) s")
+        let cancelled: (String, () -> Bool) = ("the signed-out screen", { signInButton.exists && !signingIn.exists })
+        var first = taken
+        if first == "the app's Signing in…" {
+            first = try Live.firstOf("sign-in consent", bound: LiveBound.consent, mustDecide + [cancelled], onScreen: screen)
+            note("MSAL's outcome: \(first) after \(LiveSteps.seconds(since: started)) s")
+        }
+        try failOnAppOutcome(first)
         if first == "the system sign-in alert" {
             allow.tap()
             note("Accepted the system alert to sign in with login.microsoftonline.com")
+            let page = try Live.firstOf(
+                "Microsoft's UPN page", bound: LiveBound.signInStep,
+                [("Microsoft's UPN page", { textField.exists }), mustDecide[2], cancelled], onScreen: screen
+            )
+            try failOnAppOutcome(page)
+            note("Microsoft's UPN page after \(LiveSteps.seconds(since: started)) s")
         }
+    }
 
+    /// Throws for the two outcomes in which the app, not Microsoft, ended
+    /// sign-in before its first page.
+    private func failOnAppOutcome(_ outcome: String) throws {
+        switch outcome {
+        case "the app's sign-in error":
+            throw LiveFailure("the app could not open Microsoft's sign-in: it says \"\(appError.label)\"")
+        case "the signed-out screen":
+            throw LiveFailure(
+                "sign-in ended before Microsoft's first page: the app is back on its signed-out screen with no error"
+                    + " (MSAL reported it cancelled)"
+            )
+        default:
+            return
+        }
+    }
+
+    /// What is on screen, for a failure before anything is pasted.
+    private func screen() -> String {
+        SignInScreen(
+            signInButton: signInButton.exists,
+            signingIn: signingIn.exists,
+            appError: appError.exists ? appError.label : nil,
+            alerts: springboard.alerts.allElementsBoundByIndex.map(\.label),
+            webViews: web.count,
+            webTextFields: web.textFields.count
+        ).summary
+    }
+
+    /// Signs in on Microsoft's pages, from the UPN page `openSheet()` reached
+    /// to the app's signed-in screen.
+    func run() throws {
         // UPN
-        try Live.waitFor(textField, "Microsoft's UPN page (its text field)", bound: LiveBound.signInStep)
         try Live.paste(inputs.upn, into: textField, of: app, "the UPN field")
         app.typeText("\n")
         let afterUpn = try Live.firstOf("password", bound: LiveBound.signInStep, [
@@ -121,7 +192,6 @@ struct MicrosoftSignIn {
         }
         // Back in the app: signed in, or MSAL's error on the signed-out screen
         // (for one, a keychain the build cannot reach).
-        let appError = app.staticTexts["signedOut.error"]
         let back = try Live.firstOf("return to the app", bound: LiveBound.signInStep, [
             ("signed in", { signedIn.exists }),
             ("a sign-in error", { appError.exists }),
@@ -144,5 +214,41 @@ struct MicrosoftSignIn {
         }
         try Live.paste(code, into: textField, of: app, "the code field")
         app.typeText("\n")
+    }
+}
+
+/// What is on screen while sign-in starts, for a failure message: the app's
+/// sign-in screens, the system alerts and the sign-in sheet. It is read only
+/// before anything is pasted, so it holds no input; the app's error and the
+/// alerts' labels are the app's and Apple's own text.
+struct SignInScreen: Equatable, Sendable {
+    var signInButton: Bool
+    var signingIn: Bool
+    var appError: String?
+    var alerts: [String]
+    var webViews: Int
+    var webTextFields: Int
+
+    var summary: String {
+        let app: String
+        if let appError {
+            app = "the app says \"\(appError)\""
+        } else if signingIn {
+            app = "the app still says \"Signing in…\""
+        } else if signInButton {
+            app = "the app's signed-out screen with Sign in with Microsoft"
+        } else {
+            app = "none of the app's sign-in screens"
+        }
+        let alert = alerts.isEmpty ? "no system alert" : alerts.map { "the system alert \"\($0)\"" }.joined(separator: ", ")
+        let sheet: String
+        if webViews == 0 {
+            sheet = "no sign-in sheet"
+        } else if webTextFields == 0 {
+            sheet = "a sign-in sheet with no text field yet"
+        } else {
+            sheet = "a sign-in sheet with a text field"
+        }
+        return "\(app); \(alert); \(sheet)"
     }
 }

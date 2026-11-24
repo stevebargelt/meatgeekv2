@@ -1001,7 +1001,8 @@ jobs:
 
       # Only the screenshots the proof itself takes, by name: 1-devices-tab,
       # 2-cook-pushed-reading (the proof), 3-cook-ended, and failure (only
-      # once signed in, never of the claim form). XCTest also attaches text
+      # before Microsoft's sign-in sheet is open or once signed in, never of
+      # the claim form). XCTest also attaches text
       # dumps of the screen's elements, which can hold a field's value; those
       # are never copied out of the result bundle, and the bundle is never
       # uploaded. On success the pushed-reading screenshot must be there.
