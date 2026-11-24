@@ -38,6 +38,37 @@ final class LiveOfflineTests: XCTestCase {
         XCTAssertEqual(TOTP.secondsLeftInWindow(at: Date(timeIntervalSince1970: 89.75)), 0.25)
     }
 
+    func testAPastedFieldHoldsTheSameText() {
+        XCTAssertTrue(Live.holds("someone@example.com", "someone@example.com", shown: .asIs))
+        XCTAssertFalse(Live.holds("", "someone@example.com", shown: .asIs))
+        XCTAssertFalse(Live.holds("Email, phone, or Skype", "someone@example.com", shown: .asIs))
+        XCTAssertFalse(Live.holds(nil, "someone@example.com", shown: .asIs))
+        XCTAssertFalse(Live.holds("", "", shown: .asIs), "an empty secret never counts as pasted")
+    }
+
+    func testAPastedSecureFieldHoldsOneBulletPerCharacter() {
+        XCTAssertTrue(Live.holds("••••••", "hunter", shown: .bullets))
+        XCTAssertFalse(Live.holds("•••••", "hunter", shown: .bullets))
+        XCTAssertFalse(Live.holds("", "hunter", shown: .bullets))
+        XCTAssertFalse(Live.holds("Password", "hunter", shown: .bullets))
+    }
+
+    func testAPastedClaimCodeHoldsTheSameSymbolsReformatted() {
+        XCTAssertTrue(Live.holds("ABCD-EFGH-JKLM", "abcd efgh jklm", shown: .reformatted))
+        XCTAssertTrue(Live.holds("ABCD-EFGH-JKLM", "ABCDEFGHJKLM", shown: .reformatted))
+        XCTAssertFalse(Live.holds("ABCD-EFGH-JKL", "abcd efgh jklm", shown: .reformatted))
+        XCTAssertFalse(Live.holds("XXXX-XXXX-XXXX", "abcd efgh jklm", shown: .reformatted))
+        XCTAssertFalse(Live.holds("", "abcd efgh jklm", shown: .reformatted))
+        XCTAssertFalse(Live.holds("-", "--", shown: .reformatted))
+    }
+
+    func testAFieldShowingItsPlaceholderIsEmpty() {
+        XCTAssertTrue(Live.isEmpty(nil, placeholder: nil))
+        XCTAssertTrue(Live.isEmpty("", placeholder: "Email, phone, or Skype"))
+        XCTAssertTrue(Live.isEmpty("Email, phone, or Skype", placeholder: "Email, phone, or Skype"))
+        XCTAssertFalse(Live.isEmpty("someone", placeholder: "Email, phone, or Skype"))
+    }
+
     func testInputsNameEveryMissingVariableAndNoValue() {
         let password = "hunter2-not-real"
         guard case .failure(let error) = LiveInputs.read(["MEATGEEK_LIVE_PASSWORD": password]) else {

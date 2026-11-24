@@ -15,7 +15,7 @@ import XCTest
 ///
 /// Nothing secret is written out. The password, the TOTP code and the claim
 /// code are pasted, never typed (XCTest logs every typed string), and never
-/// read back or printed. Screenshots are taken only once sign-in has finished
+/// printed: a pasted field is read back only to compare it in the test runner. Screenshots are taken only once sign-in has finished
 /// (Microsoft's pages show the UPN) and never of the claim form (it shows the
 /// claim code); the test plan keeps no automatic screenshot.
 final class LiveProofUITests: XCTestCase {
@@ -207,7 +207,7 @@ final class Proof {
         try Live.waitFor(deviceID, "the claim form")
         deviceID.tap()
         deviceID.typeText(inputs.deviceID)
-        try Live.paste(code, into: app.textFields[ID.claimCode], of: app, "the claim code field")
+        try Live.paste(code, into: app.textFields[ID.claimCode], of: app, "the claim code field", shown: .reformatted)
         let name = app.textFields[ID.claimName]
         name.tap()
         name.typeText(LiveProofUITests.deviceName)

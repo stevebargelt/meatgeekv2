@@ -17,6 +17,10 @@ enum LiveBound {
     /// `pasteRetap`).
     static let pasteMenu: TimeInterval = 10
     static let pasteRetap: TimeInterval = 2
+    /// From the tap on Paste to the field holding the pasted value. The paste
+    /// lands asynchronously (in the sign-in sheet, another process reads the
+    /// pasteboard), and on a CI simulator one tap alone takes several seconds.
+    static let pasted: TimeInterval = 20
     /// From the tap on Start to the cook screen showing a pushed reading.
     static let push: TimeInterval = 90
     /// A code typed with less than this left in its window can expire before
@@ -109,9 +113,17 @@ enum Live {
     /// Puts `secret` into `field` by the edit menu's Paste, never by typing:
     /// XCTest writes every `typeText` value to the xcodebuild log
     /// (`Type '<text>' into …`), and a paste logs only `Tap "Paste" MenuItem`.
-    /// The pasteboard is emptied again before this returns. Nothing reads the
-    /// field's value back.
-    static func paste(_ secret: String, into field: XCUIElement, of app: XCUIApplication, _ what: String) throws {
+    ///
+    /// Returns only once the field holds the value (`Live.holds`), so a Return
+    /// pressed next submits it. The tap on Paste returns before the paste has
+    /// landed: in the sign-in sheet another process reads the pasteboard
+    /// later. So the pasteboard is emptied only after the field holds the
+    /// value, or when this throws. The field's value is compared in the test
+    /// runner and never printed: a failure says only whether the field was
+    /// empty. `shown` is how the field shows what was pasted.
+    static func paste(
+        _ secret: String, into field: XCUIElement, of app: XCUIApplication, _ what: String, shown: Shown = .asIs
+    ) throws {
         UIPasteboard.general.string = secret
         defer { UIPasteboard.general.items = [] }
         let paste = app.menuItems["Paste"]
@@ -124,6 +136,50 @@ enum Live {
             _ = paste.waitForExistence(timeout: LiveBound.pasteRetap)
         }
         paste.tap()
+        let held = Date().addingTimeInterval(LiveBound.pasted)
+        while !holds(field.value, secret, shown: shown) {
+            guard Date() < held else {
+                let empty = isEmpty(field.value, placeholder: field.placeholderValue)
+                throw LiveFailure(
+                    "\(what) did not hold the pasted value within \(Int(LiveBound.pasted)) s of Paste "
+                        + (empty ? "(it is empty)" : "(it holds something else)")
+                )
+            }
+            Thread.sleep(forTimeInterval: LiveBound.poll)
+        }
+    }
+
+    /// How a field shows a pasted value.
+    enum Shown: Sendable {
+        /// The same text.
+        case asIs
+        /// One bullet per character: a secure text field.
+        case bullets
+        /// The same letters and digits, in any case and with any separators:
+        /// the app's claim code field, which formats as `XXXX-XXXX-XXXX`.
+        case reformatted
+    }
+
+    /// Whether a field whose accessibility value is `value` holds `secret`,
+    /// shown as `shown`.
+    nonisolated static func holds(_ value: Any?, _ secret: String, shown: Shown) -> Bool {
+        guard let text = value as? String, !secret.isEmpty else { return false }
+        switch shown {
+        case .asIs:
+            return text == secret
+        case .bullets:
+            return text.count == secret.count && text.allSatisfy { $0 == "•" }
+        case .reformatted:
+            let symbols = { (s: String) in s.uppercased().filter { $0.isLetter || $0.isNumber } }
+            return !symbols(secret).isEmpty && symbols(text) == symbols(secret)
+        }
+    }
+
+    /// Whether a field shows nothing typed: no value, an empty one, or its
+    /// placeholder (which a web field can report as its value).
+    nonisolated static func isEmpty(_ value: Any?, placeholder: String?) -> Bool {
+        guard let text = value as? String, !text.isEmpty else { return true }
+        return text == placeholder
     }
 
     /// Keeps a screenshot of the app in the result bundle, whatever the outcome.
