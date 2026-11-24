@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The MeatGeek app's Info.plist keys that build settings cannot generate
+  (GENERATE_INFOPLIST_FILE merges this file with the generated keys).
+
+  - CFBundleURLTypes: the msauth.<bundle id> scheme of MSAL's redirect URI
+    (msauth.com.meatgeek.ios://auth).
+  - LSApplicationQueriesSchemes: lets MSAL check for Microsoft Authenticator.
+  - MeatGeek*: the sign-in and API settings from Config/Dev.xcconfig, read by
+    MeatGeekKit's AppConfig.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).msal</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>msauth.$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>msauthv2</string>
+		<string>msauthv3</string>
+	</array>
+	<key>MeatGeekAPIBaseURL</key>
+	<string>$(MEATGEEK_API_BASE_URL)</string>
+	<key>MeatGeekTenantID</key>
+	<string>$(MEATGEEK_TENANT_ID)</string>
+	<key>MeatGeekClientID</key>
+	<string>$(MEATGEEK_CLIENT_ID)</string>
+	<key>MeatGeekAPIScope</key>
+	<string>$(MEATGEEK_API_SCOPE)</string>
+</dict>
+</plist>

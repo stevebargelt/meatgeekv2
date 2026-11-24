@@ -9,11 +9,19 @@
     }
   ],
   "defaultOptions" : {
+    "defaultTestExecutionTimeAllowance" : 300,
+    "environmentVariableEntries" : [
+      {
+        "key" : "MEATGEEK_APP_INFOPLIST",
+        "value" : "$(BUILT_PRODUCTS_DIR)\/$(INFOPLIST_PATH)"
+      }
+    ],
     "targetForVariableExpansion" : {
       "containerPath" : "container:MeatGeek.xcodeproj",
       "identifier" : "A1000000000000000000000C",
       "name" : "MeatGeek"
-    }
+    },
+    "testTimeoutsEnabled" : true
   },
   "testTargets" : [
     {
