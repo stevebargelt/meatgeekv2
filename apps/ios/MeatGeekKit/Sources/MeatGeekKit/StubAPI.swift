@@ -153,10 +153,20 @@ extension StubAPI {
     public static let uiTestUserName = "Pat Pitmaster"
 
     /// The stub the app runs on in UI test mode: `GET /users/me` answers
-    /// `uiTestUserName`; every other operation is not stubbed yet.
-    public static func uiTest() -> StubAPI {
+    /// `uiTestUserName`; the device routes are served by a `StubDevices`
+    /// whose timestamps come from `now`; `GET /cooks` lists no cooks. Every
+    /// other operation is not stubbed yet.
+    public static func uiTest(now: @escaping @Sendable () -> Date = { UITestMode.fixedNow }) -> StubAPI {
         var api = StubAPI()
         api.getUserProfileHandler = { _ in .ok(.init(body: .json(try user(name: uiTestUserName)))) }
+        let devices = StubDevices(now: now)
+        api.getDevicesHandler = { _ in await devices.list() }
+        api.claimDeviceHandler = { input in await devices.claim(input) }
+        api.updateDeviceHandler = { input in await devices.update(input) }
+        api.deleteDeviceHandler = { input in await devices.release(input) }
+        api.listCooksHandler = { input in
+            .ok(.init(body: .json(.init(cooks: [], limit: input.query.limit ?? 20, hasMore: false))))
+        }
         return api
     }
 
