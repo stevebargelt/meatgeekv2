@@ -5,7 +5,7 @@ import OpenAPIRuntime
 import Testing
 @testable import MeatGeekKit
 
-/// The session and the home screen's profile load, on `FakeTokenProvider`
+/// The session and the account menu's profile load, on `FakeTokenProvider`
 /// and `StubAPI` (or the generated client over `FakeTransport`). No MSAL, no
 /// network, no clock: every step is awaited.
 @Suite("SessionModel")
@@ -169,9 +169,9 @@ struct SessionModelTests {
     }
 }
 
-@Suite("HomeModel")
+@Suite("ProfileModel")
 @MainActor
-struct HomeModelTests {
+struct ProfileModelTests {
     static let account = SignedInAccount(displayName: "Account Name")
     static let ended = SessionModel.State.signedOut(message: "Your session ended. Sign in again.")
 
@@ -189,12 +189,12 @@ struct HomeModelTests {
     @Test("shows the name from GET /users/me")
     func loadsProfile() async {
         let session = await Self.signedIn(api: StubAPI.uiTest())
-        let home = HomeModel(session: session)
-        #expect(home.state == .loading)
+        let profile = ProfileModel(session: session)
+        #expect(profile.state == .loading)
 
-        await home.load()
+        await profile.load()
 
-        #expect(home.state == .loaded(displayName: "Pat Pitmaster"))
+        #expect(profile.state == .loaded(displayName: "Pat Pitmaster"))
         #expect(session.state == .signedIn(Self.account))
     }
 
@@ -207,9 +207,9 @@ struct HomeModelTests {
             ))))
         }
         let session = await Self.signedIn(api: api)
-        let home = HomeModel(session: session)
+        let profile = ProfileModel(session: session)
 
-        await home.load()
+        await profile.load()
 
         #expect(session.state == Self.ended)
     }
@@ -222,9 +222,9 @@ struct HomeModelTests {
             baseURL: APIClientTests.baseURL, tokenProvider: provider, transport: transport
         )
         let session = await Self.signedIn(api: client, provider: provider)
-        let home = HomeModel(session: session)
+        let profile = ProfileModel(session: session)
 
-        await home.load()
+        await profile.load()
 
         #expect(session.state == Self.ended)
         #expect(await transport.requests.count == 1)
@@ -238,11 +238,11 @@ struct HomeModelTests {
             baseURL: APIClientTests.baseURL, tokenProvider: provider, transport: transport
         )
         let session = await Self.signedIn(api: client, provider: provider)
-        let home = HomeModel(session: session)
+        let profile = ProfileModel(session: session)
 
-        await home.load()
+        await profile.load()
 
-        #expect(home.state == .loaded(displayName: "Profile Name"))
+        #expect(profile.state == .loaded(displayName: "Profile Name"))
         let sent = try #require(await transport.requests.first)
         #expect(sent.request.path == "/users/me")
         #expect(sent.request.headerFields[.authorization] == "Bearer token-from-provider")
@@ -258,13 +258,13 @@ struct HomeModelTests {
             baseURL: APIClientTests.baseURL, tokenProvider: provider, transport: transport
         )
         let session = await Self.signedIn(api: client, provider: provider)
-        let home = HomeModel(session: session)
+        let profile = ProfileModel(session: session)
         await provider.setTokenError(.signInRequired)
 
-        await home.load()
+        await profile.load()
 
         #expect(session.state == Self.ended)
-        #expect(home.state == .loading) // never shown as an error
+        #expect(profile.state == .loading) // never shown as an error
         #expect(await transport.requests.isEmpty) // nothing sent without a token
     }
 
@@ -277,11 +277,11 @@ struct HomeModelTests {
             ))))
         }
         let session = await Self.signedIn(api: api)
-        let home = HomeModel(session: session)
+        let profile = ProfileModel(session: session)
 
-        await home.load()
+        await profile.load()
 
-        #expect(home.state == .noProfile(displayName: "Account Name"))
+        #expect(profile.state == .noProfile(displayName: "Account Name"))
         #expect(session.state == .signedIn(Self.account))
     }
 
@@ -290,12 +290,12 @@ struct HomeModelTests {
         var api = StubAPI()
         api.getUserProfileHandler = { _ in throw URLError(.notConnectedToInternet) }
         let session = await Self.signedIn(api: api)
-        let home = HomeModel(session: session)
+        let profile = ProfileModel(session: session)
 
-        await home.load()
+        await profile.load()
 
-        guard case .failed(let message) = home.state else {
-            Issue.record("expected .failed, got \(home.state)")
+        guard case .failed(let message) = profile.state else {
+            Issue.record("expected .failed, got \(profile.state)")
             return
         }
         #expect(message.hasPrefix("Your profile could not be loaded."))
@@ -307,11 +307,11 @@ struct HomeModelTests {
         var api = StubAPI()
         api.getUserProfileHandler = { _ in .undocumented(statusCode: 503, .init()) }
         let session = await Self.signedIn(api: api)
-        let home = HomeModel(session: session)
+        let profile = ProfileModel(session: session)
 
-        await home.load()
+        await profile.load()
 
-        #expect(home.state == .failed("Your profile could not be loaded (HTTP 503)."))
+        #expect(profile.state == .failed("Your profile could not be loaded (HTTP 503)."))
     }
 
     static let userJSON = """
@@ -361,9 +361,9 @@ struct UITestModeTests {
         await session.signIn()
         #expect(session.state == .signedIn(SignedInAccount(displayName: UITestMode.accountName)))
 
-        let home = HomeModel(session: session)
-        await home.load()
-        #expect(home.state == .loaded(displayName: StubAPI.uiTestUserName))
+        let profile = ProfileModel(session: session)
+        await profile.load()
+        #expect(profile.state == .loaded(displayName: StubAPI.uiTestUserName))
     }
 
     @Test("MEATGEEK_UI_TEST_NOT_CONFIGURED=1 starts not configured")
@@ -376,8 +376,8 @@ struct UITestModeTests {
 
     @Test("an operation nobody stubbed throws NotStubbed")
     func notStubbed() async {
-        await #expect(throws: StubAPI.NotStubbed(operationID: "getDevices")) {
-            _ = try await StubAPI.uiTest().getDevices()
+        await #expect(throws: StubAPI.NotStubbed(operationID: "listRecipes")) {
+            _ = try await StubAPI.uiTest().listRecipes()
         }
     }
 }

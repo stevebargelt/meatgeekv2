@@ -1,10 +1,12 @@
 import MeatGeekKit
 import SwiftUI
 
-/// The root screen: one of the sign-in states, or the signed-in home.
+/// The root screen: one of the sign-in states, or the signed-in tabs.
 struct RootView: View {
     let root: RootModel
     let session: SessionModel
+    /// The clock the screens read (`UITestMode.now(environment:)`).
+    var now: @Sendable () -> Date = { Date() }
 
     var body: some View {
         switch session.state {
@@ -18,7 +20,7 @@ struct RootView: View {
             ProgressView("Signing in…")
                 .accessibilityIdentifier(AccessibilityID.signingIn)
         case .signedIn:
-            HomeView(session: session)
+            SignedInView(session: session, now: now)
         }
     }
 }
@@ -32,8 +34,36 @@ enum AccessibilityID {
     static let signIn = "signedOut.signIn"
     static let signedOutNotice = "signedOut.notice"
     static let signedOutError = "signedOut.error"
-    static let homeDisplayName = "home.displayName"
-    static let signOut = "home.signOut"
+    static let accountMenu = "account.menu"
+    static let accountName = "account.displayName"
+    static let signOut = "account.signOut"
+    static let devicesTab = "tab.devices"
+    static let claimDevice = "devices.claim"
+    static let devicesLoading = "devices.loading"
+    static let devicesEmpty = "devices.empty"
+    static let devicesError = "devices.error"
+    static let devicesNotice = "devices.notice"
+    static let devicesCooksProblem = "devices.cooksProblem"
+    static func deviceRow(_ id: String) -> String { "device.row.\(id)" }
+    static func deviceName(_ id: String) -> String { "device.name.\(id)" }
+    static func deviceConnection(_ id: String) -> String { "device.connection.\(id)" }
+    static func deviceCooking(_ id: String) -> String { "device.cooking.\(id)" }
+    static func deviceRename(_ id: String) -> String { "device.rename.\(id)" }
+    static func deviceRelease(_ id: String) -> String { "device.release.\(id)" }
+    static let detailRename = "deviceDetail.rename"
+    static let detailRelease = "deviceDetail.release"
+    static let confirmRelease = "release.confirm"
+    static let claimDeviceID = "claim.deviceID"
+    static let claimCode = "claim.claimCode"
+    static let claimName = "claim.name"
+    static let claimLocation = "claim.location"
+    static let claimSubmit = "claim.submit"
+    static let claimCancel = "claim.cancel"
+    static let claimProblem = "claim.problem"
+    static let renameName = "rename.name"
+    static let renameSave = "rename.save"
+    static let renameCancel = "rename.cancel"
+    static let renameProblem = "rename.problem"
 }
 
 /// The app name and version, at the top of the signed-out screens.

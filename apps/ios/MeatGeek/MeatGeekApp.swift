@@ -11,7 +11,7 @@ struct MeatGeekApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(root: root, session: session)
+            RootView(root: root, session: session, now: UITestMode.now(environment: ProcessInfo.processInfo.environment))
                 // A redirect back from Microsoft Authenticator. With the
                 // system browser (ASWebAuthenticationSession) MSAL gets the
                 // redirect itself and this is not called.

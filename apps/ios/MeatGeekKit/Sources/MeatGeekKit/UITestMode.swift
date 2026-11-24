@@ -1,3 +1,5 @@
+import Foundation
+
 /// How the app runs under its UI tests: launched with `MEATGEEK_UI_TEST=1`, it
 /// signs in with `FakeTokenProvider` and calls `StubAPI.uiTest()`, in process.
 /// Nothing reaches MSAL, Entra or the network.
@@ -12,8 +14,22 @@ public enum UITestMode {
     /// shows: that is `StubAPI.uiTestUserName`, from `GET /users/me`.
     public static let accountName = "UI Test Account"
 
+    /// The clock in UI test mode: always 2026-11-22T18:00:00Z. The stub's
+    /// device timestamps and the devices list's "last heard" ages are both
+    /// measured on it, so the text is the same on every run.
+    public static let fixedNow = Date(timeIntervalSince1970: 1_795_370_400)
+
     public static func isEnabled(_ environment: [String: String]) -> Bool {
         environment[environmentKey] == "1"
+    }
+
+    /// The clock the app's screens read: `fixedNow` in UI test mode, the
+    /// device's clock otherwise.
+    public static func now(environment: [String: String]) -> @Sendable () -> Date {
+        if isEnabled(environment) {
+            return { fixedNow }
+        }
+        return { Date() }
     }
 
     /// The session the app uses in UI test mode: signed out at launch.

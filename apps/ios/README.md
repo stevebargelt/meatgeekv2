@@ -5,9 +5,10 @@ iPhone only. It builds and tests in the simulator (HAR-158), calls the API
 through a client generated from the OpenAPI contract (HAR-161, see
 [API client](#api-client)), and signs users in with Entra in the system
 browser (HAR-162, see [Sign-in](#sign-in)) with the dev iOS registration's
-client id (HAR-164). Signed in, it shows a placeholder home with the user's
-name from `GET /users/me`. Goal HAR-157 adds devices, cooks, the live screen
-and the chart. The web app in
+client id (HAR-164). Signed in, it shows the [Devices](#devices) tab (HAR-165):
+the list with each device's connection, claim, rename and release, with the
+user's name and Sign out in the account menu. Goal HAR-157 adds cooks, the
+live screen and the chart. The web app in
 [`apps/web`](../web) is the reference for how those behave.
 
 This is not an Nx project. `nx` does not build or test it; use Xcode or
@@ -30,7 +31,7 @@ apps/ios/
 ├── MeatGeekUITests/          # UI tests (XCTest/XCUITest)
 └── MeatGeekKit/              # Local Swift package: all the app's logic
     ├── Sources/MeatGeekAPI/      # Generated API client: openapi.yaml + generator config
-    ├── Sources/MeatGeekKit/      # Config, session, token provider protocol, stub API
+    ├── Sources/MeatGeekKit/      # Config, session, screen models, token provider protocol, stub API
     ├── Sources/MeatGeekMSAL/     # MSALTokenProvider: the only code that links MSAL
     └── Tests/MeatGeekKitTests/   # Unit tests (Swift Testing)
 ```
@@ -40,7 +41,8 @@ apps/ios/
   Swift Testing (`import Testing`). The app target only holds views, the
   `@main` entry point and `AppComposition`, which picks the session's token
   provider and API. Screen state is `@Observable`, `@MainActor` models:
-  `RootModel` (name and version), `SessionModel` (sign-in), `HomeModel`.
+  `RootModel` (name and version), `SessionModel` (sign-in), `ProfileModel`
+  (the account menu's name), and the devices models (see [Devices](#devices)).
 - **Adding a file needs no project edit.** `MeatGeek/` and `MeatGeekUITests/`
   are synchronized folders: drop a Swift file (or an asset) into the folder and
   it is part of the target. `project.pbxproj` only changes when you add a
@@ -304,10 +306,59 @@ mode before it reads the config). Sign-in always succeeds, and
 `GET /users/me` returns "Pat Pitmaster".
 `MEATGEEK_UI_TEST_NOT_CONFIGURED=1` starts on the not-configured screen.
 
+The device routes are served by `StubDevices`, an actor holding one launch's
+devices in memory:
+
+| Device | State |
+|---|---|
+| `sim-device-1` "Backyard Smoker" | connected, last heard 12 s before the clock |
+| `sim-device-2` "Garage Kettle" | offline, never heard from |
+
+Claiming `sim-device-3` with code `ABCD-EFGH-JKLM` (any case, spaces or
+hyphens) adds it, connected and last heard 3 s before the clock; any other
+device or code is 403. Rename and release change the list; `GET /cooks`
+returns no cooks. The clock is injected: in UI test mode both the stub and the
+screens read `UITestMode.fixedNow` (2026-11-22T18:00:00Z), so "last heard"
+text is the same on every run.
+
 `StubAPI` has one handler per operation, `<operationId>Handler`; an unset one
 throws `StubAPI.NotStubbed`. To give a new screen data in UI test mode, set
 its operations' handlers in `StubAPI.uiTest()`. When the spec gains an
 operation, the compiler asks for its handler and method in `StubAPI`.
+
+## Devices
+
+The Devices tab (HAR-165) ports the web app's devices page
+(`apps/web/src/devices`): its behaviour and copy, not its layout.
+
+- **List**: one row per device with name, model, location, connection and
+  "Cooking: <cook name>" when the device has an active cook. Pull to refresh
+  re-reads it. The connection text is the web's `connectionText`
+  (`ConnectionText` in MeatGeekKit): "Connected", "Connected · last heard
+  <age> ago", "Offline · last heard <age> ago", "Offline · never heard from"
+  or "Status unknown", aged against the moment the list was read, not a
+  ticking clock. Active cooks come from one `GET /cooks?status=active&limit=100`;
+  if that fails the list still shows, under "Could not check which devices
+  are cooking: …".
+- **Claim** (the + button): device ID, claim code (`XXXX-XXXX-XXXX`, formatted
+  as typed by a `UITextField` wrapper so the caret stays put), name and
+  location, checked as the web checks them (`DeviceValidation`). A 403, 409 or
+  503 gets the web's message; a 400 keeps the API's. The code is cleared once
+  the API has answered, accepted or refused. A claim re-reads the list.
+- **Rename and release**: swipe a row, long-press it, or open its detail
+  screen. Rename checks 1–100 characters after trimming, then re-reads the
+  list. Release asks first; a 204 takes the row off without a re-read. A 404
+  on either says "Device <id> was not found. The list has been refreshed." and
+  re-reads the list.
+- **Errors**: `APIProblem` maps an error body to the message and request id a
+  screen shows (`apps/web/src/api/problem.ts`). A 401 from any call goes
+  through `SessionModel.endSession()` and the signed-out screen.
+
+The logic is in `DevicesModel`, `ClaimDeviceModel` and `RenameDeviceModel`
+(MeatGeekKit), unit tested in `DevicesTests.swift`; the views
+(`MeatGeek/DevicesView.swift`, `DeviceFormViews.swift`) only bind to them.
+`MeatGeekUITests.testDevicesClaimRenameRelease` drives the whole path on the
+stub.
 
 ## Signing for a physical iPhone
 

@@ -1,11 +1,11 @@
 import MeatGeekAPI
 import Observation
 
-/// The placeholder home screen: who is signed in, from `GET /users/me`.
-/// Later issues replace the home screen with tabs.
+/// Who is signed in, from `GET /users/me`: the name in the account menu on
+/// the signed-in tabs' navigation bar.
 @MainActor
 @Observable
-public final class HomeModel {
+public final class ProfileModel {
     public enum State: Equatable, Sendable {
         case loading
         /// The profile's name.
