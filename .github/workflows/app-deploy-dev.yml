@@ -314,17 +314,34 @@ jobs:
         run: npm ci
 
       # simdevice (HAR-40) sends readings to IoT Hub as the simulated device.
+      # setup-go's own cache stays off: this workflow's cache mode is read
+      # (workflow_run), so it could never save one here.
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: apps/data-pusher/go.mod
-          cache-dependency-path: apps/data-pusher/go.sum
+          cache: false
 
+      # HAR-176: the Go module cache ci.yml's `build-go (data-pusher)` saved on
+      # main for this go.mod/go.sum. On a hit the build never contacts the
+      # module proxy, so a proxy error cannot fail the job. Path list and
+      # action must match ci.yml's "Cache Go modules" step exactly. Exact key
+      # only: a near match would hold another go.sum's modules.
+      - name: Restore the Go module cache (from CI on main)
+        id: go-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: Linux-go-data-pusher-${{ hashFiles('apps/data-pusher/go.mod', 'apps/data-pusher/go.sum') }}
+
+      # On a hit, GOPROXY=off; on a miss, downloads and says so. See the script.
       - name: Build simdevice
-        run: |
-          set -euo pipefail
-          make -C apps/data-pusher build
-          test -x apps/data-pusher/dist/simdevice
+        env:
+          GO_MODULE_CACHE_HIT: ${{ steps.go-cache.outputs.cache-hit }}
+          GO_MODULE_CACHE_KEY: Linux-go-data-pusher-${{ hashFiles('apps/data-pusher/go.mod', 'apps/data-pusher/go.sum') }}
+        run: .github/scripts/build-simdevice.sh
 
       # Same identity as the publish (owner decision): no new identity. Its
       # client id is in functions_auth_allowed_client_app_ids in dev.tfvars, so
@@ -640,17 +657,34 @@ jobs:
         run: npm ci
 
       # simdevice (HAR-40) sends the reading the browser must show.
+      # setup-go's own cache stays off: this workflow's cache mode is read
+      # (workflow_run), so it could never save one here.
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: apps/data-pusher/go.mod
-          cache-dependency-path: apps/data-pusher/go.sum
+          cache: false
 
+      # HAR-176: the Go module cache ci.yml's `build-go (data-pusher)` saved on
+      # main for this go.mod/go.sum. On a hit the build never contacts the
+      # module proxy, so a proxy error cannot fail the job. Path list and
+      # action must match ci.yml's "Cache Go modules" step exactly. Exact key
+      # only: a near match would hold another go.sum's modules.
+      - name: Restore the Go module cache (from CI on main)
+        id: go-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: Linux-go-data-pusher-${{ hashFiles('apps/data-pusher/go.mod', 'apps/data-pusher/go.sum') }}
+
+      # On a hit, GOPROXY=off; on a miss, downloads and says so. See the script.
       - name: Build simdevice
-        run: |
-          set -euo pipefail
-          make -C apps/data-pusher build
-          test -x apps/data-pusher/dist/simdevice
+        env:
+          GO_MODULE_CACHE_HIT: ${{ steps.go-cache.outputs.cache-hit }}
+          GO_MODULE_CACHE_KEY: Linux-go-data-pusher-${{ hashFiles('apps/data-pusher/go.mod', 'apps/data-pusher/go.sum') }}
+        run: .github/scripts/build-simdevice.sh
 
       # As ci.yml's web-e2e job (HAR-98): the browser build is tied to the
       # exact @playwright/test version, read from the lockfile, so that is the

@@ -503,15 +503,29 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      # HAR-176: one cache per app. Deploy Dev App and iOS Live Proof restore
+      # `Linux-go-data-pusher-<hash>` to build simdevice without the module
+      # proxy (.github/scripts/build-simdevice.sh), and only this matrix leg
+      # saves that key, after `make build`, `make test` and `make build-arm`
+      # pass, so the cache holds every module data-pusher builds with. When the
+      # two legs shared one key, whichever finished first saved it and the
+      # other's save was refused, so the cache on main could lack data-pusher's
+      # modules. The key covers go.mod as well as go.sum.
+      #
+      # Restoring needs the same action, `path` list (same order) and key, or
+      # the cache version differs and the restore misses: change those in
+      # app-deploy-dev.yml and ios-live-proof.yml together with these. A cache
+      # entry never changes once saved; a run that restores only through
+      # restore-keys saves the exact key at its end.
       - name: Cache Go modules
-        uses: actions/cache@v3
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ matrix.app }}-${{ hashFiles(format('apps/{0}/go.mod', matrix.app), format('apps/{0}/go.sum', matrix.app)) }}
           restore-keys: |
-            ${{ runner.os }}-go-
+            ${{ runner.os }}-go-${{ matrix.app }}-
 
       - name: Install Make
         run: sudo apt-get update && sudo apt-get install -y make
