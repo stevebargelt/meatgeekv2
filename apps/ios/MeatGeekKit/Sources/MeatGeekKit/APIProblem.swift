@@ -79,3 +79,15 @@ extension Components.Schemas.DeviceClaimTwinFailedError: ProblemBody {
     public var problemMessage: String { message }
     public var problemRequestID: String { requestId }
 }
+
+extension Components.Schemas.CookAlreadyActiveError: ProblemBody {
+    public var problemCode: String { error.rawValue }
+    public var problemMessage: String { message }
+    public var problemRequestID: String { requestId }
+}
+
+extension Components.Schemas.DeviceTwinUpdateFailedError: ProblemBody {
+    public var problemCode: String { error.rawValue }
+    public var problemMessage: String { message }
+    public var problemRequestID: String { requestId }
+}

@@ -64,6 +64,38 @@ enum AccessibilityID {
     static let renameSave = "rename.save"
     static let renameCancel = "rename.cancel"
     static let renameProblem = "rename.problem"
+    static func deviceStartCook(_ id: String) -> String { "device.startCook.\(id)" }
+    static let detailStartCook = "deviceDetail.startCook"
+    static let detailOpenCook = "deviceDetail.openCook"
+    static let cooksTab = "tab.cooks"
+    static let cooksLoading = "cooks.loading"
+    static let cooksEmpty = "cooks.empty"
+    static let cooksError = "cooks.error"
+    static let cooksMoreProblem = "cooks.moreProblem"
+    static let cooksLoadMore = "cooks.loadMore"
+    static let cooksFilter = "cooks.filter"
+    static let cooksFilterSummary = "cooks.filterSummary"
+    static let cooksClearFilters = "cooks.clearFilters"
+    static func cookRow(_ id: String) -> String { "cook.row.\(id)" }
+    static func cookName(_ id: String) -> String { "cook.name.\(id)" }
+    static func cookStatus(_ id: String) -> String { "cook.status.\(id)" }
+    static let cookDetailLoading = "cookDetail.loading"
+    static let cookDetailNotFound = "cookDetail.notFound"
+    static let cookDetailError = "cookDetail.error"
+    static let cookDetailStatus = "cookDetail.status"
+    static let cookDetailEnded = "cookDetail.ended"
+    static let cookDetailStop = "cookDetail.stop"
+    static let cookDetailStopProblem = "cookDetail.stopProblem"
+    static let cookDetailLivePlaceholder = "cookDetail.livePlaceholder"
+    static let confirmStop = "stop.confirm"
+    static let startName = "startCook.name"
+    static let startMeatType = "startCook.meatType"
+    static let startWeight = "startCook.weight"
+    static func startTarget(_ key: String) -> String { "startCook.target.\(key)" }
+    static let startSubmit = "startCook.submit"
+    static let startCancel = "startCook.cancel"
+    static let startProblem = "startCook.problem"
+    static let startOpenActive = "startCook.openActive"
 }
 
 /// The app name and version, at the top of the signed-out screens.

@@ -3,18 +3,22 @@ import MeatGeekKit
 import SwiftUI
 
 /// The Devices tab: the list, pull to refresh, claim (+), and per-device
-/// rename and release (swipe, context menu, or the detail screen).
+/// start cook, rename and release (swipe, context menu, or the detail
+/// screen). A device's active cook opens from its "Cooking: <name>".
 struct DevicesView: View {
     let model: DevicesModel
+    let cooks: CooksModel
     let profile: ProfileModel
     let session: SessionModel
 
+    @State private var path: [Route] = []
     @State private var claiming = false
+    @State private var starting: Device?
     @State private var renaming: Device?
     @State private var releasing: Device?
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if let notice = model.notice {
                     ProblemText(problem: notice)
@@ -27,9 +31,7 @@ struct DevicesView: View {
                 content
             }
             .navigationTitle("Devices")
-            .navigationDestination(for: String.self) { id in
-                DeviceDetailView(model: model, deviceID: id)
-            }
+            .routes(devices: model, cooks: cooks, path: $path)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     AccountMenu(profile: profile, session: session)
@@ -47,6 +49,7 @@ struct DevicesView: View {
             .sheet(item: $renaming) { device in
                 RenameDeviceView(model: RenameDeviceModel(device: device, devices: model))
             }
+            .startCookSheet(device: $starting, cooks: cooks, path: $path)
             .releaseConfirmation(model: model, device: $releasing)
         }
     }
@@ -70,10 +73,18 @@ struct DevicesView: View {
                 .accessibilityIdentifier(AccessibilityID.devicesEmpty)
         case .loaded(let devices, _):
             ForEach(devices) { device in
-                NavigationLink(value: device.id) {
-                    DeviceRow(model: model, device: device)
+                let active = model.activeCook(for: device)
+                NavigationLink(value: Route.device(device.id)) {
+                    DeviceRow(model: model, device: device) { path.append(.cook($0)) }
                 }
                 .accessibilityIdentifier(AccessibilityID.deviceRow(device.id))
+                .swipeActions(edge: .leading) {
+                    if active == nil {
+                        Button("Start cook") { starting = device }
+                            .tint(.green)
+                            .accessibilityIdentifier(AccessibilityID.deviceStartCook(device.id))
+                    }
+                }
                 .swipeActions {
                     // Not `role: .destructive`: List would take the row away
                     // at once, before the confirmation is answered.
@@ -85,6 +96,13 @@ struct DevicesView: View {
                         .accessibilityIdentifier(AccessibilityID.deviceRename(device.id))
                 }
                 .contextMenu {
+                    if let active {
+                        Button("Open \(active.name)", systemImage: "list.bullet.rectangle") {
+                            path.append(.cook(active.id))
+                        }
+                    } else {
+                        Button("Start cook", systemImage: "play.circle") { starting = device }
+                    }
                     Button("Rename", systemImage: "pencil") { renaming = device }
                     Button("Release", systemImage: "minus.circle", role: .destructive) { releasing = device }
                 }
@@ -93,10 +111,12 @@ struct DevicesView: View {
     }
 }
 
-/// One device: name, model and location, connection, and its active cook.
+/// One device: name, model and location, connection, and its active cook,
+/// which `openCook` opens.
 struct DeviceRow: View {
     let model: DevicesModel
     let device: Device
+    let openCook: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -110,8 +130,11 @@ struct DeviceRow: View {
                 .font(.subheadline)
                 .foregroundStyle(device.connection?.state == .connected ? .green : .secondary)
                 .accessibilityIdentifier(AccessibilityID.deviceConnection(device.id))
-            if let cooking = model.cookingText(for: device) {
-                Text(cooking)
+            if let cook = model.activeCook(for: device), let cooking = model.cookingText(for: device) {
+                // Borderless, so a tap opens the cook rather than the row's
+                // device detail.
+                Button(cooking) { openCook(cook.id) }
+                    .buttonStyle(.borderless)
                     .font(.subheadline)
                     .accessibilityIdentifier(AccessibilityID.deviceCooking(device.id))
             }
@@ -120,12 +143,16 @@ struct DeviceRow: View {
     }
 }
 
-/// Every field of one device, with Rename and Release.
+/// Every field of one device, with Start cook (or its active cook), Rename
+/// and Release.
 struct DeviceDetailView: View {
     let model: DevicesModel
+    let cooks: CooksModel
     let deviceID: String
+    @Binding var path: [Route]
 
     @Environment(\.dismiss) private var dismiss
+    @State private var starting: Device?
     @State private var renaming: Device?
     @State private var releasing: Device?
 
@@ -152,6 +179,15 @@ struct DeviceDetailView: View {
                         ConfigurationSection(configuration: configuration)
                     }
                     Section {
+                        if let active = model.activeCook(for: device) {
+                            Button("Open \(active.name)", systemImage: "list.bullet.rectangle") {
+                                path.append(.cook(active.id))
+                            }
+                            .accessibilityIdentifier(AccessibilityID.detailOpenCook)
+                        } else {
+                            Button("Start cook", systemImage: "play.circle") { starting = device }
+                                .accessibilityIdentifier(AccessibilityID.detailStartCook)
+                        }
                         Button("Rename", systemImage: "pencil") { renaming = device }
                             .accessibilityIdentifier(AccessibilityID.detailRename)
                         Button("Release", systemImage: "minus.circle", role: .destructive) { releasing = device }
@@ -167,6 +203,7 @@ struct DeviceDetailView: View {
         .sheet(item: $renaming) { device in
             RenameDeviceView(model: RenameDeviceModel(device: device, devices: model))
         }
+        .startCookSheet(device: $starting, cooks: cooks, path: $path)
         .releaseConfirmation(model: model, device: $releasing) { dismiss() }
     }
 
@@ -210,6 +247,18 @@ private struct ConfigurationSection: View {
 }
 
 extension View {
+    /// The start-cook form for `device`, as a sheet. Once the cook has
+    /// started, or the form opens the device's active cook, the sheet closes
+    /// and the cook's detail is pushed onto `path`.
+    func startCookSheet(device: Binding<Device?>, cooks: CooksModel, path: Binding<[Route]>) -> some View {
+        sheet(item: device) { shown in
+            StartCookView(model: StartCookModel(device: shown, cooks: cooks)) { cookID in
+                device.wrappedValue = nil
+                path.wrappedValue.append(.cook(cookID))
+            }
+        }
+    }
+
     /// Asks before releasing `device`, then releases it; says why when the
     /// API refuses. `onReleased` runs after a release or when the device
     /// turned out to be gone already.

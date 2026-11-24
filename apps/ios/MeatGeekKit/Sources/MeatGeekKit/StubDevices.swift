@@ -97,6 +97,11 @@ public actor StubDevices {
         return .noContent(.init())
     }
 
+    /// Whether the user has claimed `deviceID`, as `POST /cooks` checks.
+    public func owns(_ deviceID: String) -> Bool {
+        devices.contains { $0.id == deviceID }
+    }
+
     private func normalized(_ code: String) -> String {
         String(code.filter { !($0.isWhitespace || $0 == "-") }).uppercased()
     }

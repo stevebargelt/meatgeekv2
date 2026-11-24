@@ -100,10 +100,28 @@ public final class DevicesModel {
         return ConnectionText.text(device.connection, now: readAt)
     }
 
+    /// The device's active cook, when the lookup found one.
+    public func activeCook(for device: Device) -> Cook? {
+        guard case .loaded(let cooks) = activeCooks else { return nil }
+        return cooks[device.id]
+    }
+
     /// "Cooking: <cook name>" when the device has an active cook.
     public func cookingText(for device: Device) -> String? {
-        guard case .loaded(let cooks) = activeCooks, let cook = cooks[device.id] else { return nil }
-        return "Cooking: \(cook.name)"
+        activeCook(for: device).map { "Cooking: \($0.name)" }
+    }
+
+    /// A cook was started or stopped (`CooksModel.apply(_:)`): an active cook
+    /// becomes its device's; a stopped one stops being it. Nothing changes
+    /// while the lookup has not answered or has failed.
+    public func apply(_ cook: Cook) {
+        guard case .loaded(var cooks) = activeCooks else { return }
+        if cook.status == .active {
+            cooks[cook.deviceId] = cook
+        } else if cooks[cook.deviceId]?.id == cook.id {
+            cooks[cook.deviceId] = nil
+        }
+        activeCooks = .loaded(cooks)
     }
 
     /// Why the active cooks are not shown, once the list is.

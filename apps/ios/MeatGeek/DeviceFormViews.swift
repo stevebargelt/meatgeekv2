@@ -99,7 +99,7 @@ struct RenameDeviceView: View {
 }
 
 /// A field's validation message, under the field.
-private struct FieldError: View {
+struct FieldError: View {
     let message: String?
 
     var body: some View {
