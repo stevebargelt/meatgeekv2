@@ -8,8 +8,9 @@ browser (HAR-162, see [Sign-in](#sign-in)) with the dev iOS registration's
 client id (HAR-164). Signed in, it shows two tabs, [Cooks](#cooks) (HAR-166:
 the list with filters and paging, start, stop, a cook's detail) and
 [Devices](#devices) (HAR-165: each device's connection, claim, rename and
-release), with the user's name and Sign out in the account menu. Goal HAR-157
-adds the live temperatures and the chart next. The web app in
+release), with the user's name and Sign out in the account menu. An active
+cook's screen shows its [live temperatures](#live-temperatures), pushed over
+SignalR (HAR-167); goal HAR-157 adds the chart next. The web app in
 [`apps/web`](../web) is the reference for how those behave.
 
 This is not an Nx project. `nx` does not build or test it; use Xcode or
@@ -34,7 +35,9 @@ apps/ios/
     ├── Sources/MeatGeekAPI/      # Generated API client: openapi.yaml + generator config
     ├── Sources/MeatGeekKit/      # Config, session, screen models, token provider protocol, stub API
     ├── Sources/MeatGeekMSAL/     # MSALTokenProvider: the only code that links MSAL
-    └── Tests/MeatGeekKitTests/   # Unit tests (Swift Testing)
+    ├── Sources/MeatGeekLive/     # SignalRLiveHub: the only code that links the SignalR client
+    ├── Tests/MeatGeekKitTests/   # Unit tests (Swift Testing)
+    └── Tests/MeatGeekLiveTests/  # Hub message decoding through the SignalR client (Swift Testing)
 ```
 
 - **All logic goes in MeatGeekKit.** Models, formatting, the API client and
@@ -43,8 +46,9 @@ apps/ios/
   `@main` entry point and `AppComposition`, which picks the session's token
   provider and API. Screen state is `@Observable`, `@MainActor` models:
   `RootModel` (name and version), `SessionModel` (sign-in), `ProfileModel`
-  (the account menu's name), the devices models (see [Devices](#devices)) and
-  the cooks models (see [Cooks](#cooks)).
+  (the account menu's name), the devices models (see [Devices](#devices)),
+  the cooks models (see [Cooks](#cooks)) and `LivePanelModel` (see
+  [Live temperatures](#live-temperatures)).
 - **Adding a file needs no project edit.** `MeatGeek/` and `MeatGeekUITests/`
   are synchronized folders: drop a Swift file (or an asset) into the folder and
   it is part of the target. `project.pbxproj` only changes when you add a
@@ -56,9 +60,10 @@ apps/ios/
   Info.plist keys, test host) are in the project file.
 - **Packages**: Apple's `swift-openapi-generator` (build plugin),
   `swift-openapi-runtime`, `swift-openapi-urlsession` and `swift-http-types`,
-  for the API client, and Microsoft's MSAL for iOS
+  for the API client, Microsoft's MSAL for iOS
   (`microsoft-authentication-library-for-objc`, a binary package) for
-  sign-in. The generator, runtime and MSAL packages are pinned exactly in
+  sign-in, and `SignalR-Client-Swift` (MIT, pure Swift) for the live
+  temperatures. The generator, runtime, MSAL and SignalR packages are pinned exactly in
   `MeatGeekKit/Package.swift`; every resolved version is in the committed
   `MeatGeek.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
 
@@ -69,7 +74,9 @@ apps/ios/
 | `MeatGeekKit` | Swift package library, `platforms: [.iOS(.v18)]`, Swift 6 mode | |
 | `MeatGeekAPI` | Swift package target in MeatGeekKit: the generated API client | |
 | `MeatGeekMSAL` | Swift package library in MeatGeekKit: `MSALTokenProvider`; the app links it, the tests do not | |
+| `MeatGeekLive` | Swift package library in MeatGeekKit: `SignalRLiveHub`; the app links it, `MeatGeekKitTests` does not | |
 | `MeatGeekKitTests` | Swift package test target | |
+| `MeatGeekLiveTests` | Swift package test target: `MeatGeekLive`'s decoding | |
 
 ## Prerequisites
 
@@ -118,9 +125,10 @@ xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek \
 ```
 
 The `MeatGeek` scheme's test action runs the `MeatGeek` test plan, which runs
-both test targets: `MeatGeekKitTests` (Swift Testing, reported as
-`✔ Test run with N tests … passed`) and `MeatGeekUITests` (XCTest, reported as
-`Executed N tests, with 0 failures`). The command exits 0 only if both pass.
+the three test targets: `MeatGeekKitTests` and `MeatGeekLiveTests` (Swift
+Testing, each reported as `✔ Test run with N tests … passed`) and
+`MeatGeekUITests` (XCTest, reported as `Executed N tests, with 0 failures`).
+The command exits 0 only if all pass.
 `CODE_SIGNING_ALLOWED=NO` skips signing, which the simulator does not need.
 `-skipPackagePluginValidation` lets the `OpenAPIGenerator` build plugin run
 without the trust prompt Xcode shows; without it `xcodebuild` stops at
@@ -406,8 +414,9 @@ The Cooks tab, the first tab (HAR-166), ports the web app's cooks pages
   targets the cook has, notes; "This cook was not found" on a 404. **Stop
   cook** asks first (`confirmationDialog`, "Yes, stop cook"), then
   `POST /cooks/{id}/stop`; the stopped cook replaces the shown one. A 503
-  says the device was not told and offers Retry. A section marks where the
-  live temperatures and the chart will go; they are not built yet.
+  says the device was not told and offers Retry. An active cook shows its
+  [live temperatures](#live-temperatures) on top. A section marks where the
+  chart will go; it is not built yet.
 - **One source of truth**: a started or stopped cook goes through
   `CooksModel.apply(_:)`, which updates the list (on top, in place, or out
   when it no longer matches the filters) and the devices' active cooks, so the
@@ -418,9 +427,64 @@ A 401 from any cook call signs the session out, as for devices. The logic is
 unit tested in `CooksTests.swift`; the views are `MeatGeek/CooksView.swift`.
 `MeatGeekUITests.testStartCookListOpenStop` drives the main path on the stub:
 start a cook from a device, see it active, open it from the device row and
-from the Cooks tab, stop it. It keeps three screenshots (cooks list, start
-form, active cook) in the result bundle; `xcrun xcresulttool export
-attachments --path <bundle> --output-path <dir>` writes them out.
+from the Cooks tab, stop it, with the live panel's path in between (see
+[Live temperatures](#live-temperatures)). It keeps screenshots (cooks list,
+start form, active cook, and the live panel live, reconnecting and stale) in
+the result bundle; `xcrun xcresulttool export attachments --path <bundle>
+--output-path <dir>` writes them out.
+
+## Live temperatures
+
+An active cook's screen shows the live readings of its device, pushed over
+SignalR (HAR-167). It ports the web app's `apps/web/src/live`: `hub.ts`,
+`live-connection.ts`, `live-panel.tsx` and `format.ts`, behaviour and copy.
+
+- **Hub** (`LiveHub`, MeatGeekKit): `onTemperature`, `onCookStopped`,
+  `onReconnecting`, `onReconnected`, `onClose`, `start()`, `stop()`, all on the
+  main actor. The app's is `SignalRLiveHub` (MeatGeekLive): `SignalR-Client-Swift`
+  to the URL `POST /negotiate` returns, its access token from the hub's
+  access-token provider, the JSON hub protocol with the API's date decoding
+  (`LiveHubProtocol.make()`), automatic reconnect, and the messages decoded
+  into the generated `TemperatureMessage` and `CookStoppedMessage`.
+- **Connection** (`LiveConnection`): automatic reconnect handles short drops.
+  When it gives up and the connection closes, or negotiate or start fails (a
+  429, a 503, a network error), it negotiates again for a fresh token after 2,
+  5, 10, then every 30 s, and starts over after a successful start. A 401 from
+  negotiate stops it ("Sign in again") and, as for any API call, ends the
+  session. Callbacks from a replaced or stopped connection are ignored. Each
+  retry wait is a `Task` on an injected sleeper (`LiveSleep`); stopping
+  cancels it.
+- **Panel** (`LivePanelModel`, view `MeatGeek/LivePanelView.swift`): Grill and
+  Probes 1–4 in the device's unit, "—" for a channel the device did not send.
+  Only the cook's device's messages count. After every start and reconnect it
+  backfills with `GET /temperatures/current/{deviceId}`, keeping the newer
+  reading. The badge: "Connecting…", "Waiting", "Live", "Reconnecting…",
+  "Sign in again", or "No reading for <duration>" once the reading is older
+  than 3 × the device's `pollingInterval` (30 s when unset). The view re-reads
+  the panel every second (`TimelineView`), so the age advances without a new
+  message. `cook_stopped` for this cook stops the connection and shows the cook
+  as ended, here and in the lists.
+- **Foreground and background**: the panel is connected only while the cook
+  screen shows and the scene is active. Leaving `.active` stops the
+  connection; coming back negotiates again, starts a new one and backfills.
+
+The logic is unit tested in `LiveTests.swift` (MeatGeekKitTests) with a fake
+hub, a fake negotiate and a virtual clock, so no test waits for the retry
+delays; `LiveHubProtocolTests.swift` (MeatGeekLiveTests) decodes a real
+`temperature` frame through the SignalR client's JSON hub protocol.
+
+**UI test mode.** `UITestMode.makeApp` runs the panel on `StubLive`, over the
+same `StubCooks`: negotiate answers a stub URL and a numbered token; once a hub
+starts, it is pushed a reading for every device with an active cook (grill
+225 °F and probe 1 150 °F, one degree more each push, probes 2–4 absent);
+`GET /temperatures/current` answers the last one pushed. The clock is
+`StubClock`, `UITestMode.fixedNow` until moved. The cook screen's navigation
+bar has a "UI test" menu, in UI test mode only, with the hooks the UI tests
+use: Drop connection (every hub closes; the retry wait then lasts until)
+Reconnect now, Advance clock 3 min (the reading goes stale), and Send
+cook_stopped (stops the cook as another client would).
+`testStartCookListOpenStop` drives push → drop → "Reconnecting…" → reconnect →
+a new reading → stale; `testCookStoppedEndsTheLiveCook` drives `cook_stopped`.
 
 ## Signing for a physical iPhone
 

@@ -1,4 +1,5 @@
 import MeatGeekKit
+import MeatGeekLive
 import MeatGeekMSAL
 import SwiftUI
 
@@ -7,31 +8,49 @@ struct MeatGeekApp: App {
     @State private var root = RootModel(
         appVersion: AppVersion(infoDictionary: Bundle.main.infoDictionary)
     )
-    @State private var session = AppComposition.makeSession()
+    @State private var app = AppComposition.make()
 
     var body: some Scene {
         WindowGroup {
-            RootView(root: root, session: session, now: UITestMode.now(environment: ProcessInfo.processInfo.environment))
+            RootView(root: root, session: app.session, now: app.now, live: app.live)
                 // A redirect back from Microsoft Authenticator. With the
                 // system browser (ASWebAuthenticationSession) MSAL gets the
                 // redirect itself and this is not called.
                 .onOpenURL { url in MSALTokenProvider.handle(url: url) }
-                .task { await session.restore() }
+                .task { await app.session.restore() }
         }
     }
 }
 
-/// Builds the app's session from its Info.plist config, or from the fakes in
-/// UI test mode (`MEATGEEK_UI_TEST=1`, see `UITestMode`).
+/// The session, the clock and the live services the app runs on.
+struct AppServices {
+    let session: SessionModel
+    let now: @Sendable () -> Date
+    let live: LiveServices
+}
+
+/// Builds the app's session from its Info.plist config, with the real clock
+/// and the SignalR hub, or everything from the fakes in UI test mode
+/// (`MEATGEEK_UI_TEST=1`, see `UITestMode`).
 enum AppComposition {
     @MainActor
-    static func makeSession(
+    static func make(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         bundle: Bundle = .main
-    ) -> SessionModel {
+    ) -> AppServices {
         if UITestMode.isEnabled(environment) {
-            return UITestMode.makeSession(environment: environment)
+            let app = UITestMode.makeApp(environment: environment)
+            return AppServices(session: app.session, now: app.now, live: app.live)
         }
+        return AppServices(
+            session: makeSession(bundle: bundle),
+            now: { Date() },
+            live: LiveServices(createHub: SignalRLiveHub.factory)
+        )
+    }
+
+    @MainActor
+    static func makeSession(bundle: Bundle) -> SessionModel {
         switch AppConfig.parse(infoDictionary: bundle.infoDictionary) {
         case .invalid(let problems):
             return .unavailable(

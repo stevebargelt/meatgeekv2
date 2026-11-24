@@ -10,12 +10,12 @@ struct SignedInView: View {
     @State private var devices: DevicesModel
     @State private var cooks: CooksModel
 
-    init(session: SessionModel, now: @escaping @Sendable () -> Date) {
+    init(session: SessionModel, now: @escaping @Sendable () -> Date, live: LiveServices?) {
         self.session = session
         let devices = DevicesModel(session: session, now: now)
         _profile = State(initialValue: ProfileModel(session: session))
         _devices = State(initialValue: devices)
-        _cooks = State(initialValue: CooksModel(devices: devices, now: now))
+        _cooks = State(initialValue: CooksModel(devices: devices, now: now, live: live))
     }
 
     var body: some View {

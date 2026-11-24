@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A10000000000000000000021 /* MeatGeekKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000020 /* MeatGeekKit */; };
 		A10000000000000000000024 /* MeatGeekMSAL in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000025 /* MeatGeekMSAL */; };
+		A10000000000000000000028 /* MeatGeekLive in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000029 /* MeatGeekLive */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,6 +54,7 @@
 			files = (
 				A10000000000000000000021 /* MeatGeekKit in Frameworks */,
 				A10000000000000000000024 /* MeatGeekMSAL in Frameworks */,
+				A10000000000000000000028 /* MeatGeekLive in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,6 +123,7 @@
 			packageProductDependencies = (
 				A10000000000000000000020 /* MeatGeekKit */,
 				A10000000000000000000025 /* MeatGeekMSAL */,
+				A10000000000000000000029 /* MeatGeekLive */,
 			);
 			productName = MeatGeek;
 			productReference = A10000000000000000000007 /* MeatGeek.app */;
@@ -351,6 +354,10 @@
 		A10000000000000000000025 /* MeatGeekMSAL */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MeatGeekMSAL;
+		};
+		A10000000000000000000029 /* MeatGeekLive */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MeatGeekLive;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -5,8 +5,10 @@ import SwiftUI
 struct RootView: View {
     let root: RootModel
     let session: SessionModel
-    /// The clock the screens read (`UITestMode.now(environment:)`).
+    /// The clock the screens read: the device's, or UI test mode's.
     var now: @Sendable () -> Date = { Date() }
+    /// What an active cook's live panel connects with.
+    var live: LiveServices?
 
     var body: some View {
         switch session.state {
@@ -20,7 +22,7 @@ struct RootView: View {
             ProgressView("Signing in…")
                 .accessibilityIdentifier(AccessibilityID.signingIn)
         case .signedIn:
-            SignedInView(session: session, now: now)
+            SignedInView(session: session, now: now, live: live)
         }
     }
 }
@@ -86,7 +88,17 @@ enum AccessibilityID {
     static let cookDetailEnded = "cookDetail.ended"
     static let cookDetailStop = "cookDetail.stop"
     static let cookDetailStopProblem = "cookDetail.stopProblem"
-    static let cookDetailLivePlaceholder = "cookDetail.livePlaceholder"
+    static let cookDetailChartPlaceholder = "cookDetail.chartPlaceholder"
+    static let liveBadge = "live.badge"
+    static func liveChannel(_ channel: String) -> String { "live.channel.\(channel)" }
+    static let liveReadingTime = "live.readingTime"
+    static let liveWaiting = "live.waiting"
+    static let liveSignedOut = "live.signedOut"
+    static let liveTestMenu = "live.test.menu"
+    static let liveTestDrop = "live.test.drop"
+    static let liveTestReconnect = "live.test.reconnect"
+    static let liveTestAdvanceClock = "live.test.advanceClock"
+    static let liveTestCookStopped = "live.test.cookStopped"
     static let confirmStop = "stop.confirm"
     static let startName = "startCook.name"
     static let startMeatType = "startCook.meatType"

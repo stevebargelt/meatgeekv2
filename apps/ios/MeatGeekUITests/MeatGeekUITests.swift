@@ -34,7 +34,14 @@ final class MeatGeekUITests: XCTestCase {
         static let cookDetailStatus = "cookDetail.status"
         static let cookDetailEnded = "cookDetail.ended"
         static let cookDetailStop = "cookDetail.stop"
-        static let cookDetailLivePlaceholder = "cookDetail.livePlaceholder"
+        static let cookDetailChartPlaceholder = "cookDetail.chartPlaceholder"
+        static let liveBadge = "live.badge"
+        static func liveChannel(_ channel: String) -> String { "live.channel.\(channel)" }
+        static let liveTestMenu = "live.test.menu"
+        static let liveTestDrop = "live.test.drop"
+        static let liveTestReconnect = "live.test.reconnect"
+        static let liveTestAdvanceClock = "live.test.advanceClock"
+        static let liveTestCookStopped = "live.test.cookStopped"
         static let confirmStop = "stop.confirm"
         static let startName = "startCook.name"
         static let startMeatType = "startCook.meatType"
@@ -113,6 +120,28 @@ final class MeatGeekUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    /// Taps one of the cook screen's UI test hooks (MeatGeek/LivePanelView.swift,
+    /// `LiveTestMenu`), in the navigation bar's "UI test" menu.
+    @MainActor
+    func liveTestHook(_ app: XCUIApplication, _ id: String) {
+        let menu = app.buttons[ID.liveTestMenu]
+        waitUntilExists(menu, "the UI test menu")
+        menu.tap()
+        let hook = app.buttons[id]
+        waitUntilExists(hook, "the \(id) hook")
+        hook.tap()
+    }
+
+    /// Scrolls the screen up until `element` exists: a list builds its rows as
+    /// they scroll into view. No deadline of its own, like `waitUntilExists`.
+    @MainActor
+    func scrollUntilExists(_ app: XCUIApplication, _ element: XCUIElement, _ what: String) {
+        while !element.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(element.exists, "\(what) never appeared")
     }
 
     /// Opens a tab by its title.
@@ -295,9 +324,41 @@ final class MeatGeekUITests: XCTestCase {
         waitUntilExists(status, "the new cook's detail screen")
         // LabeledContent reads as one element: "<label>, <value>".
         XCTAssertEqual(status.label, "Status, Active")
-        XCTAssertTrue(app.staticTexts["Probe 1 target, 203 °F"].exists, "the probe 1 target is not shown")
-        XCTAssertTrue(app.staticTexts[ID.cookDetailLivePlaceholder].exists, "the live panel's place is not marked")
+
+        // Live readings, pushed by the stub hub once the panel connects:
+        // grill and probe 1, and "—" for the probes the device did not send.
+        let badge = app.staticTexts[ID.liveBadge]
+        let grill = app.staticTexts[ID.liveChannel("grill")]
+        waitUntilLabel(grill, "Grill, 225 °F", "the pushed grill reading")
+        XCTAssertEqual(app.staticTexts[ID.liveChannel("probe1")].label, "Probe 1, 150 °F")
+        XCTAssertEqual(app.staticTexts[ID.liveChannel("probe2")].label, "Probe 2, —")
+        XCTAssertEqual(app.staticTexts[ID.liveChannel("probe4")].label, "Probe 4, —")
+        waitUntilLabel(badge, "Live", "the live badge")
+        screenshot(app, "4-live-panel-live")
+
+        // The connection drops and automatic reconnect gives up: the panel
+        // says so and keeps the last reading until it negotiates again.
+        liveTestHook(app, ID.liveTestDrop)
+        waitUntilLabel(badge, "Reconnecting…", "the reconnecting badge")
+        XCTAssertEqual(grill.label, "Grill, 225 °F")
+        screenshot(app, "5-live-panel-reconnecting")
+        liveTestHook(app, ID.liveTestReconnect)
+        waitUntilLabel(grill, "Grill, 226 °F", "a reading on the new connection")
+        waitUntilLabel(badge, "Live", "the live badge after recovering")
+
+        // Three minutes with no reading: stale, saying for how long.
+        liveTestHook(app, ID.liveTestAdvanceClock)
+        let stale = app.staticTexts.matching(
+            NSPredicate(format: "identifier == %@ AND label BEGINSWITH 'No reading for '", ID.liveBadge)
+        ).firstMatch
+        waitUntilExists(stale, "the stale badge")
+        screenshot(app, "6-live-panel-stale")
+
+        // Below the live panel: the cook's fields, then the chart's place.
+        let target = app.staticTexts["Probe 1 target, 203 °F"]
+        scrollUntilExists(app, target, "the probe 1 target")
         screenshot(app, "3-active-cook-detail")
+        scrollUntilExists(app, app.staticTexts[ID.cookDetailChartPlaceholder], "the chart's place")
 
         // Back on the device list, the device is cooking it.
         app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -337,6 +398,37 @@ final class MeatGeekUITests: XCTestCase {
 
         waitUntilLabel(app.staticTexts[ID.cookDetailStatus], "Status, Completed", "the cook's status")
         XCTAssertTrue(app.staticTexts[ID.cookDetailEnded].exists, "the end time is not shown")
+        XCTAssertFalse(app.buttons[ID.cookDetailStop].exists, "Stop is still offered")
+    }
+
+    /// Another client stops the cook while its screen is open: `cook_stopped`
+    /// ends it here, and the live panel goes.
+    @MainActor
+    func testCookStoppedEndsTheLiveCook() throws {
+        let app = launchInTestMode()
+        signIn(app)
+        openTab(app, "Devices")
+        let row = app.buttons[ID.deviceRow(Stub.connectedID)]
+        waitUntilExists(row, "the connected device's row")
+        row.tap()
+        let start = app.buttons[ID.detailStartCook]
+        waitUntilExists(start, "Start cook on the device detail screen")
+        start.tap()
+        let name = app.textFields[ID.startName]
+        waitUntilExists(name, "the start cook form")
+        name.tap()
+        name.typeText("Stopped Elsewhere")
+        let meatType = app.textFields[ID.startMeatType]
+        meatType.tap()
+        meatType.typeText("pork")
+        app.buttons[ID.startSubmit].tap()
+
+        waitUntilLabel(app.staticTexts[ID.liveChannel("grill")], "Grill, 225 °F", "the pushed grill reading")
+        liveTestHook(app, ID.liveTestCookStopped)
+
+        waitUntilLabel(app.staticTexts[ID.cookDetailStatus], "Status, Completed", "the cook's status")
+        XCTAssertTrue(app.staticTexts[ID.cookDetailEnded].exists, "the end time is not shown")
+        XCTAssertFalse(app.staticTexts[ID.liveBadge].exists, "the live panel is still shown")
         XCTAssertFalse(app.buttons[ID.cookDetailStop].exists, "Stop is still offered")
     }
 

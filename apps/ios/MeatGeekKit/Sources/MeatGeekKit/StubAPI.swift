@@ -155,8 +155,28 @@ extension StubAPI {
     /// The stub the app runs on in UI test mode: `GET /users/me` answers
     /// `uiTestUserName`; the device routes are served by a `StubDevices` and
     /// the cook routes (list, start, get, stop) by a `StubCooks`, both with
-    /// timestamps from `now`. Every other operation is not stubbed yet.
+    /// timestamps from `now`. Every other operation is not stubbed (the app
+    /// runs on `uiTestWithLive(clock:)`, which adds the live routes).
     public static func uiTest(now: @escaping @Sendable () -> Date = { UITestMode.fixedNow }) -> StubAPI {
+        uiTestParts(now: now).api
+    }
+
+    /// `uiTest()` plus the SignalR side: `POST /negotiate` and
+    /// `GET /temperatures/current/{deviceId}` are served by the returned
+    /// `StubLive`, which pushes readings for the cooks this stub starts. Every
+    /// timestamp comes from `clock`.
+    @MainActor
+    public static func uiTestWithLive(clock: StubClock) -> (api: StubAPI, live: StubLive) {
+        let parts = uiTestParts(now: { clock.now })
+        var api = parts.api
+        let cooks = parts.cooks
+        let live = StubLive(cooks: cooks, clock: clock)
+        api.negotiateHandler = { _ in await live.negotiate() }
+        api.getCurrentTemperaturesHandler = { input in await live.current(input) }
+        return (api, live)
+    }
+
+    private static func uiTestParts(now: @escaping @Sendable () -> Date) -> (api: StubAPI, cooks: StubCooks) {
         var api = StubAPI()
         api.getUserProfileHandler = { _ in .ok(.init(body: .json(try user(name: uiTestUserName)))) }
         let devices = StubDevices(now: now)
@@ -169,7 +189,7 @@ extension StubAPI {
         api.startCookHandler = { input in await cooks.start(input) }
         api.getCookHandler = { input in await cooks.get(input) }
         api.stopCookHandler = { input in await cooks.stop(input) }
-        return api
+        return (api, cooks)
     }
 
     /// A `User` as `GET /users/me` returns it, with the API's default
