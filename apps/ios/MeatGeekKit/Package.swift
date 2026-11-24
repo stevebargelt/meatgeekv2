@@ -1,7 +1,8 @@
 // swift-tools-version: 6.0
 // MeatGeekKit holds the app's logic: models, formatting, the API client and
 // the sign-in session. The MeatGeek app target is a thin SwiftUI shell over it.
-// MeatGeekMSAL is the one target that links MSAL; the unit tests do not.
+// MeatGeekMSAL is the one target that links MSAL, and MeatGeekLive the one
+// that links the SignalR client; MeatGeekKit and its unit tests link neither.
 // iOS only: `swift build` on macOS is not expected to work; build and test it
 // through the MeatGeek scheme (see apps/ios/README.md).
 import PackageDescription
@@ -12,6 +13,7 @@ let package = Package(
     products: [
         .library(name: "MeatGeekKit", targets: ["MeatGeekKit"]),
         .library(name: "MeatGeekMSAL", targets: ["MeatGeekMSAL"]),
+        .library(name: "MeatGeekLive", targets: ["MeatGeekLive"]),
     ],
     dependencies: [
         // Exact pins: the generated code is only as stable as the generator.
@@ -25,6 +27,9 @@ let package = Package(
         // Microsoft Authentication Library: Entra sign-in in the system browser
         // (auth code + PKCE) and its keychain token cache. A binary package.
         .package(url: "https://github.com/AzureAD/microsoft-authentication-library-for-objc", exact: "2.18.1"),
+        // The ASP.NET Core SignalR client (MIT): the live temperatures' hub
+        // connection, over WebSockets with the JSON hub protocol.
+        .package(url: "https://github.com/moozzyk/SignalR-Client-Swift", exact: "1.2.1"),
     ],
     targets: [
         // The API client, generated on every build from Sources/MeatGeekAPI/openapi.yaml
@@ -57,6 +62,16 @@ let package = Package(
                 .product(name: "MSAL", package: "microsoft-authentication-library-for-objc"),
             ]
         ),
+        // The SignalR-backed LiveHub. Kept apart from MeatGeekKit, like
+        // MeatGeekMSAL, so MeatGeekKit's models and tests do not link SignalR.
+        .target(
+            name: "MeatGeekLive",
+            dependencies: [
+                "MeatGeekKit",
+                "MeatGeekAPI",
+                .product(name: "SignalRClient", package: "SignalR-Client-Swift"),
+            ]
+        ),
         .testTarget(
             name: "MeatGeekKitTests",
             dependencies: [
@@ -64,6 +79,15 @@ let package = Package(
                 "MeatGeekAPI",
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
+            ]
+        ),
+        // The SignalR layer's message decoding, on the real client's JSON hub protocol.
+        .testTarget(
+            name: "MeatGeekLiveTests",
+            dependencies: [
+                "MeatGeekLive",
+                "MeatGeekAPI",
+                .product(name: "SignalRClient", package: "SignalR-Client-Swift"),
             ]
         ),
     ],

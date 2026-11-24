@@ -1,5 +1,5 @@
 {
-  "originHash" : "de359eb292b00bf9182df192d1e63b16f3d596cf35cd3e69486846e7d641be98",
+  "originHash" : "7c01acc1ca61033afbd5884b710e940c1265af95a740c701e2ebfeaf2d596487",
   "pins" : [
     {
       "identity" : "microsoft-authentication-library-for-objc",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "5b72eb9a6b23b1fec439d9a0bf38f115400421f9",
         "version" : "6.4.0"
+      }
+    },
+    {
+      "identity" : "signalr-client-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/moozzyk/SignalR-Client-Swift",
+      "state" : {
+        "revision" : "a5aca80a4de24cc59bb51a1a9c7242960422b9b3",
+        "version" : "1.2.1"
       }
     },
     {

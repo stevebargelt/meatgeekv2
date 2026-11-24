@@ -184,11 +184,12 @@ struct CookRow: View {
     }
 }
 
-/// One cook's fields, Stop while it is active, and the space the live
-/// temperatures and the chart will take.
+/// One cook's fields, Stop and the live readings while it is active, and the
+/// space the chart will take.
 struct CookDetailView: View {
     @State var model: CookDetailModel
     @State private var confirmingStop = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -216,7 +217,19 @@ struct CookDetailView: View {
         }
         .navigationTitle(model.cook?.name ?? "Cook")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let live = model.live, let controls = live.testControls {
+                ToolbarItem(placement: .topBarTrailing) {
+                    LiveTestMenu(controls: controls, cookID: live.cookID)
+                }
+            }
+        }
         .task { await model.start() }
+        // The live panel connects while this screen shows and the app is in
+        // the foreground; a trip to the background closes it.
+        .onAppear { model.appear() }
+        .onDisappear { model.disappear() }
+        .onChange(of: scenePhase, initial: true) { _, phase in model.setAppActive(phase == .active) }
         .confirmationDialog(
             CookDetailModel.stopConfirmTitle(name: model.cook?.name ?? "this cook"),
             isPresented: $confirmingStop,
@@ -234,6 +247,12 @@ struct CookDetailView: View {
 
     private func fields(_ cook: Cook) -> some View {
         List {
+            // The live readings first: while a cook runs they are what the
+            // screen is for.
+            if cook.status == .active, let live = model.live {
+                LivePanelView(model: live)
+            }
+
             Section {
                 LabeledContent("Status") {
                     Text(CookText.status(cook.status))
@@ -268,12 +287,11 @@ struct CookDetailView: View {
                 stopSection
             }
 
-            // Placeholder, on purpose: the live temperatures (the next issue)
-            // and the chart (the one after) go here. Nothing is built yet.
-            Section("Live temperatures and chart") {
-                Text("Live temperatures and the cook's chart will show here.")
+            // Placeholder, on purpose: the chart (the next issue) goes here.
+            Section("Chart") {
+                Text("The cook's chart will show here.")
                     .foregroundStyle(.secondary)
-                    .accessibilityIdentifier(AccessibilityID.cookDetailLivePlaceholder)
+                    .accessibilityIdentifier(AccessibilityID.cookDetailChartPlaceholder)
             }
         }
         .refreshable { await model.reload() }

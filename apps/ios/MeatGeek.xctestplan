@@ -33,6 +33,13 @@
     },
     {
       "target" : {
+        "containerPath" : "container:MeatGeekKit",
+        "identifier" : "MeatGeekLiveTests",
+        "name" : "MeatGeekLiveTests"
+      }
+    },
+    {
+      "target" : {
         "containerPath" : "container:MeatGeek.xcodeproj",
         "identifier" : "A1000000000000000000000D",
         "name" : "MeatGeekUITests"

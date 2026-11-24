@@ -120,8 +120,8 @@ public final class StartCookModel {
     }
 }
 
-/// One cook: its fields, and Stop while it is active. Mirrors
-/// apps/web/src/cooks/cook-detail-page.tsx.
+/// One cook: its fields, Stop while it is active, and the live panel of an
+/// active cook. Mirrors apps/web/src/cooks/cook-detail-page.tsx.
 @MainActor
 @Observable
 public final class CookDetailModel {
@@ -153,9 +153,17 @@ public final class CookDetailModel {
     public let cookID: String
     public private(set) var state: State = .loading
     public private(set) var stopState: StopState = .idle
+    /// The live temperatures, while the cook is active and the app has live
+    /// services (`CooksModel.live`). A `cook_stopped` for this cook ends it
+    /// and shows the cook as it stopped.
+    public private(set) var live: LivePanelModel?
 
     @ObservationIgnored private let cooks: CooksModel
     @ObservationIgnored private var started = false
+    /// The screen is showing, and the app is active: passed on to the live
+    /// panel, including one made after the cook loads.
+    @ObservationIgnored private var visible = false
+    @ObservationIgnored private var appActive = true
 
     public init(cookID: String, cooks: CooksModel) {
         self.cookID = cookID
@@ -178,7 +186,7 @@ public final class CookDetailModel {
             let output = try await cooks.session.perform { api in try await api.getCook(path: .init(cookId: id)) }
             switch output {
             case .ok(let ok):
-                state = .loaded(try ok.body.json)
+                show(try ok.body.json)
             case .notFound:
                 state = .notFound
             case .unauthorized:
@@ -219,7 +227,7 @@ public final class CookDetailModel {
                 stopState = .failed(APIProblem(message: "The cook was stopped, but the answer could not be read."))
                 return
             }
-            state = .loaded(stopped)
+            show(stopped)
             stopState = .idle
             cooks.apply(stopped)
         case .unauthorized:
@@ -241,6 +249,55 @@ public final class CookDetailModel {
         case .undocumented(let status, _):
             stopState = .failed(APIProblem(status: status, body: nil))
         }
+    }
+
+    /// The screen is showing: the live panel connects.
+    public func appear() {
+        visible = true
+        live?.appear()
+    }
+
+    /// The screen went away: the live panel disconnects.
+    public func disappear() {
+        visible = false
+        live?.disappear()
+    }
+
+    /// The scene phase: the live panel disconnects in the background and
+    /// connects again in the foreground.
+    public func setAppActive(_ active: Bool) {
+        appActive = active
+        live?.setAppActive(active)
+    }
+
+    /// Shows `cook`, and keeps the live panel in step: one for an active
+    /// cook, none once it has ended.
+    private func show(_ cook: Cook) {
+        state = .loaded(cook)
+        if cook.status == .active {
+            guard live == nil, let services = cooks.live else { return }
+            let devices = cooks.devices
+            let deviceID = cook.deviceId
+            live = LivePanelModel(
+                cook: cook,
+                session: cooks.session,
+                device: { devices.device(id: deviceID) },
+                services: services,
+                now: cooks.now,
+                onCookStopped: { [weak self] stopped in self?.cookStopped(stopped) }
+            )
+            live?.setAppActive(appActive)
+            if visible { live?.appear() }
+        } else if let live {
+            live.end(with: cook)
+            self.live = nil
+        }
+    }
+
+    /// `cook_stopped` for this cook arrived: it is ended here and in the lists.
+    private func cookStopped(_ cook: Cook) {
+        show(cook)
+        cooks.apply(cook)
     }
 
     // MARK: What the screen shows

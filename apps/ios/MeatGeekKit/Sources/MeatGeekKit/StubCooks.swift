@@ -136,6 +136,11 @@ public actor StubCooks {
         return .ok(.init(body: .json(cooks[index])))
     }
 
+    /// The devices that have an active cook: where `StubLive` pushes readings.
+    public func activeDeviceIDs() -> [String] {
+        cooks.filter { $0.status == .active }.map(\.deviceId)
+    }
+
     static func token(_ offset: Int) -> String { "stub-offset-\(offset)" }
 
     static func offset(_ token: String) -> Int? {

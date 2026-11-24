@@ -32,6 +32,23 @@ public enum UITestMode {
         return { Date() }
     }
 
+    /// What the app runs on in UI test mode: the session over the stub, the
+    /// stub's clock (which the screens read), and the live panel's stub hub.
+    @MainActor
+    public static func makeApp(environment: [String: String]) -> (
+        session: SessionModel, now: @Sendable () -> Date, live: LiveServices
+    ) {
+        let clock = StubClock()
+        let (api, live) = StubAPI.uiTestWithLive(clock: clock)
+        let session: SessionModel = environment[notConfiguredKey] == "1"
+            ? .notConfigured()
+            : SessionModel(
+                tokenProvider: FakeTokenProvider(signInAccount: SignedInAccount(displayName: accountName)),
+                api: api
+            )
+        return (session, { clock.now }, live.services)
+    }
+
     /// The session the app uses in UI test mode: signed out at launch.
     @MainActor
     public static func makeSession(environment: [String: String]) -> SessionModel {
