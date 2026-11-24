@@ -15,8 +15,9 @@ import XCTest
 ///
 /// Nothing secret is written out. The password, the TOTP code and the claim
 /// code are pasted, never typed (XCTest logs every typed string), and never
-/// printed: a pasted field is read back only to compare it in the test runner. Screenshots are taken only once sign-in has finished
-/// (Microsoft's pages show the UPN) and never of the claim form (it shows the
+/// printed: a pasted field is read back only to compare it in the test runner. Screenshots are taken only before Microsoft's
+/// sign-in sheet is open (a failure to open it) or once sign-in has finished
+/// (Microsoft's pages show the UPN), and never of the claim form (it shows the
 /// claim code); the test plan keeps no automatic screenshot.
 final class LiveProofUITests: XCTestCase {
     /// `AccessibilityID` in MeatGeek/RootView.swift.
@@ -87,6 +88,9 @@ final class Proof {
     let inputs: LiveInputs
     let steps: LiveSteps
     private var signedIn = false
+    /// Microsoft's UPN page is up: from here until signed in, a screen can
+    /// show what was pasted.
+    private var sheetOpen = false
     private var onClaimForm = false
 
     init(app: XCUIApplication, inputs: LiveInputs, steps: LiveSteps) {
@@ -119,10 +123,11 @@ final class Proof {
         try steps.run("7. release the device") { try release() }
     }
 
-    /// On failure: a screenshot only once signed in, and never while the claim
+    /// On failure: a screenshot before Microsoft's sign-in sheet is open
+    /// (nothing has been pasted) or once signed in, and never while the claim
     /// form (which can hold the claim code) is open.
     func failureScreenshot() {
-        guard signedIn else { return }
+        guard signedIn || !sheetOpen else { return }
         if onClaimForm || app.textFields[ID.claimCode].exists {
             log("No failure screenshot: the claim form can show the claim code")
             return
@@ -160,7 +165,10 @@ final class Proof {
             break
         }
         signInButton.tap()
-        try MicrosoftSignIn(app: app, inputs: inputs, note: log).run()
+        let microsoft = MicrosoftSignIn(app: app, inputs: inputs, note: log)
+        try microsoft.openSheet()
+        sheetOpen = true
+        try microsoft.run()
         signedIn = true
     }
 
