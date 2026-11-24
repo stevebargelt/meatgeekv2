@@ -10,8 +10,10 @@ enum LiveBound {
     static let app: TimeInterval = 30
     /// One of Microsoft's sign-in pages showing its element.
     static let signInStep: TimeInterval = 30
-    /// The system "wants to use … to sign in" alert, or Microsoft's first
-    /// page, after Sign in with Microsoft.
+    /// MSAL's outcome once the app shows "Signing in…" after the tap on Sign
+    /// in with Microsoft: the system "wants to use … to sign in" alert,
+    /// Microsoft's first page, the app's sign-in error or its signed-out
+    /// screen. (The tap itself being taken is `app`.)
     static let consent: TimeInterval = 30
     /// The edit menu's Paste item, after a tap on a field (re-tapped every
     /// `pasteRetap`).
@@ -93,9 +95,11 @@ enum Live {
     }
 
     /// Polls `outcomes` in order every `LiveBound.poll` until one holds, for
-    /// at most `bound`, and returns its key. Throws naming `step` and every key.
+    /// at most `bound`, and returns its key. Throws naming `step` and every key,
+    /// and what `onScreen` says is on screen (only where nothing on screen can
+    /// be an input).
     static func firstOf<K: Sendable>(
-        _ step: String, bound: TimeInterval, _ outcomes: [(K, () -> Bool)]
+        _ step: String, bound: TimeInterval, _ outcomes: [(K, () -> Bool)], onScreen: (() -> String)? = nil
     ) throws -> K {
         let deadline = Date().addingTimeInterval(bound)
         while true {
@@ -104,7 +108,8 @@ enum Live {
             }
             guard Date() < deadline else {
                 let keys = outcomes.map { "\($0.0)" }.joined(separator: ", ")
-                throw LiveFailure("\(step): none of \(keys) within \(Int(bound)) s")
+                let seen = onScreen.map { "; on screen: \($0())" } ?? ""
+                throw LiveFailure("\(step): none of \(keys) within \(Int(bound)) s\(seen)")
             }
             Thread.sleep(forTimeInterval: LiveBound.poll)
         }

@@ -116,6 +116,39 @@ final class LiveOfflineTests: XCTestCase {
         XCTAssertFalse(already.runID.isEmpty)
     }
 
+    /// A sign-in that does not reach Microsoft's first page says which of the
+    /// app's states it was stuck in, so a red run names the cause.
+    func testSignInScreenSaysWhereSignInStopped() {
+        let spinning = SignInScreen(
+            signInButton: false, signingIn: true, appError: nil, alerts: [], webViews: 0, webTextFields: 0
+        )
+        XCTAssertEqual(spinning.summary, "the app still says \"Signing in…\"; no system alert; no sign-in sheet")
+        let untapped = SignInScreen(
+            signInButton: true, signingIn: false, appError: nil, alerts: [], webViews: 0, webTextFields: 0
+        )
+        XCTAssertEqual(
+            untapped.summary, "the app's signed-out screen with Sign in with Microsoft; no system alert; no sign-in sheet"
+        )
+        let loading = SignInScreen(
+            signInButton: false, signingIn: true, appError: nil, alerts: ["“MeatGeek” Wants to Use “microsoftonline.com” to Sign In"],
+            webViews: 1, webTextFields: 0
+        )
+        XCTAssertEqual(
+            loading.summary,
+            "the app still says \"Signing in…\"; the system alert \"“MeatGeek” Wants to Use “microsoftonline.com” to Sign In\";"
+                + " a sign-in sheet with no text field yet"
+        )
+        let failed = SignInScreen(
+            signInButton: true, signingIn: false, appError: "Sign-in failed. The request timed out.", alerts: [],
+            webViews: 0, webTextFields: 0
+        )
+        XCTAssertEqual(
+            failed.summary, "the app says \"Sign-in failed. The request timed out.\"; no system alert; no sign-in sheet"
+        )
+        let page = SignInScreen(signInButton: false, signingIn: false, appError: nil, alerts: [], webViews: 1, webTextFields: 1)
+        XCTAssertEqual(page.summary, "none of the app's sign-in screens; no system alert; a sign-in sheet with a text field")
+    }
+
     static let complete = [
         "MEATGEEK_LIVE_UPN": "someone@example.test",
         "MEATGEEK_LIVE_PASSWORD": "not-a-real-password",
