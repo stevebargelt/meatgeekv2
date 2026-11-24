@@ -27,6 +27,13 @@
 			remoteGlobalIDString = A1000000000000000000000C;
 			remoteInfo = MeatGeek;
 		};
+		A10000000000000000000036 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1000000000000000000000C;
+			remoteInfo = MeatGeek;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +48,7 @@
 		A10000000000000000000022 /* MeatGeek.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = MeatGeek.xctestplan; sourceTree = "<group>"; };
 		A1000000000000000000002A /* MeatGeekLiveUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeatGeekLiveUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000035 /* Live.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = Live.xctestplan; sourceTree = "<group>"; };
+		A10000000000000000000037 /* MeatGeekMSALTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeatGeekMSALTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -57,6 +65,11 @@
 		A1000000000000000000002B /* MeatGeekLiveUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = MeatGeekLiveUITests;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000038 /* MeatGeekMSALTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MeatGeekMSALTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -86,6 +99,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1000000000000000000003A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -99,6 +119,7 @@
 				A10000000000000000000005 /* MeatGeek */,
 				A10000000000000000000006 /* MeatGeekUITests */,
 				A1000000000000000000002B /* MeatGeekLiveUITests */,
+				A10000000000000000000038 /* MeatGeekMSALTests */,
 				A10000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -109,6 +130,7 @@
 				A10000000000000000000007 /* MeatGeek.app */,
 				A10000000000000000000008 /* MeatGeekUITests.xctest */,
 				A1000000000000000000002A /* MeatGeekLiveUITests.xctest */,
+				A10000000000000000000037 /* MeatGeekMSALTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -199,6 +221,29 @@
 			productReference = A1000000000000000000002A /* MeatGeekLiveUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A10000000000000000000039 /* MeatGeekMSALTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1000000000000000000003E /* Build configuration list for PBXNativeTarget "MeatGeekMSALTests" */;
+			buildPhases = (
+				A1000000000000000000003B /* Sources */,
+				A1000000000000000000003A /* Frameworks */,
+				A1000000000000000000003C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A1000000000000000000003D /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A10000000000000000000038 /* MeatGeekMSALTests */,
+			);
+			name = MeatGeekMSALTests;
+			packageProductDependencies = (
+			);
+			productName = MeatGeekMSALTests;
+			productReference = A10000000000000000000037 /* MeatGeekMSALTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -217,6 +262,10 @@
 						TestTargetID = A1000000000000000000000C;
 					};
 					A1000000000000000000002C = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = A1000000000000000000000C;
+					};
+					A10000000000000000000039 = {
 						CreatedOnToolsVersion = 26.0;
 						TestTargetID = A1000000000000000000000C;
 					};
@@ -239,6 +288,7 @@
 				A1000000000000000000000C /* MeatGeek */,
 				A1000000000000000000000D /* MeatGeekUITests */,
 				A1000000000000000000002C /* MeatGeekLiveUITests */,
+				A10000000000000000000039 /* MeatGeekMSALTests */,
 			);
 		};
 /* End PBXProject section */
@@ -259,6 +309,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A1000000000000000000002F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1000000000000000000003C /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -289,6 +346,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1000000000000000000003B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -301,6 +365,11 @@
 			isa = PBXTargetDependency;
 			target = A1000000000000000000000C /* MeatGeek */;
 			targetProxy = A10000000000000000000030 /* PBXContainerItemProxy */;
+		};
+		A1000000000000000000003D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1000000000000000000000C /* MeatGeek */;
+			targetProxy = A10000000000000000000036 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -407,6 +476,30 @@
 			};
 			name = Release;
 		};
+		A1000000000000000000003F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.meatgeek.ios.msaltests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MeatGeek.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MeatGeek";
+			};
+			name = Debug;
+		};
+		A10000000000000000000040 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.meatgeek.ios.msaltests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MeatGeek.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MeatGeek";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -442,6 +535,15 @@
 			buildConfigurations = (
 				A10000000000000000000033 /* Debug */,
 				A10000000000000000000034 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1000000000000000000003E /* Build configuration list for PBXNativeTarget "MeatGeekMSALTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000000000000000000003F /* Debug */,
+				A10000000000000000000040 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

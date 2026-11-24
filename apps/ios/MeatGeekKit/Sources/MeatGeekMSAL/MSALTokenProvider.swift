@@ -7,7 +7,9 @@ import UIKit
 ///
 /// - Sign-in runs the authorization-code flow with PKCE in the system browser
 ///   (`ASWebAuthenticationSession`, MSAL's `.authenticationSession` webview).
-///   The app is a public client: there is no secret.
+///   The app is a public client: there is no secret. It never hands sign-in
+///   to the Microsoft Authenticator broker, even when it is installed (see
+///   `init`).
 /// - Tokens live in MSAL's keychain cache; there is no other token store. The
 ///   cache's keychain group is the app's own bundle id, which every app may
 ///   use without a keychain-sharing entitlement (see apps/ios/README.md).
@@ -27,6 +29,13 @@ public final class MSALTokenProvider: TokenProvider {
     ///   - bundleIdentifier: the app's bundle id; the redirect URI is
     ///     `msauth.<bundleIdentifier>://auth`, as registered by bootstrap.sh.
     public init(config: AppConfig, bundleIdentifier: String) throws {
+        // Sign-in goes through the system browser (goal HAR-157): MSAL would
+        // otherwise hand interactive sign-in to Microsoft Authenticator
+        // whenever it is installed. Brokered auth is a separate decision
+        // (HAR-171). Must be set before the application object is created:
+        // MSAL reads it in init, where with the broker on it also requires the
+        // msauthv2/msauthv3 query schemes the Info.plist no longer has.
+        MSALGlobalConfig.brokerAvailability = .none
         let authority = try MSALAADAuthority(url: config.authorityURL)
         let msalConfig = MSALPublicClientApplicationConfig(
             clientId: config.clientID,
@@ -46,8 +55,9 @@ public final class MSALTokenProvider: TokenProvider {
         "msauth.\(bundleIdentifier)://auth"
     }
 
-    /// Hands a URL the app was opened with to MSAL (a response from the
-    /// Microsoft Authenticator broker). Returns whether MSAL took it.
+    /// Hands a URL the app was opened with to MSAL. Returns whether MSAL took
+    /// it. With the broker off and the system browser, MSAL gets its redirect
+    /// itself, so this is not expected to take anything.
     @discardableResult
     public static func handle(url: URL) -> Bool {
         MSALPublicClientApplication.handleMSALResponse(url, sourceApplication: nil)

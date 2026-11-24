@@ -546,9 +546,10 @@ final class MeatGeekUITests: XCTestCase {
         XCTAssertFalse(app.buttons[ID.signIn].exists)
     }
 
-    /// The built app's Info.plist: MSAL's redirect scheme, the Authenticator
-    /// query schemes, and the config from Config/Dev.xcconfig with each `//`
-    /// intact (xcconfig would read an unescaped one as a comment).
+    /// The built app's Info.plist: MSAL's redirect scheme, no Authenticator
+    /// query schemes (the broker is off, HAR-171), and the config from
+    /// Config/Dev.xcconfig with each `//` intact (xcconfig would read an
+    /// unescaped one as a comment).
     func testBuiltInfoPlistHasSchemesAndConfig() throws {
         // Set by MeatGeek.xctestplan from the MeatGeek target's build settings:
         // $(BUILT_PRODUCTS_DIR)/$(INFOPLIST_PATH), the Info.plist in the build
@@ -567,7 +568,7 @@ final class MeatGeekUITests: XCTestCase {
         let urlTypes = try XCTUnwrap(info["CFBundleURLTypes"] as? [[String: Any]])
         let schemes = urlTypes.flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
         XCTAssertEqual(schemes, ["msauth.com.meatgeek.ios"])
-        XCTAssertEqual(info["LSApplicationQueriesSchemes"] as? [String], ["msauthv2", "msauthv3"])
+        XCTAssertNil(info["LSApplicationQueriesSchemes"], "MSAL needs msauthv2/msauthv3 only for the broker")
 
         let baseURL = try XCTUnwrap(info["MeatGeekAPIBaseURL"] as? String)
         XCTAssertEqual(baseURL, "https://meatgeek-v2-dev-func-259d4bf5b628.azurewebsites.net/api")

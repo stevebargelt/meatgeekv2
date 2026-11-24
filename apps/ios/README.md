@@ -27,7 +27,7 @@ This is not an Nx project. `nx` does not build or test it; use Xcode or
 ```
 apps/ios/
 ├── MeatGeek.xcodeproj        # The app project (shared scheme: MeatGeek)
-├── MeatGeek.xctestplan       # Test plan: MeatGeekKitTests, MeatGeekLiveTests, MeatGeekUITests
+├── MeatGeek.xctestplan       # Test plan: MeatGeekKitTests, MeatGeekLiveTests, MeatGeekMSALTests, MeatGeekUITests
 ├── Live.xctestplan           # Test plan: MeatGeekLiveUITests, the live proof against dev
 ├── Config/                   # Build settings (xcconfig), see Signing below
 │   ├── Base.xcconfig         # Shared by every target and configuration
@@ -38,6 +38,7 @@ apps/ios/
 │   └── Signing.local.xcconfig.example
 ├── MeatGeek/                 # App target: a thin SwiftUI shell
 ├── MeatGeekUITests/          # UI tests (XCTest/XCUITest)
+├── MeatGeekMSALTests/        # MSALTokenProvider against the real MSAL (XCTest, hosted in the app)
 ├── MeatGeekLiveUITests/      # The live iOS proof (XCUITest), see Run the tests
 ├── scripts/run-live-proof.sh # Runs the live proof (CI's ios-acceptance job)
 └── MeatGeekKit/              # Local Swift package: all the app's logic
@@ -59,9 +60,9 @@ apps/ios/
   the cooks models (see [Cooks](#cooks)), `LivePanelModel` (see
   [Live temperatures](#live-temperatures)) and `CookChartModel` (see
   [Cook chart](#cook-chart)).
-- **Adding a file needs no project edit.** `MeatGeek/` and `MeatGeekUITests/`
-  are synchronized folders: drop a Swift file (or an asset) into the folder and
-  it is part of the target. `project.pbxproj` only changes when you add a
+- **Adding a file needs no project edit.** `MeatGeek/`, `MeatGeekUITests/`,
+  `MeatGeekMSALTests/` and `MeatGeekLiveUITests/` are synchronized folders:
+  drop a Swift file (or an asset) into the folder and it is part of the target. `project.pbxproj` only changes when you add a
   target, a package or a build setting.
 - **Build settings live in `Config/`.** Platform and language settings
   (`IPHONEOS_DEPLOYMENT_TARGET = 18.0`, `SWIFT_VERSION = 6.0`,
@@ -134,15 +135,18 @@ From the repository root:
 ```sh
 xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek \
   -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
-  -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO
+  -skipPackagePluginValidation
 ```
 
 The `MeatGeek` scheme's test action runs the `MeatGeek` test plan, which runs
-the three test targets: `MeatGeekKitTests` and `MeatGeekLiveTests` (Swift
-Testing, each reported as `✔ Test run with N tests … passed`) and
-`MeatGeekUITests` (XCTest, reported as `Executed N tests, with 0 failures`).
-The command exits 0 only if all pass.
-`CODE_SIGNING_ALLOWED=NO` skips signing, which the simulator does not need.
+the four test targets: `MeatGeekKitTests` and `MeatGeekLiveTests` (Swift
+Testing, each reported as `✔ Test run with N tests … passed`),
+`MeatGeekMSALTests` and `MeatGeekUITests` (XCTest, reported as
+`Executed N tests, with 0 failures`). The command exits 0 only if all pass.
+Do not add `CODE_SIGNING_ALLOWED=NO`: `MeatGeekMSALTests` runs inside the app
+and creates MSAL, whose keychain cache needs the entitlements that simulator
+signing ("Sign to Run Locally", no team or account) gives the build. Without
+them MSAL fails with "Failed to retrieve teamId from keychain".
 `-skipPackagePluginValidation` lets the `OpenAPIGenerator` build plugin run
 without the trust prompt Xcode shows; without it `xcodebuild` stops at
 "Validate plug-in “OpenAPIGenerator”" and exits 65.
@@ -305,11 +309,22 @@ client applications (HAR-163). With an empty client id the app starts on
   cached account silently. A 401 from the API, or `signInRequired` from the
   provider, moves it to `signedOut` with "Your session ended. Sign in again."
   Sign-out removes the account from MSAL's cache.
-- The URL scheme `msauth.com.meatgeek.ios` (`CFBundleURLTypes`) and the query
-  schemes `msauthv2`/`msauthv3` (`LSApplicationQueriesSchemes`) are in
-  `Config/MeatGeek-Info.plist`. `.onOpenURL` hands redirects to
-  `MSALPublicClientApplication.handleMSALResponse`; with the system browser,
-  that only happens when Microsoft Authenticator answers.
+- Sign-in never opens Microsoft Authenticator, even when it is installed:
+  `MSALTokenProvider` sets `MSALGlobalConfig.brokerAvailability = .none`
+  before it creates MSAL (HAR-171), so MSAL never hands sign-in to the
+  Authenticator broker. Brokered auth is a separate decision.
+- The URL scheme `msauth.com.meatgeek.ios` (`CFBundleURLTypes`, in
+  `Config/MeatGeek-Info.plist`) is the redirect URI's. There are no query
+  schemes (`LSApplicationQueriesSchemes`): MSAL 2.18.1 needs `msauthv2` and
+  `msauthv3` only to look for the broker, and with the broker on its init
+  fails without them; with it off it never checks. `.onOpenURL` still hands
+  any URL to `MSALPublicClientApplication.handleMSALResponse`; with the system
+  browser MSAL gets its redirect itself, so it is not expected to be called.
+- `MeatGeekMSALTests` (an XCTest target hosted in the app, because MSAL's init
+  checks the app's Info.plist for the redirect scheme) creates an
+  `MSALTokenProvider` against the real MSAL and checks the broker is off. The
+  UI test `testBuiltInfoPlistHasSchemesAndConfig` checks the built Info.plist
+  has the redirect scheme and no query schemes.
 
 ### Keychain
 
@@ -321,10 +336,10 @@ entitlement, so **a device build needs no keychain entitlement and no
 `.entitlements` file**: only signing with your team (below). Add the Keychain
 Sharing capability only if another app should share the sign-in.
 
-The simulator needs nothing either. CI builds and tests with
-`CODE_SIGNING_ALLOWED=NO`, and neither the unit tests nor the UI tests touch
-MSAL: the unit tests do not link `MeatGeekMSAL`, and the UI tests run in UI
-test mode.
+The simulator needs no team either: Xcode signs every simulator build "to
+run locally", which gives the app its keychain group. CI builds and tests that
+way. `MeatGeekMSALTests` is the only test that touches MSAL: the package's
+unit tests do not link `MeatGeekMSAL`, and the UI tests run in UI test mode.
 
 ### UI test mode
 

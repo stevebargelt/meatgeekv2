@@ -357,6 +357,9 @@ jobs:
         # the swift-openapi-generator build plugin (HAR-161), and xcodebuild
         # otherwise refuses an unapproved plugin ("Validate plug-in
         # OpenAPIGenerator", exit 65). The plugin is pinned in Package.resolved.
+        # Default simulator signing ("Sign to Run Locally", no team): HAR-171's
+        # MeatGeekMSALTests creates MSAL in the app, and MSAL's keychain cache
+        # needs the build's entitlements, which CODE_SIGNING_ALLOWED=NO drops.
         run: |
           xcodebuild test \
             -project apps/ios/MeatGeek.xcodeproj \
@@ -364,10 +367,9 @@ jobs:
             -destination "id=${{ steps.simulator.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -resultBundlePath "$RUNNER_TEMP/MeatGeek.xcresult" \
-            -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO
+            -skipPackagePluginValidation
 
-      - name: Check both test targets ran
+      - name: Check every test target ran
         # A scheme or test plan edit that drops a target would otherwise still
         # pass. Writes each target's count and result to the run summary.
         if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
@@ -391,7 +393,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$counts"
           code=0
-          for target in MeatGeekKitTests MeatGeekUITests; do
+          for target in MeatGeekKitTests MeatGeekLiveTests MeatGeekMSALTests MeatGeekUITests; do
             n="$(printf '%s\n' "$counts" | awk -F'\t' -v t="$target" '$1 == t { print $3 }')"
             if [ -z "$n" ] || [ "$n" -eq 0 ]; then
               echo "::error::$target ran no tests."
@@ -417,8 +419,7 @@ jobs:
             -testPlan Live \
             -destination "id=${{ steps.simulator.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO
+            -skipPackagePluginValidation
 
       - name: Upload the test result bundle
         if: always()

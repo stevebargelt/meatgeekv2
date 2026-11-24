@@ -6,7 +6,9 @@
 
   - CFBundleURLTypes: the msauth.<bundle id> scheme of MSAL's redirect URI
     (msauth.com.meatgeek.ios://auth).
-  - LSApplicationQueriesSchemes: lets MSAL check for Microsoft Authenticator.
+  - No LSApplicationQueriesSchemes (msauthv2/msauthv3): MSAL needs them only
+    to look for the Microsoft Authenticator broker, which the app turns off
+    (MSALTokenProvider, HAR-171). Sign-in is always in the system browser.
   - MeatGeek*: the sign-in and API settings from Config/Dev.xcconfig, read by
     MeatGeekKit's AppConfig.
 -->
@@ -22,11 +24,6 @@
 				<string>msauth.$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			</array>
 		</dict>
-	</array>
-	<key>LSApplicationQueriesSchemes</key>
-	<array>
-		<string>msauthv2</string>
-		<string>msauthv3</string>
 	</array>
 	<key>MeatGeekAPIBaseURL</key>
 	<string>$(MEATGEEK_API_BASE_URL)</string>

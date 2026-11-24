@@ -41,6 +41,13 @@
     {
       "target" : {
         "containerPath" : "container:MeatGeek.xcodeproj",
+        "identifier" : "A10000000000000000000039",
+        "name" : "MeatGeekMSALTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:MeatGeek.xcodeproj",
         "identifier" : "A1000000000000000000000D",
         "name" : "MeatGeekUITests"
       }
