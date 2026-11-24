@@ -70,6 +70,6 @@ COPY_PHASE_STRIP = NO
 
 // Signing for a physical device. Copy Signing.local.xcconfig.example to
 // Signing.local.xcconfig (gitignored) and set your own team id there.
-// The file is optional: simulator builds need no signing. Keep this include
+// The file is optional: simulator builds need no team. Keep this include
 // last so the local file overrides anything above.
 #include? "Signing.local.xcconfig"
