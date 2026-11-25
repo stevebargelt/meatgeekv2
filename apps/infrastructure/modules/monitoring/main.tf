@@ -290,9 +290,11 @@ resource "azurerm_monitor_metric_alert" "signalr_connection_failure_rate" {
 #     (daily-cap page, "Alert when daily cap is reached"):
 #     `_LogOperation | where Category =~ "Ingestion" | where Detail contains "OverQuota"`.
 #
-# What the docs do NOT say outright: no page states in so many words that the
-# cap event row itself is ingested after the cap is reached. The three points
-# above are why we rely on it; the documented alert would not work otherwise.
+# Proven live, not only inferred: no doc page states in so many words that the
+# cap event row itself is ingested after the cap is reached, but on 2026-11-25
+# (HAR-179), with the dev cap at 0.1 GB, the cap row was ingested at 09:43:35Z,
+# after billable ingestion had stopped. Its Category was `Ingestion`, and this
+# alert fired at 09:56:40Z.
 # -----------------------------------------------------------------------------
 
 # Rule 1 — the cap was reached and ingestion has stopped.
@@ -304,12 +306,14 @@ resource "azurerm_monitor_metric_alert" "signalr_connection_failure_rate" {
 #   * https://learn.microsoft.com/en-us/azure/azure-monitor/logs/monitor-workspace
 #     lists it under Category "Ingestion" with Detail "Data collection stopped
 #     due to daily limit of free data reached. Ingestion status = OverQuota".
+# The live row's Category was `Ingestion` (HAR-179).
 # Filtering on Detail alone matches either.
 #
 # Evaluated every 15 minutes over a 30-minute window: the overlap covers the
 # ingestion latency of the event row. 15 minutes costs a third of Microsoft's
-# 5-minute example, and the delay does not matter for an outage that lasts until
-# the next daily reset. Stateless (auto_mitigation off) with actions muted for an
+# 5-minute example. The outage lasts until the daily reset, or until about 45
+# minutes after the cap is raised (HAR-180), so 15 minutes of delay does not
+# matter. Stateless (auto_mitigation off) with actions muted for an
 # hour, so a cap event sends one email rather than one per evaluation that still
 # sees the row.
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "ingestion_cap_reached" {
@@ -317,7 +321,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "ingestion_cap_reached
   resource_group_name = var.resource_group_name
   location            = var.location
   scopes              = [var.log_analytics_workspace_id]
-  description         = "Workspace ${var.log_analytics_workspace_name} reached its daily ingestion cap of ${var.ingestion_cap_gb} GB. Azure has stopped storing logs and telemetry (App Insights, Function App logs, diagnostic logs) until the workspace's daily reset hour, and everything sent until then is lost. Find which tables grew with: Usage | where IsBillable | summarize sum(Quantity) by DataType. Then fix the source. Raising the cap costs money and is the owner's decision."
+  description         = "Workspace ${var.log_analytics_workspace_name} reached its daily ingestion cap of ${var.ingestion_cap_gb} GB. Azure has stopped storing billable logs and telemetry (App Insights, Function App logs, diagnostic logs), and everything sent while capped is lost, not delayed. Ingestion resumes by itself at the workspace's daily reset hour. Raising the cap brings it back sooner, but not at once: in the 2026-11-25 test, data returned about 45 minutes after the cap was raised. Raising the cap costs money and is the owner's decision. Find which tables grew with: Usage | where IsBillable | summarize sum(Quantity) by DataType. Then fix the source."
   severity            = 1
 
   evaluation_frequency              = "PT15M"
@@ -357,7 +361,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "ingestion_near_cap" {
   resource_group_name = var.resource_group_name
   location            = var.location
   scopes              = [var.log_analytics_workspace_id]
-  description         = "Billable ingestion into workspace ${var.log_analytics_workspace_name} over the last 24 hours passed ${var.ingestion_warning_percent}% of the ${var.ingestion_cap_gb} GB daily cap. If it keeps growing, the cap will stop ingestion and logs will be lost until the daily reset. The cap's day starts at a reset hour Azure picks per workspace, so this rule measures a trailing 24 hours instead. Find which tables grew with: Usage | where IsBillable | summarize sum(Quantity) by DataType."
+  description         = "Billable ingestion into workspace ${var.log_analytics_workspace_name} over the last 24 hours passed ${var.ingestion_warning_percent}% of the ${var.ingestion_cap_gb} GB daily cap. If it keeps growing, the cap will stop ingestion, and logs sent while capped are lost until the daily reset, or until about 45 minutes after the cap is raised. The cap's day starts at a reset hour Azure picks per workspace, so this rule measures a trailing 24 hours instead. Find which tables grew with: Usage | where IsBillable | summarize sum(Quantity) by DataType."
   severity            = 2
 
   evaluation_frequency    = "PT1H"

@@ -372,6 +372,10 @@ run "ingestion_cap_reached_log_alert" {
     condition     = length(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.action) == 1 && length(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.action).action_groups) == 1
     error_message = "ingestion_cap_reached must notify exactly one action group (an alert nobody receives is not a control)"
   }
+  assert {
+    condition     = strcontains(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.description, "daily reset") && strcontains(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.description, "45 minutes")
+    error_message = "ingestion_cap_reached description must say ingestion resumes at the daily reset, or about 45 minutes after the cap is raised (HAR-180)"
+  }
 }
 
 # Rule 2 warns when billable ingestion over a trailing 24 hours passes a percent
@@ -419,6 +423,10 @@ run "ingestion_near_cap_log_alert" {
   assert {
     condition     = length(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.action) == 1 && length(one(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.action).action_groups) == 1
     error_message = "ingestion_near_cap must notify exactly one action group (an alert nobody receives is not a control)"
+  }
+  assert {
+    condition     = strcontains(azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.description, "45 minutes after the cap is raised")
+    error_message = "ingestion_near_cap description must say logs return about 45 minutes after the cap is raised (HAR-180)"
   }
 }
 
