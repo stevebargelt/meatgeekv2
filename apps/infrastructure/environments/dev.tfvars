@@ -224,7 +224,7 @@ admin_email            = "steve@bargelt.com" # Update with your email for alerts
 manage_subscription_budget = false
 
 # Observability cost control
-ingestion_cap_gb = 0.1 # TEMPORARY proof for HAR-173 (HAR-177), owner-approved 2026-11-25: reach the cap for real so the cap alert fires. The follow-up issue restores 2.
+ingestion_cap_gb = 2 # Hard daily ingestion cap on Log Analytics workspace
 
 # HAR-39 standing simulated device: the acceptance job creates it and sends as it.
 simulated_device_id = "meatgeek-dev-simulated-smoker"
