@@ -1,21 +1,24 @@
-# HAR-190 — cosmos-emulator.ps1 restarts the emulator for one start-up fault
-# only. These cases pin what counts as that fault: the real .NET Runtime 1026
-# event from api-cosmos-emulator job 139411256607 matches; its Application
-# Error 1000 event, and the same event with any one marker changed, do not.
+# HAR-190 — cosmos-emulator.ps1 removes the localhost certificates that crash
+# the emulator's gateway at start-up, and warns if that crash still happens.
+# These cases pin which certificates it removes, and what counts as the crash:
+# the real .NET Runtime 1026 event from api-cosmos-emulator job 139411256607
+# matches; its Application Error 1000 event, and the same event with any one
+# marker changed, do not.
 # Run: Invoke-Pester -Path .github/scripts/cosmos-emulator.Tests.ps1
 BeforeAll {
-  # Load the one function without running the script (it starts the emulator).
+  # Load the pure functions without running the script (it starts the emulator).
   $script = Join-Path $PSScriptRoot 'cosmos-emulator.ps1'
   $parseErrors = $null
   $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$parseErrors)
   if ($parseErrors.Count) { throw "cosmos-emulator.ps1 does not parse: $($parseErrors -join '; ')" }
-  $definition = $ast.FindAll({
-      param($node)
-      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-      $node.Name -eq 'Test-SetCertificateAclFault'
-    }, $true) | Select-Object -First 1
-  if (-not $definition) { throw 'cosmos-emulator.ps1 defines no Test-SetCertificateAclFault' }
-  . ([scriptblock]::Create($definition.Extent.Text))
+  foreach ($name in 'Test-SetCertificateAclFault', 'Get-LocalhostCertificateProblem') {
+    $definition = $ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+      }, $true) | Select-Object -First 1
+    if (-not $definition) { throw "cosmos-emulator.ps1 defines no $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+  }
 
   $fixtures = Join-Path $PSScriptRoot 'fixtures'
   $event1026 = Get-Content -Raw (Join-Path $fixtures 'cosmos-emulator-event-1026-har190.txt')
@@ -48,5 +51,24 @@ Describe 'Test-SetCertificateAclFault' {
 
   It 'does not match an empty message' {
     Test-SetCertificateAclFault '' | Should -BeFalse
+  }
+}
+
+Describe 'Get-LocalhostCertificateProblem' {
+  It 'removes the IIS Express Development Certificate as the runner image ships it (key gone)' {
+    Get-LocalhostCertificateProblem $true $null 'Keyset does not exist' | Should -Match 'cannot be opened \(Keyset does not exist\)'
+  }
+
+  It 'removes a localhost certificate with no private key' {
+    Get-LocalhostCertificateProblem $false $null $null | Should -Be 'it has no private key'
+  }
+
+  It 'removes a localhost certificate whose key is held by a legacy CSP' {
+    Get-LocalhostCertificateProblem $true 'Microsoft Enhanced Cryptographic Provider v1.0' $null | Should -Match 'legacy CSP'
+    Get-LocalhostCertificateProblem $true 'Microsoft Enhanced RSA and AES Cryptographic Provider' $null | Should -Match 'legacy CSP'
+  }
+
+  It "keeps the emulator's own certificates (CNG keys in the software key storage provider)" {
+    Get-LocalhostCertificateProblem $true 'Microsoft Software Key Storage Provider' $null | Should -BeNullOrEmpty
   }
 }

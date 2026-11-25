@@ -15,9 +15,10 @@
 #       partition count below, waits (bounded, 300 s) until it reports Running
 #       and its gateway answers, writes the certificate the gateway presents to
 #       <cert-file> (PEM) and reports the start-up time with the partition
-#       count, as a notice and in the job summary. If, and only if, the start
-#       hits the SetCertificateAcl fault (below), it stops the emulator and
-#       starts it once more, with its own 300 s bound, and says so in a notice.
+#       count, as a notice and in the job summary. First it removes the runner
+#       image's localhost certificates that crash the emulator's gateway at
+#       start-up (HAR-190, below), and afterwards it warns if that crash still
+#       happened.
 #
 #   cosmos-emulator.ps1 sample <file>
 #       Every 10 s until killed, appends one timestamped line: the emulator's
@@ -57,27 +58,72 @@ function Write-Summary([string]$line) {
   if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $line }
 }
 
-# HAR-190 — the one start-up fault this script restarts the emulator for. On
-# 2.14.29.0 an emulator service's StartupEntryPoint (the gateway's, in job
-# 139411256607) can die about a minute into the start with an unhandled
-# CryptographicException in AclCertificateUtil.SetCertificateAcl. The emulator
-# starts its services together, and the StartupEntryPoint of each of its
-# gateway, controller and background-task services opens the private key of
-# the emulator's own CosmosEmulatorSecrets certificate (a CNG key) to add its
-# service group to the key file's ACL. It opens the key before taking the
-# cross-process mutex the emulator uses for that ACL change, so the services'
-# opens and ACL writes on the one key file overlap. When .NET Framework's GetRSAPrivateKey cannot
-# acquire the CNG key, for whatever reason, it falls back to the legacy CSP
-# path (RSACryptoServiceProvider), which cannot open a CNG key and throws; the
-# CNG error itself is lost. Windows logs .NET Runtime event 1026 with the
-# stack, then Application Error 1000. Service Fabric relaunches the service
-# minutes later, too late for the 300 s bound. All of this happens inside the
-# emulator's own processes, on a key it owns, after Start-CosmosDbEmulator
-# returns, so nothing can be prepared from outside: a clean stop and one more
-# start is the remedy.
+# HAR-190 — why the gateway crashed at start-up, and what removes the cause.
+# The emulator's secrets certificate is CN=localhost (friendly name
+# CosmosEmulatorSecrets). At each start, the StartupEntryPoint of its gateway
+# (and controller and background-task services) calls
+# AclCertificateUtil.SetCertificateAclByCommonName('localhost'), which finds
+# certificates in LocalMachine\My with X509FindType.FindBySubjectName: a
+# substring match, so every certificate whose subject contains "localhost". For
+# each one it opens the private key as a CNG key, to add its service group to
+# the key file's ACL, and it throws if any one of them cannot be opened, has no
+# private key, or has a legacy CSP key. The windows-2025 runner image ships an
+# "IIS Express Development Certificate", CN=localhost, whose private key is
+# gone ("Keyset does not exist"). So the gateway's StartupEntryPoint dies with a
+# CryptographicException in SetCertificateAcl at every start, on 2.14.28.0 and
+# 2.14.29.0 alike. Windows logs it as .NET Runtime event 1026, then Application
+# Error 1000. The start succeeds only if Service Fabric starts the gateway
+# again soon enough. It usually does, but on 2.14.29.0 it once took 170 s, and
+# the 300 s bound ran out (job 139411256607). Removing such certificates before
+# the start removes the crash. None of them is the emulator's own: it creates
+# its certificates during the start, with CNG keys.
+function Get-LocalhostCertificateProblem([bool]$HasPrivateKey, [string]$KeyProvider, [string]$KeyError) {
+  # Why the emulator's ACL step would fail on this certificate, or $null if it
+  # would not. $KeyProvider is the provider that holds the key (a CNG key
+  # storage provider or a legacy CSP); $KeyError is why the key did not open.
+  if (-not $HasPrivateKey) { return 'it has no private key' }
+  if ($KeyError) { return "its private key cannot be opened ($KeyError)" }
+  if ($KeyProvider -match 'Cryptographic( Service)? Provider') { return "its private key is held by a legacy CSP ($KeyProvider), not a CNG key storage provider" }
+  return $null
+}
+
+function Remove-LocalhostCertificatesTheEmulatorCannotUse {
+  # The certificates SetCertificateAclByCommonName('localhost') would find, and
+  # the removal of each one it would fail on, logged as a notice.
+  $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'LocalMachine')
+  $store.Open('ReadWrite')
+  try {
+    $found = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindBySubjectName, 'localhost', $false)
+    foreach ($cert in $found) {
+      $provider = $null
+      $keyError = $null
+      if ($cert.HasPrivateKey) {
+        try {
+          $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+          if (-not $key) { $key = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($cert) }
+          $provider = if ($key -and $key.PSObject.Properties['Key']) { $key.Key.Provider.Provider } elseif ($key) { $key.GetType().Name } else { 'none' }
+        } catch {
+          $keyError = $_.Exception.InnerException.Message
+          if (-not $keyError) { $keyError = $_.Exception.Message }
+        }
+      }
+      $problem = Get-LocalhostCertificateProblem $cert.HasPrivateKey $provider $keyError
+      $what = "$($cert.Subject) '$($cert.FriendlyName)' ($($cert.Thumbprint))"
+      if ($problem) {
+        $store.Remove($cert)
+        Write-Host "::notice title=Removed a localhost certificate (HAR-190)::Removed $what from LocalMachine\My before starting the emulator: $problem, which would crash the emulator's gateway at start-up."
+      } else {
+        Write-Host "Kept $what in LocalMachine\My: its private key is a CNG key ($provider)."
+      }
+    }
+  } finally {
+    $store.Close()
+  }
+}
+
 function Test-SetCertificateAclFault([string]$Message) {
-  # Every marker of this fault in the .NET Runtime 1026 event's text, and only
-  # this fault: a different crash, or a different exception, does not match.
+  # Every marker of the HAR-190 crash in the .NET Runtime 1026 event's text,
+  # and only that crash: a different exception or process does not match.
   return ($Message -match 'Microsoft\.Azure\.Cosmos\.StartupEntryPoint\.exe') -and
     ($Message -match 'System\.Security\.Cryptography\.CryptographicException') -and
     ($Message -match 'AclCertificateUtil\.SetCertificateAcl')
@@ -87,74 +133,6 @@ function Find-SetCertificateAclFault([datetime]$Since) {
   Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = '.NET Runtime'; Id = 1026; StartTime = $Since } -ErrorAction SilentlyContinue |
     Where-Object { Test-SetCertificateAclFault $_.Message } |
     Select-Object -First 1
-}
-
-function Write-CertSnapshot([string]$Label) {
-  # HAR-190 experiment: the certificates the emulator's ACL code enumerates,
-  # and whether their private keys open from this (admin) process.
-  Write-Host "----- LocalMachine\My certificates ($Label) -----"
-  $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'LocalMachine')
-  $store.Open('ReadOnly')
-  try {
-    foreach ($c in $store.Certificates) {
-      $key = 'no private key'
-      if ($c.HasPrivateKey) {
-        try {
-          $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($c)
-          if ($rsa -is [System.Security.Cryptography.RSACng]) { $key = "RSACng $($rsa.Key.Provider.Provider) $($rsa.Key.UniqueName)" }
-          elseif ($rsa) { $key = "RSA $($rsa.GetType().Name) $($rsa.CspKeyContainerInfo.ProviderName) $($rsa.CspKeyContainerInfo.UniqueKeyContainerName)" }
-          else {
-            $ec = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($c)
-            $key = if ($ec -is [System.Security.Cryptography.ECDsaCng]) { "ECDsaCng $($ec.Key.Provider.Provider) $($ec.Key.UniqueName)" } else { "other: $($ec.GetType().Name)" }
-          }
-        } catch { $key = "KEY OPEN FAILED: $($_.Exception.GetType().Name): $($_.Exception.Message)" }
-      }
-      Write-Host ("{0} | {1} | friendly={2} | notBefore={3:o} | {4}" -f $c.Thumbprint, $c.Subject, $c.FriendlyName, $c.NotBefore, $key)
-    }
-  } finally { $store.Close() }
-}
-
-function Write-StartEvents([datetime]$Since) {
-  Write-Host "----- .NET Runtime 1026 / Application Error 1000 since $($Since.ToString('HH:mm:ss')) -----"
-  Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1026, 1000; StartTime = $Since } -ErrorAction SilentlyContinue |
-    Sort-Object TimeCreated |
-    ForEach-Object {
-      $frames = ($_.Message -split "`n" | Where-Object { $_ -match 'SetupCommand\.|ServiceSetupHelper\.|Exception Info|Faulting application path' } | ForEach-Object { $_.Trim() }) -join ' <- '
-      Write-Host ("{0:HH:mm:ss} {1} {2} +{3}s {4}" -f $_.TimeCreated, $_.ProviderName, $_.Id, [int]($_.TimeCreated - $Since).TotalSeconds, $frames)
-    }
-  Write-Host '----- emulator processes -----'
-  Get-Process | Where-Object { $_.ProcessName -match $ProcessPattern -or $_.ProcessName -match 'StartupEntryPoint|Fabric' } |
-    ForEach-Object { Write-Host ("{0} pid={1} started +{2}s" -f $_.ProcessName, $_.Id, [int]($_.StartTime - $Since).TotalSeconds) }
-}
-
-function Start-Emulator {
-  # One start, bounded at 300 s. Returns the PEM once the emulator is Running
-  # and its gateway completes a TLS handshake. HAR-190 experiment: records the
-  # first SetCertificateAcl fault seen, but keeps waiting.
-  $since = Get-Date
-  $clock = [System.Diagnostics.Stopwatch]::StartNew()
-  Start-CosmosDbEmulator -NoUI -NoTelemetry -NoWait `
-    -PartitionCount $PartitionCount -DefaultPartitionCount $DefaultPartitionCount
-  $faultAt = $null
-  $result = @{ Pem = $null; Fault = $null; Seconds = 0 }
-  while ($clock.Elapsed.TotalSeconds -lt 300) {
-    if ((Get-CosmosDbEmulatorStatus) -eq 'Running') {
-      try {
-        $result.Pem = Get-GatewayCertificatePem
-        break
-      } catch {
-        # Running but the gateway is not accepting TLS yet.
-      }
-    }
-    if (-not $faultAt -and (Find-SetCertificateAclFault $since)) {
-      $faultAt = [int]$clock.Elapsed.TotalSeconds
-      Write-Host "HAR-190 experiment: SetCertificateAcl fault seen at ${faultAt}s; still waiting."
-    }
-    Start-Sleep -Seconds 2
-  }
-  $result.Seconds = [int]$clock.Elapsed.TotalSeconds
-  Write-StartEvents $since
-  return $result
 }
 
 function Get-GatewayCertificatePem {
@@ -180,18 +158,36 @@ switch ($Command) {
       throw "Expected Cosmos emulator $($PinnedVersions -join ' or '), found $version (runner image changed)."
     }
     Import-Module (Join-Path $InstallDir 'PSModules\Microsoft.Azure.CosmosDB.Emulator')
+    Remove-LocalhostCertificatesTheEmulatorCannotUse
+    $since = Get-Date
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-CertSnapshot 'before start'
-    $attempt = Start-Emulator
-    Write-CertSnapshot 'after start'
-    $restarted = ''
-    if (-not $attempt.Pem) {
+    Start-CosmosDbEmulator -NoUI -NoTelemetry -NoWait `
+      -PartitionCount $PartitionCount -DefaultPartitionCount $DefaultPartitionCount
+    $pem = $null
+    while ($clock.Elapsed.TotalSeconds -lt 300) {
+      if ((Get-CosmosDbEmulatorStatus) -eq 'Running') {
+        try {
+          $pem = Get-GatewayCertificatePem
+          break
+        } catch {
+          # Running but the gateway is not accepting TLS yet.
+        }
+      }
+      Start-Sleep -Seconds 2
+    }
+    # The removal above should leave nothing for this to find; say so if not.
+    $fault = Find-SetCertificateAclFault $since
+    if ($fault) {
+      Write-Host "::warning title=Cosmos emulator SetCertificateAcl crash (HAR-190)::StartupEntryPoint died with a CryptographicException in AclCertificateUtil.SetCertificateAcl at $($fault.TimeCreated.ToString('HH:mm:ss')), during this start."
+      Write-Host $fault.Message
+    }
+    if (-not $pem) {
       Write-Host "::error::Cosmos emulator not ready within 300s (status: $(Get-CosmosDbEmulatorStatus))"
       exit 1
     }
-    [System.IO.File]::WriteAllText($Path, $attempt.Pem)
+    [System.IO.File]::WriteAllText($Path, $pem)
     $seconds = [int]$clock.Elapsed.TotalSeconds
-    $line = "Cosmos emulator $version started in ${seconds}s (PartitionCount=$PartitionCount, DefaultPartitionCount=$DefaultPartitionCount$restarted)"
+    $line = "Cosmos emulator $version started in ${seconds}s (PartitionCount=$PartitionCount, DefaultPartitionCount=$DefaultPartitionCount)"
     Write-Host "::notice title=Cosmos emulator start-up::$line"
     Write-Summary $line
   }
