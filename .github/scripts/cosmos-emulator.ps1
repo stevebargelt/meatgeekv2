@@ -67,7 +67,8 @@ function Write-Summary([string]$line) {
 # substring match, so every certificate whose subject contains "localhost". For
 # each one it opens the private key as a CNG key, to add its service group to
 # the key file's ACL, and it throws if any one of them cannot be opened, has no
-# private key, or has a legacy CSP key. The windows-2025 runner image ships an
+# private key, or has a key it cannot open as a CNG key (a legacy CSP key).
+# The windows-2025 runner image ships an
 # "IIS Express Development Certificate", CN=localhost, whose private key is
 # gone ("Keyset does not exist"). So the gateway's StartupEntryPoint dies with a
 # CryptographicException in SetCertificateAcl at every start, on 2.14.28.0 and
@@ -77,14 +78,36 @@ function Write-Summary([string]$line) {
 # the 300 s bound ran out (job 139411256607). Removing such certificates before
 # the start removes the crash. None of them is the emulator's own: it creates
 # its certificates during the start, with CNG keys.
-function Get-LocalhostCertificateProblem([bool]$HasPrivateKey, [string]$KeyProvider, [string]$KeyError) {
+function Read-CertificatePrivateKey($Certificate) {
+  # The certificate's private key as .NET opens it, or why it would not open.
+  # On Windows, GetRSAPrivateKey returns an RSACng for a key in a CNG key
+  # storage provider and an RSACryptoServiceProvider for a key in a legacy CSP.
+  $key = $null
+  $keyError = $null
+  if ($Certificate.HasPrivateKey) {
+    try {
+      $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+      if (-not $key) { $key = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($Certificate) }
+    } catch {
+      $keyError = $_.Exception.InnerException.Message
+      if (-not $keyError) { $keyError = $_.Exception.Message }
+    }
+  }
+  [pscustomobject]@{ Key = $key; Error = $keyError }
+}
+
+function Get-LocalhostCertificateProblem([bool]$HasPrivateKey, [object]$Key, [string]$KeyError) {
   # Why the emulator's ACL step would fail on this certificate, or $null if it
-  # would not. $KeyProvider is the provider that holds the key (a CNG key
-  # storage provider or a legacy CSP); $KeyError is why the key did not open.
+  # would not. $Key and $KeyError are what Read-CertificatePrivateKey returned.
+  # The emulator opens each key as a CNG key, so only an RSACng or ECDsaCng
+  # key is kept; any other key, or none, is a problem.
   if (-not $HasPrivateKey) { return 'it has no private key' }
   if ($KeyError) { return "its private key cannot be opened ($KeyError)" }
-  if ($KeyProvider -match 'Cryptographic( Service)? Provider') { return "its private key is held by a legacy CSP ($KeyProvider), not a CNG key storage provider" }
-  return $null
+  if ($null -eq $Key) { return 'its private key is neither an RSA nor an ECDsa key' }
+  if ($Key -is [System.Security.Cryptography.RSACng] -or $Key -is [System.Security.Cryptography.ECDsaCng]) { return $null }
+  $type = $Key.GetType().Name
+  if ($type -match 'CryptoServiceProvider$') { return "its private key is held by a legacy CSP ($type), not a CNG key storage provider" }
+  return "its private key opens as $type, not as a CNG key"
 }
 
 function Remove-LocalhostCertificatesTheEmulatorCannotUse {
@@ -95,25 +118,14 @@ function Remove-LocalhostCertificatesTheEmulatorCannotUse {
   try {
     $found = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindBySubjectName, 'localhost', $false)
     foreach ($cert in $found) {
-      $provider = $null
-      $keyError = $null
-      if ($cert.HasPrivateKey) {
-        try {
-          $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
-          if (-not $key) { $key = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($cert) }
-          $provider = if ($key -and $key.PSObject.Properties['Key']) { $key.Key.Provider.Provider } elseif ($key) { $key.GetType().Name } else { 'none' }
-        } catch {
-          $keyError = $_.Exception.InnerException.Message
-          if (-not $keyError) { $keyError = $_.Exception.Message }
-        }
-      }
-      $problem = Get-LocalhostCertificateProblem $cert.HasPrivateKey $provider $keyError
+      $read = Read-CertificatePrivateKey $cert
+      $problem = Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error
       $what = "$($cert.Subject) '$($cert.FriendlyName)' ($($cert.Thumbprint))"
       if ($problem) {
         $store.Remove($cert)
         Write-Host "::notice title=Removed a localhost certificate (HAR-190)::Removed $what from LocalMachine\My before starting the emulator: $problem, which would crash the emulator's gateway at start-up."
       } else {
-        Write-Host "Kept $what in LocalMachine\My: its private key is a CNG key ($provider)."
+        Write-Host "Kept $what in LocalMachine\My: its private key is a CNG key ($($read.Key.Key.Provider.Provider))."
       }
     }
   } finally {
