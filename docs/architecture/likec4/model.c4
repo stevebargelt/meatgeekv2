@@ -409,7 +409,16 @@ model {
           description 'Terraform is on main but count-guarded off (enable_native_otlp = false). No span from the Pi has reached App Insights.'
         }
         metricAlerts = service 'Metric alerts' {
-          description 'function-failure-rate (App Insights requests/failed > 5 in 5 min), cosmos-429-rate (Cosmos 429s > 50 in 15 min), signalr-connection-failure-rate (SignalR SystemErrors > 5%), ingestion-cap-reached (workspace Heartbeat ≤ 0 in 15 min; no heartbeat source exists, so it cannot fire today).'
+          description 'function-failure-rate (App Insights requests/failed > 5 in 5 min), cosmos-429-rate (Cosmos 429s > 50 in 15 min), signalr-connection-failure-rate (SignalR SystemErrors > 5%).'
+        }
+        logAlerts = service 'Log search alerts' {
+          technology 'scheduled query rules'
+          description '''
+            ingestion-cap-reached fires when _LogOperation has an OverQuota row in 30 minutes,
+            checked every 15 minutes. ingestion-near-cap fires when billable Usage over a trailing
+            24 hours passes 80% of the daily cap (1600 MB in dev), checked hourly. The cap rule
+            was proven to fire on 2026-11-25 (HAR-179).
+          '''
         }
         activityAlerts = service 'Activity-log alerts' {
           description 'role-assignment-write, user-assigned-identity-write, cosmos-sql-role-assignment-write.'
@@ -429,8 +438,9 @@ model {
         appinsights -> logs 'stores in'
         workbook -> appinsights 'queries'
         appinsights -> metricAlerts 'function-failure-rate'
-        logs -> metricAlerts 'ingestion-cap-reached'
-        metricAlerts -> actionGroup 'four metric alerts'
+        logAlerts -> logs 'queries: ingestion-cap-reached, ingestion-near-cap'
+        metricAlerts -> actionGroup 'three metric alerts'
+        logAlerts -> actionGroup 'two log search alerts'
         activityAlerts -> actionGroup 'three activity-log alerts'
       }
     }

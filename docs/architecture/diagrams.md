@@ -140,6 +140,7 @@ graph TB
         Meatgeek.Cloud.Observability.ActionGroup@{ shape: rectangle, label: "Action group" }
         Meatgeek.Cloud.Observability.Collector@{ shape: rectangle, label: "OTLP collector" }
         Meatgeek.Cloud.Observability.Workbook@{ shape: rectangle, label: "Workbook" }
+        Meatgeek.Cloud.Observability.LogAlerts@{ shape: rectangle, label: "Log search alerts" }
         Meatgeek.Cloud.Observability.Appinsights@{ shape: rectangle, label: "Application Insights" }
         Meatgeek.Cloud.Observability.Logs@{ shape: rectangle, label: "Log Analytics" }
         Meatgeek.Cloud.Observability.MetricAlerts@{ shape: rectangle, label: "Metric alerts" }
@@ -219,8 +220,10 @@ identity (X.509 thumbprint)`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Cloud.Observability.Appinsights -. "`function-failure-rate`" .-> Meatgeek.Cloud.Observability.MetricAlerts
   Meatgeek.Cloud.Observability.Workbook -. "`queries`" .-> Meatgeek.Cloud.Observability.Appinsights
   Meatgeek.Cloud.Observability.Collector -. "`native OTLP`" .-> Meatgeek.Cloud.Observability.Appinsights
-  Meatgeek.Cloud.Observability.Logs -. "`ingestion-cap-reached`" .-> Meatgeek.Cloud.Observability.MetricAlerts
-  Meatgeek.Cloud.Observability.MetricAlerts -. "`four metric alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
+  Meatgeek.Cloud.Observability.LogAlerts -. "`queries: ingestion-cap-
+reached, ingestion-near-cap`" .-> Meatgeek.Cloud.Observability.Logs
+  Meatgeek.Cloud.Observability.MetricAlerts -. "`three metric alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
+  Meatgeek.Cloud.Observability.LogAlerts -. "`two log search alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
   Meatgeek.Cloud.Observability.ActivityAlerts -. "`three activity-log alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
   Pitmaster -. "`cooks on`" .-> Smoker
   Delivery.Simdevice -. "`telemetry as <sim>, <sim>-chart,
@@ -230,16 +233,16 @@ $.ce=utf-8, traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Vercel,Smoker,Meatgeek.Edge.Updater,Meatgeek.Cloud.Deviceupdate,Entra muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class Meatgeek.Cloud.Ingest.Eventhub,Meatgeek.Cloud.Observability.Budgets,Meatgeek.Cloud.Observability.ActivityAlerts,Meatgeek.Cloud.Observability.ActionGroup,Meatgeek.Cloud.Realtime,Meatgeek.Cloud.Ingest.Dps,Meatgeek.Cloud.Ingest.Iothub,Meatgeek.Cloud.Observability.Workbook,Meatgeek.Cloud.Observability.Appinsights,Meatgeek.Cloud.Observability.Logs,Meatgeek.Cloud.Observability.MetricAlerts indigo
+  class Meatgeek.Cloud.Ingest.Eventhub,Meatgeek.Cloud.Observability.Budgets,Meatgeek.Cloud.Observability.ActivityAlerts,Meatgeek.Cloud.Observability.ActionGroup,Meatgeek.Cloud.Realtime,Meatgeek.Cloud.Ingest.Dps,Meatgeek.Cloud.Ingest.Iothub,Meatgeek.Cloud.Observability.Workbook,Meatgeek.Cloud.Observability.LogAlerts,Meatgeek.Cloud.Observability.Appinsights,Meatgeek.Cloud.Observability.Logs,Meatgeek.Cloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery.Simdevice,Meatgeek.Mobile,Meatgeek.Web,Meatgeek.Edge.Pusher,Meatgeek.Edge.Controller,Meatgeek.Cloud.Api primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class Meatgeek.Cloud.Data green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class Meatgeek.Cloud.Observability.Collector amber
-  linkStyle 0,1,2,3,4,5,6,7,8,11,12,13,14,15,16,17,18,21,23,26,27,32,35,36,37,38,39,40,41,42,43,44,45,46,48,49,50,51 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,11,12,13,14,15,16,17,18,21,23,26,27,32,35,36,37,38,39,40,41,42,43,44,45,46,48,49,50,51,52 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 9,10,24,25,28,33,34,47 stroke:#8D8D8D
-  linkStyle 19,20,22,29,30,31,52 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 19,20,22,29,30,31,53 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## MeatGeek cloud (Azure)
@@ -259,6 +262,7 @@ graph TB
       MeatgeekCloud.Observability.ActionGroup@{ shape: rectangle, label: "Action group" }
       MeatgeekCloud.Observability.Workbook@{ shape: rectangle, label: "Workbook" }
       MeatgeekCloud.Observability.Collector@{ shape: rectangle, label: "OTLP collector" }
+      MeatgeekCloud.Observability.LogAlerts@{ shape: rectangle, label: "Log search alerts" }
       MeatgeekCloud.Observability.Appinsights@{ shape: rectangle, label: "Application Insights" }
       MeatgeekCloud.Observability.Logs@{ shape: rectangle, label: "Log Analytics" }
       MeatgeekCloud.Observability.MetricAlerts@{ shape: rectangle, label: "Metric alerts" }
@@ -309,8 +313,10 @@ identity (X.509 thumbprint)`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Observability.Appinsights -. "`function-failure-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
   MeatgeekCloud.Observability.Workbook -. "`queries`" .-> MeatgeekCloud.Observability.Appinsights
   MeatgeekCloud.Observability.Collector -. "`native OTLP`" .-> MeatgeekCloud.Observability.Appinsights
-  MeatgeekCloud.Observability.Logs -. "`ingestion-cap-reached`" .-> MeatgeekCloud.Observability.MetricAlerts
-  MeatgeekCloud.Observability.MetricAlerts -. "`four metric alerts`" .-> MeatgeekCloud.Observability.ActionGroup
+  MeatgeekCloud.Observability.LogAlerts -. "`queries: ingestion-cap-
+reached, ingestion-near-cap`" .-> MeatgeekCloud.Observability.Logs
+  MeatgeekCloud.Observability.MetricAlerts -. "`three metric alerts`" .-> MeatgeekCloud.Observability.ActionGroup
+  MeatgeekCloud.Observability.LogAlerts -. "`two log search alerts`" .-> MeatgeekCloud.Observability.ActionGroup
   MeatgeekCloud.Observability.ActivityAlerts -. "`three activity-log alerts`" .-> MeatgeekCloud.Observability.ActionGroup
   MeatgeekCloud.Api.Cooks -. "`cook_started, cook_stopped
 to the owning userId`" .-> MeatgeekCloud.Realtime
@@ -341,16 +347,16 @@ $.ce=utf-8, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra,MeatgeekCloud.Deviceupdate muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.ActionGroup,MeatgeekCloud.Ingest.Dps,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts indigo
+  class MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.ActionGroup,MeatgeekCloud.Ingest.Dps,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.LogAlerts,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekMobile.LivePanel,MeatgeekWeb.Chart,MeatgeekMobile.Chart primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data.TemperatureRollups green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.Observability.Collector amber
-  linkStyle 0,3,4,5,6,7,8,9,10,11,13,14,15,17,18,20,21,22,23,24,25,26,27,28,29,30,31,32,33,35,36,37 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,6,7,8,9,10,11,13,14,15,16,18,19,21,22,23,24,25,26,27,28,29,30,31,32,33,34,36,37,38 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 1,12 stroke:#8D8D8D
-  linkStyle 2,16,19,34 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 2,17,20,35 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -716,8 +722,8 @@ register it with simdevice`" .-> MeatgeekCloudIngest.Iothub
 The API exports straight to Application Insights at a 0.5 sampling ratio. The Go
 services sample every span (`AlwaysSample`) and export OTLP/HTTP to the collector, which
 is off by default (`enable_native_otlp = false`); with no `OTEL_EXPORTER_OTLP_ENDPOINT`
-they export nothing. Four metric alerts and three activity-log alerts notify one action
-group; the budgets email through their own `contact_emails`.
+they export nothing. Three metric alerts, two log search alerts and three activity-log
+alerts notify one action group; the budgets email through their own `contact_emails`.
 
 View `observability` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/observability/
 
@@ -732,12 +738,13 @@ graph TB
   subgraph MeatgeekCloudObservability["`Observability`"]
     MeatgeekCloudObservability.Workbook@{ shape: rectangle, label: "Workbook" }
     MeatgeekCloudObservability.Collector@{ shape: rectangle, label: "OTLP collector" }
+    MeatgeekCloudObservability.LogAlerts@{ shape: rectangle, label: "Log search alerts" }
     MeatgeekCloudObservability.ActivityAlerts@{ shape: rectangle, label: "Activity-log alerts" }
     MeatgeekCloudObservability.Budgets@{ shape: rectangle, label: "Budgets" }
     MeatgeekCloudObservability.Appinsights@{ shape: rectangle, label: "Application Insights" }
-    MeatgeekCloudObservability.Logs@{ shape: rectangle, label: "Log Analytics" }
     MeatgeekCloudObservability.MetricAlerts@{ shape: rectangle, label: "Metric alerts" }
     MeatgeekCloudObservability.ActionGroup@{ shape: rectangle, label: "Action group" }
+    MeatgeekCloudObservability.Logs@{ shape: rectangle, label: "Log Analytics" }
   end
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   subgraph MeatgeekEdge["`MeatGeek device`"]
@@ -758,8 +765,10 @@ graph TB
   MeatgeekCloudObservability.Appinsights -. "`function-failure-rate`" .-> MeatgeekCloudObservability.MetricAlerts
   MeatgeekCloudObservability.Workbook -. "`queries`" .-> MeatgeekCloudObservability.Appinsights
   MeatgeekCloudObservability.Collector -. "`native OTLP`" .-> MeatgeekCloudObservability.Appinsights
-  MeatgeekCloudObservability.Logs -. "`ingestion-cap-reached`" .-> MeatgeekCloudObservability.MetricAlerts
-  MeatgeekCloudObservability.MetricAlerts -. "`four metric alerts`" .-> MeatgeekCloudObservability.ActionGroup
+  MeatgeekCloudObservability.LogAlerts -. "`queries: ingestion-cap-
+reached, ingestion-near-cap`" .-> MeatgeekCloudObservability.Logs
+  MeatgeekCloudObservability.MetricAlerts -. "`three metric alerts`" .-> MeatgeekCloudObservability.ActionGroup
+  MeatgeekCloudObservability.LogAlerts -. "`two log search alerts`" .-> MeatgeekCloudObservability.ActionGroup
   MeatgeekCloudObservability.ActivityAlerts -. "`three activity-log alerts`" .-> MeatgeekCloudObservability.ActionGroup
   MeatgeekCloudObservability.ActionGroup -. "`alert email`" .-> Operator
   MeatgeekCloudObservability.Budgets -. "`budget email (contact_emails)`" .-> Operator
@@ -781,12 +790,12 @@ graph TB
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class MeatgeekCloudApi,MeatgeekEdge.Pusher,MeatgeekEdge.Controller primary
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
-  class MeatgeekCloudRealtime,MeatgeekCloudObservability.Workbook,MeatgeekCloudObservability.ActivityAlerts,MeatgeekCloudObservability.Budgets,MeatgeekCloudObservability.Appinsights,MeatgeekCloudObservability.Logs,MeatgeekCloudObservability.MetricAlerts,MeatgeekCloudObservability.ActionGroup,MeatgeekCloudIngest.Iothub indigo
+  class MeatgeekCloudRealtime,MeatgeekCloudObservability.Workbook,MeatgeekCloudObservability.LogAlerts,MeatgeekCloudObservability.ActivityAlerts,MeatgeekCloudObservability.Budgets,MeatgeekCloudObservability.Appinsights,MeatgeekCloudObservability.MetricAlerts,MeatgeekCloudObservability.ActionGroup,MeatgeekCloudIngest.Iothub,MeatgeekCloudObservability.Logs indigo
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloudObservability.Collector amber
-  linkStyle 0,1,2,3,4,5,6,7,8,10,11,12,13,14,16,18,20,21,23,25,27 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 9,19,22 stroke:#8D8D8D
-  linkStyle 15,17,24,26 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,10,11,12,13,14,15,17,19,21,22,24,26,28 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 9,20,23 stroke:#8D8D8D
+  linkStyle 16,18,25,27 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Delivery pipeline
