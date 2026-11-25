@@ -33,11 +33,13 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # The runner image pins the emulator; fail loudly if an image update moves it
-# to a build this tier has not passed 50 runs in a row and 8 concurrent copies
-# on (test-repeat's repeat-emulator job). GitHub rolls a new runner image out
-# over days, so while it does both builds are live: win25-vs2026 20261116.315.1
-# ships 2.14.28.0 and 20261123.321.1 ships 2.14.29.0 (HAR-185). Drop the old
-# build once no runner reports it.
+# to a build nobody has re-verified this tier on. GitHub rolls a new runner
+# image out over days, so while it does both builds are live: win25-vs2026
+# 20261116.315.1 ships 2.14.28.0 and 20261123.321.1 ships 2.14.29.0 (HAR-185).
+# 2.14.28.0 has passed test-repeat's repeat-emulator job in full: 50 runs in a
+# row and 8 concurrent copies (HAR-113, HAR-185). 2.14.29.0 has passed the
+# 8-copy pass and api-cosmos-emulator; its 50-run serial pass is outstanding
+# (HAR-186). HAR-186 runs it and drops 2.14.28.0 once no runner reports it.
 $PinnedVersions = @('2.14.28.0', '2.14.29.0')
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
