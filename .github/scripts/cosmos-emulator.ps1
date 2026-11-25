@@ -32,8 +32,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-# The runner image pins the emulator; fail loudly if an image update moves it.
-$PinnedVersion = '2.14.29.0'
+# The runner image pins the emulator; fail loudly if an image update moves it
+# to a build this tier has not passed 50 runs in a row and 8 concurrent copies
+# on (test-repeat's repeat-emulator job). GitHub rolls a new runner image out
+# over days, so while it does both builds are live: win25-vs2026 20261116.315.1
+# ships 2.14.28.0 and 20261123.321.1 ships 2.14.29.0 (HAR-185). Drop the old
+# build once no runner reports it.
+$PinnedVersions = @('2.14.28.0', '2.14.29.0')
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
 # the deployed 400 RU/s shared database has one physical partition.
@@ -67,8 +72,8 @@ switch ($Command) {
     $exe = Get-Item (Join-Path $InstallDir 'Microsoft.Azure.Cosmos.Emulator.exe')
     $version = $exe.VersionInfo.FileVersion
     Write-Host "Runner image: $env:ImageOS $env:ImageVersion; Cosmos emulator: $version"
-    if ($version -ne $PinnedVersion) {
-      throw "Expected Cosmos emulator $PinnedVersion, found $version (runner image changed)."
+    if ($version -notin $PinnedVersions) {
+      throw "Expected Cosmos emulator $($PinnedVersions -join ' or '), found $version (runner image changed)."
     }
     Import-Module (Join-Path $InstallDir 'PSModules\Microsoft.Azure.CosmosDB.Emulator')
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
