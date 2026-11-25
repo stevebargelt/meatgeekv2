@@ -40,6 +40,8 @@ $ErrorActionPreference = 'Stop'
 # row and 8 concurrent copies (HAR-113, HAR-185). 2.14.29.0 has passed the
 # 8-copy pass and api-cosmos-emulator; its 50-run serial pass is outstanding
 # (HAR-186). HAR-186 runs it and drops 2.14.28.0 once no runner reports it.
+# 2.14.29.0 also failed 1 of its first 3 starts (gateway crash in
+# SetCertificateAcl); HAR-189 tracks it.
 $PinnedVersions = @('2.14.28.0', '2.14.29.0')
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
