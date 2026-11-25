@@ -1,4 +1,5 @@
 import type {
+  TargetsPending,
   TargetTemperatures,
   TargetsReached,
   TemperatureChannel,
@@ -38,9 +39,6 @@ import type {
 
 /** How far below its target a reached probe must read to re-arm, in °F. */
 export const PROBE_REARM_DROP_F = 15;
-
-/** Stored per channel: the timestamp of the first reading at or above target. */
-export type TargetsPending = { [C in TemperatureChannel]?: string };
 
 export interface TargetState {
   readonly targetsReached: TargetsReached;

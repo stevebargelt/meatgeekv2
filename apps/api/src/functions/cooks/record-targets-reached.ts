@@ -3,7 +3,11 @@ import type { TemperatureReading } from '@meatgeekv2/api-interfaces';
 
 import { getCooksRepository, type CooksRepository } from '../../shared/cosmos/cooks-repository';
 import { getDevicesRepository } from '../../shared/cosmos/devices-repository';
-import { readingsOfBatch, resolveOwners } from '../signalr/broadcast-temperature';
+import {
+  readingsOfBatch,
+  resolveOwners,
+  type LiveReading,
+} from '../signalr/broadcast-temperature';
 import { applyReadings, type TargetState } from './target-rule';
 
 /**
@@ -83,7 +87,9 @@ export async function recordTargetsReachedHandler(
   deps: RecordTargetsReachedDeps = defaultRecordTargetsReachedDeps
 ): Promise<void> {
   const { readings, skipped } = readingsOfBatch(events, context);
-  const tagged = readings.filter(r => r.payload.cookId !== undefined);
+  const tagged = readings.filter(
+    (r): r is LiveReading & { payload: { cookId: string } } => r.payload.cookId !== undefined
+  );
   const untagged = readings.length - tagged.length;
 
   const owners = await resolveOwners(
@@ -103,7 +109,7 @@ export async function recordTargetsReachedHandler(
       unowned += 1;
       continue;
     }
-    const cookId = payload.cookId as string;
+    const { cookId } = payload;
     const key = JSON.stringify([userId, cookId, deviceId]);
     const group = cooks.get(key) ?? { userId, cookId, deviceId, readings: [] };
     group.readings.push(payload);

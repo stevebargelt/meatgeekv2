@@ -6,7 +6,7 @@ import { ACTIVE_DEVICE_LOCK_DOC_TYPE, activeDeviceLockId } from './cooks-reposit
  * HAR-136 — an in-memory cooks container that answers POINT READS and
  * conditional REPLACES only, for unit tests that need the real
  * CooksRepository's view of the MG-84 device lock (`getActiveCookIdForDevice`)
- * or of a cook's reached targets (`recordReadings`). Documents are keyed by
+ * or of a cook's reached targets (`updateActiveCook`). Documents are keyed by
  * `(partition = userId, id)`; a missing one answers 404 as the SDK does. Each
  * document carries an ETag that changes on every write; a replace whose
  * If-Match no longer matches fails with 412, as Cosmos does. Any other

@@ -36,6 +36,12 @@ export interface TargetReached {
 export type TargetsReached = { [C in TemperatureChannel]?: TargetReached };
 
 /**
+ * Stored on a cook and never returned: per channel, the timestamp of a first
+ * reading at or above its target, waiting for a second one.
+ */
+export type TargetsPending = { [C in TemperatureChannel]?: string };
+
+/**
  * Cook session data
  */
 export interface Cook {

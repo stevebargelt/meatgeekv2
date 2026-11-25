@@ -7,7 +7,7 @@ import type {
   RequestOptions,
   SqlParameter,
 } from '@azure/cosmos';
-import type { Cook, CookStatus } from '@meatgeekv2/api-interfaces';
+import type { Cook, CookStatus, TargetsPending } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
 
@@ -59,7 +59,7 @@ type StoredCook = Cook;
 /** A stored cook with the fields that are stored but never returned: the target
  *  rule's pending readings (see apps/api/src/functions/cooks/target-rule.ts). */
 export interface StoredCookDocument extends Cook {
-  targetsPending?: { [channel: string]: string };
+  targetsPending?: TargetsPending;
 }
 
 /** What {@link CooksRepository.updateActiveCook} did. */
