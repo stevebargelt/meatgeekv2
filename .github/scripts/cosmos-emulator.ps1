@@ -3,7 +3,7 @@
 # ships on the windows-2025 runner image. One script so both jobs start,
 # measure and diagnose it the same way.
 #
-# Why Windows: the classic Linux emulator image (same 2.14.28 build) dies with a
+# Why Windows: the classic Linux emulator image (2.14.28 in HAR-113) dies with a
 # native fault in its SQLPAL HTTP/socket layer ("Last Chance", Reason
 # 0x00000006, stack through Http.sys and AfdWsk.sys) within minutes of the
 # tier's load: exit 1, OOMKilled=false, 1.2 GB of 15.6 GB used. Partition count
@@ -33,7 +33,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # The runner image pins the emulator; fail loudly if an image update moves it.
-$PinnedVersion = '2.14.28.0'
+$PinnedVersion = '2.14.29.0'
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
 # the deployed 400 RU/s shared database has one physical partition.
