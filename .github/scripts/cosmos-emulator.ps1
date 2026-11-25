@@ -89,30 +89,72 @@ function Find-SetCertificateAclFault([datetime]$Since) {
     Select-Object -First 1
 }
 
+function Write-CertSnapshot([string]$Label) {
+  # HAR-190 experiment: the certificates the emulator's ACL code enumerates,
+  # and whether their private keys open from this (admin) process.
+  Write-Host "----- LocalMachine\My certificates ($Label) -----"
+  $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'LocalMachine')
+  $store.Open('ReadOnly')
+  try {
+    foreach ($c in $store.Certificates) {
+      $key = 'no private key'
+      if ($c.HasPrivateKey) {
+        try {
+          $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($c)
+          if ($rsa -is [System.Security.Cryptography.RSACng]) { $key = "RSACng $($rsa.Key.Provider.Provider) $($rsa.Key.UniqueName)" }
+          elseif ($rsa) { $key = "RSA $($rsa.GetType().Name) $($rsa.CspKeyContainerInfo.ProviderName) $($rsa.CspKeyContainerInfo.UniqueKeyContainerName)" }
+          else {
+            $ec = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($c)
+            $key = if ($ec -is [System.Security.Cryptography.ECDsaCng]) { "ECDsaCng $($ec.Key.Provider.Provider) $($ec.Key.UniqueName)" } else { "other: $($ec.GetType().Name)" }
+          }
+        } catch { $key = "KEY OPEN FAILED: $($_.Exception.GetType().Name): $($_.Exception.Message)" }
+      }
+      Write-Host ("{0} | {1} | friendly={2} | notBefore={3:o} | {4}" -f $c.Thumbprint, $c.Subject, $c.FriendlyName, $c.NotBefore, $key)
+    }
+  } finally { $store.Close() }
+}
+
+function Write-StartEvents([datetime]$Since) {
+  Write-Host "----- .NET Runtime 1026 / Application Error 1000 since $($Since.ToString('HH:mm:ss')) -----"
+  Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1026, 1000; StartTime = $Since } -ErrorAction SilentlyContinue |
+    Sort-Object TimeCreated |
+    ForEach-Object {
+      $frames = ($_.Message -split "`n" | Where-Object { $_ -match 'SetupCommand\.|ServiceSetupHelper\.|Exception Info|Faulting application path' } | ForEach-Object { $_.Trim() }) -join ' <- '
+      Write-Host ("{0:HH:mm:ss} {1} {2} +{3}s {4}" -f $_.TimeCreated, $_.ProviderName, $_.Id, [int]($_.TimeCreated - $Since).TotalSeconds, $frames)
+    }
+  Write-Host '----- emulator processes -----'
+  Get-Process | Where-Object { $_.ProcessName -match $ProcessPattern -or $_.ProcessName -match 'StartupEntryPoint|Fabric' } |
+    ForEach-Object { Write-Host ("{0} pid={1} started +{2}s" -f $_.ProcessName, $_.Id, [int]($_.StartTime - $Since).TotalSeconds) }
+}
+
 function Start-Emulator {
   # One start, bounded at 300 s. Returns the PEM once the emulator is Running
-  # and its gateway completes a TLS handshake; or, as soon as Windows logs the
-  # SetCertificateAcl fault for this start, that event; or neither on timeout.
+  # and its gateway completes a TLS handshake. HAR-190 experiment: records the
+  # first SetCertificateAcl fault seen, but keeps waiting.
   $since = Get-Date
   $clock = [System.Diagnostics.Stopwatch]::StartNew()
   Start-CosmosDbEmulator -NoUI -NoTelemetry -NoWait `
     -PartitionCount $PartitionCount -DefaultPartitionCount $DefaultPartitionCount
+  $faultAt = $null
+  $result = @{ Pem = $null; Fault = $null; Seconds = 0 }
   while ($clock.Elapsed.TotalSeconds -lt 300) {
     if ((Get-CosmosDbEmulatorStatus) -eq 'Running') {
       try {
-        $pem = Get-GatewayCertificatePem
-        return @{ Pem = $pem; Fault = $null; Seconds = [int]$clock.Elapsed.TotalSeconds }
+        $result.Pem = Get-GatewayCertificatePem
+        break
       } catch {
         # Running but the gateway is not accepting TLS yet.
       }
     }
-    $fault = Find-SetCertificateAclFault $since
-    if ($fault) {
-      return @{ Pem = $null; Fault = $fault; Seconds = [int]$clock.Elapsed.TotalSeconds }
+    if (-not $faultAt -and (Find-SetCertificateAclFault $since)) {
+      $faultAt = [int]$clock.Elapsed.TotalSeconds
+      Write-Host "HAR-190 experiment: SetCertificateAcl fault seen at ${faultAt}s; still waiting."
     }
     Start-Sleep -Seconds 2
   }
-  return @{ Pem = $null; Fault = $null; Seconds = [int]$clock.Elapsed.TotalSeconds }
+  $result.Seconds = [int]$clock.Elapsed.TotalSeconds
+  Write-StartEvents $since
+  return $result
 }
 
 function Get-GatewayCertificatePem {
@@ -139,35 +181,10 @@ switch ($Command) {
     }
     Import-Module (Join-Path $InstallDir 'PSModules\Microsoft.Azure.CosmosDB.Emulator')
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-CertSnapshot 'before start'
     $attempt = Start-Emulator
+    Write-CertSnapshot 'after start'
     $restarted = ''
-    if ($attempt.Fault) {
-      # The one retry this script allows, for this fault only (HAR-190).
-      $fault = $attempt.Fault
-      $notice = "Cosmos emulator $version`: $($fault.ProviderName) event $($fault.Id) at $($fault.TimeCreated.ToString('HH:mm:ss')), $($attempt.Seconds)s into the start: " +
-        'StartupEntryPoint died with a CryptographicException in AclCertificateUtil.SetCertificateAcl (HAR-190). ' +
-        'Stopping the emulator and starting it once more, with its own 300s bound.'
-      Write-Host "::notice title=Cosmos emulator restart (SetCertificateAcl fault)::$notice"
-      Write-Summary $notice
-      Write-Host $fault.Message
-      if ($env:RUNNER_TEMP) {
-        # Kept in the cosmos-emulator-* artifact, which is uploaded on success too.
-        $dir = Join-Path $env:RUNNER_TEMP 'cosmos-emulator'
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        ($fault | Format-List TimeCreated, ProviderName, Id, Message | Out-String -Width 300) |
-          Set-Content (Join-Path $dir 'restart-fault.txt')
-      }
-      Stop-CosmosDbEmulator
-      Write-Host "Cosmos emulator stopped (status: $(Get-CosmosDbEmulatorStatus)) after $([int]$clock.Elapsed.TotalSeconds)s; starting it again."
-      $first = $attempt.Seconds
-      $attempt = Start-Emulator
-      if ($attempt.Fault) {
-        Write-Host "::error::Cosmos emulator $version hit the SetCertificateAcl fault again after its one restart ($($attempt.Fault.TimeCreated.ToString('HH:mm:ss')))"
-        Write-Host $attempt.Fault.Message
-        exit 1
-      }
-      $restarted = ", after one restart for the SetCertificateAcl fault: fault at ${first}s, second start $($attempt.Seconds)s"
-    }
     if (-not $attempt.Pem) {
       Write-Host "::error::Cosmos emulator not ready within 300s (status: $(Get-CosmosDbEmulatorStatus))"
       exit 1
