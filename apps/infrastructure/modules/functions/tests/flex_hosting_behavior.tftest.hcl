@@ -53,6 +53,7 @@ variables {
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   iothub_service_hostname                = "meatgeek-v2-dev-iothub-abc123def456.azure-devices.net"
   temperature_broadcast_consumer_group   = "api-broadcast"
+  targets_consumer_group                 = "api-targets"
   cors_allowed_origins                   = ["http://localhost:4200"]
   auth_active_directory_client_id        = "11111111-1111-1111-1111-111111111111"
   auth_active_directory_tenant_id        = "22222222-2222-2222-2222-222222222222"
@@ -332,6 +333,7 @@ run "app_settings_are_exactly_the_declared_collection" {
       "IOTHUB_EVENTS__fullyQualifiedNamespace",
       "IOTHUB_SERVICE_HOSTNAME",
       "MEATGEEK_ENVIRONMENT",
+      "TARGETS_CONSUMER_GROUP",
       "TEMPERATURE_BROADCAST_CONSUMER_GROUP",
     ]))
     error_message = "The Function App's app settings must be exactly the declared collection. azapi PUTs this list as the site's COMPLETE settings, so an added or dropped name changes the deployed app"

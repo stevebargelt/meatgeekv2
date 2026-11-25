@@ -1368,7 +1368,11 @@ name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 # azurerm_cosmosdb_sql_database.meatgeek_shared (database_name) by configured
 # name, and each replace_triggered_by names both `.id`s. That raises the floor by
 # 4, from 22 to 26.
-NAME_REF_PAIR_FLOOR=26
+#
+# The target rule added azurerm_eventhub_consumer_group.api_targets beside
+# api_broadcast, with the same two name-referenced parents and the same `.id`
+# triggers. That raises the floor by 2, from 26 to 28.
+NAME_REF_PAIR_FLOOR=28
 
 name_replace_hits=""
 name_ref_pairs=0

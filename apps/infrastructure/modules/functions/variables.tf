@@ -202,6 +202,11 @@ variable "temperature_broadcast_consumer_group" {
   type        = string
 }
 
+variable "targets_consumer_group" {
+  description = "Name of the target rule's consumer group on the temperature-data Event Hub (non-secret), published as TARGETS_CONSUMER_GROUP."
+  type        = string
+}
+
 # --- HTTP posture (S2) ------------------------------------------------------
 
 variable "cors_allowed_origins" {

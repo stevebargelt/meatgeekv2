@@ -15,6 +15,27 @@ export interface TargetTemperatures {
 }
 
 /**
+ * A channel: the grill, or one of probes 1 to 4.
+ */
+export type TemperatureChannel = keyof TargetTemperatures;
+
+/**
+ * A channel that has reached its target: it read at or above the target on two
+ * readings in a row. `reachedAt` is the timestamp of the second reading (the
+ * device's clock), so a reading that arrives late still says when the target
+ * was reached.
+ */
+export interface TargetReached {
+  reachedAt: string;
+}
+
+/**
+ * The channels that have reached their current target, keyed by channel. A
+ * channel that is absent has not.
+ */
+export type TargetsReached = { [C in TemperatureChannel]?: TargetReached };
+
+/**
  * Cook session data
  */
 export interface Cook {
@@ -28,6 +49,8 @@ export interface Cook {
   meatType?: string;
   weight?: number;
   targetTemps?: TargetTemperatures;
+  /** Which channels have reached their target, and when. Set by the server. */
+  targetsReached?: TargetsReached;
   actualDuration?: number; // hours
   maxTemps?: TargetTemperatures;
   notes?: string;

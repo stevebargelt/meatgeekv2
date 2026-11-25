@@ -13,6 +13,7 @@
  */
 import type { InvocationContext } from '@azure/functions';
 
+import { recordTargetsReachedHandler } from '../functions/cooks/record-targets-reached';
 import { broadcastTemperatureHandler } from '../functions/signalr/broadcast-temperature';
 import {
   HUB_NAME,
@@ -27,6 +28,7 @@ interface EventHubRegistration {
   consumerGroup?: string;
   cardinality?: 'many' | 'one';
   extraOutputs?: unknown[];
+  retry?: { strategy: string };
   handler: (messages: unknown, context: InvocationContext) => Promise<unknown>;
 }
 
@@ -72,8 +74,26 @@ beforeAll(() => {
 });
 
 describe('broadcastTemperature registration (main.ts)', () => {
-  it('is the only Event Hub trigger', () => {
-    expect(Object.keys(mockEventHubRegistrations)).toEqual(['broadcastTemperature']);
+  it('shares the temperature-data event hub with the target rule only', () => {
+    expect(Object.keys(mockEventHubRegistrations).sort()).toEqual([
+      'broadcastTemperature',
+      'recordTargetsReached',
+    ]);
+  });
+
+  it('runs the target rule beside the push, never inside it: its own consumer group, no SignalR output, host retries', () => {
+    const push = mockEventHubRegistrations['broadcastTemperature'];
+    const rule = mockEventHubRegistrations['recordTargetsReached'];
+    expect(rule.eventHubName).toBe(push.eventHubName);
+    expect(rule.connection).toBe(push.connection);
+    expect(rule.consumerGroup).toBe('%TARGETS_CONSUMER_GROUP%');
+    expect(rule.consumerGroup).not.toBe(push.consumerGroup);
+    expect(rule.cardinality).toBe('many');
+    expect(rule.extraOutputs ?? []).toEqual([]);
+    expect(rule.handler).toBe(recordTargetsReachedHandler);
+    // A batch whose write failed is run again; the push never is.
+    expect(rule.retry).toMatchObject({ strategy: 'exponentialBackoff' });
+    expect(push.retry).toBeUndefined();
   });
 
   it('reads temperature-data on the API consumer group, identity-based, in batches', () => {

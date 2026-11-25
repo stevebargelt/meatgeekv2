@@ -145,6 +145,18 @@ A cook's chart is never read from the raw readings. The `rollupTemperatures` Fun
 
 The change feed is **at-least-once**: a batch written but not checkpointed (a host crash between the two) is folded again, which double-counts `n` and `sum` for those readings and skews one or a few minutes of one chart; `min` and `max` are unaffected. This is accepted: exact-once would need a write per reading. See `apps/api/src/shared/cosmos/temperature-rollups-repository.ts`.
 
+### 6. Target rule
+
+`recordTargetsReached` (`apps/api/src/functions/cooks/record-targets-reached.ts`, the rule itself in `target-rule.ts`) is a second Event Hub trigger on `temperature-data`, on its own consumer group, `api-targets` (`TARGETS_CONSUMER_GROUP`). It is a separate invocation from `broadcastTemperature`, with its own checkpoints, so it can never delay or drop a live push.
+
+- **Which cook.** A reading counts for the cook its device tagged it with (`cookId`), point-read in the device owner's partition. The cook must be on that device and `active`; a reading that arrives after the stop changes nothing. An untagged reading counts for no cook.
+- **Reached.** A channel with a target has reached it when it reads at or above the target on two readings in a row; the cook records `targetsReached.<channel>.reachedAt`, the second reading's own timestamp, so a late (buffered) reading records when the target was reached. One reading does not count.
+- **Re-arm.** A reached probe that reads 15 °F or more below its target (`PROBE_REARM_DROP_F`) is no longer reached and can be reached again with a new time. The grill never re-arms by falling. Hovering at the target, or dipping less than 15 °F, keeps the first time.
+- **State.** The cook document holds it: `targetsReached` (in the API contract) and `targetsPending`, the first reading at or above a target, stored and never returned. So it holds across batches, restarts and instances. The write is a replace under If-Match on the ETag read, retried on 412, so it never undoes a concurrent stop. It writes only when a channel's state changes.
+- **Order and repeats.** A batch's readings for a cook are applied oldest first. A reading no newer than a channel's pending or reached time is ignored, so a batch delivered again does not count one reading twice. The data-pusher drains its offline queue oldest first, ahead of new readings.
+- **Failures.** A failed owner read or cook write makes the invocation throw after the rest of the batch is handled; the host retries the batch (exponential backoff, 8 retries). While it retries, only this consumer group waits. Each batch logs `recordTargetsReached cooks=<n> updated=<u> notActive=<a> failed=<f> untagged=<t> skipped=<s> unowned=<o> lookupFailed=<l>`, counts only.
+- **Not read:** the user's and the device's notification preference fields.
+
 ## Provisioning and claiming
 
 Before a device sends anything it is enrolled in the Device Provisioning Service with the X.509 certificate it generated, registers with DPS, and connects to IoT Hub with that certificate; its readings carry no owner until a user claims it with the claim code it minted. The [`onboardDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/onboardDevice/) view shows onboarding, [`claimDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/claimDevice/) shows claim and release (readings from before `claimedAt` are never returned to the new owner), and [`revokeDevice`](https://stevebargelt.github.io/meatgeekv2/#/view/revokeDevice/) shows revoking a lost device. See [`docs/devices/runbook.md`](../devices/runbook.md).
@@ -177,7 +189,7 @@ The [`cookStart`](https://stevebargelt.github.io/meatgeekv2/#/view/cookStart/) v
 
 ### During Active Cook
 
-Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId; IoT Hub stores it in Cosmos DB, and `broadcastTemperature` pushes it to the device owner's SignalR `userId`. See the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view.
+Every 5 seconds the Data Pusher sends a reading enriched with the cached cookId; IoT Hub stores it in Cosmos DB, `broadcastTemperature` pushes it to the device owner's SignalR `userId`, and `recordTargetsReached` records on the cook any channel that has reached its target (see [Target rule](#6-target-rule)); the cook as the API returns it carries `targetsReached`. See the [`telemetry`](https://stevebargelt.github.io/meatgeekv2/#/view/telemetry/) view.
 
 ### Ending a Cook
 

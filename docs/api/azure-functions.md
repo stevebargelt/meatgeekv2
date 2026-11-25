@@ -38,6 +38,7 @@ yet wired.
 | `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                   |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
 | `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its device's owner            |
+| `recordTargetsReached`   | **Event Hub** | `temperature-data`, many          | Records on each running cook which targets are reached        |
 | `rollupTemperatures`     | **Cosmos DB** | `temperatures` change feed        | HAR-86 — folds readings into per-device, per-hour rollups     |
 
 `broadcastTemperature` is the live-reading producer. IoT Hub routes every device
@@ -215,6 +216,18 @@ Built in HAR-60 as `broadcastTemperature`:
 no `function.json`). What it does and what it sends is described under
 [Registered Functions](#registered-functions). It stores nothing; the Cosmos copy
 of each reading is written by IoT Hub's own `cosmos-storage` route.
+
+#### Target rule
+
+`recordTargetsReached`
+(`apps/api/src/functions/cooks/record-targets-reached.ts`) reads the same
+`temperature-data` event hub on its own consumer group,
+`%TARGETS_CONSUMER_GROUP%` (`api-targets`), and records on each running cook
+which channels have reached their target (`targetsReached` on the cook). It has
+no SignalR output and is a separate invocation from `broadcastTemperature`, so
+it can never delay or drop a live push. A batch whose cook write failed throws
+and is retried by the host. The rule, its state and its failure handling are in
+[Data Flow](../architecture/data-flow.md#6-target-rule).
 
 ### **API Functions**
 
@@ -567,6 +580,11 @@ IOTHUB_EVENTS__fullyQualifiedNamespace=<iot-eventhub-namespace-fqdn>
 # second Event Hub setting. Read by broadcastTemperature (HAR-60) as the
 # binding expression %TEMPERATURE_BROADCAST_CONSUMER_GROUP%.
 TEMPERATURE_BROADCAST_CONSUMER_GROUP=api-broadcast
+
+# The target rule's own consumer group on the same Event Hub. Non-secret,
+# Terraform-owned (module.iot_hub.targets_consumer_group_name, "api-targets").
+# Read by recordTargetsReached as %TARGETS_CONSUMER_GROUP%.
+TARGETS_CONSUMER_GROUP=api-targets
 
 # IoT Hub service hostname (HAR-56), a bare hostname such as
 # <name>.azure-devices.net. Non-secret, Terraform-owned (module.iot_hub.hostname).

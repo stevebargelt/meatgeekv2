@@ -17,6 +17,7 @@ const COOK = {
   meatType: 'brisket',
   weight: 12.5,
   targetTemps: { grill: 225, probe1: 203 },
+  targetsReached: { grill: { reachedAt: '2026-11-20T13:05:10.000Z' } },
   notes: 'post oak',
 } as const;
 

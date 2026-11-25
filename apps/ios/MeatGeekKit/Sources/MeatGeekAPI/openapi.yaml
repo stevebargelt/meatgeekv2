@@ -2016,8 +2016,9 @@ components:
     TargetTemperatures:
       type: object
       description: |
-        Per-probe setpoint group. All members optional — a cook may target the
-        grill only, or any subset of probes.
+        Per-channel targets: the temperature the pitmaster wants to be told
+        about, for the grill and each probe. All members optional — a cook may
+        target the grill only, or any subset of probes.
       additionalProperties: false
       properties:
         grill:
@@ -2025,7 +2026,7 @@ components:
           format: double
           minimum: -50
           maximum: 1000
-          description: Grill chamber setpoint, degrees F.
+          description: Grill chamber target, degrees F.
         probe1:
           type: number
           format: double
@@ -2046,6 +2047,40 @@ components:
           format: double
           minimum: -50
           maximum: 1000
+    TargetReached:
+      type: object
+      description: |
+        A channel that has reached its target: it read at or above the target on
+        two readings in a row. Set by the server from the reading stream.
+      required:
+        - reachedAt
+      additionalProperties: false
+      properties:
+        reachedAt:
+          type: string
+          format: date-time
+          description: |
+            Timestamp of the second of those readings, by the device's clock. A
+            reading that arrives late still records when the target was reached.
+    TargetsReached:
+      type: object
+      description: |
+        The channels of a running cook that have reached their current target,
+        keyed by channel. A channel that is absent has not. A reached probe that
+        reads 15 degrees F or more below its target is removed and can be reached
+        again; the grill stays reached once reached.
+      additionalProperties: false
+      properties:
+        grill:
+          $ref: '#/components/schemas/TargetReached'
+        probe1:
+          $ref: '#/components/schemas/TargetReached'
+        probe2:
+          $ref: '#/components/schemas/TargetReached'
+        probe3:
+          $ref: '#/components/schemas/TargetReached'
+        probe4:
+          $ref: '#/components/schemas/TargetReached'
     Cook:
       type: object
       description: |
@@ -2097,6 +2132,8 @@ components:
           description: Pre-cook weight in pounds.
         targetTemps:
           $ref: '#/components/schemas/TargetTemperatures'
+        targetsReached:
+          $ref: '#/components/schemas/TargetsReached'
         actualDuration:
           type: number
           format: double
@@ -2129,7 +2166,7 @@ components:
           format: double
           minimum: 0
           maximum: 1000
-          description: Grill chamber setpoint, degrees F.
+          description: Grill chamber target, degrees F.
         probe1:
           type: number
           format: double

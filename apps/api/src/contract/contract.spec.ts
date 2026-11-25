@@ -488,6 +488,35 @@ describe('(d) SignalR: the messages the API builds match their x-signalr schemas
     expectValid(compile(signalR().messages[COOK_STOPPED]), envelope);
   });
 
+  it('a cook with reached targets matches Cook and both cook events', () => {
+    const reached = cook({
+      targetsReached: {
+        grill: { reachedAt: '2026-11-20T13:05:10.000Z' },
+        probe1: { reachedAt: '2026-11-20T19:40:00.000Z' },
+      },
+    });
+    expectValid(compile(schemaAt('Cook')), reached);
+    expectValid(
+      compile(signalR().messages[COOK_STOPPED]),
+      buildCookEnvelope(COOK_STOPPED, { ...reached, status: 'completed' }, 'c')
+    );
+
+    const cookSchema = compile(schemaAt('Cook'));
+    expect(cookSchema({ ...reached, targetsReached: { probe1: {} } })).toBe(false);
+    expect(
+      cookSchema({ ...reached, targetsReached: { probe5: { reachedAt: '2026-11-20T13:05:10.000Z' } } })
+    ).toBe(false);
+    expect(cookSchema({ ...reached, targetsPending: { probe1: '2026-11-20T13:05:05.000Z' } })).toBe(
+      false
+    );
+  });
+
+  it('the grill target is described as a target, not a setpoint', () => {
+    for (const name of ['TargetTemperatures', 'StartCookTargetTemperatures']) {
+      expect(JSON.stringify(schemaAt(name))).not.toMatch(/setpoint/i);
+    }
+  });
+
   it('rejects a message that does not match (the validation is not vacuous)', () => {
     const started = buildCookEnvelope(COOK_STARTED, cook(), 'correlation-1');
     const stopped = buildCookEnvelope(COOK_STOPPED, cook({ status: 'completed' }), 'c');

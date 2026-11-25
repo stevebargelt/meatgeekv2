@@ -386,6 +386,7 @@ module "azure_functions" {
   # Receiver grant, so it adds no Event Hub setting and no role.
   iothub_service_hostname              = module.iot_hub.hostname
   temperature_broadcast_consumer_group = module.iot_hub.temperature_broadcast_consumer_group_name
+  targets_consumer_group               = module.iot_hub.targets_consumer_group_name
 
   # S2 HTTP posture — explicit per-environment CORS + optional Entra ID auth.
   cors_allowed_origins            = var.functions_cors_allowed_origins

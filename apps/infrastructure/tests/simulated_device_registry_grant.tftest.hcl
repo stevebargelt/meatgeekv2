@@ -32,6 +32,7 @@ override_module {
     eventhub_namespace_id                     = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/meatgeek-v2-dev-rg/providers/Microsoft.EventHub/namespaces/meatgeek-v2-dev-ehns"
     eventhub_namespace_fqdn                   = "meatgeek-v2-dev-ehns.servicebus.windows.net"
     temperature_broadcast_consumer_group_name = "api-broadcast"
+    targets_consumer_group_name               = "api-targets"
   }
 }
 

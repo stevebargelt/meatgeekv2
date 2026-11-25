@@ -9,6 +9,10 @@ initializeTelemetry();
 
 // Import function handlers
 import { getCookHandler } from './functions/cooks/get-cook';
+import {
+  recordTargetsReachedHandler,
+  TARGETS_RETRY,
+} from './functions/cooks/record-targets-reached';
 import { getCookChartHandler } from './functions/cooks/get-cook-chart';
 import { getCooksHandler } from './functions/cooks/list-cooks';
 import { startCookHandler } from './functions/cooks/start-cook';
@@ -123,6 +127,21 @@ app.eventHub('broadcastTemperature', {
   cardinality: 'many',
   extraOutputs: [signalROutput],
   handler: broadcastTemperatureHandler,
+});
+
+// The target rule: records on each running cook which channels have reached
+// their target. It reads the same readings on its OWN consumer group
+// (TARGETS_CONSUMER_GROUP, `api-targets`), so it is a separate invocation from
+// broadcastTemperature and can never delay or drop a live push. It has no
+// SignalR output. A batch whose cook write failed throws and is retried by the
+// host (TARGETS_RETRY); the rule ignores readings it has already counted.
+app.eventHub('recordTargetsReached', {
+  connection: 'IOTHUB_EVENTS',
+  eventHubName: TEMPERATURE_EVENT_HUB,
+  consumerGroup: '%TARGETS_CONSUMER_GROUP%',
+  cardinality: 'many',
+  retry: TARGETS_RETRY,
+  handler: recordTargetsReachedHandler,
 });
 
 // HAR-86: the cook chart's read model. A change-feed trigger on `temperatures`

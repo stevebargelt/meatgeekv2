@@ -46,6 +46,8 @@ terraform {
 #   azurerm_iothub_consumer_group.realtime     -> iothub.main              (iothub_name)
 #   azurerm_eventhub_consumer_group.api_broadcast -> eventhub_namespace.main (namespace_name)
 #   azurerm_eventhub_consumer_group.api_broadcast -> eventhub.temperature_data (eventhub_name)
+#   azurerm_eventhub_consumer_group.api_targets -> eventhub_namespace.main (namespace_name)
+#   azurerm_eventhub_consumer_group.api_targets -> eventhub.temperature_data (eventhub_name)
 #
 # COMPUTED references — these carry replacement natively. No lifecycle block is
 # needed and adding one would be noise, not safety:
@@ -205,6 +207,27 @@ resource "azurerm_eventhub_consumer_group" "api_broadcast" {
   # state would then list a consumer group that does not exist (MG-48). The
   # triggers name each parent's `.id` so an in-place parent update (a tag, a
   # throughput-unit scale) does not recreate it and reset its checkpoints.
+  lifecycle {
+    replace_triggered_by = [
+      azurerm_eventhub_namespace.main.id,
+      azurerm_eventhub.temperature_data.id,
+    ]
+  }
+}
+
+# The API's second reader on the temperature-data Event Hub: the target rule
+# (recordTargetsReached in apps/api), which records on each running cook which
+# channels have reached their target. Its own group, so its checkpoints and its
+# retries never hold back the live push on `api-broadcast`. Same receiver grant,
+# same replacement rules as api_broadcast above.
+resource "azurerm_eventhub_consumer_group" "api_targets" {
+  name                = "api-targets"
+  namespace_name      = azurerm_eventhub_namespace.main.name
+  eventhub_name       = azurerm_eventhub.temperature_data.name
+  resource_group_name = var.resource_group_name
+
+  # See api_broadcast: the parents are reached by configured name, so only these
+  # triggers plan this group's replacement with theirs (MG-48).
   lifecycle {
     replace_triggered_by = [
       azurerm_eventhub_namespace.main.id,

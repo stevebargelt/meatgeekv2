@@ -178,6 +178,10 @@ components:
       $ref: './components/schemas/cook.yaml#/CookStatus'
     TargetTemperatures:
       $ref: './components/schemas/cook.yaml#/TargetTemperatures'
+    TargetReached:
+      $ref: './components/schemas/cook.yaml#/TargetReached'
+    TargetsReached:
+      $ref: './components/schemas/cook.yaml#/TargetsReached'
     Cook:
       $ref: './components/schemas/cook.yaml#/Cook'
     StartCookTargetTemperatures:

@@ -212,6 +212,12 @@ locals {
     # not a credential.
     "TEMPERATURE_BROADCAST_CONSUMER_GROUP" = var.temperature_broadcast_consumer_group
 
+    # The target rule's own consumer group on the same Event Hub: it records on
+    # each running cook which channels have reached their target, beside the
+    # live push and never inside it. Same namespace setting, same receiver
+    # grant. A name, not a credential.
+    "TARGETS_CONSUMER_GROUP" = var.targets_consumer_group
+
     # IoT Hub service hostname (HAR-56), where the API writes device twin desired
     # properties under its managed identity. Non-secret; the identity is granted
     # IoT Hub Twin Contributor in the root module (on in dev, off in prod).

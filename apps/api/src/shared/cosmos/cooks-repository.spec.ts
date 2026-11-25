@@ -843,6 +843,8 @@ describe('MG-59 cooks repository', () => {
         _attachments: 'attachments/',
         _ts: 1790000000,
         legacyField: 'not in the contract',
+        // Stored by the target rule, never returned.
+        targetsPending: { probe1: '2026-08-24T15:00:00Z' },
       } as unknown as Cook;
     }
 
@@ -852,6 +854,7 @@ describe('MG-59 cooks repository', () => {
         endTime: '2026-08-24T18:00:00Z',
         weight: 14,
         targetTemps: { grill: 250, probe1: 203 },
+        targetsReached: { grill: { reachedAt: '2026-08-24T07:10:05Z' } },
         actualDuration: 12,
         maxTemps: { grill: 270 },
         notes: 'wrapped at 165',
