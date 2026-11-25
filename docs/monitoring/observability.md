@@ -582,10 +582,19 @@ These are the alerts live in dev today. All of them are Terraform-managed in `ap
 
 ### `ingestion-cap-reached` (severity 1)
 
-- **Condition:** workspace `Heartbeat`, `Count` ≤ `0` over a 15-minute window (`PT15M`), checked every 5 minutes (`PT5M`).
-- **Means, as designed:** workspace ingestion stopped, most likely because the daily cap was reached.
-- **This rule cannot fire today.** The `Heartbeat` metric only has data when VM or Arc agents send heartbeats, and nothing in this system does. The metric had no data points at all from 2026-11-16 to 2026-11-23.
-- **Do, if it ever fires:** check the workspace's Usage and estimated costs, and its daily cap setting.
+- **Condition:** log search alert on the workspace. Query `_LogOperation | where Detail contains "OverQuota"`, row count > `0` over a 30-minute window (`PT30M`), evaluated every 15 minutes (`PT15M`). Stateless (it does not auto-resolve), and its actions are muted for 1 hour (`PT1H`) after it fires.
+- **Means:** the workspace hit its daily ingestion cap (`ingestion_cap_gb`, 2 GB in dev) and Azure has stopped storing billable data: App Insights telemetry, Function App logs and diagnostic logs. Data sent while capped is lost, not delayed.
+- **Why a log query still works after the cap:** the cap stops billable data only. The `Operation` table behind `_LogOperation` is free of ingestion charges ([Excluded tables](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/cost-logs)), so the cap row is still ingested after the cap. Microsoft documents this query as its cap alert ([daily cap](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/daily-cap)).
+- **Do:** find the table that grew, `Usage | where TimeGenerated > ago(1d) | where IsBillable | summarize MB=sum(Quantity) by DataType | order by MB desc`, then fix the source. Raising the cap costs money and is the owner's decision. Raising it does bring ingestion back before the daily reset, but not at once (HAR-180): the cap went from 0.1 GB back to 2 GB at 2026-11-25T11:19:56Z, `_LogOperation` logged "Data collection started due to quota increased" in the same second, and the first billable row arrived at 12:03:50Z, 43 min 55 s later. All nine billable tables were back by 12:09:40Z. Nothing is logged when data actually resumes, so a gap under an hour after raising the cap is not a failure. Without a cap change, ingestion resumes at the workspace's daily reset (02:00 UTC in dev).
+- **Proof (HAR-179):** with the dev cap temporarily at 0.1 GB, the cap row arrived at 2026-11-25T09:43:35Z (Category `Ingestion`, Level `Warning`, Detail `Data collection stopped due to daily limit of free data reached. Ingestion status = OverQuota`). All billable ingestion stopped by 09:45:41Z. The alert fired at 09:56:40Z, 13 minutes after the row.
+- **Cost:** $0.50 per rule per month, $1.00 for this rule and `ingestion-near-cap` together (Azure Retail Prices API, westus2, meter "Alerts System Log Monitored at 15 Minute Frequency").
+
+### `ingestion-near-cap` (severity 2)
+
+- **Condition:** log search alert on the workspace. Billable `Usage` (`IsBillable`), sum of `Quantity` in MB over a trailing 24 hours (`P1D`), evaluated every hour (`PT1H`), > `ingestion_cap_gb × 1000 × ingestion_warning_percent / 100`, which is `1600` MB in dev (80% of 2 GB).
+- **Means:** billable ingestion is heading for the cap. The window is a trailing 24 hours because the cap's day starts at a reset hour Azure picks per workspace (02:00 UTC in dev, from `workspaceCapping.quotaNextResetTime`), and Terraform cannot set it. A normal dev day is about 360 MB billable (18% of the cap), since a step-up on 2026-11-23.
+- **Do:** run the same `Usage` query as for `ingestion-cap-reached` to find the table that grew, and fix the source before the cap stops ingestion.
+- **Proof (HAR-179):** with the dev cap temporarily at 0.1 GB, it fired at 2026-11-25T03:29:23Z (349 MB > 80 MB).
 
 ### `role-assignment-write`, `user-assigned-identity-write`, `cosmos-sql-role-assignment-write` (activity log)
 
