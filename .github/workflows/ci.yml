@@ -173,11 +173,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test the emulator script's fault matcher
+        # HAR-190: the start step restarts the emulator for one fault only;
+        # these Pester cases pin what counts as that fault.
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion 5.0
+          $result = Invoke-Pester -Path ./.github/scripts/cosmos-emulator.Tests.ps1 -PassThru -Output Detailed
+          if ($result.FailedCount -gt 0 -or $result.PassedCount -eq 0) { exit 1 }
+
       - name: Start the Cosmos emulator (bounded)
         # Checks the runner image's emulator is the pinned version, starts it
         # with the tier's partition count, waits (bounded at 5 minutes) until
         # it is Running and its gateway answers TLS, writes the certificate it
-        # presents for NODE_EXTRA_CA_CERTS, and reports the start-up time.
+        # presents for NODE_EXTRA_CA_CERTS, and reports the start-up time. On
+        # the SetCertificateAcl start-up fault, and only that, it stops the
+        # emulator and starts it once more (HAR-190).
         shell: pwsh
         run: |
           $cert = Join-Path $env:RUNNER_TEMP 'cosmos-emulator.pem'

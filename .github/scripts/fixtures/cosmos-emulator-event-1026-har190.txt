@@ -1,0 +1,21 @@
+TimeCreated  : 11/25/2026 6:15:20 PM
+ProviderName : .NET Runtime
+Id           : 1026
+Message      : Application: Microsoft.Azure.Cosmos.StartupEntryPoint.exe
+               Framework Version: v4.0.30319
+               Description: The process was terminated due to an unhandled exception.
+               Exception Info: System.Security.Cryptography.CryptographicException
+                  at System.Security.Cryptography.Utils.CreateProvHandle(System.Security.Cryptography.CspParameters, Boolean)
+                  at System.Security.Cryptography.Utils.GetKeyPairHelper(System.Security.Cryptography.CspAlgorithmType, System.Security.Cryptography.CspParameters, Boolean, Int32, System.Security.Cryptography.SafeProvHandle ByRef, System.Security.Cryptography.SafeKeyHandle ByRef)
+                  at System.Security.Cryptography.RSACryptoServiceProvider.GetKeyPair()
+                  at System.Security.Cryptography.RSACryptoServiceProvider..ctor(Int32, System.Security.Cryptography.CspParameters, Boolean)
+                  at System.Security.Cryptography.X509Certificates.X509Certificate2.get_PrivateKey()
+                  at System.Security.Cryptography.X509Certificates.RSACertificateExtensions.GetRSAPrivateKey(System.Security.Cryptography.X509Certificates.X509Certificate2)
+                  at Microsoft.Azure.Cosmos.ServiceFramework.EntryPoint.AclCertificateUtil.GetCngPrivateKey(System.Security.Cryptography.X509Certificates.X509Certificate2)
+                  at Microsoft.Azure.Cosmos.ServiceFramework.EntryPoint.AclCertificateUtil.SetCertificateAcl(System.Security.Cryptography.X509Certificates.X509Certificate2, System.String, Boolean)
+                  at Microsoft.Azure.Cosmos.ServiceFramework.EntryPoint.AclCertificateUtil.SetCertificateAclByCommonName(System.String, System.String, System.Security.Cryptography.X509Certificates.StoreName, System.Security.Cryptography.X509Certificates.StoreLocation, Boolean, Boolean)
+                  at Microsoft.Azure.Documents.Services.StartupEntryPoint.ServiceSetupHelper.SetSecretsEncryptionCertAcl(System.String, System.String, System.String)
+                  at Microsoft.Azure.Documents.Services.StartupEntryPoint.GatewayServiceSetupCommand.GatewayInit(System.Fabric.CodePackageActivationContext)
+                  at Microsoft.Azure.Documents.Services.StartupEntryPoint.GatewayServiceSetupCommand+<>c.<AddCommand>b__2_1()
+                  at Microsoft.Extensions.CommandLineUtils.CommandLineApplication.Execute(System.String[])
+                  at Microsoft.Azure.Documents.Services.StartupEntryPoint.ServiceStartupEntryPoint.Main(System.String[])

@@ -15,7 +15,9 @@
 #       partition count below, waits (bounded, 300 s) until it reports Running
 #       and its gateway answers, writes the certificate the gateway presents to
 #       <cert-file> (PEM) and reports the start-up time with the partition
-#       count, as a notice and in the job summary.
+#       count, as a notice and in the job summary. If, and only if, the start
+#       hits the SetCertificateAcl fault (below), it stops the emulator and
+#       starts it once more, with its own 300 s bound, and says so in a notice.
 #
 #   cosmos-emulator.ps1 sample <file>
 #       Every 10 s until killed, appends one timestamped line: the emulator's
@@ -40,8 +42,6 @@ $ErrorActionPreference = 'Stop'
 # row and 8 concurrent copies (HAR-113, HAR-185). 2.14.29.0 has passed the
 # 8-copy pass and api-cosmos-emulator; its 50-run serial pass is outstanding
 # (HAR-186). HAR-186 runs it and drops 2.14.28.0 once no runner reports it.
-# 2.14.29.0 also failed 1 of its first 3 starts (gateway crash in
-# SetCertificateAcl); HAR-189 tracks it.
 $PinnedVersions = @('2.14.28.0', '2.14.29.0')
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
@@ -55,6 +55,64 @@ $ProcessPattern = '^(Microsoft\.Azure\.Cosmos|CosmosDB\.|Microsoft\.Azure\.Docum
 
 function Write-Summary([string]$line) {
   if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $line }
+}
+
+# HAR-190 — the one start-up fault this script restarts the emulator for. On
+# 2.14.29.0 an emulator service's StartupEntryPoint (the gateway's, in job
+# 139411256607) can die about a minute into the start with an unhandled
+# CryptographicException in AclCertificateUtil.SetCertificateAcl. The emulator
+# starts its services together, and the StartupEntryPoint of each of its
+# gateway, controller and background-task services opens the private key of
+# the emulator's own CosmosEmulatorSecrets certificate (a CNG key) to add its
+# service group to the key file's ACL. It opens the key before taking the
+# cross-process mutex the emulator uses for that ACL change, so the services'
+# opens and ACL writes on the one key file overlap. When .NET Framework's GetRSAPrivateKey cannot
+# acquire the CNG key, for whatever reason, it falls back to the legacy CSP
+# path (RSACryptoServiceProvider), which cannot open a CNG key and throws; the
+# CNG error itself is lost. Windows logs .NET Runtime event 1026 with the
+# stack, then Application Error 1000. Service Fabric relaunches the service
+# minutes later, too late for the 300 s bound. All of this happens inside the
+# emulator's own processes, on a key it owns, after Start-CosmosDbEmulator
+# returns, so nothing can be prepared from outside: a clean stop and one more
+# start is the remedy.
+function Test-SetCertificateAclFault([string]$Message) {
+  # Every marker of this fault in the .NET Runtime 1026 event's text, and only
+  # this fault: a different crash, or a different exception, does not match.
+  return ($Message -match 'Microsoft\.Azure\.Cosmos\.StartupEntryPoint\.exe') -and
+    ($Message -match 'System\.Security\.Cryptography\.CryptographicException') -and
+    ($Message -match 'AclCertificateUtil\.SetCertificateAcl')
+}
+
+function Find-SetCertificateAclFault([datetime]$Since) {
+  Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = '.NET Runtime'; Id = 1026; StartTime = $Since } -ErrorAction SilentlyContinue |
+    Where-Object { Test-SetCertificateAclFault $_.Message } |
+    Select-Object -First 1
+}
+
+function Start-Emulator {
+  # One start, bounded at 300 s. Returns the PEM once the emulator is Running
+  # and its gateway completes a TLS handshake; or, as soon as Windows logs the
+  # SetCertificateAcl fault for this start, that event; or neither on timeout.
+  $since = Get-Date
+  $clock = [System.Diagnostics.Stopwatch]::StartNew()
+  Start-CosmosDbEmulator -NoUI -NoTelemetry -NoWait `
+    -PartitionCount $PartitionCount -DefaultPartitionCount $DefaultPartitionCount
+  while ($clock.Elapsed.TotalSeconds -lt 300) {
+    if ((Get-CosmosDbEmulatorStatus) -eq 'Running') {
+      try {
+        $pem = Get-GatewayCertificatePem
+        return @{ Pem = $pem; Fault = $null; Seconds = [int]$clock.Elapsed.TotalSeconds }
+      } catch {
+        # Running but the gateway is not accepting TLS yet.
+      }
+    }
+    $fault = Find-SetCertificateAclFault $since
+    if ($fault) {
+      return @{ Pem = $null; Fault = $fault; Seconds = [int]$clock.Elapsed.TotalSeconds }
+    }
+    Start-Sleep -Seconds 2
+  }
+  return @{ Pem = $null; Fault = $null; Seconds = [int]$clock.Elapsed.TotalSeconds }
 }
 
 function Get-GatewayCertificatePem {
@@ -81,27 +139,42 @@ switch ($Command) {
     }
     Import-Module (Join-Path $InstallDir 'PSModules\Microsoft.Azure.CosmosDB.Emulator')
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
-    Start-CosmosDbEmulator -NoUI -NoTelemetry -NoWait `
-      -PartitionCount $PartitionCount -DefaultPartitionCount $DefaultPartitionCount
-    $pem = $null
-    while ($clock.Elapsed.TotalSeconds -lt 300) {
-      if ((Get-CosmosDbEmulatorStatus) -eq 'Running') {
-        try {
-          $pem = Get-GatewayCertificatePem
-          break
-        } catch {
-          # Running but the gateway is not accepting TLS yet.
-        }
+    $attempt = Start-Emulator
+    $restarted = ''
+    if ($attempt.Fault) {
+      # The one retry this script allows, for this fault only (HAR-190).
+      $fault = $attempt.Fault
+      $notice = "Cosmos emulator $version`: $($fault.ProviderName) event $($fault.Id) at $($fault.TimeCreated.ToString('HH:mm:ss')), $($attempt.Seconds)s into the start: " +
+        'StartupEntryPoint died with a CryptographicException in AclCertificateUtil.SetCertificateAcl (HAR-190). ' +
+        'Stopping the emulator and starting it once more, with its own 300s bound.'
+      Write-Host "::notice title=Cosmos emulator restart (SetCertificateAcl fault)::$notice"
+      Write-Summary $notice
+      Write-Host $fault.Message
+      if ($env:RUNNER_TEMP) {
+        # Kept in the cosmos-emulator-* artifact, which is uploaded on success too.
+        $dir = Join-Path $env:RUNNER_TEMP 'cosmos-emulator'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        ($fault | Format-List TimeCreated, ProviderName, Id, Message | Out-String -Width 300) |
+          Set-Content (Join-Path $dir 'restart-fault.txt')
       }
-      Start-Sleep -Seconds 2
+      Stop-CosmosDbEmulator
+      Write-Host "Cosmos emulator stopped (status: $(Get-CosmosDbEmulatorStatus)) after $([int]$clock.Elapsed.TotalSeconds)s; starting it again."
+      $first = $attempt.Seconds
+      $attempt = Start-Emulator
+      if ($attempt.Fault) {
+        Write-Host "::error::Cosmos emulator $version hit the SetCertificateAcl fault again after its one restart ($($attempt.Fault.TimeCreated.ToString('HH:mm:ss')))"
+        Write-Host $attempt.Fault.Message
+        exit 1
+      }
+      $restarted = ", after one restart for the SetCertificateAcl fault: fault at ${first}s, second start $($attempt.Seconds)s"
     }
-    if (-not $pem) {
+    if (-not $attempt.Pem) {
       Write-Host "::error::Cosmos emulator not ready within 300s (status: $(Get-CosmosDbEmulatorStatus))"
       exit 1
     }
-    [System.IO.File]::WriteAllText($Path, $pem)
+    [System.IO.File]::WriteAllText($Path, $attempt.Pem)
     $seconds = [int]$clock.Elapsed.TotalSeconds
-    $line = "Cosmos emulator $version started in ${seconds}s (PartitionCount=$PartitionCount, DefaultPartitionCount=$DefaultPartitionCount)"
+    $line = "Cosmos emulator $version started in ${seconds}s (PartitionCount=$PartitionCount, DefaultPartitionCount=$DefaultPartitionCount$restarted)"
     Write-Host "::notice title=Cosmos emulator start-up::$line"
     Write-Summary $line
   }
