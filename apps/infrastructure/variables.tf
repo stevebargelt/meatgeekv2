@@ -294,8 +294,8 @@ variable "ingestion_cap_gb" {
   type        = number
   default     = 2
   validation {
-    condition     = var.ingestion_cap_gb >= 0.1 && var.ingestion_cap_gb <= 10
-    error_message = "ingestion_cap_gb must be between 0.1 and 10 (inclusive)."
+    condition     = var.ingestion_cap_gb >= 1 && var.ingestion_cap_gb <= 10
+    error_message = "ingestion_cap_gb must be between 1 and 10 (inclusive)."
   }
 }
 
