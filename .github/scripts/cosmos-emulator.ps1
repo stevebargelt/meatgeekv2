@@ -3,7 +3,7 @@
 # ships on the windows-2025 runner image. One script so both jobs start,
 # measure and diagnose it the same way.
 #
-# Why Windows: the classic Linux emulator image (same 2.14.28 build) dies with a
+# Why Windows: the classic Linux emulator image (2.14.28 in HAR-113) dies with a
 # native fault in its SQLPAL HTTP/socket layer ("Last Chance", Reason
 # 0x00000006, stack through Http.sys and AfdWsk.sys) within minutes of the
 # tier's load: exit 1, OOMKilled=false, 1.2 GB of 15.6 GB used. Partition count
@@ -32,8 +32,17 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-# The runner image pins the emulator; fail loudly if an image update moves it.
-$PinnedVersion = '2.14.28.0'
+# The runner image pins the emulator; fail loudly if an image update moves it
+# to a build nobody has re-verified this tier on. GitHub rolls a new runner
+# image out over days, so while it does both builds are live: win25-vs2026
+# 20261116.315.1 ships 2.14.28.0 and 20261123.321.1 ships 2.14.29.0 (HAR-185).
+# 2.14.28.0 has passed test-repeat's repeat-emulator job in full: 50 runs in a
+# row and 8 concurrent copies (HAR-113, HAR-185). 2.14.29.0 has passed the
+# 8-copy pass and api-cosmos-emulator; its 50-run serial pass is outstanding
+# (HAR-186). HAR-186 runs it and drops 2.14.28.0 once no runner reports it.
+# 2.14.29.0 also failed 1 of its first 3 starts (gateway crash in
+# SetCertificateAcl); HAR-189 tracks it.
+$PinnedVersions = @('2.14.28.0', '2.14.29.0')
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
 # the deployed 400 RU/s shared database has one physical partition.
@@ -67,8 +76,8 @@ switch ($Command) {
     $exe = Get-Item (Join-Path $InstallDir 'Microsoft.Azure.Cosmos.Emulator.exe')
     $version = $exe.VersionInfo.FileVersion
     Write-Host "Runner image: $env:ImageOS $env:ImageVersion; Cosmos emulator: $version"
-    if ($version -ne $PinnedVersion) {
-      throw "Expected Cosmos emulator $PinnedVersion, found $version (runner image changed)."
+    if ($version -notin $PinnedVersions) {
+      throw "Expected Cosmos emulator $($PinnedVersions -join ' or '), found $version (runner image changed)."
     }
     Import-Module (Join-Path $InstallDir 'PSModules\Microsoft.Azure.CosmosDB.Emulator')
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
