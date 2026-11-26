@@ -208,36 +208,6 @@ export const suites = [
     timeoutSec: 600,
   },
 
-  // --- Node (node --test, through each tool's floored wrapper) -------------
-  {
-    id: 'iot-fixture',
-    command: ['node', 'apps/infrastructure/scripts/iot-fixture/run-tests.mjs'],
-    paths: ['apps/infrastructure/scripts/iot-fixture/**'],
-    needs: [],
-    timeoutSec: 600,
-  },
-  {
-    id: 'iot-fixture-sdk',
-    command: ['node', 'apps/infrastructure/scripts/iot-fixture/run-tests.mjs', '--sdk'],
-    paths: ['apps/infrastructure/scripts/iot-fixture/**', 'package.json', 'package-lock.json'],
-    needs: ['npm'],
-    timeoutSec: 600,
-  },
-  {
-    id: 'cosmos-export',
-    command: ['node', 'apps/infrastructure/scripts/cosmos-export/run-tests.mjs'],
-    paths: ['apps/infrastructure/scripts/cosmos-export/**'],
-    needs: [],
-    timeoutSec: 600,
-  },
-  {
-    id: 'cosmos-export-sdk',
-    command: ['node', 'apps/infrastructure/scripts/cosmos-export/run-tests.mjs', '--sdk'],
-    paths: ['apps/infrastructure/scripts/cosmos-export/**', 'package.json', 'package-lock.json'],
-    needs: ['npm'],
-    timeoutSec: 600,
-  },
-
   // --- Shell --------------------------------------------------------------
   // Exactly as ci.yml's validate-infrastructure runs them: through
   // assert-suite-completion.sh, with stdin closed (the harness always closes

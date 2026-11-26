@@ -1,5 +1,9 @@
 # MG-67 — Dev IoT Device Fixture: Host-Phase Verification Runbook
 
+> **Historical record. The tool is retired.** `apps/infrastructure/scripts/iot-fixture/`
+> (and `scripts/cosmos-export/`) were removed once MG-67 closed; nothing below can be
+> run as written. The evidence files under `docs/infrastructure/evidence/` stay.
+
 > **The 3-message traversal has now run against the live tenant, and it was
 > confirmed.** On **2026-08-16** `send-fixture.mjs` ran against
 > `meatgeek-v2-dev-db` as run `mg-67-run-bc775303-3692-41de-a405-b6765e014c21`,
