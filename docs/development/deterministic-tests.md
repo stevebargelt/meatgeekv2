@@ -136,11 +136,9 @@ that would otherwise never finish, so it cannot turn a slow pass into a failure.
 
 - **Wait on the child's own signal, then on the child.** Have the child write
   a readiness line to a FIFO or a socket once it is ready, `read` it (no `-t`),
-  act, then `wait $pid`. The iot-fixture SIGKILL test (HAR-112,
-  `send-fixture.test.mjs`, "realSpawn enforces a HARD timeout") is the pattern:
-  the child connects back, installs its SIGTERM trap, then writes `ready`, so
-  "ready" means "a SIGTERM now is ignored", and the test never guesses how long
-  that takes.
+  act, then `wait $pid`. For example (HAR-112): the child connects back,
+  installs its SIGTERM trap, then writes `ready`, so "ready" means "a SIGTERM
+  now is ignored", and the test never guesses how long that takes.
 - **No `producer | grep -q` under pipefail.** `grep -q` exits at its first
   match; the producer's next write gets SIGPIPE, and pipefail turns the match
   into a failure, depending on scheduling. Use a here-string
