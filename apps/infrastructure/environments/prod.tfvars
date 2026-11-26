@@ -25,8 +25,8 @@ environment = "prod"
 # protect prod data — at the operator's live re-apply it will DESTROY AND RECREATE the
 # Cosmos account with TEMPERATURE-HISTORY DATA LOSS unless a migration/restore is done
 # first. The operator is the only control here; nothing in this code stops it. Real
-# prod data-loss protection (a durable preventdestroy/backup posture) is tracked
-# separately in MG-35 — see backlog/stories/MG-35-*.
+# prod data-loss protection (a durable preventdestroy/backup posture) was tracked
+# separately, as MG-35 in a retired tracker.
 location = "West US 2"
 
 # Production-grade retention settings
