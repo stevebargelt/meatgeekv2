@@ -40,9 +40,10 @@ $ErrorActionPreference = 'Stop'
 # image out over days, so while it does both builds are live: win25-vs2026
 # 20261116.315.1 ships 2.14.28.0 and 20261123.321.1 ships 2.14.29.0 (HAR-185).
 # 2.14.28.0 has passed test-repeat's repeat-emulator job in full: 50 runs in a
-# row and 8 concurrent copies (HAR-113, HAR-185). 2.14.29.0 has passed the
-# 8-copy pass and api-cosmos-emulator; its 50-run serial pass is outstanding
-# (HAR-186). HAR-186 runs it and drops 2.14.28.0 once no runner reports it.
+# row and 8 concurrent copies (HAR-113, HAR-185). 2.14.29.0 passed both on
+# HAR-190's PR at 7eec29e (jobs 139565515749 and 139565515731), but this
+# script as merged (f98ff70) has so far started only on 2.14.28.0. HAR-186
+# re-proves 2.14.29.0 with it and drops 2.14.28.0 once no runner reports it.
 $PinnedVersions = @('2.14.28.0', '2.14.29.0')
 # One partition per Terraform container the tier creates (7, in one shared
 # database) plus headroom. Each container gets one partition, as a container in
