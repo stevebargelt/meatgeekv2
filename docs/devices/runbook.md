@@ -13,8 +13,10 @@ The commands run against the dev environment (`meatgeek-v2-dev-rg`).
 
 - A Raspberry Pi 4 with an MCP3008 ADC on SPI (1 grill RTD and 4 probe RTDs)
   and an LCD on I2C bus 1 at `0x27`.
-- 64-bit Debian (`aarch64`); plain Debian, not Raspberry Pi OS, is fine. SPI
-  must be on (`/dev/spidev0.0` exists). The command turns I2C on itself.
+- Raspberry Pi OS Lite (64-bit, `aarch64`), Raspberry Pi's port of Debian
+  Trixie: the image the enrolled Pi runs. Onboarding also handles plain 64-bit
+  Debian, which needs the udev rules and I2C overlay it installs. SPI must be
+  on (`/dev/spidev0.0` exists). The command turns I2C on itself.
 - You can reach it as `pi@<lan ip>` over ssh with a key, with no password.
   `pi` may need a password for `sudo`.
 

@@ -15,9 +15,9 @@ build:
 	go build $(LDFLAGS) -o dist/$(BINARY_NAME) main.go
 	@echo "✅ Build complete: dist/$(BINARY_NAME)"
 
-# Cross-compile for Raspberry Pi OS (linux/arm64)
+# Cross-compile for the Pi (linux/arm64: Raspberry Pi OS Lite 64-bit, Debian Trixie)
 build-arm:
-	@echo "Cross-compiling $(BINARY_NAME) for Raspberry Pi OS (linux/arm64)..."
+	@echo "Cross-compiling $(BINARY_NAME) for the Pi (linux/arm64)..."
 	GOARCH=arm64 GOOS=linux go build $(LDFLAGS) -o dist/$(BINARY_NAME)-arm main.go
 	@echo "✅ ARM build complete: dist/$(BINARY_NAME)-arm"
 
@@ -134,7 +134,7 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  build         - Build for local development"
-	@echo "  build-arm     - Cross-compile for Raspberry Pi OS (linux/arm64)"
+	@echo "  build-arm     - Cross-compile for the Pi (linux/arm64)"
 	@echo "  build-windows - Cross-compile for Windows"
 	@echo "  test          - Run tests"
 	@echo "  lint          - Run linters"

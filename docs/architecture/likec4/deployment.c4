@@ -4,7 +4,7 @@ deployment {
 
     host pi 'Raspberry Pi' {
       technology 'linux/arm64, one per smoker'
-      description 'Debian trixie arm64. apps/data-pusher/deploy/onboard-pi.sh, run from a laptop, cross-compiles both binaries, copies them over SSH, installs both as systemd units running as the meatgeek user, and enrols the device in DPS. A re-run is how a newer build reaches the Pi (docs/devices/runbook.md).'
+      description 'Raspberry Pi OS Lite (64-bit), based on Debian Trixie. apps/data-pusher/deploy/onboard-pi.sh, run from a laptop, cross-compiles both binaries, copies them over SSH, installs both as systemd units running as the meatgeek user, and enrols the device in DPS. A re-run is how a newer build reaches the Pi (docs/devices/runbook.md).'
       controller = instanceOf meatgeek.edge.controller
       pusher = instanceOf meatgeek.edge.pusher {
         description '''
