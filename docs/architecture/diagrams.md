@@ -68,7 +68,7 @@ title: "MeatGeek V2: landscape"
 ---
 graph TB
   Pitmaster@{ icon: "fa:user", shape: rounded, label: "Pitmaster" }
-  Team@{ icon: "fa:user", shape: rounded, label: "Paperclip team" }
+  Team@{ icon: "fa:user", shape: rounded, label: "Developers" }
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   Vercel@{ shape: rectangle, label: "Vercel" }
   Smoker@{ shape: rectangle, label: "Pellet smoker" }
@@ -822,7 +822,7 @@ View `pipeline` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/pi
 title: "Delivery pipeline"
 ---
 graph TB
-  Team@{ icon: "fa:user", shape: rounded, label: "Paperclip team" }
+  Team@{ icon: "fa:user", shape: rounded, label: "Developers" }
   subgraph Delivery["`Delivery pipeline`"]
     subgraph Delivery.Acceptance["`Acceptance`"]
       Delivery.Acceptance.Roundtrip@{ shape: rectangle, label: "telemetry-roundtrip.proof.ts" }
@@ -1272,7 +1272,7 @@ View `mergeToDeploy` on the site: https://stevebargelt.github.io/meatgeekv2/#/vi
 title: "Flow: a merge reaches dev"
 ---
 graph LR
-  Team@{ icon: "fa:user", shape: rounded, label: "Paperclip team" }
+  Team@{ icon: "fa:user", shape: rounded, label: "Developers" }
   DeliveryCi@{ shape: rectangle, label: "CI/CD Pipeline" }
   Vercel@{ shape: rectangle, label: "Vercel" }
   MeatgeekWeb@{ shape: rounded, label: "Web app" }
@@ -1307,7 +1307,7 @@ graph LR
 
 Steps:
 
-- **1a.** Paperclip team → CI/CD Pipeline: merge to main. The push to `main` starts CI/CD Pipeline.
+- **1a.** Developers → CI/CD Pipeline: merge to main. The push to `main` starts CI/CD Pipeline.
 - **1b.** Vercel → Web app: builds main, serves production. The Vercel Git integration, on its own: no workflow and no Vercel token in GitHub. It reports back only through the `Vercel` commit status.
 - **2.** CI/CD Pipeline → Apply Dev Infrastructure: green on main. `workflow_run`, so the workflow file that runs is always the one on `main`. If a newer commit has landed, this run ends green **without applying**.
 - **3.** Apply Dev Infrastructure → MeatGeek cloud: terraform apply

@@ -4,8 +4,8 @@ model {
     description 'Runs a cook on a pellet smoker and watches it from a phone or browser.'
   }
 
-  team = actor 'Paperclip team' {
-    description 'Lead, Engineer and Reviewer agents. They open, review and merge pull requests.'
+  team = actor 'Developers' {
+    description 'The owner and the coding agents working for them. They open, review and merge pull requests.'
   }
 
   operator = actor 'Operator' {

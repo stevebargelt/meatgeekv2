@@ -91,8 +91,10 @@ node tools/test-repeat/test-repeat.mjs run utils --runs 20
 
 ## Conventions
 
-- Commit subject: `type(scope): HAR-<n> <what changed>`, e.g. `fix(ios): HAR-171 sign-in always uses the system
-  browser`. Types in use: `feat`, `fix`, `docs`, `chore`, `ci`. The squash merge appends `(#<pr>)`.
+- Commit subject: `type(scope): <what changed>`, e.g. `fix(ios): sign-in always uses the system browser`. Types in
+  use: `feat`, `fix`, `docs`, `chore`, `ci`, `refactor`. The squash merge appends `(#<pr>)`. A pull request that
+  finishes a GitHub issue says `Closes #<n>` in its body. Older subjects carry `HAR-<n>` or `MG-<n>`: ids from
+  trackers this repository no longer uses.
 - Where tests live: `*.spec.ts` next to the source; `*.emulator.spec.ts` only for the emulator tier (excluded from
   `nx test api`); the live API suite in `apps/api/acceptance/`; the live browser proof in `apps/web-e2e/live/`; Go
   `*_test.go` next to the package; Terraform `*.tftest.hcl` under `tests/` of the root or a module (CI finds new ones
