@@ -1,0 +1,162 @@
+name: Agent
+
+# Runs Claude Code on an issue labelled ready-for-agent, once nothing blocks it.
+# The run ends in a pull request for the owner to merge, or, when the agent can't
+# finish, in a comment and the ready-for-human label.
+#
+# - Adding ready-for-agent starts a run, but only when every issue blocking it is
+#   closed as completed: GitHub's blocked-by links, plus any "Blocked by: #n" line
+#   in the body. A blocked issue is skipped before Claude starts, without a comment.
+# - Closing an issue as completed releases the ready-for-agent issues it was
+#   blocking: each is re-checked and started if nothing else blocks it.
+# - "Run workflow" (or `gh workflow run agent.yml -f issue=N`) starts one by hand,
+#   through the same checks.
+# - Setting the repository variable AGENT_PAUSED to true stops all of it.
+# Installed by the home repo's bin/install-agent-action; change the template there.
+on:
+  issues:
+    types: [labeled, closed]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number
+        required: true
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+# One run per issue; a second start while one is going waits, then re-checks.
+concurrency:
+  group: agent-issue-${{ github.event.inputs.issue || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  # An issue closed as completed: start the agent on the ready-for-agent issues it was blocking.
+  release:
+    if: >-
+      vars.AGENT_PAUSED != 'true' && github.event_name == 'issues' &&
+      github.event.action == 'closed' && github.event.issue.state_reason == 'completed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      CLOSED: ${{ github.event.issue.number }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - run: |
+          set -euo pipefail
+          native=$(gh api "repos/$REPO/issues/$CLOSED/dependencies/blocking" --paginate --jq '.[].number' || true)
+          text=$(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number,body \
+              --jq '.[] | "\(.number) \(.body // "" | @base64)"' |
+            while read -r n b; do
+              base64 -d <<<"$b" | grep -iE '^\W*blocked by\W*:' | grep -qE "#$CLOSED([^0-9]|$)" && echo "$n" || true
+            done)
+          for n in $(printf '%s\n' $native $text | sort -un); do
+            labels=$(gh api "repos/$REPO/issues/$n" --jq 'select(.state=="open") | [.labels[].name] | join(",")')
+            if [[ ",$labels," == *",ready-for-agent,"* ]]; then
+              echo "#$CLOSED closed: starting the agent on #$n (it re-checks its other blockers)"
+              gh workflow run agent.yml --repo "$REPO" --ref "$DEFAULT_BRANCH" -f issue="$n"
+            fi
+          done
+
+  # Is this issue ready? Open, labelled ready-for-agent, not ready-for-human, no open
+  # blocker, and no open pull request already closing it.
+  gate:
+    if: >-
+      vars.AGENT_PAUSED != 'true' && (github.event_name == 'workflow_dispatch' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'ready-for-agent'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      issue: ${{ steps.check.outputs.issue }}
+      ready: ${{ steps.check.outputs.ready }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ISSUE: ${{ github.event.inputs.issue || github.event.issue.number }}
+    steps:
+      - id: check
+        run: |
+          set -euo pipefail
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "::error::issue must be a number"; exit 1; }
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+          skip() { echo "Not starting #$ISSUE: $1" | tee -a "$GITHUB_STEP_SUMMARY"; echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          read -r state labels < <(gh api "repos/$REPO/issues/$ISSUE" --jq '"\(.state) ,\([.labels[].name]|join(",")),"')
+          [[ "$state" == open ]] || skip "it is $state"
+          [[ "$labels" == *",ready-for-agent,"* ]] || skip "it is not labelled ready-for-agent"
+          [[ "$labels" != *",ready-for-human,"* ]] || skip "it is labelled ready-for-human"
+
+          native=$(gh api "repos/$REPO/issues/$ISSUE/dependencies/blocked_by" --paginate --jq '.[].number' || true)
+          text=$(gh api "repos/$REPO/issues/$ISSUE" --jq '.body // ""' | grep -iE '^\W*blocked by\W*:' | grep -oE "#[0-9]+" | tr -d "#" || true)
+          open=""
+          for b in $(printf '%s\n' $native $text | sort -un); do
+            [[ "$b" == "$ISSUE" ]] && continue
+            read -r bs reason < <(gh api "repos/$REPO/issues/$b" --jq '"\(.state) \(.state_reason // "none")"')
+            [[ "$bs" == closed && "$reason" == completed ]] || open+=" #$b($bs${reason:+, $reason})"
+          done
+          [[ -z "$open" ]] || skip "blocked by$open"
+
+          pr=$(gh pr list --repo "$REPO" --state open --search "\"Closes #$ISSUE\" in:body" --json number --jq '.[0].number // empty')
+          [[ -z "$pr" ]] || skip "pull request #$pr already closes it"
+          echo "#$ISSUE is ready" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+  implement:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_26.6.app/Contents/Developer"
+          xcodebuild -version
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/data-pusher/go.mod
+          cache: false
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: https://github.com/anthropics/claude-plugins-official.git
+          plugins: mattpocock-skills@claude-plugins-official
+          claude_args: |
+            --permission-mode acceptEdits
+            --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,Bash(xcodebuild:*),Bash(xcrun:*),Bash(swift:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh:*)"
+          prompt: |
+            You are working on issue #${{ needs.gate.outputs.issue }} in ${{ github.repository }}, with no one watching.
+            Nothing blocks it: every issue it was blocked by is closed as completed. Read AGENTS.md first and follow it.
+
+            1. Read the issue with `gh issue view ${{ needs.gate.outputs.issue }} --comments`.
+            2. Implement what it asks ("What done looks like", when it has one), test-first where it has
+               behaviour to test. The checks AGENTS.md lists for CI must pass. Never run `az`, `terraform apply`
+               or `supabase`, and never deploy: a step that needs the owner's account or device is left undone
+               and listed in the pull request.
+            3. Commit on your branch following AGENTS.md's commit conventions, referencing `#${{ needs.gate.outputs.issue }}`.
+            4. Review your change with the code-review skill against `origin/${{ github.event.repository.default_branch }}`,
+               using this issue as the spec. Fix every real finding, then re-run the checks. Repeat at most twice.
+            5. Push, then `gh pr create --base ${{ github.event.repository.default_branch }} --fill-first` with a body
+               that starts with `Closes #${{ needs.gate.outputs.issue }}` and lists anything you left undone and why.
+
+            If you cannot get the checks green or the review clean, do not open a pull request. Instead comment
+            on the issue with what you tried and where it stuck, and run
+            `gh issue edit ${{ needs.gate.outputs.issue }} --remove-label ready-for-agent --add-label ready-for-human`.
