@@ -695,7 +695,9 @@ model {
         On every pull request and push to main: lint and test (including `nx test api-specs`,
         which fails when the iOS app's committed OpenAPI bundle has drifted from
         `libs/api-specs/spec`, HAR-161); the Cosmos emulator tests on the
-        Windows-native emulator (`api-cosmos-emulator` on `windows-2025`, emulator 2.14.29,
+        Windows-native emulator (`api-cosmos-emulator` on `windows-2025`; emulator 2.14.28.0 or
+        2.14.29.0 while GitHub rolls out the new runner image, HAR-185; the start script first
+        removes the image's `localhost` certificate whose key the emulator cannot use, HAR-190;
         `PartitionCount=10`; the Linux emulator image crashes natively under load, HAR-113);
         builds, Terraform validation and the security scan; `no-real-time-guard`:
         `node tools/no-real-time/check.mjs`, which fails when a test file adds a real sleep, a
