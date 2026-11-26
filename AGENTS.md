@@ -120,7 +120,8 @@ node tools/test-repeat/test-repeat.mjs run utils --runs 20
 - Checks required to merge (branch protection on `main`): `setup`, `lint-and-test` for `api`, `web` and
   `api-interfaces`, both `build-typescript` and both `build-go` legs, `validate-infrastructure`, `security-scan`.
   Every other job, including the other `lint-and-test` legs, `ios`, `web-e2e` and `test-repeat`, runs on each pull
-  request without gating the merge. `security-scan`'s `npm audit` and Snyk steps are `continue-on-error`.
+  request without gating the merge. `security-scan`'s `npm audit` and Snyk steps are `continue-on-error`; Snyk
+  runs only on push to `main`, so `SNYK_TOKEN` never reaches a pull request run.
 
 ## What a merge to `main` starts
 
