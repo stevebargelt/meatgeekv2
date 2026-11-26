@@ -24,24 +24,12 @@
         "development": {
           "optimization": false,
           "extractLicenses": false,
-          "inspect": false,
-          "fileReplacements": [
-            {
-              "replace": "apps/api/src/environments/environment.ts",
-              "with": "apps/api/src/environments/environment.development.ts"
-            }
-          ]
+          "inspect": false
         },
         "production": {
           "optimization": true,
           "extractLicenses": true,
-          "inspect": false,
-          "fileReplacements": [
-            {
-              "replace": "apps/api/src/environments/environment.ts",
-              "with": "apps/api/src/environments/environment.production.ts"
-            }
-          ]
+          "inspect": false
         }
       }
     },

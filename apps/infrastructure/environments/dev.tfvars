@@ -26,20 +26,26 @@ environment = "dev"
 # WHAT THE CONTROL IS NOW (MG-23, automated dev GitOps reconciliation, CI-run).
 # Under MG-24 (Terraform reconciliation, operator-run) the operator's own judgement
 # at apply time was the only control. MG-23 removes the operator from the STEADY-
-# STATE dev path — applies happen automatically on merge to main — so that framing
-# is obsolete for dev and the control is now a PIPELINE control, in two parts:
-#   1. The destroy circuit-breaker in .github/workflows/infra-apply-dev.yml, which
-#      inspects the SAVED plan and FAILS the run on ANY destroy unless the merge
-#      explicitly opts in with the exact expected destroy count. A whole-stack
-#      relocation is a high-count destroy plan and is exactly what it stops.
-#   2. Protected `main`: the plan a human reviews on the PR is the plan that
-#      applies, from the same commit.
-# So a `location` edit here does NOT silently auto-apply — it fails the apply job
-# and demands a deliberate opt-in. That is a REFUSAL, not data protection: the
-# opt-in still destroys and recreates Cosmos with temperature-history loss, and
-# nothing in the code restores it. A region cutover still requires a Cosmos
-# migration/restore decision first. Prod is unaffected (still operator-run,
-# plan-only in CI; prod's CI-run apply is MG-25).
+# STATE dev path: applies happen automatically on merge to main, so the control is
+# now a PIPELINE control:
+#   1. Pull requests get credentialless, backendless validation only (ci.yml's
+#      validate-infrastructure). No pull request plans against dev state; the only
+#      plan is the one .github/workflows/infra-apply-dev.yml saves after merge.
+#   2. The destroy circuit-breaker in that workflow inspects the SAVED plan and
+#      FAILS the run on ANY destroy or forget. The automatic path cannot carry a
+#      destroy authorization at all.
+#   3. The only route to a destructive change is the reviewer-approved
+#      workflow_dispatch RECOVERY run on main, whose `authorized_changes` input
+#      names the EXACT SET of action-qualified tokens (`delete:<address>`,
+#      `forget:<address>`) to allow. A set, never a count; see
+#      scripts/tf-plan-destroy-guard.sh.
+# So a `location` edit here does NOT silently auto-apply: the post-merge apply
+# fails, and going ahead needs a recovery run naming every destroyed resource.
+# That is a REFUSAL, not data protection: the authorized run still destroys and
+# recreates Cosmos with temperature-history loss, and nothing in the code restores
+# it. A region cutover still requires a Cosmos migration/restore decision first.
+# Prod is unaffected (still operator-run, plan-only in CI; prod's CI-run apply is
+# MG-25).
 #
 # DEV is GREENFIELD: no temperature history to preserve, so the whole-stack recreate
 # (including Cosmos) is intended and carries no data-loss concern here.
