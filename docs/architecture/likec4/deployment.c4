@@ -26,7 +26,7 @@ deployment {
         description 'meatgeek-v2-dev-dps-259d4bf5b628, S1, linked to the dev hub by its managed identity (no connection string). Enrollments are made by enrol-device.sh, from the laptop or the acceptance jobs.'
       }
       eventhub = instanceOf meatgeek.cloud.ingest.eventhub {
-        description 'Event Hub temperature-data, 2 partitions, consumer group api-broadcast, read by the API broadcastTemperature trigger.'
+        description 'Event Hub temperature-data, 2 partitions, consumer groups api-broadcast and api-targets, read by the API broadcastTemperature and recordTargetsReached triggers.'
       }
       api = instanceOf meatgeek.cloud.api {
         technology 'Flex Consumption FC1, Node 24, system-assigned managed identity'

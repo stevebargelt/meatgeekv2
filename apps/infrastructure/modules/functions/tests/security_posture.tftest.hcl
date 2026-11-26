@@ -47,6 +47,7 @@ variables {
   signalr_service_uri                    = "https://meatgeek-v2-dev-signalr-abc123def456.service.signalr.net"
   iothub_service_hostname                = "meatgeek-v2-dev-iothub-abc123def456.azure-devices.net"
   temperature_broadcast_consumer_group   = "api-broadcast"
+  targets_consumer_group                 = "api-targets"
   # dev/prod tfvars always supply explicit, non-empty CORS origins (no wildcard).
   cors_allowed_origins = ["http://localhost:4200"]
   # Configured (real dev/prod) auth path — a non-empty API registration client id.
@@ -618,6 +619,10 @@ run "iothub_hostname_and_broadcast_consumer_group_reach_the_app" {
   assert {
     condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["TEMPERATURE_BROADCAST_CONSUMER_GROUP"] == var.temperature_broadcast_consumer_group
     error_message = "TEMPERATURE_BROADCAST_CONSUMER_GROUP must be in the site's app settings, set from var.temperature_broadcast_consumer_group (HAR-56)"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["TARGETS_CONSUMER_GROUP"] == var.targets_consumer_group
+    error_message = "TARGETS_CONSUMER_GROUP must be in the site's app settings, set from var.targets_consumer_group (the target rule's consumer group)"
   }
 }
 

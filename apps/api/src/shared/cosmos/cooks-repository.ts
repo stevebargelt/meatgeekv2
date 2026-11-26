@@ -7,7 +7,7 @@ import type {
   RequestOptions,
   SqlParameter,
 } from '@azure/cosmos';
-import type { Cook, CookStatus } from '@meatgeekv2/api-interfaces';
+import type { Cook, CookStatus, TargetsPending } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
 
@@ -37,6 +37,7 @@ const COOK_FIELDS = [
   'meatType',
   'weight',
   'targetTemps',
+  'targetsReached',
   'actualDuration',
   'maxTemps',
   'notes',
@@ -54,6 +55,19 @@ void cookFieldsAreExhaustive;
  *  (or legacy) properties the store carries at runtime, which the static type
  *  cannot see. Never returned to a caller without going through {@link toCook}. */
 type StoredCook = Cook;
+
+/** A stored cook with the fields that are stored but never returned: the target
+ *  rule's pending readings (see apps/api/src/functions/cooks/target-rule.ts). */
+export interface StoredCookDocument extends Cook {
+  targetsPending?: TargetsPending;
+}
+
+/** What {@link CooksRepository.updateActiveCook} did. */
+export type ActiveCookUpdate = 'updated' | 'unchanged' | 'notActive';
+
+/** Read-then-replace attempts {@link CooksRepository.updateActiveCook} makes
+ *  when another writer keeps changing the cook between its read and its write. */
+export const UPDATE_ACTIVE_COOK_MAX_ATTEMPTS = 3;
 
 /**
  * Projects a stored document onto the api-interfaces Cook shape. Absent fields
@@ -588,6 +602,50 @@ export class CooksRepository {
     // Unreachable: the loop always returns or throws on the final attempt. Kept so
     // the method is total for the type-checker.
     return { cook: undefined, requestCharge, transitioned: false };
+  }
+
+  /**
+   * Changes a RUNNING cook (status `active`) in place, for a writer that is not
+   * the cook's owner acting through a route: the target rule. `change` gets the
+   * whole stored document, stored-only fields included, and returns the fields
+   * to set, or `undefined` to write nothing.
+   *
+   * The replace carries If-Match on the ETag just read, so it can never undo a
+   * concurrent stop or another change: on 412 the cook is read again and
+   * `change` runs again on the new version, within
+   * {@link UPDATE_ACTIVE_COOK_MAX_ATTEMPTS}. A cook that is missing, a lock
+   * document, or no longer active is `notActive` and is not written.
+   */
+  async updateActiveCook(
+    userId: string,
+    id: string,
+    change: (cook: StoredCookDocument) => Partial<StoredCookDocument> | undefined
+  ): Promise<{ readonly outcome: ActiveCookUpdate; readonly requestCharge: number }> {
+    let requestCharge = 0;
+    for (let attempt = 1; ; attempt++) {
+      const existing = await this.readCookWithEtag(userId, id);
+      requestCharge += existing.requestCharge;
+      const document = existing.document as StoredCookDocument | undefined;
+      if (!document || isLockDocument(document) || document.status !== 'active') {
+        return { outcome: 'notActive', requestCharge };
+      }
+      const fields = change(document);
+      if (fields === undefined) {
+        return { outcome: 'unchanged', requestCharge };
+      }
+      try {
+        const response = await this.container
+          .item(id, userId)
+          .replace<StoredCookDocument>({ ...document, ...fields }, ifMatch(existing.etag));
+        requestCharge += response.requestCharge;
+        return { outcome: 'updated', requestCharge };
+      } catch (error) {
+        if (statusCodeOf(error) === 412 && attempt < UPDATE_ACTIVE_COOK_MAX_ATTEMPTS) {
+          continue;
+        }
+        throw error;
+      }
+    }
   }
 
   /**

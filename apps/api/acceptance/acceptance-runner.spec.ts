@@ -80,6 +80,7 @@ import devicesGroup, { CLOCK_SKEW_MS } from './proofs/devices.proof';
 import releaseGroup, { RELEASE_WAIT } from './proofs/device-release.proof';
 import revokeGroup, { REVOKED_SEND_KILL_MS } from './proofs/device-revoke.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
+import targetsGroup, { TARGETS, TARGETS_POLL } from './proofs/targets-reached.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import liveGroup, { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
@@ -276,6 +277,8 @@ const SIGNALR_CLIENT_TOKEN = 'stub-signalr-client-token-7d1e';
 const PEER_SIGNALR_CLIENT_TOKEN = 'stub-signalr-peer-token-3a90';
 /** HAR-68: the body `timestamp` of the reading a fake `simdevice --twin --count 1` sends. */
 const TWIN_TIMESTAMP = '2026-11-19T16:45:12.340Z';
+/** The second reading of a fake `simdevice --twin --count 2 --interval 2s`. */
+const TWIN_SECOND_TIMESTAMP = '2026-11-19T16:45:14.340Z';
 /** HAR-152: the apply lag the fake `simdevice --twin` reports for a cook start. */
 const TWIN_APPLY_LAG_MS = 840;
 /** HAR-68: the fixed reason the stub's 503 DEVICE_TWIN_UPDATE_FAILED carries. */
@@ -367,6 +370,10 @@ interface StubOptions {
    *  desired activeCookId that is not the active cook; `reported-version`, a
    *  reported appliedDesiredVersion one behind desired.$version. */
   readonly twinFault?: 'desired-cook' | 'reported-version' | 'no-apply-lag' | 'negative-apply-lag';
+  /** The target rule: after `simdevice --twin --count 2`, the cook's targets
+   *  under the simulated readings are reached at the second reading. `never`:
+   *  nothing is recorded; `first-reading`: recorded at the first reading. */
+  readonly targetsFault?: 'never' | 'first-reading';
   /** HAR-77: answer this route without the X-Request-ID header. */
   readonly omitRequestIdOn?: StubRoute;
   /** HAR-77: rewrite the body of this route's 2xx answer. */
@@ -433,6 +440,8 @@ interface StubCook {
   endTime?: string;
   meatType?: string;
   notes?: string;
+  targetTemps?: Record<string, number>;
+  targetsReached?: Record<string, { reachedAt: string }>;
 }
 
 /** HAR-142: the userIds the stub stores for the owner and the peer. */
@@ -1111,6 +1120,19 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
         if (args.join(' ').includes('--count 1') && !options.twinReadingNeverRouted) {
           twinReading = { timestamp: TWIN_TIMESTAMP, cookId: reported.activeCookId };
         }
+        // The target rule on two readings tagged with the applied cook.
+        const tagged = cooks.find(c => c.id === reported.activeCookId && c.status === 'active');
+        if (args.join(' ').includes('--count 2') && tagged && options.targetsFault !== 'never') {
+          const reading = simReading(TWIN_SECOND_TIMESTAMP) as Record<string, unknown>;
+          const reachedAt =
+            options.targetsFault === 'first-reading' ? TWIN_TIMESTAMP : TWIN_SECOND_TIMESTAMP;
+          for (const [channel, target] of Object.entries(tagged.targetTemps ?? {})) {
+            const value = reading[channel === 'grill' ? 'grillTemp' : `${channel}Temp`];
+            if (typeof value === 'number' && value >= target) {
+              tagged.targetsReached = { ...tagged.targetsReached, [channel]: { reachedAt } };
+            }
+          }
+        }
         response.writeHead(200, { 'Content-Type': 'application/json' });
         response.end(
           JSON.stringify({
@@ -1682,6 +1704,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
           startTime: new Date(fakeClock.now()).toISOString(),
           meatType: body.meatType,
           notes: body.notes,
+          ...(body.targetTemps === undefined ? {} : { targetTemps: body.targetTemps }),
         };
         cooks.push(cook);
         pushCookEvent('cook_started', cook);
@@ -1847,7 +1870,7 @@ const chartHandedOver = dpsHandedOver && dpsDevice === ${JSON.stringify(CHART_DE
 // HAR-87: a chart top-up, stamped start + i × step.
 const chartTopup = /^--count ([1-9][0-9]*) --start ([^ ]+) --step ([1-9][0-9]*)s --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
 const topup = /^--count ([1-9][0-9]*) --inflight [1-9][0-9]* --interval [0-9]+ms$/.exec(args);
-const twin = /^--twin --count ([01]) --timeout 60s$/.exec(args);
+const twin = /^--twin --count ([012])(?: --interval 2s)? --timeout 60s$/.exec(args);
 // HAR-140: a fresh device. identity init makes a state dir; in DPS mode a
 // --twin --count 0 registers through the stub's fake DPS (which mints the
 // claim code); claim-code prints the stub's claim state. In every mode.
@@ -1949,7 +1972,8 @@ if (handledFresh) {
     .then(({ desired, reported, applyLagMs, now }) => {
       sentAt = now;
       line({ event: 'twin', desired, reported, ...(applyLagMs === undefined ? {} : { applyLagMs }) });
-      if (twin[1] === '1') line(reading(${JSON.stringify(TWIN_TIMESTAMP)}));
+      if (twin[1] !== '0') line(reading(${JSON.stringify(TWIN_TIMESTAMP)}));
+      if (twin[1] === '2') line(reading(${JSON.stringify(TWIN_SECOND_TIMESTAMP)}));
     }, () => {
       process.stderr.write('fake simdevice: no twin response\\n');
       process.exit(1);
@@ -2467,9 +2491,10 @@ describe('live acceptance runner (against an in-process stub)', () => {
 
     // HAR-26: one start on the registered device, one refused on the unowned one.
     // HAR-67: the isolation group starts one more as the owner and is refused
-    // one as the peer. HAR-68: the twin group starts one more as the owner.
+    // one as the peer. HAR-68: the twin group starts one more as the owner, and
+    // so does the targets-reached group.
     const posts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
-    expect(posts.filter(r => r.authorization === `Bearer ${TOKEN}`)).toHaveLength(4);
+    expect(posts.filter(r => r.authorization === `Bearer ${TOKEN}`)).toHaveLength(5);
     expect(posts.filter(r => r.authorization === `Bearer ${PEER_TOKEN}`)).toHaveLength(1);
     expect(
       stub!.requests.filter(
@@ -2515,11 +2540,16 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(chart).toHaveLength(route === 'GET /cooks' ? 1 : 0);
     const lifecycle = result.failures.filter(line => line.startsWith('FAIL cooks lifecycle ›'));
     expect(lifecycle).toHaveLength(lifecycleFailures(route, true));
-    expect(result.failures).toHaveLength(lifecycle.length + 1 + twin.length + chart.length);
-    expect(result.failures[0]).toContain('cooks lifecycle ›');
-    expect(result.failures[result.failures.length - 1 - chart.length]).toContain(
-      'signalr isolation ›'
+    // The targets-reached group starts, lists and stops cooks like the twin group.
+    const targets = result.failures.filter(line => line.startsWith('FAIL targets reached ›'));
+    expect(targets).toHaveLength(twinFailures(route, true));
+    expect(result.failures).toHaveLength(
+      lifecycle.length + 1 + twin.length + targets.length + chart.length
     );
+    expect(result.failures[0]).toContain('cooks lifecycle ›');
+    expect(
+      result.failures[result.failures.length - 1 - targets.length - chart.length]
+    ).toContain('signalr isolation ›');
     for (const failure of result.failures) {
       expect(failure).toMatch(new RegExp(`${escape(route)}( \\(peer\\))? → 503`));
     }
@@ -2535,7 +2565,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
         id: decodeURIComponent(r.path.slice('/api/cooks/'.length)),
         as: r.authorization === `Bearer ${PEER_TOKEN}` ? 'peer' : 'owner',
       }));
-    expect(reads).toHaveLength(5);
+    expect(reads).toHaveLength(6);
     const cookId = reads[0].id;
     expect(reads).toEqual([
       { id: cookId, as: 'owner' },
@@ -2543,8 +2573,11 @@ describe('live acceptance runner (against an in-process stub)', () => {
       { id: expect.stringMatching(/^[0-9a-f-]{36}$/), as: 'owner' },
       { id: expect.stringMatching(/^active-device:acceptance-cook-/), as: 'owner' },
       { id: cookId, as: 'owner' },
+      // The targets-reached group reads its own cook until both targets are reached.
+      { id: expect.stringMatching(/^[0-9a-f-]{36}$/), as: 'owner' },
     ]);
     expect(reads[2].id).not.toBe(cookId);
+    expect(reads[5].id).not.toBe(cookId);
     for (const step of [
       'GET /cooks/{cookId} as the owner returns the started cook',
       'GET /cooks/{cookId} as the peer is 404 NOT_FOUND',
@@ -2633,20 +2666,27 @@ describe('live acceptance runner (against an in-process stub)', () => {
     const result = await runAgainstStub({ failRoute: { route: COOK_ITEM_ROUTE, status: 503 } });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
+    // The targets-reached group reads its cook by id too.
+    expect(result.failures).toHaveLength(2);
     expect(result.failures[0]).toContain(
       'FAIL cooks lifecycle › GET /cooks/{cookId} as the owner returns the started cook'
     );
-    expect(result.failures[0]).toContain('GET /cooks/{cookId} → 503');
+    expect(result.failures[1]).toContain(
+      'FAIL targets reached › GET /cooks/{cookId} shows the grill and probe 1 reached'
+    );
+    result.failures.forEach(failure => expect(failure).toContain('GET /cooks/{cookId} → 503'));
   });
 
   it('(c) HAR-75: exits non-zero when GET /cooks/{cookId} omits the RU header', async () => {
     const result = await runAgainstStub({ omitChargeOn: COOK_ITEM_ROUTE });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.failures).toHaveLength(1);
-    expect(result.failures[0]).toContain('GET /cooks/{cookId}');
-    expect(result.failures[0]).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    // The cooks lifecycle and targets-reached groups.
+    expect(result.failures).toHaveLength(2);
+    for (const failure of result.failures) {
+      expect(failure).toContain('GET /cooks/{cookId}');
+      expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
+    }
   });
 
   /** HAR-26 and HAR-28: the cooks lifecycle and the temperatures proof also
@@ -2690,6 +2730,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
               'device twin ›',
               'signalr isolation ›',
               'signalr live temperature ›',
+              'targets reached ›',
               'telemetry round-trip ›',
               'cook chart ›',
             ]
@@ -3344,6 +3385,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
             ![
               'signalr isolation ›',
               'signalr live temperature ›',
+              'targets reached ›',
               'telemetry round-trip ›',
             ].includes(group)
         )
@@ -3456,11 +3498,16 @@ describe('live acceptance runner (against an in-process stub)', () => {
     expect(chart).toHaveLength(route === 'GET /cooks' ? 1 : 0);
     const lifecycle = result.failures.filter(line => line.startsWith('FAIL cooks lifecycle ›'));
     expect(lifecycle).toHaveLength(lifecycleFailures(route, false));
-    expect(result.failures).toHaveLength(lifecycle.length + 1 + twin.length + chart.length);
-    expect(result.failures[0]).toContain('cooks lifecycle ›');
-    expect(result.failures[result.failures.length - 1 - chart.length]).toContain(
-      'signalr isolation ›'
+    // The targets-reached group starts, lists and stops cooks like the twin group.
+    const targets = result.failures.filter(line => line.startsWith('FAIL targets reached ›'));
+    expect(targets).toHaveLength(twinFailures(route, false));
+    expect(result.failures).toHaveLength(
+      lifecycle.length + 1 + twin.length + targets.length + chart.length
     );
+    expect(result.failures[0]).toContain('cooks lifecycle ›');
+    expect(
+      result.failures[result.failures.length - 1 - targets.length - chart.length]
+    ).toContain('signalr isolation ›');
     for (const failure of result.failures) {
       expect(failure).toContain(route);
       expect(failure).toContain(`missing ${REQUEST_CHARGE_HEADER} header`);
@@ -3556,8 +3603,8 @@ describe('live acceptance runner (against an in-process stub)', () => {
     // In file order: the three fresh devices are new (201: cooks lifecycle,
     // devices, temperatures); the owner already held the simulated device
     // (200, device twin), and its later groups claim it again with the same
-    // code (200: isolation, live temperature, round trip); the chart device
-    // was held too (200). HAR-142: between them, the owner's claims in the
+    // code (200: isolation, live temperature, targets reached, round trip); the
+    // chart device was held too (200). HAR-142: between them, the owner's claims in the
     // claim group (three refusals, the claim, its retry), the release group
     // (both devices, then the old code after the release) and the revoke
     // group; the peer's claims are lines of their own.
@@ -3566,7 +3613,7 @@ describe('live acceptance runner (against an in-process stub)', () => {
       ...['403', '403', '403', '201', '200'],
       ...['201', '201', '403'],
       '201',
-      ...['200', '201', '200', '200', '200', '201', '200'],
+      ...['200', '201', '200', '200', '200', '200', '201', '200'],
     ]);
     // HAR-145: one POST /devices, the devices group's proof that the removed
     // route is not served; it registers nothing.
@@ -4286,6 +4333,92 @@ describe('device twin (HAR-68, against the stub and a fake simdevice)', () => {
   });
 });
 
+describe('targets reached (against the stub and a fake simdevice)', () => {
+  const GROUP = 'targets reached ›';
+  const STEPS = [
+    'POST /devices/claim claims the simulated device for the owner',
+    'any cook already active on the simulated device is stopped',
+    'POST /cooks with targets below the simulated readings starts a cook that has reached nothing: 201',
+    'simdevice --twin --count 2 applies the cook and sends two readings tagged with it',
+    'GET /cooks/{cookId} shows the grill and probe 1 reached at the second reading, probe 2 not',
+    'POST /cooks/{cookId}/stop stops the cook: 200, and it keeps its reached targets',
+    'no cook is left active on the simulated device',
+  ];
+  const CLEANUP = STEPS[STEPS.length - 1];
+  const runTargets = (options: StubOptions = {}, mode: FakeMode = 'ok') =>
+    runAgainstStub(options, mode, [targetsGroup]);
+  const expectFailedAt = (result: Run, step: number, message: string) => {
+    expect(result.exitCode).not.toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain(`FAIL ${GROUP} ${STEPS[step]}`);
+    expect(result.failures[0]).toContain(message);
+    STEPS.slice(step + 1, -1).forEach(skipped =>
+      expect(result.lines).toContain(
+        `SKIP ${GROUP} ${skipped} (an earlier proof in this group failed)`
+      )
+    );
+    expect(result.lines).toContain(`PASS ${GROUP} ${CLEANUP}`);
+    expect(stub!.simCooks().every(c => c.status === 'completed')).toBe(true);
+  };
+
+  it('targets sit under the simulated readings, so the cook starts with them already met', () => {
+    const sim = simReading(TWIN_TIMESTAMP);
+    expect(TARGETS.grill).toBeLessThanOrEqual(sim.grillTemp);
+    expect(TARGETS.probe1).toBeLessThanOrEqual(sim.probe1Temp);
+  });
+
+  it('(a) passes: the cook reports the grill and probe 1 reached at the second reading, and keeps them when stopped', async () => {
+    const result = await runTargets();
+
+    expect(result.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
+    expect(result.lines.filter(line => line.startsWith('METRIC targets-reached-ms '))).toHaveLength(
+      1
+    );
+    expect(stub!.twinRuns).toEqual([
+      ['--twin', '--count', '2', '--interval', '2s', '--timeout', '60s'],
+    ]);
+    const starts = stub!.requests.filter(r => r.method === 'POST' && r.path === '/api/cooks');
+    expect(starts).toHaveLength(1);
+    expect(stub!.simCooks()).toEqual([expect.objectContaining({ status: 'completed' })]);
+  });
+
+  it('(b) fails naming the 90 s cap when the reach is never recorded, and still stops the cook', async () => {
+    const result = await runTargets({ targetsFault: 'never' });
+
+    expectFailedAt(
+      result,
+      4,
+      'the grill and probe 1 were not both reached within the 90 s cap; last targetsReached absent'
+    );
+    const polls = stub!.requests.filter(
+      r => r.method === 'GET' && /^\/api\/cooks\/[0-9a-f-]{36}$/.test(r.path)
+    );
+    expect(polls).toHaveLength(1 + 90 / 2);
+    expect(fakeClock.slept).toEqual(
+      Array.from({ length: 90 / 2 }, () => TARGETS_POLL.intervalMs)
+    );
+  });
+
+  it('(b) fails when a channel is recorded at the first reading, not the second', async () => {
+    const result = await runTargets({ targetsFault: 'first-reading' });
+
+    expectFailedAt(
+      result,
+      4,
+      `grill was reached at "${TWIN_TIMESTAMP}", not at the second reading's timestamp ` +
+        TWIN_SECOND_TIMESTAMP
+    );
+  });
+
+  it('(c) fails with the exit code when simdevice exits 1, and still stops the cook', async () => {
+    const result = await runTargets({}, 'exit1');
+
+    expectFailedAt(result, 3, 'simdevice exited 1, expected 0');
+  });
+});
+
 describe('signalr isolation (HAR-67, against the stub and a fake simdevice)', () => {
   const GROUP = 'signalr isolation ›';
   const STEPS = [
@@ -4481,13 +4614,14 @@ describe('telemetry volume (HAR-45, HAR-75, against the stub and a fake simdevic
     STEPS.forEach(step => expect(result.lines).toContain(`PASS ${GROUP} ${step}`));
     // No simdevice top-up: the only sends are the isolation proof's (HAR-67),
     // the live push's (HAR-63) and the round trip's, one reading each, besides
-    // the twin group's two reconnects (HAR-68) and the run's one claim of the
-    // device (HAR-140: a twin sync, then its claim code).
+    // the twin group's two reconnects (HAR-68), the targets-reached group's one
+    // and the run's one claim of the device (HAR-140: a twin sync, then its
+    // claim code).
     expect(stub!.topups).toEqual([]);
     // HAR-140: the simulated device's runs only; fresh devices run as themselves.
     const execs = result.lines.filter(line => /^\s+EXEC\s+simdevice\s(?!\()/.test(line));
     const sends = execs.filter(line => !/^\s+EXEC\s+simdevice (--twin|claim-code)\s/.test(line));
-    expect(execs).toHaveLength(sends.length + 4);
+    expect(execs).toHaveLength(sends.length + 5);
     expect(sends).toHaveLength(3);
     sends.forEach(line => expect(line).toMatch(/^\s+EXEC\s+simdevice --count 1\s/));
     // Two walks, page by page by continuation token: never an offset, never a total.

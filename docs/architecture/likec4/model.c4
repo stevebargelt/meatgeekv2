@@ -194,7 +194,7 @@ model {
         eventhub = stream 'Event Hub: temperature-data' {
           #live
           technology '2 partitions'
-          description 'Provisioned and receiving every message. Read by broadcastTemperature in apps/api (HAR-60) on the API consumer group, `api-broadcast` (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`), identity-based.'
+          description 'Provisioned and receiving every message. Read by broadcastTemperature in apps/api (HAR-60) on the API consumer group, `api-broadcast` (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`), and by recordTargetsReached on `api-targets` (`TARGETS_CONSUMER_GROUP`), identity-based.'
         }
 
         iothub -[event]-> eventhub 'eventhub-realtime-route' {
@@ -213,7 +213,8 @@ model {
           the Terraform-owned database and container names (`COSMOSDB_DATABASE_NAME` and one
           `COSMOSDB_*_CONTAINER_NAME` per container), the IoT Hub host
           (`IOTHUB_SERVICE_HOSTNAME`) and its Event Hub consumer group
-          (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`). broadcastTemperature reads the consumer group;
+          (`TEMPERATURE_BROADCAST_CONSUMER_GROUP`) and the target rule's (`TARGETS_CONSUMER_GROUP`).
+          broadcastTemperature and recordTargetsReached read them;
           rollupTemperatures reads the `temperatures` change feed with its leases in `leases`
           (`COSMOSDB_LEASES_CONTAINER_NAME`);
           startCook and stopCook read `IOTHUB_SERVICE_HOSTNAME` to write the device twin's
@@ -293,6 +294,19 @@ model {
             meatgeek.reading.hub_lag_ms (hub enqueue time minus the reading's timestamp). They
             carry no device or user attribute and are pre-aggregated, so App Insights sampling
             does not drop them.
+          '''
+        }
+        targets = component 'target rule' {
+          technology 'Event Hub trigger, cardinality many, host retry; no output binding'
+          description '''
+            recordTargetsReached: reads the same readings as broadcastTemperature on its own
+            consumer group, api-targets, so it never delays or drops a live push. For each reading
+            tagged with a running cook on its device, a channel that reads at or above its target
+            on two readings in a row is recorded on the cook as reached, at the second reading's
+            timestamp (`targetsReached`). A reached probe 15 °F or more below its target re-arms;
+            the grill never re-arms by falling. State is on the cook document, written by an
+            If-Match replace only when a channel's state changes. A failed write throws and the
+            host retries the batch; readings already counted are ignored.
           '''
         }
         rollup = component 'rollupTemperatures' {
@@ -578,6 +592,12 @@ model {
     cloud.api.broadcast -> cloud.realtime 'each reading, to its device owner' {
       technology 'SignalR output binding, target temperature'
     }
+
+    // Target rule: the same readings on a second consumer group, recorded on the cook.
+    cloud.ingest.eventhub -[event]-> cloud.api.targets 'Event Hub trigger' {
+      technology 'consumer group api-targets, identity-based'
+    }
+    cloud.api.targets -> cloud.api.repos 'device owner; the tagged cook: read, If-Match replace'
     cloud.realtime -> web.livePanel 'temperature, cook_stopped' {
       technology 'WebSockets, @microsoft/signalr'
     }

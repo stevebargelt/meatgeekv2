@@ -117,7 +117,7 @@ function storedEnqueuedTime(value: unknown): unknown {
 }
 
 /** A valid batch element: its device and the payload to push. */
-interface LiveReading {
+export interface LiveReading {
   readonly deviceId: string;
   readonly payload: LiveTemperaturePayload;
   /** The hub-stamped `iothub-enqueuedtime`, when the event carries a valid one. */
@@ -236,9 +236,9 @@ function recordReadingLatency(
 
 /** Each distinct device's owner: a string, `undefined` (no owner), or `null`
  *  when the read failed. Reads run in parallel and never throw. */
-async function resolveOwners(
+export async function resolveOwners(
   deviceIds: Iterable<string>,
-  deps: BroadcastTemperatureDeps
+  deps: Pick<BroadcastTemperatureDeps, 'ownerOf'>
 ): Promise<Map<string, string | undefined | null>> {
   const ids = [...new Set(deviceIds)];
   const owners = await Promise.all(
@@ -254,15 +254,16 @@ async function resolveOwners(
 }
 
 /**
- * The `cardinality: 'many'` handler: `events[i]` pairs with
+ * A `cardinality: 'many'` batch from the temperature-data event hub as
+ * readings, in batch order: `events[i]` pairs with
  * `triggerMetadata.systemPropertiesArray[i]` and
- * `triggerMetadata.enqueuedTimeUtcArray[i]`.
+ * `triggerMetadata.enqueuedTimeUtcArray[i]`. A bad event is counted in
+ * `skipped`, never thrown. Shared by every trigger on that event hub.
  */
-export async function broadcastTemperatureHandler(
+export function readingsOfBatch(
   events: unknown,
-  context: InvocationContext,
-  deps: BroadcastTemperatureDeps = defaultBroadcastTemperatureDeps
-): Promise<void> {
+  context: InvocationContext
+): { readings: LiveReading[]; skipped: number } {
   const batch = arrayOrEmpty(events);
   const metadata = context.triggerMetadata ?? {};
   const systemPropertiesArray = arrayOrEmpty(metadata['systemPropertiesArray']);
@@ -283,6 +284,20 @@ export async function broadcastTemperatureHandler(
       skipped += 1;
     }
   });
+  return { readings, skipped };
+}
+
+/**
+ * The `cardinality: 'many'` handler: `events[i]` pairs with
+ * `triggerMetadata.systemPropertiesArray[i]` and
+ * `triggerMetadata.enqueuedTimeUtcArray[i]`.
+ */
+export async function broadcastTemperatureHandler(
+  events: unknown,
+  context: InvocationContext,
+  deps: BroadcastTemperatureDeps = defaultBroadcastTemperatureDeps
+): Promise<void> {
+  const { readings, skipped } = readingsOfBatch(events, context);
 
   const owners = await resolveOwners(
     readings.map(r => r.deviceId),

@@ -272,6 +272,7 @@ graph TB
       MeatgeekCloud.Api.Negotiate@{ shape: rectangle, label: "negotiate" }
       MeatgeekCloud.Api.Cooks@{ shape: rectangle, label: "cooks" }
       MeatgeekCloud.Api.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
+      MeatgeekCloud.Api.Targets@{ shape: rectangle, label: "target rule" }
     end
     subgraph MeatgeekCloud.Data["`Cosmos DB`"]
       MeatgeekCloud.Data.TemperatureRollups@{ shape: cylinder, label: "temperature-rollups" }
@@ -324,6 +325,7 @@ to the owning userId`" .-> MeatgeekCloud.Realtime
   MeatgeekCloud.Api.Negotiate -. "`mint client token for the caller`" .-> MeatgeekCloud.Realtime
   MeatgeekCloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloud.Api.Broadcast
   MeatgeekCloud.Api.Broadcast -. "`each reading, to its device owner`" .-> MeatgeekCloud.Realtime
+  MeatgeekCloud.Ingest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloud.Api.Targets
   MeatgeekCloud.Api.Rollup -. "`read-merge-replace, If-Match`" .-> MeatgeekCloud.Data.TemperatureRollups
   MeatgeekCloud.Ingest.Iothub -. "`desired properties`" .-> MeatgeekEdge.PusherTwin
   MeatgeekEdge.PusherTwin -. "`reported properties`" .-> MeatgeekCloud.Ingest.Iothub
@@ -349,14 +351,14 @@ $.ce=utf-8, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.ActionGroup,MeatgeekCloud.Ingest.Dps,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.LogAlerts,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekMobile.LivePanel,MeatgeekWeb.Chart,MeatgeekMobile.Chart primary
+  class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekCloud.Api.Targets,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekMobile.LivePanel,MeatgeekWeb.Chart,MeatgeekMobile.Chart primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data.TemperatureRollups green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.Observability.Collector amber
-  linkStyle 0,3,4,5,6,7,8,9,10,11,13,14,15,16,18,19,21,22,23,24,25,26,27,28,29,30,31,32,33,34,36,37,38 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,6,7,8,9,10,11,13,14,15,16,18,19,21,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 1,12 stroke:#8D8D8D
-  linkStyle 2,17,20,35 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 2,17,20,22,36 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -465,6 +467,7 @@ graph TB
     MeatgeekCloudApi.Users@{ shape: rectangle, label: "users" }
     MeatgeekCloudApi.Ownership@{ shape: rectangle, label: "ownership check" }
     MeatgeekCloudApi.Broadcast@{ shape: rectangle, label: "realtime broadcast" }
+    MeatgeekCloudApi.Targets@{ shape: rectangle, label: "target rule" }
     MeatgeekCloudApi.Repos@{ shape: rectangle, label: "cosmos repositories" }
   end
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
@@ -527,6 +530,8 @@ DEVICE_NOT_FOUND`" .-> MeatgeekCloudApi.Ownership
   MeatgeekCloudApi.Users -.-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Health -. "`probe`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Broadcast -. "`owner of each device in the batch`" .-> MeatgeekCloudApi.Repos
+  MeatgeekCloudApi.Targets -. "`device owner; the tagged
+cook: read, If-Match replace`" .-> MeatgeekCloudApi.Repos
   MeatgeekCloudApi.Easyauth -. "`validates access tokens`" .-> Entra
   MeatgeekCloudApi.Cooks -. "`cook_started, cook_stopped
 to the owning userId`" .-> MeatgeekCloudRealtime
@@ -565,18 +570,19 @@ sets desired claim properties`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Iothub -. "`cosmos-storage-route`" .-> MeatgeekCloudData.Temperatures
   MeatgeekCloudIngest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloudIngest.Eventhub
   MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Broadcast
+  MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Targets
   MeatgeekCloudIngest.Iothub -. "`desired properties`" .-> MeatgeekEdgePusherTwin
   MeatgeekEdgePusherTwin -. "`reported properties`" .-> MeatgeekCloudIngest.Iothub
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class Delivery,MeatgeekMobile,MeatgeekWeb,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Rollup,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekEdgePusherTwin,MeatgeekCloudApi.Broadcast,MeatgeekCloudApi.Repos primary
+  class Delivery,MeatgeekMobile,MeatgeekWeb,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Rollup,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekEdgePusherTwin,MeatgeekCloudApi.Broadcast,MeatgeekCloudApi.Targets,MeatgeekCloudApi.Repos primary
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudObservability.Appinsights,MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.TemperatureRollups,MeatgeekCloudData.Leases,MeatgeekCloudData.Devices,MeatgeekCloudData.Temperatures,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,30,31,32,33,34,35,36,37,38,39,40,42,43,44,45,46,47,48,49,50,52,53,57,58 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 29,41,51,54,55,56 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,31,32,33,34,35,36,37,38,39,40,41,43,44,45,46,47,48,49,50,51,53,54,59,60 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 30,42,52,55,56,57,58 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Cosmos DB

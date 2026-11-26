@@ -100,6 +100,7 @@ The Event Hub → Functions → SignalR broadcast path is **live end to end**: I
   - Event Hub route → Functions for real-time processing (on `main` since HAR-60: `broadcastTemperature` in the API app reads `temperature-data` and pushes each reading to its device owner's SignalR user; the web app's live panel receives it)
 - **Azure Functions**: Two distinct roles
   - **Lightweight Functions**: SignalR broadcasting only, no database writes (`broadcastTemperature`, on `main` since HAR-60)
+  - **Target rule**: `recordTargetsReached` reads the same readings on its own consumer group (`api-targets`) and records on each running cook which channels have reached their target. It writes the cook, and only when a channel's state changes; it never delays the live push (see [Data Flow](data-flow.md#6-target-rule))
   - **API Functions**: Cook management and queries
 - **CosmosDB**: Document database receiving telemetry directly from IoT Hub
 
