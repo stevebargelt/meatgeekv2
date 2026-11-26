@@ -90,22 +90,31 @@ Describe 'Get-LocalhostCertificateProblem' {
     } finally { $key.Dispose() }
   }
 
-  It 'removes a certificate made with a legacy CSP key, read back through Read-CertificatePrivateKey' {
-    # On Windows the key reads back as RSACryptoServiceProvider; elsewhere as
-    # the platform's RSA, which is not a CNG key either.
-    $key = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
+  It 'removes a certificate whose key a legacy CSP holds, read back through Read-CertificatePrivateKey' -Skip:(-not $IsWindows) {
+    # The key must live in a named, persisted CSP container: CopyWithPrivateKey
+    # copies an ephemeral CSP key into an ephemeral CNG key, which reads back
+    # as RSACng. CSP containers exist only on Windows.
+    $csp = [System.Security.Cryptography.CspParameters]::new(24, 'Microsoft Enhanced RSA and AES Cryptographic Provider', "har190-test-$([guid]::NewGuid())")
+    $key = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048, $csp)
     try {
+      $key.PersistKeyInCsp = $true
       $cert = New-LocalhostCertificate $key
       $read = Read-CertificatePrivateKey $cert
       $read.Error | Should -BeNullOrEmpty
-      $read.Key | Should -Not -BeNullOrEmpty
-      $problem = Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error
-      if ($IsWindows) {
-        $problem | Should -Be 'its private key is held by a legacy CSP (RSACryptoServiceProvider), not a CNG key storage provider'
-      } else {
-        $problem | Should -Match '^its private key opens as \S+, not as a CNG key$'
-      }
-    } finally { $key.Dispose() }
+      $read.Key | Should -BeOfType [System.Security.Cryptography.RSACryptoServiceProvider]
+      Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error | Should -Be 'its private key is held by a legacy CSP (RSACryptoServiceProvider), not a CNG key storage provider'
+    } finally {
+      $key.PersistKeyInCsp = $false
+      $key.Clear()
+    }
+  }
+
+  It 'removes a certificate whose key is not a CNG key, read back through Read-CertificatePrivateKey' -Skip:$IsWindows {
+    # Off Windows a certificate's key reads back as the platform's RSA.
+    $cert = New-LocalhostCertificate ([System.Security.Cryptography.RSA]::Create(2048))
+    $read = Read-CertificatePrivateKey $cert
+    $read.Key | Should -Not -BeNullOrEmpty
+    Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error | Should -Match '^its private key opens as \S+, not as a CNG key$'
   }
 
   It 'removes a localhost certificate whose key is some other non-CNG implementation' -Skip:$IsWindows {
