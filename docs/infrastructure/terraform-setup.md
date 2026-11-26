@@ -48,7 +48,9 @@ apps/infrastructure/
 │   ├── cosmos-db/              # CREATES and OWNS the V2 Cosmos account
 │   ├── functions/
 │   ├── signalr/
-│   └── monitoring/
+│   ├── monitoring/
+│   ├── dps/
+│   └── apns-key-vault/         # dev Key Vault for the APNs signing key (#241)
 ├── main.tf                     # root module (backend, provider, locals, modules)
 ├── variables.tf                # input variable definitions
 ├── outputs.tf                  # output value definitions

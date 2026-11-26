@@ -406,6 +406,21 @@ model {
         '''
       }
 
+      keyvault = store 'Key Vault: APNs key' {
+        #scaffold
+        technology 'standard SKU, RBAC only, soft delete 7 days, dev only'
+        description '''
+          Holds the APNs signing key (#241, spec #237): the owner's Apple `.p8`, imported by hand as
+          a software EC P-256 key whose only operation is `sign`. Key Vault has no export
+          operation, so the private key never leaves it. Terraform creates the vault empty and never
+          touches the key: no key material, key id or team id reaches Terraform state, an app
+          setting or the repository. The app is told only `APNS_KEY_VAULT_URI` and `APNS_KEY_NAME`.
+          The Function App identity's grant, `Key Vault Crypto User` (sign; no read or export of the
+          private key), is behind `apns_key_signer_enabled`, off until bootstrap is re-run. Nothing
+          signs with it yet (#243).
+        '''
+      }
+
       observability = area 'Observability' {
         appinsights = service 'Application Insights' {
           technology 'workspace-based'
@@ -675,6 +690,17 @@ model {
     cloud.api -> cloud.observability.logs 'diagnostic settings'
     cloud.data -> cloud.observability.metricAlerts 'cosmos-429-rate'
     cloud.realtime -> cloud.observability.metricAlerts 'signalr-connection-failure-rate'
+
+    // APNs signing key (#241). The vault exists; nothing signs with it or imports into it yet.
+    cloud.api -[decided]-> cloud.keyvault 'signs the APNs provider token (ES256)' {
+      #decided
+      technology 'Key Vault sign, managed identity, Key Vault Crypto User'
+      description 'The provider token is signed in Key Vault; the app never holds the key (#243).'
+    }
+    operator -[decided]-> cloud.keyvault 'imports the APNs key, sign only' {
+      #decided
+      description 'One-off, by hand, under a temporary Key Vault Crypto Officer grant (docs/infrastructure/apns-key-vault.md).'
+    }
 
     // Web app: live in production on Vercel (HAR-71).
     web -> cloud.api 'REST, user access token (access_as_user)' {

@@ -53,3 +53,8 @@ output "function_app_import_ids" {
     auth = "${local.function_app_resource_id}/config/authsettingsV2?api-version=${local.web_api_version}"
   }
 }
+
+output "app_setting_names" {
+  description = "Names (never values) of every app setting the site is given, sorted. Lets the root module's tests see which optional settings a switch publishes."
+  value       = sort(keys(local.function_app_settings))
+}

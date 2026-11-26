@@ -413,3 +413,28 @@ variable "dps_ci_enroller_enabled" {
   type        = bool
   default     = false
 }
+
+# Key Vault for the APNs signing key (#241, spec #237). When true, this apply
+# creates the vault (modules/apns-key-vault), empty, and publishes its URI and
+# the key's name to the Function App. dev.tfvars sets it; prod does not (alerts
+# are dev only, on the APNs sandbox).
+variable "apns_key_vault_enabled" {
+  description = "When true, creates the Key Vault that holds the APNs signing key (empty until the owner imports the key) and publishes APNS_KEY_VAULT_URI and APNS_KEY_NAME to the Function App. Default false creates nothing."
+  type        = bool
+  default     = false
+}
+
+# The Function App identity's grant on that vault (#241): Key Vault Crypto User,
+# scoped to the vault, so the app can sign its APNs provider token and can never
+# read or export the private key.
+#
+# Leave FALSE until bootstrap.sh has been re-run with `Key Vault Crypto User` in
+# bootstrap/tf-managed-role-allowlist.tsv: the infra-apply identity's ABAC
+# condition only permits allowlisted roles, so setting this before that re-run
+# fails every dev apply with AuthorizationFailed. See
+# docs/infrastructure/bootstrap-runbook.md.
+variable "apns_key_signer_enabled" {
+  description = "When true AND apns_key_vault_enabled, grants the Function App identity Key Vault Crypto User on the APNs Key Vault (sign; no read or export of the private key). Default false skips the grant. Requires a bootstrap.sh re-run first (role allowlist)."
+  type        = bool
+  default     = false
+}

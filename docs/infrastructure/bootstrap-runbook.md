@@ -683,6 +683,31 @@ change, so the committed GUID `dfce44e4-17b7-4bd1-a6d1-04996ec95633` stands, and
 `dev.tfvars` now sets `dps_ci_enroller_enabled = true`, so the dev grant is on.
 Prod still does not set it.
 
+### APNs key signer grant — re-run bootstrap BEFORE setting `apns_key_signer_enabled` (#241)
+
+`modules/apns-key-vault` declares `azurerm_role_assignment.signer`: `Key Vault
+Crypto User` for the Function App's system-assigned identity, scoped to the
+APNs Key Vault alone, so the API can sign its APNs provider token and can never
+read or export the private key. The grant is `count`-guarded on
+`apns_key_signer_enabled` (default `false`) and exists only where the vault does
+(`apns_key_vault_enabled`, on in dev). It shipped **off** in #241, in every
+tfvars.
+
+`Key Vault Crypto User` is in
+[`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)
+with GUID `12338af0-0e69-4776-bea7-57ae8d297424` (Microsoft's built-in roles
+list; bootstrap still resolves it live and refuses a mismatch). In this order:
+
+1. Re-run `./bootstrap.sh` as the operator, from `main`, so the live ABAC
+   condition learns the role.
+2. Only then set `apns_key_signer_enabled = true` in `environments/dev.tfvars`.
+
+Setting it before step 1 makes every `Apply Dev Infrastructure` run on `main`
+fail with `AuthorizationFailed` on the role assignment create. The owner's own
+one-off `Key Vault Crypto Officer` grant for importing the key is made by hand
+and removed after the import; it is not Terraform's and needs no re-run. See
+[APNs key: the Apple account and the dev Key Vault](./apns-key-vault.md).
+
 ### Dev acceptance peer identity — zero roles, second caller for HAR-55 (HAR-61)
 
 **What it is.** A dedicated Entra app registration and service principal,

@@ -637,3 +637,45 @@ run "unknown_environment_is_refused" {
     var.environment,
   ]
 }
+
+# #241 — where the APNs signing key lives. Two non-secret names, published only
+# when the vault exists (dev), and absent, not empty, otherwise. The key itself
+# never reaches an app setting.
+run "apns_key_settings_absent_without_a_vault" {
+  command = plan
+  assert {
+    condition     = length([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name if startswith(s.name, "APNS_")]) == 0
+    error_message = "With no apns_key_vault_uri, the app must have no APNS_* setting"
+  }
+}
+
+run "apns_key_settings_reach_the_app" {
+  command = plan
+  variables {
+    apns_key_vault_uri = "https://mgv2-dev-kv-0123456789.vault.azure.net/"
+    apns_key_name      = "apns-auth-key"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["APNS_KEY_VAULT_URI"] == "https://mgv2-dev-kv-0123456789.vault.azure.net/"
+    error_message = "APNS_KEY_VAULT_URI must be in the site's app settings, set from var.apns_key_vault_uri"
+  }
+  assert {
+    condition     = { for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value }["APNS_KEY_NAME"] == "apns-auth-key"
+    error_message = "APNS_KEY_NAME must be in the site's app settings, set from var.apns_key_name"
+  }
+  assert {
+    condition     = jsonencode(sort([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name if startswith(s.name, "APNS_")])) == jsonencode(["APNS_KEY_NAME", "APNS_KEY_VAULT_URI"])
+    error_message = "The vault adds exactly APNS_KEY_VAULT_URI and APNS_KEY_NAME: no key material, key id or team id travels through Terraform"
+  }
+}
+
+run "apns_key_vault_uri_must_be_a_vault_uri" {
+  command = plan
+  variables {
+    apns_key_vault_uri = "https://example.com/"
+    apns_key_name      = "apns-auth-key"
+  }
+  expect_failures = [
+    var.apns_key_vault_uri,
+  ]
+}

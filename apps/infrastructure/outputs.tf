@@ -153,3 +153,15 @@ output "dps_global_endpoint" {
   description = "Device provisioning host name devices connect to, global.azure-devices-provisioning.net (empty when dps_enabled is false)"
   value       = var.dps_enabled ? module.dps[0].dps_global_endpoint : ""
 }
+
+# APNs Key Vault (#241, non-secret). The name is what the owner passes to
+# `az keyvault key import --vault-name`; null where there is no vault (prod).
+output "apns_key_vault_name" {
+  description = "Name of the Key Vault that holds the APNs signing key (null when apns_key_vault_enabled is false)"
+  value       = var.apns_key_vault_enabled ? module.apns_key_vault[0].vault_name : null
+}
+
+output "apns_key_name" {
+  description = "Name the APNs signing key is imported under in that vault (null when apns_key_vault_enabled is false)"
+  value       = var.apns_key_vault_enabled ? module.apns_key_vault[0].key_name : null
+}

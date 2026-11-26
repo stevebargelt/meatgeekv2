@@ -40,6 +40,9 @@ deployment {
       signalr = instanceOf meatgeek.cloud.realtime {
         technology 'service_mode = "Serverless", hub temperatureHub'
       }
+      keyvault = instanceOf meatgeek.cloud.keyvault {
+        description 'mgv2-dev-kv-<10 hex>, standard, RBAC only, soft delete 7 days, no purge protection. Created empty by the dev apply; the owner imports the APNs key.'
+      }
       appinsights = instanceOf meatgeek.cloud.observability.appinsights
       logs = instanceOf meatgeek.cloud.observability.logs
       workbook = instanceOf meatgeek.cloud.observability.workbook
