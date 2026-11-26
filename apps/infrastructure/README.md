@@ -18,6 +18,7 @@ This Terraform project provisions all Azure resources required for MeatGeek V2:
 - **SignalR Service** — real-time client communication
 - **Application Insights + Log Analytics** — monitoring and observability
 - **Event Hub** — real-time data processing pipeline
+- **Key Vault** (dev only) — holds the APNs signing key, non-exportable; see [APNs Key Vault](#apns-key-vault-241)
 
 ## Architecture
 
@@ -219,6 +220,7 @@ Activation of the dev loop is operator-gated: see
 | `modules/signalr/`    | SignalR Service (identity-based access; no secret outputs)                                                                                                                             |
 | `modules/monitoring/` | Alerts, budgets, Log Analytics wiring                                                                                                                                                  |
 | `modules/dps/`        | IoT Hub Device Provisioning Service (azapi `Microsoft.Devices/provisioningServices`, HAR-131), linked to the IoT Hub by managed identity; behind `dps_enabled`                          |
+| `modules/apns-key-vault/` | Key Vault for the APNs signing key (azapi `Microsoft.KeyVault/vaults`, #241): RBAC only, soft delete 7 days, no purge protection, created empty; the Function App's `Key Vault Crypto User` grant; behind `apns_key_vault_enabled` |
 
 The Cosmos module **creates** the account (`azurerm_cosmosdb_account`) — it does
 **not** read a shared V1 account via a data source. There is no adoption of a pre-existing shared Cosmos account
@@ -293,6 +295,39 @@ The dev DPS is applied by the **Apply Dev Infrastructure** workflow
 (`.github/workflows/infra-apply-dev.yml`) on merge to `main`. Outputs:
 `dps_name`, `dps_id_scope`, `dps_global_endpoint` (all identifiers, empty when
 `dps_enabled` is false).
+
+## APNs Key Vault (#241)
+
+**What it is for.** The API will send target alerts to the iOS app through APNs
+(spec #237, dev only, APNs sandbox). APNs needs a provider token signed with the
+owner's Apple APNs key. That key lives in this Key Vault as a non-exportable EC
+P-256 signing key, and the Function App signs through Key Vault under its
+managed identity, which may sign and may never read or export the key.
+
+**What Terraform does and does not do.** `modules/apns-key-vault` creates the
+vault (standard SKU, RBAC only, soft delete 7 days, purge protection off, public
+network access) over the ARM control plane and publishes two non-secret app
+settings, `APNS_KEY_VAULT_URI` and `APNS_KEY_NAME` (`apns-auth-key`). It never
+creates, imports or reads a key: the owner imports it by hand, so no key
+material, Apple key id or team id passes through Terraform, its state or an app
+setting, and the vault is empty after every apply. Nothing in the stack needs the
+key to exist.
+
+**The two flags.**
+
+| Variable                  | Default | dev     | What it does |
+| ------------------------- | ------- | ------- | ------------ |
+| `apns_key_vault_enabled`  | `false` | `true`  | Creates the vault and publishes `APNS_KEY_VAULT_URI` and `APNS_KEY_NAME` to the Function App. Prod does not set it. |
+| `apns_key_signer_enabled` | `false` | `false` | Grants the Function App identity `Key Vault Crypto User` on the vault (sign; no read or export of the private key). Needs `apns_key_vault_enabled` too. |
+
+**Switching on `apns_key_signer_enabled` needs a `bootstrap.sh` re-run first**,
+for the same reason as every grant that adds a role. See the
+[bootstrap runbook](../../docs/infrastructure/bootstrap-runbook.md#apns-key-signer-grant--re-run-bootstrap-before-setting-apns_key_signer_enabled-241).
+
+The owner's steps (Apple account, the import, the key id and team id for the
+deployment), the role choice, destroy and recreate, and the cost are in
+[APNs key: the Apple account and the dev Key Vault](../../docs/infrastructure/apns-key-vault.md).
+Outputs: `apns_key_vault_name`, `apns_key_name` (null when the vault is off).
 
 ## Provider pinning & lock files
 
@@ -424,6 +459,7 @@ terraform output -raw signalr_service_uri        # non-secret; access is identit
 terraform output development_urls                # non-secret endpoint URLs
 terraform output -raw dps_id_scope               # non-secret DPS id scope (empty when dps_enabled is false)
 terraform output -raw dps_global_endpoint        # global.azure-devices-provisioning.net
+terraform output -raw apns_key_vault_name        # the vault the owner imports the APNs key into (dev)
 ```
 
 ### How the app gets access (no secrets)
@@ -435,6 +471,7 @@ narrowly-scoped data-plane RBAC by the root module:
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
 | Cosmos DB     | `COSMOSDB__accountEndpoint`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Cosmos DB Built-in Data Contributor       |
 | IoT telemetry | `IOTHUB_EVENTS__fullyQualifiedNamespace`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Azure Event Hubs Data Receiver            |
+| APNs key (dev) | `APNS_KEY_VAULT_URI`, `APNS_KEY_NAME` (the key never leaves the vault; the app signs through it) | Key Vault Crypto User, on the vault (behind `apns_key_signer_enabled`) |
 | SignalR       | `AzureSignalRConnectionString__serviceUri`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | SignalR Service Owner                     |
 | App Insights  | `APPLICATIONINSIGHTS_CONNECTION_STRING` — the FULL TF-managed connection string (`InstrumentationKey=…;IngestionEndpoint=…` — Microsoft requires the ikey as the destination-resource identifier even under Entra) wired via the **native** `site_config.application_insights_connection_string` field, **not** an app setting (Azure surfaces it to the host unchanged as this env var); plus the `APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD` app setting. The ikey **cannot authenticate**: `local_authentication_enabled = false` on the App Insights resource forces AAD-only ingestion. | Monitoring Metrics Publisher              |
 

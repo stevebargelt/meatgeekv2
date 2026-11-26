@@ -207,6 +207,28 @@ variable "targets_consumer_group" {
   type        = string
 }
 
+variable "apns_key_vault_uri" {
+  description = "Data-plane URI of the Key Vault holding the APNs signing key (non-secret, https://<vault>.vault.azure.net/), published as APNS_KEY_VAULT_URI. Empty (default) publishes neither APNS setting."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.apns_key_vault_uri == "" || can(regex("^https://[a-zA-Z0-9-]{3,24}\\.vault\\.azure\\.net/$", var.apns_key_vault_uri))
+    error_message = "apns_key_vault_uri must be empty or a Key Vault URI (https://<vault>.vault.azure.net/)."
+  }
+}
+
+variable "apns_key_name" {
+  description = "Name of the APNs signing key in that vault (non-secret), published as APNS_KEY_NAME when apns_key_vault_uri is set."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.apns_key_vault_uri == "" || can(regex("^[0-9a-zA-Z-]{1,127}$", var.apns_key_name))
+    error_message = "apns_key_name must be a Key Vault key name (1-127 letters, digits and hyphens) whenever apns_key_vault_uri is set."
+  }
+}
+
 # --- HTTP posture (S2) ------------------------------------------------------
 
 variable "cors_allowed_origins" {

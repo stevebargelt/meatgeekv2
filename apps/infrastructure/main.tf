@@ -43,7 +43,7 @@ provider "azurerm" {
   # required providers (Microsoft.Devices, Microsoft.DocumentDB, Microsoft.Web,
   # Microsoft.SignalRService, Microsoft.Storage, Microsoft.Insights,
   # Microsoft.OperationalInsights, Microsoft.EventHub, Microsoft.App,
-  # Microsoft.Consumption) must already be Registered on the subscription before
+  # Microsoft.Consumption, Microsoft.KeyVault) must already be Registered on the subscription before
   # the CI apply runs. Do NOT "fix" a missing-RP apply failure by widening the
   # apply identity to subscription scope — that breaks the closed-escalation-path
   # precondition the MG-23 threat model rests on.
@@ -128,6 +128,15 @@ locals {
   # so it is stable across plans; 12 hex chars keeps every derived name inside
   # Azure's per-service length limits. Threaded to each module as `global_suffix`.
   global_name_suffix = substr(sha1("${data.azurerm_client_config.current.subscription_id}-global"), 0, 12)
+
+  # Globally-unique Key Vault name for the APNs signing key (#241). A vault name
+  # is its DNS label: 3-24 characters, letters, digits and hyphens. Same
+  # deterministic, subscription-derived approach as the Cosmos and storage names
+  # ("mgv2-dev-kv-" + 10 hex = 22 characters, prod 23). Deterministic matters
+  # twice here: after a destroy, the soft-deleted vault keeps this name for its
+  # 7-day retention, and a recreate must either recover it or wait (see
+  # modules/apns-key-vault/main.tf).
+  apns_key_vault_name = "mgv2-${var.environment}-kv-${substr(sha1("${data.azurerm_client_config.current.subscription_id}-apns-kv"), 0, 10)}"
 
   # FULL Terraform-managed Application Insights connection string — including the
   # InstrumentationKey. Microsoft requires the connection string (with the ikey
@@ -388,6 +397,12 @@ module "azure_functions" {
   temperature_broadcast_consumer_group = module.iot_hub.temperature_broadcast_consumer_group_name
   targets_consumer_group               = module.iot_hub.targets_consumer_group_name
 
+  # Where the APNs signing key lives (#241): the vault's URI and the key's name,
+  # both non-secret, from the module that creates the vault. Empty where there
+  # is no vault (prod), which publishes neither setting.
+  apns_key_vault_uri = var.apns_key_vault_enabled ? module.apns_key_vault[0].vault_uri : ""
+  apns_key_name      = var.apns_key_vault_enabled ? module.apns_key_vault[0].key_name : ""
+
   # S2 HTTP posture — explicit per-environment CORS + optional Entra ID auth.
   cors_allowed_origins            = var.functions_cors_allowed_origins
   auth_active_directory_client_id = var.functions_auth_client_id
@@ -610,6 +625,36 @@ resource "azurerm_role_assignment" "dps_ci_enroller" {
   role_definition_name = "Device Provisioning Service Data Contributor"
   principal_id         = var.app_deploy_principal_object_id
   principal_type       = "ServicePrincipal"
+}
+
+# Key Vault for the APNs signing key (#241, spec #237). Dev only: created where
+# var.apns_key_vault_enabled is true (dev.tfvars), absent in prod. The vault is
+# created EMPTY and stays empty after every apply: the owner imports the key by
+# hand, as a non-exportable signing key (docs/infrastructure/apns-key-vault.md),
+# so no key material, Apple key id or team id ever passes through Terraform or
+# its state. Nothing in this stack needs the key to exist.
+#
+# The Function App identity's grant on it (Key Vault Crypto User: may sign, may
+# never read or export the private key) lives in the module and is switched by
+# var.apns_key_signer_enabled, OFF by default. The role is in
+# bootstrap/tf-managed-role-allowlist.tsv, but the live ABAC condition on the
+# infra-apply identity only learns it when bootstrap.sh is re-run; setting
+# apns_key_signer_enabled in a tfvars before that re-run fails every dev apply
+# with AuthorizationFailed. Covered by tests/apns_key_vault.tftest.hcl and
+# modules/apns-key-vault/tests/.
+module "apns_key_vault" {
+  count  = var.apns_key_vault_enabled ? 1 : 0
+  source = "./modules/apns-key-vault"
+
+  name              = local.apns_key_vault_name
+  resource_group_id = azurerm_resource_group.main.id
+  location          = azurerm_resource_group.main.location
+  tenant_id         = data.azurerm_client_config.current.tenant_id
+
+  signer_principal_id  = module.azure_functions.identity_principal_id
+  signer_grant_enabled = var.apns_key_signer_enabled
+
+  tags = local.common_tags
 }
 
 # SignalR Module

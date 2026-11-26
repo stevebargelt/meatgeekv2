@@ -134,7 +134,7 @@ locals {
   #     functionAppConfig and manages the extension version and package mount;
   #     FUNCTIONS_WORKER_RUNTIME fails a Flex create with 400 BadRequest
   #     (ExtendedCode 51021).
-  function_app_settings = {
+  function_app_settings = merge({
     # HOST STORAGE — identity-based, ACCOUNT-NAME form (MG-58).
     #
     # The host resolves this against the app's system-assigned managed identity
@@ -232,7 +232,18 @@ locals {
     # Nothing reads it yet; it is also the Terraform-made setting change whose
     # merge proves the dev apply -> deploy -> acceptance chain (goal HAR-9 item 7).
     "MEATGEEK_ENVIRONMENT" = var.environment
-  }
+    },
+    # Where the APNs signing key lives (#241): the Key Vault's data-plane URI and
+    # the key's name, both non-secret. The key never leaves the vault: the app
+    # signs its provider token through Key Vault under its managed identity
+    # (Key Vault Crypto User, modules/apns-key-vault). Present only where
+    # the vault exists (dev); absent, not empty, everywhere else. Nothing reads
+    # them yet (#243 does).
+    var.apns_key_vault_uri == "" ? {} : {
+      "APNS_KEY_VAULT_URI" = var.apns_key_vault_uri
+      "APNS_KEY_NAME"      = var.apns_key_name
+    },
+  )
 }
 
 # Storage account for Azure Functions — created via azapi over the ARM CONTROL

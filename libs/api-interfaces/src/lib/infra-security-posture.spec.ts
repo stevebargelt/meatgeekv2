@@ -1448,10 +1448,10 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
     return out;
   }
 
-  it('finds every role assignment in the graph (13 blocks over 11 distinct roles)', () => {
+  it('finds every role assignment in the graph (14 blocks over 12 distinct roles)', () => {
     // Premise guard: if this scan silently matched nothing, the two assertions
     // below would be vacuously green. Pin the shape the MG-23 allowlist is derived
-    // from — 13 azurerm_role_assignment blocks over 11 DISTINCT role definition
+    // from — 14 azurerm_role_assignment blocks over 12 DISTINCT role definition
     // names (Monitoring Metrics Publisher is granted twice, at different scopes:
     // App Insights for the Function App, the DCR for the OTLP collector; IoT Hub
     // Registry Contributor is granted twice too, to the app-deploy identity and
@@ -1461,8 +1461,10 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
     // HAR-131 added the DPS identity's IoT Hub Registry Contributor grant (on
     // with dps_enabled) and Device Provisioning Service Data Contributor for the
     // CI enroller, count-disabled until dps_ci_enroller_enabled is set.
+    // #241 added Key Vault Crypto User for the Function App on the APNs Key
+    // Vault, count-disabled until apns_key_signer_enabled is set.
     const found = roleAssignments();
-    expect(found.length).toBe(13);
+    expect(found.length).toBe(14);
 
     const roles = found.map(r => r.body.match(/role_definition_name\s*=\s*"([^"]+)"/)?.[1] ?? '');
     expect(roles).not.toContain('');
@@ -1473,6 +1475,7 @@ describe('MG-23: the Terraform graph is appliable by a resource-group-scoped CI 
         'Device Provisioning Service Data Contributor',
         'IoT Hub Registry Contributor',
         'IoT Hub Twin Contributor',
+        'Key Vault Crypto User',
         'Monitoring Metrics Publisher',
         'SignalR Service Owner',
         'Storage Blob Data Contributor',

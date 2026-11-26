@@ -58,7 +58,7 @@ render those dashed or faded, but its flows describe only what runs today.
 
 ## MeatGeek V2: landscape
 
-Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). Nothing is decided and unbuilt; grey dotted is not built, with no decision. Click a box to go down a level.
+Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). Decided and unbuilt: the APNs signing path to the dev Key Vault (sky dashed); grey dotted is not built, with no decision. Click a box to go down a level.
 
 View `index` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/index/
 
@@ -85,7 +85,7 @@ graph TB
   Delivery -. "`[...]`" .-> Entra
   Operator -. "`onboard-pi.sh`" .-> Meatgeek.Edge
   Smoker -. "`RTD sensor readings`" .-> Meatgeek.Edge
-  Operator -. "`enrol-device.sh / revoke-device.sh`" .-> Meatgeek.Cloud
+  Operator -. "`[...]`" .-> Meatgeek.Cloud
   Delivery -. "`[...]`" .-> Meatgeek.Cloud
   Meatgeek.Edge -. "`[...]`" .-> Meatgeek.Cloud
   Meatgeek.Cloud -. "`[...]`" .-> Operator
@@ -110,13 +110,14 @@ to main, serves production`" .-> Meatgeek.Web
   class Vercel,Smoker,Entra muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery,Meatgeek.Edge,Meatgeek.Cloud,Meatgeek.Mobile,Meatgeek.Web primary
-  linkStyle 0,1,2,3,4,5,6,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,6,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 5 stroke:#0ea5e9,stroke-dasharray:8 4
   linkStyle 10 stroke:#8D8D8D
 ```
 
 ## MeatGeek V2: containers
 
-Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). Nothing is decided and unbuilt; grey dotted is not built, with no decision.
+Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). Decided and unbuilt: the APNs signing path to the dev Key Vault (sky dashed); grey dotted is not built, with no decision.
 
 View `system` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/system/
 
@@ -148,6 +149,7 @@ graph TB
       Meatgeek.Cloud.Api@{ shape: rectangle, label: "Functions API" }
       Meatgeek.Cloud.Deviceupdate@{ shape: rectangle, label: "Device Update for IoT Hub" }
       Meatgeek.Cloud.Realtime@{ shape: rectangle, label: "SignalR Service" }
+      Meatgeek.Cloud.Keyvault@{ shape: disk, label: "Key Vault: APNs key" }
       Meatgeek.Cloud.Data@{ shape: disk, label: "Cosmos DB" }
     end
     subgraph Meatgeek.Edge["`MeatGeek device`"]
@@ -184,11 +186,14 @@ token (access_as_user)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Web -. "`REST, user access
 token (access_as_user)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Web -. "`connects as the signed-in user`" .-> Meatgeek.Cloud.Realtime
+  Operator -. "`imports the APNs key, sign only`" .-> Meatgeek.Cloud.Keyvault
   Meatgeek.Cloud.Api -. "`validates access tokens`" .-> Entra
   Meatgeek.Cloud.Realtime -. "`temperature, cook_stopped`" .-> Meatgeek.Mobile
   Meatgeek.Cloud.Realtime -. "`temperature, cook_stopped`" .-> Meatgeek.Web
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Data
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Realtime
+  Meatgeek.Cloud.Api -. "`signs the APNs
+provider token (ES256)`" .-> Meatgeek.Cloud.Keyvault
   Meatgeek.Cloud.Data -. "`change feed (leases)`" .-> Meatgeek.Cloud.Api
   Operator -. "`enrol-device.sh / revoke-device.sh`" .-> Meatgeek.Cloud.Ingest.Dps
   Meatgeek.Edge.Pusher -. "`[...]`" .-> Meatgeek.Cloud.Ingest.Iothub
@@ -236,13 +241,14 @@ $.ce=utf-8, traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   class Meatgeek.Cloud.Ingest.Eventhub,Meatgeek.Cloud.Observability.Budgets,Meatgeek.Cloud.Observability.ActivityAlerts,Meatgeek.Cloud.Observability.ActionGroup,Meatgeek.Cloud.Realtime,Meatgeek.Cloud.Ingest.Dps,Meatgeek.Cloud.Ingest.Iothub,Meatgeek.Cloud.Observability.Workbook,Meatgeek.Cloud.Observability.LogAlerts,Meatgeek.Cloud.Observability.Appinsights,Meatgeek.Cloud.Observability.Logs,Meatgeek.Cloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery.Simdevice,Meatgeek.Mobile,Meatgeek.Web,Meatgeek.Edge.Pusher,Meatgeek.Edge.Controller,Meatgeek.Cloud.Api primary
+  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
+  class Meatgeek.Cloud.Keyvault,Meatgeek.Cloud.Observability.Collector amber
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class Meatgeek.Cloud.Data green
-  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
-  class Meatgeek.Cloud.Observability.Collector amber
-  linkStyle 0,1,2,3,4,5,6,7,8,11,12,13,14,15,16,17,18,21,23,26,27,32,35,36,37,38,39,40,41,42,43,44,45,46,48,49,50,51,52 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 9,10,24,25,28,33,34,47 stroke:#8D8D8D
-  linkStyle 19,20,22,29,30,31,53 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,11,12,13,14,16,17,18,19,23,25,28,29,34,37,38,39,40,41,42,43,44,45,46,47,48,50,51,52,53,54 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 9,10,26,27,30,35,36,49 stroke:#8D8D8D
+  linkStyle 15,21 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 20,22,24,31,32,33,55 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## MeatGeek cloud (Azure)
@@ -277,6 +283,7 @@ graph TB
     subgraph MeatgeekCloud.Data["`Cosmos DB`"]
       MeatgeekCloud.Data.TemperatureRollups@{ shape: cylinder, label: "temperature-rollups" }
     end
+    MeatgeekCloud.Keyvault@{ shape: disk, label: "Key Vault: APNs key" }
     MeatgeekCloud.Deviceupdate@{ shape: rectangle, label: "Device Update for IoT Hub" }
     subgraph MeatgeekCloud.Ingest["`Ingest`"]
       MeatgeekCloud.Ingest.Dps@{ shape: rectangle, label: "Device Provisioning Service" }
@@ -300,6 +307,7 @@ graph TB
     MeatgeekMobile.LivePanel@{ shape: rectangle, label: "live panel" }
     MeatgeekMobile.Chart@{ shape: rectangle, label: "chart" }
   end
+  Operator -. "`imports the APNs key, sign only`" .-> MeatgeekCloud.Keyvault
   Operator -. "`enrol-device.sh / revoke-device.sh`" .-> MeatgeekCloud.Ingest.Dps
   MeatgeekCloud.Deviceupdate -. "`deployment to a device group`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Ingest.Iothub -. "`eventhub-realtime-route`" .-> MeatgeekCloud.Ingest.Eventhub
@@ -343,6 +351,8 @@ to the owning userId`" .-> MeatgeekCloud.Realtime
 <sim>-web or <sim>-ios:
 messageId, $.ct=application/json,
 $.ce=utf-8, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
+  MeatgeekCloud.Api -. "`signs the APNs
+provider token (ES256)`" .-> MeatgeekCloud.Keyvault
   MeatgeekCloud.Api -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`cosmos-429-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
@@ -355,10 +365,11 @@ $.ce=utf-8, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data.TemperatureRollups green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
-  class MeatgeekCloud.Observability.Collector amber
-  linkStyle 0,3,4,5,6,7,8,9,10,11,13,14,15,16,18,19,21,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,12 stroke:#8D8D8D
-  linkStyle 2,17,20,22,36 stroke:#b45309,stroke-dasharray:8 4
+  class MeatgeekCloud.Keyvault,MeatgeekCloud.Observability.Collector amber
+  linkStyle 0,38 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,4,5,6,7,8,9,10,11,12,14,15,16,17,19,20,22,24,25,26,27,28,29,30,31,32,33,34,35,36,39,40,41 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 2,13 stroke:#8D8D8D
+  linkStyle 3,18,21,23,37 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -920,6 +931,7 @@ graph TB
     DevRg.Workbook@{ shape: rectangle, label: "Workbook" }
     DevRg.Iothub@{ shape: rectangle, label: "IoT Hub" }
     DevRg.Signalr@{ shape: rectangle, label: "SignalR Service" }
+    DevRg.Keyvault@{ shape: disk, label: "Key Vault: APNs key" }
     DevRg.Appinsights@{ shape: rectangle, label: "Application Insights" }
     DevRg.Eventhub@{ shape: horizontal-cylinder, label: "Event Hub: temperature-data" }
     DevRg.Cosmos@{ shape: disk, label: "Cosmos DB" }
@@ -938,6 +950,8 @@ identity (X.509 thumbprint)`" .-> DevRg.Iothub
   DevRg.Eventhub -. "`Event Hub trigger`" .-> DevRg.Api
   DevRg.Api -. "`[...]`" .-> DevRg.Cosmos
   DevRg.Api -. "`[...]`" .-> DevRg.Signalr
+  DevRg.Api -. "`signs the APNs
+provider token (ES256)`" .-> DevRg.Keyvault
   DevRg.Api -. "`traces, logs (samplingRatio
 0.5) and metrics (unsampled)`" .-> DevRg.Appinsights
   DevRg.Api -. "`diagnostic settings`" .-> DevRg.Logs
@@ -991,11 +1005,12 @@ system browser), no secret`" .-> DevIdentity.Entra
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class DevRg.Dps,DevRg.Workbook,DevRg.Iothub,DevRg.Signalr,DevRg.Appinsights,DevRg.Eventhub,DevRg.Logs indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
-  class DevRg.Cosmos green
+  class DevRg.Keyvault,DevRg.Cosmos green
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class DevIdentity.Entra muted
-  linkStyle 0,3,4,5,7,9,10,12,13,14,15,16,17,18,20,21,22,23,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 1,2,6,8,11,19,24 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,7,10,11,13,14,15,16,17,18,19,21,22,23,24,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 1,2,6,8,12,20,25 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 9 stroke:#0ea5e9,stroke-dasharray:8 4
 ```
 
 ---
