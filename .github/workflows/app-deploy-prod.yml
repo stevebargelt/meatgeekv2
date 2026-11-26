@@ -91,13 +91,13 @@ jobs:
 
       - name: Checkout the CI'd commit
         if: steps.freshness.outputs.fresh == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Setup Node.js
         if: steps.freshness.outputs.fresh == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -136,7 +136,7 @@ jobs:
       # until then this login fails closed rather than deploying with a wrong role.
       - name: Azure login (OIDC — app deployment identity)
         if: steps.freshness.outputs.fresh == 'true'
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ vars.AZURE_APP_DEPLOY_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -144,7 +144,7 @@ jobs:
 
       - name: Setup Terraform
         if: steps.freshness.outputs.fresh == 'true'
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: '~1.9'
 
