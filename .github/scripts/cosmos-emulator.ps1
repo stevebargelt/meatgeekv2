@@ -66,9 +66,9 @@ function Write-Summary([string]$line) {
 # certificates in LocalMachine\My with X509FindType.FindBySubjectName: a
 # substring match, so every certificate whose subject contains "localhost". For
 # each one it opens the private key as a CNG key, to add its service group to
-# the key file's ACL, and it throws if any one of them cannot be opened, has no
-# private key, or has a key it cannot open as a CNG key (a legacy CSP key).
-# The windows-2025 runner image ships an
+# the key file's ACL, and it throws if any one of them has no private key,
+# has one that cannot be opened or does not open as an RSACng or ECDsaCng key,
+# or has no key file where it looks. The windows-2025 runner image ships an
 # "IIS Express Development Certificate", CN=localhost, whose private key is
 # gone ("Keyset does not exist"). So the gateway's StartupEntryPoint dies with a
 # CryptographicException in SetCertificateAcl at every start, on 2.14.28.0 and
@@ -79,11 +79,15 @@ function Write-Summary([string]$line) {
 # the start removes the crash. None of them is the emulator's own: it creates
 # its certificates during the start, with CNG keys.
 function Read-CertificatePrivateKey($Certificate) {
-  # The certificate's private key as .NET opens it, or why it would not open.
-  # On Windows, GetRSAPrivateKey returns an RSACng for a key in a CNG key
-  # storage provider and an RSACryptoServiceProvider for a key in a legacy CSP.
+  # The certificate's private key as the emulator's AclCertificateUtil reads
+  # it: GetRSAPrivateKey, or GetECDsaPrivateKey, which try CNG first, in
+  # .NET Framework as in pwsh's .NET. They return an RSACng/ECDsaCng for a key
+  # CNG can open, including a software CSP key, and an RSACryptoServiceProvider
+  # for a CSP key it cannot. Also where the emulator looks for a CNG key's file
+  # (GetPrivateKeyFileInfo) and whether that file exists.
   $key = $null
   $keyError = $null
+  $keyFile = $null
   if ($Certificate.HasPrivateKey) {
     try {
       $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
@@ -93,21 +97,28 @@ function Read-CertificatePrivateKey($Certificate) {
       if (-not $keyError) { $keyError = $_.Exception.Message }
     }
   }
-  [pscustomobject]@{ Key = $key; Error = $keyError }
+  if (($key -is [System.Security.Cryptography.RSACng] -or $key -is [System.Security.Cryptography.ECDsaCng]) -and $key.Key.UniqueName) {
+    $folder = if ($key.Key.Provider -eq [System.Security.Cryptography.CngProvider]::MicrosoftSoftwareKeyStorageProvider) { 'Microsoft\Crypto\Keys' } else { 'Microsoft\Crypto\RSA\MachineKeys' }
+    $keyFile = [System.IO.Path]::Combine([Environment]::GetFolderPath('CommonApplicationData'), $folder, $key.Key.UniqueName)
+  }
+  [pscustomobject]@{ Key = $key; Error = $keyError; KeyFile = $keyFile; KeyFileExists = [bool]($keyFile -and [System.IO.File]::Exists($keyFile)) }
 }
 
-function Get-LocalhostCertificateProblem([bool]$HasPrivateKey, [object]$Key, [string]$KeyError) {
-  # Why the emulator's ACL step would fail on this certificate, or $null if it
-  # would not. $Key and $KeyError are what Read-CertificatePrivateKey returned.
-  # The emulator opens each key as a CNG key, so only an RSACng or ECDsaCng
-  # key is kept; any other key, or none, is a problem.
+function Get-LocalhostCertificateProblem([bool]$HasPrivateKey, $Read) {
+  # Why the emulator's ACL step would throw on this certificate, or $null if
+  # it would not. $Read is what Read-CertificatePrivateKey returned. The steps
+  # follow AclCertificateUtil.SetCertificateAcl: the key must open, be an
+  # RSACng or ECDsaCng key, and have its file where the emulator looks.
   if (-not $HasPrivateKey) { return 'it has no private key' }
-  if ($KeyError) { return "its private key cannot be opened ($KeyError)" }
-  if ($null -eq $Key) { return 'its private key is neither an RSA nor an ECDsa key' }
-  if ($Key -is [System.Security.Cryptography.RSACng] -or $Key -is [System.Security.Cryptography.ECDsaCng]) { return $null }
-  $type = $Key.GetType().Name
-  if ($type -match 'CryptoServiceProvider$') { return "its private key is held by a legacy CSP ($type), not a CNG key storage provider" }
-  return "its private key opens as $type, not as a CNG key"
+  if ($Read.Error) { return "its private key cannot be opened ($($Read.Error))" }
+  if ($null -eq $Read.Key) { return 'its private key is neither an RSA nor an ECDsa key' }
+  if (-not ($Read.Key -is [System.Security.Cryptography.RSACng] -or $Read.Key -is [System.Security.Cryptography.ECDsaCng])) {
+    $type = $Read.Key.GetType().Name
+    if ($type -match 'CryptoServiceProvider$') { return "its private key is held by a legacy CSP that CNG cannot open ($type)" }
+    return "its private key opens as $type, not as a CNG key"
+  }
+  if (-not $Read.KeyFileExists) { return "its CNG key has no file where the emulator looks for it ($(if ($Read.KeyFile) { $Read.KeyFile } else { 'an ephemeral key' }))" }
+  return $null
 }
 
 function Remove-LocalhostCertificatesTheEmulatorCannotUse {
@@ -119,13 +130,13 @@ function Remove-LocalhostCertificatesTheEmulatorCannotUse {
     $found = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindBySubjectName, 'localhost', $false)
     foreach ($cert in $found) {
       $read = Read-CertificatePrivateKey $cert
-      $problem = Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error
+      $problem = Get-LocalhostCertificateProblem $cert.HasPrivateKey $read
       $what = "$($cert.Subject) '$($cert.FriendlyName)' ($($cert.Thumbprint))"
       if ($problem) {
         $store.Remove($cert)
         Write-Host "::notice title=Removed a localhost certificate (HAR-190)::Removed $what from LocalMachine\My before starting the emulator: $problem, which would crash the emulator's gateway at start-up."
       } else {
-        Write-Host "Kept $what in LocalMachine\My: its private key is a CNG key ($($read.Key.Key.Provider.Provider))."
+        Write-Host "Kept $what in LocalMachine\My: its private key is a CNG key ($($read.Key.Key.Provider.Provider), $($read.KeyFile))."
       }
     }
   } finally {

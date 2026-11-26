@@ -55,9 +55,11 @@ Describe 'Test-SetCertificateAclFault' {
 }
 
 Describe 'Get-LocalhostCertificateProblem' {
-  # Each case passes what Read-CertificatePrivateKey returns: a real key
-  # object of the type GetRSAPrivateKey / GetECDsaPrivateKey yields, never a
-  # hand-typed provider name.
+  # The read-back cases build a real certificate and read it through
+  # Read-CertificatePrivateKey, the path the script takes. The other cases pass
+  # a real key object of the type GetRSAPrivateKey / GetECDsaPrivateKey yields.
+  # CNG and CSP key containers exist only on Windows, so those cases run there
+  # (CI's api-cosmos-emulator job runs this file on windows-2025).
   BeforeAll {
     function New-LocalhostCertificate([System.Security.Cryptography.RSA]$Key) {
       $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
@@ -65,10 +67,12 @@ Describe 'Get-LocalhostCertificateProblem' {
         [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
       $request.CreateSelfSigned([datetimeoffset]::new(2026, 1, 1, 0, 0, 0, [timespan]::Zero), [datetimeoffset]::new(2027, 1, 1, 0, 0, 0, [timespan]::Zero))
     }
+    function Read-Key($Key) { [pscustomobject]@{ Key = $Key; Error = $null; KeyFile = $null; KeyFileExists = $false } }
   }
 
   It 'removes the IIS Express Development Certificate as the runner image ships it (key gone)' {
-    Get-LocalhostCertificateProblem $true $null 'Keyset does not exist' | Should -Match 'cannot be opened \(Keyset does not exist\)'
+    $read = [pscustomobject]@{ Key = $null; Error = 'Keyset does not exist'; KeyFile = $null; KeyFileExists = $false }
+    Get-LocalhostCertificateProblem $true $read | Should -Be 'its private key cannot be opened (Keyset does not exist)'
   }
 
   It 'removes a localhost certificate with no private key' {
@@ -76,37 +80,18 @@ Describe 'Get-LocalhostCertificateProblem' {
     $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($withKey.RawData)
     $read = Read-CertificatePrivateKey $cert
     $read.Key | Should -BeNullOrEmpty
-    Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error | Should -Be 'it has no private key'
+    Get-LocalhostCertificateProblem $cert.HasPrivateKey $read | Should -Be 'it has no private key'
   }
 
   It 'removes a localhost certificate with a private key that is neither RSA nor ECDsa' {
-    Get-LocalhostCertificateProblem $true $null $null | Should -Be 'its private key is neither an RSA nor an ECDsa key'
+    Get-LocalhostCertificateProblem $true (Read-Key $null) | Should -Be 'its private key is neither an RSA nor an ECDsa key'
   }
 
-  It 'removes a localhost certificate whose key opens as RSACryptoServiceProvider (a legacy CSP)' {
+  It 'removes a localhost certificate whose key opens as RSACryptoServiceProvider (a CSP key CNG cannot open)' {
     $key = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
     try {
-      Get-LocalhostCertificateProblem $true $key $null | Should -Be 'its private key is held by a legacy CSP (RSACryptoServiceProvider), not a CNG key storage provider'
+      Get-LocalhostCertificateProblem $true (Read-Key $key) | Should -Be 'its private key is held by a legacy CSP that CNG cannot open (RSACryptoServiceProvider)'
     } finally { $key.Dispose() }
-  }
-
-  It 'removes a certificate whose key a legacy CSP holds, read back through Read-CertificatePrivateKey' -Skip:(-not $IsWindows) {
-    # The key must live in a named, persisted CSP container: CopyWithPrivateKey
-    # copies an ephemeral CSP key into an ephemeral CNG key, which reads back
-    # as RSACng. CSP containers exist only on Windows.
-    $csp = [System.Security.Cryptography.CspParameters]::new(24, 'Microsoft Enhanced RSA and AES Cryptographic Provider', "har190-test-$([guid]::NewGuid())")
-    $key = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048, $csp)
-    try {
-      $key.PersistKeyInCsp = $true
-      $cert = New-LocalhostCertificate $key
-      $read = Read-CertificatePrivateKey $cert
-      $read.Error | Should -BeNullOrEmpty
-      $read.Key | Should -BeOfType [System.Security.Cryptography.RSACryptoServiceProvider]
-      Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error | Should -Be 'its private key is held by a legacy CSP (RSACryptoServiceProvider), not a CNG key storage provider'
-    } finally {
-      $key.PersistKeyInCsp = $false
-      $key.Clear()
-    }
   }
 
   It 'removes a certificate whose key is not a CNG key, read back through Read-CertificatePrivateKey' -Skip:$IsWindows {
@@ -114,29 +99,60 @@ Describe 'Get-LocalhostCertificateProblem' {
     $cert = New-LocalhostCertificate ([System.Security.Cryptography.RSA]::Create(2048))
     $read = Read-CertificatePrivateKey $cert
     $read.Key | Should -Not -BeNullOrEmpty
-    Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error | Should -Match '^its private key opens as \S+, not as a CNG key$'
+    Get-LocalhostCertificateProblem $cert.HasPrivateKey $read | Should -Match '^its private key opens as \S+, not as a CNG key$'
   }
 
-  It 'removes a localhost certificate whose key is some other non-CNG implementation' -Skip:$IsWindows {
-    # RSA.Create() is RSACng on Windows, so this case exists only elsewhere.
-    $key = [System.Security.Cryptography.RSA]::Create(2048)
-    Get-LocalhostCertificateProblem $true $key $null | Should -Match '^its private key opens as \S+, not as a CNG key$'
+  It "keeps a certificate whose CNG key is a machine key in the software key storage provider, as the emulator's own are" -Skip:(-not $IsWindows) {
+    $parameters = [System.Security.Cryptography.CngKeyCreationParameters]::new()
+    $parameters.Provider = [System.Security.Cryptography.CngProvider]::MicrosoftSoftwareKeyStorageProvider
+    $parameters.KeyCreationOptions = [System.Security.Cryptography.CngKeyCreationOptions]::MachineKey
+    $parameters.Parameters.Add([System.Security.Cryptography.CngProperty]::new('Length', [BitConverter]::GetBytes(2048), [System.Security.Cryptography.CngPropertyOptions]::None))
+    $cng = [System.Security.Cryptography.CngKey]::Create([System.Security.Cryptography.CngAlgorithm]::Rsa, "har190-test-$([guid]::NewGuid())", $parameters)
+    try {
+      $cert = New-LocalhostCertificate ([System.Security.Cryptography.RSACng]::new($cng))
+      $read = Read-CertificatePrivateKey $cert
+      $read.Key | Should -BeOfType [System.Security.Cryptography.RSACng]
+      $read.KeyFile | Should -BeLike "$([Environment]::GetFolderPath('CommonApplicationData'))\Microsoft\Crypto\Keys\*"
+      $read.KeyFileExists | Should -BeTrue
+      Get-LocalhostCertificateProblem $cert.HasPrivateKey $read | Should -BeNullOrEmpty
+    } finally { $cng.Delete() }
   }
 
-  It "keeps a certificate with an RSACng key, as the emulator's own are, read back through Read-CertificatePrivateKey" -Skip:(-not $IsWindows) {
+  It 'removes a certificate whose CNG key has no file where the emulator looks (an ephemeral key)' -Skip:(-not $IsWindows) {
     $key = [System.Security.Cryptography.RSACng]::new(2048)
     try {
       $cert = New-LocalhostCertificate $key
       $read = Read-CertificatePrivateKey $cert
       $read.Key | Should -BeOfType [System.Security.Cryptography.RSACng]
-      Get-LocalhostCertificateProblem $cert.HasPrivateKey $read.Key $read.Error | Should -BeNullOrEmpty
+      $read.KeyFileExists | Should -BeFalse
+      Get-LocalhostCertificateProblem $cert.HasPrivateKey $read | Should -Match '^its CNG key has no file where the emulator looks for it'
     } finally { $key.Dispose() }
   }
 
-  It 'keeps a localhost certificate with an ECDsaCng key' -Skip:(-not $IsWindows) {
+  It 'removes a certificate whose key is in a software CSP container, read back through Read-CertificatePrivateKey' -Skip:(-not $IsWindows) {
+    # CNG opens a software CSP key, so it reads back as RSACng (job
+    # 139605737919), in pwsh as in the emulator's .NET Framework; but its file
+    # is not where the emulator looks for a CNG key.
+    $csp = [System.Security.Cryptography.CspParameters]::new(24, 'Microsoft Enhanced RSA and AES Cryptographic Provider', "har190-test-$([guid]::NewGuid())")
+    $key = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048, $csp)
+    try {
+      $key.PersistKeyInCsp = $true
+      $cert = New-LocalhostCertificate $key
+      $read = Read-CertificatePrivateKey $cert
+      $read.Error | Should -BeNullOrEmpty
+      $read.KeyFileExists | Should -BeFalse
+      Get-LocalhostCertificateProblem $cert.HasPrivateKey $read | Should -Not -BeNullOrEmpty
+    } finally {
+      $key.PersistKeyInCsp = $false
+      $key.Clear()
+    }
+  }
+
+  It 'keeps a localhost certificate with an ECDsaCng key whose file is where the emulator looks' -Skip:(-not $IsWindows) {
     $key = [System.Security.Cryptography.ECDsaCng]::new(256)
     try {
-      Get-LocalhostCertificateProblem $true $key $null | Should -BeNullOrEmpty
+      $read = [pscustomobject]@{ Key = $key; Error = $null; KeyFile = 'C:\ProgramData\Microsoft\Crypto\Keys\k'; KeyFileExists = $true }
+      Get-LocalhostCertificateProblem $true $read | Should -BeNullOrEmpty
     } finally { $key.Dispose() }
   }
 }
