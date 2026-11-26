@@ -2563,7 +2563,7 @@ when it skips, and so does the workflow's step-1 comment. After a red CI on
 `main`, **confirm the eventual green SHA actually reconciled** — check the
 `infra-apply-dev` run list, do not infer it from the commit list.
 
-**Tracked as MG-38** (`backlog/stories/MG-38-dev-gitops-reconciliation-drift-alert-green-ci-mai.md`):
+**Tracked as MG-38** (a retired tracker's id):
 a scheduled check that alerts (or auto-triggers a catch-up through this same
 gated sequence) when a green-CI `main` SHA is ahead of the last-applied SHA, and
 that does _not_ false-positive on an intentionally-blocked `main`.
