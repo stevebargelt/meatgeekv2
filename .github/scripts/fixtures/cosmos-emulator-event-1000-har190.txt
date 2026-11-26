@@ -1,0 +1,14 @@
+TimeCreated  : 11/25/2026 6:15:51 PM
+ProviderName : Application Error
+Id           : 1000
+Message      : Faulting application name: Microsoft.Azure.Cosmos.StartupEntryPoint.exe, version: 2.14.0.0, time stamp: 0x8e6e9a5f
+               Faulting module name: KERNELBASE.dll, version: 10.0.26100.33822, time stamp: 0xea72bec6
+               Exception code: 0xe0434352
+               Fault offset: 0x00000000000c7d9a
+               Faulting process id: 0x151C
+               Faulting application start time: 0x1DD7D08DCFF3E81
+               Faulting application path: C:\Program Files\Azure Cosmos DB Emulator\Packages\GatewayService\GatewayService.Code\EP\Microsoft.Azure.Cosmos.StartupEntryPoint.exe
+               Faulting module path: C:\Windows\System32\KERNELBASE.dll
+               Report Id: d0f49e8d-42b7-416b-a0b6-7a1cc566e4bf
+               Faulting package full name:
+               Faulting package-relative application ID:
