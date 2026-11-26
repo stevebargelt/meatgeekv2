@@ -135,6 +135,20 @@ node tools/test-repeat/test-repeat.mjs run utils --runs 20
 Not started by a merge: `infra-deploy-prod.yml` (manual, plan only), `ios-live-proof.yml` (daily at 09:17 UTC and on
 demand), `test-repeat.yml` (pull requests only).
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `stevebargelt/meatgeekv2`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## Deeper docs
 
 - Development: [CI/CD](docs/development/ci-cd.md), [local setup](docs/development/local-setup.md),
