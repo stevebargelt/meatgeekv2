@@ -27,7 +27,7 @@ repository, Terraform state, an app setting, a log or an issue.
 | Network | Public access on. The Function App runs on Flex Consumption with no VNet and no fixed outbound address; RBAC is the gate. |
 | Key | **None.** Terraform never creates, imports or reads a key. The vault is empty after every apply until the owner imports the key, and nothing in the stack needs it to exist. |
 | App settings | `APNS_KEY_VAULT_URI` (`https://<vault>.vault.azure.net/`) and `APNS_KEY_NAME` (`apns-auth-key`). Both are names, not secrets. Nothing reads them yet (#243 does). |
-| Function App grant | `Key Vault Crypto User` on the vault, for the Function App's system-assigned identity. Behind `apns_key_signer_enabled`, **off** until the owner re-runs `bootstrap.sh` (step 3 below). |
+| Function App grant | `Key Vault Crypto User` on the vault, for the Function App's system-assigned identity. Behind `apns_key_signer_enabled`, on in dev since the owner re-ran `bootstrap.sh` on 2026-11-26 (step 7 below). |
 
 The vault is created over the ARM control plane (azapi), not with
 `azurerm_key_vault`, because that resource reads the vault's certificate
@@ -60,7 +60,7 @@ So the identity can sign, and at worst disable the key. It can never obtain it.
 ## The owner's steps
 
 Steps 1 to 4 are on Apple's side; `bin/apple-push-setup` in the owner's
-`paperclip-team` repository walks them and records the ids in
+home repository walks them and records the ids in
 `~/.config/meatgeek/apns.env` (mode 600, outside every repository), with the key
 file beside it. Steps 5 to 8 are the Key Vault import and the ids for the
 deployment.
