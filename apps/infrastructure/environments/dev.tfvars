@@ -248,9 +248,9 @@ dps_enabled = true
 # HAR-131 CI enroller grant: on since the owner re-ran bootstrap.sh on 2026-11-22.
 dps_ci_enroller_enabled = true
 
-# #241 Key Vault for the APNs signing key, created empty; the owner imports the
-# key by hand (docs/infrastructure/apns-key-vault.md). Its role, Key Vault
-# Crypto User for the Function App identity, is allowlisted but not yet in the
-# live ABAC condition, so the grant stays off until the owner re-runs
-# bootstrap.sh; then set apns_key_signer_enabled = true here.
-apns_key_vault_enabled = true
+# #241 Key Vault for the APNs signing key; the owner imports the key by hand
+# (docs/infrastructure/apns-key-vault.md). The Function App's grant, Key Vault
+# Crypto User on that vault: on since the owner re-ran bootstrap.sh on
+# 2026-11-26, which put the role in the live ABAC condition.
+apns_key_vault_enabled  = true
+apns_key_signer_enabled = true
