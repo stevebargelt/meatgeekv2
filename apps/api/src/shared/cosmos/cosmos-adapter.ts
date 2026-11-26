@@ -22,10 +22,7 @@ import type { TokenCredential } from '@azure/core-auth';
  *
  * Configuration is fail-loud at module load (MG-51 pattern): the settings
  * Terraform publishes are read from process.env directly and THROW on
- * missing/blank, inventing no default. This deliberately does NOT route through
- * environments/environment.ts, whose `|| 'meatgeek'` database fallback (MG-55,
- * out of scope) is exactly the silent-wrong-name failure this guard refuses to
- * inherit.
+ * missing/blank, inventing no default.
  */
 
 /** Setting names Terraform publishes to the Function App. Source-fixed text. */

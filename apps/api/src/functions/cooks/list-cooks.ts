@@ -30,8 +30,10 @@ import { correlationIdOf } from '../devices/devices-http';
  *
  * FILTERS (MG-87)
  * `deviceId` and `status` narrow the caller's own cooks and combine with AND.
- * The data-pusher's reconcile asks for `deviceId=<id>&status=active` and treats
- * the first cook as authoritative, so the filters must be honoured, not ignored.
+ * A client asking for `deviceId=<id>&status=active` treats the first cook as
+ * authoritative, so the filters must be honoured, not ignored. (The data-pusher
+ * no longer calls this route: since HAR-58 the active cook reaches the device
+ * through its IoT Hub device twin.)
  * Both are validated before any query: `status` must be a CookStatus and
  * `deviceId` a non-empty opaque string of at most
  * {@link MAX_DEVICE_ID_LENGTH} characters. Anything else is a 400 that spends
