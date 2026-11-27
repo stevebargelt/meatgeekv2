@@ -7,13 +7,18 @@
  * owns a device by a fake. The re-arm cases then drive the real target rule
  * (recordTargetsReachedHandler) the way the Functions host does, so "reached
  * again on the next two readings" is the rule's own behaviour, not a copy.
+ * Its alerts (#244) go to the owner's phones in a fake users container through
+ * the real APNs client over a fake transport; nothing reads the wall clock.
  */
 import type { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import type { Cook } from '@meatgeekv2/api-interfaces';
 
+import { ApnsClient } from '../../shared/apns/apns-client';
 import { principalFromRequest } from '../../shared/auth/principal';
 import { CooksRepository } from '../../shared/cosmos/cooks-repository';
 import type { DeviceOwnership } from '../../shared/cosmos/devices-repository';
+import { FakeDevicesContainer } from '../../shared/cosmos/fake-devices-container.testing';
+import { PushTokensRepository } from '../../shared/cosmos/push-tokens-repository';
 import {
   COOKS_READ_CHARGE,
   COOKS_WRITE_CHARGE,
@@ -21,6 +26,7 @@ import {
 } from '../../shared/cosmos/fake-cooks-container.testing';
 import { REQUEST_CHARGE_HEADER } from '../../shared/cosmos/request-charge';
 import { recordTargetsReachedHandler } from './record-targets-reached';
+import { FakeApnsTransport, noopMeter, phoneToken } from './targets-harness.testing';
 import { updateCookTargetsHandler, type UpdateCookTargetsDeps } from './update-cook-targets';
 
 const TID = 'tid-bbbb-2222';
@@ -81,6 +87,10 @@ class Harness {
   readonly repository = new CooksRepository(this.container.asContainer());
   ownership: DeviceOwnership['status'] = 'owned';
   readonly ownershipReads: Array<{ userId: string; deviceId: string }> = [];
+  /** The time an alert is sent: the newest reading's time. */
+  now = new Date(at(0));
+  readonly pushTokens = new PushTokensRepository(new FakeDevicesContainer().asContainer(), () => this.now);
+  readonly apple = new FakeApnsTransport();
   readonly deps: UpdateCookTargetsDeps = {
     resolvePrincipal: principalFromRequest,
     getRepository: () => this.repository,
@@ -130,9 +140,21 @@ class Harness {
         enqueuedTimeUtcArray: readings.map(r => at(r.n)),
       },
     } as unknown as InvocationContext;
+    this.now = new Date(at(Math.max(...readings.map(r => r.n))));
     await recordTargetsReachedHandler(events, ctx, {
       ownerOf: async deviceId => (deviceId === DEVICE ? USER_ID : undefined),
       getRepository: () => this.repository,
+      getPushTokens: () => this.pushTokens,
+      getApns: () =>
+        new ApnsClient({
+          transport: this.apple,
+          tokens: { get: async () => 'provider.jwt.token' },
+          host: 'api.sandbox.push.apple.com',
+          bundleId: 'com.meatgeek.ios',
+        }),
+      temperatureUnitOf: async () => 'fahrenheit',
+      now: () => this.now,
+      meter: noopMeter,
     });
   }
 
@@ -260,6 +282,40 @@ describe('PUT /cooks/{cookId}/targets', () => {
 
       await h.readings({ n: 4, probe1Temp: 203 }, { n: 5, probe1Temp: 204 });
       expect(h.stored()['targetsReached']).toEqual({ probe1: { reachedAt: at(5) } });
+    });
+
+    it('alerts the new target when a changed target is reached again (#244)', async () => {
+      const h = new Harness();
+      await h.pushTokens.register(USER_ID, phoneToken(1));
+      h.seed({ targetTemps: { probe1: 165 } });
+      await h.readings({ n: 1, probe1Temp: 170 }, { n: 2, probe1Temp: 171 });
+      expect(h.apple.titles()).toEqual(['Probe 1 reached 165 °F']);
+
+      await h.put({ probe1: 203 });
+      await h.readings({ n: 3, probe1Temp: 190 });
+      expect(h.apple.titles()).toEqual(['Probe 1 reached 165 °F']);
+
+      await h.readings({ n: 4, probe1Temp: 203 }, { n: 5, probe1Temp: 204 });
+      expect(h.apple.titles()).toEqual(['Probe 1 reached 165 °F', 'Probe 1 reached 203 °F']);
+      expect(h.stored()['targetsAlerted']).toEqual({ probe1: at(5) });
+    });
+
+    it('sends no alert for a reach whose target was changed before it was alerted (#244)', async () => {
+      const h = new Harness();
+      await h.pushTokens.register(USER_ID, phoneToken(1));
+      h.seed({ targetTemps: { probe1: 165 } });
+      h.apple.answers.set(phoneToken(1), 'no-answer');
+      await expect(
+        h.readings({ n: 1, probe1Temp: 170 }, { n: 2, probe1Temp: 171 })
+      ).rejects.toThrow();
+      expect(h.stored()['targetsAlerted']).toBeUndefined();
+
+      // Apple answers again, but the target moved on before the retry.
+      h.apple.answers.delete(phoneToken(1));
+      await h.put({ probe1: 203 });
+      await h.readings({ n: 3, probe1Temp: 172 });
+
+      expect(h.apple.titles()).toEqual(['Probe 1 reached 165 °F']);
     });
 
     it('reaches a new target that is already met on the next two readings, not on one', async () => {

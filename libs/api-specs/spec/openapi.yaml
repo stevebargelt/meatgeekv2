@@ -59,7 +59,7 @@ tags:
   - name: devices
     description: Claim, register and manage the caller's devices.
   - name: users
-    description: The authenticated caller's own profile.
+    description: The authenticated caller's own profile, and the phones its alerts go to.
   - name: recipes
     description: The authenticated caller's private recipes.
   - name: signalr
@@ -92,6 +92,10 @@ paths:
     $ref: './paths/devices.yaml#/device-item'
   /users/me:
     $ref: './paths/users.yaml#/user-me'
+  /users/me/push-tokens:
+    $ref: './paths/users.yaml#/user-push-tokens'
+  /users/me/push-tokens/{tokenId}:
+    $ref: './paths/users.yaml#/user-push-token-item'
   /recipes:
     $ref: './paths/recipes.yaml#/recipes-collection'
   /recipes/{id}:
@@ -234,6 +238,12 @@ components:
       $ref: './components/schemas/user.yaml#/NotificationPreferences'
     PutUserProfileRequest:
       $ref: './components/schemas/user.yaml#/PutUserProfileRequest'
+    RegisterPushTokenRequest:
+      $ref: './components/schemas/user.yaml#/RegisterPushTokenRequest'
+    PushToken:
+      $ref: './components/schemas/user.yaml#/PushToken'
+    PushTokenListResponse:
+      $ref: './components/schemas/user.yaml#/PushTokenListResponse'
 
     # Recipe
     RecipeMeatType:

@@ -7,7 +7,7 @@ import type {
   RequestOptions,
   SqlParameter,
 } from '@azure/cosmos';
-import type { Cook, CookStatus, TargetsPending } from '@meatgeekv2/api-interfaces';
+import type { Cook, CookStatus, TargetsAlerted, TargetsPending } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
 
@@ -57,11 +57,14 @@ void cookFieldsAreExhaustive;
 type StoredCook = Cook;
 
 /** A stored cook with the fields that are stored but never returned: the target
- *  rule's pending readings and, per re-armed channel, the newest reading time
- *  already counted (see apps/api/src/functions/cooks/target-rule.ts). */
+ *  rule's pending readings, per re-armed channel the newest reading time
+ *  already counted (see apps/api/src/functions/cooks/target-rule.ts) and, per
+ *  channel, the `reachedAt` whose alert Apple accepted (#244, see
+ *  apps/api/src/functions/cooks/target-alerts.ts). */
 export interface StoredCookDocument extends Cook {
   targetsPending?: TargetsPending;
   targetsSeen?: TargetsPending;
+  targetsAlerted?: TargetsAlerted;
 }
 
 /** What {@link CooksRepository.updateActiveCook} did. */
@@ -74,6 +77,10 @@ export type ActiveCookUpdateResult =
   | {
       readonly outcome: 'updated' | 'unchanged';
       readonly cook: Cook;
+      /** The cook as stored afterwards, with the stored-only fields. Internal
+       *  callers only (the target rule's alerts, #244): never returned to a
+       *  caller; {@link cook} is the public shape. */
+      readonly stored: StoredCookDocument;
       readonly requestCharge: number;
     };
 
@@ -643,7 +650,7 @@ export class CooksRepository {
       }
       const fields = change(document);
       if (fields === undefined) {
-        return { outcome: 'unchanged', cook: toCook(document), requestCharge };
+        return { outcome: 'unchanged', cook: toCook(document), stored: document, requestCharge };
       }
       // A field set to `undefined` is removed: JSON drops it on the write.
       const next: StoredCookDocument = { ...document, ...fields };
@@ -652,7 +659,8 @@ export class CooksRepository {
           .item(id, userId)
           .replace<StoredCookDocument>(next, ifMatch(existing.etag));
         requestCharge += response.requestCharge;
-        return { outcome: 'updated', cook: toCook(response.resource ?? next), requestCharge };
+        const stored = response.resource ?? next;
+        return { outcome: 'updated', cook: toCook(stored), stored, requestCharge };
       } catch (error) {
         if (statusCodeOf(error) === 412 && attempt < UPDATE_ACTIVE_COOK_MAX_ATTEMPTS) {
           continue;

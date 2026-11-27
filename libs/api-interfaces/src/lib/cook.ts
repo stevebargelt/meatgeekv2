@@ -42,6 +42,13 @@ export type TargetsReached = { [C in TemperatureChannel]?: TargetReached };
 export type TargetsPending = { [C in TemperatureChannel]?: string };
 
 /**
+ * Stored on a cook and never returned: per channel, the `reachedAt` of the
+ * reach whose alert Apple accepted for every phone (#244). A channel whose
+ * `targetsReached` time differs is still to be alerted.
+ */
+export type TargetsAlerted = { [C in TemperatureChannel]?: string };
+
+/**
  * Cook session data
  */
 export interface Cook {

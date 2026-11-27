@@ -66,7 +66,7 @@ tags:
   - name: devices
     description: Claim, register and manage the caller's devices.
   - name: users
-    description: The authenticated caller's own profile.
+    description: The authenticated caller's own profile, and the phones its alerts go to.
   - name: recipes
     description: The authenticated caller's private recipes.
   - name: signalr
@@ -1506,6 +1506,127 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /users/me/push-tokens:
+    description: |
+      The phones the caller's alerts go to. When a channel of one of the
+      caller's running cooks reaches its target, an alert is sent through
+      Apple's push service to every phone registered here. A phone Apple says
+      is gone (410, or 400 BadDeviceToken) is removed by the API.
+    get:
+      operationId: listPushTokens
+      summary: List the caller's registered phones
+      description: Ids and registration times only; never a token.
+      tags:
+        - users
+      responses:
+        '200':
+          description: The caller's phones; empty when none is registered.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushTokenListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      operationId: registerPushToken
+      summary: Register a phone for the caller's alerts
+      description: |
+        Registers the APNs device token for the signed-in user. Registering a
+        token again is 200 and moves its `registeredAt` to now. A caller keeps
+        at most 10 phones; registering an eleventh drops the least recently
+        registered.
+      tags:
+        - users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterPushTokenRequest'
+      responses:
+        '200':
+          description: The token was already registered; its time moved to now.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushToken'
+        '201':
+          description: The token was registered.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushToken'
+        '400':
+          description: |
+            VALIDATION_ERROR: the body is not JSON, carries a field other than
+            `token`, or the token is not 64 to 200 hex characters. Answered
+            before any Cosmos call.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /users/me/push-tokens/{tokenId}:
+    parameters:
+      - name: tokenId
+        in: path
+        required: true
+        description: The phone's id, the SHA-256 of its APNs device token in lowercase hex.
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+    delete:
+      operationId: deletePushToken
+      summary: Remove a phone from the caller's alerts
+      description: |
+        Removes the phone with this id. A phone that is not registered is also
+        204, so signing out can always call it.
+      tags:
+        - users
+      responses:
+        '204':
+          description: The phone is not registered (any more).
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+        '400':
+          description: VALIDATION_ERROR — tokenId is not 64 lowercase hex characters.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/ServerError'
   /recipes:
@@ -3149,6 +3270,49 @@ components:
             (or DEFAULT_USER_PREFERENCES on create): plain objects merge key by
             key; scalars and arrays replace. Must be an object if present.
           additionalProperties: true
+    RegisterPushTokenRequest:
+      type: object
+      description: |
+        Body for POST /users/me/push-tokens: the APNs device token the iOS app
+        was given, in hex. Any other field is rejected with 400
+        VALIDATION_ERROR. The token travels only here: it is never returned,
+        never in a URL and never logged.
+      required:
+        - token
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          pattern: ^[0-9a-fA-F]{64,200}$
+          description: The APNs device token, as hex. Case does not matter.
+    PushToken:
+      type: object
+      description: |
+        A phone registered for the caller's alerts, by its id: the SHA-256 of
+        its APNs device token, in lowercase hex. The app can compute the id
+        from its own token; the id says nothing about the token.
+      required:
+        - id
+        - registeredAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        registeredAt:
+          $ref: '#/components/schemas/ISODateTime'
+    PushTokenListResponse:
+      type: object
+      description: The caller's registered phones.
+      required:
+        - items
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/PushToken'
     RecipeMeatType:
       type: string
       enum:

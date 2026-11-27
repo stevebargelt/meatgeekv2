@@ -64,6 +64,12 @@ public struct StubAPI: APIProtocol {
         = { _ in throw NotStubbed(operationID: "getCosmosHealth") }
     public var getApnsHealthHandler: @Sendable (Operations.GetApnsHealth.Input) async throws -> Operations.GetApnsHealth.Output
         = { _ in throw NotStubbed(operationID: "getApnsHealth") }
+    public var listPushTokensHandler: @Sendable (Operations.ListPushTokens.Input) async throws -> Operations.ListPushTokens.Output
+        = { _ in throw NotStubbed(operationID: "listPushTokens") }
+    public var registerPushTokenHandler: @Sendable (Operations.RegisterPushToken.Input) async throws -> Operations.RegisterPushToken.Output
+        = { _ in throw NotStubbed(operationID: "registerPushToken") }
+    public var deletePushTokenHandler: @Sendable (Operations.DeletePushToken.Input) async throws -> Operations.DeletePushToken.Output
+        = { _ in throw NotStubbed(operationID: "deletePushToken") }
 }
 
 extension StubAPI {
@@ -157,6 +163,18 @@ extension StubAPI {
 
     public func getApnsHealth(_ input: Operations.GetApnsHealth.Input) async throws -> Operations.GetApnsHealth.Output {
         try await getApnsHealthHandler(input)
+    }
+
+    public func listPushTokens(_ input: Operations.ListPushTokens.Input) async throws -> Operations.ListPushTokens.Output {
+        try await listPushTokensHandler(input)
+    }
+
+    public func registerPushToken(_ input: Operations.RegisterPushToken.Input) async throws -> Operations.RegisterPushToken.Output {
+        try await registerPushTokenHandler(input)
+    }
+
+    public func deletePushToken(_ input: Operations.DeletePushToken.Input) async throws -> Operations.DeletePushToken.Output {
+        try await deletePushTokenHandler(input)
     }
 }
 

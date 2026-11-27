@@ -1,101 +1,19 @@
-import type { InvocationContext } from '@azure/functions';
-import type { Cook, TargetTemperatures } from '@meatgeekv2/api-interfaces';
-import type { Meter } from '@opentelemetry/api';
-
 import { CooksRepository } from '../../shared/cosmos/cooks-repository';
-import { FakeCooksContainer } from '../../shared/cosmos/fake-cooks-container.testing';
 import { broadcastTemperatureHandler } from '../signalr/broadcast-temperature';
 import {
   recordTargetsReachedHandler,
   TargetsNotRecordedError,
   type RecordTargetsReachedDeps,
 } from './record-targets-reached';
+import { at, batchOf, COOK, DEVICE, Harness, noopMeter, OWNER } from './targets-harness.testing';
 
 /**
  * The target rule, driven the way the Functions host drives the Event Hub
- * trigger: a batch of bodies, with each event's hub-stamped device id and
- * enqueued time in `triggerMetadata`. The cook is read back through the
- * repository, as GET /cooks/{id} reads it. Time is the readings' own
- * timestamps; nothing reads the wall clock.
+ * trigger (see ./targets-harness.testing.ts). The cook is read back through
+ * the repository, as GET /cooks/{id} reads it. Time is the readings' own
+ * timestamps; nothing reads the wall clock. The alerts the rule sends are in
+ * ./target-alerts.spec.ts.
  */
-
-const OWNER = 'owner-a';
-const DEVICE = 'smoker-a';
-const COOK = 'cook-1';
-
-/** Reading n is stamped 5 s after reading n-1, as the device sends them. */
-function at(n: number): string {
-  return new Date(Date.UTC(2026, 10, 25, 18, 0, 0) + n * 5_000).toISOString();
-}
-
-interface Reading {
-  n: number;
-  grillTemp?: number;
-  probe1Temp?: number;
-  probe2Temp?: number;
-  cookId?: string;
-  deviceId?: string;
-}
-
-function batchOf(readings: Reading[]): { events: unknown[]; context: InvocationContext } {
-  const logs: string[] = [];
-  const context = {
-    invocationId: 'targets-inv',
-    triggerMetadata: {
-      systemPropertiesArray: readings.map(r => ({
-        'iothub-connection-device-id': r.deviceId ?? DEVICE,
-        'iothub-enqueuedtime': at(r.n),
-      })),
-      enqueuedTimeUtcArray: readings.map(r => at(r.n)),
-    },
-    log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
-    warn: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
-    error: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
-    extraOutputs: { set: () => undefined },
-    logs,
-  } as unknown as InvocationContext;
-  const events = readings.map(({ n, cookId, deviceId: _deviceId, ...temps }) => ({
-    timestamp: at(n),
-    cookId: cookId === undefined ? COOK : cookId,
-    ...temps,
-  }));
-  return { events, context };
-}
-
-class Harness {
-  readonly container = new FakeCooksContainer();
-  readonly repository = new CooksRepository(this.container.asContainer());
-  readonly deps: RecordTargetsReachedDeps = {
-    ownerOf: async deviceId => (deviceId === DEVICE ? OWNER : undefined),
-    getRepository: () => this.repository,
-  };
-
-  startCook(targetTemps: TargetTemperatures, status: Cook['status'] = 'active'): void {
-    this.container.seed({
-      id: COOK,
-      userId: OWNER,
-      deviceId: DEVICE,
-      name: 'Brisket',
-      status,
-      startTime: at(0),
-      targetTemps: { ...targetTemps },
-    });
-  }
-
-  /** Each call is one batch, as one trigger invocation. */
-  async send(...readings: Reading[]): Promise<void> {
-    const { events, context } = batchOf(readings);
-    await recordTargetsReachedHandler(events, context, this.deps);
-  }
-
-  async cook(): Promise<Cook> {
-    const { cook } = await this.repository.getCook(OWNER, COOK);
-    if (!cook) {
-      throw new Error('cook missing');
-    }
-    return cook;
-  }
-}
 
 describe('recordTargetsReachedHandler', () => {
   it('records a probe as reached at the second of two readings in a row at or above its target', async () => {
@@ -294,6 +212,7 @@ describe('recordTargetsReachedHandler', () => {
     const other = new CooksRepository(h.container.asContainer());
     const { events, context } = batchOf([{ n: 2, probe1Temp: 205 }]);
     await recordTargetsReachedHandler(events, context, {
+      ...h.deps,
       ownerOf: async () => OWNER,
       getRepository: () => other,
     });
@@ -347,28 +266,33 @@ describe('recordTargetsReachedHandler', () => {
     expect(h.container.reads).toEqual([{ id: COOK, partitionKey: OWNER }]);
   });
 
-  it('reads only the device owner and the cook, never a notification preference', async () => {
+  it('reads only the device owner, the cook and the owner\'s phones, never a notification preference', async () => {
     const h = new Harness();
     h.startCook({ probe1: 203 });
     const lookups: string[] = [];
 
-    // The deps reach the device owner (a user id, nothing else) and the cooks
-    // container. The fake container serves the cook alone: any query, or any
-    // read of a user or device settings document, would throw or miss.
+    // The deps reach the device owner (a user id, nothing else), the cooks
+    // container and the owner's phones. The fake containers serve those
+    // documents alone: any query, or any read of a user or device settings
+    // document, would show up here.
     const { events, context } = batchOf([
       { n: 1, probe1Temp: 204 },
       { n: 2, probe1Temp: 205 },
     ]);
     await recordTargetsReachedHandler(events, context, {
+      ...h.deps,
       ownerOf: async deviceId => {
         lookups.push(deviceId);
         return OWNER;
       },
-      getRepository: () => h.repository,
     });
 
     expect(lookups).toEqual([DEVICE]);
-    expect(h.container.reads.map(r => r.id)).toEqual([COOK]);
+    // The rule's read, then the alert's record of the reach.
+    expect(h.container.reads.map(r => r.id)).toEqual([COOK, COOK]);
+    expect(h.usersContainer.calls.map(c => [c.operation, c.id])).toEqual([
+      ['read', `push-tokens:${OWNER}`],
+    ]);
     expect((await h.cook()).targetsReached).toEqual({ probe1: { reachedAt: at(2) } });
   });
 
@@ -379,9 +303,10 @@ describe('recordTargetsReachedHandler', () => {
     await h.send({ n: 1, probe1Temp: 150 }, { n: 2, probe1Temp: 160 });
     expect(h.container.replaces).toHaveLength(0);
 
+    // The reach is written, then its alert is recorded: two writes, once.
     await h.send({ n: 3, probe1Temp: 204 }, { n: 4, probe1Temp: 205 });
     await h.send({ n: 5, probe1Temp: 205 }, { n: 6, probe1Temp: 206 });
-    expect(h.container.replaces).toHaveLength(1);
+    expect(h.container.replaces).toHaveLength(2);
   });
 
   it('never returns the pending reading: the cook carries reached channels only', async () => {
@@ -406,7 +331,8 @@ describe('recordTargetsReachedHandler', () => {
 
     const logs = (context as unknown as { logs: string[] }).logs;
     expect(logs).toEqual([
-      'recordTargetsReached cooks=1 updated=1 notActive=0 failed=0 untagged=1 skipped=0 unowned=0 lookupFailed=0',
+      'recordTargetsReached cooks=1 updated=1 notActive=0 failed=0 untagged=1 skipped=0 unowned=0 lookupFailed=0' +
+        ' alertsAccepted=0 alertsUnanswered=0 alertsRefused=0 deadTokens=0 alertsUnconfigured=0',
     ]);
     expect(logs.join('\n')).not.toMatch(/smoker|owner|cook-1/);
   });
@@ -436,8 +362,8 @@ describe('recordTargetsReachedHandler', () => {
         { n: 2, probe1Temp: 196, deviceId: 'smoker-b', cookId: 'cook-2' },
       ]);
       const deps: RecordTargetsReachedDeps = {
+        ...h.deps,
         ownerOf: async id => (id === 'smoker-b' ? 'owner-b' : OWNER),
-        getRepository: () => h.repository,
       };
 
       const run = recordTargetsReachedHandler(events, context, deps);
@@ -462,10 +388,10 @@ describe('recordTargetsReachedHandler', () => {
 
       await expect(
         recordTargetsReachedHandler(events, context, {
+          ...h.deps,
           ownerOf: async () => {
             throw new Error('cosmos down');
           },
-          getRepository: () => h.repository,
         })
       ).rejects.toThrow(TargetsNotRecordedError);
     });
@@ -503,7 +429,3 @@ describe('recordTargetsReachedHandler', () => {
     });
   });
 });
-
-const noopMeter = {
-  createHistogram: () => ({ record: () => undefined }),
-} as unknown as Meter;

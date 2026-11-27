@@ -1,15 +1,9 @@
 import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { ManagedIdentityCredential } from '@azure/identity';
 
-import { ApnsClient } from '../../shared/apns/apns-client';
-import { ApnsConfigError, readApnsConfig } from '../../shared/apns/apns-config';
-import { Http2ApnsTransport } from '../../shared/apns/apns-transport';
-import {
-  KeyVaultSignError,
-  KeyVaultSigner,
-  type KeyVaultSignFailure,
-} from '../../shared/apns/key-vault-signer';
-import { ProviderTokenCache } from '../../shared/apns/provider-token';
+import type { ApnsClient } from '../../shared/apns/apns-client';
+import { ApnsConfigError } from '../../shared/apns/apns-config';
+import { KeyVaultSignError, type KeyVaultSignFailure } from '../../shared/apns/key-vault-signer';
+import { getSharedApnsClient } from '../../shared/apns/shared-client';
 
 /**
  * #243 — health check for the API's path to Apple. It signs a provider token
@@ -46,29 +40,8 @@ export interface ApnsHealthResult {
 
 export type ApnsClientFactory = () => ApnsClient;
 
-/** Production wiring, built once per warm instance so the token cache lives across calls. */
-let sharedClient: ApnsClient | undefined;
-const sharedClientFactory: ApnsClientFactory = () => {
-  if (!sharedClient) {
-    const config = readApnsConfig();
-    sharedClient = new ApnsClient({
-      transport: new Http2ApnsTransport(),
-      tokens: new ProviderTokenCache({
-        signer: new KeyVaultSigner({
-          vaultUri: config.keyVaultUri,
-          keyName: config.keyName,
-          credential: new ManagedIdentityCredential(),
-        }),
-        keyId: config.keyId,
-        teamId: config.teamId,
-        now: () => Date.now(),
-      }),
-      host: config.host,
-      bundleId: config.bundleId,
-    });
-  }
-  return sharedClient;
-};
+/** Production wiring: one client per warm instance, shared with the target alerts. */
+const sharedClientFactory: ApnsClientFactory = getSharedApnsClient;
 
 export async function checkApnsHealth(
   clientFactory: ApnsClientFactory = sharedClientFactory,

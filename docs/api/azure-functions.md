@@ -31,6 +31,9 @@ yet wired.
 | `deleteDevice`           | HTTP `DELETE` | `devices/{id}`                    | HAR-136 — release one of the caller's devices                 |
 | `getUserProfile`         | HTTP `GET`    | `users/me`                        | The caller's profile (404 until the first PUT)                |
 | `putUserProfile`         | HTTP `PUT`    | `users/me`                        | Create or replace the caller's profile                        |
+| `listPushTokens`         | HTTP `GET`    | `users/me/push-tokens`            | #244 — the caller's phones, by id (the token's SHA-256)       |
+| `registerPushToken`      | HTTP `POST`   | `users/me/push-tokens`            | #244 — registers a phone's APNs token, sent in the body       |
+| `deletePushToken`        | HTTP `DELETE` | `users/me/push-tokens/{tokenId}`  | #244 — removes a phone; 204 also when it is not registered    |
 | `listRecipes`            | HTTP `GET`    | `recipes`                         | List the caller's recipes, newest first                       |
 | `createRecipe`           | HTTP `POST`   | `recipes`                         | Create a recipe owned by the caller                           |
 | `getRecipe`              | HTTP `GET`    | `recipes/{id}`                    | One of the caller's recipes (404 otherwise)                   |
@@ -40,7 +43,7 @@ yet wired.
 | `apnsHealth`             | HTTP `GET`    | `health/apns`                     | #243 — signs a provider token through Key Vault and checks Apple accepts it |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
 | `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its device's owner            |
-| `recordTargetsReached`   | **Event Hub** | `temperature-data`, many          | Records on each running cook which targets are reached        |
+| `recordTargetsReached`   | **Event Hub** | `temperature-data`, many          | Records on each running cook which targets are reached, and alerts the owner's phones (#244) |
 | `rollupTemperatures`     | **Cosmos DB** | `temperatures` change feed        | HAR-86 — folds readings into per-device, per-hour rollups     |
 
 `broadcastTemperature` is the live-reading producer. IoT Hub routes every device
@@ -227,8 +230,10 @@ of each reading is written by IoT Hub's own `cosmos-storage` route.
 `%TARGETS_CONSUMER_GROUP%` (`api-targets`), and records on each running cook
 which channels have reached their target (`targetsReached` on the cook). It has
 no SignalR output and is a separate invocation from `broadcastTemperature`, so
-it can never delay or drop a live push. A batch whose cook write failed throws
-and is retried by the host. The rule, its state and its failure handling are in
+it can never delay or drop a live push. Each reach is sent as an alert through
+APNs to every phone the cook's owner registered (#244). A batch whose cook
+write failed, or whose alert Apple gave no answer for, throws and is retried
+by the host. The rule, its state and its failure handling are in
 [Data Flow](../architecture/data-flow.md#6-target-rule).
 
 ### **API Functions**
