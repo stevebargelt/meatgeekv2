@@ -1,0 +1,157 @@
+name: Agent review
+
+# A fresh agent reviews each draft pull request the agent opens, before the owner sees it.
+# It posts its findings as inline review comments, pushes fixes, and marks the pull
+# request ready for review once the review is clean. Then, if the repository opted in
+# (variable AGENT_AUTOMERGE=true) and nothing holds it, it turns on auto-merge, so the
+# pull request merges itself when the required checks pass. Held for the owner, with the
+# needs-owner label: a non-empty "Left undone" list in the body, or a change under a
+# held path (workflows, infrastructure, migrations).
+#
+# Adding the agent-review label to any pull request runs it again.
+# Installed by the home repo's bin/install-agent-action; change the template there.
+on:
+  pull_request:
+    types: [opened, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+concurrency:
+  group: agent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: >-
+      vars.AGENT_PAUSED != 'true' && github.event.pull_request.state == 'open' && (
+      (github.event.action == 'opened' && github.event.pull_request.draft &&
+       github.event.pull_request.user.login == 'claude[bot]') ||
+      (github.event.action == 'labeled' && github.event.label.name == 'agent-review'))
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      BASE: ${{ github.event.pull_request.base.ref }}
+      AUTOMERGE: ${{ vars.AGENT_AUTOMERGE }}
+      # Changes under these paths always wait for the owner.
+      HOLD_PATHS: '^\.github/workflows/|^apps/infrastructure/'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      # Decide, before the agent starts, whether a clean review may turn on auto-merge.
+      - id: hold
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR" --repo "$REPO" --remove-label agent-review --remove-label needs-owner >/dev/null 2>&1 || true
+          body=$(gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""')
+          issue=$(grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' <<<"$body" | head -1 | grep -oE '[0-9]+' || true)
+          echo "issue=${issue:-none}" >> "$GITHUB_OUTPUT"
+
+          reason=""
+          [[ "$AUTOMERGE" == true ]] || reason="this repository has not opted in to auto-merge"
+          # A "Left undone" section with anything in it but "nothing"/"none".
+          # The section ends at the next heading, a --- rule, or the generated-by footer.
+          undone=$(awk 'tolower($0) ~ /^#* *\**left undone/ {on=1; sub(/^[^:]*[Ll]eft undone[*: ]*/, ""); print; next}
+                        on && (/^#/ || /^---/ || /Generated with/ || /claude\.ai\/code/) {on=0} on' <<<"$body" \
+            | grep -viE '^\W*(nothing|none)\W*$' | grep -E '\w' || true)
+          [[ -n "$reason" || -z "$undone" ]] || reason="the pull request lists work left undone"
+          held=$(gh pr view "$PR" --repo "$REPO" --json files --jq '.files[].path' | grep -E "$HOLD_PATHS" | head -5 || true)
+          [[ -n "$reason" || -z "$held" ]] || reason="it changes $(echo "$held" | paste -sd, - | sed 's/,/, /g')"
+
+          if [[ -z "$reason" ]]; then
+            echo "instruction=then run \`gh pr merge $PR --auto --squash\`, so it merges itself once the required checks pass." >> "$GITHUB_OUTPUT"
+          else
+            echo "instruction=then do not merge: run \`gh pr edit $PR --add-label needs-owner\` and comment \"Needs the owner before merging: $reason.\"" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Auto-merge: ${reason:-allowed}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_26.6.app/Contents/Developer"
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: xcodebuild -resolvePackageDependencies -project apps/ios/MeatGeek.xcodeproj -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" -disablePackageRepositoryCache -skipPackagePluginValidation
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/data-pusher/go.mod
+          cache: false
+
+      # Every Bash command is allowed: the runner is thrown away after the run.
+      - id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The pull request was opened by claude[bot]; labels may come from github-actions.
+          allowed_bots: "claude,claude[bot],github-actions,github-actions[bot]"
+          restrict_untrusted_prs: "false"
+          plugin_marketplaces: https://github.com/anthropics/claude-plugins-official.git
+          plugins: mattpocock-skills@claude-plugins-official
+          # Same model and effort as the owner's interactive sessions; the action defaults to Sonnet.
+          settings: '{"effortLevel": "medium"}'
+          claude_args: |
+            --model claude-opus-5-5
+            --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,WebFetch,Bash"
+            --append-system-prompt "Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"${{ runner.temp }}/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
+
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }},
+            written by another agent for issue #${{ steps.hold.outputs.issue }}. You did not write it: review it
+            as a stranger would. Read AGENTS.md first. No one is watching.
+
+            1. Review it with the code-review skill: the diff against `origin/${{ github.event.pull_request.base.ref }}`,
+               with the issue as the spec (`gh issue view ${{ steps.hold.outputs.issue }}`). Check claims in the
+               pull request body against the code, not just the code against the issue.
+            2. Post the findings as one review with inline comments: write the review as JSON
+               (`{"event": "COMMENT", "body": "...", "comments": [{"path": "...", "line": N, "body": "..."}]}`)
+               to a file and run `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --method POST --input <file>`.
+               Post nothing if there are no findings.
+            3. Fix every real finding on this branch. Run the checks AGENTS.md lists for CI; they must pass.
+               Commit following AGENTS.md's conventions and push. Reply to each inline comment with what you
+               changed, or why it needs no change. Never run `az`, `terraform apply` or `supabase`, and never deploy.
+            4. If a fix needs the owner (an account, a device, a secret), add it to the pull request body's
+               "Left undone" list instead of guessing.
+            5. When the review is clean (no real findings left, checks pass), run `gh pr ready ${{ github.event.pull_request.number }}`,
+               ${{ steps.hold.outputs.instruction }}
+
+            If it is still not clean after two rounds of fixes, leave the pull request as a draft and comment
+            on it with what is left and why.
+
+      # A run must leave the pull request ready for review, or a comment saying why not.
+      - name: Check the result
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+          draft=$(gh pr view "$PR" --repo "$REPO" --json isDraft --jq .isDraft)
+          if [[ "$draft" == false ]]; then echo "#$PR is ready for review" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          said="(no transcript)"
+          if [[ -n "${EXECUTION_FILE:-}" && -f "$EXECUTION_FILE" ]]; then
+            said=$(jq -r '[.[] | select(.type == "result")] | last | .result // "(no final message)"' "$EXECUTION_FILE" | head -c 3000)
+          fi
+          {
+            echo "The review run ended with this pull request still a draft: $RUN_URL. Add the \`agent-review\` label to run it again."
+            echo; echo "**The reviewer's last message:**"; echo
+            while IFS= read -r line; do echo "> $line"; done <<<"$said"
+          } > "$RUNNER_TEMP/review.md"
+          gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/review.md"
